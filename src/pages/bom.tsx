@@ -528,26 +528,15 @@ function loadStoredTemplates(): BOMTemplate[] | null {
   }
 }
 
+// Persist the full templates list to localStorage ONLY. D1 is the
+// authoritative store — individual BOM edits go through `PUT /api/bom/:id`
+// via the edit dialog. Pushing the whole list back to the server on every
+// setTemplates call used to overwrite D1 with stale cached state (e.g. if
+// localStorage still had pre-reapply qty=1), wiping out bulk reapply runs.
 function saveStoredTemplates(list: BOMTemplate[]) {
   if (typeof window === "undefined") return;
   try {
     localStorage.setItem(BOM_TEMPLATES_KEY, JSON.stringify(list));
-  } catch {
-    // ignore
-  }
-  // Also push the full list to the server so downstream readers (SO
-  // confirm route, dept dashboards) see the same BOMs the Module Builder
-  // is editing. Fire-and-forget — localStorage is still the source of
-  // truth for the UI, the server sync is best-effort.
-  try {
-    fetch("/api/bom/templates", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ templates: list }),
-      cache: "no-store",
-    }).catch(() => {
-      // ignore — server sync is optional
-    });
   } catch {
     // ignore
   }

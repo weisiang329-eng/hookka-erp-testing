@@ -511,13 +511,18 @@ export default function ProductionPage() {
   // When a dept tab is active, Print Schedule and the on-screen QR Stickers
   // row drive off this instead of the raw `deptRows`, so whatever the user
   // sees filtered in the grid is exactly what prints / renders as QRs.
+  // `null` = DataGrid hasn't reported filtered rows yet (first render /
+  // tab-switch). We must DISTINGUISH this from `[]` (legitimate empty filter
+  // match) because the QR tile row uses `gridFilterIdSet` to scope stickers
+  // to visible grid rows — an empty Set would hide every sticker, so we
+  // only treat it as a real filter once the grid has actually reported.
   const [gridFilteredDeptRows, setGridFilteredDeptRows] = useState<
-    Array<{ id: string; poId: string; jobCardId: string }>
-  >([]);
+    Array<{ id: string; poId: string; jobCardId: string }> | null
+  >(null);
   // Reset the mirror when the active tab changes — the new dept's grid will
   // report its own rows once it mounts. Without this, stale rows from the
   // previous dept would briefly filter the QR tile row to an empty set.
-  useEffect(() => { setGridFilteredDeptRows([]); }, [activeTab]);
+  useEffect(() => { setGridFilteredDeptRows(null); }, [activeTab]);
 
   // Batch sticker printing — populated when the user clicks "Print Job Card
   // Stickers" or "Print FG Stickers" in the header. Each entry renders into
@@ -1431,6 +1436,9 @@ export default function ProductionPage() {
   // Print-All button scope to exactly what the user sees in the grid.
   const gridFilterIdSet = useMemo(() => {
     if (activeTab === "ALL") return null;
+    // `null` = grid hasn't reported yet → show everything (no filter).
+    // A real filter with zero matches is still a non-null empty array.
+    if (gridFilteredDeptRows === null) return null;
     return new Set(gridFilteredDeptRows.map((r) => r.id));
   }, [gridFilteredDeptRows, activeTab]);
 

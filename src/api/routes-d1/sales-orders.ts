@@ -13,6 +13,14 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
+import {
+  ensureLeadTimesSeeded,
+  loadLeadTimes,
+  leadDaysFor,
+  addDays,
+  DEPT_ORDER,
+} from "../lib/lead-times";
+import { breakBomIntoWips } from "../lib/bom-wip-breakdown";
 
 const app = new Hono<Env>();
 
@@ -208,14 +216,21 @@ function genOverrideId(): string {
 
 // ---------------------------------------------------------------------------
 // Shared cascade: auto-create one production_orders row per SO item row on
-// SO confirmation. Idempotent — if ANY production_orders row already exists
-// for the SO, return the existing list without inserting duplicates.
+// SO confirmation. Idempotent at the PO level — if ANY production_orders row
+// already exists for the SO, return the existing set without duplicating.
+//
+// Additionally walks each product's BOM (bom_templates.wipComponents JSON) to
+// break the FG into WIPs (DIVAN/HEADBOARD for BEDFRAME, SOFA_BASE + modules
+// for SOFA) and generate one job_cards row per (WIP × dept) combination with
+// a reverse-scheduled `dueDate` so the Production tracker UI can populate
+// every dept column.
+//
+// Idempotency is tracked separately for job_cards: if any job_cards exist for
+// a PO, that PO's job_card generation is skipped even if the PO row is brand
+// new (should not happen in practice but guards against partial failures).
 //
 // Returned shape matches what the confirm/PUT handlers already expose on
 // the JSON response as `productionOrders`.
-//
-// Job-card generation is deferred — the UI only needs a PENDING PO row to
-// exist; job cards will be populated by a later BOM-driven trigger.
 // ---------------------------------------------------------------------------
 type CreatedProductionOrder = {
   id: string;
@@ -230,7 +245,16 @@ async function createProductionOrdersForSO(
   so: SalesOrderRow,
   items: SalesOrderItemRow[],
 ): Promise<{ statements: D1PreparedStatement[]; created: CreatedProductionOrder[]; preExisting: boolean }> {
-  // Idempotency guard — if any PO exists for this SO, return the existing set.
+  // Ensure lead times are seeded. Safe to call every pass — short-circuits
+  // after the first insert (COUNT(*) > 0).
+  await ensureLeadTimesSeeded(db);
+  const leadTimes = await loadLeadTimes(db);
+
+  // Idempotency guard (PO-level) — if any PO exists for this SO, return the
+  // existing set. Job-card backfill for those existing POs is handled by
+  // `buildJobCardStatementsForPo` below when invoked for a PO that has zero
+  // job_cards; here we return preExisting=true so the caller's status-change
+  // log reflects "already exists".
   const existing = await db
     .prepare(
       "SELECT id, poNo, productName, quantity, status FROM production_orders WHERE salesOrderId = ? ORDER BY lineNo",
@@ -252,12 +276,22 @@ async function createProductionOrdersForSO(
     };
   }
 
+  // Load department lookup once — job_cards stores both departmentId and
+  // departmentCode; we need the FK for the departmentId column.
+  const deptRes = await db
+    .prepare("SELECT id, code, name FROM departments").all<{ id: string; code: string; name: string }>();
+  const deptByCode = new Map<string, { id: string; name: string }>();
+  for (const d of deptRes.results ?? []) {
+    deptByCode.set(d.code, { id: d.id, name: d.name });
+  }
+
   const nowIso = new Date().toISOString();
+  const today = nowIso.split("T")[0];
   const statements: D1PreparedStatement[] = [];
   const created: CreatedProductionOrder[] = [];
   const sortedItems = [...items].sort((a, b) => a.lineNo - b.lineNo);
-  const targetDate = so.hookkaExpectedDD || so.customerDeliveryDate || "";
-  const startDate = so.companySODate || nowIso.split("T")[0];
+  const deliveryDate = so.hookkaExpectedDD || so.customerDeliveryDate || "";
+  const startDate = so.companySODate || today;
   const companySoId = so.companySOId ?? "";
 
   for (const item of sortedItems) {
@@ -270,6 +304,145 @@ async function createProductionOrdersForSO(
     // Deterministic id — re-running a failed confirm regenerates the same id so
     // UNIQUE on production_orders.id still catches retries.
     const poId = `pord-${so.id}-${String(item.lineNo).padStart(2, "0")}`;
+
+    const category = item.itemCategory ?? "BEDFRAME";
+    const productCode = item.productCode ?? "";
+
+    // ------ BOM → WIP breakdown ------
+    // Look up active BOM template for this productCode; if none, fall back
+    // to the latest template regardless of status.
+    let bomRow = await db
+      .prepare(
+        `SELECT wipComponents FROM bom_templates
+           WHERE productCode = ? AND versionStatus = 'ACTIVE'
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ wipComponents: string | null }>();
+    if (!bomRow) {
+      bomRow = await db
+        .prepare(
+          `SELECT wipComponents FROM bom_templates
+             WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+        )
+        .bind(productCode)
+        .first<{ wipComponents: string | null }>();
+    }
+
+    const wips = breakBomIntoWips(bomRow?.wipComponents ?? null, productCode);
+
+    // ------ Reverse-schedule dept dueDates ------
+    // Goal: build a per-dept `dueDate` string for every (wip, dept) entry.
+    // If we have deliveryDate, walk BACKWARDS from it: PACKING = deliveryDate,
+    // each earlier dept = prevDept.dueDate - prevDept.leadDays.
+    // If we don't have deliveryDate, FORWARD-schedule from startDate.
+    type PlannedJc = {
+      wipType: string;
+      wipCode: string;
+      wipLabel: string;
+      wipKey: string;
+      wipQty: number;
+      sequence: number;
+      deptCode: string;
+      deptId: string;
+      deptName: string;
+      dueDate: string;
+      category: string;
+      minutes: number;
+    };
+    const planned: PlannedJc[] = [];
+
+    for (const wip of wips) {
+      // Each wip has its own independent dept chain; reverse-schedule it end
+      // at delivery (or forward-schedule from start).
+      const wipQty = Math.max(1, Math.floor(item.quantity * wip.quantityMultiplier));
+
+      // Compute per-dept dueDate for this wip's chain. We iterate in DEPT_ORDER
+      // so the `sequence` matches the forward chain (0-based).
+      const chain = wip.processes;
+
+      if (deliveryDate) {
+        // Reverse pass. Start with the LAST dept in chain = deliveryDate.
+        // Each earlier dept = nextDept.dueDate - nextDept.leadDays.
+        // NOTE: we anchor PACKING at deliveryDate; if the chain includes
+        // PACKING it uses deliveryDate directly.
+        const dueByDept = new Map<string, string>();
+        const lastIdx = chain.length - 1;
+        if (lastIdx >= 0) {
+          // Anchor: LAST dept in chain due on deliveryDate.
+          dueByDept.set(chain[lastIdx].deptCode, deliveryDate);
+          for (let i = lastIdx - 1; i >= 0; i--) {
+            const nextDept = chain[i + 1];
+            const prevDue = dueByDept.get(nextDept.deptCode)!;
+            const nextLeadDays = leadDaysFor(leadTimes, category, nextDept.deptCode);
+            // Current dept due = nextDept's dueDate minus nextDept's leadDays.
+            dueByDept.set(chain[i].deptCode, addDays(prevDue, -nextLeadDays));
+          }
+        }
+        for (let i = 0; i < chain.length; i++) {
+          const p = chain[i];
+          const deptMeta = deptByCode.get(p.deptCode);
+          if (!deptMeta) continue;
+          planned.push({
+            wipType: wip.wipType,
+            wipCode: wip.wipCode,
+            wipLabel: wip.wipLabel,
+            wipKey: wip.wipKey,
+            wipQty,
+            sequence: i,
+            deptCode: p.deptCode,
+            deptId: deptMeta.id,
+            deptName: deptMeta.name,
+            dueDate: dueByDept.get(p.deptCode) || deliveryDate,
+            category: p.category,
+            minutes: p.minutes,
+          });
+        }
+      } else {
+        // Forward pass from startDate.
+        let cursor = startDate;
+        for (let i = 0; i < chain.length; i++) {
+          const p = chain[i];
+          const deptMeta = deptByCode.get(p.deptCode);
+          const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
+          cursor = addDays(cursor, leadDays);
+          if (!deptMeta) continue;
+          planned.push({
+            wipType: wip.wipType,
+            wipCode: wip.wipCode,
+            wipLabel: wip.wipLabel,
+            wipKey: wip.wipKey,
+            wipQty,
+            sequence: i,
+            deptCode: p.deptCode,
+            deptId: deptMeta.id,
+            deptName: deptMeta.name,
+            dueDate: cursor,
+            category: p.category,
+            minutes: p.minutes,
+          });
+        }
+      }
+    }
+
+    // Overall targetEndDate = deliveryDate or last planned dept dueDate.
+    const poTargetEnd =
+      deliveryDate ||
+      planned.reduce<string>((acc, p) => (p.dueDate > acc ? p.dueDate : acc), startDate);
+
+    // PO.currentDepartment = first-in-DEPT_ORDER dept across all WIP chains
+    // (see task spec H3).
+    let currentDept = "FAB_CUT";
+    if (planned.length > 0) {
+      let minIdx = 999;
+      for (const p of planned) {
+        const idx = DEPT_ORDER.indexOf(p.deptCode as (typeof DEPT_ORDER)[number]);
+        if (idx >= 0 && idx < minIdx) {
+          minIdx = idx;
+          currentDept = p.deptCode;
+        }
+      }
+    }
 
     statements.push(
       db
@@ -294,9 +467,9 @@ async function createProductionOrdersForSO(
           so.customerState ?? "",
           companySoId,
           item.productId ?? "",
-          item.productCode ?? "",
+          productCode,
           item.productName ?? "",
-          item.itemCategory ?? "BEDFRAME",
+          category,
           item.sizeCode ?? "",
           item.sizeLabel ?? "",
           item.fabricCode ?? "",
@@ -307,10 +480,10 @@ async function createProductionOrdersForSO(
           item.specialOrder ?? "",
           item.notes ?? "",
           "PENDING",
-          "FAB_CUT",
+          currentDept,
           0,
           startDate,
-          targetDate,
+          poTargetEnd,
           null,
           "",
           0,
@@ -318,6 +491,53 @@ async function createProductionOrdersForSO(
           nowIso,
         ),
     );
+
+    // ------ job_cards — one per (WIP × dept) ------
+    // The first dept of each WIP's chain gets prerequisiteMet=1 so workers
+    // can pick it up immediately; subsequent depts get prerequisiteMet=0.
+    for (const p of planned) {
+      const jcId = `jc-${poId}-${p.wipCode}-${p.deptCode}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 128);
+      const isFirstDeptForWip = p.sequence === 0;
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
+               departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
+               wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            jcId,
+            poId,
+            p.deptId,
+            p.deptCode,
+            p.deptName,
+            p.sequence,
+            "WAITING",
+            p.dueDate,
+            p.wipKey,
+            p.wipCode,
+            p.wipType,
+            p.wipLabel,
+            p.wipQty,
+            isFirstDeptForWip ? 1 : 0,
+            null,
+            "",
+            null,
+            "",
+            null,
+            p.minutes,
+            null,
+            p.category,
+            p.minutes,
+            "PENDING",
+            null,
+          ),
+      );
+    }
 
     created.push({
       id: poId,
@@ -330,6 +550,214 @@ async function createProductionOrdersForSO(
 
   return { statements, created, preExisting: false };
 }
+
+// ---------------------------------------------------------------------------
+// backfillJobCardsForPo — build the job_cards batch for an already-existing
+// production_orders row that has zero job_cards. Used by the one-shot
+// admin backfill endpoint below. Idempotent: checks for existing job_cards
+// and returns [] if any are present.
+// ---------------------------------------------------------------------------
+async function backfillJobCardsForPo(
+  db: D1Database,
+  poId: string,
+): Promise<{ statements: D1PreparedStatement[]; jcCount: number; currentDept: string | null }> {
+  await ensureLeadTimesSeeded(db);
+  const leadTimes = await loadLeadTimes(db);
+
+  // Skip if any job_cards already exist.
+  const existingJc = await db
+    .prepare("SELECT id FROM job_cards WHERE productionOrderId = ? LIMIT 1")
+    .bind(poId)
+    .first<{ id: string }>();
+  if (existingJc) {
+    return { statements: [], jcCount: 0, currentDept: null };
+  }
+
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po) {
+    return { statements: [], jcCount: 0, currentDept: null };
+  }
+  const so = po.salesOrderId
+    ? await db
+        .prepare("SELECT * FROM sales_orders WHERE id = ?")
+        .bind(po.salesOrderId)
+        .first<SalesOrderRow>()
+    : null;
+
+  const deliveryDate =
+    (so?.hookkaExpectedDD || so?.customerDeliveryDate) ||
+    po.targetEndDate ||
+    "";
+  const startDate = so?.companySODate || po.startDate || new Date().toISOString().split("T")[0];
+  const category = po.itemCategory ?? "BEDFRAME";
+  const productCode = po.productCode ?? "";
+
+  const deptRes = await db
+    .prepare("SELECT id, code, name FROM departments").all<{ id: string; code: string; name: string }>();
+  const deptByCode = new Map<string, { id: string; name: string }>();
+  for (const d of deptRes.results ?? []) {
+    deptByCode.set(d.code, { id: d.id, name: d.name });
+  }
+
+  let bomRow = await db
+    .prepare(
+      `SELECT wipComponents FROM bom_templates
+         WHERE productCode = ? AND versionStatus = 'ACTIVE'
+         ORDER BY effectiveFrom DESC LIMIT 1`,
+    )
+    .bind(productCode)
+    .first<{ wipComponents: string | null }>();
+  if (!bomRow) {
+    bomRow = await db
+      .prepare(
+        `SELECT wipComponents FROM bom_templates
+           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ wipComponents: string | null }>();
+  }
+  const wips = breakBomIntoWips(bomRow?.wipComponents ?? null, productCode);
+
+  const statements: D1PreparedStatement[] = [];
+  let currentDept = po.currentDepartment ?? "FAB_CUT";
+  let currentDeptIdx = 999;
+  let jcCount = 0;
+
+  for (const wip of wips) {
+    const wipQty = Math.max(1, Math.floor((po.quantity || 1) * wip.quantityMultiplier));
+    const chain = wip.processes;
+
+    const planned: Array<{
+      deptCode: string;
+      deptId: string;
+      deptName: string;
+      sequence: number;
+      dueDate: string;
+      category: string;
+      minutes: number;
+    }> = [];
+
+    if (deliveryDate) {
+      const dueByDept = new Map<string, string>();
+      const lastIdx = chain.length - 1;
+      if (lastIdx >= 0) {
+        dueByDept.set(chain[lastIdx].deptCode, deliveryDate);
+        for (let i = lastIdx - 1; i >= 0; i--) {
+          const nextDept = chain[i + 1];
+          const prevDue = dueByDept.get(nextDept.deptCode)!;
+          const nextLeadDays = leadDaysFor(leadTimes, category, nextDept.deptCode);
+          dueByDept.set(chain[i].deptCode, addDays(prevDue, -nextLeadDays));
+        }
+      }
+      for (let i = 0; i < chain.length; i++) {
+        const p = chain[i];
+        const deptMeta = deptByCode.get(p.deptCode);
+        if (!deptMeta) continue;
+        planned.push({
+          deptCode: p.deptCode,
+          deptId: deptMeta.id,
+          deptName: deptMeta.name,
+          sequence: i,
+          dueDate: dueByDept.get(p.deptCode) || deliveryDate,
+          category: p.category,
+          minutes: p.minutes,
+        });
+      }
+    } else {
+      let cursor = startDate;
+      for (let i = 0; i < chain.length; i++) {
+        const p = chain[i];
+        const deptMeta = deptByCode.get(p.deptCode);
+        const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
+        cursor = addDays(cursor, leadDays);
+        if (!deptMeta) continue;
+        planned.push({
+          deptCode: p.deptCode,
+          deptId: deptMeta.id,
+          deptName: deptMeta.name,
+          sequence: i,
+          dueDate: cursor,
+          category: p.category,
+          minutes: p.minutes,
+        });
+      }
+    }
+
+    for (const p of planned) {
+      const idx = DEPT_ORDER.indexOf(p.deptCode as (typeof DEPT_ORDER)[number]);
+      if (idx >= 0 && idx < currentDeptIdx) {
+        currentDeptIdx = idx;
+        currentDept = p.deptCode;
+      }
+      const jcId = `jc-${poId}-${wip.wipCode}-${p.deptCode}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 128);
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
+               departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
+               wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            jcId,
+            poId,
+            p.deptId,
+            p.deptCode,
+            p.deptName,
+            p.sequence,
+            "WAITING",
+            p.dueDate,
+            wip.wipKey,
+            wip.wipCode,
+            wip.wipType,
+            wip.wipLabel,
+            wipQty,
+            p.sequence === 0 ? 1 : 0,
+            null,
+            "",
+            null,
+            "",
+            null,
+            p.minutes,
+            null,
+            p.category,
+            p.minutes,
+            "PENDING",
+            null,
+          ),
+      );
+      jcCount++;
+    }
+  }
+
+  if (statements.length > 0) {
+    statements.push(
+      db
+        .prepare("UPDATE production_orders SET currentDepartment = ? WHERE id = ?")
+        .bind(currentDept, poId),
+    );
+  }
+
+  return { statements, jcCount, currentDept };
+}
+
+// Minimal inline type used by backfillJobCardsForPo.
+type ProductionOrderRow = {
+  id: string;
+  salesOrderId: string | null;
+  productCode: string | null;
+  itemCategory: string | null;
+  quantity: number;
+  currentDepartment: string | null;
+  targetEndDate: string | null;
+  startDate: string | null;
+};
 
 // Generate next SO number by scanning existing companySOId values for the
 // current YYMM prefix and incrementing the max sequence. Falls back to 001.
@@ -405,6 +833,47 @@ app.get("/status-changes", async (c) => {
   ).all<SOStatusChangeRow>();
   const data = (res.results ?? []).map(rowToStatusChange);
   return c.json({ success: true, data, total: data.length });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sales-orders/backfill-job-cards — admin one-shot backfill.
+//
+// Walks every production_orders row that has zero job_cards and runs the
+// BOM → WIP → job_cards cascade against it, using the same helper as the
+// main SO-confirm path. Idempotent per-PO (skips POs that already have jcs).
+//
+// Intended for one-time recovery of the stuck PO (SO-2604-001-01) that was
+// created before this cascade existed. Safe to re-invoke — it's a no-op on
+// any PO that already has at least one job_cards row.
+// ---------------------------------------------------------------------------
+app.post("/backfill-job-cards", async (c) => {
+  const db = c.env.DB;
+  const empties = await db
+    .prepare(
+      `SELECT p.id FROM production_orders p
+         LEFT JOIN job_cards j ON j.productionOrderId = p.id
+         WHERE j.id IS NULL`,
+    )
+    .all<{ id: string }>();
+  const ids = (empties.results ?? []).map((r) => r.id);
+
+  const results: Array<{ poId: string; jcCount: number; currentDept: string | null }> = [];
+  for (const poId of ids) {
+    const { statements, jcCount, currentDept } = await backfillJobCardsForPo(db, poId);
+    if (statements.length > 0) {
+      await db.batch(statements);
+    }
+    results.push({ poId, jcCount, currentDept });
+  }
+  const total = results.reduce((sum, r) => sum + r.jcCount, 0);
+  return c.json({
+    success: true,
+    data: {
+      posScanned: ids.length,
+      jobCardsInserted: total,
+      details: results,
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

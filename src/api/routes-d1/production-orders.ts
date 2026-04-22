@@ -25,6 +25,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
+import { postProductionOrderCompletion } from "../lib/fg-completion";
 
 const app = new Hono<Env>();
 
@@ -711,6 +712,10 @@ async function applyPoUpdate(
 
   // SO cascades.
   if (body.jobCardId && updatedPoStatus === "COMPLETED") {
+    // Auto-generate FG units + fg_batches row on PO completion. Idempotent:
+    // postProductionOrderCompletion short-circuits if fg_units already exist
+    // for this PO, and the fg_batches insert is guarded by productionOrderId.
+    await postProductionOrderCompletion(db, id);
     await cascadePoCompletionToSO(db, existing.salesOrderId);
   }
   await cascadeUpholsteryToSO(db, id);
@@ -1485,7 +1490,9 @@ app.post("/:id/scan-complete", async (c) => {
   if (allDone) {
     newPoStatus = "COMPLETED";
     newCompleted = today;
-    // TODO(phase-5): postProductionOrderCompletion (FIFO consume + FGBatch)
+    // FG generation + fg_batches row is handled below, after the PO UPDATE
+    // writes the COMPLETED status (so generateFGUnitsForPO sees the flipped
+    // completedDate when stamping mfdDate on new units).
   } else if (completedCount > 0) {
     newPoStatus = "IN_PROGRESS";
   }
@@ -1510,6 +1517,10 @@ app.post("/:id/scan-complete", async (c) => {
     .run();
 
   if (allDone) {
+    // Auto-generate FG units + fg_batches row on PO completion. Runs BEFORE
+    // the SO cascade so SO progression sees the freshly created inventory.
+    // Idempotent — safe on re-entry.
+    await postProductionOrderCompletion(db, target.po.id);
     await cascadePoCompletionToSO(db, target.po.salesOrderId);
   }
   await cascadeUpholsteryToSO(db, target.po.id);

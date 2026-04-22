@@ -148,6 +148,167 @@ function parsePieces(
   return { count: 1, names: ["Full Product"] };
 }
 
+// ---------------------------------------------------------------------------
+// generateFGUnitsForPO — pure helper, used by both the HTTP route below and
+// the internal PO-completion cascade in production-orders.ts.
+//
+// Idempotent: if any fg_units already exist for the given poId, returns them
+// untouched with `generated: false`. Otherwise creates one FGUnit per
+// (unit, piece) combination derived from PO quantity and product pieces
+// metadata, then returns the freshly created rows with `generated: true`.
+// ---------------------------------------------------------------------------
+export async function generateFGUnitsForPO(
+  db: D1Database,
+  poId: string,
+): Promise<{
+  status: "not-found" | "ok";
+  generated: boolean;
+  units: ReturnType<typeof rowToFGUnit>[];
+  po?: ProductionOrderRow;
+}> {
+  const po = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerName,
+         productId, productCode, productName, quantity, startDate, completedDate
+       FROM production_orders WHERE id = ?`,
+    )
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po) {
+    return { status: "not-found", generated: false, units: [] };
+  }
+
+  // Idempotency check — return existing set untouched
+  const existingRes = await db
+    .prepare("SELECT * FROM fg_units WHERE poId = ? ORDER BY id ASC")
+    .bind(poId)
+    .all<FGUnitRow>();
+  const existing = existingRes.results ?? [];
+  if (existing.length > 0) {
+    return {
+      status: "ok",
+      generated: false,
+      units: existing.map(rowToFGUnit),
+      po,
+    };
+  }
+
+  // Resolve Product (by id, then by code) to get pieces metadata
+  let product: ProductRow | null = null;
+  if (po.productId) {
+    product = await db
+      .prepare("SELECT id, code, pieces FROM products WHERE id = ? LIMIT 1")
+      .bind(po.productId)
+      .first<ProductRow>();
+  }
+  if (!product && po.productCode) {
+    product = await db
+      .prepare("SELECT id, code, pieces FROM products WHERE code = ? LIMIT 1")
+      .bind(po.productCode)
+      .first<ProductRow>();
+  }
+
+  const pieces = parsePieces(product?.pieces ?? null);
+  const totalUnits = Math.max(1, po.quantity || 1);
+  const totalPieces = pieces.count;
+
+  // Pick a customer hub — best-effort, matches in-memory helper
+  let hubShort: string | null = null;
+  if (po.salesOrderId) {
+    const so = await db
+      .prepare("SELECT id, customerId FROM sales_orders WHERE id = ?")
+      .bind(po.salesOrderId)
+      .first<SalesOrderMini>();
+    if (so?.customerId) {
+      const hub = await db
+        .prepare(
+          "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
+        )
+        .bind(so.customerId)
+        .first<DeliveryHubMini>();
+      hubShort = hub?.shortName ?? null;
+    }
+  }
+
+  const pad = (n: number, w: number) => String(n).padStart(w, "0");
+  const unitWidth = Math.max(2, String(totalUnits).length);
+  const baseBatch = String(100000 + Math.floor(Math.random() * 900000));
+  const mfdDate = po.completedDate || po.startDate || null;
+  const newUnits: Array<{
+    id: string;
+    unitSerial: string;
+    shortCode: string;
+    unitNo: number;
+    pieceNo: number;
+    pieceName: string;
+  }> = [];
+
+  for (let u = 1; u <= totalUnits; u++) {
+    for (let p = 1; p <= totalPieces; p++) {
+      const pieceName = pieces.names[p - 1] ?? `Piece ${p}`;
+      const unitSerial = `${po.salesOrderNo ?? ""}-R${po.lineNo}-U${pad(u, unitWidth)}-P${p}/${totalPieces}`;
+      const unitBatch = String(Number(baseBatch) + (u - 1))
+        .slice(-6)
+        .padStart(6, "0");
+      const shortCode = `${unitBatch}-${p}`;
+      newUnits.push({
+        id: genFGUnitId(po.id, u, p),
+        unitSerial,
+        shortCode,
+        unitNo: u,
+        pieceNo: p,
+        pieceName,
+      });
+    }
+  }
+
+  const statements = newUnits.map((unit) =>
+    db
+      .prepare(
+        `INSERT INTO fg_units (id, unitSerial, shortCode, soId, soNo, soLineNo,
+           poId, poNo, productCode, productName, unitNo, totalUnits,
+           pieceNo, totalPieces, pieceName, customerName, customerHub,
+           mfdDate, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+      )
+      .bind(
+        unit.id,
+        unit.unitSerial,
+        unit.shortCode,
+        po.salesOrderId ?? null,
+        po.salesOrderNo ?? null,
+        po.lineNo,
+        po.id,
+        po.poNo,
+        po.productCode ?? null,
+        po.productName ?? null,
+        unit.unitNo,
+        totalUnits,
+        unit.pieceNo,
+        totalPieces,
+        unit.pieceName,
+        po.customerName ?? null,
+        hubShort,
+        mfdDate,
+      ),
+  );
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
+
+  const createdRes = await db
+    .prepare("SELECT * FROM fg_units WHERE poId = ? ORDER BY id ASC")
+    .bind(poId)
+    .all<FGUnitRow>();
+  const created = createdRes.results ?? [];
+  return {
+    status: "ok",
+    generated: true,
+    units: created.map(rowToFGUnit),
+    po,
+  };
+}
+
 // GET /api/fg-units?poId=&soId=&status=&serial=
 app.get("/", async (c) => {
   const poId = c.req.query("poId");
@@ -198,160 +359,25 @@ app.get("/:id", async (c) => {
 });
 
 // POST /api/fg-units/generate/:poId — idempotent
-// Returns existing units as-is if any exist for this PO; otherwise
-// generates one FGUnit per (unit, piece) combination derived from the
-// PO's quantity and the product's pieces metadata.
+// Thin HTTP wrapper around generateFGUnitsForPO(). Returns existing units
+// untouched if already generated; otherwise creates one FGUnit per
+// (unit, piece) combination derived from PO quantity and product pieces.
 app.post("/generate/:poId", async (c) => {
   const poId = c.req.param("poId");
-
-  const po = await c.env.DB.prepare(
-    `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerName,
-       productId, productCode, productName, quantity, startDate, completedDate
-     FROM production_orders WHERE id = ?`,
-  )
-    .bind(poId)
-    .first<ProductionOrderRow>();
-  if (!po) {
+  const result = await generateFGUnitsForPO(c.env.DB, poId);
+  if (result.status === "not-found") {
     return c.json(
       { success: false, error: "Production order not found" },
       404,
     );
   }
-
-  // Idempotency check — return existing set untouched
-  const existingRes = await c.env.DB.prepare(
-    "SELECT * FROM fg_units WHERE poId = ? ORDER BY id ASC",
-  )
-    .bind(poId)
-    .all<FGUnitRow>();
-  const existing = existingRes.results ?? [];
-  if (existing.length > 0) {
-    return c.json({
-      success: true,
-      data: existing.map(rowToFGUnit),
-      total: existing.length,
-      generated: false,
-    });
-  }
-
-  // Resolve Product (by id, then by code) to get pieces metadata
-  let product: ProductRow | null = null;
-  if (po.productId) {
-    product = await c.env.DB.prepare(
-      "SELECT id, code, pieces FROM products WHERE id = ? LIMIT 1",
-    )
-      .bind(po.productId)
-      .first<ProductRow>();
-  }
-  if (!product && po.productCode) {
-    product = await c.env.DB.prepare(
-      "SELECT id, code, pieces FROM products WHERE code = ? LIMIT 1",
-    )
-      .bind(po.productCode)
-      .first<ProductRow>();
-  }
-
-  const pieces = parsePieces(product?.pieces ?? null);
-  const totalUnits = Math.max(1, po.quantity || 1);
-  const totalPieces = pieces.count;
-
-  // Pick a customer hub — best-effort, matches in-memory helper
-  let hubShort: string | null = null;
-  if (po.salesOrderId) {
-    const so = await c.env.DB.prepare(
-      "SELECT id, customerId FROM sales_orders WHERE id = ?",
-    )
-      .bind(po.salesOrderId)
-      .first<SalesOrderMini>();
-    if (so?.customerId) {
-      const hub = await c.env.DB.prepare(
-        "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
-      )
-        .bind(so.customerId)
-        .first<DeliveryHubMini>();
-      hubShort = hub?.shortName ?? null;
-    }
-  }
-
-  const pad = (n: number, w: number) => String(n).padStart(w, "0");
-  const unitWidth = Math.max(2, String(totalUnits).length);
-  const baseBatch = String(100000 + Math.floor(Math.random() * 900000));
-  const mfdDate = po.completedDate || po.startDate || null;
-  const newUnits: Array<{
-    id: string;
-    unitSerial: string;
-    shortCode: string;
-    unitNo: number;
-    pieceNo: number;
-    pieceName: string;
-  }> = [];
-
-  for (let u = 1; u <= totalUnits; u++) {
-    for (let p = 1; p <= totalPieces; p++) {
-      const pieceName = pieces.names[p - 1] ?? `Piece ${p}`;
-      const unitSerial = `${po.salesOrderNo ?? ""}-R${po.lineNo}-U${pad(u, unitWidth)}-P${p}/${totalPieces}`;
-      const unitBatch = String(Number(baseBatch) + (u - 1))
-        .slice(-6)
-        .padStart(6, "0");
-      const shortCode = `${unitBatch}-${p}`;
-      newUnits.push({
-        id: genFGUnitId(po.id, u, p),
-        unitSerial,
-        shortCode,
-        unitNo: u,
-        pieceNo: p,
-        pieceName,
-      });
-    }
-  }
-
-  const statements = newUnits.map((unit) =>
-    c.env.DB.prepare(
-      `INSERT INTO fg_units (id, unitSerial, shortCode, soId, soNo, soLineNo,
-         poId, poNo, productCode, productName, unitNo, totalUnits,
-         pieceNo, totalPieces, pieceName, customerName, customerHub,
-         mfdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
-    ).bind(
-      unit.id,
-      unit.unitSerial,
-      unit.shortCode,
-      po.salesOrderId ?? null,
-      po.salesOrderNo ?? null,
-      po.lineNo,
-      po.id,
-      po.poNo,
-      po.productCode ?? null,
-      po.productName ?? null,
-      unit.unitNo,
-      totalUnits,
-      unit.pieceNo,
-      totalPieces,
-      unit.pieceName,
-      po.customerName ?? null,
-      hubShort,
-      mfdDate,
-    ),
-  );
-  if (statements.length > 0) {
-    await c.env.DB.batch(statements);
-  }
-
-  const createdRes = await c.env.DB.prepare(
-    "SELECT * FROM fg_units WHERE poId = ? ORDER BY id ASC",
-  )
-    .bind(poId)
-    .all<FGUnitRow>();
-  const created = createdRes.results ?? [];
-  return c.json(
-    {
-      success: true,
-      data: created.map(rowToFGUnit),
-      total: created.length,
-      generated: true,
-    },
-    201,
-  );
+  const body = {
+    success: true,
+    data: result.units,
+    total: result.units.length,
+    generated: result.generated,
+  };
+  return result.generated ? c.json(body, 201) : c.json(body);
 });
 
 // POST /api/fg-units/scan

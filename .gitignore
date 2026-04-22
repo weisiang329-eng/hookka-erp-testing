@@ -39,3 +39,6 @@ tsc-out.txt
 
 # Derived from seed.sql via scripts/chunk-seed.ts
 migrations/seed-chunks/
+
+# Recovered localStorage snapshot (one-shot, not versioned)
+recovered-bom-templates.json

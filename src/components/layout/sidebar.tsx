@@ -152,11 +152,7 @@ const navigationGroups: NavGroup[] = [
   {
     label: "SYSTEM",
     items: [
-      { name: "Approvals", href: "/approvals", icon: ClipboardCheck },
-      { name: "Documents", href: "/documents", icon: FolderOpen },
-      { name: "Customer Portal", href: "/portal", icon: Globe },
       { name: "Organisations", href: "/settings/organisations", icon: Building2 },
-      { name: "Variants", href: "/settings/variants", icon: SlidersHorizontal },
       // "User Management" is injected below (SUPER_ADMIN only) at render time
       { name: "Settings", href: "/settings", icon: Settings },
     ],
@@ -182,7 +178,6 @@ export function Sidebar() {
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set(["Consignment"]));
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [unreadCount, setUnreadCount] = useState(0);
-  const [pendingApprovalCount, setPendingApprovalCount] = useState(0);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
   const [activeOrgId, setActiveOrgId] = useState("");
   const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
@@ -252,28 +247,14 @@ export function Sidebar() {
     }
   }, []);
 
-  const fetchPendingApprovals = useCallback(async () => {
-    try {
-      const res = await fetch("/api/approvals?status=PENDING");
-      if (!res.ok) return;
-      const data = await res.json();
-      const list = Array.isArray(data) ? data : [];
-      setPendingApprovalCount(list.length);
-    } catch {
-      // silently ignore
-    }
-  }, []);
-
   useEffect(() => {
     fetchOrgs();
     fetchUnreadCount();
-    fetchPendingApprovals();
     const interval = setInterval(() => {
       fetchUnreadCount();
-      fetchPendingApprovals();
     }, 60_000);
     return () => clearInterval(interval);
-  }, [fetchOrgs, fetchUnreadCount, fetchPendingApprovals]);
+  }, [fetchOrgs, fetchUnreadCount]);
 
   // Inject badge counts into Notifications and Approvals items, and the
   // SUPER_ADMIN-only User Management link into the SYSTEM group.
@@ -294,7 +275,6 @@ export function Sidebar() {
   const groupsWithBadge = navigationGroups.map((group) => {
     let items = group.items.map((item) => {
       if (item.name === "Notifications") return { ...item, badge: unreadCount };
-      if (item.name === "Approvals") return { ...item, badge: pendingApprovalCount };
       return item;
     });
     if (group.label === "SYSTEM" && isSuperAdmin) {

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { TabBar } from "@/components/layout/tab-bar";
@@ -5,6 +6,7 @@ import { TabbedOutlet } from "@/components/layout/tabbed-outlet";
 import { TabsProvider } from "@/contexts/tabs-context";
 import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
 import { ToastProvider } from "@/components/ui/toast";
+import { hydrateMasterTemplates } from "@/pages/bom";
 
 const mockUser = {
   name: "Lim",
@@ -15,6 +17,13 @@ const mockUser = {
 };
 
 export default function DashboardLayout() {
+  // Hydrate Master BOM Templates from D1 once the dashboard shell mounts.
+  // On first run this also migrates any legacy localStorage templates to D1
+  // and then wipes the legacy keys.
+  useEffect(() => {
+    void hydrateMasterTemplates();
+  }, []);
+
   return (
     <ToastProvider>
       <TabsProvider>

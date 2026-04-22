@@ -98,6 +98,7 @@ import priceHistory from "./routes-d1/price-history";
 import auth from "./routes-d1/auth";
 import users from "./routes-d1/users";
 import presence from "./routes-d1/presence";
+import bomMasterTemplates from "./routes-d1/bom-master-templates";
 import { authMiddleware } from "./lib/auth-middleware";
 
 // Phase 5 — mock-backed routes mounted until each is migrated to D1.
@@ -166,6 +167,7 @@ app.route("/api/price-history", priceHistory);
 app.route("/api/auth", auth);
 app.route("/api/users", users);
 app.route("/api/presence", presence);
+app.route("/api/bom-master-templates", bomMasterTemplates);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

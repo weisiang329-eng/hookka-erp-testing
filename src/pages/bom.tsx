@@ -171,80 +171,179 @@ type MasterTemplate = {
   updatedAt: string;
 };
 
+// Legacy localStorage keys — kept for a one-time migration to D1 on first
+// hydrate. After that, D1 is the source of truth for master templates.
 const MASTER_TPL_KEY = (id: string) => `bom-master-template-${id}`;
 const MASTER_TPL_INDEX_KEY = "bom-master-templates-index";
+const MASTERS_MIGRATED_FLAG = "bom-masters-migrated-to-d1";
 
-// Load the index of all master template ids. Falls back to ["BEDFRAME", "SOFA"]
-// for backward compatibility with the previous one-per-category scheme.
-function loadMasterTemplateIndex(): string[] {
-  if (typeof window === "undefined") return ["BEDFRAME", "SOFA"];
-  try {
-    const raw = localStorage.getItem(MASTER_TPL_INDEX_KEY);
-    if (!raw) return ["BEDFRAME", "SOFA"];
-    const parsed = JSON.parse(raw) as string[];
-    if (!Array.isArray(parsed) || parsed.length === 0) return ["BEDFRAME", "SOFA"];
-    return parsed;
-  } catch {
-    return ["BEDFRAME", "SOFA"];
+// In-memory cache populated from D1 on app start (see hydrateMasterTemplates).
+// Keeping sync load/save APIs against the cache means the dozens of existing
+// call sites don't all need to become async.
+let cachedMasters: MasterTemplate[] = [];
+let cacheHydrated = false;
+const hydrateListeners = new Set<() => void>();
+
+function notifyHydrateListeners() {
+  for (const cb of hydrateListeners) {
+    try {
+      cb();
+    } catch {
+      /* ignore */
+    }
   }
 }
 
-function saveMasterTemplateIndex(ids: string[]) {
-  if (typeof window === "undefined") return;
+function authHeaders(): HeadersInit {
+  const raw =
+    typeof window !== "undefined"
+      ? localStorage.getItem("hookka_auth")
+      : null;
+  if (!raw) return { "content-type": "application/json" };
   try {
-    localStorage.setItem(MASTER_TPL_INDEX_KEY, JSON.stringify(ids));
+    const parsed = JSON.parse(raw) as { token?: string };
+    return parsed.token
+      ? {
+          "content-type": "application/json",
+          authorization: `Bearer ${parsed.token}`,
+        }
+      : { "content-type": "application/json" };
   } catch {
-    // ignore
+    return { "content-type": "application/json" };
   }
+}
+
+async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {
+  if (typeof window === "undefined") return [];
+  if (localStorage.getItem(MASTERS_MIGRATED_FLAG) === "1") return [];
+
+  const idxRaw = localStorage.getItem(MASTER_TPL_INDEX_KEY);
+  if (!idxRaw) {
+    localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
+    return [];
+  }
+
+  let ids: string[];
+  try {
+    ids = JSON.parse(idxRaw);
+  } catch {
+    localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
+    return [];
+  }
+  if (!Array.isArray(ids) || ids.length === 0) {
+    localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
+    return [];
+  }
+
+  const templates: MasterTemplate[] = [];
+  for (const id of ids) {
+    const raw = localStorage.getItem(MASTER_TPL_KEY(id));
+    if (!raw) continue;
+    try {
+      const parsed = JSON.parse(raw) as Partial<MasterTemplate>;
+      templates.push({
+        id: parsed.id || id,
+        category:
+          (parsed.category as "BEDFRAME" | "SOFA") ||
+          (id === "SOFA" ? "SOFA" : "BEDFRAME"),
+        label:
+          parsed.label ||
+          (id === "BEDFRAME" || id === "SOFA" ? "Default" : id),
+        moduleKey: parsed.moduleKey,
+        isDefault: parsed.isDefault ?? (id === "BEDFRAME" || id === "SOFA"),
+        l1Processes: parsed.l1Processes || [],
+        l1Materials: parsed.l1Materials || [],
+        wipItems: parsed.wipItems || [],
+        updatedAt: parsed.updatedAt || new Date().toISOString(),
+      });
+    } catch {
+      // skip malformed entry
+    }
+  }
+
+  if (templates.length === 0) {
+    localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
+    return [];
+  }
+
+  try {
+    await fetch("/api/bom-master-templates", {
+      method: "PUT",
+      headers: authHeaders(),
+      body: JSON.stringify({ templates, replaceAll: false }),
+    });
+    // Only clear the legacy keys after a successful upload so a failed
+    // migration doesn't lose data.
+    localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
+    for (const id of ids) localStorage.removeItem(MASTER_TPL_KEY(id));
+    localStorage.removeItem(MASTER_TPL_INDEX_KEY);
+  } catch {
+    // Leave the flag unset so we try again next hydrate.
+  }
+  return templates;
+}
+
+export async function hydrateMasterTemplates(): Promise<void> {
+  try {
+    await migrateLocalMastersToD1IfNeeded();
+    const res = await fetch("/api/bom-master-templates", {
+      headers: authHeaders(),
+    });
+    if (!res.ok) return;
+    const json = (await res.json()) as {
+      success?: boolean;
+      data?: MasterTemplate[];
+    };
+    if (Array.isArray(json.data)) {
+      cachedMasters = json.data;
+      cacheHydrated = true;
+      notifyHydrateListeners();
+    }
+  } catch {
+    // offline / unauth — leave cache empty; fallback defaults will fill in.
+  }
+}
+
+export function onMasterTemplatesHydrated(cb: () => void): () => void {
+  hydrateListeners.add(cb);
+  if (cacheHydrated) cb();
+  return () => hydrateListeners.delete(cb);
+}
+
+function loadMasterTemplateIndex(): string[] {
+  if (cachedMasters.length > 0) return cachedMasters.map((t) => t.id);
+  return ["BEDFRAME", "SOFA"];
 }
 
 function loadMasterTemplateById(id: string): MasterTemplate | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(MASTER_TPL_KEY(id));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<MasterTemplate>;
-    // Backward compat: legacy templates didn't have id/label/isDefault.
-    return {
-      id: parsed.id || id,
-      category: (parsed.category as "BEDFRAME" | "SOFA") || (id === "SOFA" ? "SOFA" : "BEDFRAME"),
-      label: parsed.label || (id === "BEDFRAME" || id === "SOFA" ? "Default" : id),
-      moduleKey: parsed.moduleKey,
-      isDefault: parsed.isDefault ?? (id === "BEDFRAME" || id === "SOFA"),
-      l1Processes: parsed.l1Processes || [],
-      l1Materials: parsed.l1Materials || [],
-      wipItems: parsed.wipItems || [],
-      updatedAt: parsed.updatedAt || new Date().toISOString(),
-    };
-  } catch {
-    return null;
-  }
+  const hit = cachedMasters.find((t) => t.id === id);
+  return hit ?? null;
 }
 
 function saveMasterTemplate(tpl: MasterTemplate) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(MASTER_TPL_KEY(tpl.id), JSON.stringify(tpl));
-    // Keep the index in sync.
-    const idx = loadMasterTemplateIndex();
-    if (!idx.includes(tpl.id)) {
-      idx.push(tpl.id);
-      saveMasterTemplateIndex(idx);
-    }
-  } catch {
-    // ignore
-  }
+  const idx = cachedMasters.findIndex((t) => t.id === tpl.id);
+  if (idx === -1) cachedMasters.push(tpl);
+  else cachedMasters[idx] = tpl;
+  // Background push to D1. Fire-and-forget — cache reflects the write
+  // immediately for synchronous read sites; the server is authoritative
+  // once the page reloads.
+  void fetch(`/api/bom-master-templates/${encodeURIComponent(tpl.id)}`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify(tpl),
+  }).catch(() => {
+    /* offline — next hydrate will refresh */
+  });
 }
 
 function deleteMasterTemplateById(id: string) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.removeItem(MASTER_TPL_KEY(id));
-    const idx = loadMasterTemplateIndex().filter((x) => x !== id);
-    saveMasterTemplateIndex(idx);
-  } catch {
-    // ignore
-  }
+  cachedMasters = cachedMasters.filter((t) => t.id !== id);
+  void fetch(`/api/bom-master-templates/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: authHeaders(),
+  }).catch(() => {
+    /* offline — next hydrate will resolve */
+  });
 }
 
 // Loads every master template (bedframe + sofa + all sofa modules) for the
@@ -2464,6 +2563,13 @@ function EditBOMDialog({
       | "BEDFRAME"
       | "SOFA";
     setMasterTemplates(loadAllMasterTemplates(cat));
+    // When D1 hydration finishes after the dialog is already open, re-pull
+    // from the (now-populated) cache so the Load Default picker isn't stuck
+    // with stale defaults.
+    const unsub = onMasterTemplatesHydrated(() => {
+      setMasterTemplates(loadAllMasterTemplates(cat));
+    });
+    return unsub;
   }, [open, product.category]);
 
   // The master that the auto-resolver WOULD pick for this product — used to
@@ -3218,15 +3324,25 @@ function MasterTemplatesDialog({
 
   useEffect(() => {
     if (!open) return;
-    const bf = loadAllMasterTemplates("BEDFRAME");
-    const sf = loadAllMasterTemplates("SOFA");
-    setBedframeList(bf);
-    setSofaList(sf);
-    setSelectedBedframeId(bf.find((t) => t.isDefault)?.id || bf[0]?.id || "BEDFRAME");
-    setSelectedSofaId(sf.find((t) => t.isDefault)?.id || sf[0]?.id || "SOFA");
+    const load = () => {
+      const bf = loadAllMasterTemplates("BEDFRAME");
+      const sf = loadAllMasterTemplates("SOFA");
+      setBedframeList(bf);
+      setSofaList(sf);
+      setSelectedBedframeId(
+        (prev) => prev || bf.find((t) => t.isDefault)?.id || bf[0]?.id || "BEDFRAME",
+      );
+      setSelectedSofaId(
+        (prev) => prev || sf.find((t) => t.isDefault)?.id || sf[0]?.id || "SOFA",
+      );
+    };
+    load();
     setDeletedIds([]);
     setTab("BEDFRAME");
     setEditMode(true);
+    // Re-sync when D1 hydration lands after the dialog is already open so
+    // the edit lists reflect authoritative D1 data, not fallback defaults.
+    return onMasterTemplatesHydrated(load);
   }, [open]);
 
   const currentList = tab === "BEDFRAME" ? bedframeList : sofaList;
@@ -3511,13 +3627,11 @@ function MasterTemplatesDialog({
 
   function handleSave() {
     const now = new Date().toISOString();
-    // Persist every template in both lists.
+    // Persist every template in both lists. saveMasterTemplate updates the
+    // in-memory cache and fires an async PUT to /api/bom-master-templates/:id.
     [...bedframeList, ...sofaList].forEach((t) => saveMasterTemplate({ ...t, updatedAt: now }));
-    // Apply pending deletions.
+    // Apply pending deletions (also async to D1).
     deletedIds.forEach((id) => deleteMasterTemplateById(id));
-    // Rebuild the index from current state to keep storage clean.
-    const ids = [...bedframeList.map((t) => t.id), ...sofaList.map((t) => t.id)];
-    saveMasterTemplateIndex(ids);
     setEditMode(false);
     toast.success(
       `Master templates saved — Bedframe: ${bedframeList.length}, Sofa: ${sofaList.length}` +

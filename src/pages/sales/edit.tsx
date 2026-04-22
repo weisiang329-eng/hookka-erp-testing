@@ -52,6 +52,13 @@ function extractSizeSuffix(sizeLabel: string): string {
   return m ? m[1] : sizeLabel;
 }
 
+/** Parse a sofa productCode like "5531-1A(LHF)" → { baseModel: "5531", module: "1A(LHF)" }.
+ *  Falls back to the full code when no hyphen is present. */
+function parseSofaCode(code: string): { baseModel: string; module: string } {
+  const m = code.match(/^([^-]+)-(.+)$/);
+  return m ? { baseModel: m[1], module: m[2] } : { baseModel: code, module: "" };
+}
+
 /** Generate WIP items for a bedframe line item */
 function generateBedframeWIPs(item: LineItem): { code: string; type: string; qty: number }[] {
   if (!item.baseModel || !item.sizeCode) return [];
@@ -127,29 +134,50 @@ export default function EditSalesOrderPage() {
           setCustomerDeliveryDate(so.customerDeliveryDate ? so.customerDeliveryDate.split("T")[0] : "");
           setHookkaExpectedDD(so.hookkaExpectedDD ? so.hookkaExpectedDD.split("T")[0] : "");
           setNotes(so.notes || "");
-          setItems(so.items.map((item: Record<string, unknown>) => ({
-            id: item.id as string,
-            productId: item.productId as string,
-            productCode: item.productCode as string,
-            productName: item.productName as string,
-            itemCategory: item.itemCategory as string,
-            baseModel: (item.baseModel as string) || (item.productCode as string) || "",
-            sizeCode: item.sizeCode as string,
-            sizeLabel: item.sizeLabel as string,
-            fabricId: item.fabricId as string,
-            fabricCode: item.fabricCode as string,
-            quantity: item.quantity as number,
-            basePriceSen: item.basePriceSen as number,
-            seatHeight: (item.seatHeight as string) || "",
-            gapInches: item.gapInches as number | null,
-            divanHeightInches: item.divanHeightInches as number | null,
-            divanPriceSen: (item.divanPriceSen as number) || 0,
-            legHeightInches: item.legHeightInches as number | null,
-            legPriceSen: (item.legPriceSen as number) || 0,
-            specialOrder: (item.specialOrder as string) || "",
-            specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
-            notes: (item.notes as string) || "",
-          })));
+          setItems(so.items.map((item: Record<string, unknown>) => {
+            const productCode = (item.productCode as string) || "";
+            const itemCategory = (item.itemCategory as string) || "";
+            const isSofa = itemCategory === "SOFA";
+            // For sofa line items:
+            //   - baseModel is parsed from productCode "5531-1A(LHF)" → "5531"
+            //     (the DB doesn't carry a separate baseModel column on
+            //     sales_order_items; we re-derive it so the Model dropdown
+            //     pre-selects on edit instead of showing blank).
+            //   - seatHeight comes from sizeLabel e.g. '28"' (sizeCode is
+            //     just the numeric portion like "28").
+            const parsed = isSofa ? parseSofaCode(productCode) : { baseModel: "", module: "" };
+            const rawSizeLabel = (item.sizeLabel as string) || "";
+            const rawSizeCode = (item.sizeCode as string) || "";
+            const seatHeight = isSofa
+              ? ((item.seatHeight as string) ||
+                 (rawSizeLabel.includes('"') ? rawSizeLabel : (rawSizeCode ? `${rawSizeCode}"` : "")))
+              : "";
+            return {
+              id: item.id as string,
+              productId: item.productId as string,
+              productCode,
+              productName: item.productName as string,
+              itemCategory,
+              baseModel: isSofa
+                ? parsed.baseModel
+                : ((item.baseModel as string) || productCode || ""),
+              sizeCode: rawSizeCode,
+              sizeLabel: rawSizeLabel,
+              fabricId: item.fabricId as string,
+              fabricCode: item.fabricCode as string,
+              quantity: item.quantity as number,
+              basePriceSen: item.basePriceSen as number,
+              seatHeight,
+              gapInches: item.gapInches as number | null,
+              divanHeightInches: item.divanHeightInches as number | null,
+              divanPriceSen: (item.divanPriceSen as number) || 0,
+              legHeightInches: item.legHeightInches as number | null,
+              legPriceSen: (item.legPriceSen as number) || 0,
+              specialOrder: (item.specialOrder as string) || "",
+              specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
+              notes: (item.notes as string) || "",
+            };
+          }));
         }
         setLoading(false);
       });
@@ -221,6 +249,13 @@ export default function EditSalesOrderPage() {
     if (!customerId) { toast.warning("Please select a customer"); return; }
     if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
     if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+    // Sofa lines require model + seat size from dropdown — no free text / blanks
+    if (items.some(l => l.itemCategory === "SOFA" && !l.baseModel)) {
+      toast.warning("Please select a model for all sofa items"); return;
+    }
+    if (items.some(l => l.itemCategory === "SOFA" && !l.seatHeight)) {
+      toast.warning("Please select a seat size for all sofa items"); return;
+    }
 
     setSaving(true);
     const res = await fetch(`/api/sales-orders/${id}`, {
@@ -495,7 +530,10 @@ export default function EditSalesOrderPage() {
                 })()}
 
                 {item.itemCategory === "SOFA" ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                  // Module shown via the top Module dropdown — the side-by-side
+                  // readonly field that used to display sizeCode here was
+                  // mislabeled (sizeCode is the seat SIZE, not the module).
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
                       <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -513,12 +551,6 @@ export default function EditSalesOrderPage() {
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
                       <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
-                    </div>
-                    <div>
-                      <label className="block text-xs text-[#9CA3AF] mb-1">Module</label>
-                      <div className="h-8 flex items-center px-2 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm font-medium">
-                        {item.sizeCode || "-"}
-                      </div>
                     </div>
                   </div>
                 ) : (

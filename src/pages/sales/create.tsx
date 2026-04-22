@@ -267,7 +267,7 @@ function CreateSalesOrderPage() {
               ...EMPTY_LINE,
               ...it,
               seatHeight: it.seatHeight || "",
-              specialOrders: it.specialOrders || (it.specialOrder ? it.specialOrder.split(",").map((s: string) => s.trim()).filter(Boolean) : []),
+              specialOrders: it.specialOrders || (it.specialOrder ? it.specialOrder.split(/[;,]/).map((s: string) => s.trim()).filter(Boolean) : []),
             }));
             setItems(migrated);
           }
@@ -520,7 +520,9 @@ function CreateSalesOrderPage() {
       surcharge = calcSpecialOrderSurcharge(next);
     }
 
-    const label = next.map(c => specialOrderOptions.find(o => o.code === c)?.name || c).join(", ");
+    // Persist as semicolon-separated canonical names; each token is guaranteed
+    // to come from the config dropdown, so no free text leaks into specialOrder.
+    const label = next.map(c => specialOrderOptions.find(o => o.code === c)?.name || c).join("; ");
     updateItem(idx, {
       specialOrders: next,
       specialOrder: label,
@@ -553,6 +555,13 @@ function CreateSalesOrderPage() {
     if (!customerId) { toast.warning("Please select a customer"); return; }
     if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
     if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+    // Sofa lines must have model + seat size chosen from dropdowns (no free text / blanks)
+    if (items.some(l => l.itemCategory === "SOFA" && !l.baseModel)) {
+      toast.warning("Please select a model for all sofa items"); return;
+    }
+    if (items.some(l => l.itemCategory === "SOFA" && !l.seatHeight)) {
+      toast.warning("Please select a seat size for all sofa items"); return;
+    }
 
     setPendingStatus(status);
     setSaving(true);
@@ -1031,7 +1040,7 @@ function LineItemCard({
 
       {/* Qty / Configuration (category-dependent) */}
       {item.itemCategory === "SOFA" ? (
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
             <Input type="number" min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -1062,12 +1071,6 @@ function LineItemCard({
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
             <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
-          </div>
-          <div>
-            <label className="block text-xs text-[#9CA3AF] mb-1">Module</label>
-            <div className="h-8 flex items-center px-2 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm font-medium">
-              {item.sizeCode || "-"}
-            </div>
           </div>
         </div>
       ) : (

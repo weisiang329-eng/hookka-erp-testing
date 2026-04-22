@@ -208,11 +208,32 @@ export default function SalesOrderDetailPage() {
     if (data.success) {
       setOrder(data.data);
       if (data.linkedPOs) setLinkedPOs(data.linkedPOs);
+      // Surface the ON_HOLD / CANCELLED / RESUME cascade summary as a toast so
+      // the user sees how many POs + job cards were touched by the transition.
+      // `cascade` is only populated when the server-side helper fired.
+      const cascade = data.cascade as
+        | { affectedPoCount: number; affectedJcCount: number; actions: string[] }
+        | null
+        | undefined;
+      if (cascade && (cascade.affectedPoCount > 0 || cascade.affectedJcCount > 0)) {
+        const parts: string[] = [];
+        if (cascade.affectedPoCount > 0) {
+          parts.push(`${cascade.affectedPoCount} production order${cascade.affectedPoCount === 1 ? "" : "s"}`);
+        }
+        if (cascade.affectedJcCount > 0) {
+          parts.push(`${cascade.affectedJcCount} job card${cascade.affectedJcCount === 1 ? "" : "s"}`);
+        }
+        toast.success(`Status → ${newStatus}. ${parts.join(" + ")} updated.`);
+      } else {
+        toast.success(`Status updated to ${newStatus}.`);
+      }
       fetchOrder(); // Refresh all data including status history
+    } else {
+      toast.error(data.error || `Failed to update status.`);
     }
     setUpdating(false);
     setModal(prev => ({ ...prev, open: false }));
-  }, [order, id, fetchOrder]);
+  }, [order, id, fetchOrder, toast]);
 
   const confirmOrder = useCallback(async () => {
     if (!order) return;

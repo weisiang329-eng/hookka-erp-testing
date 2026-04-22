@@ -506,6 +506,12 @@ export default function ProductionPage() {
   const [fltCustomer, setFltCustomer] = useState("");
   const [fltDueFrom, setFltDueFrom] = useState("");
   const [fltDueTo, setFltDueTo] = useState("");
+  // Status lifecycle filter: Active (default) hides ON_HOLD + CANCELLED.
+  // "all" shows everything; "onhold" / "cancelled" / "completed" isolate
+  // a single bucket for supervisors auditing the queue.
+  const [fltLifecycle, setFltLifecycle] = useState<
+    "active" | "all" | "onhold" | "cancelled" | "completed"
+  >("active");
 
   // Mirror of the Production Sheet DataGrid's internal filter + sort result.
   // When a dept tab is active, Print Schedule and the on-screen QR Stickers
@@ -738,9 +744,27 @@ export default function ProductionPage() {
       if (fltCustomer && o.customerName !== fltCustomer) return false;
       if (fltDueFrom && (o.targetEndDate || "") < fltDueFrom) return false;
       if (fltDueTo && (o.targetEndDate || "") > fltDueTo) return false;
+      // Lifecycle filter — "active" is the default since day-to-day operators
+      // don't want ON_HOLD / CANCELLED POs cluttering their queue. Supervisors
+      // can flip to "all" or drill into a specific bucket.
+      switch (fltLifecycle) {
+        case "active":
+          if (o.status === "ON_HOLD" || o.status === "CANCELLED") return false;
+          break;
+        case "onhold":
+          if (o.status !== "ON_HOLD") return false;
+          break;
+        case "cancelled":
+          if (o.status !== "CANCELLED") return false;
+          break;
+        case "completed":
+          if (o.status !== "COMPLETED") return false;
+          break;
+        // "all" — no-op
+      }
       return true;
     });
-  }, [orders, fltSearch, fltState, fltCustomer, fltDueFrom, fltDueTo]);
+  }, [orders, fltSearch, fltState, fltCustomer, fltDueFrom, fltDueTo, fltLifecycle]);
 
   const visibleOrders = useMemo(() => {
     if (activeTab === "ALL") return filteredOrders;
@@ -838,7 +862,8 @@ export default function ProductionPage() {
     completedDate: string;
     pic1: string;
     pic2: string;
-    status: string;
+    status: string;        // job_card status
+    poStatus: string;      // parent production_order status — drives ON_HOLD / CANCELLED styling
     // Scheduling info for every one of the 8 departments — NOT just
     // upstreams. The user can toggle any dept column on/off via the grid's
     // Columns button. Each entry is flattened into `sched_<CODE>` keys so
@@ -1006,6 +1031,7 @@ export default function ProductionPage() {
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
+          poStatus: o.status || "",
           sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, siblings),
           sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, siblings),
           sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, siblings),
@@ -1280,7 +1306,41 @@ export default function ProductionPage() {
 
   const deptColumns: Column<DeptRow>[] = [
     { key: "rowNo",         label: "#",              type: "number", width: "50px",  align: "right", sortable: true },
-    { key: "soId",          label: "SO ID",          type: "docno",  width: "140px", sortable: true },
+    {
+      key: "soId",
+      label: "SO ID",
+      type: "docno",
+      width: "170px",
+      sortable: true,
+      // Append an ON HOLD / CANCELLED pill when the parent PO is paused or
+      // cancelled so operators can see at-a-glance why the row looks different.
+      render: (_v, row) => {
+        const pillCls =
+          row.poStatus === "ON_HOLD"
+            ? "bg-[#FAEFCB] text-[#9C6F1E]"
+            : row.poStatus === "CANCELLED"
+              ? "bg-[#E5E7EB] text-[#4B5563]"
+              : "";
+        const pillLabel =
+          row.poStatus === "ON_HOLD"
+            ? "ON HOLD"
+            : row.poStatus === "CANCELLED"
+              ? "CANCELLED"
+              : "";
+        return (
+          <span className="flex items-center gap-1.5 tabular-nums">
+            <span className="doc-number truncate">{row.soId}</span>
+            {pillLabel && (
+              <span
+                className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide ${pillCls}`}
+              >
+                {pillLabel}
+              </span>
+            )}
+          </span>
+        );
+      },
+    },
     { key: "customerPOId",  label: "Customer PO ID", type: "docno",  width: "130px", sortable: true },
     { key: "customerRef",   label: "Customer Ref",   type: "text",   width: "120px", sortable: true },
     { key: "customerName",  label: "Customer Name",  type: "text",   width: "130px", sortable: true },
@@ -1975,6 +2035,24 @@ export default function ProductionPage() {
           <option value="">All states</option>
           {stateOptions.map((s) => (<option key={s} value={s}>{s}</option>))}
         </select>
+        {/* Lifecycle status filter — default "Active" hides ON_HOLD + CANCELLED */}
+        <select
+          value={fltLifecycle}
+          onChange={(e) =>
+            setFltLifecycle(
+              e.target.value as
+                | "active" | "all" | "onhold" | "cancelled" | "completed",
+            )
+          }
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+          title="Production order lifecycle filter"
+        >
+          <option value="active">Active</option>
+          <option value="all">All</option>
+          <option value="onhold">On Hold</option>
+          <option value="cancelled">Cancelled</option>
+          <option value="completed">Completed</option>
+        </select>
         <label className="text-[10px] text-[#6B7280]">Due from</label>
         <input
           type="date"
@@ -1989,11 +2067,11 @@ export default function ProductionPage() {
           onChange={(e) => setFltDueTo(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
         />
-        {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo) && (
+        {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo || fltLifecycle !== "active") && (
           <button
             onClick={() => {
               setFltSearch(""); setFltState(""); setFltCustomer("");
-              setFltDueFrom(""); setFltDueTo("");
+              setFltDueFrom(""); setFltDueTo(""); setFltLifecycle("active");
             }}
             className="text-[10px] text-[#6B5C32] hover:underline"
           >
@@ -2064,6 +2142,18 @@ export default function ProductionPage() {
             onDoubleClick={(row) => navigate(`/production/${row.poId}`)}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
+            // ON_HOLD → amber background; CANCELLED → grey + strikethrough.
+            // rowClassName appends onto the grid's default row class so alt-row
+            // striping still works when no lifecycle class applies.
+            rowClassName={(row) => {
+              if (row.poStatus === "ON_HOLD") {
+                return "bg-[#FEF6D8] hover:bg-[#FBEBAE]";
+              }
+              if (row.poStatus === "CANCELLED") {
+                return "bg-[#F3F4F6] text-[#9CA3AF] line-through hover:bg-[#E5E7EB]";
+              }
+              return "";
+            }}
           />
         </div>
       )}
@@ -2097,14 +2187,42 @@ export default function ProductionPage() {
             No production orders found.
           </div>
         ) : (
-          visibleOrders.map((order) => (
+          visibleOrders.map((order) => {
+            // Lifecycle row styling — amber background for ON_HOLD, grey +
+            // strikethrough for CANCELLED. Matches the dept DataGrid rule.
+            const rowCls =
+              order.status === "ON_HOLD"
+                ? "bg-[#FEF6D8] hover:bg-[#FBEBAE]"
+                : order.status === "CANCELLED"
+                  ? "bg-[#F3F4F6] text-[#9CA3AF] line-through hover:bg-[#E5E7EB]"
+                  : "hover:bg-[#FDFBF7]";
+            const pillLabel =
+              order.status === "ON_HOLD"
+                ? "ON HOLD"
+                : order.status === "CANCELLED"
+                  ? "CANCELLED"
+                  : "";
+            const pillCls =
+              order.status === "ON_HOLD"
+                ? "bg-[#FAEFCB] text-[#9C6F1E]"
+                : order.status === "CANCELLED"
+                  ? "bg-[#E5E7EB] text-[#4B5563]"
+                  : "";
+            return (
             <div
               key={order.id}
-              className="grid items-stretch border-b border-[#F0EBE3] last:border-b-0 hover:bg-[#FDFBF7] cursor-pointer"
+              className={`grid items-stretch border-b border-[#F0EBE3] last:border-b-0 cursor-pointer ${rowCls}`}
               style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 50px 70px repeat(8,minmax(0,1fr))" }}
               onDoubleClick={() => navigate(`/production/${order.id}`)}
             >
-              <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center tabular-nums">{order.poNo}</div>
+              <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
+                <span className="truncate">{order.poNo}</span>
+                {pillLabel && (
+                  <span className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide no-underline ${pillCls}`}>
+                    {pillLabel}
+                  </span>
+                )}
+              </div>
               <div className="px-3 py-1.5 min-w-0 flex flex-col justify-center">
                 <div className="text-xs font-semibold text-[#1F1D1B] truncate">{order.productCode}</div>
                 <ProductDetailLine order={order} />
@@ -2171,7 +2289,8 @@ export default function ProductionPage() {
                 );
               })}
             </div>
-          ))
+            );
+          })
         )}
 
         {/* Footer */}

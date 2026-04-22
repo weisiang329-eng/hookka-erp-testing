@@ -623,6 +623,22 @@ async function applyPoUpdate(
       return c.json({ success: false, error: "Job card not found" }, 404);
     }
 
+    // ---- PO lock guard -----------------------------------------------------
+    // If the parent PO is ON_HOLD or CANCELLED, reject any job-card mutation
+    // from this endpoint. Mirrors the scan-complete guard so the shop floor
+    // and admin PATCH path agree: paused/cancelled work cannot advance until
+    // the SO supervisor resumes or reopens the order.
+    if (existing.status === "ON_HOLD" || existing.status === "CANCELLED") {
+      return c.json(
+        {
+          success: false,
+          code: "PO_LOCKED",
+          error: `Cannot modify job card — parent PO is ${existing.status}.`,
+        },
+        409,
+      );
+    }
+
     // Upstream-lock rule: when an operator tries to edit dueDate or
     // completedDate on this JC, refuse if any DOWNSTREAM JC in the same
     // wipKey branch has already been COMPLETED / TRANSFERRED. The UI greys
@@ -1246,6 +1262,32 @@ app.post("/:id/scan-complete", async (c) => {
     .first<ProductionOrderRow>();
   if (!scannedPo) {
     return c.json({ success: false, error: "Production order not found" }, 404);
+  }
+
+  // ---- ON_HOLD / CANCELLED scan block ---------------------------------------
+  // Paused or cancelled production orders must not accept new scans. The
+  // supervisor has to resume (ON_HOLD → PENDING) before the shop floor can
+  // record any more completions. COMPLETED POs are intentionally left alone —
+  // FIFO sticker binding already handles that path.
+  if (scannedPo.status === "ON_HOLD") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_ON_HOLD",
+        error: "此 Production Order 处于 ON_HOLD。主管恢复后才能扫描。",
+      },
+      409,
+    );
+  }
+  if (scannedPo.status === "CANCELLED") {
+    return c.json(
+      {
+        success: false,
+        code: "PO_CANCELLED",
+        error: "此 Production Order 已被取消,无法扫描。",
+      },
+      409,
+    );
   }
 
   const body = await c.req.json();

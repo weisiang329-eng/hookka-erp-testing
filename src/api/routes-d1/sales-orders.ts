@@ -1514,6 +1514,9 @@ app.put("/:id", async (c) => {
     let newStatus: string = existing.status;
     let pendingStatusChangeId: string | null = null;
     let isDraftToConfirmed = false;
+    // Cascade result from ON_HOLD / CANCELLED / RESUME transitions — prepended
+    // to the batch below so the SO + PO + JC updates land atomically.
+    let cascade: SOCascadeResult | null = null;
 
     // --- Status change with validation ---
     if (body.status && body.status !== existing.status) {
@@ -1533,6 +1536,17 @@ app.put("/:id", async (c) => {
         (existing.status === "DRAFT" || existing.status === "PENDING") &&
         newStatus === "CONFIRMED";
 
+      // Run cascade for ON_HOLD / CANCELLED transitions and for RESUME
+      // (ON_HOLD → CONFIRMED / IN_PRODUCTION). cascadeSOStatusToPOs is a no-op
+      // for any other transition, so calling it unconditionally is cheap.
+      cascade = await cascadeSOStatusToPOs(
+        c.env.DB,
+        id,
+        newStatus,
+        existing.status,
+        now,
+      );
+
       // Defer the status-change INSERT until after the PO cascade runs so we
       // can stamp autoActions with the created PO numbers.
       pendingStatusChangeId = genStatusId();
@@ -1550,9 +1564,13 @@ app.put("/:id", async (c) => {
             (body.changedBy as string) || "Admin",
             now,
             (body.statusNotes as string) || `Status changed to ${newStatus}`,
-            JSON.stringify([]),
+            JSON.stringify(cascade?.actions ?? []),
           ),
         );
+        // Queue the cascade UPDATEs for POs (and job_cards on CANCELLED).
+        if (cascade && cascade.statements.length > 0) {
+          statements.push(...cascade.statements);
+        }
       }
     }
 
@@ -1902,6 +1920,16 @@ app.put("/:id", async (c) => {
       data: updated,
       linkedPOs: createdProductionOrders,
       productionOrders: createdProductionOrders,
+      // Cascade summary surfaced to the UI so the toast can show
+      // "3 production orders moved to ON_HOLD". Null when the PUT
+      // didn't change status or the transition doesn't cascade.
+      cascade: cascade
+        ? {
+            affectedPoCount: cascade.affectedPoCount,
+            affectedJcCount: cascade.affectedJcCount,
+            actions: cascade.actions,
+          }
+        : null,
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

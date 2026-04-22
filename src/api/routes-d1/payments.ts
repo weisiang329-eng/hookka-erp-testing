@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { previewCascadeSOClosed } from "./invoices";
 
 const app = new Hono<Env>();
 
@@ -143,7 +144,9 @@ app.post("/", async (c) => {
     // Look up each invoice to grab the invoiceNo + current state for the
     // per-allocation side-effects (invoice_payments insert + paid bump).
     // Also pull salesOrderId so we can cascade the SO once the invoice is
-    // fully paid (E3).
+    // fully paid (E3), and deliveryOrderId so we can reuse
+    // previewCascadeSOClosed() from invoices.ts to flip the SO to CLOSED
+    // when every sibling invoice is PAID.
     const invoiceSnapshots = new Map<
       string,
       {
@@ -151,13 +154,15 @@ app.post("/", async (c) => {
         paidAmount: number;
         totalSen: number;
         salesOrderId: string | null;
+        deliveryOrderId: string | null;
       }
     >();
     if (allocInput.length > 0) {
       const ids = allocInput.map((a) => a.invoiceId);
       const placeholders = ids.map(() => "?").join(",");
       const invs = await c.env.DB.prepare(
-        `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId FROM invoices WHERE id IN (${placeholders})`,
+        `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
+           FROM invoices WHERE id IN (${placeholders})`,
       )
         .bind(...ids)
         .all<{
@@ -166,6 +171,7 @@ app.post("/", async (c) => {
           paidAmount: number;
           totalSen: number;
           salesOrderId: string | null;
+          deliveryOrderId: string | null;
         }>();
       for (const i of invs.results ?? []) {
         invoiceSnapshots.set(i.id, {
@@ -173,6 +179,7 @@ app.post("/", async (c) => {
           paidAmount: i.paidAmount,
           totalSen: i.totalSen,
           salesOrderId: i.salesOrderId,
+          deliveryOrderId: i.deliveryOrderId,
         });
       }
     }
@@ -212,9 +219,14 @@ app.post("/", async (c) => {
     // Track total allocated to this customer so we can decrement their
     // outstandingSen in one statement (E3). Track fully-paid invoices so
     // we can cascade their linked SO to INVOICED (only from DELIVERED /
-    // READY_TO_SHIP).
+    // READY_TO_SHIP) *and* run previewCascadeSOClosed() to flip the SO to
+    // CLOSED once every sibling invoice is PAID.
     let totalAllocatedSen = 0;
     const fullyPaidSOIds: string[] = [];
+    const fullyPaidInvoices: Array<{
+      invoiceId: string;
+      deliveryOrderId: string | null;
+    }> = [];
     for (const alloc of parsedAllocations) {
       const snap = invoiceSnapshots.get(alloc.invoiceId);
       if (!snap) continue;
@@ -228,6 +240,12 @@ app.post("/", async (c) => {
       totalAllocatedSen += alloc.amount;
       if (isFullyPaid && snap.salesOrderId) {
         fullyPaidSOIds.push(snap.salesOrderId);
+      }
+      if (isFullyPaid) {
+        fullyPaidInvoices.push({
+          invoiceId: alloc.invoiceId,
+          deliveryOrderId: snap.deliveryOrderId,
+        });
       }
       statements.push(
         c.env.DB.prepare(
@@ -301,6 +319,32 @@ app.post("/", async (c) => {
           );
         }
       }
+    }
+
+    // Second SO cascade: if this payment pushed an invoice to PAID *and*
+    // every sibling invoice attached to that SO (through every DO of the
+    // SO) is also PAID, flip the SO to CLOSED. previewCascadeSOClosed()
+    // treats the in-flight invoice as PAID (since the UPDATE is queued in
+    // the same batch above) and ignores invoices already tagged CLOSED /
+    // CANCELLED — so repeat POSTs or mixed-status SOs are safe. De-dupe
+    // on salesOrderId because multiple allocations in the same payment
+    // can target different invoices of the same SO; we only need to emit
+    // one UPDATE + audit row per SO.
+    const seenClosedSO = new Set<string>();
+    for (const fp of fullyPaidInvoices) {
+      if (!fp.deliveryOrderId) continue;
+      const snap = invoiceSnapshots.get(fp.invoiceId);
+      const soKey = snap?.salesOrderId;
+      if (!soKey || seenClosedSO.has(soKey)) continue;
+      const closeStmts = await previewCascadeSOClosed(
+        c.env.DB,
+        fp.invoiceId,
+        fp.deliveryOrderId,
+        now,
+      );
+      if (closeStmts.length === 0) continue;
+      seenClosedSO.add(soKey);
+      statements.push(...closeStmts);
     }
 
     await c.env.DB.batch(statements);

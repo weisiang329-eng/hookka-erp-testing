@@ -11,9 +11,11 @@
 // payments.ts), we cascade the linked SO to CLOSED *once every invoice
 // attached to that SO is PAID*. An SO can fan out to multiple DOs →
 // multiple invoices; closing the SO on the first fully-paid invoice would
-// be wrong. The helper `cascadeSOClosedIfAllInvoicesPaid` handles that
-// check and appends a so_status_changes audit row. Idempotent — running
-// against an already-CLOSED SO is a no-op.
+// be wrong. The exported helper `previewCascadeSOClosed` walks back
+// invoice → DO → SO, probes every sibling invoice, and returns the batch
+// statements to flip the SO + write a so_status_changes audit row.
+// Idempotent — running against an already-CLOSED SO is a no-op.
+// payments.ts imports the same helper so both paths stay in lock-step.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -178,7 +180,7 @@ function genStatusChangeId(): string {
 // before appending the INSERT (so older deployments still close the SO
 // even without the audit row).
 // ---------------------------------------------------------------------------
-async function previewCascadeSOClosed(
+export async function previewCascadeSOClosed(
   db: D1Database,
   invoiceId: string,
   deliveryOrderId: string | null,

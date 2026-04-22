@@ -274,11 +274,13 @@ app.get("/:id", async (c) => {
 });
 
 // PUT /api/credit-notes/:id — update status / approvedBy.
-// When transitioning to POSTED (E4) we decrement the customer's A/R and,
-// if the CN references a specific invoice, reduce that invoice's totalSen
-// so aging math stays correct. Idempotent: the decrement only fires on
-// the actual transition into POSTED (not on repeated PUTs with the same
-// status).
+//
+// The invoice/customer cascade fires on the first transition out of DRAFT
+// (DRAFT → APPROVED or DRAFT → POSTED). Once the CN is "issued" (APPROVED
+// or POSTED) the invoice totals + customer A/R have already absorbed the
+// amount, so a later APPROVED → POSTED (or the reverse) must NOT fire the
+// cascade again. Idempotent: repeated PUTs with the same status are a
+// no-op beyond the status/approvedBy column update.
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
@@ -300,8 +302,12 @@ app.put("/:id", async (c) => {
       }
     }
 
-    const transitionedToPosted =
-      existing.status !== "POSTED" && status === "POSTED";
+    // Fire cascade only on the first DRAFT → issued transition. Once the
+    // existing row is already APPROVED or POSTED, the invoice cascade has
+    // already been applied (either here on the earlier transition, or via
+    // POST if the CN was created directly in an issued state).
+    const transitionedToIssued =
+      !isIssuedStatus(existing.status) && isIssuedStatus(status);
 
     const statements: D1PreparedStatement[] = [
       c.env.DB.prepare(
@@ -309,7 +315,7 @@ app.put("/:id", async (c) => {
       ).bind(status, approvedBy, id),
     ];
 
-    if (transitionedToPosted && existing.totalAmount > 0) {
+    if (transitionedToIssued && existing.totalAmount > 0) {
       // Customer A/R: a credit note reduces what the customer owes.
       statements.push(
         c.env.DB.prepare(

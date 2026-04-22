@@ -108,9 +108,9 @@ import { authMiddleware } from "./lib/auth-middleware";
 // Pure Hono handlers + in-memory data from src/lib/mock-data.ts, fully
 // Workers-runtime compatible. Returning real shapes (not stubs) keeps
 // the UI pages from crashing on .filter/.map over envelope objects.
-import accounting from "./routes/accounting";
-import attendance from "./routes/attendance";
-import cashFlow from "./routes/cash-flow";
+import accounting from "./routes-d1/accounting";
+import attendance from "./routes-d1/attendance";
+import cashFlow from "./routes-d1/cash-flow";
 import consignments from "./routes-d1/consignments";
 import consignmentNotes from "./routes-d1/consignment-notes";
 import drivers from "./routes-d1/drivers";
@@ -122,8 +122,8 @@ import lorries from "./routes-d1/lorries";
 import maintenanceLogs from "./routes-d1/maintenance-logs";
 import mrp from "./routes-d1/mrp";
 import notifications from "./routes-d1/notifications";
-import payroll from "./routes/payroll";
-import payslips from "./routes/payslips";
+import payroll from "./routes-d1/payroll";
+import payslips from "./routes-d1/payslips";
 import productionLeadtimes from "./routes-d1/production-leadtimes";
 import promiseDate from "./routes-d1/promise-date";
 import qcInspections from "./routes-d1/qc-inspections";

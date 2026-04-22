@@ -420,6 +420,79 @@ app.put("/templates", async (c) => {
   }
 });
 
+// PUT /api/bom/templates/:id — partial update for a single template row.
+// The Module Builder save flow calls this once per user-triggered save so D1
+// is never rewritten in bulk from stale client state. Only the fields the
+// caller sends are updated; JSON fields (l1Processes, wipComponents) are
+// re-stringified from whatever array the client sends. Returns 404 if the
+// id doesn't exist — callers should POST /templates to create new rows.
+app.put("/templates/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare(
+    "SELECT * FROM bom_templates WHERE id = ?",
+  )
+    .bind(id)
+    .first<BOMTemplateRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "BOM template not found" }, 404);
+  }
+  try {
+    const body = await c.req.json();
+    const patch: Record<string, string | number | null> = {};
+    if (typeof body.productCode === "string") patch.productCode = body.productCode;
+    if (typeof body.baseModel === "string") patch.baseModel = body.baseModel;
+    if (body.category === "SOFA" || body.category === "BEDFRAME") {
+      patch.category = body.category;
+    }
+    if (Array.isArray(body.l1Processes)) {
+      patch.l1Processes = JSON.stringify(body.l1Processes);
+    }
+    if (Array.isArray(body.wipComponents)) {
+      patch.wipComponents = JSON.stringify(body.wipComponents);
+    }
+    if (typeof body.version === "string") patch.version = body.version;
+    if (
+      body.versionStatus === "DRAFT" ||
+      body.versionStatus === "ACTIVE" ||
+      body.versionStatus === "OBSOLETE"
+    ) {
+      patch.versionStatus = body.versionStatus;
+    }
+    if (typeof body.effectiveFrom === "string") patch.effectiveFrom = body.effectiveFrom;
+    if (typeof body.effectiveTo === "string" || body.effectiveTo === null) {
+      patch.effectiveTo = body.effectiveTo;
+    }
+    if (typeof body.changeLog === "string" || body.changeLog === null) {
+      patch.changeLog = body.changeLog;
+    }
+
+    const keys = Object.keys(patch);
+    if (keys.length > 0) {
+      const setClause = keys.map((k) => `${k} = ?`).join(", ");
+      await c.env.DB.prepare(
+        `UPDATE bom_templates SET ${setClause} WHERE id = ?`,
+      )
+        .bind(...keys.map((k) => patch[k]), id)
+        .run();
+    }
+
+    const refreshed = await c.env.DB.prepare(
+      "SELECT * FROM bom_templates WHERE id = ?",
+    )
+      .bind(id)
+      .first<BOMTemplateRow>();
+    if (!refreshed) {
+      return c.json(
+        { success: false, error: "Failed to read back BOM template" },
+        500,
+      );
+    }
+    return c.json({ success: true, data: rowToTemplate(refreshed) });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // bom_versions dynamic-id routes — MUST come AFTER /templates
 // ---------------------------------------------------------------------------

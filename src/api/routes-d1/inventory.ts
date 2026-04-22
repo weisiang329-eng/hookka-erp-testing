@@ -8,11 +8,12 @@
 //     data: { finishedProducts, wipItems, rawMaterials }
 //   }
 //
-// `finishedProducts` are products joined with a deterministic seeded stock
-// quantity (matches the in-memory seededRandom output for index i).
-// `wipItems` come from the wip_items table and `rawMaterials` from
-// raw_materials. The raw material POST endpoint validates uniqueness of
-// itemCode the same way as the in-memory route.
+// `finishedProducts` are products with `stockQty` defaulted to 0 — the real
+// on-hand quantity is derived client-side from fg_units state (see
+// `deriveFGStock` in src/pages/inventory/index.tsx). `wipItems` come from
+// the wip_items table and `rawMaterials` from raw_materials. The raw
+// material POST endpoint validates uniqueness of itemCode the same way as
+// the in-memory route.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -126,14 +127,6 @@ function rowToRawMaterial(row: RawMaterialRow) {
   };
 }
 
-// Deterministic seeded random — matches the in-memory route so the same
-// product index always produces the same stockQty. Preserves a frontend
-// expectation (stable stock numbers in dev).
-function seededRandom(seed: number): number {
-  const x = Math.sin(seed) * 10000;
-  return x - Math.floor(x);
-}
-
 function genRmId(): string {
   return `rm-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -148,9 +141,13 @@ app.get("/", async (c) => {
     ).all<RawMaterialRow>(),
   ]);
 
-  const finishedProducts = (productsRes.results ?? []).map((p, i) => ({
+  // stockQty is always 0 from the API — the real FG inventory is derived
+  // client-side from fg_units by `deriveFGStock` in
+  // src/pages/inventory/index.tsx. Keeping the field on the response
+  // preserves the wire-shape that the frontend expects.
+  const finishedProducts = (productsRes.results ?? []).map((p) => ({
     ...rowToProduct(p),
-    stockQty: Math.floor(seededRandom(i + 1) * 51),
+    stockQty: 0,
   }));
   const wipItems = (wipRes.results ?? []).map(rowToWipItem);
   const rawMaterials = (rmRes.results ?? []).map(rowToRawMaterial);

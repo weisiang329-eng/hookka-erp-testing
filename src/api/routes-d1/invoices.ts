@@ -6,9 +6,14 @@
 // joins invoice_payments. Invoice creation still requires a DELIVERED
 // deliveryOrderId, and flips the DO status to INVOICED in the same batch.
 //
-// Phase-3 scope: basic invoice CRUD + payment appending on PUT. Cascading
-// the linked SO from DELIVERED → INVOICED → CLOSED when the invoice is paid
-// is DEFERRED — see `// TODO(phase-4)` below.
+// When an invoice transitions to PAID (either via a direct PUT setting
+// status=PAID / paidAmount ≥ totalSen, or via a payment allocation in
+// payments.ts), we cascade the linked SO to CLOSED *once every invoice
+// attached to that SO is PAID*. An SO can fan out to multiple DOs →
+// multiple invoices; closing the SO on the first fully-paid invoice would
+// be wrong. The helper `cascadeSOClosedIfAllInvoicesPaid` handles that
+// check and appends a so_status_changes audit row. Idempotent — running
+// against an already-CLOSED SO is a no-op.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -146,6 +151,109 @@ function genNextInvoiceNo(): string {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
   return `INV-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+}
+
+function genStatusChangeId(): string {
+  return `sc-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
+// previewCascadeSOClosed
+//
+// Called from inside a PUT handler that is about to flip an invoice to PAID
+// as part of its own batch. The current invoice's PAID status is in-flight
+// (not yet on disk); every sibling invoice is read straight from D1.
+//
+// Returns the extra batch statements that, when appended to the caller's
+// batch, flip the linked SO to CLOSED and append a so_status_changes audit
+// row *only if* every invoice against every DO of that SO is PAID or
+// CANCELLED (the in-flight invoice is treated as PAID).
+//
+// Idempotent:
+//   * no-op if invoice has no linked DO / SO;
+//   * no-op if the SO is already CLOSED or CANCELLED;
+//   * no-op if any sibling invoice is still unpaid.
+//
+// Handles missing `so_status_changes` table gracefully by probing once
+// before appending the INSERT (so older deployments still close the SO
+// even without the audit row).
+// ---------------------------------------------------------------------------
+async function previewCascadeSOClosed(
+  db: D1Database,
+  invoiceId: string,
+  deliveryOrderId: string | null,
+  nowIso: string,
+  changedBy = "System",
+): Promise<D1PreparedStatement[]> {
+  if (!deliveryOrderId) return [];
+  const doRow = await db
+    .prepare("SELECT id, salesOrderId FROM delivery_orders WHERE id = ?")
+    .bind(deliveryOrderId)
+    .first<{ id: string; salesOrderId: string | null }>();
+  if (!doRow || !doRow.salesOrderId) return [];
+
+  const soRow = await db
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+    .bind(doRow.salesOrderId)
+    .first<{ id: string; status: string }>();
+  if (!soRow) return [];
+  if (soRow.status === "CLOSED" || soRow.status === "CANCELLED") return [];
+
+  // Sibling invoices that are still unpaid (excluding *this* invoice —
+  // its PAID status is in-flight and will land in the same batch).
+  const unpaidProbe = await db
+    .prepare(
+      `SELECT COUNT(*) AS n
+         FROM invoices i
+         JOIN delivery_orders d ON d.id = i.deliveryOrderId
+        WHERE d.salesOrderId = ?
+          AND i.id != ?
+          AND i.status != 'PAID'
+          AND i.status != 'CANCELLED'`,
+    )
+    .bind(soRow.id, invoiceId)
+    .first<{ n: number }>();
+  if ((unpaidProbe?.n ?? 0) > 0) return [];
+
+  const stmts: D1PreparedStatement[] = [
+    db
+      .prepare(
+        "UPDATE sales_orders SET status = 'CLOSED', updated_at = ? WHERE id = ?",
+      )
+      .bind(nowIso, soRow.id),
+  ];
+
+  // Probe for so_status_changes — skip audit insert if the table isn't
+  // present (older deployments that haven't applied migration 0001's
+  // status-history tables yet).
+  const hasAudit = await db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'so_status_changes' LIMIT 1",
+    )
+    .first<{ name: string }>()
+    .catch(() => null);
+  if (hasAudit) {
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO so_status_changes
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          genStatusChangeId(),
+          soRow.id,
+          soRow.status,
+          "CLOSED",
+          changedBy,
+          nowIso,
+          "All invoices fully paid",
+          JSON.stringify([`Invoice ${invoiceId} PAID closed SO`]),
+        ),
+    );
+  }
+
+  return stmts;
 }
 
 async function fetchInvoiceWithChildren(db: D1Database, id: string) {
@@ -544,8 +652,18 @@ app.put("/:id", async (c) => {
       );
     }
 
-    // TODO(phase-4): cascade the linked SO DELIVERED→INVOICED→CLOSED when
-    // the invoice becomes PAID, and append so_status_changes rows.
+    // Cascade: if this PUT flipped the invoice to PAID, close the linked
+    // SO iff all sibling invoices are also PAID. See
+    // previewCascadeSOClosed() for the "this invoice is in-flight" logic.
+    if (nextStatus === "PAID" && existing.status !== "PAID") {
+      const cascadeStmts = await previewCascadeSOClosed(
+        c.env.DB,
+        id,
+        existing.deliveryOrderId,
+        now,
+      );
+      statements.push(...cascadeStmts);
+    }
 
     await c.env.DB.batch(statements);
 

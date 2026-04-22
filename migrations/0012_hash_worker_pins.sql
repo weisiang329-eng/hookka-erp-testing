@@ -1,0 +1,24 @@
+-- ---------------------------------------------------------------------------
+-- 0012_hash_worker_pins
+--
+-- Worker PINs used to live as cleartext in worker_pins.pin. From this
+-- migration forward the application stores SHA-256 hex digests (see
+-- src/api/lib/auth-utils.ts::hashPin) and compares hashes on login.
+--
+-- Existing cleartext rows CANNOT be hashed retroactively without knowing the
+-- original PIN, so this migration is intentionally a no-op on data. The
+-- login handler in worker-auth.ts transparently handles legacy rows:
+--   * if stored value looks like a SHA-256 hex (64 lowercase hex chars),
+--     compare hash-to-hash;
+--   * otherwise fall back to cleartext compare, and on a successful match
+--     rewrite the row to the hashed form so subsequent logins take the
+--     fast path.
+--
+-- Operator playbook if you want to force-rotate:
+--   * inform workers they must reset PIN (existing reset-pin flow works);
+--   * optionally `DELETE FROM worker_pins;` to drop all rows, which forces
+--     every worker through the first-time registration path on next login.
+-- ---------------------------------------------------------------------------
+
+-- No DDL / DML needed — see header.
+SELECT 1;

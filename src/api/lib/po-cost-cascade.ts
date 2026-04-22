@@ -30,16 +30,17 @@
 //       - Idempotent: bail if an FG_COMPLETED row already exists for the PO.
 //
 //   F4. WIP component tracking (light placeholder):
-//       - Emits one ADJUSTMENT cost_ledger entry tagged "WIP_COMPLETED" in
-//         notes, summarising the FG qty. Real WIP inventory deducts / layer
-//         creation is deferred (TODO(wip-phase-2)).
-//       - Idempotent by refType='PRODUCTION_ORDER' + notes tag check.
+//       - Emits one WIP_COMPLETED cost_ledger entry summarising the FG qty.
+//         Real WIP inventory deducts / layer creation is deferred
+//         (TODO(wip-phase-2)).
+//       - Idempotent by refType='PRODUCTION_ORDER' + WIP_COMPLETED row check.
 //
 // SCHEMA NOTE
-//   cost_ledger.type CHECK constraint limits us to:
+//   cost_ledger.type CHECK constraint allows (post-migration-0011):
 //     RM_RECEIPT / RM_ISSUE / LABOR_POSTED / FG_COMPLETED / FG_DELIVERED /
-//     ADJUSTMENT. There is no dedicated WIP_COMPLETED type, so F4 uses
-//     ADJUSTMENT + a "WIP_COMPLETED" prefix in notes.
+//     ADJUSTMENT / WIP_COMPLETED. F4 uses WIP_COMPLETED directly.
+//     Legacy pre-0011 rows may still exist as ADJUSTMENT with a
+//     "WIP_COMPLETED" notes prefix — the idempotency check covers both.
 // ---------------------------------------------------------------------------
 import { fifoConsume, laborRateForDate } from "../../lib/costing";
 import type { RMBatch } from "../../types";
@@ -568,9 +569,12 @@ export async function backfillFGBatchCost(
 
 // ---------------------------------------------------------------------------
 // F4 — Light WIP completion marker. Real WIP inventory deducts / layer
-// creation is a bigger project — for now we emit a single ADJUSTMENT ledger
-// entry tagged "WIP_COMPLETED" so month-end views can see something
-// happened. Full tracking is TODO(wip-phase-2).
+// creation is a bigger project — for now we emit a single WIP_COMPLETED
+// ledger entry so month-end views can see something happened. Full
+// tracking is TODO(wip-phase-2).
+//
+// Idempotency: checks for WIP_COMPLETED OR legacy ADJUSTMENT rows with a
+// "WIP_COMPLETED" notes prefix (pre-migration-0011 shape).
 // ---------------------------------------------------------------------------
 export async function postWIPCompletionMarker(
   db: D1Database,
@@ -581,7 +585,12 @@ export async function postWIPCompletionMarker(
 
   const existing = await db
     .prepare(
-      "SELECT COUNT(*) AS n FROM cost_ledger WHERE type = 'ADJUSTMENT' AND refType = 'PRODUCTION_ORDER' AND refId = ? AND notes LIKE 'WIP_COMPLETED%'",
+      `SELECT COUNT(*) AS n FROM cost_ledger
+         WHERE refType = 'PRODUCTION_ORDER' AND refId = ?
+           AND (
+             type = 'WIP_COMPLETED'
+             OR (type = 'ADJUSTMENT' AND notes LIKE 'WIP_COMPLETED%')
+           )`,
     )
     .bind(poId)
     .first<{ n: number }>();
@@ -598,7 +607,7 @@ export async function postWIPCompletionMarker(
       `INSERT INTO cost_ledger
          (id, date, type, itemType, itemId, batchId, qty, direction,
           unitCostSen, totalCostSen, refType, refId, notes)
-       VALUES (?, ?, 'ADJUSTMENT', 'WIP', ?, NULL, ?, 'IN', 0, 0, 'PRODUCTION_ORDER', ?, ?)`,
+       VALUES (?, ?, 'WIP_COMPLETED', 'WIP', ?, NULL, ?, 'IN', 0, 0, 'PRODUCTION_ORDER', ?, ?)`,
     )
     .bind(
       genLedgerId("wip"),
@@ -606,7 +615,7 @@ export async function postWIPCompletionMarker(
       poId,
       fgQty,
       poId,
-      `WIP_COMPLETED placeholder — ${fgQty} FG from PO ${poId}. TODO(wip-phase-2): full WIP layer tracking.`,
+      `WIP_COMPLETED — ${fgQty} FG from PO ${poId}. TODO(wip-phase-2): full WIP layer tracking.`,
     )
     .run();
 

@@ -6,11 +6,15 @@
 // tables in D1. The HTTP surface (login / reset-pin / logout / me) stays
 // identical so the /worker mobile portal needs no changes.
 //
-// PINs are still stored as plaintext (shop-floor convenience login, not real
-// auth) — when this matures into real auth it should be bcrypt-hashed here.
+// PINs are stored as SHA-256 hex digests (see lib/auth-utils.ts). SHA-256 is
+// not salted — PIN space is only 10^4 so rainbow tables are trivial — but it
+// keeps raw PINs out of D1. Legacy cleartext rows (from before migration
+// 0012) are auto-upgraded in-place the first time the worker logs in
+// successfully with them.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { hashPin, isPinHashed } from "../lib/auth-utils";
 
 const app = new Hono<Env>();
 
@@ -97,14 +101,34 @@ app.post("/login", async (c) => {
         200,
       );
     }
+    const hashed = await hashPin(firstTimePin);
     await c.env.DB.prepare(
       "INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)",
     )
-      .bind(worker.id, firstTimePin, new Date().toISOString())
+      .bind(worker.id, hashed, new Date().toISOString())
       .run();
   } else {
-    if (!pin || pin !== existing.pin) {
+    if (!pin) {
       return c.json({ success: false, error: "Wrong PIN" }, 401);
+    }
+    // Back-compat: rows predating the hashing migration still hold cleartext
+    // PINs. On a successful match rewrite them to SHA-256 so the next login
+    // takes the fast path. After a full rollout + cleanup this branch can be
+    // removed.
+    const submittedHash = await hashPin(pin);
+    const storedIsHashed = isPinHashed(existing.pin);
+    const matches = storedIsHashed
+      ? submittedHash === existing.pin
+      : pin === existing.pin;
+    if (!matches) {
+      return c.json({ success: false, error: "Wrong PIN" }, 401);
+    }
+    if (!storedIsHashed) {
+      await c.env.DB.prepare(
+        "UPDATE worker_pins SET pin = ?, updatedAt = ? WHERE workerId = ?",
+      )
+        .bind(submittedHash, new Date().toISOString(), worker.id)
+        .run();
     }
   }
 
@@ -158,10 +182,11 @@ app.post("/reset-pin", async (c) => {
     );
   }
 
+  const hashedNew = await hashPin(newPin);
   await c.env.DB.prepare(
     "INSERT OR REPLACE INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)",
   )
-    .bind(worker.id, newPin, new Date().toISOString())
+    .bind(worker.id, hashedNew, new Date().toISOString())
     .run();
 
   // Invalidate any active tokens for this worker — force re-login.

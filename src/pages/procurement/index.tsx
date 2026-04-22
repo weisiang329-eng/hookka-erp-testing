@@ -8,12 +8,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
-import type { Supplier, PurchaseOrder, SupplierMaterialBinding } from "@/lib/mock-data";
-import {
-  rawMaterials,
-  supplierMaterialBindings,
-  suppliers as allMockSuppliers,
-} from "@/lib/mock-data";
+import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/lib/mock-data";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
@@ -41,39 +36,53 @@ type POLineItem = {
   materialCategory: string;  // kept for PO payload compatibility
 };
 
-/** For a given RM code, return all supplier bindings. */
-function getBindingsForRM(materialCode: string): SupplierMaterialBinding[] {
-  return supplierMaterialBindings.filter((b) => b.materialCode === materialCode);
-}
-
-/** For a given RM code, return the main-supplier binding (or first available). */
-function getMainBinding(materialCode: string): SupplierMaterialBinding | undefined {
-  const bindings = getBindingsForRM(materialCode);
-  return bindings.find((b) => b.isMainSupplier) ?? bindings[0];
-}
-
-/** Resolve supplier name from id. */
-function resolveSupplierName(supplierId: string): string {
-  const sup = allMockSuppliers.find((s) => s.id === supplierId);
-  return sup ? `${sup.code} - ${sup.name}` : supplierId;
-}
-
 function POFormDialog({
   onSave,
   onClose,
+  rawMaterials,
+  supplierMaterialBindings,
+  allSuppliers,
 }: {
   onSave: (data: Record<string, unknown>) => void;
   onClose: () => void;
+  rawMaterials: RawMaterial[];
+  supplierMaterialBindings: SupplierMaterialBinding[];
+  allSuppliers: Supplier[];
 }) {
   const [expectedDate, setExpectedDate] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<POLineItem[]>([]);
   const [rmSearch, setRmSearch] = useState("");
 
+  /** For a given RM code, return all supplier bindings. */
+  const getBindingsForRM = useCallback(
+    (materialCode: string): SupplierMaterialBinding[] =>
+      supplierMaterialBindings.filter((b) => b.materialCode === materialCode),
+    [supplierMaterialBindings],
+  );
+
+  /** For a given RM code, return the main-supplier binding (or first available). */
+  const getMainBinding = useCallback(
+    (materialCode: string): SupplierMaterialBinding | undefined => {
+      const bindings = getBindingsForRM(materialCode);
+      return bindings.find((b) => b.isMainSupplier) ?? bindings[0];
+    },
+    [getBindingsForRM],
+  );
+
+  /** Resolve supplier name from id. */
+  const resolveSupplierName = useCallback(
+    (supplierId: string): string => {
+      const sup = allSuppliers.find((s) => s.id === supplierId);
+      return sup ? `${sup.code} - ${sup.name}` : supplierId;
+    },
+    [allSuppliers],
+  );
+
   // Active raw materials for the RM selector dropdown
   const activeRMs = useMemo(
     () => rawMaterials.filter((rm) => rm.isActive),
-    []
+    [rawMaterials]
   );
 
   // Filtered RM list based on search input
@@ -375,8 +384,12 @@ const ALL_PO_STATUSES = [
 export default function ProcurementPage() {
   useToast();
   const navigate = useNavigate();
-  const [, setSuppliers] = useState<Supplier[]>([]);
+  const [allSuppliers, setAllSuppliers] = useState<Supplier[]>([]);
   const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
+  const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
+  const [supplierMaterialBindings, setSupplierMaterialBindings] = useState<
+    SupplierMaterialBinding[]
+  >([]);
   const [loading, setLoading] = useState(true);
 
   // Dialog
@@ -392,14 +405,25 @@ export default function ProcurementPage() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [supRes, poRes] = await Promise.all([
+      const [supRes, poRes, invRes, bindingsRes] = await Promise.all([
         fetch("/api/suppliers"),
         fetch("/api/purchase-orders"),
+        fetch("/api/inventory"),
+        fetch("/api/supplier-materials"),
       ]);
       const supData = await supRes.json();
       const poData = await poRes.json();
-      if (supData.success) setSuppliers(supData.data);
-      if (poData.success) setPurchaseOrders(poData.data);
+      const invData = await invRes.json();
+      const bindingsData = await bindingsRes.json();
+      if (supData.success) setAllSuppliers(supData.data || []);
+      if (poData.success) setPurchaseOrders(poData.data || []);
+      if (invData.success) {
+        // /api/inventory returns { data: { finishedProducts, wipItems, rawMaterials } }
+        setRawMaterials(invData.data?.rawMaterials || []);
+      }
+      // /api/supplier-materials may return either {data: [...]}  or the raw array
+      const bindings = bindingsData?.data ?? bindingsData;
+      setSupplierMaterialBindings(Array.isArray(bindings) ? bindings : []);
     } catch (err) {
       console.error("Failed to fetch data:", err);
     } finally {
@@ -750,6 +774,9 @@ export default function ProcurementPage() {
         <POFormDialog
           onSave={handleCreatePO}
           onClose={() => setShowPOForm(false)}
+          rawMaterials={rawMaterials}
+          supplierMaterialBindings={supplierMaterialBindings}
+          allSuppliers={allSuppliers}
         />
       )}
 

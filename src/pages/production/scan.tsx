@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Camera, Search, CheckCircle2, AlertTriangle, ArrowLeft, User } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useSearchParams } from "react-router-dom";
+import { parseStickerData } from "@/lib/qr-utils";
 
 type JobCard = {
   id: string;
@@ -80,6 +81,10 @@ function ScannerPage() {
     | { kind: "error"; message: string }
     | null
   >(null);
+  // pieceNo from the scanned sticker URL. Defaults to 1 (legacy single-piece
+  // behaviour) when the QR didn't encode &p=<n> — the server treats missing
+  // pieceNo as 1 too, so this matches backend semantics.
+  const [scannedPieceNo, setScannedPieceNo] = useState<number>(1);
 
   // Fetch worker list once
   useEffect(() => {
@@ -95,7 +100,19 @@ function ScannerPage() {
 
   // Check URL params on mount
   useEffect(() => {
-    const opId = searchParams.get("op");
+    // Parse the full scan URL via parseStickerData so we share the same
+    // decoding logic as the worker portal. We reconstruct the URL from
+    // window.location because the SPA has consumed it into searchParams
+    // and parseStickerData expects a URL string.
+    const fullUrl =
+      typeof window !== "undefined"
+        ? `${window.location.origin}${window.location.pathname}${window.location.search}`
+        : "";
+    const parsed = fullUrl ? parseStickerData(fullUrl) : null;
+    if (parsed?.pieceNo && parsed.pieceNo >= 1) {
+      setScannedPieceNo(parsed.pieceNo);
+    }
+    const opId = parsed?.opId || searchParams.get("op");
     if (opId) {
       setManualInput(opId);
       doLookup(opId);
@@ -173,6 +190,12 @@ function ScannerPage() {
           body: JSON.stringify({
             jobCardId: lookupResult.jobCard.id,
             workerId: selectedWorkerId,
+            // Forward the per-piece number the QR sticker carried. Without
+            // this, a multi-piece job card (qty=N) would always increment
+            // piece 1 no matter which sticker the operator scanned — the
+            // backend's sticker-binding + FIFO logic rely on pieceNo to
+            // route the scan to the right piece_pics slot.
+            pieceNo: scannedPieceNo,
           }),
         }
       );

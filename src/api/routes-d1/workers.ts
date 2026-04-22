@@ -259,6 +259,18 @@ app.put("/:id", async (c) => {
 });
 
 // DELETE /api/workers/:id
+//
+// Default behaviour is a *soft* delete — flips status to INACTIVE so the
+// row's history (piece completions, payroll, attendance) stays intact.
+// Live worker tokens are purged so any session for that worker is killed
+// immediately.
+//
+// `?hard=1` (SUPER_ADMIN only) hard-deletes the row. FKs from
+// worker_pins / worker_tokens / attendance / salary_adjustments /
+// worker_salary_periods / payroll_records cascade via ON DELETE CASCADE
+// (see migrations/0001_init.sql). The soft-FK pic1Id / pic2Id columns on
+// job_cards + piece_pics are not declared as FKs, so we explicitly NULL
+// them out first to avoid dangling references.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
@@ -267,8 +279,69 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Worker not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM workers WHERE id = ?").bind(id).run();
-  return c.json({ success: true, data: rowToWorker(existing) });
+
+  const hard = c.req.query("hard") === "1";
+
+  if (hard) {
+    // Role gate — hard deletes wipe referential history, SUPER_ADMIN only.
+    const role = (c as unknown as {
+      get: (k: string) => string | undefined;
+    }).get("userRole");
+    if (role !== "SUPER_ADMIN") {
+      return c.json(
+        { success: false, error: "Hard delete requires SUPER_ADMIN" },
+        403,
+      );
+    }
+
+    // Nullify the soft-FK pic columns on job_cards + piece_pics so the
+    // cascade delete doesn't leave orphaned worker references. Wrapped in
+    // a batch with the terminal DELETE so partial failures roll back.
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "UPDATE job_cards SET pic1Id = NULL, pic1Name = NULL WHERE pic1Id = ?",
+      ).bind(id),
+      c.env.DB.prepare(
+        "UPDATE job_cards SET pic2Id = NULL, pic2Name = NULL WHERE pic2Id = ?",
+      ).bind(id),
+      c.env.DB.prepare(
+        "UPDATE piece_pics SET pic1Id = NULL, pic1Name = NULL WHERE pic1Id = ?",
+      ).bind(id),
+      c.env.DB.prepare(
+        "UPDATE piece_pics SET pic2Id = NULL, pic2Name = NULL WHERE pic2Id = ?",
+      ).bind(id),
+      c.env.DB.prepare("DELETE FROM workers WHERE id = ?").bind(id),
+    ]);
+    // Return a synthetic "terminated" snapshot so the client sees the final
+    // state without another round-trip.
+    return c.json({
+      success: true,
+      data: { ...rowToWorker(existing), status: "DELETED" },
+    });
+  }
+
+  // Soft delete path — idempotent: re-hitting on an already-INACTIVE row is
+  // a no-op (status stays INACTIVE, no audit column on this table).
+  //
+  // NOTE: the workers table has no updated_at column (see 0001_init.sql),
+  // which is why the spec's `updated_at = ?` clause is skipped here.
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "UPDATE workers SET status = 'INACTIVE' WHERE id = ?",
+    ).bind(id),
+    // Kill any live worker-portal sessions so the inactive worker can't
+    // keep browsing on an old token.
+    c.env.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?").bind(id),
+  ]);
+  const updated = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
+    .bind(id)
+    .first<WorkerRow>();
+  return c.json({
+    success: true,
+    data: updated
+      ? rowToWorker(updated)
+      : { ...rowToWorker(existing), status: "INACTIVE" },
+  });
 });
 
 export default app;

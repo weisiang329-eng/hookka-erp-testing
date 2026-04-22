@@ -27,6 +27,8 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
+import { DEPT_ORDER } from "../lib/lead-times";
+import { resolveWorkerToken } from "./worker-auth";
 
 const app = new Hono<Env>();
 
@@ -341,6 +343,22 @@ async function nextSOHNumber(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 // WIP inventory — mirror of the in-memory applyWipInventoryChange().
 // Writes directly to wip_items (code-keyed).
+//
+// UPHOLSTERY special case: UPHOLSTERY is the terminal WIP dept — once it
+// completes, the WIP chain is finished and the piece becomes FG. We therefore
+// DO NOT create / bump a new wip_items row for UPH (there's no physical
+// "upholstered WIP" sitting on a shelf — it's a finished product). Instead we
+// consume (zero out) every earlier-dept wip_items row in the same wipKey
+// chain so the WIP board stops showing the intermediate Divan / HB / Cushion
+// stock that was upstream of this UPH.
+//
+// FG stock is NOT written from here — it's derived at render time by
+// deriveFGStock() in src/pages/inventory/index.tsx, which counts POs where
+// every UPH job_card is completed. So the cascade is:
+//   earlier depts COMPLETED → wip_items row added (stock accumulates)
+//   UPH COMPLETED → wip_items rows for THIS wipKey zeroed out
+//                   → deriveFGStock() now sees PO.jobCards[UPH].allCompleted
+//                     and surfaces an FG row
 // ---------------------------------------------------------------------------
 async function applyWipInventoryChange(
   db: D1Database,
@@ -355,6 +373,9 @@ async function applyWipInventoryChange(
   const wipQty = jcRow.wipQty || poRow.quantity || 1;
   if (!wipLabel) return;
 
+  const isUpholstery =
+    (jcRow.departmentCode || "").toUpperCase() === "UPHOLSTERY";
+
   const shortType = (() => {
     const t = (wipType || "").toUpperCase();
     if (t === "HEADBOARD") return "HB";
@@ -365,7 +386,36 @@ async function applyWipInventoryChange(
   })();
 
   if (newStatus === "COMPLETED" || newStatus === "TRANSFERRED") {
-    // Upsert-by-code: find existing wip_items row, create if missing.
+    if (isUpholstery) {
+      // UPH completion: consume every earlier-dept WIP row in the same
+      // wipKey chain. We zero stockQty and mark status=IN_PRODUCTION so
+      // the board stops counting it as available WIP. FG presence is
+      // derived downstream from PO.jobCards[UPH].allCompleted — nothing
+      // to insert here.
+      if (wipKey) {
+        const upstreamLabels = new Set<string>();
+        for (const j of allJcRows) {
+          if (
+            j.wipKey === wipKey &&
+            j.sequence < jcRow.sequence &&
+            j.wipLabel
+          ) {
+            upstreamLabels.add(j.wipLabel);
+          }
+        }
+        for (const label of upstreamLabels) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = 0, status = 'IN_PRODUCTION' WHERE code = ?",
+            )
+            .bind(label)
+            .run();
+        }
+      }
+      return;
+    }
+
+    // Non-UPH dept: upsert-by-code, accumulate stock on each completion.
     const existing = await db
       .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
       .bind(wipLabel)
@@ -1210,6 +1260,39 @@ app.post("/:id/scan-complete", async (c) => {
     );
   }
 
+  // ---- Worker-auth verification --------------------------------------------
+  // The scan-complete endpoint is mounted under /api/production-orders, which
+  // means the dashboard auth-middleware gate already passed OR the caller is
+  // a worker using the shop-floor portal. For worker callers we bind the
+  // body.workerId to the `x-worker-token` header so a malicious worker can't
+  // post scans "as someone else" by spoofing the workerId field.
+  //
+  // Two accepted auth paths:
+  //   1. A dashboard user (userId already set on ctx by auth-middleware) —
+  //      trust body.workerId as-is (admin scanner in src/pages/production/scan).
+  //   2. A worker token (x-worker-token header) — body.workerId must match
+  //      the worker_tokens row; otherwise 403.
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  );
+  const workerToken = c.req.header("x-worker-token");
+  if (!ctxUserId) {
+    // No dashboard auth → must be a worker call; verify the token binds to
+    // the claimed workerId.
+    const resolvedWorkerId = await resolveWorkerToken(db, workerToken);
+    if (!resolvedWorkerId || resolvedWorkerId !== workerId) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Worker auth mismatch — workerId does not match the session token.",
+          code: "AUTH_MISMATCH",
+        },
+        403,
+      );
+    }
+  }
+
   const scannedJc = await db
     .prepare("SELECT * FROM job_cards WHERE id = ? AND productionOrderId = ?")
     .bind(jobCardId, scannedId)
@@ -1223,6 +1306,65 @@ app.post("/:id/scan-complete", async (c) => {
     .first<{ id: string; name: string }>();
   if (!worker) {
     return c.json({ success: false, error: "Worker not found" }, 400);
+  }
+
+  // ---- Upstream-lock enforcement -------------------------------------------
+  // Mirrors the PATCH guard in applyPoUpdate (production-orders.ts:585-607).
+  // If any LATER dept in DEPT_ORDER for the same wipKey on this PO is already
+  // COMPLETED / TRANSFERRED, the operator is trying to retroactively scan a
+  // piece whose downstream work already landed — must undo downstream first.
+  //
+  // DEPT_ORDER is the forward production order; we compare against job_cards
+  // for the same (productionOrderId, wipKey) whose departmentCode appears
+  // LATER in DEPT_ORDER than this one.
+  const myDeptIdx = DEPT_ORDER.indexOf(
+    (scannedJc.departmentCode ?? "") as (typeof DEPT_ORDER)[number],
+  );
+  if (myDeptIdx >= 0 && scannedJc.wipKey) {
+    const siblingsRes = await db
+      .prepare(
+        `SELECT departmentCode, status FROM job_cards
+         WHERE productionOrderId = ? AND wipKey = ?`,
+      )
+      .bind(scannedJc.productionOrderId, scannedJc.wipKey)
+      .all<{ departmentCode: string | null; status: string }>();
+    const laterDone = (siblingsRes.results ?? []).some((s) => {
+      const idx = DEPT_ORDER.indexOf(
+        (s.departmentCode ?? "") as (typeof DEPT_ORDER)[number],
+      );
+      return (
+        idx > myDeptIdx &&
+        (s.status === "COMPLETED" || s.status === "TRANSFERRED")
+      );
+    });
+    if (laterDone) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "Cannot scan — a later department is already completed. Undo that first.",
+          code: "UPSTREAM_LOCKED",
+        },
+        409,
+      );
+    }
+  }
+
+  // ---- prerequisiteMet check -----------------------------------------------
+  // The sales-orders planner stamps prerequisiteMet=1 on the first dept of
+  // each wip chain and 0 on every downstream dept. As each earlier dept
+  // completes, the rollup flips downstream prerequisiteMet=1. If it's still
+  // 0 here, the operator is trying to scan a piece whose upstream dept
+  // hasn't finished yet.
+  if (scannedJc.prerequisiteMet !== 1) {
+    return c.json(
+      {
+        success: false,
+        error: "Earlier department hasn't completed yet. Cannot scan this one.",
+        code: "PREREQUISITE_NOT_MET",
+      },
+      400,
+    );
   }
 
   // Ensure scanned JC has piecePics rows.
@@ -1470,6 +1612,17 @@ app.post("/:id/scan-complete", async (c) => {
     mergedJc.completedDate = today;
     mergedJc.overdue = "COMPLETED";
     jcJustCompleted = true;
+  } else if (
+    // WAITING → IN_PROGRESS on the FIRST pic1 assignment. The first scan is
+    // the operator "starting" the job card; if the rollup above didn't move
+    // it straight to COMPLETED (e.g. multi-piece JCs only complete after
+    // every piece's pic1 is filled), flip it to IN_PROGRESS now.
+    // Never overwrite COMPLETED / TRANSFERRED — those are terminal and the
+    // caller is expected to 409 long before we get here.
+    target.jc.status === "WAITING" &&
+    assignedSlot === 1
+  ) {
+    mergedJc.status = "IN_PROGRESS";
   }
 
   // Mirror legacy pic1/pic2 from first piece with a value.

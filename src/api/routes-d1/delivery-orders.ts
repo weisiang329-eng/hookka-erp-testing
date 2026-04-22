@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 
 const app = new Hono<Env>();
 
@@ -490,8 +491,37 @@ app.post("/", async (c) => {
       );
     }
 
-    // TODO(phase-4): consume FG units + record stock_movement when DO is
-    // created from production orders (body.productionOrderIds flow).
+    // Phase-4: stamp FG units with the new doId (LOADED is the valid CHECK
+    // enum value — there is no RESERVED state) and write one STOCK_OUT
+    // movement per source PO so warehouse history shows the units leaving.
+    if (poRowsForItems.length > 0) {
+      for (const po of poRowsForItems) {
+        statements.push(
+          c.env.DB.prepare(
+            `UPDATE fg_units
+                SET doId = ?, status = 'LOADED', loadedAt = ?
+              WHERE poId = ? AND (doId IS NULL OR doId = '')`,
+          ).bind(id, now, po.id),
+          c.env.DB.prepare(
+            `INSERT INTO stock_movements (
+               id, type, rackLocationId, rackLabel, productionOrderId,
+               productCode, productName, quantity, reason, performedBy,
+               created_at
+             ) VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+          ).bind(
+            `mov-${crypto.randomUUID().slice(0, 8)}`,
+            null,
+            po.rackingNumber ?? "",
+            po.id,
+            po.productCode ?? "",
+            po.productName ?? "",
+            Number(po.quantity) || 0,
+            `DO ${doNo} created`,
+            now,
+          ),
+        );
+      }
+    }
 
     await c.env.DB.batch(statements);
 
@@ -565,7 +595,8 @@ app.put("/:id", async (c) => {
           body.proofOfDelivery?.deliveredAt ?? existing.deliveredAt ?? now;
         nextDeliveredAt = podAt;
         nextOverdue = "COMPLETED";
-        // TODO(phase-4): FIFO-consume FG batches + emit COGS ledger entries.
+        // FIFO FG_DELIVERED COGS is emitted inside the cascadedToDelivered
+        // block below so it rides the same atomic batch as the UPDATE.
       }
       if (nextStatus === "INVOICED") {
         nextOverdue = "INVOICED";
@@ -793,6 +824,41 @@ app.put("/:id", async (c) => {
         ).bind(nextDeliveredAt ?? now, id),
       );
 
+      // FIFO FG_DELIVERED COGS — consume fg_batches across layers and emit
+      // one cost_ledger entry per slice. Idempotent inside the helper. Uses
+      // the in-memory newItems if the caller replaced items, otherwise the
+      // current DB rows.
+      const itemsForCogs = newItems
+        ? newItems.map((i) => ({
+            id: i.id,
+            productCode: i.productCode,
+            productName: i.productName,
+            quantity: i.quantity,
+          }))
+        : (
+            await c.env.DB.prepare(
+              `SELECT id, productCode, productName, quantity
+                 FROM delivery_order_items WHERE deliveryOrderId = ?`,
+            )
+              .bind(id)
+              .all<{
+                id: string;
+                productCode: string | null;
+                productName: string | null;
+                quantity: number;
+              }>()
+          ).results ?? [];
+      const cogs = await consumeFGBatchesForDO(
+        c.env.DB,
+        id,
+        existing.doNo,
+        itemsForCogs,
+        nextDeliveredAt ?? now,
+      );
+      if (!cogs.skipped && cogs.statements.length > 0) {
+        statements.push(...cogs.statements);
+      }
+
       // SO status cascade — only if this DO is linked to a SO.
       if (existing.salesOrderId) {
         const soRow = await c.env.DB.prepare(
@@ -990,6 +1056,35 @@ app.put("/:id", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// DELETE /api/delivery-orders/:id — only DRAFT rows are deletable.
+app.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare(
+    "SELECT id, status FROM delivery_orders WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; status: string }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Delivery order not found" }, 404);
+  }
+  if (existing.status !== "DRAFT") {
+    return c.json(
+      {
+        success: false,
+        error: `Only DRAFT delivery orders can be deleted (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      "DELETE FROM delivery_order_items WHERE deliveryOrderId = ?",
+    ).bind(id),
+    c.env.DB.prepare("DELETE FROM delivery_orders WHERE id = ?").bind(id),
+  ]);
+  return c.json({ success: true });
 });
 
 export default app;

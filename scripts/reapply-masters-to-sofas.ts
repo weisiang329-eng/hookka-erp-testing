@@ -119,8 +119,9 @@ function suffixToMasterLabel(suffix: string): string | null {
     case "CNR":
       return "Corner";
     case "L(LHF)":
+      return "L(LHF)";
     case "L(RHF)":
-      return "L(LHR)";
+      return "L(RHF)";
     default:
       return null; // fall back to Default
   }

@@ -1,7 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import DashboardLayout from './layouts/DashboardLayout'
-import PortalLayout from './layouts/PortalLayout'
 import WorkerLayout from './layouts/WorkerLayout'
 import { ErrorFallback } from './components/ui/error-boundary'
 import { DASHBOARD_ROUTES } from './dashboard-routes'
@@ -11,13 +10,6 @@ import RequireAuth from './components/RequireAuth'
 
 // Public tracking (standalone, no auth)
 const Track = lazy(() => import('./pages/track'))
-
-// Portal
-const Portal = lazy(() => import('./pages/portal'))
-const PortalOrders = lazy(() => import('./pages/portal/orders'))
-const PortalOrderDetail = lazy(() => import('./pages/portal/order-detail'))
-const PortalDeliveries = lazy(() => import('./pages/portal/deliveries'))
-const PortalAccount = lazy(() => import('./pages/portal/account'))
 
 // Auth
 const Login = lazy(() => import('./pages/login'))
@@ -71,23 +63,6 @@ export const router = createBrowserRouter([
     ),
     errorElement: <ErrorFallback error={null} />,
     children: DASHBOARD_ROUTES,
-  },
-
-  // Portal layout — also gated behind RequireAuth (same hookka_auth token).
-  {
-    element: (
-      <RequireAuth>
-        <PortalLayout />
-      </RequireAuth>
-    ),
-    errorElement: <ErrorFallback error={null} />,
-    children: [
-      { path: '/portal', element: <S><Portal /></S> },
-      { path: '/portal/orders', element: <S><PortalOrders /></S> },
-      { path: '/portal/orders/:id', element: <S><PortalOrderDetail /></S> },
-      { path: '/portal/deliveries', element: <S><PortalDeliveries /></S> },
-      { path: '/portal/account', element: <S><PortalAccount /></S> },
-    ],
   },
 
   // Worker portal (mobile PIN auth — intentionally NOT behind RequireAuth;

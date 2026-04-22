@@ -80,17 +80,14 @@ const Quality = lazy(() => import('./pages/quality'))
 const RD = lazy(() => import('./pages/rd'))
 const RDDetail = lazy(() => import('./pages/rd/detail'))
 
-// Reports, Documents, Notifications, Approvals, Maintenance
+// Reports, Notifications, Maintenance
 const Reports = lazy(() => import('./pages/reports'))
-const Documents = lazy(() => import('./pages/documents'))
 const Notifications = lazy(() => import('./pages/notifications'))
-const Approvals = lazy(() => import('./pages/approvals'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
 
 // Settings
 const Settings = lazy(() => import('./pages/settings'))
 const Organisations = lazy(() => import('./pages/settings/organisations'))
-const Variants = lazy(() => import('./pages/settings/variants'))
 const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 
 // Consignment
@@ -203,17 +200,14 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/rd', element: <S><RD /></S> },
   { path: '/rd/:id', element: <S><RDDetail /></S> },
 
-  // Reports, Documents, Notifications, Approvals, Maintenance
+  // Reports, Notifications, Maintenance
   { path: '/reports', element: <S><Reports /></S> },
-  { path: '/documents', element: <S><Documents /></S> },
   { path: '/notifications', element: <S><Notifications /></S> },
-  { path: '/approvals', element: <S><Approvals /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
 
   // Settings
   { path: '/settings', element: <S><Settings /></S> },
   { path: '/settings/organisations', element: <S><Organisations /></S> },
-  { path: '/settings/variants', element: <S><Variants /></S> },
   { path: '/settings/users', element: <S><SettingsUsers /></S> },
 
   // Consignment

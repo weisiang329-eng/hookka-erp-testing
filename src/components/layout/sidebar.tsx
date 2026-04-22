@@ -256,7 +256,7 @@ export function Sidebar() {
     return () => clearInterval(interval);
   }, [fetchOrgs, fetchUnreadCount]);
 
-  // Inject badge counts into Notifications and Approvals items, and the
+  // Inject badge counts into the Notifications item, and the
   // SUPER_ADMIN-only User Management link into the SYSTEM group.
   const authUser = getCurrentUser();
   const isSuperAdmin = authUser?.role === "SUPER_ADMIN";
@@ -362,9 +362,6 @@ export function Sidebar() {
     }
     if (href === "/settings/organisations") {
       return pathname === "/settings/organisations" || pathname.startsWith("/settings/organisations/");
-    }
-    if (href === "/settings/variants") {
-      return pathname === "/settings/variants" || pathname.startsWith("/settings/variants/");
     }
     if (href === "/settings") {
       return pathname === "/settings";

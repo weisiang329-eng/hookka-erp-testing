@@ -3997,60 +3997,7 @@ export function getNextQCNo(): string {
   return `QC-${yymm}-${String(_qcSeq++).padStart(3, "0")}`;
 }
 
-export const qcInspections: QCInspection[] = [
-  {
-    id: "qc-1", inspectionNo: "QC-2603-001",
-    productionOrderId: productionOrders[0]?.id || "", poNo: "SO-2509-238-01",
-    productCode: "1003(A)", productName: "HILTON(A) BEDFRAME Queen",
-    customerName: "Houzs PG", department: "UPHOLSTERY",
-    inspectorId: "emp-7", inspectorName: "KHIN MAUNG LIN",
-    result: "PASS", defects: [], notes: "All checks passed. Fabric alignment excellent.",
-    inspectionDate: "2026-03-12", createdAt: "2026-03-12T08:00:00Z",
-  },
-  {
-    id: "qc-2", inspectionNo: "QC-2603-002",
-    productionOrderId: productionOrders[0]?.id || "", poNo: "SO-2509-238-01",
-    productCode: "1003(A)", productName: "HILTON(A) BEDFRAME Queen",
-    customerName: "Houzs PG", department: "PACKING",
-    inspectorId: "emp-14", inspectorName: "AUNG THEIN WIN",
-    result: "PASS", defects: [], notes: "Packing verified. Label and hardware included.",
-    inspectionDate: "2026-03-12", createdAt: "2026-03-12T10:00:00Z",
-  },
-  {
-    id: "qc-3", inspectionNo: "QC-2604-003",
-    productionOrderId: productionOrders[1]?.id || "", poNo: "SO-2509-244-01",
-    productCode: "1013", productName: "JAGER BEDFRAME Queen",
-    customerName: "Carress", department: "UPHOLSTERY",
-    inspectorId: "emp-8", inspectorName: "KYAW OO",
-    result: "PASS", defects: [], notes: "Seam quality good. No visible defects.",
-    inspectionDate: "2026-04-16", createdAt: "2026-04-16T09:00:00Z",
-  },
-  {
-    id: "qc-4", inspectionNo: "QC-2604-004",
-    productionOrderId: productionOrders[5]?.id || "", poNo: "SO-2509-241-01",
-    productCode: "2009(A)", productName: "2009(A) BEDFRAME King",
-    customerName: "Houzs PG", department: "UPHOLSTERY",
-    inspectorId: "emp-7", inspectorName: "KHIN MAUNG LIN",
-    result: "CONDITIONAL_PASS", defects: [
-      { id: "def-1", type: "FABRIC", severity: "MINOR", description: "Slight colour variation on divan cover - within spec", actionTaken: "ACCEPT" },
-    ],
-    notes: "Minor colour variation accepted. HB STRAIGHT BESAR custom spec met.",
-    inspectionDate: "2026-03-10", createdAt: "2026-03-10T14:00:00Z",
-  },
-  {
-    id: "qc-5", inspectionNo: "QC-2604-005",
-    productionOrderId: productionOrders[6]?.id || "", poNo: "SO-2509-243-01",
-    productCode: "1005", productName: "FENRIR BEDFRAME Single",
-    customerName: "Houzs KL", department: "UPHOLSTERY",
-    inspectorId: "emp-8", inspectorName: "KYAW OO",
-    result: "FAIL", defects: [
-      { id: "def-2", type: "STRUCTURAL", severity: "MAJOR", description: "Left drawer mechanism not aligned properly", actionTaken: "REPAIR" },
-      { id: "def-3", type: "ALIGNMENT", severity: "MINOR", description: "Slight gap on drawer panel (2mm)", actionTaken: "ACCEPT" },
-    ],
-    notes: "Drawer mechanism needs adjustment. Sent back for repair.",
-    inspectionDate: "2026-03-08", createdAt: "2026-03-08T15:00:00Z",
-  },
-];
+export const qcInspections: QCInspection[] = [];
 
 // ============================================================
 // ACCOUNTING - Chart of Accounts, Journal Entries, Aging
@@ -4104,47 +4051,7 @@ export type APAgingEntry = {
   over90Sen: number;
 };
 
-export const chartOfAccounts: ChartOfAccount[] = [
-  // Assets 100-xxxx
-  { code: "100-0000", name: "Assets", type: "ASSET", balance: 0, isActive: true },
-  { code: "100-0001", name: "Cash & Bank", type: "ASSET", parentCode: "100-0000", balance: 12500000, isActive: true },
-  { code: "100-0002", name: "Petty Cash", type: "ASSET", parentCode: "100-0000", balance: 150000, isActive: true },
-  { code: "100-1000", name: "Accounts Receivable", type: "ASSET", parentCode: "100-0000", balance: 5650000, isActive: true },
-  { code: "100-2000", name: "Inventory - Raw Materials", type: "ASSET", parentCode: "100-0000", balance: 3200000, isActive: true },
-  { code: "100-2001", name: "Inventory - Work In Progress", type: "ASSET", parentCode: "100-0000", balance: 1850000, isActive: true },
-  { code: "100-2002", name: "Inventory - Finished Goods", type: "ASSET", parentCode: "100-0000", balance: 4100000, isActive: true },
-  { code: "100-3000", name: "Prepaid Expenses", type: "ASSET", parentCode: "100-0000", balance: 480000, isActive: true },
-  { code: "100-4000", name: "Fixed Assets - Equipment", type: "ASSET", parentCode: "100-0000", balance: 8500000, isActive: true },
-  { code: "100-4001", name: "Accumulated Depreciation", type: "ASSET", parentCode: "100-0000", balance: -2100000, isActive: true },
-  // Liabilities 200-xxxx
-  { code: "200-0000", name: "Liabilities", type: "LIABILITY", balance: 0, isActive: true },
-  { code: "200-0001", name: "Accounts Payable", type: "LIABILITY", parentCode: "200-0000", balance: 3645000, isActive: true },
-  { code: "200-0002", name: "Accrued Expenses", type: "LIABILITY", parentCode: "200-0000", balance: 920000, isActive: true },
-  { code: "200-1000", name: "EPF Payable", type: "LIABILITY", parentCode: "200-0000", balance: 540000, isActive: true },
-  { code: "200-1001", name: "SOCSO Payable", type: "LIABILITY", parentCode: "200-0000", balance: 185000, isActive: true },
-  { code: "200-2000", name: "Hire Purchase - Machinery", type: "LIABILITY", parentCode: "200-0000", balance: 6200000, isActive: true },
-  // Equity 300-xxxx
-  { code: "300-0000", name: "Equity", type: "EQUITY", balance: 0, isActive: true },
-  { code: "300-0001", name: "Share Capital", type: "EQUITY", parentCode: "300-0000", balance: 10000000, isActive: true },
-  { code: "300-0002", name: "Retained Earnings", type: "EQUITY", parentCode: "300-0000", balance: 5820000, isActive: true },
-  // Revenue 500-xxxx
-  { code: "500-0000", name: "Revenue", type: "REVENUE", balance: 0, isActive: true },
-  { code: "500-0001", name: "Sales Revenue", type: "REVENUE", parentCode: "500-0000", balance: 13180000, isActive: true },
-  { code: "500-0002", name: "Delivery Income", type: "REVENUE", parentCode: "500-0000", balance: 350000, isActive: true },
-  // COGS 600-xxxx
-  { code: "600-0000", name: "Cost of Goods Sold", type: "EXPENSE", balance: 0, isActive: true },
-  { code: "600-0001", name: "Direct Materials", type: "EXPENSE", parentCode: "600-0000", balance: 4200000, isActive: true },
-  { code: "600-0002", name: "Direct Labour", type: "EXPENSE", parentCode: "600-0000", balance: 3150000, isActive: true },
-  { code: "600-0003", name: "Manufacturing Overhead", type: "EXPENSE", parentCode: "600-0000", balance: 980000, isActive: true },
-  // Operating Expenses 700-xxxx
-  { code: "700-0000", name: "Operating Expenses", type: "EXPENSE", balance: 0, isActive: true },
-  { code: "700-0001", name: "Salaries & Wages", type: "EXPENSE", parentCode: "700-0000", balance: 4500000, isActive: true },
-  { code: "700-0002", name: "Utilities", type: "EXPENSE", parentCode: "700-0000", balance: 320000, isActive: true },
-  { code: "700-0003", name: "Rent", type: "EXPENSE", parentCode: "700-0000", balance: 550000, isActive: true },
-  { code: "700-0004", name: "Transport & Delivery", type: "EXPENSE", parentCode: "700-0000", balance: 280000, isActive: true },
-  { code: "700-0005", name: "Office Supplies", type: "EXPENSE", parentCode: "700-0000", balance: 45000, isActive: true },
-  { code: "700-0006", name: "Depreciation Expense", type: "EXPENSE", parentCode: "700-0000", balance: 175000, isActive: true },
-];
+export const chartOfAccounts: ChartOfAccount[] = [];
 
 let _jeSeq = 43;
 export function getNextJENo(): string {
@@ -4153,117 +4060,11 @@ export function getNextJENo(): string {
   return `JE-${yymm}-${String(_jeSeq++).padStart(4, "0")}`;
 }
 
-export const journalEntries: JournalEntry[] = [
-  {
-    id: "je-1", entryNo: "JE-2604-0042", date: "2026-04-12",
-    description: "Sales Revenue - HOUZS KL Invoice",
-    lines: [
-      { accountCode: "100-1000", accountName: "Accounts Receivable", debitSen: 1850000, creditSen: 0, description: "AR - HOUZS KL" },
-      { accountCode: "500-0001", accountName: "Sales Revenue", debitSen: 0, creditSen: 1850000, description: "Sales - HOUZS KL" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-12T10:00:00Z",
-  },
-  {
-    id: "je-2", entryNo: "JE-2604-0041", date: "2026-04-11",
-    description: "Raw Material Purchase - Kain Utama",
-    lines: [
-      { accountCode: "100-2000", accountName: "Inventory - Raw Materials", debitSen: 875000, creditSen: 0, description: "Fabric purchase" },
-      { accountCode: "200-0001", accountName: "Accounts Payable", debitSen: 0, creditSen: 875000, description: "AP - Kain Utama" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-11T14:00:00Z",
-  },
-  {
-    id: "je-3", entryNo: "JE-2604-0040", date: "2026-04-10",
-    description: "Payroll - April Week 2",
-    lines: [
-      { accountCode: "700-0001", accountName: "Salaries & Wages", debitSen: 4500000, creditSen: 0, description: "Salaries Apr W2" },
-      { accountCode: "200-1000", accountName: "EPF Payable", debitSen: 0, creditSen: 540000, description: "EPF contribution" },
-      { accountCode: "200-1001", accountName: "SOCSO Payable", debitSen: 0, creditSen: 185000, description: "SOCSO contribution" },
-      { accountCode: "100-0001", accountName: "Cash & Bank", debitSen: 0, creditSen: 3775000, description: "Net pay" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-10T09:00:00Z",
-  },
-  {
-    id: "je-4", entryNo: "JE-2604-0039", date: "2026-04-10",
-    description: "Utilities - Factory Electricity",
-    lines: [
-      { accountCode: "700-0002", accountName: "Utilities", debitSen: 320000, creditSen: 0, description: "TNB bill Apr" },
-      { accountCode: "100-0001", accountName: "Cash & Bank", debitSen: 0, creditSen: 320000, description: "Payment TNB" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-10T08:30:00Z",
-  },
-  {
-    id: "je-5", entryNo: "JE-2604-0038", date: "2026-04-09",
-    description: "Sales Revenue - CARRESS SDN BHD",
-    lines: [
-      { accountCode: "100-1000", accountName: "Accounts Receivable", debitSen: 920000, creditSen: 0, description: "AR - CARRESS" },
-      { accountCode: "500-0001", accountName: "Sales Revenue", debitSen: 0, creditSen: 920000, description: "Sales - CARRESS" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-09T15:00:00Z",
-  },
-  {
-    id: "je-6", entryNo: "JE-2604-0037", date: "2026-04-08",
-    description: "Customer Payment Received - THE CONTS",
-    lines: [
-      { accountCode: "100-0001", accountName: "Cash & Bank", debitSen: 640000, creditSen: 0, description: "Payment from THE CONTS" },
-      { accountCode: "100-1000", accountName: "Accounts Receivable", debitSen: 0, creditSen: 640000, description: "Clear AR - THE CONTS" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-08T11:00:00Z",
-  },
-  {
-    id: "je-7", entryNo: "JE-2604-0036", date: "2026-04-07",
-    description: "Monthly Rent Payment",
-    lines: [
-      { accountCode: "700-0003", accountName: "Rent", debitSen: 550000, creditSen: 0, description: "Factory rent Apr" },
-      { accountCode: "100-0001", accountName: "Cash & Bank", debitSen: 0, creditSen: 550000, description: "Rent payment" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-07T09:00:00Z",
-  },
-  {
-    id: "je-8", entryNo: "JE-2604-0035", date: "2026-04-05",
-    description: "COGS - Direct Materials Consumption",
-    lines: [
-      { accountCode: "600-0001", accountName: "Direct Materials", debitSen: 1200000, creditSen: 0, description: "Materials consumed W1" },
-      { accountCode: "100-2000", accountName: "Inventory - Raw Materials", debitSen: 0, creditSen: 1200000, description: "RM issued to production" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-05T16:00:00Z",
-  },
-  {
-    id: "je-9", entryNo: "JE-2604-0034", date: "2026-04-03",
-    description: "Supplier Payment - Papan Jaya Trading",
-    lines: [
-      { accountCode: "200-0001", accountName: "Accounts Payable", debitSen: 630000, creditSen: 0, description: "Clear AP - Papan Jaya" },
-      { accountCode: "100-0001", accountName: "Cash & Bank", debitSen: 0, creditSen: 630000, description: "Payment to supplier" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-03T10:00:00Z",
-  },
-  {
-    id: "je-10", entryNo: "JE-2604-0033", date: "2026-04-01",
-    description: "Depreciation - April",
-    lines: [
-      { accountCode: "700-0006", accountName: "Depreciation Expense", debitSen: 175000, creditSen: 0, description: "Monthly depreciation" },
-      { accountCode: "100-4001", accountName: "Accumulated Depreciation", debitSen: 0, creditSen: 175000, description: "Accum. depreciation" },
-    ],
-    status: "POSTED", createdBy: "admin", createdAt: "2026-04-01T08:00:00Z",
-  },
-];
+export const journalEntries: JournalEntry[] = [];
 
-export const arAging: ARAgingEntry[] = [
-  { customerId: "cust-1", customerName: "Houzs Century", currentSen: 1200000, days30Sen: 650000, days60Sen: 280000, days90Sen: 0, over90Sen: 0 },
-  { customerId: "cust-1", customerName: "Houzs Century", currentSen: 854000, days30Sen: 350000, days60Sen: 0, days90Sen: 0, over90Sen: 0 },
-  { customerId: "cust-1", customerName: "Houzs Century", currentSen: 0, days30Sen: 420000, days60Sen: 180000, days90Sen: 0, over90Sen: 0 },
-  { customerId: "cust-1", customerName: "Houzs Century", currentSen: 350000, days30Sen: 0, days60Sen: 0, days90Sen: 280000, over90Sen: 0 },
-  { customerId: "cust-2", customerName: "CARRESS SDN BHD", currentSen: 920000, days30Sen: 0, days60Sen: 260000, days90Sen: 0, over90Sen: 150000 },
-  { customerId: "cust-3", customerName: "The Conts", currentSen: 0, days30Sen: 230000, days60Sen: 0, days90Sen: 0, over90Sen: 0 },
-];
+export const arAging: ARAgingEntry[] = [];
 
-export const apAging: APAgingEntry[] = [
-  { supplierId: "sup-1", supplierName: "Kain Utama Sdn Bhd", currentSen: 875000, days30Sen: 500000, days60Sen: 0, days90Sen: 0, over90Sen: 0 },
-  { supplierId: "sup-2", supplierName: "Papan Jaya Trading", currentSen: 630000, days30Sen: 0, days60Sen: 0, days90Sen: 0, over90Sen: 0 },
-  { supplierId: "sup-3", supplierName: "Foam Industries M'sia Sdn Bhd", currentSen: 256000, days30Sen: 350000, days60Sen: 250000, days90Sen: 120000, over90Sen: 0 },
-  { supplierId: "sup-4", supplierName: "Hardware Plus Sdn Bhd", currentSen: 0, days30Sen: 350000, days60Sen: 200000, days90Sen: 0, over90Sen: 0 },
-  { supplierId: "sup-5", supplierName: "Pack & Ship M'sia Sdn Bhd", currentSen: 114000, days30Sen: 0, days60Sen: 0, days90Sen: 0, over90Sen: 0 },
-];
+export const apAging: APAgingEntry[] = [];
 
 // ============================================================
 // PAYROLL & LEAVE MANAGEMENT
@@ -4312,44 +4113,7 @@ export function getNextPayrollId(): string {
 }
 
 // Mock payroll records (March 2026)
-export const payrollRecords: PayrollRecord[] = [
-  {
-    id: "PAY-00001", workerId: "emp-1", workerName: "EI PHOO WEI", period: "2026-03",
-    basicSalarySen: 180000, workingDays: 26, otHoursWeekday: 12, otHoursSunday: 4, otHoursHoliday: 0,
-    otAmountSen: 20769, grossSalarySen: 200769,
-    epfEmployeeSen: 22085, epfEmployerSen: 26100, socsoEmployeeSen: 745, socsoEmployerSen: 745, eisEmployeeSen: 390, eisEmployerSen: 390, pcbSen: 0,
-    totalDeductionsSen: 23220, netPaySen: 177549, status: "PAID",
-  },
-  {
-    id: "PAY-00002", workerId: "emp-4", workerName: "ANN", period: "2026-03",
-    basicSalarySen: 180000, workingDays: 26, otHoursWeekday: 8, otHoursSunday: 0, otHoursHoliday: 0,
-    otAmountSen: 9231, grossSalarySen: 189231,
-    epfEmployeeSen: 20815, epfEmployerSen: 24600, socsoEmployeeSen: 745, socsoEmployerSen: 745, eisEmployeeSen: 390, eisEmployerSen: 390, pcbSen: 0,
-    totalDeductionsSen: 21950, netPaySen: 167281, status: "PAID",
-  },
-  {
-    id: "PAY-00003", workerId: "emp-7", workerName: "KHIN MAUNG LIN", period: "2026-03",
-    basicSalarySen: 220000, workingDays: 26, otHoursWeekday: 15, otHoursSunday: 8, otHoursHoliday: 0,
-    otAmountSen: 35897, grossSalarySen: 255897,
-    epfEmployeeSen: 28149, epfEmployerSen: 33267, socsoEmployeeSen: 745, socsoEmployerSen: 745, eisEmployeeSen: 390, eisEmployerSen: 390, pcbSen: 0,
-    totalDeductionsSen: 29284, netPaySen: 226613, status: "PAID",
-  },
-  {
-    id: "PAY-00004", workerId: "emp-9", workerName: "HLAING MIN AUNG", period: "2026-03",
-    basicSalarySen: 220000, workingDays: 26, otHoursWeekday: 10, otHoursSunday: 0, otHoursHoliday: 8,
-    otAmountSen: 35470, grossSalarySen: 255470,
-    epfEmployeeSen: 28102, epfEmployerSen: 33211, socsoEmployeeSen: 745, socsoEmployerSen: 745, eisEmployeeSen: 390, eisEmployerSen: 390, pcbSen: 0,
-    totalDeductionsSen: 29237, netPaySen: 226233, status: "PAID",
-  },
-  {
-    id: "PAY-00005", workerId: "emp-14", workerName: "AUNG THEIN WIN", period: "2026-03",
-    basicSalarySen: 180000, workingDays: 24, otHoursWeekday: 5, otHoursSunday: 0, otHoursHoliday: 0,
-    otAmountSen: 5769, grossSalarySen: 185769,
-    epfEmployeeSen: 20435, epfEmployerSen: 24150, socsoEmployeeSen: 745, socsoEmployerSen: 745, eisEmployeeSen: 390, eisEmployerSen: 390, pcbSen: 0,
-    totalDeductionsSen: 21570, netPaySen: 164199, status: "PAID",
-  },
-];
-_payrollIdCounter = 6;
+export const payrollRecords: PayrollRecord[] = [];
 
 // Mock leave records
 export const leaveRecords: LeaveRecord[] = [

@@ -106,7 +106,6 @@ import { authMiddleware } from "./lib/auth-middleware";
 // Workers-runtime compatible. Returning real shapes (not stubs) keeps
 // the UI pages from crashing on .filter/.map over envelope objects.
 import accounting from "./routes/accounting";
-import approvals from "./routes/approvals";
 import attendance from "./routes/attendance";
 import cashFlow from "./routes/cash-flow";
 import consignments from "./routes/consignments";
@@ -127,7 +126,6 @@ import promiseDate from "./routes/promise-date";
 import qcInspections from "./routes/qc-inspections";
 import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
-import portal from "./routes/portal";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -173,7 +171,6 @@ app.route("/api/bom-master-templates", bomMasterTemplates);
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)
 // so writes need real D1 persistence once the module is actively used.
 app.route("/api/accounting", accounting);
-app.route("/api/approvals", approvals);
 app.route("/api/attendance", attendance);
 app.route("/api/cash-flow", cashFlow);
 app.route("/api/consignments", consignments);
@@ -194,7 +191,6 @@ app.route("/api/promise-date", promiseDate);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);
-app.route("/api/portal", portal);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

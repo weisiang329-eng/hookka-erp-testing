@@ -528,7 +528,11 @@ async function createProductionOrdersForSO(
     // The first dept of each WIP's chain gets prerequisiteMet=1 so workers
     // can pick it up immediately; subsequent depts get prerequisiteMet=0.
     for (const p of planned) {
-      const jcId = `jc-${poId}-${p.wipCode}-${p.deptCode}`
+      // Include wipKey (not wipCode) so DIVAN.Frame and HEADBOARD.Frame
+      // don't collide at the same dept — wipCode can repeat across parallel
+      // WIPs after the per-dept wipCode override landed (both branches may
+      // carry a node literally named "Frame").
+      const jcId = `jc-${poId}-${p.wipKey}-${p.deptCode}`
         .replace(/[^a-zA-Z0-9_-]/g, "_")
         .slice(0, 128);
       const isFirstDeptForWip = p.sequence === 0;
@@ -747,7 +751,10 @@ async function backfillJobCardsForPo(
       }
       const deptWipCode = chain[p.sequence]?.wipCode || wip.wipCode;
       const deptWipLabel = chain[p.sequence]?.wipLabel || wip.wipLabel;
-      const jcId = `jc-${poId}-${deptWipCode}-${p.deptCode}`
+      // Scope jcId by wipKey (stable per top-level WIP) not wipCode, so two
+      // WIPs that share a leaf node name (e.g. both DIVAN and HEADBOARD carry
+      // a "Frame" node) don't collapse into a single job_card row.
+      const jcId = `jc-${poId}-${wip.wipKey}-${p.deptCode}`
         .replace(/[^a-zA-Z0-9_-]/g, "_")
         .slice(0, 128);
       statements.push(

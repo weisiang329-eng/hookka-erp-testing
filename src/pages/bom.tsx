@@ -94,16 +94,13 @@ const DEPT_LABELS: Record<string, string> = {
 // Reads the dept × category minutes matrix the user configures in
 // /settings/variants → Production Times. BOM process rows use this to
 // auto-fill minutes when a category is picked.
+// Data lives in D1 under kv_config('variants-config'); the in-memory cache is
+// primed at dashboard mount (see DashboardLayout.tsx) so this sync API stays
+// ergonomic for the dozens of call sites here.
 function getProductionMinutes(deptCode: string, category: string): number {
   if (typeof window === "undefined") return 0;
-  try {
-    const raw = localStorage.getItem("hookka-variants-config");
-    if (!raw) return 0;
-    const parsed = JSON.parse(raw) as { productionTimes?: Record<string, Record<string, number>> };
-    return parsed.productionTimes?.[deptCode]?.[category] ?? 0;
-  } catch {
-    return 0;
-  }
+  const cfg = getVariantsConfigSync();
+  return cfg?.productionTimes?.[deptCode]?.[category] ?? 0;
 }
 
 // Category options come from the user-configured fabricGroups list
@@ -112,14 +109,9 @@ function getProductionMinutes(deptCode: string, category: string): number {
 function getCategoryOptions(): string[] {
   const DEFAULTS = ["CAT 1", "CAT 2", "CAT 3", "CAT 4", "CAT 5", "CAT 6", "CAT 7"];
   if (typeof window === "undefined") return DEFAULTS;
-  try {
-    const raw = localStorage.getItem("hookka-variants-config");
-    if (!raw) return DEFAULTS;
-    const parsed = JSON.parse(raw) as { fabricGroups?: string[] };
-    return parsed.fabricGroups && parsed.fabricGroups.length > 0 ? parsed.fabricGroups : DEFAULTS;
-  } catch {
-    return DEFAULTS;
-  }
+  const cfg = getVariantsConfigSync();
+  const groups = cfg?.fabricGroups;
+  return Array.isArray(groups) && groups.length > 0 ? groups : DEFAULTS;
 }
 
 const WIP_TYPE_LABELS: Record<string, { label: string; color: string }> = {

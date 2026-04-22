@@ -30,6 +30,11 @@ database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
 
 # Runtime env vars — override per environment (dev/preview/prod) on the
 # Cloudflare dashboard or via wrangler secret put.
+#
+# NOTE: RESEND_API_KEY is intentionally NOT listed here — secrets belong in
+# .dev.vars locally and `wrangler secret put RESEND_API_KEY` in prod.
 [vars]
 ENVIRONMENT = "dev"
 API_CORS_ORIGIN = "http://localhost:3000"
+APP_URL = "http://localhost:8788"
+RESEND_FROM_EMAIL = "Hookka ERP <noreply@houzscentury.com>"

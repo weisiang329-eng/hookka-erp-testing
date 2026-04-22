@@ -44,6 +44,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { getCurrentUser } from "@/lib/auth";
 
 interface NavItem {
   name: string;
@@ -156,10 +157,18 @@ const navigationGroups: NavGroup[] = [
       { name: "Customer Portal", href: "/portal", icon: Globe },
       { name: "Organisations", href: "/settings/organisations", icon: Building2 },
       { name: "Variants", href: "/settings/variants", icon: SlidersHorizontal },
+      // "User Management" is injected below (SUPER_ADMIN only) at render time
       { name: "Settings", href: "/settings", icon: Settings },
     ],
   },
 ];
+
+// Admin-only extra link inserted into the SYSTEM group at render time.
+const SUPER_ADMIN_LINK: NavItem = {
+  name: "User Management",
+  href: "/settings/users",
+  icon: Users,
+};
 
 type OrgInfo = {
   id: string;
@@ -266,15 +275,27 @@ export function Sidebar() {
     return () => clearInterval(interval);
   }, [fetchOrgs, fetchUnreadCount, fetchPendingApprovals]);
 
-  // Inject badge counts into Notifications and Approvals items
-  const groupsWithBadge = navigationGroups.map((group) => ({
-    ...group,
-    items: group.items.map((item) => {
+  // Inject badge counts into Notifications and Approvals items, and the
+  // SUPER_ADMIN-only User Management link into the SYSTEM group.
+  const isSuperAdmin = getCurrentUser()?.role === "SUPER_ADMIN";
+  const groupsWithBadge = navigationGroups.map((group) => {
+    let items = group.items.map((item) => {
       if (item.name === "Notifications") return { ...item, badge: unreadCount };
       if (item.name === "Approvals") return { ...item, badge: pendingApprovalCount };
       return item;
-    }),
-  }));
+    });
+    if (group.label === "SYSTEM" && isSuperAdmin) {
+      // Insert "User Management" just before the trailing "Settings" entry.
+      const idx = items.findIndex((i) => i.name === "Settings");
+      const insertAt = idx === -1 ? items.length : idx;
+      items = [
+        ...items.slice(0, insertAt),
+        SUPER_ADMIN_LINK,
+        ...items.slice(insertAt),
+      ];
+    }
+    return { ...group, items };
+  });
 
   const isItemActive = (href: string) => {
     if (href === "/production/scan") {

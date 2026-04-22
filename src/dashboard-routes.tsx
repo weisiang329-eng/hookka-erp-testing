@@ -91,6 +91,7 @@ const Maintenance = lazy(() => import('./pages/maintenance'))
 const Settings = lazy(() => import('./pages/settings'))
 const Organisations = lazy(() => import('./pages/settings/organisations'))
 const Variants = lazy(() => import('./pages/settings/variants'))
+const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 
 // Consignment
 const Consignment = lazy(() => import('./pages/consignment'))
@@ -213,6 +214,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/settings', element: <S><Settings /></S> },
   { path: '/settings/organisations', element: <S><Organisations /></S> },
   { path: '/settings/variants', element: <S><Variants /></S> },
+  { path: '/settings/users', element: <S><SettingsUsers /></S> },
 
   // Consignment
   { path: '/consignment', element: <S><Consignment /></S> },

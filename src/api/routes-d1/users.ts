@@ -12,8 +12,14 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword } from "../lib/password";
+import { inviteEmailTemplate, sendEmail } from "../lib/email";
 
 const app = new Hono<Env>();
+
+// Invite TTL — 72 hours is a standard SaaS balance between "oops I missed it"
+// and "stale tokens floating around". Change here, not in the schema.
+const INVITE_TTL_HOURS = 72;
+const INVITE_TTL_MS = INVITE_TTL_HOURS * 60 * 60 * 1000;
 
 type UserRow = {
   id: string;
@@ -24,6 +30,24 @@ type UserRow = {
   createdAt: string;
   lastLoginAt: string | null;
   displayName: string | null;
+};
+
+type InviteRow = {
+  token: string;
+  email: string;
+  role: string;
+  displayName: string | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+  emailSentAt: string | null;
+  emailResendId: string | null;
+};
+
+type InviteWithInviterRow = InviteRow & {
+  inviterDisplayName: string | null;
+  inviterEmail: string | null;
 };
 
 function publicUser(u: UserRow) {
@@ -51,17 +75,10 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
-// GET /api/users/:id — single user
-app.get("/:id", async (c) => {
-  const id = c.req.param("id");
-  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
-    .bind(id)
-    .first<UserRow>();
-  if (!user) {
-    return c.json({ success: false, error: "User not found" }, 404);
-  }
-  return c.json({ success: true, data: publicUser(user) });
-});
+// NOTE: GET /api/users/:id is registered at the bottom of this file (after the
+// invite routes). Hono's router matches routes in registration order and /:id
+// is a single-segment wildcard — declaring it here would swallow GET /invites
+// as GET /:id with id="invites".
 
 // POST /api/users — create a new user
 // Body: { email, password, displayName?, role? }
@@ -243,6 +260,296 @@ app.post("/:id/reset-password", async (c) => {
   ]);
 
   return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// Invite routes — admin-side management. The public accept-invite endpoints
+// live in routes-d1/auth.ts because they run without a bearer token.
+// ---------------------------------------------------------------------------
+
+function publicInvite(row: InviteWithInviterRow) {
+  return {
+    token: row.token,
+    email: row.email,
+    role: row.role,
+    displayName: row.displayName ?? "",
+    invitedBy: row.invitedBy,
+    inviterName:
+      row.inviterDisplayName && row.inviterDisplayName.length > 0
+        ? row.inviterDisplayName
+        : (row.inviterEmail ?? ""),
+    createdAt: row.createdAt,
+    expiresAt: row.expiresAt,
+    emailSentAt: row.emailSentAt,
+  };
+}
+
+async function sendInviteEmail(
+  env: Env["Bindings"],
+  invite: InviteRow,
+  inviterName: string,
+): Promise<{ ok: boolean; id?: string; error?: string }> {
+  const baseUrl = (env.APP_URL || "").replace(/\/$/, "");
+  const inviteUrl = `${baseUrl}/invite/${invite.token}`;
+  const tpl = inviteEmailTemplate({
+    appName: "Hookka ERP",
+    inviterName: inviterName || "A Hookka ERP admin",
+    inviteUrl,
+    expiresInHours: INVITE_TTL_HOURS,
+  });
+  return sendEmail(env.RESEND_API_KEY, env.RESEND_FROM_EMAIL, {
+    to: invite.email,
+    subject: tpl.subject,
+    html: tpl.html,
+    text: tpl.text,
+  });
+}
+
+// POST /api/users/invite — create + send invite
+// Body: { email, role?, displayName? }
+app.post("/invite", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { email, role, displayName } = body as {
+      email?: string;
+      role?: string;
+      displayName?: string;
+    };
+    if (!email || typeof email !== "string" || !email.includes("@")) {
+      return c.json(
+        { success: false, error: "valid email is required" },
+        400,
+      );
+    }
+
+    const trimmedEmail = email.trim();
+    const nowIso = new Date().toISOString();
+
+    // Collision: existing active user with this email?
+    const existingUser = await c.env.DB.prepare(
+      "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND isActive = 1 LIMIT 1",
+    )
+      .bind(trimmedEmail)
+      .first<{ id: string }>();
+    if (existingUser) {
+      return c.json(
+        { success: false, error: "A user with this email already exists" },
+        409,
+      );
+    }
+
+    // Collision: pending (unexpired, unaccepted) invite?
+    const existingInvite = await c.env.DB.prepare(
+      `SELECT token FROM user_invites
+         WHERE LOWER(email) = LOWER(?)
+           AND acceptedAt IS NULL
+           AND expiresAt > ?
+         LIMIT 1`,
+    )
+      .bind(trimmedEmail, nowIso)
+      .first<{ token: string }>();
+    if (existingInvite) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "A pending invite already exists for this email. Revoke it first or use resend.",
+        },
+        409,
+      );
+    }
+
+    // Purge any stale (expired or accepted) row on the same email so the
+    // UNIQUE(email) constraint doesn't fight us.
+    await c.env.DB.prepare(
+      "DELETE FROM user_invites WHERE LOWER(email) = LOWER(?)",
+    )
+      .bind(trimmedEmail)
+      .run();
+
+    const userId = (c as unknown as { get: (k: string) => unknown }).get(
+      "userId",
+    ) as string | undefined;
+    if (!userId) {
+      return c.json({ success: false, error: "Unauthorized" }, 401);
+    }
+
+    const token = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
+
+    await c.env.DB.prepare(
+      `INSERT INTO user_invites
+         (token, email, role, displayName, invitedBy, createdAt, expiresAt,
+          acceptedAt, emailSentAt, emailResendId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+    )
+      .bind(
+        token,
+        trimmedEmail,
+        role ?? "SUPER_ADMIN",
+        displayName ?? null,
+        userId,
+        nowIso,
+        expiresAt,
+      )
+      .run();
+
+    // Pull the inviter's displayName for the email greeting.
+    const inviter = await c.env.DB.prepare(
+      "SELECT displayName, email FROM users WHERE id = ?",
+    )
+      .bind(userId)
+      .first<{ displayName: string | null; email: string }>();
+    const inviterName =
+      inviter?.displayName && inviter.displayName.length > 0
+        ? inviter.displayName
+        : (inviter?.email ?? "An admin");
+
+    const invite: InviteRow = {
+      token,
+      email: trimmedEmail,
+      role: role ?? "SUPER_ADMIN",
+      displayName: displayName ?? null,
+      invitedBy: userId,
+      createdAt: nowIso,
+      expiresAt,
+      acceptedAt: null,
+      emailSentAt: null,
+      emailResendId: null,
+    };
+
+    const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+    if (emailRes.ok) {
+      await c.env.DB.prepare(
+        "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
+      )
+        .bind(new Date().toISOString(), emailRes.id ?? null, token)
+        .run();
+    }
+
+    const baseUrl = (c.env.APP_URL || "").replace(/\/$/, "");
+    const inviteUrl = `${baseUrl}/invite/${token}`;
+
+    return c.json({
+      success: true,
+      data: {
+        token,
+        inviteUrl,
+        emailSent: emailRes.ok,
+        emailError: emailRes.ok ? undefined : emailRes.error,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// GET /api/users/invites — list pending (unaccepted, unexpired) invites
+app.get("/invites", async (c) => {
+  const nowIso = new Date().toISOString();
+  const res = await c.env.DB.prepare(
+    `SELECT i.*,
+            u.displayName AS inviterDisplayName,
+            u.email AS inviterEmail
+       FROM user_invites i
+       LEFT JOIN users u ON u.id = i.invitedBy
+      WHERE i.acceptedAt IS NULL
+        AND i.expiresAt > ?
+      ORDER BY i.createdAt DESC`,
+  )
+    .bind(nowIso)
+    .all<InviteWithInviterRow>();
+  const data = (res.results ?? []).map(publicInvite);
+  return c.json({ success: true, data });
+});
+
+// POST /api/users/invites/:token/resend — re-email the same invite
+app.post("/invites/:token/resend", async (c) => {
+  const token = c.req.param("token");
+  const nowIso = new Date().toISOString();
+
+  const invite = await c.env.DB.prepare(
+    "SELECT * FROM user_invites WHERE token = ? LIMIT 1",
+  )
+    .bind(token)
+    .first<InviteRow>();
+  if (!invite) {
+    return c.json({ success: false, error: "Invite not found" }, 404);
+  }
+  if (invite.acceptedAt) {
+    return c.json(
+      { success: false, error: "Invite already accepted" },
+      409,
+    );
+  }
+  if (invite.expiresAt <= nowIso) {
+    return c.json({ success: false, error: "Invite expired" }, 410);
+  }
+
+  const inviter = await c.env.DB.prepare(
+    "SELECT displayName, email FROM users WHERE id = ?",
+  )
+    .bind(invite.invitedBy)
+    .first<{ displayName: string | null; email: string }>();
+  const inviterName =
+    inviter?.displayName && inviter.displayName.length > 0
+      ? inviter.displayName
+      : (inviter?.email ?? "An admin");
+
+  const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+  if (emailRes.ok) {
+    await c.env.DB.prepare(
+      "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
+    )
+      .bind(new Date().toISOString(), emailRes.id ?? null, token)
+      .run();
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      emailSent: emailRes.ok,
+      emailError: emailRes.ok ? undefined : emailRes.error,
+    },
+  });
+});
+
+// DELETE /api/users/invites/:token — revoke a pending invite
+app.delete("/invites/:token", async (c) => {
+  const token = c.req.param("token");
+  const existing = await c.env.DB.prepare(
+    "SELECT token, acceptedAt FROM user_invites WHERE token = ?",
+  )
+    .bind(token)
+    .first<{ token: string; acceptedAt: string | null }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Invite not found" }, 404);
+  }
+  if (existing.acceptedAt) {
+    return c.json(
+      { success: false, error: "Invite already accepted; cannot revoke" },
+      409,
+    );
+  }
+  await c.env.DB.prepare("DELETE FROM user_invites WHERE token = ?")
+    .bind(token)
+    .run();
+  return c.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/users/:id — single user lookup. MUST be declared last so the
+// static invite routes above take precedence (see note near the top of file).
+// ---------------------------------------------------------------------------
+app.get("/:id", async (c) => {
+  const id = c.req.param("id");
+  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    .bind(id)
+    .first<UserRow>();
+  if (!user) {
+    return c.json({ success: false, error: "User not found" }, 404);
+  }
+  return c.json({ success: true, data: publicUser(user) });
 });
 
 export default app;

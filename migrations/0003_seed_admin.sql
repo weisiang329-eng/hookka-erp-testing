@@ -1,16 +1,15 @@
 -- ============================================================================
 -- HOOKKA ERP — Seed initial SUPER_ADMIN account
 --
--- Single bootstrap user. Change the password immediately after first login
--- via POST /api/auth/change-password.
+-- Single bootstrap user. Change the password via POST /api/auth/change-password
+-- after first login if desired.
 --
---   email    : admin@hookka.local
---   password : admin123
+--   email    : weisiang329@gmail.com
+--   password : Hookka@123
 --
 -- The hash below was generated with:
---     npx tsx scripts/hash-admin-password.ts admin123
--- (deterministic 16-byte salt used for this seed; regenerate if you want a
--- fresh salt per environment).
+--     npx tsx scripts/hash-admin-password.ts 'Hookka@123'
+-- Regenerate if you want a fresh salt per environment.
 -- ============================================================================
 
 INSERT INTO users (
@@ -24,11 +23,11 @@ INSERT INTO users (
   displayName
 ) VALUES (
   'user-admin-001',
-  'admin@hookka.local',
-  'pbkdf2-sha256$100000$a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6$212117de3526e58ba8d73e4406c9a40fc39c36a9eec9d5638628c06cc307c0f9',
+  'weisiang329@gmail.com',
+  'pbkdf2-sha256$100000$b412e5147165a4b1db773ac93226c4ee$910bd31c2a5d1dbd8b64ae5b4db0de7eaada6cc65c5bf0194d60f89647586d98',
   'SUPER_ADMIN',
   1,
   '2026-04-22T00:00:00Z',
   NULL,
-  'Administrator'
+  'Wei Siang'
 );

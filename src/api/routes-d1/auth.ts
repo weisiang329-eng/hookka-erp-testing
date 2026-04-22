@@ -169,4 +169,161 @@ app.post("/change-password", async (c) => {
   return c.json({ success: true });
 });
 
+// ---------------------------------------------------------------------------
+// Invite acceptance flow — PUBLIC routes, exempted in auth-middleware.ts.
+//
+// GET /api/auth/invite/:token   → preflight (fetches the invite meta so the
+//                                   recipient can see "You were invited as X")
+// POST /api/auth/accept-invite  → creates the users row, marks the invite
+//                                   accepted, and logs the user in.
+// ---------------------------------------------------------------------------
+
+type InviteRow = {
+  token: string;
+  email: string;
+  role: string;
+  displayName: string | null;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | null;
+};
+
+// GET /api/auth/invite/:token
+app.get("/invite/:token", async (c) => {
+  const token = c.req.param("token");
+  const nowIso = new Date().toISOString();
+
+  const row = await c.env.DB.prepare(
+    `SELECT i.email, i.displayName, i.expiresAt, i.acceptedAt,
+            u.displayName AS inviterDisplayName,
+            u.email AS inviterEmail
+       FROM user_invites i
+       LEFT JOIN users u ON u.id = i.invitedBy
+      WHERE i.token = ?
+      LIMIT 1`,
+  )
+    .bind(token)
+    .first<{
+      email: string;
+      displayName: string | null;
+      expiresAt: string;
+      acceptedAt: string | null;
+      inviterDisplayName: string | null;
+      inviterEmail: string | null;
+    }>();
+
+  if (!row || row.acceptedAt || row.expiresAt <= nowIso) {
+    return c.json({ success: false, error: "Invalid or expired invite" }, 404);
+  }
+
+  const inviterName =
+    row.inviterDisplayName && row.inviterDisplayName.length > 0
+      ? row.inviterDisplayName
+      : (row.inviterEmail ?? "");
+
+  return c.json({
+    success: true,
+    data: {
+      email: row.email,
+      displayName: row.displayName ?? "",
+      inviterName,
+      expiresAt: row.expiresAt,
+    },
+  });
+});
+
+// POST /api/auth/accept-invite
+// Body: { token, password, displayName? }
+app.post("/accept-invite", async (c) => {
+  const body = await c.req.json().catch(() => ({}));
+  const { token, password, displayName } = body as {
+    token?: string;
+    password?: string;
+    displayName?: string;
+  };
+  if (!token || !password) {
+    return c.json(
+      { success: false, error: "token and password are required" },
+      400,
+    );
+  }
+  if (password.length < 6) {
+    return c.json(
+      { success: false, error: "password must be at least 6 characters" },
+      400,
+    );
+  }
+
+  const nowIso = new Date().toISOString();
+  const invite = await c.env.DB.prepare(
+    "SELECT * FROM user_invites WHERE token = ? LIMIT 1",
+  )
+    .bind(token)
+    .first<InviteRow>();
+  if (!invite || invite.acceptedAt || invite.expiresAt <= nowIso) {
+    return c.json({ success: false, error: "Invalid or expired invite" }, 404);
+  }
+
+  // Race condition: someone else (re-)created a user with this email between
+  // invite send and now. Bail loudly rather than silently overwriting.
+  const existingUser = await c.env.DB.prepare(
+    "SELECT id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
+  )
+    .bind(invite.email)
+    .first<{ id: string }>();
+  if (existingUser) {
+    return c.json(
+      { success: false, error: "A user with this email already exists" },
+      409,
+    );
+  }
+
+  const resolvedDisplayName =
+    (displayName && displayName.trim()) ||
+    invite.displayName ||
+    "";
+  const userId = `user-${crypto.randomUUID().slice(0, 8)}`;
+  const passwordHash = await hashPassword(password);
+  const sessionToken = crypto.randomUUID();
+  const sessionExpires = new Date(
+    Date.now() + SESSION_TTL_MS,
+  ).toISOString();
+
+  // Atomic: create user, mark invite accepted, issue session in one batch.
+  await c.env.DB.batch([
+    c.env.DB.prepare(
+      `INSERT INTO users (id, email, passwordHash, role, isActive, createdAt, lastLoginAt, displayName)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
+    ).bind(
+      userId,
+      invite.email,
+      passwordHash,
+      invite.role,
+      nowIso,
+      nowIso,
+      resolvedDisplayName,
+    ),
+    c.env.DB.prepare(
+      "UPDATE user_invites SET acceptedAt = ? WHERE token = ?",
+    ).bind(nowIso, token),
+    c.env.DB.prepare(
+      "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
+    ).bind(sessionToken, userId, nowIso, sessionExpires),
+  ]);
+
+  return c.json({
+    success: true,
+    data: {
+      token: sessionToken,
+      user: {
+        id: userId,
+        email: invite.email,
+        role: invite.role,
+        displayName: resolvedDisplayName,
+      },
+    },
+  });
+});
+
 export default app;

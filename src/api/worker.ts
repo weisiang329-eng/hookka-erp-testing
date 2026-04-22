@@ -19,6 +19,9 @@ export type Env = {
     DB: D1Database;
     ENVIRONMENT: string;
     API_CORS_ORIGIN: string;
+    APP_URL: string;              // e.g. "http://localhost:8788" or "https://hookka-erp-testing.pages.dev"
+    RESEND_API_KEY?: string;      // Optional — set via wrangler secret for prod, .dev.vars for local
+    RESEND_FROM_EMAIL: string;    // e.g. "Hookka ERP <onboarding@resend.dev>"
   };
 };
 

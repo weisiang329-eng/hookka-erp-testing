@@ -21,6 +21,7 @@ const PortalAccount = lazy(() => import('./pages/portal/account'))
 
 // Auth
 const Login = lazy(() => import('./pages/login'))
+const InviteAccept = lazy(() => import('./pages/InviteAccept'))
 
 // Worker Portal (mobile, shop floor — uses its own PIN token, not hookka_auth)
 const WorkerLogin = lazy(() => import('./pages/worker/login'))
@@ -52,6 +53,9 @@ export const router = createBrowserRouter([
 
   // Auth (standalone, no layout — PUBLIC)
   { path: '/login', element: <S><Login /></S> },
+
+  // Invite acceptance (standalone, no auth — the token IS the credential)
+  { path: '/invite/:token', element: <S><InviteAccept /></S> },
 
   // Public FG unit tracking (standalone, no auth, mobile-friendly)
   { path: '/track', element: <S><Track /></S> },

@@ -17,17 +17,20 @@ import type { Env } from "../worker";
 export const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
+  "/api/auth/accept-invite",
   "/api/health",
 ];
 
 // Prefix-match endpoints that bypass the dashboard auth gate. These cover the
 // shop-floor Worker Portal (its own PIN/token flow via /api/worker-auth and
-// /api/worker) and the public FG tracking lookup. Anything else under /api/*
-// goes through the Bearer token check.
+// /api/worker), the public FG tracking lookup, and the invite preflight
+// (GET /api/auth/invite/:token — anyone with the token URL can hit it).
+// Anything else under /api/* goes through the Bearer token check.
 const PUBLIC_PREFIXES = [
   "/api/worker-auth/",
   "/api/worker/",
   "/api/fg-units",
+  "/api/auth/invite/",
 ];
 
 function isPublicPath(path: string): boolean {

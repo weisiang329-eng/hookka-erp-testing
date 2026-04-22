@@ -4,3 +4,8 @@
 
 ENVIRONMENT=dev
 API_CORS_ORIGIN=http://localhost:3000
+
+# Resend API key — get yours at https://resend.com/api-keys
+# Without this, POST /api/users/invite still succeeds but returns
+# `emailSent: false` so the admin can copy the invite link manually.
+RESEND_API_KEY=re_YOUR_KEY_HERE

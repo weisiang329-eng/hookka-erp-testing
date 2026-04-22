@@ -64,15 +64,46 @@ const TAB_META: { key: TabKey; label: string; description: string }[] = [
   { key: "productionTimes", label: "Production Times", description: "Minutes per department × category. BOM picks a category and the minutes are filled automatically." },
 ];
 
+// The Products > Maintenance tab and the Sales > Create form both write into
+// this same localStorage key, but they store objects like `{value, priceSen}`
+// while this page stores plain strings. Coerce every entry to its string form
+// on load so `{entry}` renders never see a raw object (React error #31).
+function coerceToStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const item of v) {
+    if (typeof item === "string") out.push(item);
+    else if (item && typeof item === "object") {
+      const val = (item as { value?: unknown }).value;
+      if (typeof val === "string") out.push(val);
+      else if (typeof val === "number") out.push(String(val));
+    }
+    // silently drop anything else — nulls, numbers sneaking in, etc.
+  }
+  return out;
+}
+
 function loadConfig(): VariantConfig {
   if (typeof window === "undefined") return DEFAULT_CONFIG;
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return DEFAULT_CONFIG;
     const parsed = JSON.parse(raw) as Partial<VariantConfig>;
+    // Normalise string-array fields. Object-array writes from other pages get
+    // reduced to their `.value` strings here.
+    const stringFields: (keyof VariantConfig)[] = [
+      "divanHeights",
+      "legHeights",
+      "sizes",
+      "specials",
+    ];
+    const cleaned: Record<string, unknown> = { ...parsed };
+    for (const k of stringFields) {
+      if (k in cleaned) cleaned[k] = coerceToStringArray(cleaned[k]);
+    }
     const merged: VariantConfig = {
       ...DEFAULT_CONFIG,
-      ...parsed,
+      ...(cleaned as Partial<VariantConfig>),
       productionTimes:
         parsed.productionTimes && Object.keys(parsed.productionTimes).length > 0
           ? parsed.productionTimes

@@ -4817,24 +4817,13 @@ export default function BOMManagementPage() {
 
         if (pData.success) setProducts(pData.data);
         if (tData.success) {
-          // Prefer localStorage overlay if present (survives refresh until
-          // we have a real backend). Falls back to API mock data.
-          const stored = loadStoredTemplates();
-          const effective =
-            stored && stored.length > 0 ? stored : tData.data;
-          setTemplates(effective);
-          // If localStorage had edits, re-sync them to the server on mount
-          // so a fresh dev server reload picks up the user's overlay
-          // before any SO confirm runs against the stale mock defaults.
-          if (stored && stored.length > 0) {
-            fetch("/api/bom/templates", {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ templates: stored }),
-              cache: "no-store",
-            }).catch(() => {
-              // ignore
-            });
+          // D1 is authoritative now. The old localStorage overlay (from
+          // pre-D1 days) would otherwise keep resurrecting stale BOMs and
+          // pushing them back to the server on every mount, undoing every
+          // bulk reapply run.
+          setTemplates(tData.data);
+          if (typeof window !== "undefined") {
+            try { localStorage.removeItem(BOM_TEMPLATES_KEY); } catch { /* ignore */ }
           }
         }
         if (invData.success && invData.data?.rawMaterials) {

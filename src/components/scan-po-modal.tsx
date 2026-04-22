@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
-import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles } from "lucide-react";
 
 type Props = {
   open: boolean;
@@ -15,11 +15,41 @@ type Props = {
 
 type StepState = "upload" | "preview" | "creating" | "done";
 
+// Shape returned by POST /api/scan-po/extract.
+type ClaudeExtractedItem = {
+  productCode: string;
+  description: string | null;
+  quantity: number;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
+  specialOrder: string | null;
+  unitPrice: number | null;
+};
+
+type ClaudeExtractedPO = {
+  customerPO: string;
+  customerName: string;
+  customerState: string | null;
+  deliveryDate: string | null;
+  items: ClaudeExtractedItem[];
+};
+
+type ClaudeScanRow = {
+  sampleId: string;
+  extracted: ClaudeExtractedPO;
+  file: File;
+};
+
 export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [step, setStep] = useState<StepState>("upload");
   const [files, setFiles] = useState<File[]>([]);
   const [parsing, setParsing] = useState(false);
   const [parseResult, setParseResult] = useState<POParseResult | null>(null);
+  const [claudeRows, setClaudeRows] = useState<ClaudeScanRow[]>([]);
+  const [usedClaude, setUsedClaude] = useState(false);
   const [selectedPOs, setSelectedPOs] = useState<Set<number>>(new Set());
   const [expandedPO, setExpandedPO] = useState<number | null>(null);
   const [, setCreating] = useState(false);
@@ -32,6 +62,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setFiles([]);
     setParsing(false);
     setParseResult(null);
+    setClaudeRows([]);
+    setUsedClaude(false);
     setSelectedPOs(new Set());
     setExpandedPO(null);
     setCreating(false);
@@ -53,42 +85,89 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       return;
     }
 
+    // 32MB per-file guard — matches backend limit.
+    const tooBig = pdfFiles.find(f => f.size > 32 * 1024 * 1024);
+    if (tooBig) {
+      setErrors([`${tooBig.name} is over the 32MB limit.`]);
+      return;
+    }
+
     setFiles(pdfFiles);
     setParsing(true);
     setErrors([]);
 
-    try {
-      // Extract text from each PDF using pdfjs-dist
-      const allPOs: ParsedPO[] = [];
-      const allErrors: string[] = [];
+    // --- Pass 1: try Claude OCR (per-file) -----------------------------
+    const claudeSuccesses: ClaudeScanRow[] = [];
+    const claudeFailures: File[] = [];
+    const claudeWarnings: string[] = [];
 
-      for (const file of pdfFiles) {
-        const text = await extractPdfText(file);
-        const result = parsePOText(text);
-
-        if (result.success) {
-          allPOs.push(...result.purchaseOrders);
+    for (const file of pdfFiles) {
+      try {
+        const fd = new FormData();
+        fd.append("file", file);
+        const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
+        const data = await res.json() as {
+          success?: boolean;
+          error?: string;
+          data?: { sampleId: string; extracted: ClaudeExtractedPO };
+        };
+        if (res.ok && data.success && data.data?.extracted) {
+          claudeSuccesses.push({
+            sampleId: data.data.sampleId,
+            extracted: data.data.extracted,
+            file,
+          });
+        } else {
+          claudeFailures.push(file);
+          claudeWarnings.push(`${file.name}: ${data.error || `HTTP ${res.status}`}`);
         }
-        if (result.errors.length > 0) {
-          allErrors.push(`${file.name}: ${result.errors.join(", ")}`);
-        }
+      } catch (err) {
+        claudeFailures.push(file);
+        claudeWarnings.push(`${file.name}: ${err instanceof Error ? err.message : "Network error"}`);
       }
-
-      const combinedResult: POParseResult = {
-        success: allPOs.length > 0,
-        purchaseOrders: allPOs,
-        errors: allErrors,
-      };
-
-      setParseResult(combinedResult);
-      // Select all by default
-      setSelectedPOs(new Set(allPOs.map((_, i) => i)));
-      setStep("preview");
-    } catch (err) {
-      setErrors([`Error parsing PDFs: ${err instanceof Error ? err.message : "Unknown error"}`]);
-    } finally {
-      setParsing(false);
     }
+
+    // --- Pass 2: template-match fallback for any file Claude failed on -
+    let fallbackResult: POParseResult | null = null;
+    if (claudeFailures.length > 0) {
+      try {
+        const allPOs: ParsedPO[] = [];
+        const allErrors: string[] = [...claudeWarnings];
+
+        for (const file of claudeFailures) {
+          const text = await extractPdfText(file);
+          const result = parsePOText(text);
+          if (result.success) allPOs.push(...result.purchaseOrders);
+          if (result.errors.length > 0) {
+            allErrors.push(`${file.name}: ${result.errors.join(", ")}`);
+          }
+        }
+
+        fallbackResult = {
+          success: allPOs.length > 0,
+          purchaseOrders: allPOs,
+          errors: allErrors,
+        };
+      } catch (err) {
+        claudeWarnings.push(`Fallback parse failed: ${err instanceof Error ? err.message : "Unknown"}`);
+      }
+    }
+
+    if (claudeSuccesses.length === 0 && (!fallbackResult || fallbackResult.purchaseOrders.length === 0)) {
+      setErrors(claudeWarnings.length > 0 ? claudeWarnings : ["Could not extract any POs from the uploaded PDFs."]);
+      setParsing(false);
+      return;
+    }
+
+    setUsedClaude(claudeSuccesses.length > 0);
+    setClaudeRows(claudeSuccesses);
+    setParseResult(fallbackResult);
+
+    // Select all rows (Claude rows first, then fallback rows) by default.
+    const total = claudeSuccesses.length + (fallbackResult?.purchaseOrders.length ?? 0);
+    setSelectedPOs(new Set(Array.from({ length: total }, (_, i) => i)));
+    setStep("preview");
+    setParsing(false);
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -103,22 +182,91 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setSelectedPOs(next);
   };
 
-  const handleCreateSOs = async () => {
-    if (!parseResult) return;
+  // Indices 0..claudeRows.length-1 are Claude rows; the rest map into
+  // parseResult.purchaseOrders (fallback template-matched rows).
+  const totalRows = claudeRows.length + (parseResult?.purchaseOrders.length ?? 0);
 
-    const selected = parseResult.purchaseOrders.filter((_, i) => selectedPOs.has(i));
-    if (selected.length === 0) return;
+  const handleCreateSOs = async () => {
+    if (totalRows === 0) return;
+
+    const selectedClaude = claudeRows.filter((_, i) => selectedPOs.has(i));
+    const selectedFallback = (parseResult?.purchaseOrders ?? []).filter(
+      (_, i) => selectedPOs.has(claudeRows.length + i),
+    );
+    if (selectedClaude.length + selectedFallback.length === 0) return;
 
     setCreating(true);
     setStep("creating");
     const created: { soNo: string; poNo: string; itemCount: number }[] = [];
     const errs: string[] = [];
 
-    for (const po of selected) {
+    // --- Claude-extracted rows ----------------------------------------
+    for (const row of selectedClaude) {
+      const po = row.extracted;
+      try {
+        // Feedback loop: save the (edited) JSON back so future extractions
+        // can use it as a few-shot example. Fire-and-forget — a failure
+        // here shouldn't block SO creation.
+        fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ correctedJson: po }),
+        }).catch(() => {});
+
+        const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
+
+        const soItems = po.items.map((item, idx) => ({
+          lineNo: idx + 1,
+          lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
+          productCode: item.productCode,
+          productName: item.description ?? item.productCode,
+          sizeLabel: item.sizeLabel ?? "",
+          fabricCode: item.fabricCode ?? "",
+          quantity: item.quantity || 1,
+          gapInches: item.gapInches ?? 0,
+          divanHeightInches: item.divanHeightInches ?? 0,
+          legHeightInches: item.legHeightInches ?? 0,
+          specialOrder: item.specialOrder ?? "",
+          notes: "",
+        }));
+
+        const body = {
+          customerId: "",
+          customerName: po.customerName,
+          customerState: po.customerState ?? hub.state ?? "",
+          customerPOId: po.customerPO,
+          deliveryHubId: hub.hubId,
+          companySODate: new Date().toISOString().split("T")[0],
+          hookkaExpectedDD: po.deliveryDate,
+          items: soItems,
+          source: "PO_SCAN_CLAUDE",
+        };
+
+        const res = await fetch("/api/sales-orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (data.success && data.data) {
+          created.push({
+            soNo: data.data.companySOId,
+            poNo: po.customerPO,
+            itemCount: po.items.length,
+          });
+        } else {
+          errs.push(`${po.customerPO}: ${data.error || "Failed to create SO"}`);
+        }
+      } catch (err) {
+        errs.push(`${po.customerPO}: ${err instanceof Error ? err.message : "Network error"}`);
+      }
+    }
+
+    // --- Fallback template-matched rows -------------------------------
+    for (const po of selectedFallback) {
       try {
         const hub = mapDeliveryHub(po.customerName, po.deliveryHub);
 
-        // Build SO items from parsed PO items
         const soItems = po.items.map((item, idx) => ({
           lineNo: idx + 1,
           lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,

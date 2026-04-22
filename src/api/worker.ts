@@ -22,6 +22,7 @@ export type Env = {
     APP_URL: string;              // e.g. "http://localhost:8788" or "https://hookka-erp-testing.pages.dev"
     RESEND_API_KEY?: string;      // Optional — set via wrangler secret for prod, .dev.vars for local
     RESEND_FROM_EMAIL: string;    // e.g. "Hookka ERP <onboarding@resend.dev>"
+    ANTHROPIC_API_KEY?: string;   // Claude API key — set via `wrangler secret put ANTHROPIC_API_KEY`. Used by routes-d1/scan-po.ts.
   };
 };
 
@@ -129,6 +130,7 @@ import promiseDate from "./routes-d1/promise-date";
 import qcInspections from "./routes-d1/qc-inspections";
 import rdProjects from "./routes-d1/rd-projects";
 import scheduling from "./routes-d1/scheduling";
+import scanPo from "./routes-d1/scan-po";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -197,6 +199,7 @@ app.route("/api/promise-date", promiseDate);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);
+app.route("/api/scan-po", scanPo);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

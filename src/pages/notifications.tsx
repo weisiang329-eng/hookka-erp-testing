@@ -118,8 +118,13 @@ export default function NotificationsPage() {
     try {
       const res = await fetch("/api/notifications");
       if (res.ok) {
-        const data: Notification[] = await res.json();
-        setNotifications(data);
+        const raw: unknown = await res.json();
+        const list = Array.isArray(raw)
+          ? (raw as Notification[])
+          : Array.isArray((raw as { data?: unknown })?.data)
+            ? ((raw as { data: Notification[] }).data)
+            : [];
+        setNotifications(list);
       }
     } catch {
       // silently fail for mock

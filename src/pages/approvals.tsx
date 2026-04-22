@@ -129,8 +129,13 @@ export default function ApprovalsPage() {
     try {
       const res = await fetch("/api/approvals");
       if (!res.ok) return;
-      const data = await res.json();
-      setApprovals(data);
+      const raw: unknown = await res.json();
+      const list = Array.isArray(raw)
+        ? raw
+        : Array.isArray((raw as { data?: unknown })?.data)
+          ? (raw as { data: unknown[] }).data
+          : [];
+      setApprovals(list as typeof approvals);
     } catch {
       // silently ignore
     } finally {

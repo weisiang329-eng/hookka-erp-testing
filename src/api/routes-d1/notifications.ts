@@ -16,14 +16,13 @@ const app = new Hono<Env>();
 
 type NotificationRow = {
   id: string;
-  userId: string | null;
   type: string;
   title: string;
-  message: string;
+  message: string | null;
   severity: string;
   isRead: number;
   link: string | null;
-  createdAt: string;
+  created_at: string;
 };
 
 function rowToNotification(r: NotificationRow) {
@@ -31,11 +30,11 @@ function rowToNotification(r: NotificationRow) {
     id: r.id,
     type: r.type,
     title: r.title,
-    message: r.message,
+    message: r.message ?? "",
     severity: r.severity,
     isRead: r.isRead === 1,
     link: r.link ?? undefined,
-    createdAt: r.createdAt,
+    createdAt: r.created_at,
   };
 }
 
@@ -57,7 +56,7 @@ app.get("/", async (c) => {
   const sql =
     "SELECT * FROM notifications" +
     (where.length > 0 ? " WHERE " + where.join(" AND ") : "") +
-    " ORDER BY createdAt DESC";
+    " ORDER BY created_at DESC";
   const res = await c.env.DB.prepare(sql)
     .bind(...binds)
     .all<NotificationRow>();

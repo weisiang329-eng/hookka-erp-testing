@@ -26,6 +26,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
+import { postJobCardLabor } from "../lib/po-cost-cascade";
 
 const app = new Hono<Env>();
 
@@ -531,10 +532,8 @@ async function cascadePoCompletionToSO(
   }
 }
 
-// TODO(phase-5): Port postProductionOrderCompletion() from the in-memory
-// route — FIFO consume rm_batches, emit cost_ledger entries (RM_ISSUE +
-// LABOR_POSTED), create an fg_batches row, emit FG_COMPLETED. Requires
-// porting getRawMaterialStock()/fifoConsume()/laborRateForDate() helpers.
+// Track F cost cascade lives in ../lib/po-cost-cascade.ts and is wired
+// through postProductionOrderCompletion() + postJobCardLabor() below.
 
 // ---------------------------------------------------------------------------
 // Core PO-update logic shared between PUT and PATCH.
@@ -654,6 +653,16 @@ async function applyPoUpdate(
       await applyWipInventoryChange(db, existing, updated, body.status, refreshed);
     }
 
+    // F2 — labor cost posting on job_card COMPLETED/TRANSFERRED transition.
+    // Idempotent: postJobCardLabor checks cost_ledger for existing LABOR_POSTED
+    // entries keyed by refType='JOB_CARD', refId=jc.id.
+    if (
+      body.status &&
+      (body.status === "COMPLETED" || body.status === "TRANSFERRED")
+    ) {
+      await postJobCardLabor(db, updated.id, existing.id);
+    }
+
     // Recalculate progress / PO status.
     const refreshedJcs = allJcRows.map((j) => (j.id === updated.id ? updated : j));
     const completedCount = refreshedJcs.filter(
@@ -664,7 +673,8 @@ async function applyPoUpdate(
     if (completedCount === refreshedJcs.length) {
       updatedPoStatus = "COMPLETED";
       updatedCompletedDate = today;
-      // TODO(phase-5): postProductionOrderCompletion (FIFO consume + FGBatch)
+      // postProductionOrderCompletion (FG + Track F cost cascade) runs
+      // after the production_orders UPDATE below.
     } else {
       updatedPoStatus = "IN_PROGRESS";
       updatedCompletedDate = null;
@@ -1471,6 +1481,9 @@ app.post("/:id/scan-complete", async (c) => {
       "COMPLETED",
       siblings.results ?? [],
     );
+
+    // F2 — labor cost posting (idempotent per jobCardId).
+    await postJobCardLabor(db, mergedJc.id, target.po.id);
   }
 
   // PO progress rollup.

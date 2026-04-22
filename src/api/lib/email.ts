@@ -24,6 +24,22 @@ export interface SendEmailResult {
   error?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Lightweight notification stubs — log only for now. Real Resend wiring can
+// be added later without changing call sites.
+// ---------------------------------------------------------------------------
+
+export function notifySupplierPoSubmitted(args: {
+  poNo: string;
+  supplierName: string;
+  supplierId: string;
+}): void {
+  // eslint-disable-next-line no-console
+  console.log(
+    `[email stub] PO ${args.poNo} submitted to supplier ${args.supplierName} (${args.supplierId})`,
+  );
+}
+
 export async function sendEmail(
   apiKey: string | undefined,
   from: string,

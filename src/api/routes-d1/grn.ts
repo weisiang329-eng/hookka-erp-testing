@@ -346,6 +346,102 @@ async function postGRNToStock(
   return { batchesCreated, ledgerEntries, unresolvedLines: unresolved };
 }
 
+// ---------------------------------------------------------------------------
+// Cascade GRN-POSTED side effects into the parent PO:
+//   1. Bump receivedQty on each matching purchase_order_items row
+//      (keyed by poItemIndex — the index of the PO line the GRN line
+//      was created against).
+//   2. After the bump, compute total received vs ordered for the PO and
+//      transition the PO status:
+//        - all items fully received → RECEIVED
+//        - some received            → PARTIAL_RECEIVED
+//        - none received            → no change (shouldn't happen here)
+// Called only on the DRAFT/CONFIRMED → POSTED boundary; postGRNToStock
+// already gates on rm_batches rows, but this extra guard keeps the
+// purchase_order_items bump idempotent across retries too.
+// ---------------------------------------------------------------------------
+async function cascadePOStatusAfterGRNPost(
+  db: D1Database,
+  grnId: string,
+): Promise<void> {
+  const grn = await db
+    .prepare("SELECT poId FROM grns WHERE id = ?")
+    .bind(grnId)
+    .first<{ poId: string | null }>();
+  if (!grn?.poId) return;
+  const poId = grn.poId;
+
+  const grnItemsRes = await db
+    .prepare(
+      "SELECT poItemIndex, acceptedQty FROM grn_items WHERE grnId = ? ORDER BY id ASC",
+    )
+    .bind(grnId)
+    .all<{ poItemIndex: number | null; acceptedQty: number }>();
+  const grnItems = grnItemsRes.results ?? [];
+
+  const poItemsRes = await db
+    .prepare(
+      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+    )
+    .bind(poId)
+    .all<{ id: string; quantity: number; receivedQty: number }>();
+  // The GRN creation flow in POST /api/grn keys GRN lines to PO lines via
+  // insertion-order array index. D1's SELECT without ORDER BY preserves
+  // insertion order so using the raw results array here matches that.
+  const poItemsOrdered = poItemsRes.results ?? [];
+
+  const statements: D1PreparedStatement[] = [];
+  for (const gi of grnItems) {
+    const idx = gi.poItemIndex ?? -1;
+    if (idx < 0 || idx >= poItemsOrdered.length) continue;
+    const poItem = poItemsOrdered[idx];
+    const qty = Number(gi.acceptedQty) || 0;
+    if (qty <= 0) continue;
+    statements.push(
+      db
+        .prepare(
+          "UPDATE purchase_order_items SET receivedQty = receivedQty + ? WHERE id = ?",
+        )
+        .bind(qty, poItem.id),
+    );
+  }
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
+
+  // Recompute status. Re-read items post-update so we include the bumps.
+  const afterRes = await db
+    .prepare(
+      "SELECT quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+    )
+    .bind(poId)
+    .all<{ quantity: number; receivedQty: number }>();
+  const after = afterRes.results ?? [];
+  if (after.length === 0) return;
+  const allFull = after.every(
+    (r) => (Number(r.receivedQty) || 0) >= (Number(r.quantity) || 0),
+  );
+  const anyPartial = after.some((r) => (Number(r.receivedQty) || 0) > 0);
+
+  const nowIso = new Date().toISOString();
+  if (allFull) {
+    await db
+      .prepare(
+        `UPDATE purchase_orders SET status = 'RECEIVED', receivedDate = ?,
+           updated_at = ? WHERE id = ?`,
+      )
+      .bind(nowIso.split("T")[0], nowIso, poId)
+      .run();
+  } else if (anyPartial) {
+    await db
+      .prepare(
+        "UPDATE purchase_orders SET status = 'PARTIAL_RECEIVED', updated_at = ? WHERE id = ?",
+      )
+      .bind(nowIso, poId)
+      .run();
+  }
+}
+
 // GET /api/grn — list all GRNs (optional ?poId=&supplierId= filters)
 app.get("/", async (c) => {
   const poId = c.req.query("poId");
@@ -611,6 +707,12 @@ app.put("/:id", async (c) => {
       !COMMITTED_STATUSES.has(prevStatus)
     ) {
       postSummary = await postGRNToStock(c.env.DB, id);
+      // Cascade to the parent PO — bump receivedQty per line and transition
+      // status to PARTIAL_RECEIVED / RECEIVED. Only runs on the
+      // non-committed → committed boundary, matching postGRNToStock.
+      if (newStatus === "POSTED") {
+        await cascadePOStatusAfterGRNPost(c.env.DB, id);
+      }
     }
 
     const updated = await fetchGRN(c.env.DB, id);

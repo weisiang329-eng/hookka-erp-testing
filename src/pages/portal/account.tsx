@@ -89,7 +89,7 @@ export default function PortalAccountPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Account</h1>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Account</h1>
         <p className="text-gray-500 mt-1">View your invoices, payments, and account standing.</p>
       </div>
 

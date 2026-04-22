@@ -180,7 +180,7 @@ export default function DebitNotesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Debit Notes</h1>
+          <h1 className="text-xl font-bold text-gray-900">Debit Notes</h1>
           <p className="text-sm text-gray-500 mt-1">
             Manage debit notes for undercharges and additional charges
           </p>

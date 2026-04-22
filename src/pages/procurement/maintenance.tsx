@@ -800,8 +800,8 @@ export default function SupplierMaintenancePage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Supplier Maintenance</h1>
-        <p className="text-sm text-[#6B7280] mt-1">
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Supplier Maintenance</h1>
+        <p className="text-xs text-[#6B7280] mt-0.5">
           Manage supplier information and material SKU mappings
         </p>
       </div>
@@ -809,37 +809,37 @@ export default function SupplierMaintenancePage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Active Suppliers</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{activeSuppliers}</p>
+              <p className="text-xs text-[#6B7280]">Active Suppliers</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{activeSuppliers}</p>
             </div>
             <Building2 className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">SKU Mappings</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{totalMappings}</p>
+              <p className="text-xs text-[#6B7280]">SKU Mappings</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{totalMappings}</p>
             </div>
             <Package className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Main Suppliers</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{mainSupplierCount}</p>
+              <p className="text-xs text-[#6B7280]">Main Suppliers</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{mainSupplierCount}</p>
             </div>
             <CheckCircle2 className="h-5 w-5 text-green-500" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Avg Rating</p>
-              <p className="text-2xl font-bold text-amber-600">{avgRating}</p>
+              <p className="text-xs text-[#6B7280]">Avg Rating</p>
+              <p className="text-xl font-bold text-amber-600">{avgRating}</p>
             </div>
             <Star className="h-5 w-5 text-amber-400 fill-amber-400" />
           </CardContent>

@@ -238,7 +238,7 @@ export default function DeliveryDetailPage() {
         </Button>
         <div className="flex-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F1D1B] doc-number">{order.doNo}</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.doNo}</h1>
             <Badge variant="status" status={order.status}>
               {STATUS_LABEL[order.status] || order.status.replace(/_/g, " ")}
             </Badge>
@@ -249,7 +249,7 @@ export default function DeliveryDetailPage() {
               </span>
             )}
           </div>
-          <p className="text-sm text-[#6B7280]">
+          <p className="text-xs text-[#6B7280]">
             {order.customerName} &middot; {order.companySOId}
           </p>
         </div>

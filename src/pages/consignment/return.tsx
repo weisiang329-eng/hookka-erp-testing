@@ -395,8 +395,8 @@ export default function ConsignmentReturnPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Consignment Returns</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Returns</h1>
+          <p className="text-xs text-[#6B7280]">
             Track and process consignment returns from branches
           </p>
         </div>
@@ -609,7 +609,7 @@ export default function ConsignmentReturnPage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">{detailCR.crNo}</h2>
-                <p className="text-sm text-[#6B7280]">Consignment Return Detail</p>
+                <p className="text-xs text-[#6B7280]">Consignment Return Detail</p>
               </div>
               <button
                 onClick={() => setDetailCR(null)}
@@ -746,7 +746,7 @@ export default function ConsignmentReturnPage() {
               {detailCR.remarks && (
                 <div className="border-t border-[#E2DDD8] pt-4">
                   <h3 className="text-sm font-semibold text-[#1F1D1B] mb-2">Remarks</h3>
-                  <p className="text-sm text-[#6B7280]">{detailCR.remarks}</p>
+                  <p className="text-xs text-[#6B7280]">{detailCR.remarks}</p>
                 </div>
               )}
             </div>

@@ -77,7 +77,7 @@ export default function ForecastPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Demand Forecasting & Analytics</h1>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Demand Forecasting & Analytics</h1>
         <p className="text-sm text-gray-500 mt-1">
           Predict future demand based on historical sales. Support production, inventory, and capacity planning.
         </p>

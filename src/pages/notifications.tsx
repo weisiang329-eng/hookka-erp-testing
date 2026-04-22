@@ -202,8 +202,8 @@ export default function NotificationsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Notifications</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Notifications</h1>
+          <p className="text-xs text-[#6B7280]">
             System alerts, reminders, and activity updates
           </p>
         </div>
@@ -216,37 +216,37 @@ export default function NotificationsPage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Unread</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{unreadCount}</p>
+              <p className="text-xs text-[#6B7280]">Total Unread</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{unreadCount}</p>
             </div>
             <BellOff className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Critical Alerts</p>
-              <p className="text-2xl font-bold text-[#9A3A2D]">{criticalCount}</p>
+              <p className="text-xs text-[#6B7280]">Critical Alerts</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{criticalCount}</p>
             </div>
             <AlertCircle className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Warnings</p>
-              <p className="text-2xl font-bold text-[#9C6F1E]">{warningCount}</p>
+              <p className="text-xs text-[#6B7280]">Warnings</p>
+              <p className="text-xl font-bold text-[#9C6F1E]">{warningCount}</p>
             </div>
             <AlertTriangle className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Info</p>
-              <p className="text-2xl font-bold text-[#3E6570]">{infoCount}</p>
+              <p className="text-xs text-[#6B7280]">Info</p>
+              <p className="text-xl font-bold text-[#3E6570]">{infoCount}</p>
             </div>
             <Info className="h-5 w-5 text-[#3E6570]" />
           </CardContent>
@@ -277,7 +277,7 @@ export default function NotificationsPage() {
         <Card>
           <CardContent className="p-12 text-center">
             <Bell className="h-10 w-10 text-[#E2DDD8] mx-auto mb-3" />
-            <p className="text-sm text-[#6B7280]">No notifications to show</p>
+            <p className="text-xs text-[#6B7280]">No notifications to show</p>
           </CardContent>
         </Card>
       ) : (

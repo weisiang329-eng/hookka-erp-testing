@@ -410,8 +410,8 @@ export default function GRNPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Goods Receipt Notes</h1>
-          <p className="text-sm text-[#6B7280]">Receive and verify incoming goods against purchase orders</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Goods Receipt Notes</h1>
+          <p className="text-xs text-[#6B7280]">Receive and verify incoming goods against purchase orders</p>
         </div>
         <Button variant="primary" onClick={() => setShowForm(true)}>
           <Plus className="h-4 w-4" /> Create GRN
@@ -441,37 +441,37 @@ export default function GRNPage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total GRNs</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{totalGRNs}</p>
+              <p className="text-xs text-[#6B7280]">Total GRNs</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{totalGRNs}</p>
             </div>
             <Package className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Pending QC</p>
-              <p className="text-2xl font-bold text-[#9C6F1E]">{pendingQC}</p>
+              <p className="text-xs text-[#6B7280]">Pending QC</p>
+              <p className="text-xl font-bold text-[#9C6F1E]">{pendingQC}</p>
             </div>
             <ClipboardCheck className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Approved (MTD)</p>
-              <p className="text-2xl font-bold text-[#4F7C3A]">{approvedMTD}</p>
+              <p className="text-xs text-[#6B7280]">Approved (MTD)</p>
+              <p className="text-xl font-bold text-[#4F7C3A]">{approvedMTD}</p>
             </div>
             <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Value</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+              <p className="text-xs text-[#6B7280]">Total Value</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
             </div>
             <DollarSign className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>

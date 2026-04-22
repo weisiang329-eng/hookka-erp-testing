@@ -167,7 +167,7 @@ export default function WorkerPayPage() {
 
   return (
     <div className="space-y-4 pt-2">
-      <h1 className="text-2xl font-bold">{t("pay.title")}</h1>
+      <h1 className="text-xl font-bold">{t("pay.title")}</h1>
 
       {/* ========== Current month pay estimate ========== */}
       <div className="bg-[#1F1D1B] text-white rounded-xl p-4">

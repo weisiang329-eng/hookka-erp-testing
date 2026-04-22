@@ -645,7 +645,7 @@ function MaintenanceView() {
     <div className="space-y-4">
       {/* Save / Reset bar */}
       <div className="flex items-center justify-between">
-        <p className="text-sm text-[#6B7280]">
+        <p className="text-xs text-[#6B7280]">
           Centralized master data for product variants. Used by BOM, Sales Orders, and Production.
         </p>
         <div className="flex items-center gap-2">
@@ -1178,7 +1178,7 @@ export default function ProductsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
-          <h1 className="text-2xl font-bold text-[#111827]">Products</h1>
+          <h1 className="text-xl font-bold text-[#111827]">Products</h1>
           {/* View mode toggle */}
           <div className="flex bg-[#F3F4F6] rounded-lg p-0.5">
             <button

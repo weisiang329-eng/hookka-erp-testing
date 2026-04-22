@@ -320,8 +320,8 @@ export default function CustomersPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Customers</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Customers</h1>
+          <p className="text-xs text-[#6B7280]">
             Manage customer accounts, delivery hubs, and credit
           </p>
         </div>
@@ -349,28 +349,28 @@ export default function CustomersPage() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Total Customers</p>
-            <p className="text-2xl font-bold text-[#1F1D1B]">{totalCustomers}</p>
+            <p className="text-xs text-[#6B7280]">Total Customers</p>
+            <p className="text-xl font-bold text-[#1F1D1B]">{totalCustomers}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Delivery Hubs</p>
-            <p className="text-2xl font-bold text-[#1F1D1B]">{totalHubs}</p>
+            <p className="text-xs text-[#6B7280]">Delivery Hubs</p>
+            <p className="text-xl font-bold text-[#1F1D1B]">{totalHubs}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Total Outstanding</p>
-            <p className="text-2xl font-bold text-[#1F1D1B]">
+            <p className="text-xs text-[#6B7280]">Total Outstanding</p>
+            <p className="text-xl font-bold text-[#1F1D1B]">
               {formatCurrency(totalOutstanding)}
             </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Total Credit Limit</p>
-            <p className="text-2xl font-bold text-[#1F1D1B]">
+            <p className="text-xs text-[#6B7280]">Total Credit Limit</p>
+            <p className="text-xl font-bold text-[#1F1D1B]">
               {formatCurrency(totalCreditLimit)}
             </p>
           </CardContent>

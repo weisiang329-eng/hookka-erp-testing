@@ -183,7 +183,7 @@ export default function WorkerMePage() {
 
   return (
     <div className="space-y-4 pt-2">
-      <h1 className="text-2xl font-bold">{t("me.title")}</h1>
+      <h1 className="text-xl font-bold">{t("me.title")}</h1>
 
       {/* Profile card */}
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] space-y-3">

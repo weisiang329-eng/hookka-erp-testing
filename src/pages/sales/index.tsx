@@ -336,8 +336,8 @@ export default function SalesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Sales Orders</h1>
-          <p className="text-sm text-[#6B7280]">Manage customer orders from creation to delivery</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Sales Orders</h1>
+          <p className="text-xs text-[#6B7280]">Manage customer orders from creation to delivery</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setScanPOOpen(true)}>
@@ -350,11 +350,11 @@ export default function SalesPage() {
       </div>
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
-        <Card><CardContent className="p-4"><p className="text-sm text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{orders.length}</p></CardContent></Card>
-        <Card><CardContent className="p-4"><p className="text-sm text-[#6B7280]">Revenue</p><p className="text-2xl font-bold">{formatCurrency(totalRevenue)}</p></CardContent></Card>
-        <Card><CardContent className="p-4"><p className="text-sm text-[#6B7280]">Outstanding</p><p className="text-2xl font-bold text-[#9C6F1E]">{orders.filter(o => ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
-        <Card><CardContent className="p-4"><p className="text-sm text-[#6B7280]">Pending Delivery</p><p className="text-2xl font-bold text-[#3E6570]">{orders.filter(o => ["READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
-        <Card><CardContent className="p-4"><p className="text-sm text-[#6B7280]">Completed</p><p className="text-2xl font-bold text-[#4F7C3A]">{orders.filter(o => ["DELIVERED", "INVOICED", "CLOSED"].includes(o.status)).length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{orders.length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Revenue</p><p className="text-xl font-bold">{formatCurrency(totalRevenue)}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{orders.filter(o => ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{orders.filter(o => ["READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{orders.filter(o => ["DELIVERED", "INVOICED", "CLOSED"].includes(o.status)).length}</p></CardContent></Card>
       </div>
 
       {/* Filters */}
@@ -579,7 +579,7 @@ export default function SalesPage() {
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[#1F1D1B]">Transfer to Delivery Order</h2>
-                  <p className="text-sm text-[#6B7280]">Create a DO from {transferDORow.companySOId}</p>
+                  <p className="text-xs text-[#6B7280]">Create a DO from {transferDORow.companySOId}</p>
                 </div>
               </div>
               <button
@@ -597,7 +597,7 @@ export default function SalesPage() {
                 </div>
                 <div>
                   <h3 className="text-lg font-semibold text-[#1F1D1B]">Delivery Order Created</h3>
-                  <p className="text-sm text-[#6B7280] mt-1">DO No: <span className="font-mono font-semibold text-[#6B5C32]">{transferSuccess.docNo}</span></p>
+                  <p className="text-xs text-[#6B7280] mt-0.5">DO No: <span className="font-mono font-semibold text-[#6B5C32]">{transferSuccess.docNo}</span></p>
                 </div>
                 <div className="flex justify-center gap-3 pt-2">
                   <Button variant="outline" onClick={() => { setTransferDORow(null); setTransferSuccess(null); }}>Close</Button>
@@ -759,7 +759,7 @@ export default function SalesPage() {
                 </div>
                 <div>
                   <h2 className="text-lg font-semibold text-[#1F1D1B]">Transfer to Invoice</h2>
-                  <p className="text-sm text-[#6B7280]">Generate invoice from {transferInvRow.companySOId}</p>
+                  <p className="text-xs text-[#6B7280]">Generate invoice from {transferInvRow.companySOId}</p>
                 </div>
               </div>
               <button
@@ -777,7 +777,7 @@ export default function SalesPage() {
                 </div>
                 <div>
                   <h3 className="text-lg font-semibold text-[#1F1D1B]">Invoice Created</h3>
-                  <p className="text-sm text-[#6B7280] mt-1">Invoice No: <span className="font-mono font-semibold text-[#6B5C32]">{transferSuccess.docNo}</span></p>
+                  <p className="text-xs text-[#6B7280] mt-0.5">Invoice No: <span className="font-mono font-semibold text-[#6B5C32]">{transferSuccess.docNo}</span></p>
                 </div>
                 <div className="flex justify-center gap-3 pt-2">
                   <Button variant="outline" onClick={() => { setTransferInvRow(null); setMatchedDO(null); setTransferSuccess(null); }}>Close</Button>
@@ -811,7 +811,7 @@ export default function SalesPage() {
                       </div>
                     </div>
                   </div>
-                  <p className="text-sm text-[#6B7280]">
+                  <p className="text-xs text-[#6B7280]">
                     This will generate an invoice based on the delivery order above. All items and pricing will be auto-populated from the sales order.
                   </p>
                 </div>

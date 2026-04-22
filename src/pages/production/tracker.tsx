@@ -207,8 +207,8 @@ export default function MasterTrackerPage() {
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div>
-            <h1 className="text-2xl font-bold text-[#1F1D1B]">Master Tracker</h1>
-            <p className="text-sm text-[#6B7280]">
+            <h1 className="text-xl font-bold text-[#1F1D1B]">Master Tracker</h1>
+            <p className="text-xs text-[#6B7280]">
               All production orders with department completion dates - BF & SF Master Tracker
             </p>
           </div>

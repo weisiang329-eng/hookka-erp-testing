@@ -259,8 +259,8 @@ export default function MaintenancePage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Maintenance</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Maintenance</h1>
+          <p className="text-xs text-[#6B7280]">
             Equipment & machine maintenance tracking for the factory
           </p>
         </div>
@@ -269,37 +269,37 @@ export default function MaintenancePage() {
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Operational</p>
-              <p className="text-2xl font-bold text-[#4F7C3A]">{operationalCount}</p>
+              <p className="text-xs text-[#6B7280]">Operational</p>
+              <p className="text-xl font-bold text-[#4F7C3A]">{operationalCount}</p>
             </div>
             <CheckCircle className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Under Maintenance</p>
-              <p className="text-2xl font-bold text-[#3E6570]">{maintenanceCount}</p>
+              <p className="text-xs text-[#6B7280]">Under Maintenance</p>
+              <p className="text-xl font-bold text-[#3E6570]">{maintenanceCount}</p>
             </div>
             <Wrench className="h-5 w-5 text-[#3E6570]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Under Repair</p>
-              <p className="text-2xl font-bold text-[#9C6F1E]">{repairCount}</p>
+              <p className="text-xs text-[#6B7280]">Under Repair</p>
+              <p className="text-xl font-bold text-[#9C6F1E]">{repairCount}</p>
             </div>
             <Clock className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Overdue</p>
-              <p className="text-2xl font-bold text-[#9A3A2D]">{overdueCount}</p>
+              <p className="text-xs text-[#6B7280]">Overdue</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{overdueCount}</p>
             </div>
             <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
@@ -503,37 +503,37 @@ export default function MaintenancePage() {
           {/* Schedule KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Upcoming This Week</p>
-                  <p className="text-2xl font-bold text-[#3E6570]">{upcomingThisWeek.length}</p>
+                  <p className="text-xs text-[#6B7280]">Upcoming This Week</p>
+                  <p className="text-xl font-bold text-[#3E6570]">{upcomingThisWeek.length}</p>
                 </div>
                 <Calendar className="h-5 w-5 text-[#3E6570]" />
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Overdue</p>
-                  <p className="text-2xl font-bold text-[#9A3A2D]">{overdueEquipment.length}</p>
+                  <p className="text-xs text-[#6B7280]">Overdue</p>
+                  <p className="text-xl font-bold text-[#9A3A2D]">{overdueEquipment.length}</p>
                 </div>
                 <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Completed This Month</p>
-                  <p className="text-2xl font-bold text-[#4F7C3A]">{thisMonthLogs.length}</p>
+                  <p className="text-xs text-[#6B7280]">Completed This Month</p>
+                  <p className="text-xl font-bold text-[#4F7C3A]">{thisMonthLogs.length}</p>
                 </div>
                 <CheckCircle className="h-5 w-5 text-[#4F7C3A]" />
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Avg Downtime</p>
-                  <p className="text-2xl font-bold text-[#1F1D1B]">{avgDowntime}h</p>
+                  <p className="text-xs text-[#6B7280]">Avg Downtime</p>
+                  <p className="text-xl font-bold text-[#1F1D1B]">{avgDowntime}h</p>
                 </div>
                 <Clock className="h-5 w-5 text-[#6B5C32]" />
               </CardContent>

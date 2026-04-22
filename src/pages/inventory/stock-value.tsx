@@ -123,8 +123,8 @@ export default function StockValuePage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Monthly Stock Value</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Monthly Stock Value</h1>
+          <p className="text-xs text-[#6B7280]">
             Stock account valuation and monthly closing (AutoCount 330-xxxx series)
           </p>
         </div>
@@ -587,7 +587,7 @@ function DashboardTab({
           </CardHeader>
           <CardContent>
             {trendData.length === 0 ? (
-              <p className="text-sm text-[#6B7280]">No trend data available</p>
+              <p className="text-xs text-[#6B7280]">No trend data available</p>
             ) : (
               <div className="space-y-3">
                 {trendData.map((d) => {
@@ -623,7 +623,7 @@ function DashboardTab({
           </CardHeader>
           <CardContent>
             {topVariances.length === 0 ? (
-              <p className="text-sm text-[#6B7280]">No variance data for this period</p>
+              <p className="text-xs text-[#6B7280]">No variance data for this period</p>
             ) : (
               <div className="space-y-3">
                 {topVariances.map((v) => {
@@ -672,14 +672,14 @@ function DashboardTab({
         <CardContent className="py-6">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Inventory Value ({periodLabel(selectedPeriod)})</p>
+              <p className="text-xs text-[#6B7280]">Total Inventory Value ({periodLabel(selectedPeriod)})</p>
               <p className="text-3xl font-bold text-[#1F1D1B] mt-1">
                 {formatCurrency(currentValues.reduce((s, v) => s + v.closingValue, 0))}
               </p>
             </div>
             <div className="text-right">
-              <p className="text-sm text-[#6B7280]">Entries</p>
-              <p className="text-2xl font-bold text-[#6B5C32]">{currentValues.length}</p>
+              <p className="text-xs text-[#6B7280]">Entries</p>
+              <p className="text-xl font-bold text-[#6B5C32]">{currentValues.length}</p>
             </div>
           </div>
         </CardContent>

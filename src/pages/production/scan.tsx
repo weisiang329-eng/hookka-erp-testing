@@ -234,7 +234,7 @@ function ScannerPage() {
         </Link>
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Production Scanner</h1>
-          <p className="text-sm text-[#6B7280]">Scan QR code or enter ID manually</p>
+          <p className="text-xs text-[#6B7280]">Scan QR code or enter ID manually</p>
         </div>
       </div>
 

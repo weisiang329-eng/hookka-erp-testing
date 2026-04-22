@@ -241,7 +241,7 @@ export default function VariantsPage() {
             <SlidersHorizontal className="w-6 h-6 text-[#6B5C32]" />
           </div>
           <div>
-            <h1 className="text-2xl font-bold text-[#111827]">Variants &amp; Options</h1>
+            <h1 className="text-xl font-bold text-[#111827]">Variants &amp; Options</h1>
             <p className="text-sm text-gray-500 mt-0.5">
               Centralized master data for product variants. Used by BOM, Sales Orders, and Production.
             </p>

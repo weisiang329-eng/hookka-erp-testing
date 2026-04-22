@@ -92,8 +92,8 @@ export default function AccountingPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Accounting</h1>
-          <p className="text-sm text-[#6B7280]">General ledger, accounts receivable, and accounts payable</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Accounting</h1>
+          <p className="text-xs text-[#6B7280]">General ledger, accounts receivable, and accounts payable</p>
         </div>
       </div>
 
@@ -233,27 +233,27 @@ function OverviewTab({
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Revenue (MTD)</p>
+              <p className="text-xs text-[#6B7280]">Revenue (MTD)</p>
               <p className="text-xl font-bold text-[#4F7C3A]">{formatCurrency(revenue)}</p>
             </div>
             <ArrowUpRight className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Expenses (MTD)</p>
+              <p className="text-xs text-[#6B7280]">Expenses (MTD)</p>
               <p className="text-xl font-bold text-[#9A3A2D]">{formatCurrency(expenses)}</p>
             </div>
             <ArrowDownRight className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Net Profit</p>
+              <p className="text-xs text-[#6B7280]">Net Profit</p>
               <p className={`text-xl font-bold ${netProfit >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
                 {formatCurrency(netProfit)}
               </p>
@@ -262,18 +262,18 @@ function OverviewTab({
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">AR Outstanding</p>
+              <p className="text-xs text-[#6B7280]">AR Outstanding</p>
               <p className="text-xl font-bold text-[#9C6F1E]">{formatCurrency(totalAR)}</p>
             </div>
             <TrendingUp className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">AP Outstanding</p>
+              <p className="text-xs text-[#6B7280]">AP Outstanding</p>
               <p className="text-xl font-bold text-[#3E6570]">{formatCurrency(totalAP)}</p>
             </div>
             <TrendingDown className="h-5 w-5 text-[#3E6570]" />
@@ -1471,26 +1471,26 @@ function PLReportTab() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Revenue</p>
+            <p className="text-xs text-[#6B7280]">Revenue</p>
             <p className="text-xl font-bold text-[#4F7C3A]">{formatCurrency(plData.totals.revenue)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">COGS</p>
+            <p className="text-xs text-[#6B7280]">COGS</p>
             <p className="text-xl font-bold text-[#9A3A2D]">{formatCurrency(plData.totals.cogs)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Gross Profit</p>
+            <p className="text-xs text-[#6B7280]">Gross Profit</p>
             <p className="text-xl font-bold text-[#6B5C32]">{formatCurrency(plData.totals.grossProfit)}</p>
             <p className="text-xs text-[#6B7280] mt-1">GP: {plData.totals.grossProfitPct}%</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Net Profit</p>
+            <p className="text-xs text-[#6B7280]">Net Profit</p>
             <p className={`text-xl font-bold ${plData.totals.netProfit >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
               {formatCurrency(plData.totals.netProfit)}
             </p>
@@ -1741,7 +1741,7 @@ function BalanceSheetTab() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
         <Card>
           <CardContent className="p-4 text-center">
-            <p className="text-sm text-[#6B7280]">Total Assets</p>
+            <p className="text-xs text-[#6B7280]">Total Assets</p>
             <p className="text-xl font-bold text-[#3E6570]">{formatCurrency(totalAssets)}</p>
           </CardContent>
         </Card>
@@ -1752,7 +1752,7 @@ function BalanceSheetTab() {
         </Card>
         <Card>
           <CardContent className="p-4 text-center">
-            <p className="text-sm text-[#6B7280]">Liabilities + Equity</p>
+            <p className="text-xs text-[#6B7280]">Liabilities + Equity</p>
             <p className="text-xl font-bold text-[#6B4A6D]">{formatCurrency(totalLiabEquity)}</p>
           </CardContent>
         </Card>

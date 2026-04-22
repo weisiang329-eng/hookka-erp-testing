@@ -23,18 +23,23 @@ export const PUBLIC_PATHS = [
 
 // Prefix-match endpoints that bypass the dashboard auth gate. These cover the
 // shop-floor Worker Portal (its own PIN/token flow via /api/worker-auth and
-// /api/worker), the public FG tracking lookup, and the invite preflight
-// (GET /api/auth/invite/:token — anyone with the token URL can hit it).
+// /api/worker) and the invite preflight (GET /api/auth/invite/:token —
+// anyone with the token URL can hit it).
 // Anything else under /api/* goes through the Bearer token check.
 const PUBLIC_PREFIXES = [
   "/api/worker-auth/",
   "/api/worker/",
-  "/api/fg-units",
   "/api/auth/invite/",
 ];
 
-function isPublicPath(path: string): boolean {
+// Customer QR tracking lookup: only the single-unit GET is public. The list
+// endpoint and all writes (scan/generate) require auth — otherwise anyone on
+// the internet can dump inventory or mutate unit status.
+const FG_UNIT_PUBLIC_GET_RE = /^\/api\/fg-units\/[^/]+$/;
+
+function isPublicPath(path: string, method: string): boolean {
   if (PUBLIC_PATHS.includes(path)) return true;
+  if (method === "GET" && FG_UNIT_PUBLIC_GET_RE.test(path)) return true;
   for (const pfx of PUBLIC_PREFIXES) {
     if (path === pfx || path.startsWith(pfx)) return true;
   }
@@ -60,7 +65,7 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
 
   // Public endpoints (login/logout/health + worker portal + public tracking)
   // bypass the auth check entirely.
-  if (isPublicPath(path)) return next();
+  if (isPublicPath(path, c.req.method)) return next();
 
   const authHeader = c.req.header("authorization") || "";
   const match = authHeader.match(/^Bearer\s+(.+)$/i);

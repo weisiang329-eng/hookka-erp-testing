@@ -183,7 +183,7 @@ export default function FGScanPage() {
         </Link>
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">FG Unit Scan</h1>
-          <p className="text-sm text-[#6B7280]">Pack / Load / Deliver / Return — scan or type a serial.</p>
+          <p className="text-xs text-[#6B7280]">Pack / Load / Deliver / Return — scan or type a serial.</p>
         </div>
       </div>
 

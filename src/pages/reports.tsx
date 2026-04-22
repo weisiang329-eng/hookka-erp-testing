@@ -187,8 +187,8 @@ function SummaryCard({
   return (
     <Card>
       <CardContent className="p-4">
-        <p className="text-sm text-[#6B7280]">{label}</p>
-        <p className="text-2xl font-bold text-[#1F1D1B] mt-1">{value}</p>
+        <p className="text-xs text-[#6B7280]">{label}</p>
+        <p className="text-xl font-bold text-[#1F1D1B] mt-1">{value}</p>
         {sub && <p className="text-xs text-[#6B7280] mt-0.5">{sub}</p>}
       </CardContent>
     </Card>
@@ -1267,8 +1267,8 @@ export default function ReportsPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Reports</h1>
-        <p className="text-sm text-[#6B7280]">
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Reports</h1>
+        <p className="text-xs text-[#6B7280]">
           Generate and view reports across all departments
         </p>
       </div>

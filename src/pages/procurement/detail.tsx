@@ -130,10 +130,10 @@ export default function PurchaseOrderDetailPage() {
       <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F1D1B]">{po.poNo}</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B]">{po.poNo}</h1>
             <Badge variant="status" status={po.status} />
           </div>
-          <p className="text-sm text-[#6B7280] mt-1">
+          <p className="text-xs text-[#6B7280] mt-0.5">
             Supplier: <span className="font-medium text-[#1F1D1B]">{po.supplierName}</span>
           </p>
         </div>
@@ -328,7 +328,7 @@ export default function PurchaseOrderDetailPage() {
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
-              <p className="text-sm text-[#6B7280]">Advance this Purchase Order to the next status:</p>
+              <p className="text-xs text-[#6B7280]">Advance this Purchase Order to the next status:</p>
               <div className="flex items-center gap-2">
                 {statusActions.map((action) => (
                   <Button

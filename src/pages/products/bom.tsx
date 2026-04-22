@@ -558,7 +558,7 @@ export default function BOMPage() {
         </Link>
         <div className="flex items-center justify-between mt-3">
           <div>
-            <h1 className="text-2xl font-bold text-[#111827]">Bill of Materials</h1>
+            <h1 className="text-xl font-bold text-[#111827]">Bill of Materials</h1>
             <div className="flex items-center gap-3 mt-1">
               <span className="text-sm font-mono font-medium text-gray-700 bg-gray-100 px-2 py-0.5 rounded">
                 {product.code}

@@ -182,12 +182,12 @@ export default function InvoiceDetailPage() {
         </Button>
         <div className="flex-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F1D1B] doc-number">
+            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">
               {invoice.invoiceNo}
             </h1>
             <Badge variant="status" status={invoice.status} />
           </div>
-          <p className="text-sm text-[#6B7280]">
+          <p className="text-xs text-[#6B7280]">
             {invoice.customerName} &middot; {invoice.customerState}
           </p>
         </div>
@@ -256,10 +256,10 @@ export default function InvoiceDetailPage() {
                   <p className="font-bold text-[#1F1D1B]">
                     HOOKKA INDUSTRIES SDN BHD
                   </p>
-                  <p className="text-sm text-[#6B7280]">
+                  <p className="text-xs text-[#6B7280]">
                     Manufacturer of Premium Upholstered Furniture
                   </p>
-                  <p className="text-sm text-[#6B7280]">
+                  <p className="text-xs text-[#6B7280]">
                     Tel: +60X-XXXXXXX
                   </p>
                 </div>
@@ -275,7 +275,7 @@ export default function InvoiceDetailPage() {
                   <p className="font-bold text-[#1F1D1B]">
                     {invoice.customerName}
                   </p>
-                  <p className="text-sm text-[#6B7280]">
+                  <p className="text-xs text-[#6B7280]">
                     State: {invoice.customerState}
                   </p>
                 </div>

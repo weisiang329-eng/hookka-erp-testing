@@ -300,8 +300,8 @@ export default function ConsignmentPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Consignment Orders</h1>
-          <p className="text-sm text-[#6B7280]">Create and manage consignment orders for branch placement</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Orders</h1>
+          <p className="text-xs text-[#6B7280]">Create and manage consignment orders for branch placement</p>
         </div>
         <Button variant="primary" onClick={() => navigate("/consignment/create")}>
           <Plus className="h-4 w-4" /> New Consignment
@@ -339,26 +339,26 @@ export default function ConsignmentPage() {
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Total Orders</p>
-            <p className="text-2xl font-bold">{orders.length}</p>
+            <p className="text-xs text-[#6B7280]">Total Orders</p>
+            <p className="text-xl font-bold">{orders.length}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Consigned Value</p>
-            <p className="text-2xl font-bold">{formatCurrency(totalConsignedValue)}</p>
+            <p className="text-xs text-[#6B7280]">Consigned Value</p>
+            <p className="text-xl font-bold">{formatCurrency(totalConsignedValue)}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Consignment Return</p>
-            <p className="text-2xl font-bold text-[#9C6F1E]">{returnedCount}</p>
+            <p className="text-xs text-[#6B7280]">Consignment Return</p>
+            <p className="text-xl font-bold text-[#9C6F1E]">{returnedCount}</p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4">
-            <p className="text-sm text-[#6B7280]">Consignment Amount</p>
-            <p className="text-2xl font-bold text-[#3E6570]">{formatCurrency(atBranchValue)}</p>
+            <p className="text-xs text-[#6B7280]">Consignment Amount</p>
+            <p className="text-xl font-bold text-[#3E6570]">{formatCurrency(atBranchValue)}</p>
           </CardContent>
         </Card>
       </div>
@@ -463,7 +463,7 @@ export default function ConsignmentPage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Consignment Note</h2>
-                <p className="text-sm text-[#6B7280]">Create a Consignment Note from {transferCNRow.noteNumber}</p>
+                <p className="text-xs text-[#6B7280]">Create a Consignment Note from {transferCNRow.noteNumber}</p>
               </div>
               <button onClick={() => setTransferCNRow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
                 <X className="h-5 w-5" />
@@ -552,7 +552,7 @@ export default function ConsignmentPage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Consignment Return</h2>
-                <p className="text-sm text-[#6B7280]">Select items to return from {transferCRRow.noteNumber}</p>
+                <p className="text-xs text-[#6B7280]">Select items to return from {transferCRRow.noteNumber}</p>
               </div>
               <button onClick={() => setTransferCRRow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
                 <X className="h-5 w-5" />
@@ -661,7 +661,7 @@ export default function ConsignmentPage() {
               <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
                 <div>
                   <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Sales Invoice</h2>
-                  <p className="text-sm text-[#6B7280]">Create an invoice for sold items from {transferSIRow.noteNumber}</p>
+                  <p className="text-xs text-[#6B7280]">Create an invoice for sold items from {transferSIRow.noteNumber}</p>
                 </div>
                 <button onClick={() => setTransferSIRow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
                   <X className="h-5 w-5" />

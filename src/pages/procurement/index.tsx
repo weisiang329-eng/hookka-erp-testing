@@ -595,8 +595,8 @@ export default function ProcurementPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Purchase Orders</h1>
-          <p className="text-sm text-[#6B7280]">Create and manage purchase orders using internal material codes</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Orders</h1>
+          <p className="text-xs text-[#6B7280]">Create and manage purchase orders using internal material codes</p>
         </div>
         <Button variant="primary" onClick={() => setShowPOForm(true)}>
           <Plus className="h-4 w-4" /> New Purchase Order
@@ -605,7 +605,7 @@ export default function ProcurementPage() {
 
       {/* Status Pipeline */}
       <Card>
-        <CardContent className="p-4">
+        <CardContent className="p-2.5">
           <div className="flex items-center justify-between overflow-x-auto gap-3">
             {statusCounts.map((s, i) => (
               <div key={s.label} className="flex items-center gap-3">
@@ -613,10 +613,10 @@ export default function ProcurementPage() {
                   className="text-center min-w-[100px] cursor-pointer py-1"
                   onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
                 >
-                  <div className="text-2xl font-bold mb-1">
-                    <Badge variant="status" status={s.status} className="text-base px-3 py-1">{s.count}</Badge>
+                  <div className="text-lg font-bold mb-0.5">
+                    <Badge variant="status" status={s.status} className="text-xs px-2 py-0.5">{s.count}</Badge>
                   </div>
-                  <p className={`text-sm mt-1 ${filterStatus === s.status ? "text-[#6B5C32] font-semibold" : "text-[#6B7280]"}`}>{s.label}</p>
+                  <p className={`text-[11px] mt-0.5 ${filterStatus === s.status ? "text-[#6B5C32] font-semibold" : "text-[#6B7280]"}`}>{s.label}</p>
                 </div>
                 {i < statusCounts.length - 1 && <ArrowRight className="h-5 w-5 text-[#D1CBC5] shrink-0" />}
               </div>
@@ -628,28 +628,28 @@ export default function ProcurementPage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total POs</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
+              <p className="text-xs text-[#6B7280]">Total POs</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{purchaseOrders.length}</p>
             </div>
             <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Pending Delivery</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{pendingDelivery}</p>
+              <p className="text-xs text-[#6B7280]">Pending Delivery</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{pendingDelivery}</p>
             </div>
             <Truck className="h-5 w-5 text-[#3E6570]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Overdue</p>
-              <p className={`text-2xl font-bold ${overduePOs > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+              <p className="text-xs text-[#6B7280]">Overdue</p>
+              <p className={`text-xl font-bold ${overduePOs > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
                 {overduePOs}
               </p>
             </div>
@@ -657,10 +657,10 @@ export default function ProcurementPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Outstanding Qty</p>
-              <p className={`text-2xl font-bold ${totalOutstandingQty > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>{totalOutstandingQty}</p>
+              <p className="text-xs text-[#6B7280]">Outstanding Qty</p>
+              <p className={`text-xl font-bold ${totalOutstandingQty > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>{totalOutstandingQty}</p>
             </div>
             <Package className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>

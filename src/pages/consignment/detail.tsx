@@ -31,7 +31,7 @@ function ConfirmModal({
           <h3 className="text-lg font-semibold text-[#1F1D1B]">{title}</h3>
           <button onClick={onCancel} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
         </div>
-        <p className="text-sm text-[#6B7280]">{message}</p>
+        <p className="text-xs text-[#6B7280]">{message}</p>
         <div className="flex justify-end gap-3">
           <Button variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
           <Button
@@ -132,10 +132,10 @@ export default function ConsignmentDetailPage() {
         <Button variant="ghost" size="icon" onClick={() => navigate("/consignment")}><ArrowLeft className="h-5 w-5" /></Button>
         <div className="flex-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F1D1B] doc-number">{note.noteNumber}</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{note.noteNumber}</h1>
             <Badge variant="status" status={note.status} />
           </div>
-          <p className="text-sm text-[#6B7280]">{note.customerName} &middot; {note.branchName}</p>
+          <p className="text-xs text-[#6B7280]">{note.customerName} &middot; {note.branchName}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <Button variant="outline" size="sm" onClick={() => toast.info(`Print ${note.noteNumber} — coming soon`)}><Printer className="h-4 w-4" /> Print</Button>

@@ -452,8 +452,8 @@ export default function ConsignmentNotePage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Consignment Notes</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Notes</h1>
+          <p className="text-xs text-[#6B7280]">
             Track consignment dispatches and deliveries to branches
           </p>
         </div>
@@ -666,7 +666,7 @@ export default function ConsignmentNotePage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">{detailCN.cnNo}</h2>
-                <p className="text-sm text-[#6B7280]">Consignment Note Detail</p>
+                <p className="text-xs text-[#6B7280]">Consignment Note Detail</p>
               </div>
               <button
                 onClick={() => setDetailCN(null)}
@@ -803,7 +803,7 @@ export default function ConsignmentNotePage() {
               {detailCN.remarks && (
                 <div className="border-t border-[#E2DDD8] pt-4">
                   <h3 className="text-sm font-semibold text-[#1F1D1B] mb-2">Remarks</h3>
-                  <p className="text-sm text-[#6B7280]">{detailCN.remarks}</p>
+                  <p className="text-xs text-[#6B7280]">{detailCN.remarks}</p>
                 </div>
               )}
             </div>
@@ -856,7 +856,7 @@ export default function ConsignmentNotePage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Delivery Order</h2>
-                <p className="text-sm text-[#6B7280]">Create a DO from {transferDORow.cnNo}</p>
+                <p className="text-xs text-[#6B7280]">Create a DO from {transferDORow.cnNo}</p>
               </div>
               <button onClick={() => setTransferDORow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
                 <X className="h-5 w-5" />
@@ -919,7 +919,7 @@ export default function ConsignmentNotePage() {
             <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Sales Invoice</h2>
-                <p className="text-sm text-[#6B7280]">Create Sales Invoice from {transferSIRow.cnNo}</p>
+                <p className="text-xs text-[#6B7280]">Create Sales Invoice from {transferSIRow.cnNo}</p>
               </div>
               <button onClick={() => setTransferSIRow(null)} className="p-1 hover:bg-gray-100 rounded">
                 <X className="h-5 w-5 text-gray-400" />
@@ -958,7 +958,7 @@ export default function ConsignmentNotePage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Consignment Return</h2>
-                <p className="text-sm text-[#6B7280]">Return items from {transferCRRow.cnNo}</p>
+                <p className="text-xs text-[#6B7280]">Return items from {transferCRRow.cnNo}</p>
               </div>
               <button onClick={() => setTransferCRRow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
                 <X className="h-5 w-5" />

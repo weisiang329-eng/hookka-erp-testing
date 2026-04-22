@@ -235,10 +235,10 @@ export default function ProductionOrderDetailPage() {
           </Button>
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-2xl font-bold text-[#1F1D1B] doc-number">{order.poNo}</h1>
+              <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.poNo}</h1>
               <Badge variant="status" status={order.status} />
             </div>
-            <p className="text-sm text-[#6B7280]">{order.productName}</p>
+            <p className="text-xs text-[#6B7280]">{order.productName}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -249,7 +249,7 @@ export default function ProductionOrderDetailPage() {
             <QrCode className="h-4 w-4" /> FG Packing Sticker
           </Button>
           <div className="text-right">
-            <p className="text-sm text-[#6B7280]">Progress</p>
+            <p className="text-xs text-[#6B7280]">Progress</p>
             <p className="text-lg font-bold text-[#1F1D1B]">{order.progress}%</p>
           </div>
           <div className="h-10 w-10 rounded-full border-4 border-[#E2DDD8] relative">

@@ -280,8 +280,8 @@ export default function InvoicesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Invoices</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Invoices</h1>
+          <p className="text-xs text-[#6B7280]">
             Invoice management, billing, and payment tracking
           </p>
         </div>
@@ -294,19 +294,19 @@ export default function InvoicesPage() {
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Invoices</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{totalInvoices}</p>
+              <p className="text-xs text-[#6B7280]">Total Invoices</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{totalInvoices}</p>
             </div>
             <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Outstanding</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">
+              <p className="text-xs text-[#6B7280]">Outstanding</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">
                 {formatCurrency(outstandingSen)}
               </p>
             </div>
@@ -314,10 +314,10 @@ export default function InvoicesPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Collected (MTD)</p>
-              <p className="text-2xl font-bold text-[#4F7C3A]">
+              <p className="text-xs text-[#6B7280]">Collected (MTD)</p>
+              <p className="text-xl font-bold text-[#4F7C3A]">
                 {formatCurrency(paidMTDSen)}
               </p>
             </div>
@@ -325,10 +325,10 @@ export default function InvoicesPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Overdue</p>
-              <p className="text-2xl font-bold text-[#9A3A2D]">{overdueCount}</p>
+              <p className="text-xs text-[#6B7280]">Overdue</p>
+              <p className="text-xl font-bold text-[#9A3A2D]">{overdueCount}</p>
             </div>
             <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
           </CardContent>

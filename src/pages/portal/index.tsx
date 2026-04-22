@@ -88,7 +88,7 @@ export default function PortalDashboard() {
     <div className="space-y-8">
       {/* Welcome */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Welcome, HOUZS KL</h1>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Welcome, HOUZS KL</h1>
         <p className="text-gray-500 mt-1">
           View your orders, deliveries, and account status below.
         </p>

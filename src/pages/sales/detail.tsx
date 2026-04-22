@@ -70,7 +70,7 @@ function ConfirmModal({
           <h3 className="text-lg font-semibold text-[#1F1D1B]">{title}</h3>
           <button onClick={onCancel} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
         </div>
-        <p className="text-sm text-[#6B7280]">{message}</p>
+        <p className="text-xs text-[#6B7280]">{message}</p>
         {children}
         <div className="flex justify-end gap-3">
           <Button variant="outline" size="sm" onClick={onCancel}>Cancel</Button>
@@ -325,10 +325,10 @@ export default function SalesOrderDetailPage() {
         <Button variant="ghost" size="icon" onClick={() => navigate("/sales")}><ArrowLeft className="h-5 w-5" /></Button>
         <div className="flex-1">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold text-[#1F1D1B] doc-number">{order.companySOId}</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.companySOId}</h1>
             <Badge variant="status" status={order.status} />
           </div>
-          <p className="text-sm text-[#6B7280]">{order.customerName} &middot; {order.customerState}</p>
+          <p className="text-xs text-[#6B7280]">{order.customerName} &middot; {order.customerState}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
           <Button variant="outline" size="sm" onClick={() => order && generateSOPdf(order, customer)}><Download className="h-4 w-4" /> PDF</Button>

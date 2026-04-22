@@ -108,8 +108,8 @@ export default function CashFlowPage() {
     <div className="p-6 space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Cash Flow & Bank Reconciliation</h1>
-        <p className="text-sm text-[#6B7280] mt-1">
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Cash Flow & Bank Reconciliation</h1>
+        <p className="text-xs text-[#6B7280] mt-0.5">
           Forecast cash position, reconcile bank statements, and manage accounts
         </p>
       </div>

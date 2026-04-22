@@ -255,7 +255,7 @@ export default function EditSalesOrderPage() {
             <ArrowLeft className="h-5 w-5" />
           </Button>
           <div className="flex-1">
-            <h1 className="text-2xl font-bold text-[#1F1D1B]">Edit Sales Order</h1>
+            <h1 className="text-xl font-bold text-[#1F1D1B]">Edit Sales Order</h1>
           </div>
         </div>
         <Card>
@@ -288,8 +288,8 @@ export default function EditSalesOrderPage() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Edit {order.companySOId}</h1>
-          <p className="text-sm text-[#6B7280]">Modify sales order details and line items</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Edit {order.companySOId}</h1>
+          <p className="text-xs text-[#6B7280]">Modify sales order details and line items</p>
         </div>
         <Button variant="outline" onClick={() => navigate(`/sales/${id}`)}>Cancel</Button>
         <Button variant="primary" onClick={handleSubmit} disabled={saving}>

@@ -112,7 +112,7 @@ export default function WorkerIssuePage() {
         >
           <ArrowLeft className="h-5 w-5" />
         </Link>
-        <h1 className="text-2xl font-bold">{t("issue.title")}</h1>
+        <h1 className="text-xl font-bold">{t("issue.title")}</h1>
       </div>
 
       <form onSubmit={handleSubmit} className="space-y-4">

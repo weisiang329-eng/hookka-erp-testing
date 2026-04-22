@@ -1801,8 +1801,8 @@ export default function ProductionPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Production Tracking</h1>
-          <p className="text-sm text-[#6B7280]">Real-time production status across all 8 departments</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Production Tracking</h1>
+          <p className="text-xs text-[#6B7280]">Real-time production status across all 8 departments</p>
         </div>
         <div className="flex gap-2">
           <Button

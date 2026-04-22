@@ -706,7 +706,7 @@ export default function WorkerScanPage() {
 
   return (
     <div className="space-y-4 pt-2">
-      <h1 className="text-2xl font-bold">{t("scan.title")}</h1>
+      <h1 className="text-xl font-bold">{t("scan.title")}</h1>
 
       {/* Batch-upload progress badge */}
       {batchActive && (

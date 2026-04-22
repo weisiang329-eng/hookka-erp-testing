@@ -725,7 +725,7 @@ export default function RDProjectDetailPage() {
             </span>
             <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
           </div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">{project.name}</h1>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">{project.name}</h1>
           {project.serviceId && (
             <p className="text-xs text-gray-400 mt-0.5">
               Service Ref: <span className="font-mono font-medium text-[#6B5C32]">{project.serviceId}</span>

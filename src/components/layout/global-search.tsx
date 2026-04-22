@@ -457,8 +457,10 @@ export function GlobalSearch() {
         className="relative hidden md:flex items-center h-9 w-80 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 text-sm text-[#9CA3AF] hover:border-[#6B5C32]/40 transition-colors cursor-pointer"
       >
         <Search className="h-4 w-4 mr-2 shrink-0" />
-        <span className="flex-1 text-left">Search orders, products, customers...</span>
-        <kbd className="hidden lg:inline-flex items-center gap-0.5 rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 text-[10px] font-medium text-[#9CA3AF]">
+        <span className="flex-1 text-left truncate whitespace-nowrap">
+          Search orders, products, customers…
+        </span>
+        <kbd className="hidden lg:inline-flex items-center gap-0.5 rounded border border-[#E2DDD8] bg-white px-1.5 py-0.5 text-[10px] font-medium text-[#9CA3AF] ml-2 shrink-0">
           Ctrl K
         </kbd>
       </button>

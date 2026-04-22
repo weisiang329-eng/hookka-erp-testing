@@ -234,7 +234,7 @@ export default function PaymentsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Payment Tracking</h1>
+          <h1 className="text-xl font-bold text-gray-900">Payment Tracking</h1>
           <p className="text-sm text-gray-500 mt-1">
             Record and track customer payments with invoice allocation
           </p>

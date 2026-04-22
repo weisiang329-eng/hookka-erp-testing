@@ -365,7 +365,7 @@ export default function DashboardPage() {
       <div className="flex items-center justify-center min-h-[60vh]">
         <div className="flex flex-col items-center gap-3">
           <Loader2 className="h-8 w-8 animate-spin text-[#6B5C32]" />
-          <p className="text-sm text-[#6B7280]">Loading dashboard...</p>
+          <p className="text-xs text-[#6B7280]">Loading dashboard...</p>
         </div>
       </div>
     );

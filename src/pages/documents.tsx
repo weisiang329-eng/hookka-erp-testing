@@ -228,8 +228,8 @@ export default function DocumentsPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Documents</h1>
-        <p className="text-sm text-[#6B7280]">
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Documents</h1>
+        <p className="text-xs text-[#6B7280]">
           Central document hub - all generated documents across the ERP
         </p>
       </div>
@@ -237,10 +237,10 @@ export default function DocumentsPage() {
       {/* KPI Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Documents</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">
+              <p className="text-xs text-[#6B7280]">Total Documents</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">
                 {loading ? "-" : totalDocs}
               </p>
             </div>
@@ -248,10 +248,10 @@ export default function DocumentsPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Sales Documents</p>
-              <p className="text-2xl font-bold text-[#3E6570]">
+              <p className="text-xs text-[#6B7280]">Sales Documents</p>
+              <p className="text-xl font-bold text-[#3E6570]">
                 {loading ? "-" : salesDocs}
               </p>
             </div>
@@ -259,10 +259,10 @@ export default function DocumentsPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Purchase Documents</p>
-              <p className="text-2xl font-bold text-[#B8601A]">
+              <p className="text-xs text-[#6B7280]">Purchase Documents</p>
+              <p className="text-xl font-bold text-[#B8601A]">
                 {loading ? "-" : purchaseDocs}
               </p>
             </div>
@@ -270,10 +270,10 @@ export default function DocumentsPage() {
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Production Documents</p>
-              <p className="text-2xl font-bold text-[#3E6570]">
+              <p className="text-xs text-[#6B7280]">Production Documents</p>
+              <p className="text-xl font-bold text-[#3E6570]">
                 {loading ? "-" : productionDocs}
               </p>
             </div>

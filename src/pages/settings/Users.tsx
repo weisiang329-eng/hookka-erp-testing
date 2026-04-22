@@ -342,7 +342,7 @@ export default function UsersPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">User Management</h1>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">User Management</h1>
           <p className="text-sm text-gray-500 mt-1">
             Manage team access: invite new admins, enable/disable accounts,
             reset passwords.

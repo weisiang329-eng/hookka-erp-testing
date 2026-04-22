@@ -576,8 +576,8 @@ function CreateSalesOrderPage() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">{isClone ? "Clone Sales Order" : "New Sales Order"}</h1>
-          <p className="text-sm text-[#6B7280]">{isClone ? "Create a new order based on an existing one" : "Create a new sales order for a customer"}</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">{isClone ? "Clone Sales Order" : "New Sales Order"}</h1>
+          <p className="text-xs text-[#6B7280]">{isClone ? "Create a new order based on an existing one" : "Create a new sales order for a customer"}</p>
         </div>
         <Button variant="outline" onClick={() => navigate("/sales")}>Cancel</Button>
         <Button

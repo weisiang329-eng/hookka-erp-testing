@@ -281,8 +281,8 @@ export default function WarehousePage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Warehouse</h1>
-          <p className="text-sm text-[#6B7280]">Rack location management, stock-in/out tracking</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Warehouse</h1>
+          <p className="text-xs text-[#6B7280]">Rack location management, stock-in/out tracking</p>
         </div>
         <Button variant="outline" size="sm" onClick={() => { fetchRackLocations(); fetchMovements(); }}>
           <RefreshCw className="h-4 w-4" /> Refresh
@@ -292,46 +292,46 @@ export default function WarehousePage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-2 sm:grid-cols-5">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Slots</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{summary.total}</p>
+              <p className="text-xs text-[#6B7280]">Total Slots</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{summary.total}</p>
             </div>
             <Grid3X3 className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Occupied</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{summary.occupied}</p>
+              <p className="text-xs text-[#6B7280]">Occupied</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{summary.occupied}</p>
             </div>
             <Package className="h-5 w-5 text-[#3E6570]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Empty</p>
-              <p className="text-2xl font-bold text-[#4F7C3A]">{summary.empty}</p>
+              <p className="text-xs text-[#6B7280]">Empty</p>
+              <p className="text-xl font-bold text-[#4F7C3A]">{summary.empty}</p>
             </div>
             <MapPin className="h-5 w-5 text-[#4F7C3A]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Reserved</p>
-              <p className="text-2xl font-bold text-[#9C6F1E]">{summary.reserved}</p>
+              <p className="text-xs text-[#6B7280]">Reserved</p>
+              <p className="text-xl font-bold text-[#9C6F1E]">{summary.reserved}</p>
             </div>
             <LayoutGrid className="h-5 w-5 text-[#9C6F1E]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Occupancy</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{summary.occupancyRate}%</p>
+              <p className="text-xs text-[#6B7280]">Occupancy</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{summary.occupancyRate}%</p>
             </div>
             <Warehouse className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
@@ -529,7 +529,7 @@ export default function WarehousePage() {
             </CardHeader>
             <CardContent className="space-y-4">
               {availablePOs.length === 0 && !showStockInForm ? (
-                <p className="text-sm text-[#6B7280]">No completed production orders available for stocking in.</p>
+                <p className="text-xs text-[#6B7280]">No completed production orders available for stocking in.</p>
               ) : (
                 <>
                   <div>

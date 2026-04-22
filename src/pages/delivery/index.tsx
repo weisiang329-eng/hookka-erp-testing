@@ -1262,8 +1262,8 @@ export default function DeliveryPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Delivery Orders</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Delivery Orders</h1>
+          <p className="text-xs text-[#6B7280]">
             Manage delivery orders, packing lists, and dispatch tracking
           </p>
         </div>
@@ -1477,7 +1477,7 @@ export default function DeliveryPage() {
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
               <h2 className="text-lg font-bold text-[#1F1D1B]">Create Delivery Order</h2>
-              <p className="text-sm text-[#6B7280]">Assign 3PL provider, delivery address, and generate DO</p>
+              <p className="text-xs text-[#6B7280]">Assign 3PL provider, delivery address, and generate DO</p>
             </div>
             <div className="px-6 py-5 space-y-4">
               {/* Items summary */}
@@ -1629,7 +1629,7 @@ export default function DeliveryPage() {
               <h2 className="text-lg font-bold text-[#1F1D1B]">Print Packing List</h2>
             </div>
             <div className="px-6 py-5 space-y-3">
-              <p className="text-sm text-[#6B7280]">Generating packing list for:</p>
+              <p className="text-xs text-[#6B7280]">Generating packing list for:</p>
               <div className="space-y-1">
                 {printDialog.map((d) => (
                   <div key={d.id} className="flex items-center justify-between text-sm bg-[#FAF9F7] rounded-lg px-3 py-2">
@@ -1656,7 +1656,7 @@ export default function DeliveryPage() {
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
               <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Sales Invoice</h2>
-              <p className="text-sm text-[#6B7280]">Create sales invoice from delivered DO</p>
+              <p className="text-xs text-[#6B7280]">Create sales invoice from delivered DO</p>
             </div>
             <div className="px-6 py-5 space-y-4">
               <div className="grid grid-cols-2 gap-3 text-sm">
@@ -1717,7 +1717,7 @@ export default function DeliveryPage() {
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">{detailDO.doNo}</h2>
-                <p className="text-sm text-[#6B7280]">
+                <p className="text-xs text-[#6B7280]">
                   {editMode ? "Edit Delivery Order" : "Delivery Order Detail"}
                 </p>
               </div>
@@ -2201,8 +2201,8 @@ export default function DeliveryPage() {
         <>
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-2xl font-bold text-[#1F1D1B]">3PL Providers</h1>
-              <p className="text-sm text-[#6B7280]">Manage third-party logistics providers</p>
+              <h1 className="text-xl font-bold text-[#1F1D1B]">3PL Providers</h1>
+              <p className="text-xs text-[#6B7280]">Manage third-party logistics providers</p>
             </div>
             <Button variant="primary" onClick={() => openProviderDialog("new")}>
               <Plus className="h-4 w-4" /> New 3PL

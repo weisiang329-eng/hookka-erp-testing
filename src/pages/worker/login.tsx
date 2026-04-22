@@ -161,7 +161,7 @@ export default function WorkerLoginPage() {
   // ----- Render -----
   return (
     <div className="pt-6 pb-8">
-      <h1 className="text-2xl font-bold mb-1">
+      <h1 className="text-lg font-bold mb-0.5">
         {mode === "login"
           ? t("login.title")
           : mode === "setup"

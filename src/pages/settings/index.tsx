@@ -862,8 +862,8 @@ export default function SettingsPage() {
 
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Settings</h1>
-        <p className="text-sm text-[#6B7280]">System administration and configuration</p>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Settings</h1>
+        <p className="text-xs text-[#6B7280]">System administration and configuration</p>
       </div>
 
       {/* Tab Navigation */}

@@ -206,7 +206,7 @@ export default function ApprovalsPage() {
       {/* Header */}
       <div className="flex items-center gap-3">
         <ClipboardCheck className="h-7 w-7 text-[#6B5C32]" />
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">Approval Queue</h1>
+        <h1 className="text-xl font-bold text-[#1F1D1B]">Approval Queue</h1>
         {pendingCount > 0 && (
           <span className="flex items-center justify-center rounded-full bg-[#9C6F1E] text-white text-xs font-bold h-6 min-w-[24px] px-2">
             {pendingCount}

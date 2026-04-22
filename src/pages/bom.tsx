@@ -4877,7 +4877,7 @@ export default function BOMManagementPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#111827]">Bill of Materials</h1>
+          <h1 className="text-xl font-bold text-[#111827]">Bill of Materials</h1>
           <p className="text-sm text-gray-500 mt-1">
             Production routing and WIP component definitions for all products
           </p>

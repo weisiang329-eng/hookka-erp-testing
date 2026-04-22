@@ -247,8 +247,8 @@ export default function PurchaseInvoicesPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Purchase Invoices</h1>
-          <p className="text-sm text-[#6B7280]">Track supplier invoices and payment status</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Invoices</h1>
+          <p className="text-xs text-[#6B7280]">Track supplier invoices and payment status</p>
         </div>
       </div>
 
@@ -275,37 +275,37 @@ export default function PurchaseInvoicesPage() {
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total PIs</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{totalPIs}</p>
+              <p className="text-xs text-[#6B7280]">Total PIs</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{totalPIs}</p>
             </div>
             <FileText className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Pending Payment</p>
-              <p className="text-2xl font-bold text-amber-600">{pendingPayment}</p>
+              <p className="text-xs text-[#6B7280]">Pending Payment</p>
+              <p className="text-xl font-bold text-amber-600">{pendingPayment}</p>
             </div>
             <Clock className="h-5 w-5 text-amber-500" />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Overdue</p>
-              <p className={`text-2xl font-bold ${overdue > 0 ? "text-red-600" : "text-[#1F1D1B]"}`}>{overdue}</p>
+              <p className="text-xs text-[#6B7280]">Overdue</p>
+              <p className={`text-xl font-bold ${overdue > 0 ? "text-red-600" : "text-[#1F1D1B]"}`}>{overdue}</p>
             </div>
             <AlertTriangle className={`h-5 w-5 ${overdue > 0 ? "text-red-500" : "text-[#E2DDD8]"}`} />
           </CardContent>
         </Card>
         <Card>
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-2.5 flex items-center justify-between">
             <div>
-              <p className="text-sm text-[#6B7280]">Total Value</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
+              <p className="text-xs text-[#6B7280]">Total Value</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{formatCurrency(totalValueSen)}</p>
             </div>
             <DollarSign className="h-5 w-5 text-[#6B5C32]" />
           </CardContent>

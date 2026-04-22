@@ -209,8 +209,8 @@ export default function EInvoicePage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">e-Invoice</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">e-Invoice</h1>
+          <p className="text-xs text-[#6B7280]">
             LHDN MyInvois - Malaysian e-Invoice management and submission
           </p>
         </div>
@@ -250,10 +250,10 @@ export default function EInvoicePage() {
           {/* KPI Cards */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Submitted (MTD)</p>
-                  <p className="text-2xl font-bold text-[#1F1D1B]">
+                  <p className="text-xs text-[#6B7280]">Submitted (MTD)</p>
+                  <p className="text-xl font-bold text-[#1F1D1B]">
                     {submittedMTD}
                   </p>
                 </div>
@@ -261,10 +261,10 @@ export default function EInvoicePage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Validated</p>
-                  <p className="text-2xl font-bold text-[#4F7C3A]">
+                  <p className="text-xs text-[#6B7280]">Validated</p>
+                  <p className="text-xl font-bold text-[#4F7C3A]">
                     {validCount}
                   </p>
                 </div>
@@ -272,10 +272,10 @@ export default function EInvoicePage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Pending</p>
-                  <p className="text-2xl font-bold text-[#9C6F1E]">
+                  <p className="text-xs text-[#6B7280]">Pending</p>
+                  <p className="text-xl font-bold text-[#9C6F1E]">
                     {pendingCount}
                   </p>
                 </div>
@@ -283,10 +283,10 @@ export default function EInvoicePage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Invalid / Rejected</p>
-                  <p className="text-2xl font-bold text-[#9A3A2D]">
+                  <p className="text-xs text-[#6B7280]">Invalid / Rejected</p>
+                  <p className="text-xl font-bold text-[#9A3A2D]">
                     {invalidCount}
                   </p>
                 </div>

@@ -2550,10 +2550,10 @@ export default function EmployeesPage() {
     <div className="space-y-6">
       {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-[#1F1D1B]">
+        <h1 className="text-xl font-bold text-[#1F1D1B]">
           Employees &amp; Attendance
         </h1>
-        <p className="text-sm text-[#6B7280]">
+        <p className="text-xs text-[#6B7280]">
           Worker attendance, production hours, and efficiency tracking
         </p>
       </div>

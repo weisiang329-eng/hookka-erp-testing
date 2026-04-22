@@ -614,74 +614,18 @@ const rmColumns: Column<RawMaterial>[] = [
     render: (_v, row) => <span className="doc-number font-medium">{row.itemCode}</span>,
   },
   {
-    key: "description",
-    label: "Name",
-    render: (_v, row) => <span className="font-medium text-[#1F1D1B] text-sm">{row.description}</span>,
-  },
-  {
-    key: "itemGroup",
-    label: "Category",
-    render: (_v, row) => <Badge>{row.itemGroup}</Badge>,
-  },
-  {
-    key: "baseUOM",
-    label: "Unit",
-    render: (_v, row) => <span className="text-[#6B7280]">{row.baseUOM}</span>,
-  },
-  {
     key: "balanceQty",
     label: "Stock Qty",
     align: "right",
     render: (_v, row) => {
       const sem = getStockSemantic(row.balanceQty);
       const cls = row.balanceQty === 0 || row.balanceQty < 5 ? sem.text : "text-[#1F1D1B]";
-      return <span className={`font-medium ${cls}`}>{row.balanceQty}</span>;
-    },
-  },
-  // FIFO costing columns. Read from module-scope `rmBatches` (seeded with
-  // opening-balance layers today; Phase 2 GRN flow will push real receipts).
-  {
-    key: "itemCode",
-    label: "Unit Cost (RM)",
-    align: "right",
-    render: (_v, row) => {
-      const batches = batchesForRM(row.id);
-      const avg = weightedAvgCostSen(batches);
       return (
-        <span className="text-[#1F1D1B] text-sm font-medium">
-          {formatUnitCost(avg)}
+        <span className={`font-medium ${cls}`}>
+          {row.balanceQty} <span className="text-[#9CA3AF] text-xs">{row.baseUOM}</span>
         </span>
       );
     },
-  },
-  {
-    key: "itemCode",
-    label: "Stock Value (RM)",
-    align: "right",
-    render: (_v, row) => {
-      const batches = batchesForRM(row.id);
-      const value = totalBatchValueSen(batches);
-      const batchCount = batches.filter((b) => b.remainingQty > 0).length;
-      return (
-        <div className="flex flex-col items-end">
-          <span className="text-[#1F1D1B] text-sm font-medium">
-            {formatValue(value)}
-          </span>
-          {batchCount > 0 && (
-            <span className="text-[10px] text-[#9CA3AF]">
-              {batchCount} batch{batchCount !== 1 ? "es" : ""} ·{" "}
-              {totalRemainingQty(batches)} {row.baseUOM}
-            </span>
-          )}
-        </div>
-      );
-    },
-  },
-  {
-    key: "rmAge",
-    label: "Age (FIFO)",
-    align: "right",
-    render: (_v, row) => renderAgeCell(oldestRMAgeDays(row.id)),
   },
 ];
 
@@ -933,8 +877,8 @@ export default function InventoryPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Inventory</h1>
-          <p className="text-sm text-[#6B7280]">Finished products, work-in-progress & raw materials</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Inventory</h1>
+          <p className="text-xs text-[#6B7280]">Finished products, work-in-progress & raw materials</p>
         </div>
       </div>
 
@@ -961,20 +905,20 @@ export default function InventoryPage() {
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Total SKUs</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{fgItems.length}</p>
+              <p className="text-xs text-[#6B7280]">Total SKUs</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{fgItems.length}</p>
             </CardContent></Card>
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Total Stock</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{fgTotalStock.toLocaleString()} pcs</p>
+              <p className="text-xs text-[#6B7280]">Total Stock</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{fgTotalStock.toLocaleString()} pcs</p>
             </CardContent></Card>
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Bedframe SKUs</p>
-              <p className="text-2xl font-bold text-[#6B5C32]">{fgBedframeCount}</p>
+              <p className="text-xs text-[#6B7280]">Bedframe SKUs</p>
+              <p className="text-xl font-bold text-[#6B5C32]">{fgBedframeCount}</p>
             </CardContent></Card>
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Sofa SKUs</p>
-              <p className="text-2xl font-bold text-[#6B5C32]">{fgSofaCount}</p>
+              <p className="text-xs text-[#6B7280]">Sofa SKUs</p>
+              <p className="text-xl font-bold text-[#6B5C32]">{fgSofaCount}</p>
             </CardContent></Card>
           </div>
 
@@ -1088,19 +1032,19 @@ export default function InventoryPage() {
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Total WIP Items</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{wipItems.length}</p>
+              <p className="text-xs text-[#6B7280]">Total WIP Items</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{wipItems.length}</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4 flex items-center justify-between">
-              <div><p className="text-sm text-[#6B7280]">Total Qty</p><p className="text-2xl font-bold text-[#6B5C32]">{wipTotalQty}</p></div>
+            <Card><CardContent className="p-2.5 flex items-center justify-between">
+              <div><p className="text-xs text-[#6B7280]">Total Qty</p><p className="text-xl font-bold text-[#6B5C32]">{wipTotalQty}</p></div>
               <Layers className="h-5 w-5 text-[#6B5C32]" />
             </CardContent></Card>
-            <Card><CardContent className="p-4 flex items-center justify-between">
-              <div><p className="text-sm text-[#6B7280]">Oldest (days)</p><p className="text-2xl font-bold text-[#9C6F1E]">{wipOldest}</p></div>
+            <Card><CardContent className="p-2.5 flex items-center justify-between">
+              <div><p className="text-xs text-[#6B7280]">Oldest (days)</p><p className="text-xl font-bold text-[#9C6F1E]">{wipOldest}</p></div>
               <AlertTriangle className="h-5 w-5 text-[#9C6F1E]" />
             </CardContent></Card>
-            <Card><CardContent className="p-4 flex items-center justify-between">
-              <div><p className="text-sm text-[#6B7280]">&gt; 7 Days</p><p className="text-2xl font-bold text-[#9A3A2D]">{wipOver7Days}</p></div>
+            <Card><CardContent className="p-2.5 flex items-center justify-between">
+              <div><p className="text-xs text-[#6B7280]">&gt; 7 Days</p><p className="text-xl font-bold text-[#9A3A2D]">{wipOver7Days}</p></div>
               <Archive className="h-5 w-5 text-[#9A3A2D]" />
             </CardContent></Card>
           </div>
@@ -1143,19 +1087,19 @@ export default function InventoryPage() {
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Total Materials</p>
-              <p className="text-2xl font-bold text-[#1F1D1B]">{rawMaterials.length}</p>
+              <p className="text-xs text-[#6B7280]">Total Materials</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{rawMaterials.length}</p>
             </CardContent></Card>
             <Card><CardContent className="p-4">
-              <p className="text-sm text-[#6B7280]">Categories</p>
-              <p className="text-2xl font-bold text-[#6B5C32]">{rmCategoriesCount}</p>
+              <p className="text-xs text-[#6B7280]">Categories</p>
+              <p className="text-xl font-bold text-[#6B5C32]">{rmCategoriesCount}</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4 flex items-center justify-between">
-              <div><p className="text-sm text-[#6B7280]">Low Stock (&lt;5)</p><p className="text-2xl font-bold text-[#9C6F1E]">{rmLowStock}</p></div>
+            <Card><CardContent className="p-2.5 flex items-center justify-between">
+              <div><p className="text-xs text-[#6B7280]">Low Stock (&lt;5)</p><p className="text-xl font-bold text-[#9C6F1E]">{rmLowStock}</p></div>
               <AlertTriangle className="h-5 w-5 text-[#9C6F1E]" />
             </CardContent></Card>
-            <Card><CardContent className="p-4 flex items-center justify-between">
-              <div><p className="text-sm text-[#6B7280]">Zero Stock</p><p className="text-2xl font-bold text-[#9A3A2D]">{rmZeroStock}</p></div>
+            <Card><CardContent className="p-2.5 flex items-center justify-between">
+              <div><p className="text-xs text-[#6B7280]">Zero Stock</p><p className="text-xl font-bold text-[#9A3A2D]">{rmZeroStock}</p></div>
               <Boxes className="h-5 w-5 text-[#9A3A2D]" />
             </CardContent></Card>
           </div>

@@ -155,11 +155,11 @@ export default function MRPPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B] flex items-center gap-2">
+          <h1 className="text-xl font-bold text-[#1F1D1B] flex items-center gap-2">
             <Layers className="h-7 w-7 text-[#6B5C32]" />
             Material Requirements Planning
           </h1>
-          <p className="text-sm text-[#6B7280] mt-1">
+          <p className="text-xs text-[#6B7280] mt-0.5">
             Plan material needs based on active production orders and BOM
           </p>
         </div>
@@ -634,7 +634,7 @@ function FabricTab({
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-[#6B7280]">
+        <p className="text-xs text-[#6B7280]">
           Fabric-specific planning based on BOM usage from active production
           orders. Replicates the Fab Maint sheet view.
         </p>

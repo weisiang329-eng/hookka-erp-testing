@@ -458,8 +458,8 @@ export default function PlanningPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Production Planning</h1>
-          <p className="text-sm text-[#6B7280]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Production Planning</h1>
+          <p className="text-xs text-[#6B7280]">
             Capacity management, scheduling & backward planning
           </p>
         </div>
@@ -495,10 +495,10 @@ export default function PlanningPage() {
           {/* Summary cards */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-3">
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Total Daily Capacity</p>
-                  <p className="text-2xl font-bold text-[#1F1D1B]">
+                  <p className="text-xs text-[#6B7280]">Total Daily Capacity</p>
+                  <p className="text-xl font-bold text-[#1F1D1B]">
                     {totalCapacity.toLocaleString()} min
                   </p>
                 </div>
@@ -506,10 +506,10 @@ export default function PlanningPage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Total Current Load</p>
-                  <p className="text-2xl font-bold text-[#1F1D1B]">
+                  <p className="text-xs text-[#6B7280]">Total Current Load</p>
+                  <p className="text-xl font-bold text-[#1F1D1B]">
                     {totalLoad.toLocaleString()} min
                   </p>
                 </div>
@@ -517,10 +517,10 @@ export default function PlanningPage() {
               </CardContent>
             </Card>
             <Card>
-              <CardContent className="p-4 flex items-center justify-between">
+              <CardContent className="p-2.5 flex items-center justify-between">
                 <div>
-                  <p className="text-sm text-[#6B7280]">Average Utilization</p>
-                  <p className={`text-2xl font-bold ${utilizationColor(avgUtilization).text}`}>
+                  <p className="text-xs text-[#6B7280]">Average Utilization</p>
+                  <p className={`text-xl font-bold ${utilizationColor(avgUtilization).text}`}>
                     {avgUtilization}%
                   </p>
                 </div>

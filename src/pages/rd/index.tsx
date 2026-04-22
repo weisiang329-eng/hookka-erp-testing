@@ -659,7 +659,7 @@ export default function RDPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">R&D Projects</h1>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">R&D Projects</h1>
           <p className="text-sm text-gray-500 mt-1">Research & Development pipeline and project management</p>
         </div>
         <Button variant="primary" onClick={() => setShowCreateDialog(true)}>

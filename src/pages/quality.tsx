@@ -943,8 +943,8 @@ export default function QualityPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">QA / Quality Management</h1>
-          <p className="text-sm text-[#6B7280]">QC inspections, returns, defect tracking, and supplier quality</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">QA / Quality Management</h1>
+          <p className="text-xs text-[#6B7280]">QC inspections, returns, defect tracking, and supplier quality</p>
         </div>
         <div className="flex items-center gap-2">
           {tab === "inspections" && (

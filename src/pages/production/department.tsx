@@ -559,8 +559,8 @@ export default function DepartmentProductionPage() {
           <div className="flex items-center gap-3">
             <div className="h-4 w-4 rounded-full" style={{ backgroundColor: dept.color }} />
             <div>
-              <h1 className="text-2xl font-bold text-[#1F1D1B]">{dept.name}</h1>
-              <p className="text-sm text-[#6B7280]">Department production listing - assign PIC & mark completion</p>
+              <h1 className="text-xl font-bold text-[#1F1D1B]">{dept.name}</h1>
+              <p className="text-xs text-[#6B7280]">Department production listing - assign PIC & mark completion</p>
             </div>
           </div>
         </div>

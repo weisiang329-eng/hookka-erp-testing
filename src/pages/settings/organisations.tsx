@@ -109,7 +109,7 @@ export default function OrganisationsPage() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">
             Organisation Management
           </h1>
           <p className="text-sm text-gray-500 mt-1">

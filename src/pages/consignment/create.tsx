@@ -113,8 +113,8 @@ export default function CreateConsignmentPage() {
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">New Consignment Note</h1>
-          <p className="text-sm text-[#6B7280]">Create a new consignment note to send products to a branch</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">New Consignment Note</h1>
+          <p className="text-xs text-[#6B7280]">Create a new consignment note to send products to a branch</p>
         </div>
         <Button variant="outline" onClick={() => navigate("/consignment")}>Cancel</Button>
         <Button

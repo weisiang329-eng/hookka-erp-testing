@@ -234,7 +234,7 @@ export default function WorkerHomePage() {
       {/* Greeting */}
       <div>
         <p className="text-sm text-[#5A5550]">{t("home.hello")},</p>
-        <h1 className="text-2xl font-bold leading-tight">{displayName}</h1>
+        <h1 className="text-xl font-bold leading-tight">{displayName}</h1>
         <p className="text-xs text-[#8A8680]">
           {data.worker.empNo} · {data.worker.departmentCode}
         </p>

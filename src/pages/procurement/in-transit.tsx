@@ -199,8 +199,8 @@ export default function GoodsInTransitPage() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#1F1D1B]">Goods in Transit</h1>
-          <p className="text-sm text-[#6B7280] mt-1">
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Goods in Transit</h1>
+          <p className="text-xs text-[#6B7280] mt-0.5">
             Track goods ordered from suppliers -- sea, air, land and courier shipments
           </p>
         </div>
@@ -236,8 +236,8 @@ export default function GoodsInTransitPage() {
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-[#6B7280]">Total In Transit</p>
-                    <p className="text-2xl font-bold text-[#1F1D1B]">{totalInTransit}</p>
+                    <p className="text-xs text-[#6B7280]">Total In Transit</p>
+                    <p className="text-xl font-bold text-[#1F1D1B]">{totalInTransit}</p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-blue-50 flex items-center justify-center">
                     <Truck className="h-5 w-5 text-blue-600" />
@@ -249,8 +249,8 @@ export default function GoodsInTransitPage() {
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-[#6B7280]">Overdue Shipments</p>
-                    <p className="text-2xl font-bold text-red-600">{overdueItems.length}</p>
+                    <p className="text-xs text-[#6B7280]">Overdue Shipments</p>
+                    <p className="text-xl font-bold text-red-600">{overdueItems.length}</p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-red-50 flex items-center justify-center">
                     <AlertTriangle className="h-5 w-5 text-red-600" />
@@ -262,8 +262,8 @@ export default function GoodsInTransitPage() {
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-[#6B7280]">In Customs</p>
-                    <p className="text-2xl font-bold text-orange-600">{inCustoms}</p>
+                    <p className="text-xs text-[#6B7280]">In Customs</p>
+                    <p className="text-xl font-bold text-orange-600">{inCustoms}</p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-orange-50 flex items-center justify-center">
                     <ShieldCheck className="h-5 w-5 text-orange-600" />
@@ -275,8 +275,8 @@ export default function GoodsInTransitPage() {
               <CardContent className="pt-6">
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm text-[#6B7280]">Total Transit Value</p>
-                    <p className="text-2xl font-bold text-[#6B5C32]">{formatCurrency(totalTransitValue)}</p>
+                    <p className="text-xs text-[#6B7280]">Total Transit Value</p>
+                    <p className="text-xl font-bold text-[#6B5C32]">{formatCurrency(totalTransitValue)}</p>
                   </div>
                   <div className="h-10 w-10 rounded-full bg-[#F0ECE9] flex items-center justify-center">
                     <DollarSign className="h-5 w-5 text-[#6B5C32]" />
@@ -457,7 +457,7 @@ export default function GoodsInTransitPage() {
                               <span className="ml-2 text-xs text-red-600 font-normal">OVERDUE</span>
                             )}
                           </CardTitle>
-                          <p className="text-sm text-[#6B7280]">{item.supplierName}</p>
+                          <p className="text-xs text-[#6B7280]">{item.supplierName}</p>
                         </div>
                       </div>
                       <div className="flex items-center gap-4">
@@ -680,7 +680,7 @@ export default function GoodsInTransitPage() {
                       <div className="flex items-center justify-between">
                         <div>
                           <CardTitle>{selectedLanded.poNumber} - Landed Cost</CardTitle>
-                          <p className="text-sm text-[#6B7280] mt-1">{selectedLanded.supplierName}</p>
+                          <p className="text-xs text-[#6B7280] mt-0.5">{selectedLanded.supplierName}</p>
                         </div>
                         <TransitBadge status={selectedLanded.status} />
                       </div>

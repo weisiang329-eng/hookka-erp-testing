@@ -206,6 +206,131 @@ function genOverrideId(): string {
   return `po-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// ---------------------------------------------------------------------------
+// Shared cascade: auto-create one production_orders row per SO item row on
+// SO confirmation. Idempotent — if ANY production_orders row already exists
+// for the SO, return the existing list without inserting duplicates.
+//
+// Returned shape matches what the confirm/PUT handlers already expose on
+// the JSON response as `productionOrders`.
+//
+// Job-card generation is deferred — the UI only needs a PENDING PO row to
+// exist; job cards will be populated by a later BOM-driven trigger.
+// ---------------------------------------------------------------------------
+type CreatedProductionOrder = {
+  id: string;
+  poNo: string;
+  productName: string;
+  quantity: number;
+  status: string;
+};
+
+async function createProductionOrdersForSO(
+  db: D1Database,
+  so: SalesOrderRow,
+  items: SalesOrderItemRow[],
+): Promise<{ statements: D1PreparedStatement[]; created: CreatedProductionOrder[]; preExisting: boolean }> {
+  // Idempotency guard — if any PO exists for this SO, return the existing set.
+  const existing = await db
+    .prepare(
+      "SELECT id, poNo, productName, quantity, status FROM production_orders WHERE salesOrderId = ? ORDER BY lineNo",
+    )
+    .bind(so.id)
+    .all<{ id: string; poNo: string; productName: string | null; quantity: number; status: string }>();
+  const existingRows = existing.results ?? [];
+  if (existingRows.length > 0) {
+    return {
+      statements: [],
+      created: existingRows.map((r) => ({
+        id: r.id,
+        poNo: r.poNo,
+        productName: r.productName ?? "",
+        quantity: r.quantity,
+        status: r.status,
+      })),
+      preExisting: true,
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  const created: CreatedProductionOrder[] = [];
+  const sortedItems = [...items].sort((a, b) => a.lineNo - b.lineNo);
+  const targetDate = so.hookkaExpectedDD || so.customerDeliveryDate || "";
+  const startDate = so.companySODate || nowIso.split("T")[0];
+  const companySoId = so.companySOId ?? "";
+
+  for (const item of sortedItems) {
+    const lineSuffix =
+      item.lineSuffix ?? `-${String(item.lineNo).padStart(2, "0")}`;
+    // poNo follows production-order-builder convention: companySOId + lineSuffix
+    const poNo = companySoId
+      ? `${companySoId}${lineSuffix}`
+      : `${so.id}${lineSuffix}`;
+    // Deterministic id — re-running a failed confirm regenerates the same id so
+    // UNIQUE on production_orders.id still catches retries.
+    const poId = `pord-${so.id}-${String(item.lineNo).padStart(2, "0")}`;
+
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO production_orders (id, poNo, salesOrderId, salesOrderNo, lineNo,
+             customerPOId, customerReference, customerName, customerState, companySOId,
+             productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
+             fabricCode, quantity, gapInches, divanHeightInches, legHeightInches,
+             specialOrder, notes, status, currentDepartment, progress, startDate,
+             targetEndDate, completedDate, rackingNumber, stockedIn, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          poId,
+          poNo,
+          so.id,
+          companySoId,
+          item.lineNo,
+          so.customerPOId ?? "",
+          so.reference ?? "",
+          so.customerName,
+          so.customerState ?? "",
+          companySoId,
+          item.productId ?? "",
+          item.productCode ?? "",
+          item.productName ?? "",
+          item.itemCategory ?? "BEDFRAME",
+          item.sizeCode ?? "",
+          item.sizeLabel ?? "",
+          item.fabricCode ?? "",
+          item.quantity,
+          item.gapInches,
+          item.divanHeightInches,
+          item.legHeightInches,
+          item.specialOrder ?? "",
+          item.notes ?? "",
+          "PENDING",
+          "FAB_CUT",
+          0,
+          startDate,
+          targetDate,
+          null,
+          "",
+          0,
+          nowIso,
+          nowIso,
+        ),
+    );
+
+    created.push({
+      id: poId,
+      poNo,
+      productName: item.productName ?? "",
+      quantity: item.quantity,
+      status: "PENDING",
+    });
+  }
+
+  return { statements, created, preExisting: false };
+}
+
 // Generate next SO number by scanning existing companySOId values for the
 // current YYMM prefix and incrementing the max sequence. Falls back to 001.
 async function generateCompanySOId(db: D1Database): Promise<string> {
@@ -522,10 +647,10 @@ app.post("/", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/sales-orders/:id/confirm
 //
-// Phase-3 scope: this just validates the transition, flips the status to
-// CONFIRMED, and logs to so_status_changes. Auto-generation of production
-// orders is deferred to Phase 4.
-// TODO(phase-4): auto-create production_orders via buildProductionOrderForSOItem
+// Flips DRAFT/PENDING -> CONFIRMED, writes so_status_changes, and cascades
+// production_orders insertion — one PO row per SO item. All writes batched
+// so a partial failure leaves no dangling state. Idempotent: re-submitting
+// confirm returns the existing production orders without duplicating.
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
   const id = c.req.param("id");
@@ -573,6 +698,21 @@ app.post("/:id/confirm", async (c) => {
   const now = new Date().toISOString();
   const fromStatus = existing.status;
 
+  // Load SO items for PO cascade.
+  const itemsRes = await c.env.DB.prepare(
+    "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
+  )
+    .bind(id)
+    .all<SalesOrderItemRow>();
+  const items = itemsRes.results ?? [];
+
+  const { statements: poStmts, created: productionOrders, preExisting } =
+    await createProductionOrdersForSO(c.env.DB, existing, items);
+
+  const autoActions = preExisting
+    ? ["Production orders already exist for this SO — skipped duplicate creation."]
+    : productionOrders.map((po) => `Created PO ${po.poNo}`);
+
   await c.env.DB.batch([
     c.env.DB.prepare(
       "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
@@ -589,8 +729,9 @@ app.post("/:id/confirm", async (c) => {
       (body.changedBy as string) || "Admin",
       now,
       (body.notes as string) || "Order confirmed",
-      JSON.stringify([]),
+      JSON.stringify(autoActions),
     ),
+    ...poStmts,
   ]);
 
   const order = await fetchSOWithItems(c.env.DB, id);
@@ -598,11 +739,12 @@ app.post("/:id/confirm", async (c) => {
   return c.json({
     success: true,
     data: order,
-    productionOrders: [],
+    productionOrders,
     bomFallbacks: [],
     bomWarnings: [],
-    message:
-      "Order confirmed. Production orders will be auto-generated in Phase 4.",
+    message: preExisting
+      ? `Order confirmed. ${productionOrders.length} existing production order(s) reused.`
+      : `Order confirmed. ${productionOrders.length} production order(s) created.`,
   });
 });
 
@@ -658,6 +800,8 @@ app.put("/:id", async (c) => {
 
     const statements: D1PreparedStatement[] = [];
     let newStatus: string = existing.status;
+    let pendingStatusChangeId: string | null = null;
+    let isDraftToConfirmed = false;
 
     // --- Status change with validation ---
     if (body.status && body.status !== existing.status) {
@@ -673,23 +817,31 @@ app.put("/:id", async (c) => {
         );
       }
       newStatus = requested;
+      isDraftToConfirmed =
+        (existing.status === "DRAFT" || existing.status === "PENDING") &&
+        newStatus === "CONFIRMED";
 
-      statements.push(
-        c.env.DB.prepare(
-          `INSERT INTO so_status_changes
-             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          genStatusId(),
-          id,
-          existing.status,
-          newStatus,
-          (body.changedBy as string) || "Admin",
-          now,
-          (body.statusNotes as string) || `Status changed to ${newStatus}`,
-          JSON.stringify([]),
-        ),
-      );
+      // Defer the status-change INSERT until after the PO cascade runs so we
+      // can stamp autoActions with the created PO numbers.
+      pendingStatusChangeId = genStatusId();
+      if (!isDraftToConfirmed) {
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO so_status_changes
+               (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            pendingStatusChangeId,
+            id,
+            existing.status,
+            newStatus,
+            (body.changedBy as string) || "Admin",
+            now,
+            (body.statusNotes as string) || `Status changed to ${newStatus}`,
+            JSON.stringify([]),
+          ),
+        );
+      }
     }
 
     // --- Customer / hub resolution ---
@@ -935,10 +1087,110 @@ app.put("/:id", async (c) => {
       ),
     );
 
+    // --- DRAFT -> CONFIRMED cascade: auto-create production_orders ---
+    let createdProductionOrders: CreatedProductionOrder[] = [];
+    if (isDraftToConfirmed) {
+      // Build the "effective" SO row (merged fields) so the PO cascade uses
+      // the freshest customer/hub/date values — body.items may also have
+      // replaced items already queued for delete+insert above.
+      const effectiveSO: SalesOrderRow = {
+        ...existing,
+        customerPOId: merged.customerPOId,
+        reference: merged.reference,
+        customerId,
+        customerName,
+        customerState: merged.customerState,
+        hubId,
+        hubName,
+        companySODate: merged.companySODate,
+        customerDeliveryDate: merged.customerDeliveryDate,
+        hookkaExpectedDD: merged.hookkaExpectedDD,
+      };
+
+      // Items source: if the body is replacing items, read them from the body
+      // so we can cascade against the NEW items. Otherwise fetch from DB.
+      let effectiveItems: SalesOrderItemRow[];
+      if (body.items) {
+        const rawItems: Array<Record<string, unknown>> = body.items;
+        effectiveItems = rawItems.map((item, idx) => {
+          const lineNo = idx + 1;
+          const lineSuffix = `-${String(lineNo).padStart(2, "0")}`;
+          return {
+            id: (item.id as string) || "",
+            salesOrderId: id,
+            lineNo,
+            lineSuffix,
+            productId: (item.productId as string) || "",
+            productCode: (item.productCode as string) || "",
+            productName: (item.productName as string) || "",
+            itemCategory: (item.itemCategory as string) || "BEDFRAME",
+            sizeCode: (item.sizeCode as string) || "",
+            sizeLabel: (item.sizeLabel as string) || "",
+            fabricId: (item.fabricId as string) || "",
+            fabricCode: (item.fabricCode as string) || "",
+            quantity: Number(item.quantity) || 0,
+            gapInches: (item.gapInches as number | null) ?? null,
+            divanHeightInches: (item.divanHeightInches as number | null) ?? null,
+            divanPriceSen: Number(item.divanPriceSen) || 0,
+            legHeightInches: (item.legHeightInches as number | null) ?? null,
+            legPriceSen: Number(item.legPriceSen) || 0,
+            specialOrder: (item.specialOrder as string) || "",
+            specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            basePriceSen: Number(item.basePriceSen) || 0,
+            unitPriceSen: 0,
+            lineTotalSen: 0,
+            notes: (item.notes as string) || "",
+          };
+        });
+      } else {
+        const itemsRes = await c.env.DB.prepare(
+          "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
+        )
+          .bind(id)
+          .all<SalesOrderItemRow>();
+        effectiveItems = itemsRes.results ?? [];
+      }
+
+      const { statements: poStmts, created, preExisting } =
+        await createProductionOrdersForSO(
+          c.env.DB,
+          effectiveSO,
+          effectiveItems,
+        );
+      createdProductionOrders = created;
+
+      const autoActions = preExisting
+        ? ["Production orders already exist for this SO — skipped duplicate creation."]
+        : created.map((po) => `Created PO ${po.poNo}`);
+
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO so_status_changes
+             (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          pendingStatusChangeId ?? genStatusId(),
+          id,
+          existing.status,
+          newStatus,
+          (body.changedBy as string) || "Admin",
+          now,
+          (body.statusNotes as string) || `Status changed to ${newStatus}`,
+          JSON.stringify(autoActions),
+        ),
+      );
+      statements.push(...poStmts);
+    }
+
     await c.env.DB.batch(statements);
 
     const updated = await fetchSOWithItems(c.env.DB, id);
-    return c.json({ success: true, data: updated, linkedPOs: [] });
+    return c.json({
+      success: true,
+      data: updated,
+      linkedPOs: createdProductionOrders,
+      productionOrders: createdProductionOrders,
+    });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

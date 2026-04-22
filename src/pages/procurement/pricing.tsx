@@ -2,6 +2,9 @@ import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
+import { Plus, X } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import type {
   SupplierMaterialBinding,
@@ -22,9 +25,18 @@ export default function PricingPage() {
   const [suppliers, setSuppliers] = useState<SupplierInfo[]>([]);
   const [search, setSearch] = useState("");
   const [selectedMaterial, setSelectedMaterial] = useState("");
+  const [showAddDialog, setShowAddDialog] = useState(false);
+  const toast = useToast();
+
+  const reloadBindings = () => {
+    fetch("/api/supplier-materials")
+      .then((r) => r.json())
+      .then((d) => setBindings(d.data ?? d))
+      .catch(() => {});
+  };
 
   useEffect(() => {
-    fetch("/api/supplier-materials").then((r) => r.json()).then((d) => setBindings(d.data ?? d)).catch(() => {});
+    reloadBindings();
     fetch("/api/price-history").then((r) => r.json()).then((d) => setHistory(d.data ?? d)).catch(() => {});
     fetch("/api/supplier-scorecards").then((r) => r.json()).then((d) => setScorecards(d.data ?? d)).catch(() => {});
     fetch("/api/suppliers").then((r) => r.json()).then((d) => {
@@ -96,6 +108,20 @@ export default function PricingPage() {
           supplierMap={supplierMap}
           search={search}
           onSearchChange={setSearch}
+          onAddClick={() => setShowAddDialog(true)}
+        />
+      )}
+
+      {showAddDialog && (
+        <AddBindingDialog
+          suppliers={suppliers}
+          onClose={() => setShowAddDialog(false)}
+          onCreated={() => {
+            setShowAddDialog(false);
+            reloadBindings();
+            toast.success("Supplier-material binding created");
+          }}
+          onError={(msg) => toast.error(msg)}
         />
       )}
       {activeTab === "price-history" && (
@@ -121,11 +147,13 @@ function PriceListTab({
   supplierMap,
   search,
   onSearchChange,
+  onAddClick,
 }: {
   bindings: SupplierMaterialBinding[];
   supplierMap: Record<string, string>;
   search: string;
   onSearchChange: (v: string) => void;
+  onAddClick: () => void;
 }) {
   const filtered = useMemo(() => {
     if (!search) return bindings;
@@ -142,14 +170,23 @@ function PriceListTab({
   return (
     <Card>
       <CardHeader className="pb-4">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-3">
           <CardTitle>All Supplier-Material Bindings</CardTitle>
-          <div className="w-72">
-            <Input
-              placeholder="Search material, supplier, SKU..."
-              value={search}
-              onChange={(e) => onSearchChange(e.target.value)}
-            />
+          <div className="flex items-center gap-2">
+            <div className="w-72">
+              <Input
+                placeholder="Search material, supplier, SKU..."
+                value={search}
+                onChange={(e) => onSearchChange(e.target.value)}
+              />
+            </div>
+            <Button
+              onClick={onAddClick}
+              className="bg-[#6B5C32] hover:bg-[#574A28] text-white gap-1.5"
+            >
+              <Plus className="w-4 h-4" />
+              Add Binding
+            </Button>
           </div>
         </div>
       </CardHeader>
@@ -207,6 +244,170 @@ function PriceListTab({
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+// ---- Add Binding Dialog ----
+function AddBindingDialog({
+  suppliers,
+  onClose,
+  onCreated,
+  onError,
+}: {
+  suppliers: SupplierInfo[];
+  onClose: () => void;
+  onCreated: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [form, setForm] = useState({
+    supplierId: "",
+    materialCode: "",
+    materialName: "",
+    supplierSku: "",
+    unitPrice: "",
+    currency: "MYR",
+    leadTimeDays: "7",
+    moq: "1",
+    paymentTerms: "NET30",
+    priceValidFrom: new Date().toISOString().slice(0, 10),
+    priceValidTo: "2026-12-31",
+    isMainSupplier: false,
+  });
+  const [saving, setSaving] = useState(false);
+
+  const set = <K extends keyof typeof form>(k: K, v: (typeof form)[K]) =>
+    setForm((f) => ({ ...f, [k]: v }));
+
+  const handleSubmit = async () => {
+    if (!form.supplierId || !form.materialCode || !form.materialName || !form.supplierSku || !form.unitPrice) {
+      onError("Fill in supplier, material code, name, SKU, and unit price.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/supplier-materials", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          supplierId: form.supplierId,
+          materialCode: form.materialCode,
+          materialName: form.materialName,
+          supplierSku: form.supplierSku,
+          unitPrice: Number(form.unitPrice),
+          currency: form.currency,
+          leadTimeDays: Number(form.leadTimeDays) || 7,
+          moq: Number(form.moq) || 1,
+          paymentTerms: form.paymentTerms,
+          priceValidFrom: form.priceValidFrom,
+          priceValidTo: form.priceValidTo,
+          isMainSupplier: form.isMainSupplier,
+        }),
+      });
+      const json = await res.json().catch(() => ({ success: false }));
+      if (res.ok && json.success) {
+        onCreated();
+      } else {
+        onError(json.error || "Failed to create binding");
+      }
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-white rounded-lg shadow-lg w-full max-w-lg max-h-[90vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 py-3 border-b border-[#E2DDD8]">
+          <h3 className="text-base font-semibold text-[#1F1D1B]">Add Supplier-Material Binding</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="p-5 grid grid-cols-2 gap-3 text-sm">
+          <label className="col-span-2">
+            <span className="block text-xs font-medium text-gray-600 mb-1">Supplier *</span>
+            <select
+              value={form.supplierId}
+              onChange={(e) => set("supplierId", e.target.value)}
+              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
+            >
+              <option value="">Select supplier…</option>
+              {suppliers.map((s) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Material Code *</span>
+            <Input value={form.materialCode} onChange={(e) => set("materialCode", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Material Name *</span>
+            <Input value={form.materialName} onChange={(e) => set("materialName", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Supplier SKU *</span>
+            <Input value={form.supplierSku} onChange={(e) => set("supplierSku", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Unit Price *</span>
+            <Input type="number" step="0.01" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Currency</span>
+            <select
+              value={form.currency}
+              onChange={(e) => set("currency", e.target.value)}
+              className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 bg-white"
+            >
+              <option value="MYR">MYR</option>
+              <option value="RMB">RMB</option>
+            </select>
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Lead Time (days)</span>
+            <Input type="number" value={form.leadTimeDays} onChange={(e) => set("leadTimeDays", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">MOQ</span>
+            <Input type="number" value={form.moq} onChange={(e) => set("moq", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Payment Terms</span>
+            <Input value={form.paymentTerms} onChange={(e) => set("paymentTerms", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Valid From</span>
+            <Input type="date" value={form.priceValidFrom} onChange={(e) => set("priceValidFrom", e.target.value)} />
+          </label>
+          <label>
+            <span className="block text-xs font-medium text-gray-600 mb-1">Valid To</span>
+            <Input type="date" value={form.priceValidTo} onChange={(e) => set("priceValidTo", e.target.value)} />
+          </label>
+          <label className="col-span-2 flex items-center gap-2 pt-1">
+            <input
+              type="checkbox"
+              checked={form.isMainSupplier}
+              onChange={(e) => set("isMainSupplier", e.target.checked)}
+            />
+            <span className="text-xs font-medium text-gray-600">Mark as main supplier for this material</span>
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-3 border-t border-[#E2DDD8] bg-[#FAF8F4]">
+          <Button variant="outline" onClick={onClose} disabled={saving}>Cancel</Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={saving}
+            className="bg-[#6B5C32] hover:bg-[#574A28] text-white"
+          >
+            {saving ? "Saving…" : "Create Binding"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

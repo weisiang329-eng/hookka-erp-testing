@@ -272,7 +272,21 @@ export default function PlanningPage() {
     try {
       const res = await fetch("/api/production/leadtimes");
       const json = await res.json();
-      if (json?.success && json.data) setLeadTimes(json.data);
+      const d = json?.data;
+      // Only hydrate when we got the expected shape — stubbed catch-all
+      // returns `data: []` which would otherwise poison BEDFRAME/SOFA access.
+      if (
+        json?.success &&
+        d &&
+        typeof d === "object" &&
+        !Array.isArray(d) &&
+        (d.BEDFRAME || d.SOFA)
+      ) {
+        setLeadTimes({
+          BEDFRAME: d.BEDFRAME ?? {},
+          SOFA: d.SOFA ?? {},
+        });
+      }
     } catch {
       // silent
     }

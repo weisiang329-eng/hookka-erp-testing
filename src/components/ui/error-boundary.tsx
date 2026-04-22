@@ -62,9 +62,33 @@ interface ErrorFallbackProps {
   reset?: () => void;
 }
 
+// Detect crashes caused by stale JS chunks — a common symptom after a new
+// deploy replaces the chunk hashes the user's browser is still holding
+// references to. Hard-reload once (guarded via sessionStorage) so the
+// browser picks up the fresh index.html + bundle map.
+function isStaleChunkError(err: Error | null): boolean {
+  if (!err) return false;
+  const msg = `${err.name || ""} ${err.message || ""}`;
+  return (
+    /ChunkLoadError/i.test(msg) ||
+    /Failed to fetch dynamically imported module/i.test(msg) ||
+    /Loading chunk \d+ failed/i.test(msg) ||
+    /Importing a module script failed/i.test(msg)
+  );
+}
+
 export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbackProps) {
   const [showDetails, setShowDetails] = React.useState(false);
   const isDev = import.meta.env.DEV;
+
+  // Auto-recover from stale chunks by hard-reloading once.
+  React.useEffect(() => {
+    if (!isStaleChunkError(error)) return;
+    const KEY = "hookka-stale-chunk-reloaded";
+    if (sessionStorage.getItem(KEY)) return; // already tried once
+    sessionStorage.setItem(KEY, String(Date.now()));
+    window.location.reload();
+  }, [error]);
 
   const handleReset = reset ?? onReset;
 

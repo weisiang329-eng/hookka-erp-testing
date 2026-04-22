@@ -88,8 +88,15 @@ export default function MRPPage() {
     try {
       const res = await fetch("/api/mrp");
       const json = await res.json();
-      if (json.success && json.data) {
-        setMrpData(json.data);
+      const d = json?.data;
+      if (
+        json?.success &&
+        d &&
+        typeof d === "object" &&
+        !Array.isArray(d) &&
+        ("requirements" in d || "runDate" in d)
+      ) {
+        setMrpData(d);
       }
     } catch {
       // ignore

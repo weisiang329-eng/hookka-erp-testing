@@ -5,6 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatDateDMY } from "@/lib/utils";
+import { asArray } from "@/lib/safe-json";
 import {
   ShieldCheck,
   CheckCircle2,
@@ -444,7 +445,7 @@ export default function QualityPage() {
     try {
       const res = await fetch("/api/qc-inspections");
       const json = await res.json();
-      if (json.success) setInspections(json.data);
+      setInspections(asArray(json));
     } catch { /* ignore */ }
     finally { setLoading(false); }
   }, []);
@@ -453,13 +454,11 @@ export default function QualityPage() {
     try {
       const res = await fetch("/api/production-orders");
       const json = await res.json();
-      if (json.success) {
-        setProductionOrders(
-          json.data.filter((po: ProductionOrder) =>
-            po.status === "IN_PROGRESS" || po.status === "COMPLETED"
-          )
-        );
-      }
+      setProductionOrders(
+        asArray<ProductionOrder>(json).filter(
+          (po) => po.status === "IN_PROGRESS" || po.status === "COMPLETED",
+        ),
+      );
     } catch { /* ignore */ }
   }, []);
 

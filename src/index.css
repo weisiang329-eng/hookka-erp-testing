@@ -60,6 +60,7 @@ body {
 /* Document number styling */
 .doc-number {
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Amount right-aligned */

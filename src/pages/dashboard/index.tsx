@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
+import { asArray } from "@/lib/safe-json";
 import {
   TrendingUp,
   TrendingDown,
@@ -244,16 +245,21 @@ export default function DashboardPage() {
             rdRes.json(),
           ]);
 
-        setSalesOrders(soData.data ?? []);
-        setProductionOrders(prodData.data ?? []);
-        setDeliveryOrders(doData.data ?? []);
-        setInvoices(invData.data ?? []);
-        setWorkerCount(wData.data?.length ?? 0);
-        setCustomerCount(cData.data?.length ?? 0);
-        setPurchaseOrders(poData.data ?? []);
-        setQcInspections(qcData.data ?? []);
-        setRawMaterials(invtData.data?.rawMaterials ?? []);
-        setRdProjects(rdData.data ?? []);
+        setSalesOrders(asArray(soData));
+        setProductionOrders(asArray(prodData));
+        setDeliveryOrders(asArray(doData));
+        setInvoices(asArray(invData));
+        setWorkerCount(asArray(wData).length);
+        setCustomerCount(asArray(cData).length);
+        setPurchaseOrders(asArray(poData));
+        setQcInspections(asArray(qcData));
+        const rmNested =
+          invtData && typeof invtData === "object" && !Array.isArray(invtData)
+            ? ((invtData as { data?: { rawMaterials?: unknown } }).data
+                ?.rawMaterials ?? [])
+            : [];
+        setRawMaterials(Array.isArray(rmNested) ? rmNested : []);
+        setRdProjects(asArray(rdData));
       } catch (err) {
         console.error("Dashboard fetch error:", err);
       } finally {

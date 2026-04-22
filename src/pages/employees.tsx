@@ -6,6 +6,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency, formatDate, formatDateDMY, formatRM } from "@/lib/utils";
+import { asArray } from "@/lib/safe-json";
 import {
   Users,
   UserCheck,
@@ -1583,7 +1584,7 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
     fetch(`/api/payslips?period=${period}`)
       .then((r) => r.json())
       .then((res) => {
-        setPayslipData(res.data ?? []);
+        setPayslipData(asArray(res));
         setLoadingPayroll(false);
       })
       .catch(() => setLoadingPayroll(false));
@@ -2073,7 +2074,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
     fetch("/api/leaves")
       .then((r) => r.json())
       .then((res) => {
-        setLeaveData(res.data ?? []);
+        setLeaveData(asArray(res));
         setLoadingLeaves(false);
       })
       .catch(() => setLoadingLeaves(false));

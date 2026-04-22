@@ -603,28 +603,6 @@ export default function ProcurementPage() {
         </Button>
       </div>
 
-      {/* Status Pipeline */}
-      <Card>
-        <CardContent className="p-2.5">
-          <div className="flex items-center justify-between overflow-x-auto gap-3">
-            {statusCounts.map((s, i) => (
-              <div key={s.label} className="flex items-center gap-3">
-                <div
-                  className="text-center min-w-[100px] cursor-pointer py-1"
-                  onClick={() => { setFilterStatus(filterStatus === s.status ? "" : s.status); setShowFilters(true); }}
-                >
-                  <div className="text-lg font-bold mb-0.5">
-                    <Badge variant="status" status={s.status} className="text-xs px-2 py-0.5">{s.count}</Badge>
-                  </div>
-                  <p className={`text-[11px] mt-0.5 ${filterStatus === s.status ? "text-[#6B5C32] font-semibold" : "text-[#6B7280]"}`}>{s.label}</p>
-                </div>
-                {i < statusCounts.length - 1 && <ArrowRight className="h-5 w-5 text-[#D1CBC5] shrink-0" />}
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
       {/* Summary Cards */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>

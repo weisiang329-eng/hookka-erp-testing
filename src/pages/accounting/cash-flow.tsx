@@ -76,7 +76,17 @@ export default function CashFlowPage() {
       const res = await fetch("/api/cash-flow");
       if (!res.ok) throw new Error("Failed to fetch");
       const json = await res.json();
-      setData(json);
+      // Only hydrate when the shape looks like CashFlowData (object with the
+      // expected top-level fields). The Phase 5 stub returns `{data: []}`
+      // which would otherwise crash `.bankAccounts.map()` downstream.
+      if (
+        json &&
+        typeof json === "object" &&
+        !Array.isArray(json) &&
+        ("bankAccounts" in json || "forecast" in json || "journalEntries" in json)
+      ) {
+        setData(json);
+      }
     } catch {
       // silently handle
     } finally {

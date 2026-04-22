@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, formatCurrency } from "@/lib/utils";
+import { asArray } from "@/lib/safe-json";
 import type { Equipment, MaintenanceLog } from "@/lib/mock-data";
 import {
   Wrench,
@@ -94,8 +95,8 @@ export default function MaintenancePage() {
           fetch("/api/equipment").then((r) => r.json()),
           fetch("/api/maintenance-logs").then((r) => r.json()),
         ]);
-        if (eqRes.success) setEquipment(eqRes.data);
-        if (logRes.success) setLogs(logRes.data);
+        setEquipment(asArray<Equipment>(eqRes));
+        setLogs(asArray<MaintenanceLog>(logRes));
       } catch (err) {
         console.error("Failed to fetch:", err);
       } finally {

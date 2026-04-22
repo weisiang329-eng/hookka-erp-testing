@@ -904,19 +904,19 @@ export default function InventoryPage() {
         <div className="space-y-4">
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total SKUs</p>
               <p className="text-xl font-bold text-[#1F1D1B]">{fgItems.length}</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total Stock</p>
               <p className="text-xl font-bold text-[#1F1D1B]">{fgTotalStock.toLocaleString()} pcs</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Bedframe SKUs</p>
               <p className="text-xl font-bold text-[#6B5C32]">{fgBedframeCount}</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Sofa SKUs</p>
               <p className="text-xl font-bold text-[#6B5C32]">{fgSofaCount}</p>
             </CardContent></Card>
@@ -1031,7 +1031,7 @@ export default function InventoryPage() {
         <div className="space-y-4">
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total WIP Items</p>
               <p className="text-xl font-bold text-[#1F1D1B]">{wipItems.length}</p>
             </CardContent></Card>
@@ -1086,11 +1086,11 @@ export default function InventoryPage() {
         <div className="space-y-4">
           {/* KPIs */}
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total Materials</p>
               <p className="text-xl font-bold text-[#1F1D1B]">{rawMaterials.length}</p>
             </CardContent></Card>
-            <Card><CardContent className="p-4">
+            <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Categories</p>
               <p className="text-xl font-bold text-[#6B5C32]">{rmCategoriesCount}</p>
             </CardContent></Card>

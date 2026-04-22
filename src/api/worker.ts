@@ -81,6 +81,8 @@ import payments from "./routes-d1/payments";
 // Phase 4 — production / inventory / supplier
 import productionOrders from "./routes-d1/production-orders";
 import inventory from "./routes-d1/inventory";
+import rawMaterials from "./routes-d1/raw-materials";
+import rmBatches from "./routes-d1/rm-batches";
 import grn from "./routes-d1/grn";
 import costLedger from "./routes-d1/cost-ledger";
 import fgUnits from "./routes-d1/fg-units";
@@ -148,6 +150,8 @@ app.route("/api/payments", payments);
 // Phase 4
 app.route("/api/production-orders", productionOrders);
 app.route("/api/inventory", inventory);
+app.route("/api/raw-materials", rawMaterials);
+app.route("/api/rm-batches", rmBatches);
 app.route("/api/grn", grn);
 app.route("/api/cost-ledger", costLedger);
 app.route("/api/fg-units", fgUnits);

@@ -1,0 +1,405 @@
+// ---------------------------------------------------------------------------
+// D1-backed Raw Materials CRUD.
+//
+// GET    /api/raw-materials             -> list all (optional ?status=)
+// GET    /api/raw-materials/:id         -> one
+// POST   /api/raw-materials             -> create
+// PUT    /api/raw-materials/:id         -> update
+// DELETE /api/raw-materials/:id         -> delete
+// POST   /api/raw-materials/bulk-import -> upsert an array of rows
+//                                          body: { rows: [...] }
+//
+// The legacy /api/inventory endpoint already surfaces raw materials in its
+// aggregated payload (see routes-d1/inventory.ts). This route exposes the
+// CRUD surface that the Inventory page + batch-import dialog call directly.
+//
+// Schema note: 0008_raw_materials.sql added minStock/maxStock/status/notes/
+// created_at/updated_at on top of the 0001 base schema. `baseUOM` / `unit`
+// are the same column — we accept either key in POST/PUT bodies for
+// consistency with the Inventory form + the mock-data RawMaterial type
+// (which uses baseUOM).  API response always exposes both `baseUOM` and
+// `unit` with the same value for backwards compatibility.
+// ---------------------------------------------------------------------------
+import { Hono } from "hono";
+import type { Env } from "../worker";
+
+const app = new Hono<Env>();
+
+type RawMaterialRow = {
+  id: string;
+  itemCode: string;
+  description: string;
+  baseUOM: string;
+  itemGroup: string;
+  isActive: number;
+  balanceQty: number;
+  minStock: number;
+  maxStock: number;
+  status: string;
+  notes: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type RawMaterialBody = {
+  itemCode?: string;
+  description?: string;
+  baseUOM?: string;
+  unit?: string;
+  itemGroup?: string;
+  isActive?: boolean;
+  balanceQty?: number;
+  minStock?: number;
+  maxStock?: number;
+  status?: string;
+  notes?: string | null;
+};
+
+function rowToApi(r: RawMaterialRow) {
+  return {
+    id: r.id,
+    itemCode: r.itemCode,
+    description: r.description,
+    baseUOM: r.baseUOM,
+    unit: r.baseUOM, // alias for UI that expects `unit`
+    itemGroup: r.itemGroup,
+    isActive: r.isActive === 1,
+    balanceQty: r.balanceQty,
+    minStock: r.minStock ?? 0,
+    maxStock: r.maxStock ?? 0,
+    status: r.status ?? (r.isActive === 1 ? "ACTIVE" : "INACTIVE"),
+    notes: r.notes ?? "",
+    created_at: r.created_at ?? "",
+    updated_at: r.updated_at ?? "",
+  };
+}
+
+function genId(): string {
+  return `rm-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+/** Pick baseUOM value from either `baseUOM` or `unit` body key. */
+function pickUnit(body: RawMaterialBody, fallback = "PCS"): string {
+  if (typeof body.baseUOM === "string" && body.baseUOM.trim()) return body.baseUOM.trim();
+  if (typeof body.unit === "string" && body.unit.trim()) return body.unit.trim();
+  return fallback;
+}
+
+function statusFromBody(body: RawMaterialBody, fallback = "ACTIVE"): string {
+  if (typeof body.status === "string" && body.status.trim()) return body.status.trim();
+  if (body.isActive === false) return "INACTIVE";
+  if (body.isActive === true) return "ACTIVE";
+  return fallback;
+}
+
+// GET /api/raw-materials  (optional ?status=ACTIVE)
+app.get("/", async (c) => {
+  const status = c.req.query("status");
+  const sql = status
+    ? "SELECT * FROM raw_materials WHERE status = ? ORDER BY itemCode"
+    : "SELECT * FROM raw_materials ORDER BY itemCode";
+  const stmt = status
+    ? c.env.DB.prepare(sql).bind(status)
+    : c.env.DB.prepare(sql);
+  const res = await stmt.all<RawMaterialRow>();
+  const data = (res.results ?? []).map(rowToApi);
+  return c.json({ success: true, data, total: data.length });
+});
+
+// GET /api/raw-materials/:id
+app.get("/:id", async (c) => {
+  const id = c.req.param("id");
+  const row = await c.env.DB.prepare(
+    "SELECT * FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<RawMaterialRow>();
+  if (!row) {
+    return c.json({ success: false, error: "Raw material not found" }, 404);
+  }
+  return c.json({ success: true, data: rowToApi(row) });
+});
+
+// POST /api/raw-materials
+app.post("/", async (c) => {
+  let body: RawMaterialBody;
+  try {
+    body = (await c.req.json()) as RawMaterialBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON" }, 400);
+  }
+  const itemCode = (body.itemCode ?? "").trim();
+  const description = (body.description ?? "").trim();
+  if (!itemCode || !description) {
+    return c.json(
+      { success: false, error: "itemCode and description are required" },
+      400,
+    );
+  }
+
+  const existing = await c.env.DB.prepare(
+    "SELECT id FROM raw_materials WHERE itemCode = ? LIMIT 1",
+  )
+    .bind(itemCode)
+    .first<{ id: string }>();
+  if (existing) {
+    return c.json(
+      { success: false, error: `Raw material ${itemCode} already exists` },
+      400,
+    );
+  }
+
+  const id = genId();
+  const baseUOM = pickUnit(body);
+  const itemGroup = (body.itemGroup ?? "OTHERS").trim() || "OTHERS";
+  const status = statusFromBody(body);
+  const isActive = status === "ACTIVE" ? 1 : 0;
+  const balanceQty = Number(body.balanceQty) || 0;
+  const minStock = Number(body.minStock) || 0;
+  const maxStock = Number(body.maxStock) || 0;
+  const notes = typeof body.notes === "string" ? body.notes : null;
+  const nowIso = new Date().toISOString();
+
+  await c.env.DB.prepare(
+    `INSERT INTO raw_materials
+       (id, itemCode, description, baseUOM, itemGroup, isActive, balanceQty,
+        minStock, maxStock, status, notes, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      itemCode,
+      description,
+      baseUOM,
+      itemGroup,
+      isActive,
+      balanceQty,
+      minStock,
+      maxStock,
+      status,
+      notes,
+      nowIso,
+      nowIso,
+    )
+    .run();
+
+  const created = await c.env.DB.prepare(
+    "SELECT * FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<RawMaterialRow>();
+  if (!created) {
+    return c.json(
+      { success: false, error: "Failed to create raw material" },
+      500,
+    );
+  }
+  return c.json({ success: true, data: rowToApi(created) }, 201);
+});
+
+// PUT /api/raw-materials/:id
+app.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare(
+    "SELECT * FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<RawMaterialRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "Raw material not found" }, 404);
+  }
+  let body: RawMaterialBody;
+  try {
+    body = (await c.req.json()) as RawMaterialBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON" }, 400);
+  }
+
+  // Reject itemCode collisions on rename.
+  if (body.itemCode && body.itemCode !== existing.itemCode) {
+    const dupe = await c.env.DB.prepare(
+      "SELECT id FROM raw_materials WHERE itemCode = ? AND id != ? LIMIT 1",
+    )
+      .bind(body.itemCode, id)
+      .first<{ id: string }>();
+    if (dupe) {
+      return c.json(
+        { success: false, error: `Raw material ${body.itemCode} already exists` },
+        400,
+      );
+    }
+  }
+
+  const merged = {
+    itemCode: body.itemCode ?? existing.itemCode,
+    description: body.description ?? existing.description,
+    baseUOM: pickUnit(body, existing.baseUOM),
+    itemGroup: body.itemGroup ?? existing.itemGroup,
+    balanceQty:
+      body.balanceQty !== undefined ? Number(body.balanceQty) : existing.balanceQty,
+    minStock:
+      body.minStock !== undefined ? Number(body.minStock) : existing.minStock ?? 0,
+    maxStock:
+      body.maxStock !== undefined ? Number(body.maxStock) : existing.maxStock ?? 0,
+    status: statusFromBody(body, existing.status ?? "ACTIVE"),
+    notes: body.notes !== undefined ? body.notes : existing.notes,
+  };
+  const isActive = merged.status === "ACTIVE" ? 1 : 0;
+  const nowIso = new Date().toISOString();
+
+  await c.env.DB.prepare(
+    `UPDATE raw_materials SET
+       itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?,
+       isActive = ?, balanceQty = ?, minStock = ?, maxStock = ?,
+       status = ?, notes = ?, updated_at = ?
+     WHERE id = ?`,
+  )
+    .bind(
+      merged.itemCode,
+      merged.description,
+      merged.baseUOM,
+      merged.itemGroup,
+      isActive,
+      merged.balanceQty,
+      merged.minStock,
+      merged.maxStock,
+      merged.status,
+      merged.notes,
+      nowIso,
+      id,
+    )
+    .run();
+
+  const updated = await c.env.DB.prepare(
+    "SELECT * FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<RawMaterialRow>();
+  if (!updated) {
+    return c.json(
+      { success: false, error: "Failed to reload raw material" },
+      500,
+    );
+  }
+  return c.json({ success: true, data: rowToApi(updated) });
+});
+
+// DELETE /api/raw-materials/:id
+app.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare(
+    "SELECT * FROM raw_materials WHERE id = ?",
+  )
+    .bind(id)
+    .first<RawMaterialRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "Raw material not found" }, 404);
+  }
+  // FK cascade on rm_batches.rmId removes dependent batch rows.
+  await c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({ success: true, data: rowToApi(existing) });
+});
+
+// POST /api/raw-materials/bulk-import
+// Upserts by itemCode.  Body: { rows: RawMaterialBody[] }
+app.post("/bulk-import", async (c) => {
+  let body: { rows?: RawMaterialBody[] };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON" }, 400);
+  }
+  const rows = Array.isArray(body.rows) ? body.rows : [];
+  if (rows.length === 0) {
+    return c.json({ success: true, data: { created: 0, updated: 0 } });
+  }
+
+  // Fetch existing itemCodes in one shot for the match test.
+  const existingRes = await c.env.DB.prepare(
+    "SELECT id, itemCode FROM raw_materials",
+  ).all<{ id: string; itemCode: string }>();
+  const codeToId = new Map<string, string>();
+  for (const r of existingRes.results ?? []) codeToId.set(r.itemCode, r.id);
+
+  const nowIso = new Date().toISOString();
+  const statements: D1PreparedStatement[] = [];
+  let created = 0;
+  let updated = 0;
+
+  for (const r of rows) {
+    const itemCode = (r.itemCode ?? "").trim();
+    if (!itemCode) continue;
+    const description = (r.description ?? "").trim() || itemCode;
+    const baseUOM = pickUnit(r);
+    const itemGroup = (r.itemGroup ?? "OTHERS").trim() || "OTHERS";
+    const status = statusFromBody(r);
+    const isActive = status === "ACTIVE" ? 1 : 0;
+    const balanceQty = Number(r.balanceQty) || 0;
+    const minStock = Number(r.minStock) || 0;
+    const maxStock = Number(r.maxStock) || 0;
+    const notes = typeof r.notes === "string" ? r.notes : null;
+
+    const existingId = codeToId.get(itemCode);
+    if (existingId) {
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE raw_materials SET
+             description = ?, baseUOM = ?, itemGroup = ?, isActive = ?,
+             balanceQty = ?, minStock = ?, maxStock = ?, status = ?,
+             notes = ?, updated_at = ?
+           WHERE id = ?`,
+        ).bind(
+          description,
+          baseUOM,
+          itemGroup,
+          isActive,
+          balanceQty,
+          minStock,
+          maxStock,
+          status,
+          notes,
+          nowIso,
+          existingId,
+        ),
+      );
+      updated++;
+    } else {
+      const id = genId();
+      statements.push(
+        c.env.DB.prepare(
+          `INSERT INTO raw_materials
+             (id, itemCode, description, baseUOM, itemGroup, isActive,
+              balanceQty, minStock, maxStock, status, notes,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          id,
+          itemCode,
+          description,
+          baseUOM,
+          itemGroup,
+          isActive,
+          balanceQty,
+          minStock,
+          maxStock,
+          status,
+          notes,
+          nowIso,
+          nowIso,
+        ),
+      );
+      codeToId.set(itemCode, id);
+      created++;
+    }
+  }
+
+  if (statements.length > 0) {
+    await c.env.DB.batch(statements);
+  }
+
+  return c.json({ success: true, data: { created, updated } });
+});
+
+export default app;

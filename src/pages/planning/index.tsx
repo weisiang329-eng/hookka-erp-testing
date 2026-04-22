@@ -265,6 +265,14 @@ export default function PlanningPage() {
     BEDFRAME: {},
     SOFA: {},
   });
+  // Hookka Expected DD buffer (days between customer DD and internal target).
+  // Stored separately from per-dept leadTimes because it lives in its own
+  // table (hookka_dd_buffer) and shifts the reverse-schedule anchor rather
+  // than contributing to any dept chain.
+  const [hookkaDDBuffer, setHookkaDDBuffer] = useState<Record<LeadTimeCat, number>>({
+    BEDFRAME: 2,
+    SOFA: 1,
+  });
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
 
@@ -286,6 +294,13 @@ export default function PlanningPage() {
           BEDFRAME: d.BEDFRAME ?? {},
           SOFA: d.SOFA ?? {},
         });
+        if (d.hookkaDDBuffer && typeof d.hookkaDDBuffer === "object") {
+          const b = d.hookkaDDBuffer as { BEDFRAME?: number; SOFA?: number };
+          setHookkaDDBuffer({
+            BEDFRAME: typeof b.BEDFRAME === "number" && b.BEDFRAME >= 0 ? b.BEDFRAME : 2,
+            SOFA: typeof b.SOFA === "number" && b.SOFA >= 0 ? b.SOFA : 1,
+          });
+        }
       }
     } catch {
       // silent
@@ -298,9 +313,14 @@ export default function PlanningPage() {
 
   const updateLeadTime = (cat: LeadTimeCat, deptCode: string, value: string) => {
     const n = Number(value);
+    const v = Number.isFinite(n) && n >= 0 ? n : 0;
+    if (deptCode === "HOOKKA_DD") {
+      setHookkaDDBuffer((prev) => ({ ...prev, [cat]: v }));
+      return;
+    }
     setLeadTimes((prev) => ({
       ...prev,
-      [cat]: { ...prev[cat], [deptCode]: Number.isFinite(n) && n >= 0 ? n : 0 },
+      [cat]: { ...prev[cat], [deptCode]: v },
     }));
   };
 
@@ -310,7 +330,7 @@ export default function PlanningPage() {
       await fetch("/api/production/leadtimes", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(leadTimes),
+        body: JSON.stringify({ ...leadTimes, hookkaDDBuffer }),
       });
       setLtSavedAt(new Date().toLocaleTimeString());
     } finally {
@@ -1088,36 +1108,57 @@ export default function PlanningPage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {LEADTIME_ROWS.map((row) => (
-                      <tr key={row.code} className="border-b border-[#E5DFD1]">
-                        <td className="px-3 py-2 font-medium text-[#1F1D1B]">
-                          {row.label}
-                          <span className="ml-2 text-xs text-[#6B5C32]">{row.code}</span>
-                        </td>
-                        <td className="px-3 py-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            value={leadTimes.BEDFRAME[row.code] ?? 0}
-                            onChange={(e) =>
-                              updateLeadTime("BEDFRAME", row.code, e.target.value)
-                            }
-                            className="h-8 w-20 rounded border border-[#E5DFD1] px-2 text-center text-sm"
-                          />
-                        </td>
-                        <td className="px-3 py-2 text-center">
-                          <input
-                            type="number"
-                            min="0"
-                            value={leadTimes.SOFA[row.code] ?? 0}
-                            onChange={(e) =>
-                              updateLeadTime("SOFA", row.code, e.target.value)
-                            }
-                            className="h-8 w-20 rounded border border-[#E5DFD1] px-2 text-center text-sm"
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                    {LEADTIME_ROWS.map((row) => {
+                      const isBuffer = row.code === "HOOKKA_DD";
+                      const bedframeVal = isBuffer
+                        ? hookkaDDBuffer.BEDFRAME
+                        : leadTimes.BEDFRAME[row.code] ?? 0;
+                      const sofaVal = isBuffer
+                        ? hookkaDDBuffer.SOFA
+                        : leadTimes.SOFA[row.code] ?? 0;
+                      return (
+                        <tr
+                          key={row.code}
+                          className={
+                            isBuffer
+                              ? "border-b-2 border-[#6B5C32] bg-[#FAF7EF]"
+                              : "border-b border-[#E5DFD1]"
+                          }
+                        >
+                          <td className="px-3 py-2 font-medium text-[#1F1D1B]">
+                            {row.label}
+                            <span className="ml-2 text-xs text-[#6B5C32]">{row.code}</span>
+                            {isBuffer && (
+                              <span className="ml-2 rounded bg-[#E5DFD1] px-1.5 py-0.5 text-[10px] font-semibold text-[#6B5C32]">
+                                Buffer
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              value={bedframeVal}
+                              onChange={(e) =>
+                                updateLeadTime("BEDFRAME", row.code, e.target.value)
+                              }
+                              className="h-8 w-20 rounded border border-[#E5DFD1] px-2 text-center text-sm"
+                            />
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <input
+                              type="number"
+                              min="0"
+                              value={sofaVal}
+                              onChange={(e) =>
+                                updateLeadTime("SOFA", row.code, e.target.value)
+                              }
+                              className="h-8 w-20 rounded border border-[#E5DFD1] px-2 text-center text-sm"
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

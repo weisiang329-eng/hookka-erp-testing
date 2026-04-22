@@ -115,6 +115,64 @@ export function leadDaysFor(
   return 1;
 }
 
+// ---------------------------------------------------------------------------
+// Hookka Expected DD buffer — days between the customer's requested delivery
+// date and the internal production target (PACKING anchor). See
+// migrations/0007_hookka_dd_buffer.sql for the underlying table.
+// ---------------------------------------------------------------------------
+
+export type HookkaDDBuffer = { BEDFRAME: number; SOFA: number };
+
+const DEFAULT_HOOKKA_DD_BUFFER: HookkaDDBuffer = { BEDFRAME: 2, SOFA: 1 };
+
+// Insert default rows IFF the table is empty. Safe to call on every cascade.
+export async function ensureHookkaDDBufferSeeded(db: D1Database): Promise<void> {
+  const res = await db
+    .prepare("SELECT COUNT(*) as n FROM hookka_dd_buffer")
+    .first<{ n: number }>();
+  if (res && res.n > 0) return;
+
+  await db.batch([
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO hookka_dd_buffer (category, days) VALUES (?, ?)",
+      )
+      .bind("BEDFRAME", DEFAULT_HOOKKA_DD_BUFFER.BEDFRAME),
+    db
+      .prepare(
+        "INSERT OR IGNORE INTO hookka_dd_buffer (category, days) VALUES (?, ?)",
+      )
+      .bind("SOFA", DEFAULT_HOOKKA_DD_BUFFER.SOFA),
+  ]);
+}
+
+// Load { BEDFRAME, SOFA } buffer map. Falls back to defaults for any missing
+// category so callers never hit undefined.
+export async function loadHookkaDDBuffer(db: D1Database): Promise<HookkaDDBuffer> {
+  const res = await db
+    .prepare("SELECT category, days FROM hookka_dd_buffer")
+    .all<{ category: string; days: number }>();
+  const map: HookkaDDBuffer = { ...DEFAULT_HOOKKA_DD_BUFFER };
+  for (const row of res.results ?? []) {
+    if (row.category === "BEDFRAME" || row.category === "SOFA") {
+      map[row.category] =
+        Number.isFinite(row.days) && row.days >= 0 ? row.days : map[row.category];
+    }
+  }
+  return map;
+}
+
+// Look up buffer days for a category with a safe default fallback.
+export function hookkaDDBufferFor(
+  buffer: HookkaDDBuffer,
+  category: string,
+): number {
+  const normalized = category === "SOFA" ? "SOFA" : "BEDFRAME";
+  const v = buffer[normalized];
+  if (typeof v === "number" && v >= 0) return v;
+  return DEFAULT_HOOKKA_DD_BUFFER[normalized];
+}
+
 // Add N days to an ISO-date string (YYYY-MM-DD), returning YYYY-MM-DD.
 // Subtract by passing a negative N.
 export function addDays(isoDate: string, days: number): string {

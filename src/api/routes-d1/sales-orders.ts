@@ -19,6 +19,9 @@ import {
   leadDaysFor,
   addDays,
   DEPT_ORDER,
+  ensureHookkaDDBufferSeeded,
+  loadHookkaDDBuffer,
+  hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
 
@@ -248,7 +251,9 @@ async function createProductionOrdersForSO(
   // Ensure lead times are seeded. Safe to call every pass — short-circuits
   // after the first insert (COUNT(*) > 0).
   await ensureLeadTimesSeeded(db);
+  await ensureHookkaDDBufferSeeded(db);
   const leadTimes = await loadLeadTimes(db);
+  const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
   // Idempotency guard (PO-level) — if any PO exists for this SO, return the
   // existing set. Job-card backfill for those existing POs is handled by
@@ -290,7 +295,12 @@ async function createProductionOrdersForSO(
   const statements: D1PreparedStatement[] = [];
   const created: CreatedProductionOrder[] = [];
   const sortedItems = [...items].sort((a, b) => a.lineNo - b.lineNo);
-  const deliveryDate = so.hookkaExpectedDD || so.customerDeliveryDate || "";
+  // If the SO already has an explicit Hookka Expected DD, honour it (users may
+  // have overridden the computed value). Otherwise derive packingAnchor from
+  // customerDeliveryDate minus the per-category buffer — see
+  // migrations/0007_hookka_dd_buffer.sql for the buffer definition.
+  const explicitHookkaDD = so.hookkaExpectedDD || "";
+  const customerDD = so.customerDeliveryDate || "";
   const startDate = so.companySODate || today;
   const companySoId = so.companySOId ?? "";
 
@@ -307,6 +317,17 @@ async function createProductionOrdersForSO(
 
     const category = item.itemCategory ?? "BEDFRAME";
     const productCode = item.productCode ?? "";
+
+    // Reverse-schedule anchor. If the user explicitly set hookkaExpectedDD on
+    // the SO we use that as-is (they committed to a date). Otherwise we shift
+    // customerDeliveryDate backwards by the category buffer, leaving the
+    // buffer days free for dispatch/loading/shipping.
+    const bufferDays = hookkaDDBufferFor(hookkaDDBuffer, category);
+    const packingAnchor = explicitHookkaDD
+      ? explicitHookkaDD
+      : customerDD
+      ? addDays(customerDD, -bufferDays)
+      : "";
 
     // ------ BOM → WIP breakdown ------
     // Look up active BOM template for this productCode; if none, fall back
@@ -370,16 +391,15 @@ async function createProductionOrdersForSO(
       // so the `sequence` matches the forward chain (0-based).
       const chain = wip.processes;
 
-      if (deliveryDate) {
-        // Reverse pass. Start with the LAST dept in chain = deliveryDate.
+      if (packingAnchor) {
+        // Reverse pass. Start with the LAST dept in chain = packingAnchor
+        // (the internal target; customerDD − buffer, or explicit hookkaDD).
         // Each earlier dept = nextDept.dueDate - nextDept.leadDays.
-        // NOTE: we anchor PACKING at deliveryDate; if the chain includes
-        // PACKING it uses deliveryDate directly.
         const dueByDept = new Map<string, string>();
         const lastIdx = chain.length - 1;
         if (lastIdx >= 0) {
-          // Anchor: LAST dept in chain due on deliveryDate.
-          dueByDept.set(chain[lastIdx].deptCode, deliveryDate);
+          // Anchor: LAST dept in chain due on packingAnchor.
+          dueByDept.set(chain[lastIdx].deptCode, packingAnchor);
           for (let i = lastIdx - 1; i >= 0; i--) {
             const nextDept = chain[i + 1];
             const prevDue = dueByDept.get(nextDept.deptCode)!;
@@ -402,7 +422,7 @@ async function createProductionOrdersForSO(
             deptCode: p.deptCode,
             deptId: deptMeta.id,
             deptName: deptMeta.name,
-            dueDate: dueByDept.get(p.deptCode) || deliveryDate,
+            dueDate: dueByDept.get(p.deptCode) || packingAnchor,
             category: p.category,
             minutes: p.minutes,
           });
@@ -434,9 +454,12 @@ async function createProductionOrdersForSO(
       }
     }
 
-    // Overall targetEndDate = deliveryDate or last planned dept dueDate.
+    // Overall targetEndDate = packingAnchor (internal production target) or
+    // last planned dept dueDate. Customer-facing deliveryDate intentionally
+    // NOT used here — targetEndDate tracks when production finishes, not when
+    // the truck arrives at the customer.
     const poTargetEnd =
-      deliveryDate ||
+      packingAnchor ||
       planned.reduce<string>((acc, p) => (p.dueDate > acc ? p.dueDate : acc), startDate);
 
     // PO.currentDepartment = first-in-DEPT_ORDER dept across all WIP chains
@@ -571,7 +594,9 @@ async function backfillJobCardsForPo(
   poId: string,
 ): Promise<{ statements: D1PreparedStatement[]; jcCount: number; currentDept: string | null }> {
   await ensureLeadTimesSeeded(db);
+  await ensureHookkaDDBufferSeeded(db);
   const leadTimes = await loadLeadTimes(db);
+  const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
   // Skip if any job_cards already exist.
   const existingJc = await db
@@ -596,13 +621,19 @@ async function backfillJobCardsForPo(
         .first<SalesOrderRow>()
     : null;
 
-  const deliveryDate =
-    (so?.hookkaExpectedDD || so?.customerDeliveryDate) ||
-    po.targetEndDate ||
-    "";
-  const startDate = so?.companySODate || po.startDate || new Date().toISOString().split("T")[0];
   const category = po.itemCategory ?? "BEDFRAME";
   const productCode = po.productCode ?? "";
+  // Prefer explicit hookkaExpectedDD; else customerDD − buffer; else
+  // po.targetEndDate (already internal target from prior cascades).
+  const explicitHookkaDD = so?.hookkaExpectedDD || "";
+  const customerDD = so?.customerDeliveryDate || "";
+  const bufferDays = hookkaDDBufferFor(hookkaDDBuffer, category);
+  const packingAnchor = explicitHookkaDD
+    ? explicitHookkaDD
+    : customerDD
+    ? addDays(customerDD, -bufferDays)
+    : po.targetEndDate || "";
+  const startDate = so?.companySODate || po.startDate || new Date().toISOString().split("T")[0];
 
   const deptRes = await db
     .prepare("SELECT id, code, name FROM departments").all<{ id: string; code: string; name: string }>();
@@ -662,11 +693,11 @@ async function backfillJobCardsForPo(
       minutes: number;
     }> = [];
 
-    if (deliveryDate) {
+    if (packingAnchor) {
       const dueByDept = new Map<string, string>();
       const lastIdx = chain.length - 1;
       if (lastIdx >= 0) {
-        dueByDept.set(chain[lastIdx].deptCode, deliveryDate);
+        dueByDept.set(chain[lastIdx].deptCode, packingAnchor);
         for (let i = lastIdx - 1; i >= 0; i--) {
           const nextDept = chain[i + 1];
           const prevDue = dueByDept.get(nextDept.deptCode)!;
@@ -683,7 +714,7 @@ async function backfillJobCardsForPo(
           deptId: deptMeta.id,
           deptName: deptMeta.name,
           sequence: i,
-          dueDate: dueByDept.get(p.deptCode) || deliveryDate,
+          dueDate: dueByDept.get(p.deptCode) || packingAnchor,
           category: p.category,
           minutes: p.minutes,
         });

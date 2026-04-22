@@ -748,7 +748,32 @@ export default function InventoryPage() {
       products: Product[];
       rawMaterials: RawMaterial[];
     }> => {
-      // 1) Try /api/inventory (returns both products + raw materials)
+      // 1) Primary: /api/raw-materials for RM + /api/products for FG.
+      //    These are the dedicated CRUD endpoints; /api/inventory is a
+      //    convenience aggregator that returns the same data but with a
+      //    less-rich RM shape (no min/max/status/notes).
+      try {
+        const [rmRes, pRes] = await Promise.all([
+          fetch("/api/raw-materials"),
+          fetch("/api/products"),
+        ]);
+        const [rmJson, pJson] = await Promise.all([
+          safeJson(rmRes),
+          safeJson(pRes),
+        ]);
+        const okRM =
+          rmJson && rmJson.success && Array.isArray(rmJson.data) && !rmJson._stub;
+        const okP =
+          pJson && pJson.success && Array.isArray(pJson.data) && !pJson._stub;
+        if (okRM || okP) {
+          return {
+            products: okP ? (pJson.data as Product[]) : [],
+            rawMaterials: okRM ? (rmJson.data as RawMaterial[]) : [],
+          };
+        }
+      } catch { /* fall through */ }
+
+      // 2) Fallback: aggregated /api/inventory (products + RM in one payload).
       try {
         const res = await fetch("/api/inventory");
         const json = await safeJson(res);
@@ -761,15 +786,6 @@ export default function InventoryPage() {
               ? json.data.rawMaterials
               : [],
           };
-        }
-      } catch { /* fall through */ }
-
-      // 2) Fallback to catalog-only /api/products; RM unavailable.
-      try {
-        const res = await fetch("/api/products");
-        const json = await safeJson(res);
-        if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return { products: json.data, rawMaterials: [] };
         }
       } catch { /* fall through */ }
 

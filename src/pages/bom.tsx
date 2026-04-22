@@ -507,40 +507,9 @@ function getEffectiveMasterTemplateForProduct(product: Product): MasterTemplate 
 }
 
 // ---------- BOM Templates Local Persistence ----------
-// The /api/bom/templates endpoint returns mock data on every page load. We
-// overlay any user edits (single-product saves, bulk Load Default) into
-// localStorage so they survive refresh until a real backend exists.
-// v2 bump: old v1 localStorage stored pre-fix BOM data with Divan qty=2 on
-// S/SS bedframes and Cushion qty=1 on all sofa modules. Bumping the key
-// forces the browser to discard that polluted cache and re-fetch fresh
-// seeds from the server on next load.
+// Legacy localStorage key from the pre-D1 era. Kept only so the load
+// effect can remove any stale cache on first mount. No more reads / writes.
 const BOM_TEMPLATES_KEY = "hookka-bom-templates-v2";
-
-function loadStoredTemplates(): BOMTemplate[] | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(BOM_TEMPLATES_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as BOMTemplate[];
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-// Persist the full templates list to localStorage ONLY. D1 is the
-// authoritative store — individual BOM edits go through `PUT /api/bom/:id`
-// via the edit dialog. Pushing the whole list back to the server on every
-// setTemplates call used to overwrite D1 with stale cached state (e.g. if
-// localStorage still had pre-reapply qty=1), wiping out bulk reapply runs.
-function saveStoredTemplates(list: BOMTemplate[]) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(BOM_TEMPLATES_KEY, JSON.stringify(list));
-  } catch {
-    // ignore
-  }
-}
 
 // ---------- Bulk BOM CSV (Export / Import) ----------
 // Flattens every BOM (L1 + nested WIPs) into a single CSV the user can
@@ -4837,16 +4806,37 @@ export default function BOMManagementPage() {
   const existingCodes = useMemo(() => new Set(templates.map((t) => t.productCode)), [templates]);
   const pendingCount = useMemo(() => products.filter((p) => !existingCodes.has(p.code)).length, [products, existingCodes]);
 
-  // Persist templates to localStorage whenever they change (after initial
-  // load completes). Without this, Load Default / single-BOM edits vanish
-  // on refresh because the API only returns mock data.
-  useEffect(() => {
-    if (loading) return;
-    saveStoredTemplates(templates);
-  }, [templates, loading]);
+  // D1 is the source of truth. Individual BOM edits go through
+  // `PUT /api/bom/templates/:id` below so each save only touches one row
+  // instead of replacing the whole table. No localStorage write-back.
 
-  function handleBOMEdited(t: BOMTemplate) {
+  async function handleBOMEdited(t: BOMTemplate) {
+    // Optimistic update — render instantly, roll back on server error.
     setTemplates((prev) => prev.map((old) => (old.id === t.id ? t : old)));
+    try {
+      const res = await fetch(
+        `/api/bom/templates/${encodeURIComponent(t.id)}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(t),
+        },
+      );
+      const json = await res.json().catch(() => null);
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      // Roll back by reloading the current server state for this product.
+      toast.error(
+        `Failed to save BOM: ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+      try {
+        const refetch = await fetch("/api/bom/templates");
+        const rj = await refetch.json();
+        if (rj?.success) setTemplates(rj.data);
+      } catch { /* ignore */ }
+    }
   }
 
   // Bulk BOM CSV — flat export of every BOM's processes and materials so

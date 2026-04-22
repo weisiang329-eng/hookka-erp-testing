@@ -562,11 +562,41 @@ type TabId = "suppliers" | "sku-costing";
 export default function SupplierMaintenancePage() {
   const [activeTab, setActiveTab] = useState<TabId>("suppliers");
 
-  // Supplier state
-  const [suppliers, setSuppliers] = useState<Supplier[]>(MOCK_SUPPLIERS);
+  // Supplier state — D1 is source of truth; MOCK_SUPPLIERS kept only as
+  // a fallback if the API is unreachable, so the page always renders.
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [supplierSearch, setSupplierSearch] = useState("");
   const [showSupplierForm, setShowSupplierForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
+
+  useEffect(() => {
+    fetch("/api/suppliers")
+      .then((r) => r.json())
+      .then((d) => {
+        const list = Array.isArray(d?.data) ? d.data : Array.isArray(d) ? d : [];
+        if (!list.length) return;
+        const mapped: Supplier[] = list.map((s: Record<string, unknown>) => ({
+          id: String(s.id ?? s.code ?? ""),
+          code: String(s.code ?? s.id ?? ""),
+          name: String(s.name ?? ""),
+          contactPerson: String(s.contactPerson ?? s.attention ?? ""),
+          phone: String(s.phone ?? ""),
+          email: String(s.email ?? ""),
+          paymentTerms: (s.paymentTerms ?? s.creditTerm ?? "NET30") as PaymentTerms,
+          rating: Number(s.rating ?? 0),
+          status: ((s.status ?? (s.isActive === false ? "INACTIVE" : "ACTIVE")) as SupplierStatus),
+          address: String(
+            s.address ??
+              [s.addressLine1, s.addressLine2, s.addressLine3, s.addressLine4]
+                .filter(Boolean)
+                .join(", ") ??
+              "",
+          ),
+        }));
+        setSuppliers(mapped);
+      })
+      .catch(() => { /* keep fallback state */ });
+  }, []);
 
   // SKU state
   const [skuList, setSkuList] = useState<SupplierSKU[]>(MOCK_SKU);

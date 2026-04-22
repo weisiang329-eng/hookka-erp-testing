@@ -50,6 +50,10 @@ app.get("/api/health", (c) =>
   }),
 );
 
+// Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
+// PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
+app.use("/api/*", authMiddleware);
+
 // ---------------------------------------------------------------------------
 // Route registrations — add each migrated route here.
 // ---------------------------------------------------------------------------
@@ -71,6 +75,26 @@ import threeWayMatch from "./routes-d1/three-way-match";
 import deliveryOrders from "./routes-d1/delivery-orders";
 import invoices from "./routes-d1/invoices";
 import payments from "./routes-d1/payments";
+// Phase 4 — production / inventory / supplier
+import productionOrders from "./routes-d1/production-orders";
+import inventory from "./routes-d1/inventory";
+import grn from "./routes-d1/grn";
+import costLedger from "./routes-d1/cost-ledger";
+import fgUnits from "./routes-d1/fg-units";
+import fabricTracking from "./routes-d1/fabric-tracking";
+import fabrics from "./routes-d1/fabrics";
+import warehouse from "./routes-d1/warehouse";
+import stockAccounts from "./routes-d1/stock-accounts";
+import stockValue from "./routes-d1/stock-value";
+import goodsInTransit from "./routes-d1/goods-in-transit";
+import suppliers from "./routes-d1/suppliers";
+import supplierMaterials from "./routes-d1/supplier-materials";
+import supplierScorecards from "./routes-d1/supplier-scorecards";
+import priceHistory from "./routes-d1/price-history";
+// Auth — login portal + admin user CRUD
+import auth from "./routes-d1/auth";
+import users from "./routes-d1/users";
+import { authMiddleware } from "./lib/auth-middleware";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -90,6 +114,25 @@ app.route("/api/three-way-match", threeWayMatch);
 app.route("/api/delivery-orders", deliveryOrders);
 app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
+// Phase 4
+app.route("/api/production-orders", productionOrders);
+app.route("/api/inventory", inventory);
+app.route("/api/grn", grn);
+app.route("/api/cost-ledger", costLedger);
+app.route("/api/fg-units", fgUnits);
+app.route("/api/fabric-tracking", fabricTracking);
+app.route("/api/fabrics", fabrics);
+app.route("/api/warehouse", warehouse);
+app.route("/api/stock-accounts", stockAccounts);
+app.route("/api/stock-value", stockValue);
+app.route("/api/goods-in-transit", goodsInTransit);
+app.route("/api/suppliers", suppliers);
+app.route("/api/supplier-materials", supplierMaterials);
+app.route("/api/supplier-scorecards", supplierScorecards);
+app.route("/api/price-history", priceHistory);
+// Auth
+app.route("/api/auth", auth);
+app.route("/api/users", users);
 
 // 501 for any /api path we haven't migrated yet.
 app.all("/api/*", (c) =>

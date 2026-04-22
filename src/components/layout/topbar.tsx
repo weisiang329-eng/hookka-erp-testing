@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Bell, ChevronDown, LogOut, User, Building2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { GlobalSearch } from "./global-search";
+import { clearAuth, getCurrentUser } from "@/lib/auth";
 
 interface TopbarProps {
   user?: {
@@ -13,6 +14,19 @@ interface TopbarProps {
   };
 }
 
+// POST /api/auth/logout, then clear local state and bounce to /login.
+// We run the server call best-effort — even if it fails we still want to
+// wipe the client token so a reload doesn't auto-sign-in.
+async function handleSignOut(): Promise<void> {
+  try {
+    await fetch("/api/auth/logout", { method: "POST" });
+  } catch {
+    // ignore — network hiccup shouldn't trap the user in the app
+  }
+  clearAuth();
+  window.location.href = "/login";
+}
+
 const organisations = [
   { code: "HOOKKA", name: "HOOKKA INDUSTRIES SDN BHD" },
   { code: "OHANA", name: "OHANA MARKETING" },
@@ -22,6 +36,12 @@ export function Topbar({ user }: TopbarProps) {
   const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
   const [userDropdownOpen, setUserDropdownOpen] = useState(false);
   const currentOrg = user?.organisationCode || "HOOKKA";
+
+  // Prefer the real signed-in user for the avatar label + dropdown.
+  const authUser = getCurrentUser();
+  const displayName =
+    authUser?.displayName || authUser?.email || user?.name || "User";
+  const displayRole = user?.role || authUser?.role || "Admin";
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-[#E2DDD8] bg-white px-6">
@@ -76,11 +96,11 @@ export function Topbar({ user }: TopbarProps) {
           className="flex items-center gap-2 rounded-md p-1.5 hover:bg-[#F0ECE9] transition-colors"
         >
           <div className="h-8 w-8 rounded-full bg-[#6B5C32] flex items-center justify-center text-white text-sm font-medium">
-            {user?.name?.charAt(0) || "U"}
+            {displayName.charAt(0).toUpperCase() || "U"}
           </div>
           <div className="hidden sm:block text-left">
-            <p className="text-sm font-medium text-[#1F1D1B]">{user?.name || "User"}</p>
-            <p className="text-xs text-[#9CA3AF]">{user?.role || "Admin"}</p>
+            <p className="text-sm font-medium text-[#1F1D1B]">{displayName}</p>
+            <p className="text-xs text-[#9CA3AF]">{displayRole}</p>
           </div>
           <ChevronDown className="h-3 w-3 text-[#9CA3AF] hidden sm:block" />
         </button>
@@ -93,7 +113,7 @@ export function Topbar({ user }: TopbarProps) {
             <hr className="my-1 border-[#E2DDD8]" />
             <button
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50"
-              onClick={() => { window.location.href = "/login"; }}
+              onClick={() => { handleSignOut(); }}
             >
               <LogOut className="h-4 w-4" />
               Sign Out

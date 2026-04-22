@@ -1,16 +1,85 @@
-import { useState } from "react";
+// ---------------------------------------------------------------------------
+// Login page — email + password against POST /api/auth/login.
+//
+// On success we stash { token, user } via setAuth() and redirect to either
+// the URL carried in location.state.from (set by <RequireAuth>) or /dashboard
+// by default. Also honours ?next=<url> on the query string for the case where
+// api-client.ts bounced here after a 401.
+// ---------------------------------------------------------------------------
+import { useState, useEffect } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
+import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
+
+type LoginResponse =
+  | {
+      success: true;
+      data: { token: string; user: AuthUser };
+    }
+  | { success: false; error?: string };
 
 export default function LoginPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [rememberMe, setRememberMe] = useState(false);
+
+  // Already signed-in? Jump straight to the dashboard.
+  useEffect(() => {
+    if (isAuthenticated()) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [navigate]);
+
+  function getRedirectTarget(): string {
+    // 1. location.state.from (populated by <RequireAuth>)
+    const state = location.state as { from?: string } | null;
+    if (state?.from && typeof state.from === "string") return state.from;
+    // 2. ?next=... query param (populated by api-client 401 handler)
+    const params = new URLSearchParams(location.search);
+    const next = params.get("next");
+    if (next) return next;
+    // 3. default
+    return "/dashboard";
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    setError(null);
+
+    const trimmedEmail = email.trim();
+    if (!trimmedEmail || !password) {
+      setError("Email and password are required.");
+      return;
+    }
+
     setLoading(true);
-    // For demo, redirect directly to dashboard
-    window.location.href = "/dashboard";
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: trimmedEmail, password }),
+      });
+      const json = (await res.json()) as LoginResponse;
+      if (!res.ok || !json.success) {
+        setError(
+          ("error" in json && json.error) ||
+            "Login failed. Please check your credentials.",
+        );
+        return;
+      }
+      setAuth(json.data);
+      navigate(getRedirectTarget(), { replace: true });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Network error. Please try again.",
+      );
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
@@ -113,15 +182,10 @@ export default function LoginPage() {
             </div>
 
             {/* Title */}
-            <h2 className="text-2xl font-bold text-white mb-1">
-              Welcome back
-            </h2>
+            <h2 className="text-2xl font-bold text-white mb-1">Welcome back</h2>
             <p
               className="mb-8"
-              style={{
-                color: "rgba(255,255,255,.45)",
-                fontSize: "13px",
-              }}
+              style={{ color: "rgba(255,255,255,.45)", fontSize: "13px" }}
             >
               Sign in to your manufacturing intelligence platform
             </p>
@@ -142,7 +206,8 @@ export default function LoginPage() {
                 </label>
                 <input
                   id="email"
-                  type="text"
+                  type="email"
+                  autoComplete="email"
                   placeholder="you@hookka.com.my"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
@@ -170,6 +235,7 @@ export default function LoginPage() {
                 <input
                   id="password"
                   type="password"
+                  autoComplete="current-password"
                   placeholder="Enter your password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -181,6 +247,21 @@ export default function LoginPage() {
                   }}
                 />
               </div>
+
+              {/* Error banner */}
+              {error && (
+                <div
+                  className="rounded-lg px-4 py-3 text-sm"
+                  style={{
+                    backgroundColor: "rgba(220, 38, 38, 0.1)",
+                    border: "1px solid rgba(220, 38, 38, 0.3)",
+                    color: "#FCA5A5",
+                  }}
+                  role="alert"
+                >
+                  {error}
+                </div>
+              )}
 
               {/* Remember me + Forgot password */}
               <div className="flex items-center justify-between">
@@ -204,10 +285,7 @@ export default function LoginPage() {
                 <a
                   href="#"
                   className="hover:underline"
-                  style={{
-                    color: "#8B7A4E",
-                    fontSize: "13px",
-                  }}
+                  style={{ color: "#8B7A4E", fontSize: "13px" }}
                 >
                   Forgot Password?
                 </a>
@@ -289,12 +367,7 @@ export default function LoginPage() {
           {/* Orbit Dots */}
           <div
             className="absolute"
-            style={{
-              top: "50%",
-              left: "50%",
-              width: 0,
-              height: 0,
-            }}
+            style={{ top: "50%", left: "50%", width: 0, height: 0 }}
           >
             <div
               className="orbit-dot"
@@ -312,8 +385,10 @@ export default function LoginPage() {
 
           {/* Center Content */}
           <div className="relative z-10 flex flex-col items-center text-center">
-            {/* Logo Hexagon */}
-            <div className="relative mb-6" style={{ width: "100px", height: "100px" }}>
+            <div
+              className="relative mb-6"
+              style={{ width: "100px", height: "100px" }}
+            >
               <div
                 className="absolute inset-0 flex items-center justify-center"
                 style={{
@@ -324,41 +399,27 @@ export default function LoginPage() {
               >
                 <span
                   className="font-bold text-white"
-                  style={{
-                    fontSize: "42px",
-                    transform: "rotate(-45deg)",
-                  }}
+                  style={{ fontSize: "42px", transform: "rotate(-45deg)" }}
                 >
                   H
                 </span>
               </div>
             </div>
 
-            {/* Brand Name */}
             <h1
               className="text-white mb-2"
-              style={{
-                fontSize: "42px",
-                fontWeight: 900,
-                letterSpacing: "6px",
-              }}
+              style={{ fontSize: "42px", fontWeight: 900, letterSpacing: "6px" }}
             >
               HOOKKA
             </h1>
 
-            {/* Tagline */}
             <p
               className="uppercase mb-6"
-              style={{
-                color: "#8B7A4E",
-                fontSize: "13px",
-                letterSpacing: "4px",
-              }}
+              style={{ color: "#8B7A4E", fontSize: "13px", letterSpacing: "4px" }}
             >
               Manufacturing Intelligence Platform
             </p>
 
-            {/* Gold Divider */}
             <div
               className="mb-6"
               style={{
@@ -369,7 +430,6 @@ export default function LoginPage() {
               }}
             />
 
-            {/* Badge */}
             <div
               className="mb-10 px-4 py-1.5 rounded-full"
               style={{
@@ -382,7 +442,6 @@ export default function LoginPage() {
               INDUSTRY 4.0
             </div>
 
-            {/* Stats Row */}
             <div className="flex gap-10">
               <div className="text-center">
                 <div className="text-2xl font-bold text-white">156</div>
@@ -426,7 +485,6 @@ export default function LoginPage() {
             </div>
           </div>
 
-          {/* Corner Floating Text - Top Left */}
           <div
             className="absolute"
             style={{
@@ -441,7 +499,6 @@ export default function LoginPage() {
             HOOKKA INDUSTRIES
           </div>
 
-          {/* Corner Floating Text - Top Right */}
           <div
             className="absolute flex items-center gap-2"
             style={{
@@ -465,7 +522,6 @@ export default function LoginPage() {
             SYSTEM ONLINE
           </div>
 
-          {/* Corner Floating Text - Bottom Left */}
           <div
             className="absolute"
             style={{
@@ -480,7 +536,6 @@ export default function LoginPage() {
             ERP v2.0 // 2026
           </div>
 
-          {/* Corner Floating Text - Bottom Right */}
           <div
             className="absolute"
             style={{

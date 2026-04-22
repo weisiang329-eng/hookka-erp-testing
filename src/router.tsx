@@ -5,6 +5,7 @@ import PortalLayout from './layouts/PortalLayout'
 import WorkerLayout from './layouts/WorkerLayout'
 import { ErrorFallback } from './components/ui/error-boundary'
 import { DASHBOARD_ROUTES } from './dashboard-routes'
+import RequireAuth from './components/RequireAuth'
 
 // ── Standalone / non-dashboard lazy pages ─────────────────────────────────
 
@@ -21,7 +22,7 @@ const PortalAccount = lazy(() => import('./pages/portal/account'))
 // Auth
 const Login = lazy(() => import('./pages/login'))
 
-// Worker Portal (mobile, shop floor)
+// Worker Portal (mobile, shop floor — uses its own PIN token, not hookka_auth)
 const WorkerLogin = lazy(() => import('./pages/worker/login'))
 const WorkerHome = lazy(() => import('./pages/worker'))
 const WorkerScan = lazy(() => import('./pages/worker/scan'))
@@ -49,25 +50,32 @@ export const router = createBrowserRouter([
   // Root redirect
   { path: '/', element: <Navigate to="/dashboard" replace /> },
 
-  // Auth (standalone, no layout)
+  // Auth (standalone, no layout — PUBLIC)
   { path: '/login', element: <S><Login /></S> },
 
   // Public FG unit tracking (standalone, no auth, mobile-friendly)
   { path: '/track', element: <S><Track /></S> },
 
-  // Dashboard layout — all dashboard routes share the one `TabbedOutlet` inside
-  // DashboardLayout. The children list here exists so createBrowserRouter
-  // routes each URL to the dashboard shell; the actual per-path component
-  // rendering is done by TabbedOutlet (keep-alive).
+  // Dashboard layout — gated behind RequireAuth. All dashboard routes share
+  // the one `TabbedOutlet` inside DashboardLayout; the children list here
+  // exists so createBrowserRouter routes each URL to the dashboard shell.
   {
-    element: <DashboardLayout />,
+    element: (
+      <RequireAuth>
+        <DashboardLayout />
+      </RequireAuth>
+    ),
     errorElement: <ErrorFallback error={null} />,
     children: DASHBOARD_ROUTES,
   },
 
-  // Portal layout
+  // Portal layout — also gated behind RequireAuth (same hookka_auth token).
   {
-    element: <PortalLayout />,
+    element: (
+      <RequireAuth>
+        <PortalLayout />
+      </RequireAuth>
+    ),
     errorElement: <ErrorFallback error={null} />,
     children: [
       { path: '/portal', element: <S><Portal /></S> },
@@ -78,7 +86,8 @@ export const router = createBrowserRouter([
     ],
   },
 
-  // Worker portal (mobile PIN auth)
+  // Worker portal (mobile PIN auth — intentionally NOT behind RequireAuth;
+  // uses its own /api/worker-auth token flow).
   {
     element: <WorkerLayout />,
     errorElement: <ErrorFallback error={null} />,

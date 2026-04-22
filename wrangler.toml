@@ -34,7 +34,7 @@ database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
 # NOTE: RESEND_API_KEY is intentionally NOT listed here — secrets belong in
 # .dev.vars locally and `wrangler secret put RESEND_API_KEY` in prod.
 [vars]
-ENVIRONMENT = "dev"
-API_CORS_ORIGIN = "http://localhost:3000"
+ENVIRONMENT = "production"
+API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
 APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka ERP <noreply@houzscentury.com>"

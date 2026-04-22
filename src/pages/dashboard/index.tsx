@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import { getCurrentUser } from "@/lib/auth";
 import {
   TrendingUp,
   TrendingDown,
@@ -375,7 +376,13 @@ export default function DashboardPage() {
       {/* Page header */}
       <div>
         <h1 className="text-[26px] font-[800] tracking-[-0.5px] text-[#1F1D1B]">
-          Good morning, Lim
+          {(() => {
+            const hour = new Date().getHours();
+            const greeting =
+              hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+            const name = getCurrentUser()?.displayName?.split(/\s+/)[0] || "there";
+            return `${greeting}, ${name}`;
+          })()}
         </h1>
         <p className="text-sm text-[#5A5550] mt-0.5">
           {new Date().toLocaleDateString("en-MY", {

@@ -41,7 +41,11 @@ export function Topbar({ user }: TopbarProps) {
   const authUser = getCurrentUser();
   const displayName =
     authUser?.displayName || authUser?.email || user?.name || "User";
-  const displayRole = user?.role || authUser?.role || "Admin";
+  const rawRole = authUser?.role || user?.role || "Admin";
+  const displayRole = rawRole
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-[#E2DDD8] bg-white px-6">

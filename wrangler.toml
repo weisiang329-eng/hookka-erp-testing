@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# Cloudflare Workers + Pages configuration for hookka-erp
+#
+# Deployment model:
+#   - Vite SPA builds to ./dist → deployed to Cloudflare Pages
+#   - Hono API runs as a Pages Function under ./functions/api/[[route]].ts
+#     (or a separate Worker — see "Alternative" below)
+#   - D1 database holds all business data (customers, SOs, POs, etc.)
+#
+# Local dev:
+#   npm run dev         # Vite dev server on 3000 (proxies /api → wrangler)
+#   npm run dev:worker  # wrangler dev on 8787 (Workers runtime + D1 local)
+# ---------------------------------------------------------------------------
+
+name = "hookka-erp-testing"
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Pages project (SPA + Pages Functions)
+pages_build_output_dir = "dist"
+
+# D1 database binding — the single source of truth for all business data.
+# Create the DB after first deploy with:
+#   wrangler d1 create hookka-erp-db
+# then paste the returned `database_id` below.
+[[d1_databases]]
+binding = "DB"
+database_name = "hookka-erp-db"
+database_id = "TODO-paste-after-wrangler-d1-create"
+
+# Runtime env vars — override per environment (dev/preview/prod) on the
+# Cloudflare dashboard or via wrangler secret put.
+[vars]
+ENVIRONMENT = "dev"
+API_CORS_ORIGIN = "http://localhost:3000"

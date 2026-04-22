@@ -30,3 +30,8 @@ dist-ssr
 # tsc --noEmit scratch output
 .tsc-out.txt
 tsc-out.txt
+
+# Cloudflare / Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*

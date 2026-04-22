@@ -51,13 +51,29 @@ app.get("/api/health", (c) =>
 );
 
 // ---------------------------------------------------------------------------
-// Route registrations will be added here as each route is migrated to D1.
-// Example (once customers is migrated):
-//   import customers from "./routes-d1/customers";
-//   app.route("/api/customers", customers);
+// Route registrations — add each migrated route here.
 // ---------------------------------------------------------------------------
+import customers from "./routes-d1/customers";
+import bom from "./routes-d1/bom";
+import products from "./routes-d1/products";
+import productConfigs from "./routes-d1/product-configs";
+import workers from "./routes-d1/workers";
+import workerAuth from "./routes-d1/worker-auth";
+import departments from "./routes-d1/departments";
+import customerHubs from "./routes-d1/customer-hubs";
+import organisations from "./routes-d1/organisations";
 
-// 404 for any /api path we haven't migrated yet.
+app.route("/api/customers", customers);
+app.route("/api/bom", bom);
+app.route("/api/products", products);
+app.route("/api/product-configs", productConfigs);
+app.route("/api/workers", workers);
+app.route("/api/worker-auth", workerAuth);
+app.route("/api/departments", departments);
+app.route("/api/customer-hubs", customerHubs);
+app.route("/api/organisations", organisations);
+
+// 501 for any /api path we haven't migrated yet.
 app.all("/api/*", (c) =>
   c.json(
     {

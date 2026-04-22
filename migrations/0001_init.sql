@@ -216,6 +216,25 @@ CREATE TABLE workers (
   FOREIGN KEY (departmentId) REFERENCES departments(id) ON DELETE SET NULL
 );
 
+-- --- Worker portal auth (PIN + opaque bearer tokens) ------------------------
+-- PIN stored plaintext because this is a shop-floor convenience login, not
+-- real auth. Replace with bcrypt when worker portal hits real auth.
+CREATE TABLE worker_pins (
+  workerId TEXT PRIMARY KEY,
+  pin TEXT NOT NULL,
+  updatedAt TEXT,
+  FOREIGN KEY (workerId) REFERENCES workers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE worker_tokens (
+  token TEXT PRIMARY KEY,
+  workerId TEXT NOT NULL,
+  issuedAt INTEGER NOT NULL,
+  FOREIGN KEY (workerId) REFERENCES workers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_worker_tokens_workerId ON worker_tokens(workerId);
+
 -- --- Suppliers --------------------------------------------------------------
 CREATE TABLE suppliers (
   id TEXT PRIMARY KEY,

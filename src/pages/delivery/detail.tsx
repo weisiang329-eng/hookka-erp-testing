@@ -25,6 +25,8 @@ import { generateDOPdf } from "@/lib/generate-do-pdf";
 import { generatePackingListPdf } from "@/lib/generate-packing-pdf";
 import PODDialog from "@/components/delivery/POD-dialog";
 import type { ProofOfDelivery } from "@/lib/mock-data";
+import { usePresence } from "@/lib/use-presence";
+import { PresenceBanner } from "@/components/presence-banner";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -122,6 +124,7 @@ export default function DeliveryDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const otherEditors = usePresence("delivery_order", id, Boolean(id));
   const [order, setOrder] = useState<DeliveryOrder | null>(null);
   const [lorries, setLorries] = useState<LorryInfo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -231,6 +234,7 @@ export default function DeliveryDetailPage() {
 
   return (
     <div className="space-y-6">
+      <PresenceBanner holders={otherEditors} />
       {/* Header */}
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate("/delivery")}>

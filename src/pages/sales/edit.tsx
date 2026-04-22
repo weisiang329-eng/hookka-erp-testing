@@ -10,6 +10,8 @@ import { formatCurrency } from "@/lib/utils";
 import { ArrowLeft, Plus, Trash2, Save, AlertTriangle } from "lucide-react";
 import type { Customer, Product, FabricItem, SalesOrder } from "@/lib/mock-data";
 import { SEAT_HEIGHT_OPTIONS } from "@/lib/mock-data";
+import { usePresence } from "@/lib/use-presence";
+import { PresenceBanner } from "@/components/presence-banner";
 
 type LineItem = {
   id?: string;
@@ -84,6 +86,7 @@ export default function EditSalesOrderPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const otherEditors = usePresence("sales_order", id, Boolean(id));
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [fabrics, setFabrics] = useState<FabricItem[]>([]);
@@ -297,6 +300,8 @@ export default function EditSalesOrderPage() {
           {saving ? "Saving..." : "Save Changes"}
         </Button>
       </div>
+
+      <PresenceBanner holders={otherEditors} />
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">

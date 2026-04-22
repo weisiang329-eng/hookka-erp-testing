@@ -223,7 +223,8 @@ function parseSku(wb: xl.WorkBook, tab: "SKU BF" | "SKU SF"): SkuRow[] {
   });
   const header = (rows[0] as string[]) || [];
 
-  // Header column lookup — headers can repeat, so we remember the FIRST match.
+  // Header column lookup — headers can repeat, so we remember the FIRST match
+  // (for single-occurrence columns like Product Code / Price 1 / Price 2).
   const colFirst = new Map<string, number>();
   for (let i = 0; i < header.length; i++) {
     const h = String(header[i]).trim();
@@ -238,14 +239,30 @@ function parseSku(wb: xl.WorkBook, tab: "SKU BF" | "SKU SF"): SkuRow[] {
   const price2Col = colFirst.get("Price 2") ?? -1;
   const price1Col = colFirst.get("Price 1") ?? -1;
 
-  // For each dept we use the FIRST occurrence of its "<Dept> Category" / "<Dept> Production Time" pair.
-  type DeptCols = { cat: number; time: number };
-  const deptCols: Record<string, DeptCols> = {};
+  // Per-dept columns — capture EVERY occurrence of the "<Dept> Category" /
+  // "<Dept> Production Time" pair. Each section (FG, Divan, HB for BF /
+  // FG, BASE, CUSHION, ARMs for SF) repeats the same headers, so one SKU row
+  // can contribute minutes to the same dept from multiple sub-sections.
+  type DeptColPair = { cat: number; time: number };
+  const deptCols: Record<string, DeptColPair[]> = {};
   for (const deptName of Object.keys(DEPT_NAME_TO_CODE)) {
-    const cat = colFirst.get(`${deptName} Category`);
-    const time = colFirst.get(`${deptName} Production Time`);
-    if (cat !== undefined && time !== undefined) {
-      deptCols[deptName] = { cat, time };
+    deptCols[deptName] = [];
+  }
+  for (let i = 0; i < header.length; i++) {
+    const h = String(header[i]).trim();
+    if (!h) continue;
+    for (const deptName of Object.keys(DEPT_NAME_TO_CODE)) {
+      if (h === `${deptName} Production Time`) {
+        // Find the closest preceding "<Dept> Category" column (may be i-1 in normal layout).
+        let catCol = -1;
+        for (let j = i - 1; j >= Math.max(0, i - 3); j--) {
+          if (String(header[j]).trim() === `${deptName} Category`) {
+            catCol = j;
+            break;
+          }
+        }
+        deptCols[deptName].push({ cat: catCol, time: i });
+      }
     }
   }
 
@@ -259,14 +276,28 @@ function parseSku(wb: xl.WorkBook, tab: "SKU BF" | "SKU SF"): SkuRow[] {
     const fabricUsage = fabricUsageCol >= 0 ? n(r[fabricUsageCol]) : 0;
     const unitM3 = unitM3Col >= 0 ? n(r[unitM3Col]) : 0;
     const deptWorkingTimes: SkuRow["deptWorkingTimes"] = [];
-    for (const [deptName, cols] of Object.entries(deptCols)) {
-      const cat = String(r[cols.cat] ?? "").trim();
-      const mins = n(r[cols.time]);
-      if (!cat && mins === 0) continue;
+    for (const [deptName, pairs] of Object.entries(deptCols)) {
+      if (pairs.length === 0) continue;
+      let totalMins = 0;
+      const cats: string[] = [];
+      for (const p of pairs) {
+        const cat =
+          p.cat >= 0 ? String(r[p.cat] ?? "").trim() : "";
+        const mins = n(r[p.time]);
+        if (mins > 0 || cat) {
+          totalMins += mins;
+          if (cat) cats.push(cat);
+        }
+      }
+      if (totalMins === 0 && cats.length === 0) continue;
+      // Category: if all sub-sections share the same cat, show it once;
+      // otherwise join with "; " (e.g. "CAT 3; CAT 1; CAT 5").
+      const uniqueCats = Array.from(new Set(cats));
+      const category = uniqueCats.join("; ");
       deptWorkingTimes.push({
         departmentCode: DEPT_NAME_TO_CODE[deptName],
-        minutes: Math.round(mins),
-        category: cat,
+        minutes: Math.round(totalMins),
+        category,
       });
     }
     out.push({

@@ -31,7 +31,13 @@ const SHEET = "C:/Users/User/Downloads/Production Sheet (9).xlsx";
 const PROD = "https://hookka-erp-testing.pages.dev";
 const EMAIL = "weisiang329@gmail.com";
 const PASSWORD = "CbpxqJQpjy3VA5yd3Q";
+// BF uses sheet row 11 (0-indexed 10) as the header row.
+// SF has a double header: row 10 (0-indexed 9) has the SF-specific labels
+//   (Gap/Divan/Size) while row 11 (0-indexed 10) is an alias header with
+//   BF-compatible labels ("Blank"/"Sofa Size"). We need row 10 to find the
+//   SF-specific columns. Data for both starts at row 12 (0-indexed 11).
 const HEADER_ROW_IDX = 10;
+const SF_HEADER_ROW_IDX = 9;
 const DATA_START_IDX = 11;
 
 // Customer name alias → D1 customer + state preference
@@ -140,20 +146,24 @@ async function postJson<T>(token: string, path: string, body: unknown): Promise<
 
 // ---------------------------------------------------------------------------
 // Load sheet rows
+// We preserve raw cell access via `__raw[i]` so the mapper can read by column
+// index regardless of misleading header labels (BF: col17=gap, col18=divan
+// despite header labels being "Blank(Dont use for sofa)" / "Sofa Size").
 // ---------------------------------------------------------------------------
-function loadRows(tab: string): Array<Record<string, unknown> & { _row: number }> {
+type TrackerRow = Record<string, unknown> & { _row: number; __raw: unknown[] };
+function loadRows(tab: string): TrackerRow[] {
   const wb = xl.readFile(SHEET);
   const ws = wb.Sheets[tab];
   if (!ws) throw new Error(`tab ${tab} not found`);
   const aoa = xl.utils.sheet_to_json<unknown[]>(ws, { defval: "", header: 1, raw: true });
   const header = aoa[HEADER_ROW_IDX] as unknown[];
-  const rows: Array<Record<string, unknown> & { _row: number }> = [];
+  const rows: TrackerRow[] = [];
   for (let r = DATA_START_IDX; r < aoa.length; r++) {
     const raw = (aoa[r] || []) as unknown[];
     if (!raw.some((v, i) => i < 36 && str(v) !== "")) continue;
     // Require customer PO AND product code
     if (str(raw[0]) === "" || str(raw[12]) === "") continue;
-    const o: Record<string, unknown> & { _row: number } = { _row: r + 1 };
+    const o: TrackerRow = { _row: r + 1, __raw: raw };
     header.forEach((h, i) => { if (h) (o as Record<string, unknown>)[String(h)] = raw[i]; });
     rows.push(o);
   }
@@ -298,7 +308,7 @@ async function main() {
   const groups = new Map<string, SOGroup>();
   const failures: Failure[] = [];
 
-  function makeBFLineItem(r: Record<string, unknown> & { _row: number }): LineItem | null {
+  function makeBFLineItem(r: TrackerRow): LineItem | null {
     const code = str(r["PRODUCT CODE"]);
     const model = str(r["MODEL"]).toUpperCase();
     let candidates = productsByNorm.get(normalizeCode(code));
@@ -317,9 +327,13 @@ async function main() {
       failures.push({ row: r._row, tab: "BF", customerPO: str(r["Customer PO"]), productCode: code, customer: str(r["Customer Name"]), reason: `No product match (MODEL=${model})` });
       return null;
     }
-    const divanIn = n(r["Blank(Dont use for sofa)"]);     // BF: col 17 = divan inches
-    const legIn = n(r["Leg (inches)"]);
-    const divanSize = n(r["Sofa Size"]);                   // BF: col 18 = sofa size (also carries something? usually 8)
+    // BF col mapping — use INDEX, not label, because BF header labels are misleading:
+    //   col 17 labeled "Blank(Dont use for sofa)" is actually GAP (inches) — values 10/12/14
+    //   col 18 labeled "Sofa Size" is actually DIVAN height (inches) — typically 8
+    //   col 20 labeled "Leg (inches)" — leg height
+    const gapIn = n(r.__raw[17]);
+    const divanIn = n(r.__raw[18]);
+    const legIn = n(r.__raw[20]);
     const basePrice = senFromRM(r["Base Price"]);
     const divanPriceSen = senFromRM(r["Divan Price"]);
     const legPriceSen = senFromRM(r["Leg Price"]);
@@ -339,9 +353,9 @@ async function main() {
         sizeLabel: product.sizeLabel || model || "",
         fabricCode: str(r["Fabric Code"]),
         quantity,
-        divanHeightInches: divanIn > 0 ? divanIn : (divanSize > 0 ? divanSize : null),
+        divanHeightInches: divanIn > 0 ? divanIn : null,
         legHeightInches: legIn > 0 ? legIn : null,
-        gapInches: null,
+        gapInches: gapIn > 0 ? gapIn : null,
         specialOrder: str(r["Special Order"]),
         basePriceSen: basePrice,
         divanPriceSen,
@@ -352,33 +366,42 @@ async function main() {
     };
   }
 
-  function makeSFLineItems(r: Record<string, unknown> & { _row: number }): LineItem[] {
+  function makeSFLineItems(r: TrackerRow): LineItem[] {
     const code = str(r["PRODUCT CODE"]);
-    const parts = code.split(",").map((s) => s.trim()).filter(Boolean);
+    // Split on comma OR newline — some rows use multi-line product code cells.
+    const parts = code.split(/[,\n]/).map((s) => s.trim()).filter(Boolean);
     if (parts.length === 0) {
       failures.push({ row: r._row, tab: "SF", customerPO: str(r["Customer PO"]), productCode: code, customer: str(r["Customer Name"]), reason: "Empty product code" });
       return [];
     }
-    const model = str(r["MODEL"]);
-    const itemCat = str(r["Item Category"]) || "SOFA";
+    // SF row-level fields:
+    //   col 13 = Item Category (SOFA | ACCESSORIES)
+    //   col 15 = Fabric Code — applies to ALL modules on the row
+    //   col 16 = Base Price (sheet RM value for the whole set/line)
+    //   col 18 = Sofa Size (seat depth, inches) — SOFA only; blank for accessories
+    //            NOTE: SF header row 9 labels this "Divan (inches)" but data
+    //            shows it's actually seat depth (28/30/32 etc). The task spec
+    //            defines col S as "Sofa Size".
+    //   col 17 / col 20 are effectively unused for SF (always blank) — SF
+    //            tracker does not populate gap/leg for sofas in this sheet.
+    const rowCat = str(r["Item Category"]).toUpperCase() || "SOFA";
+    const isSofa = rowCat === "SOFA";
     const basePrice = senFromRM(r["Base Price"]);
-    const gapIn = n(r["Gap (inches)"]);                   // SF col 17
-    const divanIn = n(r["Divan (inches)"]);                // SF col 18
-    const legIn = n(r["Leg (inches)"]);                    // SF col 20
+    const sofaSizeRaw = str(r.__raw[18]);
+    const sofaSizeNum = n(r.__raw[18]);
+    const rowSizeCode = isSofa && sofaSizeNum > 0 ? String(sofaSizeNum) : "";
+    const rowSizeLabel = rowSizeCode ? `${rowSizeCode}"` : "";
+    const gapIn = n(r.__raw[17]);
+    const legIn = n(r.__raw[20]);
     const divanPriceSen = senFromRM(r["Divan Price"]);
     const legPriceSen = senFromRM(r["Leg Price"]);
     const specialPriceSen = senFromRM(r["Special Order Price"]);
     const fabricCode = str(r["Fabric Code"]);
     const notes = str(r["Notes"]);
     const specialOrder = str(r["Special Order"]);
+    void sofaSizeRaw;
 
     const out: LineItem[] = [];
-    // Sub-total price across all components on this row — we split evenly
-    // across components, rounded to integer sen. Any rounding remainder goes
-    // onto the first line.
-    const perPartSen = parts.length > 0 ? Math.floor(basePrice / parts.length) : basePrice;
-    const remainder = basePrice - perPartSen * parts.length;
-
     for (let idx = 0; idx < parts.length; idx++) {
       const p = parts[idx];
       const cand = productsByNorm.get(normalizeCode(p));
@@ -397,7 +420,25 @@ async function main() {
         failures.push({ row: r._row, tab: "SF", customerPO: str(r["Customer PO"]), productCode: p, customer: str(r["Customer Name"]), reason: "No SF product match" });
         continue;
       }
-      const lineBase = idx === 0 ? perPartSen + remainder : perPartSen;
+      // Per-module line:
+      //   - sizeCode / sizeLabel come from the ROW's Sofa Size (for SOFA rows).
+      //     This is the seat depth that applies to the whole set — each
+      //     module inherits it. Accessories (pillows) keep their own size
+      //     label from the product (e.g. "12\" X 28\"").
+      //   - fabricCode comes from the ROW (single fabric per set).
+      //   - unitPriceSen prefers product.basePriceSen when the product has
+      //     one; otherwise the row's total Base Price lands on the FIRST
+      //     module line (idx 0) with 0 on subsequent modules — the sheet only
+      //     gives a single total per row, so this preserves the total while
+      //     keeping sums correct.
+      const productUnitPrice = typeof prod.basePriceSen === "number" ? prod.basePriceSen : 0;
+      const linePriceSen = productUnitPrice > 0
+        ? productUnitPrice
+        : (idx === 0 ? basePrice : 0);
+      const lineSizeCode = isSofa ? (rowSizeCode || prod.sizeCode || "") : (prod.sizeCode || "");
+      const lineSizeLabel = isSofa
+        ? (rowSizeLabel || prod.sizeLabel || "")
+        : (prod.sizeLabel || "");
       out.push({
         row: r._row,
         tab: "SF",
@@ -407,26 +448,26 @@ async function main() {
           productCode: prod.code,
           productId: prod.id,
           productName: prod.name,
-          itemCategory: prod.category || itemCat,
-          sizeCode: prod.sizeCode || "",
-          sizeLabel: prod.sizeLabel || model || "",
+          itemCategory: prod.category || rowCat,
+          sizeCode: lineSizeCode,
+          sizeLabel: lineSizeLabel,
           fabricCode,
           quantity: 1,
-          divanHeightInches: divanIn > 0 ? divanIn : null,
+          // SF tracker doesn't populate divan/gap/leg for sofas in this sheet;
+          // keep optional fields null unless explicitly numeric in the row.
+          divanHeightInches: null,
           legHeightInches: legIn > 0 ? legIn : null,
           gapInches: gapIn > 0 ? gapIn : null,
           specialOrder,
-          // Only the first component carries the price; the others are components of the same sofa
-          basePriceSen: idx === 0 ? basePrice : 0,
+          basePriceSen: linePriceSen,
+          // Row-level adders go on the first module only (they describe the
+          // whole set, not each piece).
           divanPriceSen: idx === 0 ? divanPriceSen : 0,
           legPriceSen: idx === 0 ? legPriceSen : 0,
           specialOrderPriceSen: idx === 0 ? specialPriceSen : 0,
           notes,
         },
       });
-      // Override: don't split (basePriceSen kept only on first item).
-      // (The first line carries full base price; subsequent lines have 0.)
-      void lineBase;
     }
     return out;
   }
@@ -437,7 +478,7 @@ async function main() {
     return `${custId}|${customerPO}`;
   }
 
-  function addRowToGroups(tab: "BF" | "SF", row: Record<string, unknown> & { _row: number }, items: LineItem[]) {
+  function addRowToGroups(tab: "BF" | "SF", row: TrackerRow, items: LineItem[]) {
     if (items.length === 0) return;
     const sheetCustName = str(row["Customer Name"]);
     const alias = CUSTOMER_MAP[sheetCustName];
@@ -474,7 +515,7 @@ async function main() {
         customerSOId: str(row["Customer SO ID"]),
         reference: str(row["Reference"]),
         companySO: str(row["Company SO"]),
-        companySOId: str(row["Company SO"]).replace(/-(\d{2})$/, ""),
+        companySOId: str(row["Company SO ID"]) || str(row["Company SO"]),
         companySODate: excelDateToIso(row["Company SO Date"]),
         customerDeliveryDate: excelDateToIso(row["Customer Delivery Date"]),
         hookkaExpectedDD: excelDateToIso(row["Hookka Expected DD"]),

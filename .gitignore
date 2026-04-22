@@ -43,3 +43,9 @@ migrations/seed-chunks/
 # Recovered localStorage snapshot (one-shot, not versioned)
 recovered-bom-templates.json
 tmp-*.json
+scripts/inspect-*.ts
+scripts/check-*.ts
+scripts/dryrun-*.ts
+scripts/count-*.ts
+scripts/debug-*.ts
+scripts/verify-*.ts

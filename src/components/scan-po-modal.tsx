@@ -379,14 +379,17 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             />
           )}
 
-          {step === "preview" && parseResult && (
+          {step === "preview" && (claudeRows.length > 0 || parseResult) && (
             <PreviewStep
+              claudeRows={claudeRows}
+              setClaudeRows={setClaudeRows}
+              usedClaude={usedClaude}
               result={parseResult}
               selectedPOs={selectedPOs}
               expandedPO={expandedPO}
               onTogglePO={togglePO}
               onExpandPO={setExpandedPO}
-              onBack={() => { setStep("upload"); setParseResult(null); }}
+              onBack={() => { setStep("upload"); setParseResult(null); setClaudeRows([]); }}
               onConfirm={handleCreateSOs}
             />
           )}
@@ -457,8 +460,8 @@ function UploadStep({
           <div className="flex flex-col items-center gap-3">
             <Upload className="h-12 w-12 text-[#9CA3AF]" />
             <p className="text-lg font-medium text-[#1F1D1B]">Drop PDF files here</p>
-            <p className="text-sm text-[#6B7280]">or click to browse — supports multiple files</p>
-            <p className="text-xs text-[#9CA3AF]">Supported: Houzs Century, Carress, The Conts PO formats</p>
+            <p className="text-sm text-[#6B7280]">or click to browse — supports multiple files (max 32MB each)</p>
+            <p className="text-xs text-[#9CA3AF]">AI-powered extraction works on any customer PO format</p>
           </div>
         )}
         <input
@@ -504,9 +507,12 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  result, selectedPOs, expandedPO, onTogglePO, onExpandPO, onBack, onConfirm,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, onTogglePO, onExpandPO, onBack, onConfirm,
 }: {
-  result: POParseResult;
+  claudeRows: ClaudeScanRow[];
+  setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
+  usedClaude: boolean;
+  result: POParseResult | null;
   selectedPOs: Set<number>;
   expandedPO: number | null;
   onTogglePO: (i: number) => void;
@@ -514,33 +520,46 @@ function PreviewStep({
   onBack: () => void;
   onConfirm: () => void;
 }) {
+  const fallbackPOs = result?.purchaseOrders ?? [];
+  const totalCount = claudeRows.length + fallbackPOs.length;
+
+  const updateClaudeRow = (idx: number, patch: Partial<ClaudeExtractedPO>) => {
+    setClaudeRows(prev => prev.map((r, i) => i === idx ? { ...r, extracted: { ...r.extracted, ...patch } } : r));
+  };
+  const updateClaudeItem = (rowIdx: number, itemIdx: number, patch: Partial<ClaudeExtractedItem>) => {
+    setClaudeRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      return {
+        ...r,
+        extracted: {
+          ...r.extracted,
+          items: r.extracted.items.map((it, j) => j === itemIdx ? { ...it, ...patch } : it),
+        },
+      };
+    }));
+  };
+
   return (
     <div className="space-y-4">
       {/* Summary */}
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="font-semibold text-[#1F1D1B]">
-            Found {result.purchaseOrders.length} Purchase Order{result.purchaseOrders.length !== 1 ? "s" : ""}
+          <h3 className="font-semibold text-[#1F1D1B] flex items-center gap-2">
+            Found {totalCount} Purchase Order{totalCount !== 1 ? "s" : ""}
+            {usedClaude && (
+              <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
+                <Sparkles className="h-3 w-3 inline mr-1" /> AI
+              </Badge>
+            )}
           </h3>
           <p className="text-sm text-[#6B7280]">
-            {selectedPOs.size} selected for creation — review and confirm below
+            {selectedPOs.size} selected — edit any field inline, then confirm
           </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button className="border border-[#D1D5DB]" size="sm" onClick={() => {
-            if (selectedPOs.size === result.purchaseOrders.length) {
-              onTogglePO(-1); // deselect all - hack
-            } else {
-              // select all
-            }
-          }}>
-            {selectedPOs.size === result.purchaseOrders.length ? "Deselect All" : "Select All"}
-          </Button>
         </div>
       </div>
 
       {/* Warnings */}
-      {result.errors.length > 0 && (
+      {result && result.errors.length > 0 && (
         <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
           {result.errors.map((err, i) => (
             <p key={i} className="text-sm text-amber-700 flex items-start gap-2">
@@ -552,17 +571,32 @@ function PreviewStep({
 
       {/* PO Cards */}
       <div className="space-y-3 max-h-[50vh] overflow-y-auto">
-        {result.purchaseOrders.map((po, idx) => (
-          <POCard
-            key={idx}
-            po={po}
-            index={idx}
+        {claudeRows.map((row, idx) => (
+          <ClaudePOCard
+            key={`claude-${idx}`}
+            row={row}
             selected={selectedPOs.has(idx)}
             expanded={expandedPO === idx}
             onToggle={() => onTogglePO(idx)}
             onExpand={() => onExpandPO(expandedPO === idx ? null : idx)}
+            onUpdate={(patch) => updateClaudeRow(idx, patch)}
+            onUpdateItem={(itemIdx, patch) => updateClaudeItem(idx, itemIdx, patch)}
           />
         ))}
+        {fallbackPOs.map((po, idx) => {
+          const globalIdx = claudeRows.length + idx;
+          return (
+            <POCard
+              key={`fb-${idx}`}
+              po={po}
+              index={globalIdx}
+              selected={selectedPOs.has(globalIdx)}
+              expanded={expandedPO === globalIdx}
+              onToggle={() => onTogglePO(globalIdx)}
+              onExpand={() => onExpandPO(expandedPO === globalIdx ? null : globalIdx)}
+            />
+          );
+        })}
       </div>
 
       {/* Actions */}
@@ -578,6 +612,136 @@ function PreviewStep({
         </Button>
       </div>
     </div>
+  );
+}
+
+function ClaudePOCard({
+  row, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem,
+}: {
+  row: ClaudeScanRow;
+  selected: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+  onExpand: () => void;
+  onUpdate: (patch: Partial<ClaudeExtractedPO>) => void;
+  onUpdateItem: (itemIdx: number, patch: Partial<ClaudeExtractedItem>) => void;
+}) {
+  const po = row.extracted;
+  const totalQty = po.items.reduce((s, i) => s + (i.quantity || 1), 0);
+
+  return (
+    <Card className={`border-2 transition-colors ${selected ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"}`}>
+      <CardContent className="p-4">
+        <div className="flex items-start gap-3">
+          <input
+            type="checkbox"
+            checked={selected}
+            onChange={onToggle}
+            className="mt-1 h-4 w-4 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]"
+          />
+          <div className="flex-1 min-w-0 space-y-2">
+            {/* Editable header fields */}
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2 text-sm">
+              <div>
+                <label className="block text-xs text-[#9CA3AF]">Customer PO</label>
+                <input
+                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
+                  value={po.customerPO}
+                  onChange={e => onUpdate({ customerPO: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF]">Customer</label>
+                <input
+                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
+                  value={po.customerName}
+                  onChange={e => onUpdate({ customerName: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF]">State</label>
+                <input
+                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
+                  value={po.customerState ?? ""}
+                  onChange={e => onUpdate({ customerState: e.target.value || null })}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF]">Delivery Date</label>
+                <input
+                  type="date"
+                  className="w-full px-2 py-1 border border-[#E2DDD8] rounded"
+                  value={po.deliveryDate ?? ""}
+                  onChange={e => onUpdate({ deliveryDate: e.target.value || null })}
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap text-xs text-[#6B7280]">
+              <Badge className="bg-violet-50 text-violet-700 border border-violet-200">
+                <Sparkles className="h-3 w-3 inline mr-0.5" /> {row.file.name}
+              </Badge>
+              <span>{po.items.length} items, {totalQty} qty</span>
+            </div>
+
+            {expanded && (
+              <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="bg-[#F5F5F5] text-xs text-[#6B7280]">
+                      <th className="px-2 py-1 text-left">#</th>
+                      <th className="px-2 py-1 text-left">Product</th>
+                      <th className="px-2 py-1 text-left">Size</th>
+                      <th className="px-2 py-1 text-left">Fabric</th>
+                      <th className="px-2 py-1 text-center">Qty</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {po.items.map((item, i) => (
+                      <tr key={i} className="border-t border-[#E2DDD8]">
+                        <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
+                        <td className="px-2 py-1">
+                          <input
+                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                            value={item.productCode}
+                            onChange={e => onUpdateItem(i, { productCode: e.target.value })}
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                            value={item.sizeLabel ?? ""}
+                            onChange={e => onUpdateItem(i, { sizeLabel: e.target.value || null })}
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <input
+                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                            value={item.fabricCode ?? ""}
+                            onChange={e => onUpdateItem(i, { fabricCode: e.target.value || null })}
+                          />
+                        </td>
+                        <td className="px-2 py-1 text-center">
+                          <input
+                            type="number"
+                            className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                            value={item.quantity}
+                            onChange={e => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          <Button variant="ghost" size="sm" onClick={onExpand}>
+            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 

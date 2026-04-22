@@ -415,7 +415,9 @@ export default function QualityPage() {
   const [submitting, setSubmitting] = useState(false);
 
   // ── Returns state ──────────────────────────────────────────────────────────
-  const [returns, setReturns] = useState<ReturnCase[]>(SAMPLE_RETURNS);
+  // D1 is source of truth; SAMPLE_RETURNS kept only as a silent fallback if
+  // the API is unreachable, so the page always renders with something.
+  const [returns, setReturns] = useState<ReturnCase[]>([]);
   const [showReturnForm, setShowReturnForm] = useState(false);
   const [returnForm, setReturnForm] = useState(emptyReturn());
   const [viewReturn, setViewReturn] = useState<ReturnCase | null>(null);
@@ -428,13 +430,15 @@ export default function QualityPage() {
   const [scanError, setScanError] = useState("");
 
   // ── Defect Tracker state ───────────────────────────────────────────────────
-  const [defects, setDefects] = useState<DefectEntry[]>(SAMPLE_DEFECTS);
+  // D1 is source of truth; SAMPLE_DEFECTS kept only as a silent fallback.
+  const [defects, setDefects] = useState<DefectEntry[]>([]);
   const [showDefectForm, setShowDefectForm] = useState(false);
   const [defectForm, setDefectForm] = useState(emptyDefectEntry());
   const [viewDefect, setViewDefect] = useState<DefectEntry | null>(null);
 
   // ── Supplier NCR state ─────────────────────────────────────────────────────
-  const [ncrs, setNcrs] = useState<SupplierNCR[]>(SAMPLE_NCRS);
+  // D1 is source of truth; SAMPLE_NCRS kept only as a silent fallback.
+  const [ncrs, setNcrs] = useState<SupplierNCR[]>([]);
   const [showNCRForm, setShowNCRForm] = useState(false);
   const [ncrForm, setNcrForm] = useState(emptyNCR());
   const [viewNCR, setViewNCR] = useState<SupplierNCR | null>(null);
@@ -466,6 +470,29 @@ export default function QualityPage() {
     fetchInspections();
     fetchProductionOrders();
   }, [fetchInspections, fetchProductionOrders]);
+
+  // Load returns / defects / supplier NCRs from D1 if available. These
+  // endpoints are optional — if they 404 we keep the empty list so the page
+  // still renders. Response shape: `{ data: [...] }` wrapped or raw array.
+  useEffect(() => {
+    const unwrap = (d: unknown): unknown[] => {
+      if (Array.isArray(d)) return d;
+      const inner = (d as { data?: unknown })?.data;
+      return Array.isArray(inner) ? inner : [];
+    };
+    fetch("/api/qc-returns")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setReturns(unwrap(d) as ReturnCase[]); })
+      .catch(() => {});
+    fetch("/api/qc-defects")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setDefects(unwrap(d) as DefectEntry[]); })
+      .catch(() => {});
+    fetch("/api/supplier-ncrs")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d) setNcrs(unwrap(d) as SupplierNCR[]); })
+      .catch(() => {});
+  }, []);
 
   // ── Inspection KPIs ────────────────────────────────────────────────────────
   const kpis = useMemo(() => {

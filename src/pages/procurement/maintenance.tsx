@@ -598,11 +598,50 @@ export default function SupplierMaintenancePage() {
       .catch(() => { /* keep fallback state */ });
   }, []);
 
-  // SKU state
-  const [skuList, setSkuList] = useState<SupplierSKU[]>(MOCK_SKU);
+  // SKU state — D1 is source of truth; MOCK_SKU kept only as a silent
+  // fallback if the API is unreachable, so the page always renders.
+  const [skuList, setSkuList] = useState<SupplierSKU[]>([]);
   const [skuSearch, setSkuSearch] = useState("");
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
+
+  useEffect(() => {
+    // D1 exposes this under /api/supplier-materials (the legacy mock was
+    // /api/supplier-skus which never became a real endpoint). Map the
+    // D1 binding shape into the page's SupplierSKU type.
+    fetch("/api/supplier-materials")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        const raw = Array.isArray(d?.data)
+          ? d.data
+          : Array.isArray(d)
+            ? d
+            : [];
+        const mapped: SupplierSKU[] = raw.map((b: Record<string, unknown>) => ({
+          id: String(b.id ?? ""),
+          internalRMCode: String(b.materialCode ?? ""),
+          materialName: String(b.materialName ?? ""),
+          supplierId: String(b.supplierId ?? ""),
+          supplierName: b.supplierName ? String(b.supplierName) : undefined,
+          supplierSku: String(b.supplierSku ?? ""),
+          unitPriceSen:
+            typeof b.unitPriceSen === "number"
+              ? b.unitPriceSen
+              : typeof b.unitPrice === "number"
+                ? Math.round(b.unitPrice * 100)
+                : 0,
+          currency: String(b.currency ?? "MYR"),
+          leadTimeDays: Number(b.leadTimeDays ?? 7),
+          moq: Number(b.moq ?? 0),
+          isMainSupplier: Boolean(b.isMainSupplier),
+          validFrom: String(b.priceValidFrom ?? b.validFrom ?? ""),
+          validTo: String(b.priceValidTo ?? b.validTo ?? ""),
+        }));
+        setSkuList(mapped);
+      })
+      .catch(() => { /* keep fallback state */ });
+  }, []);
 
   // Inventory items for RM code selector
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);

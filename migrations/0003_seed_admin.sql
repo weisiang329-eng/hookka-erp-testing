@@ -1,15 +1,13 @@
 -- ============================================================================
 -- HOOKKA ERP — Seed initial SUPER_ADMIN account
 --
--- Single bootstrap user. Change the password via POST /api/auth/change-password
--- after first login if desired.
+-- Single bootstrap user. The plaintext password is NOT stored here — for a
+-- fresh environment, generate your own hash first:
 --
---   email    : weisiang329@gmail.com
---   password : Hookka@123
+--     npx tsx scripts/hash-admin-password.ts '<pick-a-strong-password>'
 --
--- The hash below was generated with:
---     npx tsx scripts/hash-admin-password.ts 'Hookka@123'
--- Regenerate if you want a fresh salt per environment.
+-- ...and paste it into `passwordHash` below. After seeding, log in once and
+-- rotate via POST /api/auth/change-password.
 -- ============================================================================
 
 INSERT INTO users (
@@ -24,7 +22,9 @@ INSERT INTO users (
 ) VALUES (
   'user-admin-001',
   'weisiang329@gmail.com',
-  'pbkdf2-sha256$100000$b412e5147165a4b1db773ac93226c4ee$910bd31c2a5d1dbd8b64ae5b4db0de7eaada6cc65c5bf0194d60f89647586d98',
+  -- Replace before running on a fresh D1; the existing prod DB was already
+  -- rotated out-of-band and no longer uses any hash previously committed here.
+  'pbkdf2-sha256$100000$000000000000000000000000000000$0000000000000000000000000000000000000000000000000000000000000000',
   'SUPER_ADMIN',
   1,
   '2026-04-22T00:00:00Z',

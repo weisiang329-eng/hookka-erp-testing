@@ -16,6 +16,19 @@ import { inviteEmailTemplate, sendEmail } from "../lib/email";
 
 const app = new Hono<Env>();
 
+// Role gate — the whole file is SUPER_ADMIN only. authMiddleware has already
+// stashed the caller's role on the ctx (`userRole`); if it's missing or not
+// SUPER_ADMIN, reject with 403 before any handler runs.
+app.use("*", async (c, next) => {
+  const role = (c as unknown as { get: (k: string) => string | undefined }).get(
+    "userRole",
+  );
+  if (role !== "SUPER_ADMIN") {
+    return c.json({ success: false, error: "Forbidden" }, 403);
+  }
+  await next();
+});
+
 // Invite TTL — 72 hours is a standard SaaS balance between "oops I missed it"
 // and "stale tokens floating around". Change here, not in the schema.
 const INVITE_TTL_HOURS = 72;
@@ -128,7 +141,7 @@ app.post("/", async (c) => {
         id,
         email.trim(),
         passwordHash,
-        role ?? "SUPER_ADMIN",
+        role ?? "STAFF",
         createdAt,
         displayName ?? "",
       )
@@ -386,7 +399,7 @@ app.post("/invite", async (c) => {
       .bind(
         token,
         trimmedEmail,
-        role ?? "SUPER_ADMIN",
+        role ?? "STAFF",
         displayName ?? null,
         userId,
         nowIso,
@@ -408,7 +421,7 @@ app.post("/invite", async (c) => {
     const invite: InviteRow = {
       token,
       email: trimmedEmail,
-      role: role ?? "SUPER_ADMIN",
+      role: role ?? "STAFF",
       displayName: displayName ?? null,
       invitedBy: userId,
       createdAt: nowIso,

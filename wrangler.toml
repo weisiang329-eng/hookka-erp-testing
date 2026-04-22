@@ -36,5 +36,5 @@ database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
 [vars]
 ENVIRONMENT = "dev"
 API_CORS_ORIGIN = "http://localhost:3000"
-APP_URL = "http://localhost:8788"
+APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka ERP <noreply@houzscentury.com>"

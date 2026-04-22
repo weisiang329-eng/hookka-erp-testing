@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,9 +7,14 @@ import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
-import { ArrowLeft, Plus, Trash2, Save, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import type { Customer, Product, FabricItem, SalesOrder } from "@/lib/mock-data";
-import { SEAT_HEIGHT_OPTIONS } from "@/lib/mock-data";
+import {
+  SEAT_HEIGHT_OPTIONS,
+  legHeightOptions,
+  specialOrderOptions,
+} from "@/lib/mock-data";
+import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 
@@ -32,6 +37,7 @@ type LineItem = {
   divanPriceSen: number;
   legHeightInches: number | null;
   legPriceSen: number;
+  specialOrders: string[];
   specialOrder: string;
   specialOrderPriceSen: number;
   notes: string;
@@ -43,8 +49,27 @@ const EMPTY_LINE: LineItem = {
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
-  specialOrder: "", specialOrderPriceSen: 0, notes: "",
+  specialOrders: [], specialOrder: "", specialOrderPriceSen: 0, notes: "",
 };
+
+function parseInches(h: string): number | null {
+  const m = h.match(/^(\d+)"/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function calcSpecialOrderSurcharge(codes: string[]): number {
+  const hasHB = codes.includes("HB_FULL_COVER");
+  const hasBtm = codes.includes("DIVAN_BTM_COVER");
+  let total = 0;
+  for (const code of codes) {
+    const opt = specialOrderOptions.find(o => o.code === code);
+    if (!opt) continue;
+    if (hasHB && hasBtm && (code === "HB_FULL_COVER" || code === "DIVAN_BTM_COVER")) continue;
+    total += opt.surcharge;
+  }
+  if (hasHB && hasBtm) total += 10000;
+  return total;
+}
 
 /** Extract FT portion from sizeLabel, e.g. "Queen 5FT" → "5FT" */
 function extractSizeSuffix(sizeLabel: string): string {
@@ -110,6 +135,12 @@ export default function EditSalesOrderPage() {
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
+  const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, unknown> | null>(getVariantsConfigSync());
+  const [showSpecialOrdersIdx, setShowSpecialOrdersIdx] = useState<number | null>(null);
+
+  useEffect(() => {
+    fetchVariantsConfig().then(setMaintenanceConfig).catch(() => { /* ignore */ });
+  }, []);
 
   // Load reference data
   useEffect(() => {
@@ -117,6 +148,59 @@ export default function EditSalesOrderPage() {
     fetch("/api/products").then(r => r.json()).then(d => setProducts(d.data || []));
     fetch("/api/fabrics").then(r => r.json()).then(d => setFabrics(d.data || []));
   }, []);
+
+  // Surcharge lookup from maintenance config
+  const getConfigSurcharge = (key: string, value: string, fallback: number): number => {
+    if (!maintenanceConfig) return fallback;
+    const arr = (maintenanceConfig as Record<string, unknown>)[key];
+    if (!Array.isArray(arr)) return fallback;
+    const found = arr.find((it: unknown) => {
+      if (typeof it !== "object" || !it) return false;
+      const r = it as Record<string, unknown>;
+      return r.value === value || r.height === value || r.name === value;
+    });
+    if (found && typeof found === "object") {
+      const r = found as Record<string, unknown>;
+      const v = r.priceSen ?? r.surcharge;
+      if (typeof v === "number") return v;
+    }
+    return fallback;
+  };
+
+  // Get available special orders for a category, filtered from config
+  const getAvailableSpecials = (isSofa: boolean) => {
+    const key = isSofa ? "sofaSpecials" : "specials";
+    const cfg = maintenanceConfig?.[key];
+    if (!Array.isArray(cfg)) return specialOrderOptions;
+    const names = cfg.map((c) =>
+      typeof c === "object" && c && "value" in c ? (c as { value: string }).value : String(c),
+    );
+    return specialOrderOptions.filter((o) => names.includes(o.name));
+  };
+
+  const toggleSpecialOrder = (idx: number, code: string) => {
+    const item = items[idx];
+    const isSofa = item.itemCategory === "SOFA";
+    const next = item.specialOrders.includes(code)
+      ? item.specialOrders.filter((c) => c !== code)
+      : [...item.specialOrders, code];
+    const available = getAvailableSpecials(isSofa);
+    const sumSurcharge = next.reduce((s, c) => {
+      const opt = available.find((o) => o.code === c);
+      if (!opt) return s;
+      return s + getConfigSurcharge(isSofa ? "sofaSpecials" : "specials", opt.name, opt.surcharge);
+    }, 0);
+    const combinedSurcharge = calcSpecialOrderSurcharge(next);
+    const surcharge = isSofa ? sumSurcharge : combinedSurcharge;
+    const label = next
+      .map((c) => specialOrderOptions.find((o) => o.code === c)?.name || c)
+      .join("; ");
+    updateItem(idx, {
+      specialOrders: next,
+      specialOrder: label,
+      specialOrderPriceSen: surcharge,
+    });
+  };
 
   // Load existing order
   useEffect(() => {
@@ -173,6 +257,13 @@ export default function EditSalesOrderPage() {
               divanPriceSen: (item.divanPriceSen as number) || 0,
               legHeightInches: item.legHeightInches as number | null,
               legPriceSen: (item.legPriceSen as number) || 0,
+              specialOrders: (() => {
+                const raw = (item.specialOrder as string) || "";
+                const tokens = raw.split(/[;,]+/).map((s) => s.trim()).filter(Boolean);
+                return tokens
+                  .map((tok) => specialOrderOptions.find((o) => o.name === tok)?.code)
+                  .filter((c): c is string => Boolean(c));
+              })(),
               specialOrder: (item.specialOrder as string) || "",
               specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
               notes: (item.notes as string) || "",
@@ -533,7 +624,7 @@ export default function EditSalesOrderPage() {
                   // Module shown via the top Module dropdown — the side-by-side
                   // readonly field that used to display sizeCode here was
                   // mislabeled (sizeCode is the seat SIZE, not the module).
-                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
                       <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -549,13 +640,41 @@ export default function EditSalesOrderPage() {
                       />
                     </div>
                     <div>
+                      <label className="block text-xs text-[#9CA3AF] mb-1">Leg</label>
+                      <SearchableSelect
+                        value={(() => {
+                          if (item.legHeightInches == null || item.legHeightInches === 0) return "No Leg";
+                          const match = legHeightOptions.find(o => parseInches(o.height) === item.legHeightInches);
+                          return match?.height || "No Leg";
+                        })()}
+                        onChange={(val) => {
+                          const inches = val === "No Leg" ? null : parseInches(val);
+                          const opt = legHeightOptions.find(o => o.height === val);
+                          const sc = opt ? getConfigSurcharge("sofaLegHeights", val, opt.surcharge) : 0;
+                          updateItem(idx, {
+                            legHeightInches: inches,
+                            legPriceSen: sc,
+                          });
+                        }}
+                        options={(() => {
+                          const cfg = maintenanceConfig?.sofaLegHeights;
+                          const arr = Array.isArray(cfg)
+                            ? cfg.map((v) => typeof v === "object" && v && "value" in v ? (v as { value: string }).value : String(v))
+                            : legHeightOptions.map(o => o.height);
+                          return arr.map(h => ({ value: h, label: h }));
+                        })()}
+                        placeholder="Select leg..."
+                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"
+                      />
+                    </div>
+                    <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
                       <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                     </div>
                   </div>
                 ) : (
                   <>
-                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
                         <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
@@ -575,19 +694,6 @@ export default function EditSalesOrderPage() {
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Leg H (&quot;)</label>
                         <Input type="number" min={0} value={item.legHeightInches ?? ""} onChange={(e) => updateItem(idx, { legHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
-                      </div>
-                      <div>
-                        <label className="block text-xs text-[#9CA3AF] mb-1">Special Order</label>
-                        <select
-                          value={item.specialOrder}
-                          onChange={(e) => updateItem(idx, { specialOrder: e.target.value, specialOrderPriceSen: e.target.value ? 15000 : 0 })}
-                          className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8 focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                        >
-                          <option value="">None</option>
-                          <option value="EXTRA_FOAM">Extra Foam</option>
-                          <option value="CUSTOM_STITCH">Custom Stitch</option>
-                          <option value="CUSTOM_SIZE">Custom Size</option>
-                        </select>
                       </div>
                     </div>
 
@@ -615,6 +721,73 @@ export default function EditSalesOrderPage() {
                     )}
                   </>
                 )}
+
+                {/* Special Orders multi-select — config-driven, shared across sofa + bedframe */}
+                {item.itemCategory && (() => {
+                  const isSofa = item.itemCategory === "SOFA";
+                  const available = getAvailableSpecials(isSofa);
+                  const isOpen = showSpecialOrdersIdx === idx;
+                  return (
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setShowSpecialOrdersIdx(isOpen ? null : idx)}
+                        className="flex items-center gap-1.5 text-xs font-medium text-[#6B5C32] hover:text-[#4A3F22] transition-colors"
+                      >
+                        {isOpen ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                        Special Orders ({item.specialOrders.length} selected)
+                      </button>
+                      {item.specialOrders.length > 0 && !isOpen && (
+                        <div className="flex flex-wrap gap-1 mt-1.5">
+                          {item.specialOrders.map(code => {
+                            const opt = specialOrderOptions.find(o => o.code === code);
+                            if (!opt) return null;
+                            const sc = getConfigSurcharge(isSofa ? "sofaSpecials" : "specials", opt.name, opt.surcharge);
+                            return (
+                              <Badge key={code} className="text-xs font-normal">
+                                {opt.name}
+                                {sc !== 0 && (
+                                  <span className={sc > 0 ? "text-[#9C6F1E] ml-1" : "text-[#4F7C3A] ml-1"}>
+                                    {sc > 0 ? "+" : ""}{formatCurrency(sc)}
+                                  </span>
+                                )}
+                              </Badge>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {isOpen && (
+                        <div className="mt-2 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                          {available.map(opt => {
+                            const checked = item.specialOrders.includes(opt.code);
+                            const sc = getConfigSurcharge(isSofa ? "sofaSpecials" : "specials", opt.name, opt.surcharge);
+                            return (
+                              <label
+                                key={opt.code}
+                                className={`flex items-start gap-2 p-2 rounded cursor-pointer text-sm transition-colors ${checked ? "bg-[#6B5C32]/10 border border-[#6B5C32]/30" : "hover:bg-white border border-transparent"}`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleSpecialOrder(idx, opt.code)}
+                                  className="mt-0.5 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]/20"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <div className="font-medium text-[#374151]">{opt.name}</div>
+                                  <div className="text-xs text-[#9CA3AF]">
+                                    {sc > 0 && <span className="text-[#9C6F1E]">+{formatCurrency(sc)}</span>}
+                                    {sc < 0 && <span className="text-[#4F7C3A]">{formatCurrency(sc)}</span>}
+                                    {sc === 0 && <span>RM 0</span>}
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
 
                 <div>
                   <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>

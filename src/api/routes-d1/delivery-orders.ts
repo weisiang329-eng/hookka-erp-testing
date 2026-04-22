@@ -173,6 +173,24 @@ function genNextDoNo(): string {
   return `DO-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
 }
 
+function genStatusChangeId(): string {
+  return `sc-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function genInvoiceId(): string {
+  return `inv-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function genInvoiceItemId(): string {
+  return `invi-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function genNextInvoiceNo(): string {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  return `INV-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+}
+
 async function fetchOrderWithItems(db: D1Database, id: string) {
   const [order, itemsRes] = await Promise.all([
     db
@@ -473,13 +491,10 @@ app.put("/:id", async (c) => {
           body.proofOfDelivery?.deliveredAt ?? existing.deliveredAt ?? now;
         nextDeliveredAt = podAt;
         nextOverdue = "COMPLETED";
-        // TODO(phase-4): FIFO-consume FG batches + emit COGS ledger entries,
-        // and cascade the SO status from IN_PRODUCTION/READY_TO_SHIP → SHIPPED.
+        // TODO(phase-4): FIFO-consume FG batches + emit COGS ledger entries.
       }
       if (nextStatus === "INVOICED") {
         nextOverdue = "INVOICED";
-        // TODO(phase-4): cascade the linked SO SHIPPED → DELIVERED and append
-        // an so_status_changes row.
       }
     }
 
@@ -683,6 +698,214 @@ app.put("/:id", async (c) => {
             item.salesOrderNo,
           ),
         );
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Cascades on DELIVERED transition (E1 + E2):
+    //   * fg_units.status = 'DELIVERED' for every unit linked to this DO
+    //   * sales_orders.status = 'DELIVERED' + so_status_changes audit row
+    //   * Auto-create a DRAFT invoice linked to this DO (idempotent — skip
+    //     if any invoice already references this deliveryOrderId).
+    // Everything goes into the same batch so a partial failure rolls back.
+    // -------------------------------------------------------------------
+    const cascadedToDelivered =
+      existing.status !== "DELIVERED" && nextStatus === "DELIVERED";
+    if (cascadedToDelivered) {
+      // fg_units sync: flip every unit whose doId matches.
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE fg_units SET status = 'DELIVERED', deliveredAt = ? WHERE doId = ?`,
+        ).bind(nextDeliveredAt ?? now, id),
+      );
+
+      // SO status cascade — only if this DO is linked to a SO.
+      if (existing.salesOrderId) {
+        const soRow = await c.env.DB.prepare(
+          "SELECT id, status, totalSen FROM sales_orders WHERE id = ?",
+        )
+          .bind(existing.salesOrderId)
+          .first<{ id: string; status: string; totalSen: number }>();
+
+        if (soRow && soRow.status !== "DELIVERED") {
+          statements.push(
+            c.env.DB.prepare(
+              "UPDATE sales_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+            ).bind(now, soRow.id),
+            c.env.DB.prepare(
+              `INSERT INTO so_status_changes
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              genStatusChangeId(),
+              soRow.id,
+              soRow.status,
+              "DELIVERED",
+              "System",
+              now,
+              "DO delivered",
+              JSON.stringify([`DO ${existing.doNo} marked DELIVERED`]),
+            ),
+          );
+        }
+
+        // Auto-create DRAFT invoice — idempotent check.
+        const existingInvoice = await c.env.DB.prepare(
+          "SELECT id FROM invoices WHERE deliveryOrderId = ? LIMIT 1",
+        )
+          .bind(id)
+          .first<{ id: string }>();
+
+        if (!existingInvoice) {
+          // Build invoice line items from DO items joined with SO unit prices
+          // (same pattern used by the invoices POST route). Fall back to the
+          // SO items themselves if the DO has no lines.
+          const [doItemsRes, soItemsRes] = await Promise.all([
+            c.env.DB.prepare(
+              `SELECT productCode, productName, sizeLabel, fabricCode, quantity
+                 FROM delivery_order_items WHERE deliveryOrderId = ?`,
+            )
+              .bind(id)
+              .all<{
+                productCode: string | null;
+                productName: string | null;
+                sizeLabel: string | null;
+                fabricCode: string | null;
+                quantity: number;
+              }>(),
+            c.env.DB.prepare(
+              `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
+                 FROM sales_order_items WHERE salesOrderId = ?`,
+            )
+              .bind(existing.salesOrderId)
+              .all<{
+                productCode: string | null;
+                productName: string | null;
+                sizeLabel: string | null;
+                fabricCode: string | null;
+                quantity: number;
+                unitPriceSen: number;
+                lineTotalSen: number;
+              }>(),
+          ]);
+
+          const priceByCode = new Map<string, number>();
+          for (const si of soItemsRes.results ?? []) {
+            if (si.productCode) priceByCode.set(si.productCode, si.unitPriceSen);
+          }
+
+          type InvItem = {
+            id: string;
+            productCode: string;
+            productName: string;
+            sizeLabel: string;
+            fabricCode: string;
+            quantity: number;
+            unitPriceSen: number;
+            totalSen: number;
+          };
+
+          let invItems: InvItem[] = (doItemsRes.results ?? []).map((di) => {
+            const unitPriceSen = di.productCode
+              ? priceByCode.get(di.productCode) ?? 0
+              : 0;
+            return {
+              id: genInvoiceItemId(),
+              productCode: di.productCode ?? "",
+              productName: di.productName ?? "",
+              sizeLabel: di.sizeLabel ?? "",
+              fabricCode: di.fabricCode ?? "",
+              quantity: di.quantity,
+              unitPriceSen,
+              totalSen: unitPriceSen * di.quantity,
+            };
+          });
+
+          let computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+
+          // Fall back to SO line items if DO had no lines OR all prices
+          // resolved to 0 (DO items not aligned with SO productCodes).
+          if (computedTotal === 0 && (soItemsRes.results ?? []).length > 0) {
+            invItems = (soItemsRes.results ?? []).map((si) => ({
+              id: genInvoiceItemId(),
+              productCode: si.productCode ?? "",
+              productName: si.productName ?? "",
+              sizeLabel: si.sizeLabel ?? "",
+              fabricCode: si.fabricCode ?? "",
+              quantity: si.quantity,
+              unitPriceSen: si.unitPriceSen,
+              totalSen: si.lineTotalSen || si.unitPriceSen * si.quantity,
+            }));
+            computedTotal = invItems.reduce((s, i) => s + i.totalSen, 0);
+          }
+
+          // Final fallback — use SO total (e.g. if DO lines exist but all
+          // priced at 0 and SO has no matching items).
+          if (computedTotal === 0 && soRow?.totalSen) {
+            computedTotal = soRow.totalSen;
+          }
+
+          const invId = genInvoiceId();
+          const invoiceNo = genNextInvoiceNo();
+          const invoiceDate = now.split("T")[0];
+          const due = new Date();
+          due.setDate(due.getDate() + 30);
+          const dueDate = due.toISOString().split("T")[0];
+
+          statements.push(
+            c.env.DB.prepare(
+              `INSERT INTO invoices (
+                 id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
+                 customerId, customerName, customerState, hubId, hubName,
+                 subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+                 paymentDate, paymentMethod, notes, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              invId,
+              invoiceNo,
+              id,
+              existing.doNo,
+              existing.salesOrderId,
+              existing.companySOId,
+              existing.customerId,
+              existing.customerName,
+              existing.customerState,
+              existing.hubId,
+              existing.hubName,
+              computedTotal,
+              computedTotal,
+              "DRAFT",
+              invoiceDate,
+              dueDate,
+              0,
+              null,
+              "",
+              "",
+              now,
+              now,
+            ),
+          );
+          for (const item of invItems) {
+            statements.push(
+              c.env.DB.prepare(
+                `INSERT INTO invoice_items (
+                   id, invoiceId, productCode, productName, sizeLabel, fabricCode,
+                   quantity, unitPriceSen, totalSen
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              ).bind(
+                item.id,
+                invId,
+                item.productCode,
+                item.productName,
+                item.sizeLabel,
+                item.fabricCode,
+                item.quantity,
+                item.unitPriceSen,
+                item.totalSen,
+              ),
+            );
+          }
+        }
       }
     }
 

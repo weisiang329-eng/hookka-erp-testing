@@ -180,7 +180,11 @@ app.get("/:id", async (c) => {
   return c.json({ success: true, data: rowToDebitNote(row) });
 });
 
-// PUT /api/debit-notes/:id — update status / approvedBy
+// PUT /api/debit-notes/:id — update status / approvedBy.
+// Mirror of the credit-note flow, but inverted: when the DN goes POSTED
+// (E5) we INCREMENT customer A/R, and if pinned to an invoice we bump
+// that invoice's totalSen. Idempotent: only fires on the actual transition
+// into POSTED (not on repeated PUTs with the same status).
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
@@ -202,11 +206,44 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.prepare(
-      "UPDATE debit_notes SET status = ?, approvedBy = ? WHERE id = ?",
-    )
-      .bind(status, approvedBy, id)
-      .run();
+    const transitionedToPosted =
+      existing.status !== "POSTED" && status === "POSTED";
+
+    const statements: D1PreparedStatement[] = [
+      c.env.DB.prepare(
+        "UPDATE debit_notes SET status = ?, approvedBy = ? WHERE id = ?",
+      ).bind(status, approvedBy, id),
+    ];
+
+    if (transitionedToPosted && existing.totalAmount > 0) {
+      // Customer A/R: a debit note adds to what the customer owes.
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+        ).bind(existing.totalAmount, existing.customerId),
+      );
+      // If pinned to a specific invoice, bump that invoice's totalSen
+      // so downstream balance math is consistent.
+      if (existing.invoiceId) {
+        const now = new Date().toISOString();
+        statements.push(
+          c.env.DB.prepare(
+            `UPDATE invoices
+               SET totalSen = totalSen + ?,
+                   subtotalSen = subtotalSen + ?,
+                   updated_at = ?
+             WHERE id = ?`,
+          ).bind(
+            existing.totalAmount,
+            existing.totalAmount,
+            now,
+            existing.invoiceId,
+          ),
+        );
+      }
+    }
+
+    await c.env.DB.batch(statements);
 
     const updated = await c.env.DB.prepare(
       "SELECT * FROM debit_notes WHERE id = ?",

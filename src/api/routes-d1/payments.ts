@@ -81,6 +81,10 @@ function genNextReceiptNo(): string {
   return `REC-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
 }
 
+function genStatusChangeId(): string {
+  return `sc-${crypto.randomUUID().slice(0, 8)}`;
+}
+
 // GET /api/payments — list all (optional ?customerId= / ?invoiceId= filters)
 app.get("/", async (c) => {
   const customerId = c.req.query("customerId");
@@ -138,15 +142,22 @@ app.post("/", async (c) => {
 
     // Look up each invoice to grab the invoiceNo + current state for the
     // per-allocation side-effects (invoice_payments insert + paid bump).
+    // Also pull salesOrderId so we can cascade the SO once the invoice is
+    // fully paid (E3).
     const invoiceSnapshots = new Map<
       string,
-      { invoiceNo: string; paidAmount: number; totalSen: number }
+      {
+        invoiceNo: string;
+        paidAmount: number;
+        totalSen: number;
+        salesOrderId: string | null;
+      }
     >();
     if (allocInput.length > 0) {
       const ids = allocInput.map((a) => a.invoiceId);
       const placeholders = ids.map(() => "?").join(",");
       const invs = await c.env.DB.prepare(
-        `SELECT id, invoiceNo, paidAmount, totalSen FROM invoices WHERE id IN (${placeholders})`,
+        `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId FROM invoices WHERE id IN (${placeholders})`,
       )
         .bind(...ids)
         .all<{
@@ -154,12 +165,14 @@ app.post("/", async (c) => {
           invoiceNo: string;
           paidAmount: number;
           totalSen: number;
+          salesOrderId: string | null;
         }>();
       for (const i of invs.results ?? []) {
         invoiceSnapshots.set(i.id, {
           invoiceNo: i.invoiceNo,
           paidAmount: i.paidAmount,
           totalSen: i.totalSen,
+          salesOrderId: i.salesOrderId,
         });
       }
     }
@@ -196,16 +209,26 @@ app.post("/", async (c) => {
     ];
 
     // Per-allocation: add invoice_payments row and bump paidAmount/status.
+    // Track total allocated to this customer so we can decrement their
+    // outstandingSen in one statement (E3). Track fully-paid invoices so
+    // we can cascade their linked SO to INVOICED (only from DELIVERED /
+    // READY_TO_SHIP).
+    let totalAllocatedSen = 0;
+    const fullyPaidSOIds: string[] = [];
     for (const alloc of parsedAllocations) {
       const snap = invoiceSnapshots.get(alloc.invoiceId);
       if (!snap) continue;
       const newPaid = snap.paidAmount + alloc.amount;
-      const newStatus =
-        newPaid >= snap.totalSen
-          ? "PAID"
-          : newPaid > 0
-            ? "PARTIAL_PAID"
-            : "SENT";
+      const isFullyPaid = newPaid >= snap.totalSen;
+      const newStatus = isFullyPaid
+        ? "PAID"
+        : newPaid > 0
+          ? "PARTIAL_PAID"
+          : "SENT";
+      totalAllocatedSen += alloc.amount;
+      if (isFullyPaid && snap.salesOrderId) {
+        fullyPaidSOIds.push(snap.salesOrderId);
+      }
       statements.push(
         c.env.DB.prepare(
           `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
@@ -227,11 +250,57 @@ app.post("/", async (c) => {
         ).bind(
           newPaid,
           newStatus,
-          newStatus === "PAID" ? date : null,
+          isFullyPaid ? date : null,
           now,
           alloc.invoiceId,
         ),
       );
+    }
+
+    // E3: decrement the customer's outstanding A/R by the total allocated.
+    // MAX(0, ...) protects against over-allocation (rounding / partial
+    // historical state). If the full invoice has just flipped to PAID,
+    // cascade the linked SO from DELIVERED/READY_TO_SHIP → INVOICED and
+    // append a so_status_changes audit row.
+    if (totalAllocatedSen > 0) {
+      statements.push(
+        c.env.DB.prepare(
+          `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
+        ).bind(totalAllocatedSen, customer.id),
+      );
+    }
+
+    if (fullyPaidSOIds.length > 0) {
+      const uniqueSOIds = [...new Set(fullyPaidSOIds)];
+      const placeholders = uniqueSOIds.map(() => "?").join(",");
+      const soRows = await c.env.DB.prepare(
+        `SELECT id, status FROM sales_orders WHERE id IN (${placeholders})`,
+      )
+        .bind(...uniqueSOIds)
+        .all<{ id: string; status: string }>();
+      for (const so of soRows.results ?? []) {
+        if (so.status === "DELIVERED" || so.status === "READY_TO_SHIP") {
+          statements.push(
+            c.env.DB.prepare(
+              "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
+            ).bind(now, so.id),
+            c.env.DB.prepare(
+              `INSERT INTO so_status_changes
+                 (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            ).bind(
+              genStatusChangeId(),
+              so.id,
+              so.status,
+              "INVOICED",
+              "System",
+              now,
+              "Invoice fully paid",
+              JSON.stringify([`Payment ${receiptNumber} fully paid linked invoice`]),
+            ),
+          );
+        }
+      }
     }
 
     await c.env.DB.batch(statements);
@@ -312,6 +381,7 @@ app.put("/:id", async (c) => {
       const invoiceIds = [...new Set(allocs.map((a) => a.invoiceId))].filter(
         (id) => id,
       );
+      let totalRolledBack = 0;
       if (invoiceIds.length > 0) {
         const placeholders = invoiceIds.map(() => "?").join(",");
         const invs = await c.env.DB.prepare(
@@ -340,12 +410,21 @@ app.put("/:id", async (c) => {
               : newPaid < inv.totalSen
                 ? "PARTIAL_PAID"
                 : "PAID";
+          totalRolledBack += Math.min(delta, inv.paidAmount);
           statements.push(
             c.env.DB.prepare(
               `UPDATE invoices SET paidAmount = ?, status = ?, updated_at = ? WHERE id = ?`,
             ).bind(newPaid, newStatus, now, invoiceId),
           );
         }
+      }
+      // Restore the customer's A/R — bounce means the money never cleared.
+      if (totalRolledBack > 0) {
+        statements.push(
+          c.env.DB.prepare(
+            `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+          ).bind(totalRolledBack, existing.customerId),
+        );
       }
     }
 

@@ -137,16 +137,18 @@ app.route("/api/price-history", priceHistory);
 app.route("/api/auth", auth);
 app.route("/api/users", users);
 
-// 501 for any /api path we haven't migrated yet.
-app.all("/api/*", (c) =>
-  c.json(
-    {
-      success: false,
-      error: "Not migrated to D1 yet",
-      path: c.req.path,
-    },
+// Unmigrated /api/* paths — return a shape the frontend can consume without
+// crashing. GET pretends to be an empty list so pages calling `.forEach` /
+// `.filter` / `.map` on the response don't blow up; other methods return a
+// plainly-unsupported error.
+app.all("/api/*", (c) => {
+  if (c.req.method === "GET") {
+    return c.json({ success: true, data: [], total: 0, _stub: true, path: c.req.path });
+  }
+  return c.json(
+    { success: false, error: "Not migrated to D1 yet", path: c.req.path },
     501,
-  ),
-);
+  );
+});
 
 export default app;

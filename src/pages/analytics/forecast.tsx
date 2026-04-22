@@ -23,9 +23,23 @@ export default function ForecastPage() {
   const [promiseProductId, setPromiseProductId] = useState<string>("");
 
   useEffect(() => {
-    fetch("/api/forecasts").then((r) => r.json()).then(setForecasts).catch(() => {});
-    fetch("/api/historical-sales").then((r) => r.json()).then(setHistoricalSales).catch(() => {});
-    fetch("/api/promise-date").then((r) => r.json()).then(setPromiseDates).catch(() => {});
+    const asArray = (j: unknown): unknown[] => {
+      if (Array.isArray(j)) return j;
+      const d = (j as { data?: unknown })?.data;
+      return Array.isArray(d) ? d : [];
+    };
+    fetch("/api/forecasts")
+      .then((r) => r.json())
+      .then((j) => setForecasts(asArray(j) as typeof forecasts))
+      .catch(() => {});
+    fetch("/api/historical-sales")
+      .then((r) => r.json())
+      .then((j) => setHistoricalSales(asArray(j) as typeof historicalSales))
+      .catch(() => {});
+    fetch("/api/promise-date")
+      .then((r) => r.json())
+      .then((j) => setPromiseDates(asArray(j) as typeof promiseDates))
+      .catch(() => {});
   }, []);
 
   // Unique products from historical data

@@ -62,6 +62,15 @@ import workerAuth from "./routes-d1/worker-auth";
 import departments from "./routes-d1/departments";
 import customerHubs from "./routes-d1/customer-hubs";
 import organisations from "./routes-d1/organisations";
+import salesOrders from "./routes-d1/sales-orders";
+import purchaseOrders from "./routes-d1/purchase-orders";
+import creditNotes from "./routes-d1/credit-notes";
+import debitNotes from "./routes-d1/debit-notes";
+import eInvoices from "./routes-d1/e-invoices";
+import threeWayMatch from "./routes-d1/three-way-match";
+import deliveryOrders from "./routes-d1/delivery-orders";
+import invoices from "./routes-d1/invoices";
+import payments from "./routes-d1/payments";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -72,6 +81,15 @@ app.route("/api/worker-auth", workerAuth);
 app.route("/api/departments", departments);
 app.route("/api/customer-hubs", customerHubs);
 app.route("/api/organisations", organisations);
+app.route("/api/sales-orders", salesOrders);
+app.route("/api/purchase-orders", purchaseOrders);
+app.route("/api/credit-notes", creditNotes);
+app.route("/api/debit-notes", debitNotes);
+app.route("/api/e-invoices", eInvoices);
+app.route("/api/three-way-match", threeWayMatch);
+app.route("/api/delivery-orders", deliveryOrders);
+app.route("/api/invoices", invoices);
+app.route("/api/payments", payments);
 
 // 501 for any /api path we haven't migrated yet.
 app.all("/api/*", (c) =>

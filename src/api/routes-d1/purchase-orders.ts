@@ -1,0 +1,405 @@
+// ---------------------------------------------------------------------------
+// D1-backed purchase-orders route.
+//
+// Mirrors the old src/api/routes/purchase-orders.ts response shape so the SPA
+// frontend does not need any changes. `items` is a nested array joined from
+// the purchase_order_items table.
+//
+// Schema-note: D1 stores timestamps as `created_at`/`updated_at` (snake_case)
+// but the TS type exposes `createdAt`/`updatedAt` (camelCase); the row->API
+// mapper handles the rename.
+// ---------------------------------------------------------------------------
+import { Hono } from "hono";
+import type { Env } from "../worker";
+
+const app = new Hono<Env>();
+
+type PurchaseOrderRow = {
+  id: string;
+  poNo: string;
+  supplierId: string;
+  supplierName: string | null;
+  subtotalSen: number;
+  totalSen: number;
+  status: string;
+  orderDate: string | null;
+  expectedDate: string | null;
+  receivedDate: string | null;
+  notes: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type PurchaseOrderItemRow = {
+  id: string;
+  purchaseOrderId: string;
+  materialCategory: string | null;
+  materialName: string | null;
+  supplierSKU: string | null;
+  quantity: number;
+  unitPriceSen: number;
+  totalSen: number;
+  receivedQty: number;
+  unit: string | null;
+};
+
+// Same transitions as the in-memory route
+const VALID_TRANSITIONS: Record<string, string[]> = {
+  DRAFT: ["SUBMITTED", "CANCELLED"],
+  SUBMITTED: ["CONFIRMED", "CANCELLED"],
+  CONFIRMED: ["PARTIAL_RECEIVED", "RECEIVED", "CANCELLED"],
+  PARTIAL_RECEIVED: ["RECEIVED", "CANCELLED"],
+  RECEIVED: [],
+  CANCELLED: [],
+};
+
+function rowToItem(r: PurchaseOrderItemRow) {
+  return {
+    id: r.id,
+    materialCategory: r.materialCategory ?? "",
+    materialName: r.materialName ?? "",
+    supplierSKU: r.supplierSKU ?? "",
+    quantity: r.quantity,
+    unitPriceSen: r.unitPriceSen,
+    totalSen: r.totalSen,
+    receivedQty: r.receivedQty,
+    unit: r.unit ?? "pcs",
+  };
+}
+
+function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
+  return {
+    id: row.id,
+    poNo: row.poNo,
+    supplierId: row.supplierId,
+    supplierName: row.supplierName ?? "",
+    items: items.filter((i) => i.purchaseOrderId === row.id).map(rowToItem),
+    subtotalSen: row.subtotalSen,
+    totalSen: row.totalSen,
+    status: row.status,
+    orderDate: row.orderDate ?? "",
+    expectedDate: row.expectedDate ?? "",
+    receivedDate: row.receivedDate,
+    notes: row.notes ?? "",
+    createdAt: row.created_at ?? "",
+    updatedAt: row.updated_at ?? "",
+  };
+}
+
+function genPoId(): string {
+  return `po-${crypto.randomUUID().slice(0, 8)}`;
+}
+function genItemId(): string {
+  return `poi-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// Generate next PO number by scanning existing poNo for the current YYMM
+// prefix and incrementing the max sequence. Falls back to 001.
+async function generatePoNo(db: D1Database): Promise<string> {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const prefix = `PO-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT poNo FROM purchase_orders WHERE poNo LIKE ? ORDER BY poNo DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ poNo: string }>();
+  const seq = res?.poNo ? Number(res.poNo.split("-").pop()) + 1 : 1;
+  return `${prefix}${String(seq).padStart(3, "0")}`;
+}
+
+async function fetchPOWithItems(db: D1Database, id: string) {
+  const [po, itemsRes] = await Promise.all([
+    db
+      .prepare("SELECT * FROM purchase_orders WHERE id = ?")
+      .bind(id)
+      .first<PurchaseOrderRow>(),
+    db
+      .prepare("SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?")
+      .bind(id)
+      .all<PurchaseOrderItemRow>(),
+  ]);
+  if (!po) return null;
+  return rowToPO(po, itemsRes.results ?? []);
+}
+
+// GET /api/purchase-orders — list all POs + items
+app.get("/", async (c) => {
+  const [pos, items] = await Promise.all([
+    c.env.DB.prepare(
+      "SELECT * FROM purchase_orders ORDER BY created_at DESC, id DESC",
+    ).all<PurchaseOrderRow>(),
+    c.env.DB.prepare(
+      "SELECT * FROM purchase_order_items",
+    ).all<PurchaseOrderItemRow>(),
+  ]);
+  const data = (pos.results ?? []).map((p) =>
+    rowToPO(p, items.results ?? []),
+  );
+  return c.json({ success: true, data });
+});
+
+// POST /api/purchase-orders — create PO + items atomically
+app.post("/", async (c) => {
+  try {
+    const body = await c.req.json();
+    const { supplierId, supplierName } = body;
+    const rawItems = Array.isArray(body.items) ? body.items : [];
+    if (!supplierId || !supplierName || rawItems.length === 0) {
+      return c.json(
+        {
+          success: false,
+          error: "supplierId, supplierName, and items are required",
+        },
+        400,
+      );
+    }
+
+    // Validate supplier exists
+    const supplier = await c.env.DB.prepare(
+      "SELECT id FROM suppliers WHERE id = ?",
+    )
+      .bind(supplierId)
+      .first<{ id: string }>();
+    if (!supplier) {
+      return c.json({ success: false, error: "Supplier not found" }, 400);
+    }
+
+    const poId = genPoId();
+    const poNo = await generatePoNo(c.env.DB);
+    const now = new Date().toISOString();
+    const today = now.split("T")[0];
+
+    const items = (rawItems as Array<Record<string, unknown>>).map((item) => {
+      const quantity = Number(item.quantity) || 0;
+      const unitPriceSen = Number(item.unitPriceSen) || 0;
+      return {
+        id: genItemId(),
+        materialCategory: (item.materialCategory as string) ?? "",
+        materialName: (item.materialName as string) ?? "",
+        supplierSKU: (item.supplierSKU as string) ?? "",
+        quantity,
+        unitPriceSen,
+        totalSen: quantity * unitPriceSen,
+        receivedQty: 0,
+        unit: (item.unit as string) ?? "pcs",
+      };
+    });
+    const subtotalSen = items.reduce((sum, i) => sum + i.totalSen, 0);
+    const status: string = body.status ?? "DRAFT";
+
+    const statements = [
+      c.env.DB.prepare(
+        `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
+           subtotalSen, totalSen, status, orderDate, expectedDate, receivedDate,
+           notes, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        poId,
+        poNo,
+        supplierId,
+        supplierName,
+        subtotalSen,
+        subtotalSen,
+        status,
+        body.orderDate ?? today,
+        body.expectedDate ?? "",
+        null,
+        body.notes ?? "",
+        now,
+        now,
+      ),
+      ...items.map((item) =>
+        c.env.DB.prepare(
+          `INSERT INTO purchase_order_items (id, purchaseOrderId,
+             materialCategory, materialName, supplierSKU, quantity,
+             unitPriceSen, totalSen, receivedQty, unit)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          item.id,
+          poId,
+          item.materialCategory,
+          item.materialName,
+          item.supplierSKU,
+          item.quantity,
+          item.unitPriceSen,
+          item.totalSen,
+          item.receivedQty,
+          item.unit,
+        ),
+      ),
+    ];
+
+    await c.env.DB.batch(statements);
+
+    const created = await fetchPOWithItems(c.env.DB, poId);
+    if (!created) {
+      return c.json(
+        { success: false, error: "Failed to create purchase order" },
+        500,
+      );
+    }
+    return c.json({ success: true, data: created }, 201);
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// GET /api/purchase-orders/:id — single PO + items
+app.get("/:id", async (c) => {
+  const po = await fetchPOWithItems(c.env.DB, c.req.param("id"));
+  if (!po) {
+    return c.json({ success: false, error: "Purchase order not found" }, 404);
+  }
+  return c.json({ success: true, data: po });
+});
+
+// PUT /api/purchase-orders/:id — update scalar fields + optionally replace items
+app.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const existing = await c.env.DB.prepare(
+      "SELECT * FROM purchase_orders WHERE id = ?",
+    )
+      .bind(id)
+      .first<PurchaseOrderRow>();
+    if (!existing) {
+      return c.json(
+        { success: false, error: "Purchase order not found" },
+        404,
+      );
+    }
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    // Status transition validation
+    if (body.status && body.status !== existing.status) {
+      const allowed = VALID_TRANSITIONS[existing.status] || [];
+      if (!allowed.includes(body.status)) {
+        return c.json(
+          {
+            success: false,
+            error: `Cannot transition from ${existing.status} to ${body.status}. Allowed: ${allowed.join(", ") || "none"}`,
+          },
+          400,
+        );
+      }
+    }
+
+    const statements: D1PreparedStatement[] = [];
+    let subtotalSen = existing.subtotalSen;
+    let totalSen = existing.totalSen;
+
+    // If items provided, replace them entirely and recompute totals
+    if (body.items !== undefined) {
+      const rawItems: Array<Record<string, unknown>> = Array.isArray(body.items)
+        ? body.items
+        : [];
+      const newItems = rawItems.map((item) => {
+        const quantity = Number(item.quantity) || 0;
+        const unitPriceSen = Number(item.unitPriceSen) || 0;
+        return {
+          id: (item.id as string) || genItemId(),
+          materialCategory: (item.materialCategory as string) ?? "",
+          materialName: (item.materialName as string) ?? "",
+          supplierSKU: (item.supplierSKU as string) ?? "",
+          quantity,
+          unitPriceSen,
+          totalSen: quantity * unitPriceSen,
+          receivedQty: Number(item.receivedQty) || 0,
+          unit: (item.unit as string) ?? "pcs",
+        };
+      });
+
+      statements.push(
+        c.env.DB.prepare(
+          "DELETE FROM purchase_order_items WHERE purchaseOrderId = ?",
+        ).bind(id),
+      );
+      for (const item of newItems) {
+        statements.push(
+          c.env.DB.prepare(
+            `INSERT INTO purchase_order_items (id, purchaseOrderId,
+               materialCategory, materialName, supplierSKU, quantity,
+               unitPriceSen, totalSen, receivedQty, unit)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            item.id,
+            id,
+            item.materialCategory,
+            item.materialName,
+            item.supplierSKU,
+            item.quantity,
+            item.unitPriceSen,
+            item.totalSen,
+            item.receivedQty,
+            item.unit,
+          ),
+        );
+      }
+      subtotalSen = body.subtotalSen ?? newItems.reduce((s, i) => s + i.totalSen, 0);
+      totalSen = body.totalSen ?? subtotalSen;
+    } else {
+      subtotalSen = body.subtotalSen ?? existing.subtotalSen;
+      totalSen = body.totalSen ?? existing.totalSen;
+    }
+
+    const merged = {
+      supplierId: body.supplierId ?? existing.supplierId,
+      supplierName: body.supplierName ?? existing.supplierName ?? "",
+      status: body.status ?? existing.status,
+      orderDate: body.orderDate ?? existing.orderDate ?? "",
+      expectedDate: body.expectedDate ?? existing.expectedDate ?? "",
+      receivedDate:
+        body.receivedDate !== undefined
+          ? body.receivedDate
+          : existing.receivedDate,
+      notes: body.notes ?? existing.notes ?? "",
+    };
+
+    statements.push(
+      c.env.DB.prepare(
+        `UPDATE purchase_orders SET
+           supplierId = ?, supplierName = ?, subtotalSen = ?, totalSen = ?,
+           status = ?, orderDate = ?, expectedDate = ?, receivedDate = ?,
+           notes = ?, updated_at = ?
+         WHERE id = ?`,
+      ).bind(
+        merged.supplierId,
+        merged.supplierName,
+        subtotalSen,
+        totalSen,
+        merged.status,
+        merged.orderDate,
+        merged.expectedDate,
+        merged.receivedDate,
+        merged.notes,
+        now,
+        id,
+      ),
+    );
+
+    await c.env.DB.batch(statements);
+
+    const updated = await fetchPOWithItems(c.env.DB, id);
+    return c.json({ success: true, data: updated });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// DELETE /api/purchase-orders/:id — cascades to items via FK
+app.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await fetchPOWithItems(c.env.DB, id);
+  if (!existing) {
+    return c.json({ success: false, error: "Purchase order not found" }, 404);
+  }
+  await c.env.DB.prepare("DELETE FROM purchase_orders WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({ success: true, data: existing });
+});
+
+export default app;

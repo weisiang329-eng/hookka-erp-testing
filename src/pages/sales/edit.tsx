@@ -1,0 +1,646 @@
+import { useState, useEffect } from "react";
+import { useToast } from "@/components/ui/toast";
+import { useNavigate, useParams } from "react-router-dom";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { SearchableSelect } from "@/components/ui/searchable-select";
+import { Badge } from "@/components/ui/badge";
+import { formatCurrency } from "@/lib/utils";
+import { ArrowLeft, Plus, Trash2, Save, AlertTriangle } from "lucide-react";
+import type { Customer, Product, FabricItem, SalesOrder } from "@/lib/mock-data";
+import { SEAT_HEIGHT_OPTIONS } from "@/lib/mock-data";
+
+type LineItem = {
+  id?: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  itemCategory: string;
+  baseModel: string;
+  sizeCode: string;
+  sizeLabel: string;
+  fabricId: string;
+  fabricCode: string;
+  quantity: number;
+  basePriceSen: number;
+  seatHeight: string;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  divanPriceSen: number;
+  legHeightInches: number | null;
+  legPriceSen: number;
+  specialOrder: string;
+  specialOrderPriceSen: number;
+  notes: string;
+};
+
+const EMPTY_LINE: LineItem = {
+  productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
+  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  quantity: 1, basePriceSen: 0, seatHeight: "",
+  gapInches: null, divanHeightInches: null, divanPriceSen: 0,
+  legHeightInches: null, legPriceSen: 0,
+  specialOrder: "", specialOrderPriceSen: 0, notes: "",
+};
+
+/** Extract FT portion from sizeLabel, e.g. "Queen 5FT" → "5FT" */
+function extractSizeSuffix(sizeLabel: string): string {
+  const m = sizeLabel.match(/(\d[\d.x]*(?:FT|CM))/i);
+  return m ? m[1] : sizeLabel;
+}
+
+/** Generate WIP items for a bedframe line item */
+function generateBedframeWIPs(item: LineItem): { code: string; type: string; qty: number }[] {
+  if (!item.baseModel || !item.sizeCode) return [];
+  const totalHeight = (item.gapInches || 0) + (item.divanHeightInches || 0) + (item.legHeightInches || 0);
+  const sizeSuffix = extractSizeSuffix(item.sizeLabel);
+  const wips: { code: string; type: string; qty: number }[] = [];
+  if (totalHeight > 0) {
+    wips.push({ code: `${item.baseModel}(${item.sizeCode})-HB${totalHeight}"`, type: "HB", qty: 1 });
+  }
+  if (item.divanHeightInches && item.divanHeightInches > 0) {
+    wips.push({ code: `${item.divanHeightInches}" Divan-${sizeSuffix}`, type: "DIVAN", qty: 2 });
+  }
+  return wips;
+}
+
+/** Generate WIP items for a sofa line item */
+function generateSofaWIPs(item: LineItem): { code: string; type: string; qty: number }[] {
+  if (!item.baseModel || !item.seatHeight) return [];
+  const heightNum = item.seatHeight.replace('"', '');
+  const wips: { code: string; type: string; qty: number }[] = [];
+  wips.push({ code: `${item.productCode}-${heightNum}-BASE`, type: "BASE", qty: 1 });
+  wips.push({ code: `${item.baseModel}-${heightNum}-CUSHION`, type: "CUSHION", qty: 1 });
+  if (item.sizeCode.includes("A")) {
+    wips.push({ code: `${item.productCode}-${heightNum}-ARM`, type: "ARM", qty: 1 });
+  }
+  return wips;
+}
+
+const EDITABLE_STATUSES = ["DRAFT", "CONFIRMED"];
+
+export default function EditSalesOrderPage() {
+  const { id } = useParams();
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const [customers, setCustomers] = useState<Customer[]>([]);
+  const [products, setProducts] = useState<Product[]>([]);
+  const [fabrics, setFabrics] = useState<FabricItem[]>([]);
+  const [saving, setSaving] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [order, setOrder] = useState<SalesOrder | null>(null);
+
+  const [customerId, setCustomerId] = useState("");
+  const [customerPOId, setCustomerPOId] = useState("");
+  const [customerSOId, setCustomerSOId] = useState("");
+  const [reference, setReference] = useState("");
+  const [companySODate, setCompanySODate] = useState("");
+  const [customerDeliveryDate, setCustomerDeliveryDate] = useState("");
+  const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
+  const [notes, setNotes] = useState("");
+  const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
+
+  // Load reference data
+  useEffect(() => {
+    fetch("/api/customers").then(r => r.json()).then(d => setCustomers(d.data || []));
+    fetch("/api/products").then(r => r.json()).then(d => setProducts(d.data || []));
+    fetch("/api/fabrics").then(r => r.json()).then(d => setFabrics(d.data || []));
+  }, []);
+
+  // Load existing order
+  useEffect(() => {
+    fetch(`/api/sales-orders/${id}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.success) {
+          const so: SalesOrder = d.data;
+          setOrder(so);
+          setCustomerId(so.customerId);
+          setCustomerPOId(so.customerPOId || "");
+          setCustomerSOId(so.customerSOId || "");
+          setReference(so.reference || "");
+          setCompanySODate(so.companySODate ? so.companySODate.split("T")[0] : "");
+          setCustomerDeliveryDate(so.customerDeliveryDate ? so.customerDeliveryDate.split("T")[0] : "");
+          setHookkaExpectedDD(so.hookkaExpectedDD ? so.hookkaExpectedDD.split("T")[0] : "");
+          setNotes(so.notes || "");
+          setItems(so.items.map((item: Record<string, unknown>) => ({
+            id: item.id as string,
+            productId: item.productId as string,
+            productCode: item.productCode as string,
+            productName: item.productName as string,
+            itemCategory: item.itemCategory as string,
+            baseModel: (item.baseModel as string) || (item.productCode as string) || "",
+            sizeCode: item.sizeCode as string,
+            sizeLabel: item.sizeLabel as string,
+            fabricId: item.fabricId as string,
+            fabricCode: item.fabricCode as string,
+            quantity: item.quantity as number,
+            basePriceSen: item.basePriceSen as number,
+            seatHeight: (item.seatHeight as string) || "",
+            gapInches: item.gapInches as number | null,
+            divanHeightInches: item.divanHeightInches as number | null,
+            divanPriceSen: (item.divanPriceSen as number) || 0,
+            legHeightInches: item.legHeightInches as number | null,
+            legPriceSen: (item.legPriceSen as number) || 0,
+            specialOrder: (item.specialOrder as string) || "",
+            specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
+            notes: (item.notes as string) || "",
+          })));
+        }
+        setLoading(false);
+      });
+  }, [id]);
+
+  const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
+
+  const removeItem = (idx: number) => {
+    if (items.length <= 1) return;
+    setItems(items.filter((_, i) => i !== idx));
+  };
+
+  const updateItem = (idx: number, updates: Partial<LineItem>) => {
+    setItems(prev => prev.map((item, i) => i === idx ? { ...item, ...updates } : item));
+  };
+
+  const selectProduct = (idx: number, productId: string) => {
+    const prod = products.find(p => p.id === productId);
+    if (!prod) return;
+    const isSofa = prod.category === "SOFA";
+    updateItem(idx, {
+      productId: prod.id,
+      productCode: prod.code,
+      productName: prod.name,
+      itemCategory: prod.category,
+      baseModel: prod.baseModel,
+      sizeCode: prod.sizeCode,
+      sizeLabel: prod.sizeLabel,
+      basePriceSen: prod.costPriceSen || 0,
+      seatHeight: "",
+      gapInches: isSofa ? null : items[idx].gapInches,
+      divanHeightInches: isSofa ? null : items[idx].divanHeightInches,
+      divanPriceSen: isSofa ? 0 : items[idx].divanPriceSen,
+      legHeightInches: isSofa ? null : items[idx].legHeightInches,
+      legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
+    });
+  };
+
+  const selectFabric = (idx: number, fabricId: string) => {
+    const fab = fabrics.find(f => f.id === fabricId);
+    if (fab) {
+      updateItem(idx, { fabricId: fab.id, fabricCode: fab.code });
+    }
+  };
+
+  const selectSeatHeight = (idx: number, value: string) => {
+    const item = items[idx];
+    const prod = products.find(p => p.id === item.productId);
+    if (!value || !prod?.seatHeightPrices) {
+      updateItem(idx, { seatHeight: "", basePriceSen: 0 });
+      return;
+    }
+    const tier = prod.seatHeightPrices.find(t => t.height === value);
+    updateItem(idx, {
+      seatHeight: value,
+      basePriceSen: tier?.priceSen || 0,
+    });
+  };
+
+  const getUnitPrice = (item: LineItem) =>
+    item.basePriceSen + item.divanPriceSen + item.legPriceSen + item.specialOrderPriceSen;
+
+  const getLineTotal = (item: LineItem) => getUnitPrice(item) * item.quantity;
+
+  const subtotal = items.reduce((sum, item) => sum + getLineTotal(item), 0);
+  const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
+
+  const handleSubmit = async () => {
+    if (!customerId) { toast.warning("Please select a customer"); return; }
+    if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
+    if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+
+    setSaving(true);
+    const res = await fetch(`/api/sales-orders/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customerId, customerPOId, customerSOId, reference,
+        companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+      }),
+    });
+    const data = await res.json();
+    setSaving(false);
+
+    if (data.success) {
+      navigate(`/sales/${id}`);
+    } else {
+      toast.error(data.error || "Failed to update order");
+    }
+  };
+
+  if (loading) return <div className="flex items-center justify-center h-64 text-[#6B7280]">Loading...</div>;
+
+  if (!order) return (
+    <div className="flex flex-col items-center justify-center h-64 gap-4">
+      <div className="text-[#6B7280]">Order not found</div>
+      <Button variant="outline" onClick={() => navigate("/sales")}>Back</Button>
+    </div>
+  );
+
+  if (!EDITABLE_STATUSES.includes(order.status)) {
+    return (
+      <div className="space-y-6">
+        <div className="flex items-center gap-4">
+          <Button variant="ghost" size="icon" onClick={() => navigate(`/sales/${id}`)}>
+            <ArrowLeft className="h-5 w-5" />
+          </Button>
+          <div className="flex-1">
+            <h1 className="text-2xl font-bold text-[#1F1D1B]">Edit Sales Order</h1>
+          </div>
+        </div>
+        <Card>
+          <CardContent className="p-8">
+            <div className="flex flex-col items-center justify-center gap-4 text-center">
+              <div className="h-12 w-12 rounded-full bg-[#FAEFCB] flex items-center justify-center">
+                <AlertTriangle className="h-6 w-6 text-[#9C6F1E]" />
+              </div>
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">Cannot Edit Order</h2>
+              <p className="text-[#6B7280]">
+                This order is currently <Badge variant="status" status={order.status} /> and cannot be edited.
+                Only orders in <span className="font-medium">Draft</span> or <span className="font-medium">Confirmed</span> status can be modified.
+              </p>
+              <Button variant="primary" onClick={() => navigate(`/sales/${id}`)}>
+                Back to Order Details
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  const selectedCustomer = customers.find(c => c.id === customerId);
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center gap-4">
+        <Button variant="ghost" size="icon" onClick={() => navigate(`/sales/${id}`)}>
+          <ArrowLeft className="h-5 w-5" />
+        </Button>
+        <div className="flex-1">
+          <h1 className="text-2xl font-bold text-[#1F1D1B]">Edit {order.companySOId}</h1>
+          <p className="text-sm text-[#6B7280]">Modify sales order details and line items</p>
+        </div>
+        <Button variant="outline" onClick={() => navigate(`/sales/${id}`)}>Cancel</Button>
+        <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+          <Save className="h-4 w-4" />
+          {saving ? "Saving..." : "Save Changes"}
+        </Button>
+      </div>
+
+      <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
+        <Card className="lg:col-span-2">
+          <CardHeader className="pb-3"><CardTitle>Order Details</CardTitle></CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer *</label>
+                <SearchableSelect
+                  value={customerId}
+                  onChange={setCustomerId}
+                  options={customers.map(c => ({ value: c.id, label: `${c.code} - ${c.name}` }))}
+                  placeholder="Select customer..."
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer PO No.</label>
+                <Input value={customerPOId} onChange={(e) => setCustomerPOId(e.target.value)} placeholder="e.g. PO-HKL-2604-012" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer SO No.</label>
+                <Input value={customerSOId} onChange={(e) => setCustomerSOId(e.target.value)} placeholder="e.g. SO-12345" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Reference</label>
+                <Input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="Optional reference" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Company SO Date</label>
+                <Input type="date" value={companySODate} onChange={(e) => setCompanySODate(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Customer Delivery Date</label>
+                <Input type="date" value={customerDeliveryDate} onChange={(e) => setCustomerDeliveryDate(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1.5">Hookka Expected DD</label>
+                <Input type="date" value={hookkaExpectedDD} onChange={(e) => setHookkaExpectedDD(e.target.value)} />
+              </div>
+            </div>
+
+            {selectedCustomer && (
+              <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">
+                <div className="flex gap-6">
+                  <span className="text-[#6B7280]">Hubs: <span className="font-medium text-[#1F1D1B]">{selectedCustomer.deliveryHubs?.length || 0}</span></span>
+                  <span className="text-[#6B7280]">Terms: <span className="font-medium text-[#1F1D1B]">{selectedCustomer.creditTerms}</span></span>
+                  <span className="text-[#6B7280]">Limit: <span className="font-medium text-[#1F1D1B]">{formatCurrency(selectedCustomer.creditLimitSen)}</span></span>
+                  <span className="text-[#6B7280]">Outstanding: <span className="font-medium text-[#9C6F1E]">{formatCurrency(selectedCustomer.outstandingSen)}</span></span>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="block text-sm font-medium text-[#374151] mb-1.5">Notes</label>
+              <textarea
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                rows={2}
+                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                placeholder="Internal notes..."
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3"><CardTitle>Summary</CardTitle></CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Status</span><Badge variant="status" status={order.status} /></div>
+            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Total Qty</span><span className="font-medium">{totalQty}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Line Items</span><span className="font-medium">{items.filter(l => l.productId).length}</span></div>
+            <hr className="border-[#E2DDD8]" />
+            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Subtotal</span><span className="font-medium amount">{formatCurrency(subtotal)}</span></div>
+            <div className="flex justify-between text-lg font-bold"><span>Total</span><span className="text-[#6B5C32]">{formatCurrency(subtotal)}</span></div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Line Items */}
+      <Card>
+        <CardHeader className="pb-3">
+          <div className="flex items-center justify-between">
+            <CardTitle>Line Items ({items.length})</CardTitle>
+            <Button variant="outline" size="sm" onClick={addItem}>
+              <Plus className="h-4 w-4" /> Add Item
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {items.map((item, idx) => {
+            return (
+              <div key={idx} className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-[#6B5C32]">Line {idx + 1}</span>
+                    {item.itemCategory && <Badge>{item.itemCategory}</Badge>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-bold amount">{formatCurrency(getLineTotal(item))}</span>
+                    <Button variant="ghost" size="icon" className="h-7 w-7 text-[#9A3A2D] hover:text-[#7A2E24]" onClick={() => removeItem(idx)} disabled={items.length <= 1}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                </div>
+
+                {(() => {
+                  const sc = "w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
+                  const catProducts = products.filter(p => p.category === item.itemCategory);
+                  const isSofa = item.itemCategory === "SOFA";
+                  const sofaModels = isSofa ? [...new Set(catProducts.map(p => p.baseModel))].sort() : [];
+                  const filteredProducts = isSofa && item.baseModel
+                    ? catProducts.filter(p => p.baseModel === item.baseModel)
+                    : catProducts;
+
+                  return (
+                    <div className={`grid gap-3 ${isSofa ? "grid-cols-[110px_130px_1fr_1fr]" : "grid-cols-[110px_1fr_140px_1fr]"}`}>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Category *</label>
+                        <select
+                          value={item.itemCategory}
+                          onChange={(e) => {
+                            updateItem(idx, {
+                              itemCategory: e.target.value,
+                              productId: "", productCode: "", productName: "",
+                              baseModel: "", sizeCode: "", sizeLabel: "",
+                              basePriceSen: 0, seatHeight: "",
+                              gapInches: null, divanHeightInches: null, divanPriceSen: 0,
+                              legHeightInches: null, legPriceSen: 0,
+                            });
+                          }}
+                          className={sc}
+                        >
+                          <option value="">Select...</option>
+                          <option value="BEDFRAME">Bedframe</option>
+                          <option value="SOFA">Sofa</option>
+                        </select>
+                      </div>
+
+                      {isSofa && (
+                        <div>
+                          <label className="block text-xs text-[#9CA3AF] mb-1">Model *</label>
+                          <SearchableSelect
+                            value={item.baseModel}
+                            onChange={(val) => {
+                              updateItem(idx, {
+                                baseModel: val,
+                                productId: "", productCode: "", productName: "",
+                                sizeCode: "", sizeLabel: "", basePriceSen: 0, seatHeight: "",
+                              });
+                            }}
+                            options={sofaModels.map(m => ({ value: m, label: m }))}
+                            placeholder="Select model..."
+                            className={sc}
+                          />
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">{isSofa ? "Module *" : "Product *"}</label>
+                        <SearchableSelect
+                          value={item.productId}
+                          onChange={(val) => selectProduct(idx, val)}
+                          options={filteredProducts.map(p => ({ value: p.id, label: `${p.code} - ${p.name}` }))}
+                          placeholder={!item.itemCategory ? "Select category first" : isSofa && !item.baseModel ? "Select model first" : isSofa ? "Select module..." : "Select product..."}
+                          disabled={!item.itemCategory || (isSofa && !item.baseModel)}
+                          className={sc}
+                        />
+                      </div>
+
+                      {!isSofa && (
+                        <div>
+                          <label className="block text-xs text-[#9CA3AF] mb-1">Size</label>
+                          <div className="h-[34px] flex items-center px-2 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm">
+                            {item.sizeLabel || "-"}
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Fabric *</label>
+                        <SearchableSelect
+                          value={item.fabricId}
+                          onChange={(val) => selectFabric(idx, val)}
+                          options={fabrics.map(f => ({ value: f.id, label: `${f.code} - ${f.name}` }))}
+                          placeholder="Select fabric..."
+                          className={sc}
+                        />
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {item.itemCategory === "SOFA" ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
+                      <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#9CA3AF] mb-1">Seat Size *</label>
+                      <SearchableSelect
+                        value={item.seatHeight}
+                        onChange={(val) => selectSeatHeight(idx, val)}
+                        options={SEAT_HEIGHT_OPTIONS.map(h => ({ value: h, label: h }))}
+                        placeholder="Select size..."
+                        className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
+                      <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                    </div>
+                    <div>
+                      <label className="block text-xs text-[#9CA3AF] mb-1">Module</label>
+                      <div className="h-8 flex items-center px-2 rounded border border-[#E2DDD8] bg-[#FAF9F7] text-sm font-medium">
+                        {item.sizeCode || "-"}
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
+                        <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
+                        <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Gap (&quot;)</label>
+                        <Input type="number" min={0} value={item.gapInches ?? ""} onChange={(e) => updateItem(idx, { gapInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Divan H (&quot;)</label>
+                        <Input type="number" min={0} value={item.divanHeightInches ?? ""} onChange={(e) => updateItem(idx, { divanHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Leg H (&quot;)</label>
+                        <Input type="number" min={0} value={item.legHeightInches ?? ""} onChange={(e) => updateItem(idx, { legHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-[#9CA3AF] mb-1">Special Order</label>
+                        <select
+                          value={item.specialOrder}
+                          onChange={(e) => updateItem(idx, { specialOrder: e.target.value, specialOrderPriceSen: e.target.value ? 15000 : 0 })}
+                          className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8 focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
+                        >
+                          <option value="">None</option>
+                          <option value="EXTRA_FOAM">Extra Foam</option>
+                          <option value="CUSTOM_STITCH">Custom Stitch</option>
+                          <option value="CUSTOM_SIZE">Custom Size</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {(item.divanHeightInches || item.legHeightInches || item.specialOrder) && (
+                      <div className="grid grid-cols-3 gap-3">
+                        {item.divanHeightInches && (
+                          <div>
+                            <label className="block text-xs text-[#9CA3AF] mb-1">Divan Surcharge (RM)</label>
+                            <Input type="number" min={0} value={item.divanPriceSen / 100} onChange={(e) => updateItem(idx, { divanPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                          </div>
+                        )}
+                        {item.legHeightInches && (
+                          <div>
+                            <label className="block text-xs text-[#9CA3AF] mb-1">Leg Surcharge (RM)</label>
+                            <Input type="number" min={0} value={item.legPriceSen / 100} onChange={(e) => updateItem(idx, { legPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                          </div>
+                        )}
+                        {item.specialOrder && (
+                          <div>
+                            <label className="block text-xs text-[#9CA3AF] mb-1">Special Order Surcharge (RM)</label>
+                            <Input type="number" min={0} value={item.specialOrderPriceSen / 100} onChange={(e) => updateItem(idx, { specialOrderPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+
+                <div>
+                  <label className="block text-xs text-[#9CA3AF] mb-1">Line Notes</label>
+                  <Input value={item.notes} onChange={(e) => updateItem(idx, { notes: e.target.value })} placeholder="Optional notes for this line..." className="h-8" />
+                </div>
+
+                {/* WIP Preview (Bedframe) */}
+                {item.itemCategory === "BEDFRAME" && item.productCode && (() => {
+                  const wips = generateBedframeWIPs(item);
+                  if (wips.length === 0) return null;
+                  return (
+                    <div className="border-t border-[#E2DDD8] pt-2">
+                      <div className="text-xs font-medium text-[#374151] mb-1.5">Auto-generated WIP Components</div>
+                      <div className="space-y-1">
+                        {wips.map((wip, i) => (
+                          <div key={i} className="flex items-center gap-2 text-xs">
+                            <span className={`px-1.5 py-0.5 rounded font-semibold ${
+                              wip.type === "HB" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
+                            }`}>
+                              {wip.type}
+                            </span>
+                            <span className="font-mono text-[#1F1D1B]">{wip.code}</span>
+                            <span className="text-[#9CA3AF]">x {wip.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* WIP Preview (Sofa) */}
+                {item.itemCategory === "SOFA" && item.productCode && item.seatHeight && (() => {
+                  const wips = generateSofaWIPs(item);
+                  if (wips.length === 0) return null;
+                  return (
+                    <div className="border-t border-[#E2DDD8] pt-2">
+                      <div className="text-xs font-medium text-[#374151] mb-1.5">Auto-generated WIP Components</div>
+                      <div className="space-y-1">
+                        {wips.map((wip, i) => (
+                          <div key={i} className="flex items-center gap-2 text-xs">
+                            <span className={`px-1.5 py-0.5 rounded font-semibold ${
+                              wip.type === "BASE" ? "bg-[#FAEFCB] text-[#9C6F1E]" : wip.type === "CUSHION" ? "bg-[#E0EDF0] text-[#3E6570]" : "bg-[#EEF3E4] text-[#4F7C3A]"
+                            }`}>
+                              {wip.type}
+                            </span>
+                            <span className="font-mono text-[#1F1D1B]">{wip.code}</span>
+                            <span className="text-[#9CA3AF]">x {wip.qty}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="flex items-center justify-between text-xs text-[#9CA3AF] border-t border-[#E2DDD8] pt-2">
+                  <span>Unit: {formatCurrency(getUnitPrice(item))} (Base{item.seatHeight ? ` @${item.seatHeight}` : ""} {formatCurrency(item.basePriceSen)}{item.itemCategory !== "SOFA" && item.divanPriceSen ? ` + Divan ${formatCurrency(item.divanPriceSen)}` : ""}{item.itemCategory !== "SOFA" && item.legPriceSen ? ` + Leg ${formatCurrency(item.legPriceSen)}` : ""}{item.specialOrderPriceSen ? ` + Special ${formatCurrency(item.specialOrderPriceSen)}` : ""})</span>
+                  <span className="font-medium text-sm text-[#1F1D1B]">Total: {formatCurrency(getLineTotal(item))}</span>
+                </div>
+              </div>
+            );
+          })}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}

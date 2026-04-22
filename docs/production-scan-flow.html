@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>HOOKKA ERP — Production & Scan Flow (端到端规格)</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                 "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    color: #1F1D1B; line-height: 1.55;
+    font-size: 10.5pt;
+    max-width: 780px; margin: 0 auto; padding: 16px;
+  }
+  h1 { font-size: 22pt; color: #6B5C32; border-bottom: 3px solid #6B5C32;
+       padding-bottom: 6px; margin-top: 0; }
+  h2 { font-size: 15pt; color: #1F1D1B; border-left: 4px solid #6B5C32;
+       padding-left: 10px; margin-top: 24px; page-break-after: avoid; }
+  h3 { font-size: 12pt; color: #4B5563; margin-top: 16px; page-break-after: avoid; }
+  h4 { font-size: 11pt; color: #6B7280; margin-top: 12px; }
+  p  { margin: 6px 0; }
+  code {
+    background: #F0ECE9; padding: 1px 5px; border-radius: 3px;
+    font-family: "Consolas", "Menlo", monospace; font-size: 9.5pt;
+    color: #6B5C32;
+  }
+  pre {
+    background: #FAF9F7; border: 1px solid #E2DDD8; border-radius: 6px;
+    padding: 10px 12px; font-family: "Consolas", "Menlo", monospace;
+    font-size: 9pt; line-height: 1.4; overflow-x: auto; white-space: pre-wrap;
+    color: #1F1D1B; page-break-inside: avoid;
+  }
+  table {
+    width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 9.5pt;
+    page-break-inside: avoid;
+  }
+  th, td { border: 1px solid #E2DDD8; padding: 6px 8px; text-align: left; vertical-align: top; }
+  th { background: #F0ECE9; color: #6B5C32; font-weight: 600; }
+  tr:nth-child(even) td { background: #FAF9F7; }
+  .note {
+    background: #FEF3C7; border-left: 4px solid #F59E0B;
+    padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0;
+    font-size: 9.5pt;
+  }
+  .success {
+    background: #D1FAE5; border-left: 4px solid #10B981;
+    padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0;
+    font-size: 9.5pt;
+  }
+  .danger {
+    background: #FEE2E2; border-left: 4px solid #EF4444;
+    padding: 10px 14px; margin: 12px 0; border-radius: 0 6px 6px 0;
+    font-size: 9.5pt;
+  }
+  .stage {
+    background: #F0ECE9; border-radius: 8px; padding: 12px 16px; margin: 12px 0;
+    page-break-inside: avoid;
+  }
+  .stage-title { color: #6B5C32; font-weight: 700; font-size: 11pt; margin-bottom: 4px; }
+  .meta {
+    display: grid; grid-template-columns: 140px 1fr; gap: 4px 10px;
+    font-size: 9.5pt; margin: 6px 0;
+  }
+  .meta dt { font-weight: 600; color: #6B7280; }
+  .meta dd { margin: 0; }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 10px;
+    font-size: 8.5pt; font-weight: 600;
+  }
+  .pill-batch  { background: #DBEAFE; color: #1E40AF; }
+  .pill-pool   { background: #D1FAE5; color: #065F46; }
+  .pill-so     { background: #FCE7F3; color: #9F1239; }
+  .pill-do     { background: #FEF3C7; color: #92400E; }
+  .toc { background: #FAF9F7; border: 1px solid #E2DDD8; border-radius: 8px;
+         padding: 14px 18px; margin: 16px 0; }
+  .toc ol { margin: 0; padding-left: 20px; }
+  .toc li { padding: 2px 0; }
+  .page-break { page-break-before: always; }
+  ul { padding-left: 20px; margin: 6px 0; }
+  li { margin: 3px 0; }
+  .sticker-mock {
+    display: inline-block; border: 2px solid #1F1D1B; border-radius: 4px;
+    padding: 8px 12px; font-family: Consolas, monospace; font-size: 8.5pt;
+    background: white; margin: 6px 8px 6px 0; vertical-align: top;
+  }
+  .sticker-mock .small { font-size: 7.5pt; color: #6B7280; }
+  hr { border: none; border-top: 1px solid #E2DDD8; margin: 20px 0; }
+  .kvtable td:first-child { background: #F0ECE9; font-weight: 600; width: 140px; }
+  .badge {
+    display: inline-block; font-size: 8pt; padding: 2px 7px; border-radius: 3px;
+    font-weight: 600; text-transform: uppercase;
+  }
+  .badge-claim    { background: #E0E7FF; color: #3730A3; }
+  .badge-uph      { background: #FCE7F3; color: #9F1239; }
+  .badge-pack     { background: #DBEAFE; color: #1E40AF; }
+  .badge-load     { background: #FED7AA; color: #9A3412; }
+  .badge-deliver  { background: #D1FAE5; color: #065F46; }
+  @media print {
+    body { font-size: 10pt; }
+    h1 { page-break-before: avoid; }
+    h2 { page-break-before: auto; }
+    .page-break { page-break-before: always; }
+    pre, table, .stage { page-break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<h1>HOOKKA ERP — 生产 &amp; 扫码全流程规格</h1>
+<p style="color:#6B7280;">Version 1.0 · 2026-04-18 · 适用于 HOOKKA INDUSTRIES 床架 &amp; 沙发生产线</p>
+
+<div class="note">
+  <strong>文件用途：</strong> 定义从 FAB_CUT 开单到客户签收的完整扫码流程。包含身份模式、贴纸规格、状态机、API 端点、防呆规则、追溯性。
+  任何对生产扫码逻辑的改动请先更新本文件再实现。
+</div>
+
+<div class="toc">
+  <strong>目录</strong>
+  <ol>
+    <li>核心概念 &amp; 三种身份模式</li>
+    <li>数据模型（Batch / SpecPool / FGUnit / DO）</li>
+    <li>贴纸规格</li>
+    <li>QR 编码格式</li>
+    <li>完整流程（10 个 Step）</li>
+    <li>状态机 &amp; 转换规则</li>
+    <li>扫码防呆矩阵</li>
+    <li>追溯性 &amp; Rework / Return</li>
+    <li>异常处理（Release / Cancel / Short Ship）</li>
+    <li>API 端点汇总</li>
+  </ol>
+</div>
+
+<h2>1 · 核心概念 &amp; 三种身份模式</h2>
+
+<p>8 个生产部门按身份追踪方式分 3 组：</p>
+
+<table>
+  <thead>
+    <tr>
+      <th width="18%">身份模式</th>
+      <th width="22%">部门</th>
+      <th>追踪粒度</th>
+      <th>原因</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="pill pill-batch">BATCH</span></td>
+      <td>FAB_CUT, FAB_SEW</td>
+      <td>按 Batch 追踪 (1 Batch = 1 FG)</td>
+      <td>布料 batch 色差约束，Batch 内 pieces 同 wipCode fungible，跨 Batch STRICT</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-pool">POOL</span></td>
+      <td>FOAM, WOOD_CUT, FRAMING, WEBBING</td>
+      <td>按 specKey fungible 池</td>
+      <td>无色差问题，同 spec 任意互换，FIFO by dueDate 自动分配</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">SO_BOUND</span></td>
+      <td>UPHOLSTERY, PACKING</td>
+      <td>按 FGUnit (绑 SO)</td>
+      <td>Upholstery Claim 时钉死 SO/customer，生成 FG 贴纸带客户资料</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>1.1 Fungibility 范围</h3>
+<ul>
+  <li><strong>BATCH 模式下</strong>：同 Batch + 同 wipCode → 互通 (例：Batch 001 的 2 个 Divan 互换)</li>
+  <li><strong>BATCH 模式下</strong>：同 Batch + 不同 wipCode → 独立 (HB vs Divan)</li>
+  <li><strong>BATCH 模式下</strong>：跨 Batch → STRICT (防布料 batch 串套)</li>
+  <li><strong>POOL 模式下</strong>：同 specKey → 全互通（匿名池）</li>
+  <li><strong>SO_BOUND 模式下</strong>：每个 FGUnit 唯一身份（绑 SO），不 fungible</li>
+</ul>
+
+<h2>2 · 数据模型</h2>
+
+<h3>2.1 Batch（FAB_CUT / FAB_SEW）</h3>
+<pre>Batch {
+  id, batchNo (001/002/...), batchCode ("BD-20260420-001")
+  productClass: "BD" | "SF"
+  productCode, sizeCode, fabricCode
+  dueDate, createdAt
+  pieces: BatchPiece[]
+  sourcePoIds: string[]
+  // 分配信息（Upholstery Claim 时填）
+  assignedSoId?, assignedSoNo?, assignedPoId?
+  assignedCustomerName?, assignedAt?, assignedByWorkerId?
+  fgUnitIds: string[]
+  status: OPEN | READY_FOR_UPHOLSTERY | CLAIMED | UPHOLSTERED | PACKED | CANCELLED
+}
+
+BatchPiece {
+  pieceCode ("BD DV-20260420-001"), pieceType ("HB" | "DV" | ...)
+  wipCode ('8" Divan- 5FT'), count (2 for Divan, 1 for HB)
+  specKey (fungibility key)
+  slots: {
+    deptDone: { FAB_CUT: number, FAB_SEW: number }
+    slotPics: Array[count] of {pic1Id?, pic2Id?, dept}[]
+    qrShortCodes: string[count]
+    history: BatchScanEvent[]   // 追溯性
+  }
+}
+
+BatchScanEvent {
+  timestamp, deptCode, slotIndex, workerId, workerName
+  picSlot: 1 | 2, action: "COMPLETE" | "UNDO"
+}</pre>
+
+<h3>2.2 SpecPoolSlot（FOAM / WOOD_CUT / FRAMING / WEBBING）</h3>
+<pre>SpecPoolSlot {
+  id, specKey, deptCode
+  poId, jobCardId, wipCode, dueDate
+  status: PENDING | DONE | CONSUMED  // CONSUMED = 被 Upholstery Claim 扣减
+  doneAt?, doneByWorkerId?, doneByWorkerName?
+  qrShortCode
+  consumedAt?, consumedBy?  // 哪次 Upholstery Claim 扣的
+}</pre>
+
+<h3>2.3 FGUnit（Upholstery Claim 时生成）</h3>
+<pre>FGUnit {
+  id, unitSerial ("SO-2604-173-01-R1-U01-P1/3"), shortCode ("711993-1")
+  soId, soNo, soLineNo, poId, poNo
+  batchId, batchCode            // 追溯到 batch
+  productCode, productName
+  unitNo, totalUnits, pieceNo, totalPieces, pieceName
+  customerName, customerHub
+  mfdDate
+
+  status: CLAIMED | UPHOLSTERED | PACKED | LOADED | DELIVERED | RETURNED
+
+  claimedAt, claimedByWorkerId, claimedByWorkerName
+  upholsteryCompletedAt, upholsteryPic1Id, upholsteryPic2Id, ...
+  packedAt, packerId, packerName
+  loadedAt, loadedOntoDoId
+  deliveredAt, deliveredToSignature?, deliveredConfirmBy?
+  returnedAt, returnReason?
+
+  doId?                         // 挂哪张 DO
+  scanHistory: FGScanEvent[]    // 全链路扫码追溯
+}
+
+FGScanEvent {
+  timestamp, action, deptCode?, workerId, workerName
+  fromStatus, toStatus, notes?
+}</pre>
+
+<h3>2.4 DeliveryOrder（加 Master QR）</h3>
+<pre>DeliveryOrder {
+  id, doNo ("DO-2604-0012")
+  doQrCode ("DO|do-abc123")    // Master QR，客户一扫即签收全部
+  customerId, hubId, customerName, hubShortName
+  fgUnitIds: string[]          // 挂的 FG
+  status: PENDING_DISPATCH | IN_TRANSIT | PARTIALLY_DELIVERED | DELIVERED | CANCELLED
+  createdAt, createdBy
+  dispatchedAt?, dispatchedBy?, truckNo?
+  deliveredAt?, deliveredConfirmBy?
+  remarks?
+}</pre>
+
+<h2>3 · 贴纸规格</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>贴纸</th>
+      <th>尺寸</th>
+      <th>生成时机</th>
+      <th>内容</th>
+      <th>粘贴方式</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Batch 贴纸</strong></td>
+      <td>50×75mm</td>
+      <td>FAB_CUT 开工</td>
+      <td>Batch code, piece code (1/2), wipCode, spec, due date, QR</td>
+      <td>订 (staple) 到布料 / 半成品</td>
+    </tr>
+    <tr>
+      <td><strong>Pool 贴纸</strong></td>
+      <td>50×75mm</td>
+      <td>PO 开单（或部门开工）</td>
+      <td>wipCode, spec, pool slot id, QR</td>
+      <td>订到木料 / 海绵 / webbing</td>
+    </tr>
+    <tr>
+      <td><strong>FG 贴纸</strong></td>
+      <td>100×150mm</td>
+      <td>Upholstery Claim</td>
+      <td>客户名, SO No, PO No, 产品, 布色, 尺寸, piece (1 of N), Batch code, MFD, QR, Serial</td>
+      <td>先订 (Upholstery) → 后贴 (Packing 到箱外)</td>
+    </tr>
+    <tr>
+      <td><strong>DO 单据</strong></td>
+      <td>A4</td>
+      <td>Create DO</td>
+      <td>DO No, 客户, Hub, 日期, Master QR, items 明细, driver/receiver 签名栏</td>
+      <td>随车单据，客户扫 Master QR 一次性签收全部</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>3.1 Batch 贴纸样例</h3>
+<div class="sticker-mock">
+BD DV-20260420-001<br>
+<strong>(1/2)</strong><br>
+8" Divan- 5FT<br>
+Fabric: PC151-01<br>
+Size: 5FT<br>
+<span class="small">[QR]</span><br>
+<span class="small">Due: 2026-04-22</span>
+</div>
+<div class="sticker-mock">
+BD HB-20260420-001<br>
+<strong>(1/1)</strong><br>
+1013-(Q) HB 20"<br>
+Fabric: PC151-01<br>
+Size: 5FT<br>
+<span class="small">[QR]</span><br>
+<span class="small">Due: 2026-04-22</span>
+</div>
+
+<h3>3.2 FG 贴纸样例 (100×150mm)</h3>
+<div class="sticker-mock" style="width:280px;">
+<strong>THE CONTS</strong><br>
+SO-2604-173-01<br>
+PO-008274<br>
+—————————————<br>
+<strong>1013 King Bedframe</strong><br>
+Fabric: PC151-01 / Size: 5FT<br>
+Piece: HB (1 of 3)<br>
+MFD: 2026-04-20<br>
+Batch: BD-20260420-002<br>
+<span class="small">[FG QR — big, centered]</span><br>
+<strong>Serial: 711993-1</strong>
+</div>
+
+<h2 class="page-break">4 · QR 编码格式</h2>
+
+<table>
+  <thead>
+    <tr>
+      <th>类型</th>
+      <th>格式</th>
+      <th>示例</th>
+      <th>用途</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="pill pill-batch">BATCH</span></td>
+      <td><code>BATCH|{batchId}|{pieceCode}|{slotIdx}</code></td>
+      <td><code>BATCH|batch-abc|DV|1</code></td>
+      <td>FAB_CUT / FAB_SEW 完成一片</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-pool">POOL</span></td>
+      <td><code>POOL|{specKey}|{deptCode}|{slotId}</code></td>
+      <td><code>POOL|1013Q|5FT|DV|FOAM|slot-xyz</code></td>
+      <td>FOAM / WOOD / FRAME / WEBBING 完成一件</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><code>FG|{fgUnitId}</code></td>
+      <td><code>FG|fgu-001-HB</code></td>
+      <td>Upholstery Complete / Pack / Load</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-do">DO</span></td>
+      <td><code>DO|{doId}</code></td>
+      <td><code>DO|do-0012</code></td>
+      <td>Master QR，一扫整张 DO 签收</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>5 · 完整流程（10 Step）</h2>
+
+<p>用例：<strong>The Conts 下 3 张同 spec 的 1013 King 单 (SO-2604-173-01/02/03)</strong>。每张 1 set = 1 HB + 2 Divan。总共 3 HB + 6 Divan。</p>
+
+<h3>Step 0 · 下单 (Sales)</h3>
+<div class="stage">
+  <p>Sales 录入 3 张 SO，系统自动开 3 张 PO。</p>
+  <p>系统同时在 <strong>Spec Pool</strong> 预生成 slots：</p>
+  <ul>
+    <li>WOOD_CUT pool ← 3 HB 木架 + 6 Divan 木框 slots</li>
+    <li>FRAMING pool ← 3 HB + 6 Divan slots</li>
+    <li>WEBBING pool ← 6 Divan slots</li>
+    <li>FOAM pool ← 3 HB + 6 Divan slots</li>
+  </ul>
+  <p>所有 slots 带 dueDate 继承自 PO，FIFO 排序用。<strong>此时还不生成 FGUnit。</strong></p>
+</div>
+
+<h3>Step 1 · FAB_CUT (Batch 开 + 裁布)</h3>
+<div class="stage">
+  <div class="stage-title">Ali (裁布师傅)</div>
+  <p><strong>1.1 Generate Batches</strong>：Ali 点 <code>Generate Batches</code> → 系统按 PO qty-set 生成 Batch（1 set = 1 Batch），打 9 张 Batch 贴纸 (50×75mm)。</p>
+  <p><strong>1.2 裁布</strong>：同 spec 的布一起切。每片贴对应的 Batch 贴纸（订上去）。</p>
+  <p><strong>1.3 Scan</strong>：Scan 贴纸 QR → <code>batchPiece.deptDone.FAB_CUT += 1</code>。记 slot PIC。</p>
+  <pre>Ali scan BATCH|batch-001|DV|1
+  → batch 001 DV piece deptDone.FAB_CUT: 0 → 1 (1/2), slotPics[0] = Ali
+
+Ali scan BATCH|batch-001|DV|2
+  → deptDone.FAB_CUT: 1 → 2 (2/2), slotPics[1] = Ali
+  → batch 001 DV piece FAB_CUT 完成</pre>
+</div>
+
+<h3>Step 2 · FAB_SEW (按 Batch 缝)</h3>
+<div class="stage">
+  <div class="stage-title">Siti &amp; Fatimah (缝纫师傅)</div>
+  <p>布料按 Batch 堆放。工人拿一片片缝。Fungibility：</p>
+  <div class="success">
+    ✅ <strong>Batch 内 Divan 互换</strong>：同 Batch 的 2 个 Divan 互换，谁先缝好都算。
+  </div>
+  <div class="danger">
+    ⛔ <strong>跨 Batch STRICT</strong>：Batch 003 的 Divan 不能 mark 到 Batch 001 的 slot。
+  </div>
+  <p>每 batch 所有 pieces 的 FAB_SEW 完成 → <code>batch.status: OPEN → READY_FOR_UPHOLSTERY</code>。</p>
+</div>
+
+<h3>Step 3 · FOAM / WOOD_CUT / FRAMING / WEBBING (Spec Pool 并行)</h3>
+<div class="stage">
+  <p>4 个部门独立并行跑，不按 batch 分组：</p>
+  <ul>
+    <li>WOOD_CUT 最早可开工（不依赖布料）</li>
+    <li>FRAMING 依赖 WOOD_CUT 出材料</li>
+    <li>WEBBING 依赖 FRAMING 出框架</li>
+    <li>FOAM 依赖 FAB_SEW 出布套（海绵按布 spec 做）</li>
+  </ul>
+  <p>工人 scan Pool QR → <code>poolSlot.status: PENDING → DONE</code>，记 doneBy。</p>
+  <div class="note">
+    <strong>池子 slot 归属规则</strong>：不预先绑 PO。系统维护"该 spec 下总共需要 N 个，已完成 M 个"。Upholstery Claim 时再逻辑上挑出所需数量。
+  </div>
+</div>
+
+<h3 class="page-break">Step 4 · UPHOLSTERY Queue — ⭐ SO 分配时刻</h3>
+<div class="stage">
+  <div class="stage-title">Kumar (Upholstery 师傅)</div>
+  <p><strong>4.1 打开 Queue 页面</strong>：FIFO by dueDate 列出所有可 Claim 的 SO。</p>
+  <p><strong>4.2 Pre-req 检查</strong>：每个 SO 显示前置是否备齐：</p>
+  <ul>
+    <li>Batch ready (FAB_SEW complete)</li>
+    <li>FOAM pool 够数（by specKey）</li>
+    <li>WOOD_CUT / FRAMING / WEBBING pools 够数</li>
+  </ul>
+  <p>不满足 → Claim 按钮 disable，tooltip 说明缺什么。</p>
+
+  <p><strong>4.3 点 Claim</strong>，系统做：</p>
+  <ol>
+    <li>从 <code>readyForUpholsteryBatches()</code> 挑一个 batch（任意 ready 的都可）</li>
+    <li>从 Spec Pool 扣减所需 slots (FOAM 3 + WOOD 3 + FRAMING 3 + WEBBING 2)</li>
+    <li>Batch 绑 SO：<code>batch.assignedSoId</code> 等</li>
+    <li>生成 FGUnit（每个 piece 1 条，共 3 条：HB + 2 Divan）</li>
+    <li>打印 FG 贴纸 × 3 (100×150mm)</li>
+  </ol>
+
+  <p><strong>4.4 领料 + 贴标</strong>：Kumar 拿着 FG 贴纸去仓库，从 Batch 堆和 Pools 里拿料，订 FG 贴纸到每件半成品上（老 Batch 贴纸可保可撕）。</p>
+</div>
+
+<h3>Step 5 · UPHOLSTERY Complete</h3>
+<div class="stage">
+  <p>Kumar 做完一件 → scan 订着的 FG QR。</p>
+  <pre>Kumar scan FG|fgu-01-HB
+  → FGUnit.status: CLAIMED → UPHOLSTERED
+  → upholsteryPic1Id = Kumar, upholsteryCompletedAt = now</pre>
+  <p>3 件全部 UPHOLSTERED → 推到 Packing 工位。</p>
+</div>
+
+<h3>Step 6 · PACKING</h3>
+<div class="stage">
+  <div class="stage-title">Yusof (Packing 师傅)</div>
+  <ol>
+    <li>取下订着的 FG 贴纸（纸暂在手）</li>
+    <li>把半成品装进纸箱</li>
+    <li>Scan 手里的 FG QR</li>
+    <li>把 FG 贴纸贴到箱子外面</li>
+    <li>推到待发货区</li>
+  </ol>
+  <pre>Yusof scan FG|fgu-01-HB
+  → 检查: status 必须 = UPHOLSTERED ✅
+  → 若 status 是 CLAIMED → ⛔ "Not finished upholstery yet"
+  → status: UPHOLSTERED → PACKED
+  → packedAt = now, packerId = Yusof</pre>
+</div>
+
+<h3>Step 7 · Pending Delivery (逻辑视图)</h3>
+<div class="stage">
+  <p>定义：<code>FGUnit.status = PACKED AND doId IS NULL</code>。</p>
+  <p>Logistics / Sales 在该列表页按 customer / SO / due date 多选，点 <code>Create DO</code> 建单。</p>
+</div>
+
+<h3>Step 8 · Create DO + 打印 DO 单据</h3>
+<div class="stage">
+  <p>POST <code>/api/delivery-orders</code> → 系统生成：</p>
+  <ul>
+    <li>新 <code>doNo</code>（如 DO-2604-0012）</li>
+    <li>新 <code>doQrCode</code> Master QR（如 DO|do-abc123）</li>
+    <li>把选中的 FGs 的 <code>doId</code> 全部绑到这张 DO</li>
+    <li>DO status = <code>PENDING_DISPATCH</code></li>
+  </ul>
+  <p>打印 A4 DO 单据（含 Master QR + items 明细 + signature 栏）。</p>
+</div>
+
+<h3>Step 9 · LOADING (装货)</h3>
+<div class="stage">
+  <p>装货工人 scan FG 贴纸。系统校验：</p>
+  <ul>
+    <li>FGUnit.status = PACKED ✅</li>
+    <li>FGUnit.doId 非空 ✅</li>
+    <li>DO.status = PENDING_DISPATCH ✅</li>
+  </ul>
+  <p>推进：<code>FGUnit.status: PACKED → LOADED</code>。当 DO 内所有 FG 都 LOADED → <code>DO.status: PENDING_DISPATCH → IN_TRANSIT</code>。</p>
+  <div class="danger">
+    ⛔ <strong>没挂 DO 的 PACKED 被扫</strong> → "This FG has no DO yet. Please create DO first."
+  </div>
+</div>
+
+<h3>Step 10 · DELIVERY (Master QR 一键签收)</h3>
+<div class="stage">
+  <p>司机送到客户 Hub，客户 / 司机 scan <strong>DO Master QR</strong>：</p>
+  <pre>Scan DO|do-abc123
+  → 检查 DO.status = IN_TRANSIT ✅
+  → 弹窗 "Confirm delivery of all N items?"
+      [ ✅ Yes, all received ]
+      [ ⚠ Partial delivery — specify short items ]
+
+Yes → 批量更新：
+  DO.status = DELIVERED
+  所有 FGUnit.status = DELIVERED, deliveredAt = now
+  触发 SO 完成判定
+  触发 Invoice 流程</pre>
+  <p><strong>部分签收</strong>：选 Partial → 进勾选界面，未到的标 SHORT_SHIP + 生成异常单，DO.status = PARTIALLY_DELIVERED。</p>
+</div>
+
+<h2 class="page-break">6 · 状态机 &amp; 转换规则</h2>
+
+<h3>6.1 Batch Status</h3>
+<pre>OPEN
+  ↓ 所有 pieces FAB_SEW 完成
+READY_FOR_UPHOLSTERY
+  ↓ Upholstery Claim
+CLAIMED (绑 SO，生成 FGUnit)
+  ↓ Upholstery Complete
+UPHOLSTERED
+  ↓ Pack
+PACKED
+  (supervisor) → CANCELLED</pre>
+
+<h3>6.2 FGUnit Status</h3>
+<pre>         (Upholstery Claim)
+                ↓
+            CLAIMED  ──scan──>  UPHOLSTERED  ──scan──>  PACKED
+                                                            │
+                                                   (create DO, 挂 doId)
+                                                            │
+                                                            ↓
+                                                        PACKED + doId
+                                                            │  scan
+                                                            ↓
+                                                         LOADED (DO=IN_TRANSIT)
+                                                            │  DO Master QR
+                                                            ↓
+                                                       DELIVERED
+                                                            │
+                                                (supervisor) → RETURNED</pre>
+
+<h3>6.3 DeliveryOrder Status</h3>
+<pre>PENDING_DISPATCH
+  ↓ 所有 FG LOADED
+IN_TRANSIT
+  ↓ Master QR scan, full receive
+DELIVERED
+  ↓ (Master QR scan, partial receive)
+PARTIALLY_DELIVERED
+  (supervisor) → CANCELLED</pre>
+
+<h2>7 · 扫码防呆矩阵</h2>
+
+<p>统一 <code>POST /api/scan</code> 端点。Body: <code>{ qrRaw, workerId }</code>。系统按 QR 前缀识别类型 + 状态自动决定动作，前端只弹出确认窗。</p>
+
+<table>
+  <thead>
+    <tr>
+      <th width="10%">QR 类型</th>
+      <th width="22%">当前状态</th>
+      <th width="24%">弹窗动作</th>
+      <th>结果 / 防呆</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="pill pill-batch">BATCH</span></td>
+      <td>slot 未完成</td>
+      <td>Complete this piece @ {dept}</td>
+      <td>deptDone +1, 记 PIC, slot full → PIC_FULL 拒绝</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-batch">BATCH</span></td>
+      <td>slot 已完成</td>
+      <td>⛔ Already complete @ {dept}</td>
+      <td>显示历史 PIC，禁止操作</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-pool">POOL</span></td>
+      <td>PENDING</td>
+      <td>Complete @ {dept}</td>
+      <td>slot DONE, 记 doneBy</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-pool">POOL</span></td>
+      <td>DONE / CONSUMED</td>
+      <td>⛔ Already consumed</td>
+      <td>显示 consumedBy (哪次 Claim 扣的)</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><span class="badge badge-claim">CLAIMED</span></td>
+      <td>Upholstery Complete</td>
+      <td>选 PIC worker (max 2) → UPHOLSTERED</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><span class="badge badge-uph">UPHOLSTERED</span></td>
+      <td>Pack</td>
+      <td>选 packer → PACKED</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><span class="badge badge-pack">PACKED</span>, no DO</td>
+      <td>⛔ Wait for DO creation</td>
+      <td>提示 logistics 先建 DO</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><span class="badge badge-pack">PACKED</span> + DO=PENDING_DISPATCH</td>
+      <td>Load &amp; Dispatch</td>
+      <td>→ LOADED, 全部 LOADED → DO IN_TRANSIT</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-so">FG</span></td>
+      <td><span class="badge badge-load">LOADED</span></td>
+      <td>⛔ Already loaded, use DO QR</td>
+      <td>指引用 DO Master QR</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-do">DO</span></td>
+      <td>PENDING_DISPATCH</td>
+      <td>⛔ Not dispatched yet</td>
+      <td>需先 scan FGs load</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-do">DO</span></td>
+      <td>IN_TRANSIT</td>
+      <td>✅ Confirm Delivery (all FGs)</td>
+      <td>[Yes, all] / [Partial] 两路径</td>
+    </tr>
+    <tr>
+      <td><span class="pill pill-do">DO</span></td>
+      <td><span class="badge badge-deliver">DELIVERED</span></td>
+      <td>⛔ Already received</td>
+      <td>显示 deliveredAt + 签收人</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>通用防呆：</strong>
+  <ul>
+    <li>同一 worker 同一 slot 不能占 2 个 PIC 槽 (<code>ALREADY_PIC</code>)</li>
+    <li>3 秒 debounce：避免双击重复 scan</li>
+    <li>跨级状态推进拒绝：必须按顺序 CLAIMED → UPHOLSTERED → PACKED → LOADED → DELIVERED</li>
+    <li>Supervisor 可通过 <code>/supervisor/scan</code> override，但需填原因</li>
+  </ul>
+</div>
+
+<h2 class="page-break">8 · 追溯性 &amp; Rework / Return</h2>
+
+<p>所有贴纸贴在成品上直到客户手里。客户投诉 / Rework 时 scan 贴纸即可看全链路。</p>
+
+<h3>8.1 追溯视图（scan FG QR 在 supervisor 模式下）</h3>
+<pre>FG Serial: 711993-1  (SO-2604-173-01 HB)
+
+Current Status: DELIVERED
+Customer: The Conts — Houzs KL
+Delivered: 2026-04-25 by Driver Ah Seng
+
+───── 生产历史 (全程追溯) ─────
+Batch: BD-20260420-002
+
+  FAB_CUT      2026-04-18 14:22  PIC: Ali
+  FAB_SEW      2026-04-19 09:45  PIC: Siti
+  FOAM (pool)  2026-04-19 15:10  PIC: Ahmad
+  WOOD_CUT     2026-04-18 10:00  PIC: Raj
+  FRAMING      2026-04-19 11:30  PIC: Hassan
+  WEBBING      (HB 无 webbing)
+  UPHOLSTERY claim  2026-04-20 08:00  by Kumar
+  UPHOLSTERY done   2026-04-20 11:45  PIC: Kumar
+  PACK              2026-04-20 16:30  by Yusof
+  DO linked    DO-2604-0012   2026-04-24 10:00
+  LOAD         2026-04-25 07:15
+  DELIVER      2026-04-25 11:00  received by Fong (The Conts)
+
+[ Initiate Rework ]  [ Mark as Return ]</pre>
+
+<h3>8.2 Return 触发</h3>
+<div class="stage">
+  <p>QMS module 的 Returns tab 已有"Scan QR to create case"功能。新流程：</p>
+  <ol>
+    <li>Scan FG QR → 系统识别 <code>DELIVERED</code> 状态 → 弹 "Create Return Case?"</li>
+    <li>输入原因 (布料色差 / 结构损坏 / 尺寸错误 / ...)</li>
+    <li>FGUnit.status: DELIVERED → RETURNED, returnedAt, returnReason</li>
+    <li>自动生成 Return Case，关联 FG + 全部生产历史</li>
+    <li>路由到 QC / 生产主管 review</li>
+  </ol>
+</div>
+
+<h3>8.3 Rework 触发</h3>
+<div class="stage">
+  <p>Rework 可在任一阶段触发（Upholstery 后发现 bug 也可）：</p>
+  <ol>
+    <li>Scan FG QR → supervisor 模式 → 选 Rework</li>
+    <li>选 Rework dept（哪个部门要重做）</li>
+    <li>系统把 FGUnit 状态回滚到该 dept 前一状态</li>
+    <li>加 rework note 到 scanHistory</li>
+    <li>该部门工作队列多出一项 "REWORK: {serial}"</li>
+  </ol>
+  <div class="note">
+    <strong>重要</strong>：Rework 不生成新 FGUnit，贴纸不换，延续原身份。追溯链不断。
+  </div>
+</div>
+
+<h2>9 · 异常处理</h2>
+
+<h3>9.1 Batch Release (Upholstery Claim 后反悔)</h3>
+<p>场景：Kumar 领料后发现布有瑕疵，不做了。</p>
+<pre>POST /api/batches/:id/release
+  → batch.assignedSoId = null
+  → batch.status = OPEN
+  → 回退 Spec Pool 扣减
+  → 删除已生成但未 UPHOLSTERED 的 FGUnit
+  → 该 batch 回到 Upholstery Queue 可重新 Claim</pre>
+
+<h3>9.2 DO Cancel</h3>
+<p>场景：DO 建了但客户改单，取消。</p>
+<pre>POST /api/delivery-orders/:id/cancel
+  → DO.status = CANCELLED
+  → 回退：挂的 FGs 的 doId 清空
+  → FG 状态保持 PACKED (回到 Pending Delivery bucket)</pre>
+
+<h3>9.3 Short Ship (Partial Delivery)</h3>
+<p>扫 DO Master QR 时选 Partial → 勾选界面：</p>
+<ul>
+  <li>Received → FGUnit → DELIVERED</li>
+  <li>Short → FGUnit 保持 LOADED，生成 SHORT_SHIP exception ticket</li>
+  <li>DO.status → PARTIALLY_DELIVERED</li>
+  <li>Short FG 进 "待重派" 列表，可重新加到新 DO</li>
+</ul>
+
+<h2 class="page-break">10 · API 端点汇总</h2>
+
+<table>
+  <thead><tr><th>Method</th><th>Endpoint</th><th>说明</th></tr></thead>
+  <tbody>
+    <tr><td>POST</td><td><code>/api/batches/generate</code></td><td>FAB_CUT 开 Batch + 打贴纸</td></tr>
+    <tr><td>GET</td><td><code>/api/batches?dept=&amp;status=</code></td><td>列表（Production Sheet 用）</td></tr>
+    <tr><td>GET</td><td><code>/api/batches/:id</code></td><td>单条详情 + history</td></tr>
+    <tr><td>POST</td><td><code>/api/batches/:id/release</code></td><td>Claim 后反悔</td></tr>
+    <tr><td>POST</td><td><code>/api/spec-pool/generate</code></td><td>PO 开单生成 pool slots</td></tr>
+    <tr><td>GET</td><td><code>/api/spec-pool?dept=&amp;specKey=</code></td><td>Pool 视图</td></tr>
+    <tr><td>GET</td><td><code>/api/upholstery/queue</code></td><td>可 Claim 的 SO 列表 (FIFO)</td></tr>
+    <tr><td>POST</td><td><code>/api/upholstery/claim</code></td><td>Claim SO → 绑 batch + 生成 FGUnit + 打 FG 贴纸</td></tr>
+    <tr><td><strong>POST</strong></td><td><strong><code>/api/scan</code></strong></td><td><strong>统一 scan，按 QR 前缀 dispatch</strong></td></tr>
+    <tr><td>GET</td><td><code>/api/fg-units/:id/history</code></td><td>追溯视图数据</td></tr>
+    <tr><td>POST</td><td><code>/api/fg-units/:id/rework</code></td><td>Supervisor 触发 rework</td></tr>
+    <tr><td>POST</td><td><code>/api/delivery-orders</code></td><td>Create DO（生成 Master QR）</td></tr>
+    <tr><td>POST</td><td><code>/api/delivery-orders/:id/deliver</code></td><td>Master QR 签收（all / partial）</td></tr>
+    <tr><td>POST</td><td><code>/api/delivery-orders/:id/cancel</code></td><td>取消 DO</td></tr>
+  </tbody>
+</table>
+
+<h3>10.1 统一 /api/scan 分派逻辑</h3>
+<pre>POST /api/scan
+Body: { qrRaw: string, workerId: string, extras?: {...} }
+
+1. Parse qrRaw → 按前缀识别 BATCH / POOL / FG / DO
+2. 根据类型 + 当前状态决定 action:
+   - BATCH   → recordBatchScan(...)
+   - POOL    → recordPoolScan(...)
+   - FG      → 按 FGUnit.status 推进状态机
+   - DO      → 按 DO.status 决定 (IN_TRANSIT → deliver)
+3. 返回:
+   {
+     success: boolean,
+     action: "BATCH_COMPLETE" | "UPHOLSTERY_COMPLETE" | "PACK" | "LOAD" | "DELIVER_ALL" | ...
+     nextPrompt: { fields: [...], confirmLabel: "..." }
+     currentEntity: { batch? / fgUnit? / do? / poolSlot? }
+     reason?: string,  // 拒绝时的 code
+   }</pre>
+
+<hr>
+
+<div class="note">
+  <strong>打印成 PDF：</strong> 在浏览器打开此 HTML → Ctrl+P (或 Cmd+P) → 目的地选 "另存为 PDF" → 保存即可。纸张选 A4，页边距 "默认"。
+</div>
+
+<p style="color:#9CA3AF; font-size:9pt; text-align:center; margin-top:40px;">
+  — HOOKKA ERP Production Scan Flow v1.0 · 2026-04-18 —
+</p>
+
+</body>
+</html>

@@ -1,0 +1,153 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-raisin: #1F1D1B;
+  --color-raisin-2: #2A2725;
+  --color-raisin-3: #353230;
+  --color-taupe: #6B5C32;
+  --color-taupe-light: #8B7A4E;
+  --color-taupe-dark: #4D4224;
+  --color-taupe-10: rgba(107,92,50,.1);
+  --color-taupe-15: rgba(107,92,50,.15);
+  --color-taupe-20: rgba(107,92,50,.2);
+  --color-stone-white: #F0ECE9;
+  --color-border: #E2DDD8;
+  --color-border-light: #E5E0DB;
+  --color-text-secondary: #5A5550;
+  --color-text-tertiary: #8A8580;
+  --color-accent-green: #16A34A;
+  --color-accent-blue: #2563EB;
+  --color-accent-amber: #D97706;
+  --color-accent-red: #DC2626;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", monospace;
+}
+
+body {
+  background: var(--color-stone-white);
+  color: var(--color-raisin);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D1CBC5;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #9CA3AF;
+}
+
+/* Tabular numbers — any element with this class uses fixed-width digits
+   so columns of numbers and dates align vertically. Applied automatically
+   by DataGrid for date / number / currency / docno column types. */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Document number styling */
+.doc-number {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Amount right-aligned */
+.amount {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* HOOKKA gradient */
+.hookka-gradient {
+  background: linear-gradient(135deg, #8B7A4E, #6B5C32);
+}
+
+/* HOOKKA card */
+.hookka-card {
+  background: #ffffff;
+  border-radius: 0.5rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--color-border);
+}
+
+/* HOOKKA badge */
+.hookka-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(107, 92, 50, 0.1);
+  color: var(--color-taupe);
+}
+
+/* KPI value — tabular-nums so digits don't jump on data refresh */
+.kpi-value {
+  font-size: 1.875rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Status badge variants */
+.badge-green {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(22, 163, 74, 0.1);
+  color: #16A34A;
+}
+
+.badge-blue {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(37, 99, 235, 0.1);
+  color: #2563EB;
+}
+
+.badge-amber {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(217, 119, 6, 0.1);
+  color: #D97706;
+}
+
+.badge-red {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 9999px;
+  font-size: 12px;
+  font-weight: 500;
+  background: rgba(220, 38, 38, 0.1);
+  color: #DC2626;
+}
+
+/* Table row hover */
+table tbody tr:hover {
+  background: rgba(107, 92, 50, 0.03);
+}

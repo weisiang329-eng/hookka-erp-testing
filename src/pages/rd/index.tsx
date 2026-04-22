@@ -1,0 +1,723 @@
+import { useState, useEffect, useCallback } from "react";
+import { Link } from "react-router-dom";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
+import { formatCurrency, formatDate } from "@/lib/utils";
+import {
+  Lightbulb,
+  Users,
+  Calendar,
+  TrendingUp,
+  Download,
+  Layers,
+  BarChart3,
+  ArrowRight,
+  Plus,
+  X,
+} from "lucide-react";
+import type { RDProject, RDProjectStage, RDProjectType } from "@/lib/mock-data";
+
+const STAGES: RDProjectStage[] = ["CONCEPT", "DESIGN", "PROTOTYPE", "TESTING", "APPROVED", "PRODUCTION_READY"];
+
+const STAGE_COLORS: Record<RDProjectStage, string> = {
+  CONCEPT: "#6366F1",
+  DESIGN: "#3B82F6",
+  PROTOTYPE: "#F59E0B",
+  TESTING: "#F97316",
+  APPROVED: "#10B981",
+  PRODUCTION_READY: "#06B6D4",
+};
+
+const STAGE_LABELS: Record<RDProjectStage, string> = {
+  CONCEPT: "Concept",
+  DESIGN: "Design",
+  PROTOTYPE: "Prototype",
+  TESTING: "Testing",
+  APPROVED: "Approved",
+  PRODUCTION_READY: "Production Ready",
+};
+
+const CATEGORY_COLORS: Record<string, string> = {
+  SOFA: "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]",
+  BEDFRAME: "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]",
+  ACCESSORY: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
+};
+
+type TabId = "projects" | "pipeline" | "reports";
+
+function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
+  const currentIndex = STAGES.indexOf(currentStage);
+  return (
+    <div className="flex items-center gap-1 w-full">
+      {STAGES.map((stage, i) => (
+        <div key={stage} className="flex-1 flex flex-col items-center gap-0.5">
+          <div
+            className="h-2 w-full rounded-full transition-all"
+            style={{
+              backgroundColor: i <= currentIndex ? STAGE_COLORS[stage] : "#E2DDD8",
+              opacity: i <= currentIndex ? 1 : 0.4,
+            }}
+          />
+          <span className="text-[9px] text-gray-400 truncate w-full text-center">
+            {STAGE_LABELS[stage].slice(0, 4)}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ProjectCard({ project }: { project: RDProject }) {
+  const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
+  const budgetColor = budgetPct > 90 ? "text-[#9A3A2D]" : budgetPct > 70 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+
+  return (
+    <Link to={`/rd/${project.id}`}>
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-gray-400">{project.code}</p>
+              <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+            </div>
+            <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2">
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+              {project.productCategory}
+            </span>
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
+                project.projectType === "IMPROVEMENT"
+                  ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                  : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
+              }`}
+            >
+              {project.projectType === "IMPROVEMENT" ? "Improvement" : "Research"}
+            </span>
+            <span
+              className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+              style={{ backgroundColor: STAGE_COLORS[project.currentStage] }}
+            >
+              {STAGE_LABELS[project.currentStage]}
+            </span>
+          </div>
+
+          <StageProgressBar currentStage={project.currentStage} />
+
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="flex items-center gap-1 text-gray-500">
+              <Calendar className="h-3 w-3" />
+              <span>Launch: {formatDate(project.targetLaunchDate)}</span>
+            </div>
+            <div className="flex items-center gap-1 text-gray-500">
+              <Users className="h-3 w-3" />
+              <span>{project.assignedTeam.length} members</span>
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-gray-500">Budget</span>
+              <span className={`font-medium ${budgetColor}`}>{budgetPct}% used</span>
+            </div>
+            <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all"
+                style={{
+                  width: `${Math.min(budgetPct, 100)}%`,
+                  backgroundColor: budgetPct > 90 ? "#DC2626" : budgetPct > 70 ? "#D97706" : "#16A34A",
+                }}
+              />
+            </div>
+            <div className="flex justify-between text-[10px] text-gray-400">
+              <span>{formatCurrency(project.actualCost)}</span>
+              <span>{formatCurrency(project.totalBudget)}</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-1">
+            {project.assignedTeam.slice(0, 3).map((name) => (
+              <span key={name} className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
+                {name.split(" ")[0]}
+              </span>
+            ))}
+            {project.assignedTeam.length > 3 && (
+              <span className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
+                +{project.assignedTeam.length - 3}
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  );
+}
+
+function PipelineView({ projects }: { projects: RDProject[] }) {
+  return (
+    <div className="grid grid-cols-6 gap-3 min-h-[500px]">
+      {STAGES.map((stage) => {
+        const stageProjects = projects.filter((p) => p.currentStage === stage);
+        return (
+          <div key={stage} className="flex flex-col">
+            <div
+              className="rounded-t-lg px-3 py-2 text-white text-xs font-semibold flex items-center justify-between"
+              style={{ backgroundColor: STAGE_COLORS[stage] }}
+            >
+              <span>{STAGE_LABELS[stage]}</span>
+              <span className="bg-white/20 rounded-full px-1.5 py-0.5 text-[10px]">{stageProjects.length}</span>
+            </div>
+            <div className="flex-1 bg-gray-50 border border-t-0 border-[#E2DDD8] rounded-b-lg p-2 space-y-2">
+              {stageProjects.map((project) => (
+                <Link key={project.id} to={`/rd/${project.id}`}>
+                  <div className="bg-white rounded-md border border-[#E2DDD8] p-2.5 hover:shadow-md transition-shadow cursor-pointer space-y-2">
+                    <p className="text-[10px] font-mono text-gray-400">{project.code}</p>
+                    <p className="text-xs font-medium text-[#1F1D1B] leading-snug">{project.name}</p>
+                    <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+                      {project.productCategory}
+                    </span>
+                    <div className="flex items-center justify-between text-[10px] text-gray-400">
+                      <span>{formatDate(project.targetLaunchDate)}</span>
+                      <ArrowRight className="h-3 w-3" />
+                    </div>
+                  </div>
+                </Link>
+              ))}
+              {stageProjects.length === 0 && (
+                <div className="flex items-center justify-center h-24 text-xs text-gray-300">
+                  No projects
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ReportsView({ projects }: { projects: RDProject[] }) {
+  const totalProjects = projects.length;
+  const activeProjects = projects.filter((p) => p.status === "ACTIVE").length;
+  const totalBudget = projects.reduce((sum, p) => sum + p.totalBudget, 0);
+  const totalSpend = projects.reduce((sum, p) => sum + p.actualCost, 0);
+
+  const byStage = STAGES.map((stage) => ({
+    stage,
+    label: STAGE_LABELS[stage],
+    color: STAGE_COLORS[stage],
+    count: projects.filter((p) => p.currentStage === stage).length,
+  }));
+
+  const byCategory = ["SOFA", "BEDFRAME", "ACCESSORY"].map((cat) => ({
+    category: cat,
+    count: projects.filter((p) => p.productCategory === cat).length,
+  }));
+
+  const handleExportCSV = () => {
+    const headers = ["Code", "Name", "Category", "Stage", "Status", "Target Launch", "Budget (MYR)", "Actual Cost (MYR)", "Budget Used %", "Team Size", "Prototypes"];
+    const rows = projects.map((p) => [
+      p.code,
+      p.name,
+      p.productCategory,
+      p.currentStage,
+      p.status,
+      p.targetLaunchDate,
+      (p.totalBudget / 100).toFixed(2),
+      (p.actualCost / 100).toFixed(2),
+      p.totalBudget > 0 ? ((p.actualCost / p.totalBudget) * 100).toFixed(1) : "0",
+      String(p.assignedTeam.length),
+      String(p.prototypes.length),
+    ]);
+    const csv = [headers.join(","), ...rows.map((r) => r.map((c) => `"${c}"`).join(","))].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `rd-projects-report-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Summary Cards */}
+      <div className="grid grid-cols-4 gap-4">
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-[#E0EDF0] flex items-center justify-center">
+                <Lightbulb className="h-5 w-5 text-[#3E6570]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-[#1F1D1B]">{totalProjects}</p>
+                <p className="text-xs text-gray-500">Total Projects</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-[#EEF3E4] flex items-center justify-center">
+                <TrendingUp className="h-5 w-5 text-[#4F7C3A]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-[#1F1D1B]">{activeProjects}</p>
+                <p className="text-xs text-gray-500">Active Projects</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-[#E0EDF0] flex items-center justify-center">
+                <BarChart3 className="h-5 w-5 text-[#3E6570]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalBudget)}</p>
+                <p className="text-xs text-gray-500">Total Budget</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-[#FAEFCB] flex items-center justify-center">
+                <Layers className="h-5 w-5 text-[#9C6F1E]" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-[#1F1D1B]">{formatCurrency(totalSpend)}</p>
+                <p className="text-xs text-gray-500">Total R&D Spend</p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* By Stage */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Projects by Stage</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-6 gap-3">
+            {byStage.map((s) => (
+              <div key={s.stage} className="text-center">
+                <div
+                  className="h-20 rounded-lg flex items-center justify-center mb-1"
+                  style={{ backgroundColor: s.color + "18" }}
+                >
+                  <span className="text-3xl font-bold" style={{ color: s.color }}>{s.count}</span>
+                </div>
+                <p className="text-xs text-gray-500">{s.label}</p>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* By Category */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Projects by Category</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-3 gap-4">
+            {byCategory.map((c) => (
+              <div key={c.category} className="flex items-center gap-3 p-3 rounded-lg border border-[#E2DDD8]">
+                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium border ${CATEGORY_COLORS[c.category]}`}>
+                  {c.category}
+                </span>
+                <span className="text-lg font-bold text-[#1F1D1B]">{c.count}</span>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Detailed Table */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-sm">All Projects - Cost & Timeline</CardTitle>
+          <Button variant="outline" size="sm" onClick={handleExportCSV}>
+            <Download className="h-3.5 w-3.5 mr-1" />
+            Export CSV
+          </Button>
+        </CardHeader>
+        <CardContent>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8]">
+                  <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Code</th>
+                  <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Name</th>
+                  <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Category</th>
+                  <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Stage</th>
+                  <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Budget</th>
+                  <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Actual</th>
+                  <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Used %</th>
+                  <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Launch Date</th>
+                  <th className="text-center py-2 px-2 text-xs font-semibold text-gray-500">Prototypes</th>
+                </tr>
+              </thead>
+              <tbody>
+                {projects.map((p) => {
+                  const pct = p.totalBudget > 0 ? Math.round((p.actualCost / p.totalBudget) * 100) : 0;
+                  return (
+                    <tr key={p.id} className="border-b border-[#E2DDD8]/50 hover:bg-[#F0ECE9]/50">
+                      <td className="py-2 px-2 font-mono text-xs text-gray-400">{p.code}</td>
+                      <td className="py-2 px-2 font-medium text-[#1F1D1B]">
+                        <Link to={`/rd/${p.id}`} className="hover:text-[#6B5C32]">{p.name}</Link>
+                      </td>
+                      <td className="py-2 px-2">
+                        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[p.productCategory]}`}>
+                          {p.productCategory}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2">
+                        <span
+                          className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+                          style={{ backgroundColor: STAGE_COLORS[p.currentStage] }}
+                        >
+                          {STAGE_LABELS[p.currentStage]}
+                        </span>
+                      </td>
+                      <td className="py-2 px-2 text-right text-xs">{formatCurrency(p.totalBudget)}</td>
+                      <td className="py-2 px-2 text-right text-xs">{formatCurrency(p.actualCost)}</td>
+                      <td className="py-2 px-2 text-right text-xs font-medium" style={{ color: pct > 90 ? "#DC2626" : pct > 70 ? "#D97706" : "#16A34A" }}>
+                        {pct}%
+                      </td>
+                      <td className="py-2 px-2 text-xs text-gray-500">{formatDate(p.targetLaunchDate)}</td>
+                      <td className="py-2 px-2 text-center text-xs">{p.prototypes.length}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function CreateProjectDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  const { toast } = useToast();
+  const [submitting, setSubmitting] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    projectType: "DEVELOPMENT" as RDProjectType,
+    productCategory: "BEDFRAME" as "BEDFRAME" | "SOFA" | "ACCESSORY",
+    serviceId: "",
+    description: "",
+    targetLaunchDate: "",
+    totalBudgetRM: "",
+    teamMembers: "",
+  });
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.name.trim()) {
+      toast.error("Project name is required");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const body: Record<string, unknown> = {
+        name: form.name.trim(),
+        projectType: form.projectType,
+        productCategory: form.productCategory,
+      };
+      if (form.serviceId.trim()) body.serviceId = form.serviceId.trim();
+      if (form.description.trim()) body.description = form.description.trim();
+      if (form.targetLaunchDate) body.targetLaunchDate = form.targetLaunchDate;
+      if (form.totalBudgetRM) body.totalBudget = Math.round(parseFloat(form.totalBudgetRM) * 100);
+      if (form.teamMembers.trim()) {
+        body.assignedTeam = form.teamMembers
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      }
+
+      const res = await fetch("/api/rd-projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error ?? "Failed to create project");
+      }
+      toast.success("Project created successfully");
+      onCreated();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to create project");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">New R&D Project</h2>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+          {/* Project Name */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-[#1F1D1B]">
+              Project Name <span className="text-[#9A3A2D]">*</span>
+            </label>
+            <input
+              type="text"
+              value={form.name}
+              onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+              className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+              placeholder="e.g. Premium Sofa V2"
+              autoFocus
+            />
+          </div>
+
+          {/* Project Type */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-[#1F1D1B]">
+              Project Type <span className="text-[#9A3A2D]">*</span>
+            </label>
+            <select
+              value={form.projectType}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  projectType: e.target.value as RDProjectType,
+                }))
+              }
+              className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32] bg-white"
+            >
+              <option value="DEVELOPMENT">New Product Research</option>
+              <option value="IMPROVEMENT">Improvement / Repair</option>
+            </select>
+          </div>
+
+          {/* Category */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-[#1F1D1B]">
+              Category <span className="text-[#9A3A2D]">*</span>
+            </label>
+            <select
+              value={form.productCategory}
+              onChange={(e) =>
+                setForm((f) => ({
+                  ...f,
+                  productCategory: e.target.value as "BEDFRAME" | "SOFA" | "ACCESSORY",
+                }))
+              }
+              className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32] bg-white"
+            >
+              <option value="BEDFRAME">Bedframe</option>
+              <option value="SOFA">Sofa</option>
+              <option value="ACCESSORY">Accessory</option>
+            </select>
+          </div>
+
+          {/* Service ID — only for IMPROVEMENT type */}
+          {form.projectType === "IMPROVEMENT" && (
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-[#1F1D1B]">Service ID</label>
+              <input
+                type="text"
+                value={form.serviceId}
+                onChange={(e) => setForm((f) => ({ ...f, serviceId: e.target.value }))}
+                className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                placeholder="e.g. RC-2604-001"
+              />
+            </div>
+          )}
+
+          {/* Description */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-[#1F1D1B]">Description</label>
+            <textarea
+              value={form.description}
+              onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
+              rows={3}
+              className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32] resize-none"
+              placeholder="Brief description of the project..."
+            />
+          </div>
+
+          {/* Target Launch Date & Budget */}
+          <div className="grid grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-[#1F1D1B]">Target Launch Date</label>
+              <input
+                type="date"
+                value={form.targetLaunchDate}
+                onChange={(e) => setForm((f) => ({ ...f, targetLaunchDate: e.target.value }))}
+                className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-sm font-medium text-[#1F1D1B]">Budget (RM)</label>
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.totalBudgetRM}
+                onChange={(e) => setForm((f) => ({ ...f, totalBudgetRM: e.target.value }))}
+                className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                placeholder="0.00"
+              />
+            </div>
+          </div>
+
+          {/* Team Members */}
+          <div className="space-y-1.5">
+            <label className="block text-sm font-medium text-[#1F1D1B]">Team Members</label>
+            <input
+              type="text"
+              value={form.teamMembers}
+              onChange={(e) => setForm((f) => ({ ...f, teamMembers: e.target.value }))}
+              className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+              placeholder="Comma-separated names, e.g. Ali, Siti, Ahmad"
+            />
+            <p className="text-xs text-gray-400">Separate names with commas</p>
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-3 pt-2">
+            <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
+              Cancel
+            </Button>
+            <Button type="submit" variant="primary" disabled={submitting}>
+              {submitting ? "Creating..." : "Create Project"}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+export default function RDPage() {
+  const [projects, setProjects] = useState<RDProject[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState<TabId>("projects");
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+
+  const fetchProjects = useCallback(async () => {
+    try {
+      const res = await fetch("/api/rd-projects");
+      if (!res.ok) return;
+      const data = await res.json();
+      setProjects(data.data ?? []);
+    } catch {
+      // silently ignore
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
+
+  const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
+    { id: "projects", label: "Projects", icon: <Lightbulb className="h-4 w-4" /> },
+    { id: "pipeline", label: "Pipeline", icon: <Layers className="h-4 w-4" /> },
+    { id: "reports", label: "Reports", icon: <BarChart3 className="h-4 w-4" /> },
+  ];
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-[#1F1D1B]">R&D Projects</h1>
+          <p className="text-sm text-gray-500 mt-1">Research & Development pipeline and project management</p>
+        </div>
+        <Button variant="primary" onClick={() => setShowCreateDialog(true)}>
+          <Plus className="h-4 w-4" /> New Project
+        </Button>
+      </div>
+
+      {/* Tabs */}
+      <div className="flex gap-1 border-b border-[#E2DDD8]">
+        {tabs.map((tab) => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id)}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+              activeTab === tab.id
+                ? "border-[#6B5C32] text-[#6B5C32]"
+                : "border-transparent text-gray-400 hover:text-gray-600"
+            }`}
+          >
+            {tab.icon}
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Content */}
+      {loading ? (
+        <div className="flex items-center justify-center h-64">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[#6B5C32]" />
+        </div>
+      ) : (
+        <>
+          {activeTab === "projects" && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {projects.map((project) => (
+                <ProjectCard key={project.id} project={project} />
+              ))}
+              {projects.length === 0 && (
+                <div className="col-span-3 text-center py-16 text-gray-400">
+                  No R&D projects found.
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === "pipeline" && <PipelineView projects={projects} />}
+          {activeTab === "reports" && <ReportsView projects={projects} />}
+        </>
+      )}
+
+      {showCreateDialog && (
+        <CreateProjectDialog
+          onClose={() => setShowCreateDialog(false)}
+          onCreated={() => {
+            setShowCreateDialog(false);
+            fetchProjects();
+          }}
+        />
+      )}
+    </div>
+  );
+}

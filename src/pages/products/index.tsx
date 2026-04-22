@@ -1260,9 +1260,9 @@ export default function ProductsPage() {
         const isSofa = categoryFilter === "SOFA";
         const colSpanN = isSofa ? 13 : 10;
         const gridCols = isSofa
-          ? "1fr 1.8fr 0.7fr 0.65fr 0.65fr 0.65fr 0.65fr 0.65fr 0.6fr 0.5fr 0.6fr 0.7fr"
-          : "1fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.7fr 0.8fr";
-        const thCls = "px-4 py-3 text-xs font-medium text-[#6B7280] uppercase tracking-wider";
+          ? "1.3fr 1.8fr 0.7fr 0.65fr 0.65fr 0.65fr 0.65fr 0.65fr 0.6fr 0.5fr 0.6fr 0.7fr"
+          : "1.3fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.7fr 0.8fr";
+        const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
         <div className="overflow-x-auto">
@@ -1317,31 +1317,31 @@ export default function ProductsPage() {
                         style={{ gridTemplateColumns: gridCols }}
                         onClick={() => setExpandedId(isExpanded ? null : p.id)}
                       >
-                        <div className="px-4 py-3 flex items-center gap-2">
+                        <div className="px-3 py-1.5 flex items-center gap-1.5">
                           <svg
                             className={`w-3.5 h-3.5 text-[#9CA3AF] transition-transform flex-shrink-0 ${isExpanded ? "rotate-90" : ""}`}
                             fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
                           >
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                           </svg>
-                          <span className="text-sm font-mono font-medium text-[#111827]">{p.code}</span>
+                          <span className="text-xs font-mono font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
                         </div>
-                        <div className="px-4 py-3">
-                          <span className="text-sm text-[#111827]">{p.name}</span>
-                          <span className="block text-xs text-[#9CA3AF]">{p.description}</span>
+                        <div className="px-3 py-1.5 min-w-0">
+                          <span className="text-xs text-[#111827] truncate block">{p.name}</span>
+                          <span className="block text-[11px] text-[#9CA3AF] truncate">{p.description}</span>
                         </div>
 
                         {isSofa ? (
                           /* ===== SOFA columns: Model | 24 | 28 | 30 | 32 | 35 ===== */
                           <>
-                            <div className="px-4 py-3 text-sm text-[#111827]">{p.baseModel}</div>
+                            <div className="px-3 py-1.5 text-sm text-[#111827]">{p.baseModel}</div>
                             {(['24"', '28"', '30"', '32"', '35"'] as const).map((h) => {
                               const hNum = h.replace('"', '');
                               const sh = (p.seatHeightPrices || []).find((s) => s.height === h || s.height === hNum);
                               const editKey = `${p.id}__${h}`;
                               const isEditingThis = editingSeatPrices === editKey;
                               return (
-                                <div key={h} className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                                <div key={h} className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                                   {isEditingThis ? (
                                     <input
                                       autoFocus
@@ -1394,16 +1394,16 @@ export default function ProductsPage() {
                         ) : (
                           /* ===== BEDFRAME / ALL columns: Category | Size | Price 2 | Price 1 ===== */
                           <>
-                            <div className="px-4 py-3">
+                            <div className="px-3 py-1.5">
                               <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
                                 p.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#E0EDF0] text-[#3E6570]"
                               }`}>
                                 {p.category}
                               </span>
                             </div>
-                            <div className="px-4 py-3 text-sm text-[#111827]">{p.sizeLabel}</div>
+                            <div className="px-3 py-1.5 text-sm text-[#111827]">{p.sizeLabel}</div>
                             {/* Price 2 */}
-                            <div className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                               {isEditingThisPrice ? (
                                 <input
                                   autoFocus
@@ -1439,7 +1439,7 @@ export default function ProductsPage() {
                               )}
                             </div>
                             {/* Price 1 */}
-                            <div className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                               {editingPrice1 === p.id ? (
                                 <input
                                   autoFocus
@@ -1477,7 +1477,7 @@ export default function ProductsPage() {
                           </>
                         )}
                         {/* Unit M3 - editable */}
-                        <div className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
                           {editingM3 === p.id ? (
                             <input
                               autoFocus
@@ -1512,14 +1512,14 @@ export default function ProductsPage() {
                             </button>
                           )}
                         </div>
-                        <div className="px-4 py-3 text-right text-sm text-[#111827]">
+                        <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                           {(cfg?.fabricUsage ?? p.fabricUsage)} m
                         </div>
-                        <div className="px-4 py-3 text-right text-sm font-medium text-[#111827]">
+                        <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827]">
                           {totalMin} min
                         </div>
                         {/* Variants badge */}
-                        <div className="px-4 py-3 flex justify-center" onClick={(e) => e.stopPropagation()}>
+                        <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
                           <button
                             onClick={() => setEditingVariant(p)}
                             className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${

@@ -35,3 +35,4 @@ tsc-out.txt
 .wrangler/
 .dev.vars
 .dev.vars.*
+!.dev.vars.example

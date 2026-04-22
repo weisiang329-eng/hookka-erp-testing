@@ -26,7 +26,7 @@ pages_build_output_dir = "dist"
 [[d1_databases]]
 binding = "DB"
 database_name = "hookka-erp-db"
-database_id = "TODO-paste-after-wrangler-d1-create"
+database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
 
 # Runtime env vars — override per environment (dev/preview/prod) on the
 # Cloudflare dashboard or via wrangler secret put.

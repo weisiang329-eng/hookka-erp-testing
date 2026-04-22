@@ -1,0 +1,6 @@
+# Copy to .dev.vars for local wrangler dev (not committed to git).
+# Production values are set via Cloudflare dashboard or
+# `wrangler secret put <NAME>`.
+
+ENVIRONMENT=dev
+API_CORS_ORIGIN=http://localhost:3000

@@ -494,6 +494,18 @@ const dict: Dict = {
     zh: '取消',
     my: 'ပယ်ဖျက်ရန်',
   },
+  'common.confirm': {
+    en: 'Please confirm',
+    ms: 'Sila sahkan',
+    zh: '请确认',
+    my: 'ကျေးဇူးပြု၍ အတည်ပြုပါ',
+  },
+  'common.continue': {
+    en: 'Continue',
+    ms: 'Teruskan',
+    zh: '继续',
+    my: 'ဆက်သွားရန်',
+  },
   'common.back': {
     en: 'Back',
     ms: 'Kembali',

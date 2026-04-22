@@ -372,13 +372,30 @@ export async function consumeRawMaterialsForPO(
 // F2 — Labor posting for a single job card on COMPLETED transition.
 // Called from production-orders.ts whenever a job_card status moves to
 // COMPLETED or TRANSFERRED. Idempotent per jobCardId.
+//
+// Multi-PIC split: a single JC can have up to 2 PICs per piece (see
+// piece_pics table), and a multi-piece JC may have different workers on
+// different pieces. We collect every DISTINCT worker id who appears in
+// ANY pic1Id or pic2Id slot for this JC, then split the JC's production
+// minutes evenly across them — one cost_ledger row per worker.
+//
+// If no workers are attributed (no piece_pics rows, or all slots null),
+// fall back to a single un-attributed LABOR_POSTED row so the FG-batch
+// cost rollup stays correct.
 // ---------------------------------------------------------------------------
 export async function postJobCardLabor(
   db: D1Database,
   jobCardId: string,
   productionOrderId: string,
-): Promise<{ skipped: boolean; laborSen: number; minutes: number }> {
-  // Idempotency — already posted for this job card?
+): Promise<{
+  skipped: boolean;
+  laborSen: number;
+  minutes: number;
+  workerCount: number;
+}> {
+  // Idempotency — already posted for this job card? Check covers BOTH
+  // legacy single-row and new multi-row shapes: any LABOR_POSTED ledger
+  // entry with refType='JOB_CARD' AND refId=jcId means we've run.
   const existing = await db
     .prepare(
       "SELECT COUNT(*) AS n FROM cost_ledger WHERE type = 'LABOR_POSTED' AND refType = 'JOB_CARD' AND refId = ?",
@@ -386,7 +403,7 @@ export async function postJobCardLabor(
     .bind(jobCardId)
     .first<{ n: number }>();
   if ((existing?.n ?? 0) > 0) {
-    return { skipped: true, laborSen: 0, minutes: 0 };
+    return { skipped: true, laborSen: 0, minutes: 0, workerCount: 0 };
   }
 
   const jc = await db
@@ -404,7 +421,7 @@ export async function postJobCardLabor(
       actualMinutes: number | null;
       productionTimeMinutes: number;
     }>();
-  if (!jc) return { skipped: false, laborSen: 0, minutes: 0 };
+  if (!jc) return { skipped: false, laborSen: 0, minutes: 0, workerCount: 0 };
 
   // Prefer actualMinutes if recorded, else fall back to standard/estimate.
   const minutes =
@@ -412,7 +429,7 @@ export async function postJobCardLabor(
       ? jc.actualMinutes
       : jc.productionTimeMinutes || jc.estMinutes) || 0;
   if (minutes <= 0) {
-    return { skipped: false, laborSen: 0, minutes: 0 };
+    return { skipped: false, laborSen: 0, minutes: 0, workerCount: 0 };
   }
 
   // TODO(labor-rate): once departments.laborRatePerMinSen lands, prefer it
@@ -421,31 +438,84 @@ export async function postJobCardLabor(
     ? new Date(`${jc.completedDate}T12:00:00`).toISOString()
     : new Date().toISOString();
   const ratePerMin = laborRateForDate(dateIso);
-  const laborSen = Math.round(ratePerMin * minutes);
-  if (laborSen <= 0) {
-    return { skipped: false, laborSen: 0, minutes };
+
+  // Collect distinct worker ids from piece_pics for this JC.
+  const picsRes = await db
+    .prepare(
+      "SELECT pic1Id, pic2Id FROM piece_pics WHERE jobCardId = ?",
+    )
+    .bind(jobCardId)
+    .all<{ pic1Id: string | null; pic2Id: string | null }>();
+  const picRows = picsRes.results ?? [];
+  const distinctWorkers = new Set<string>();
+  for (const row of picRows) {
+    if (row.pic1Id) distinctWorkers.add(row.pic1Id);
+    if (row.pic2Id) distinctWorkers.add(row.pic2Id);
   }
 
-  await db
-    .prepare(
-      `INSERT INTO cost_ledger
-         (id, date, type, itemType, itemId, batchId, qty, direction,
-          unitCostSen, totalCostSen, refType, refId, notes)
-       VALUES (?, ?, 'LABOR_POSTED', 'WIP', ?, NULL, ?, 'IN', ?, ?, 'JOB_CARD', ?, ?)`,
-    )
-    .bind(
-      genLedgerId("lab"),
-      dateIso,
-      productionOrderId,
-      minutes,
-      Math.round(ratePerMin),
-      laborSen,
-      jobCardId,
-      `Labor posted for ${jc.departmentCode ?? "?"} (${minutes} min)`,
-    )
-    .run();
+  // No attributed workers → single un-attributed LABOR_POSTED row so the
+  // FG rollup still captures the labor cost.
+  if (distinctWorkers.size === 0) {
+    const laborSen = Math.round(ratePerMin * minutes);
+    if (laborSen <= 0) {
+      return { skipped: false, laborSen: 0, minutes, workerCount: 0 };
+    }
+    await db
+      .prepare(
+        `INSERT INTO cost_ledger
+           (id, date, type, itemType, itemId, batchId, qty, direction,
+            unitCostSen, totalCostSen, refType, refId, notes, workerId)
+         VALUES (?, ?, 'LABOR_POSTED', 'WIP', ?, NULL, ?, 'IN', ?, ?, 'JOB_CARD', ?, ?, NULL)`,
+      )
+      .bind(
+        genLedgerId("lab"),
+        dateIso,
+        productionOrderId,
+        minutes,
+        Math.round(ratePerMin),
+        laborSen,
+        jobCardId,
+        `Labor posted for ${jc.departmentCode ?? "?"} (${minutes} min) — no worker attributed`,
+      )
+      .run();
+    return { skipped: false, laborSen, minutes, workerCount: 0 };
+  }
 
-  return { skipped: false, laborSen, minutes };
+  // Split minutes evenly across distinct workers (round half-up).
+  const n = distinctWorkers.size;
+  const perWorkerMinutes = Math.round((minutes / n) * 10) / 10; // 1 dp
+  const statements: D1PreparedStatement[] = [];
+  let totalLaborSen = 0;
+  for (const wid of distinctWorkers) {
+    const workerSen = Math.round(ratePerMin * perWorkerMinutes);
+    totalLaborSen += workerSen;
+    if (workerSen <= 0) continue;
+    statements.push(
+      db
+        .prepare(
+          `INSERT INTO cost_ledger
+             (id, date, type, itemType, itemId, batchId, qty, direction,
+              unitCostSen, totalCostSen, refType, refId, notes, workerId)
+           VALUES (?, ?, 'LABOR_POSTED', 'WIP', ?, NULL, ?, 'IN', ?, ?, 'JOB_CARD', ?, ?, ?)`,
+        )
+        .bind(
+          genLedgerId("lab"),
+          dateIso,
+          productionOrderId,
+          perWorkerMinutes,
+          Math.round(ratePerMin),
+          workerSen,
+          jobCardId,
+          `Labor posted for ${jc.departmentCode ?? "?"} — PIC share 1/${n} (${perWorkerMinutes} min)`,
+          wid,
+        ),
+    );
+  }
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
+
+  return { skipped: false, laborSen: totalLaborSen, minutes, workerCount: n };
 }
 
 // ---------------------------------------------------------------------------

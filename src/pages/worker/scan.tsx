@@ -130,6 +130,15 @@ type Result =
   // and Headboard), surface them all so the worker disambiguates. Never
   // silently auto-pick — that's how a Divan scan ended up marking HB done.
   | { kind: "choices"; options: WipOption[]; piece?: PieceInfo }
+  // Soft warning — server returned HTTP 202 with `requiresConfirmation`.
+  // The worker acknowledges and re-posts with `force: true` on Continue.
+  | {
+      kind: "confirm";
+      order: Order;
+      jobCard: JobCard;
+      piece?: PieceInfo;
+      warning: { code: string; message: string };
+    }
   | {
       kind: "success";
       slot: 1 | 2;
@@ -582,8 +591,21 @@ export default function WorkerScanPage() {
     [decodeFromFile],
   );
 
-  async function handleConfirmScan() {
-    if (result.kind !== "lookup") return;
+  // `opts.force` — when true, adds `force: true` to the request body so
+  // the server bypasses the soft-warning guards (PREREQUISITE_NOT_MET /
+  // UPSTREAM_LOCKED) and records an audit row in scan_override_audit.
+  // Used by the confirm dialog's Continue button after the worker
+  // acknowledges the warning on a prior 202 round-trip.
+  async function handleConfirmScan(opts?: { force?: boolean }) {
+    // Accept either a fresh lookup OR a confirm-dialog continue. Both
+    // carry the order+jobCard context we need to re-post.
+    const ctx =
+      result.kind === "lookup"
+        ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
+        : result.kind === "confirm"
+          ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
+          : null;
+    if (!ctx) return;
     if (!workerId) {
       setResult({ kind: "error", message: t("common.error") });
       return;
@@ -591,11 +613,11 @@ export default function WorkerScanPage() {
     setLoading(true);
     try {
       const res = await workerFetch(
-        `/api/production-orders/${result.order.id}/scan-complete`,
+        `/api/production-orders/${ctx.order.id}/scan-complete`,
         {
           method: "POST",
           body: JSON.stringify({
-            jobCardId: result.jobCard.id,
+            jobCardId: ctx.jobCard.id,
             workerId,
             // Piece-level routing: the QR carries `p=<pieceNo>&t=<total>` so
             // the backend knows which physical piece on this JC was scanned.
@@ -604,18 +626,37 @@ export default function WorkerScanPage() {
             // FIFO and route subsequent scans of the same sticker back to
             // that slot (enables 2-worker share on a single piece). Defaults
             // to 1 server-side if omitted, so manual entry still works.
-            pieceNo: result.piece?.pieceNo,
+            pieceNo: ctx.piece?.pieceNo,
+            // Forced overrides bypass the PREREQUISITE_NOT_MET / UPSTREAM_LOCKED
+            // soft warnings. Server records an audit row in scan_override_audit.
+            ...(opts?.force ? { force: true } : {}),
           }),
         },
       );
       const data = await res.json();
+      // Soft-warning path — server returned HTTP 202 with
+      // `requiresConfirmation`. Surface the confirm dialog instead of
+      // treating it as an error.
+      if (res.status === 202 && data.requiresConfirmation) {
+        setResult({
+          kind: "confirm",
+          order: ctx.order,
+          jobCard: ctx.jobCard,
+          piece: ctx.piece,
+          warning: data.warning || {
+            code: "UNKNOWN",
+            message: t("common.error"),
+          },
+        });
+        return;
+      }
       if (data.success) {
         setResult({
           kind: "success",
           slot: data.data.assignedSlot,
           jobCard: data.data.jobCard,
-          order: result.order,
-          piece: result.piece,
+          order: ctx.order,
+          piece: ctx.piece,
           // FIFO diagnostic — server tells us if the scan was routed to a
           // DIFFERENT PO (older due date). Surfaces on the success card so
           // the worker isn't confused when the Production Sheet row they
@@ -915,7 +956,7 @@ export default function WorkerScanPage() {
             )}
             <button
               type="button"
-              onClick={handleConfirmScan}
+              onClick={() => handleConfirmScan()}
               disabled={loading || blocked}
               className="w-full h-14 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white text-lg font-semibold disabled:opacity-60 transition-colors"
             >
@@ -931,6 +972,46 @@ export default function WorkerScanPage() {
           </div>
         );
       })()}
+
+      {/* Soft-warning confirm dialog — shown when the server returned
+          HTTP 202 with requiresConfirmation (PREREQUISITE_NOT_MET or
+          UPSTREAM_LOCKED). The worker either acknowledges and continues
+          (re-posts with force:true, which records an audit row) or
+          cancels back to the scanner. Same colour palette as the main
+          lookup card so the jump feels contained, not alarming. */}
+      {result.kind === "confirm" && (
+        <div className="bg-[#FFF8E1] border border-[#F6D672] rounded-xl p-4 space-y-3">
+          <div className="flex items-start gap-2 text-[#7A5B1A]">
+            <AlertTriangle className="h-5 w-5 mt-0.5 shrink-0" />
+            <div className="min-w-0">
+              <p className="font-semibold text-base">
+                {t("common.confirm")}
+              </p>
+              <p className="text-sm mt-0.5 break-words">
+                {result.warning.message}
+              </p>
+              <p className="text-xs mt-1 text-[#9C6F1E]">
+                {result.order.poNo} · {wipNameFor(result.jobCard, result.order)}
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => handleConfirmScan({ force: true })}
+            disabled={loading}
+            className="w-full h-12 rounded-lg bg-[#3E6570] hover:bg-[#355863] text-white font-semibold disabled:opacity-60"
+          >
+            {loading ? t("common.loading") : t("common.continue")}
+          </button>
+          <button
+            type="button"
+            onClick={reset}
+            className="w-full h-10 rounded-lg border border-[#D8D2CC] bg-white text-[#5A5550] font-semibold"
+          >
+            {t("common.cancel")}
+          </button>
+        </div>
+      )}
 
       {/* Success — show the WIP name + piece badge too, so the worker sees
           exactly which piece they just completed. */}

@@ -1253,6 +1253,11 @@ app.post("/:id/scan-complete", async (c) => {
   const rawPiece = Number(body?.pieceNo);
   const pieceNo =
     Number.isFinite(rawPiece) && rawPiece >= 1 ? Math.floor(rawPiece) : 1;
+  // `force: true` means the worker has already acknowledged a soft warning
+  // (PREREQUISITE_NOT_MET / UPSTREAM_LOCKED) on the previous scan-complete
+  // round-trip and is re-posting to bypass it. Each forced scan gets an
+  // audit row in `scan_override_audit`.
+  const forced = body?.force === true;
   if (!jobCardId || !workerId) {
     return c.json(
       { success: false, error: "jobCardId and workerId are required" },
@@ -1338,15 +1343,44 @@ app.post("/:id/scan-complete", async (c) => {
       );
     });
     if (laterDone) {
-      return c.json(
-        {
-          success: false,
-          error:
-            "Cannot scan — a later department is already completed. Undo that first.",
-          code: "UPSTREAM_LOCKED",
-        },
-        409,
-      );
+      // Soft warning path — without `force: true` we ask the worker to
+      // confirm before proceeding. The PATCH guard in applyPoUpdate still
+      // treats this as a hard reject (editing past dates via admin UI is
+      // different from completing work on the shop floor).
+      if (!forced) {
+        return c.json(
+          {
+            success: false,
+            requiresConfirmation: true,
+            warning: {
+              code: "UPSTREAM_LOCKED",
+              message: "后面 dept 已经完工,确定继续?",
+            },
+            data: {
+              jobCardId: scannedJc.id,
+              blockedBy: "DOWNSTREAM_COMPLETED",
+            },
+          },
+          202,
+        );
+      }
+      // Forced — record the override so we can trace who bypassed what.
+      await db
+        .prepare(
+          `INSERT INTO scan_override_audit
+             (id, workerId, workerName, jobCardId, productionOrderId,
+              overrideCode, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, 'UPSTREAM_LOCKED', 'force scan', ?)`,
+        )
+        .bind(
+          `soa-${crypto.randomUUID().slice(0, 8)}`,
+          workerId,
+          worker.name,
+          scannedJc.id,
+          scannedJc.productionOrderId,
+          new Date().toISOString(),
+        )
+        .run();
     }
   }
 
@@ -1357,14 +1391,40 @@ app.post("/:id/scan-complete", async (c) => {
   // 0 here, the operator is trying to scan a piece whose upstream dept
   // hasn't finished yet.
   if (scannedJc.prerequisiteMet !== 1) {
-    return c.json(
-      {
-        success: false,
-        error: "Earlier department hasn't completed yet. Cannot scan this one.",
-        code: "PREREQUISITE_NOT_MET",
-      },
-      400,
-    );
+    if (!forced) {
+      return c.json(
+        {
+          success: false,
+          requiresConfirmation: true,
+          warning: {
+            code: "PREREQUISITE_NOT_MET",
+            message: "前面 dept 还没完工,确定继续?",
+          },
+          data: {
+            jobCardId: scannedJc.id,
+            blockedBy: "UPSTREAM_NOT_COMPLETED",
+          },
+        },
+        202,
+      );
+    }
+    // Forced — record the override.
+    await db
+      .prepare(
+        `INSERT INTO scan_override_audit
+           (id, workerId, workerName, jobCardId, productionOrderId,
+            overrideCode, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, 'PREREQUISITE_NOT_MET', 'force scan', ?)`,
+      )
+      .bind(
+        `soa-${crypto.randomUUID().slice(0, 8)}`,
+        workerId,
+        worker.name,
+        scannedJc.id,
+        scannedJc.productionOrderId,
+        new Date().toISOString(),
+      )
+      .run();
   }
 
   // Ensure scanned JC has piecePics rows.

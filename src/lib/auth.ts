@@ -46,8 +46,36 @@ export function setAuth(data: { token: string; user: AuthUser }): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
 }
 
+// Per-user UI state that should not leak across logouts / account switches.
+// Listed here rather than scattered at call-sites so adding a new persisted
+// preference means one place to update.
+const PER_USER_EXACT_KEYS = [
+  STORAGE_KEY,                     // hookka_auth — token + user blob
+  "hookka-global-search-recent",   // GlobalSearch recent searches
+  "hookka-open-tabs",              // TabsProvider open tabs
+  "sidebar-collapsed-groups",      // Sidebar group collapse state
+];
+const PER_USER_PREFIXES = [
+  "datagrid-cols-",        // DataGrid visible columns per grid
+  "datagrid-colorder-",    // DataGrid column order per grid
+  "datagrid-views-",       // DataGrid saved views per grid
+];
+
 export function clearAuth(): void {
-  localStorage.removeItem(STORAGE_KEY);
+  try {
+    for (const key of PER_USER_EXACT_KEYS) localStorage.removeItem(key);
+    // Sweep prefixed keys. Collect first, then remove — mutating localStorage
+    // while iterating `key(i)` shifts indices.
+    const toRemove: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k) continue;
+      if (PER_USER_PREFIXES.some((p) => k.startsWith(p))) toRemove.push(k);
+    }
+    for (const k of toRemove) localStorage.removeItem(k);
+  } catch {
+    // localStorage can throw in private-mode quotas; best-effort is fine.
+  }
 }
 
 export function isAuthenticated(): boolean {

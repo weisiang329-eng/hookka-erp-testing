@@ -99,6 +99,33 @@ import auth from "./routes-d1/auth";
 import users from "./routes-d1/users";
 import { authMiddleware } from "./lib/auth-middleware";
 
+// Phase 5 — mock-backed routes mounted until each is migrated to D1.
+// Pure Hono handlers + in-memory data from src/lib/mock-data.ts, fully
+// Workers-runtime compatible. Returning real shapes (not stubs) keeps
+// the UI pages from crashing on .filter/.map over envelope objects.
+import accounting from "./routes/accounting";
+import approvals from "./routes/approvals";
+import attendance from "./routes/attendance";
+import cashFlow from "./routes/cash-flow";
+import consignments from "./routes/consignments";
+import consignmentNotes from "./routes/consignment-notes";
+import drivers from "./routes/drivers";
+import equipment from "./routes/equipment";
+import forecasts from "./routes/forecasts";
+import historicalSales from "./routes/historical-sales";
+import leaves from "./routes/leaves";
+import lorries from "./routes/lorries";
+import maintenanceLogs from "./routes/maintenance-logs";
+import mrp from "./routes/mrp";
+import notifications from "./routes/notifications";
+import payroll from "./routes/payroll";
+import payslips from "./routes/payslips";
+import productionLeadtimes from "./routes/production-leadtimes";
+import promiseDate from "./routes/promise-date";
+import qcInspections from "./routes/qc-inspections";
+import rdProjects from "./routes/rd-projects";
+import scheduling from "./routes/scheduling";
+
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
 app.route("/api/products", products);
@@ -136,6 +163,32 @@ app.route("/api/price-history", priceHistory);
 // Auth
 app.route("/api/auth", auth);
 app.route("/api/users", users);
+
+// Phase 5 — mock-backed. Same shapes as before; data lives in
+// src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)
+// so writes need real D1 persistence once the module is actively used.
+app.route("/api/accounting", accounting);
+app.route("/api/approvals", approvals);
+app.route("/api/attendance", attendance);
+app.route("/api/cash-flow", cashFlow);
+app.route("/api/consignments", consignments);
+app.route("/api/consignment-notes", consignmentNotes);
+app.route("/api/drivers", drivers);
+app.route("/api/equipment", equipment);
+app.route("/api/forecasts", forecasts);
+app.route("/api/historical-sales", historicalSales);
+app.route("/api/leaves", leaves);
+app.route("/api/lorries", lorries);
+app.route("/api/maintenance-logs", maintenanceLogs);
+app.route("/api/mrp", mrp);
+app.route("/api/notifications", notifications);
+app.route("/api/payroll", payroll);
+app.route("/api/payslips", payslips);
+app.route("/api/production-leadtimes", productionLeadtimes);
+app.route("/api/promise-date", promiseDate);
+app.route("/api/qc-inspections", qcInspections);
+app.route("/api/rd-projects", rdProjects);
+app.route("/api/scheduling", scheduling);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

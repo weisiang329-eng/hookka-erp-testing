@@ -503,70 +503,9 @@ emit(
 // 2. TRANSACTIONS
 // =============================================================================
 
-section("Sales orders + items");
-{
-  const soRows: Record<string, unknown>[] = [];
-  const itemRows: Record<string, unknown>[] = [];
-  for (const so of M.salesOrders ?? []) {
-    soRows.push({
-      id: so.id,
-      customerPO: opt(so.customerPO),
-      customerPOId: opt(so.customerPOId),
-      customerPODate: opt(so.customerPODate),
-      customerSO: opt(so.customerSO),
-      customerSOId: opt(so.customerSOId),
-      reference: opt(so.reference),
-      customerId: so.customerId,
-      customerName: so.customerName,
-      customerState: opt(so.customerState),
-      hubId: opt(so.hubId),
-      hubName: opt(so.hubName),
-      companySO: opt(so.companySO),
-      companySOId: opt(so.companySOId),
-      companySODate: opt(so.companySODate),
-      customerDeliveryDate: opt(so.customerDeliveryDate),
-      hookkaExpectedDD: opt(so.hookkaExpectedDD),
-      hookkaDeliveryOrder: opt(so.hookkaDeliveryOrder),
-      subtotalSen: so.subtotalSen,
-      totalSen: so.totalSen,
-      status: so.status,
-      overdue: opt(so.overdue),
-      notes: opt(so.notes),
-      created_at: so.createdAt,
-      updated_at: so.updatedAt,
-    });
-    for (const it of so.items ?? []) {
-      itemRows.push({
-        id: it.id,
-        salesOrderId: so.id,
-        lineNo: it.lineNo,
-        lineSuffix: it.lineSuffix,
-        productId: opt(it.productId),
-        productCode: opt(it.productCode),
-        productName: opt(it.productName),
-        itemCategory: opt(it.itemCategory),
-        sizeCode: opt(it.sizeCode),
-        sizeLabel: opt(it.sizeLabel),
-        fabricId: opt(it.fabricId),
-        fabricCode: opt(it.fabricCode),
-        quantity: it.quantity,
-        gapInches: opt(it.gapInches),
-        divanHeightInches: opt(it.divanHeightInches),
-        divanPriceSen: it.divanPriceSen,
-        legHeightInches: opt(it.legHeightInches),
-        legPriceSen: it.legPriceSen,
-        specialOrder: opt(it.specialOrder),
-        specialOrderPriceSen: it.specialOrderPriceSen,
-        basePriceSen: it.basePriceSen,
-        unitPriceSen: it.unitPriceSen,
-        lineTotalSen: it.lineTotalSen,
-        notes: opt(it.notes),
-      });
-    }
-  }
-  emit("sales_orders", soRows);
-  emit("sales_order_items", itemRows);
-}
+// Sales orders are intentionally NOT seeded — the team enters them through
+// the UI on a live instance. Skipping also keeps dependent tables
+// (delivery_orders, invoices, production_orders, fg_units.soId) clean.
 
 section("Purchase orders + items");
 {

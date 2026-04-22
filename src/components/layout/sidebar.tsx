@@ -277,7 +277,20 @@ export function Sidebar() {
 
   // Inject badge counts into Notifications and Approvals items, and the
   // SUPER_ADMIN-only User Management link into the SYSTEM group.
-  const isSuperAdmin = getCurrentUser()?.role === "SUPER_ADMIN";
+  const authUser = getCurrentUser();
+  const isSuperAdmin = authUser?.role === "SUPER_ADMIN";
+  const displayName = authUser?.displayName || authUser?.email || "User";
+  const roleLabel = (authUser?.role || "Member")
+    .replace(/_/g, " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+  const initials =
+    displayName
+      .split(/\s+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((s) => s[0]?.toUpperCase() ?? "")
+      .join("") || "U";
   const groupsWithBadge = navigationGroups.map((group) => {
     let items = group.items.map((item) => {
       if (item.name === "Notifications") return { ...item, badge: unreadCount };
@@ -628,18 +641,18 @@ export function Sidebar() {
         {collapsed ? (
           <div className="flex items-center justify-center">
             <div className="h-8 w-8 rounded-full bg-[#6B5C32]/40 flex items-center justify-center text-xs font-semibold text-white">
-              AK
+              {initials}
             </div>
           </div>
         ) : (
           <div className="flex items-center gap-2.5 px-1">
             <div className="h-8 w-8 rounded-full bg-[#6B5C32]/40 flex items-center justify-center text-xs font-semibold text-white shrink-0">
-              L
+              {initials}
             </div>
             <div className="flex flex-col min-w-0">
-              <span className="text-[13px] font-semibold text-white truncate">Lim</span>
+              <span className="text-[13px] font-semibold text-white truncate">{displayName}</span>
               <span className="inline-flex items-center self-start rounded-full bg-[#6B5C32]/30 text-[10px] text-gray-300 px-2 py-[2px]">
-                Director
+                {roleLabel}
               </span>
             </div>
           </div>

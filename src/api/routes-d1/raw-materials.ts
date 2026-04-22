@@ -23,6 +23,12 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import {
+  buildFabricDeleteStatements,
+  buildFabricUpsertStatements,
+  countActiveSalesOrderRefs,
+  isFabricGroup,
+} from "./_fabric-cascade";
 
 const app = new Hono<Env>();
 
@@ -189,33 +195,45 @@ app.post("/", async (c) => {
     : null;
   const nowIso = new Date().toISOString();
 
-  await c.env.DB.prepare(
+  const insertStmt = c.env.DB.prepare(
     `INSERT INTO raw_materials
        (id, itemCode, description, baseUOM, itemGroup, isActive, balanceQty,
         minStock, maxStock, status, notes, created_at, updated_at,
         uomCount, itemType, stockControl, mainSupplierCode)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
+  ).bind(
+    id,
+    itemCode,
+    description,
+    baseUOM,
+    itemGroup,
+    isActive,
+    balanceQty,
+    minStock,
+    maxStock,
+    status,
+    notes,
+    nowIso,
+    nowIso,
+    uomCount,
+    itemType,
+    stockControl,
+    mainSupplierCode,
+  );
+
+  // If this row is a fabric group, cascade into fabrics + fabric_trackings
+  // atomically in a single batch. Non-fabrics take the single-statement path.
+  if (isFabricGroup(itemGroup)) {
+    const cascadeStmts = await buildFabricUpsertStatements(c.env.DB, {
       itemCode,
       description,
-      baseUOM,
       itemGroup,
-      isActive,
       balanceQty,
-      minStock,
-      maxStock,
-      status,
-      notes,
-      nowIso,
-      nowIso,
-      uomCount,
-      itemType,
-      stockControl,
-      mainSupplierCode,
-    )
-    .run();
+    });
+    await c.env.DB.batch([insertStmt, ...cascadeStmts]);
+  } else {
+    await insertStmt.run();
+  }
 
   const created = await c.env.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
@@ -301,33 +319,75 @@ app.put("/:id", async (c) => {
   const isActive = merged.status === "ACTIVE" ? 1 : 0;
   const nowIso = new Date().toISOString();
 
-  await c.env.DB.prepare(
+  const updateStmt = c.env.DB.prepare(
     `UPDATE raw_materials SET
        itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?,
        isActive = ?, balanceQty = ?, minStock = ?, maxStock = ?,
        status = ?, notes = ?, updated_at = ?,
        uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?
      WHERE id = ?`,
-  )
-    .bind(
-      merged.itemCode,
-      merged.description,
-      merged.baseUOM,
-      merged.itemGroup,
-      isActive,
-      merged.balanceQty,
-      merged.minStock,
-      merged.maxStock,
-      merged.status,
-      merged.notes,
-      nowIso,
-      merged.uomCount,
-      merged.itemType,
-      merged.stockControl,
-      merged.mainSupplierCode,
-      id,
-    )
-    .run();
+  ).bind(
+    merged.itemCode,
+    merged.description,
+    merged.baseUOM,
+    merged.itemGroup,
+    isActive,
+    merged.balanceQty,
+    merged.minStock,
+    merged.maxStock,
+    merged.status,
+    merged.notes,
+    nowIso,
+    merged.uomCount,
+    merged.itemType,
+    merged.stockControl,
+    merged.mainSupplierCode,
+    id,
+  );
+
+  // Fabric cascade with transition handling:
+  //   was fabric  → now fabric  : upsert mirror rows (code may have renamed).
+  //   was fabric  → not fabric  : delete old mirror rows.
+  //   not fabric  → now fabric  : insert new mirror rows.
+  //   neither                   : plain update.
+  const wasFabric = isFabricGroup(existing.itemGroup);
+  const isFab = isFabricGroup(merged.itemGroup);
+  const cascadeStmts: D1PreparedStatement[] = [];
+  if (wasFabric && isFab) {
+    // If the code changed, drop old mirror rows (old code) then upsert new.
+    if (existing.itemCode !== merged.itemCode) {
+      cascadeStmts.push(
+        ...buildFabricDeleteStatements(c.env.DB, existing.itemCode),
+      );
+    }
+    cascadeStmts.push(
+      ...(await buildFabricUpsertStatements(c.env.DB, {
+        itemCode: merged.itemCode,
+        description: merged.description,
+        itemGroup: merged.itemGroup,
+        balanceQty: merged.balanceQty,
+      })),
+    );
+  } else if (wasFabric && !isFab) {
+    cascadeStmts.push(
+      ...buildFabricDeleteStatements(c.env.DB, existing.itemCode),
+    );
+  } else if (!wasFabric && isFab) {
+    cascadeStmts.push(
+      ...(await buildFabricUpsertStatements(c.env.DB, {
+        itemCode: merged.itemCode,
+        description: merged.description,
+        itemGroup: merged.itemGroup,
+        balanceQty: merged.balanceQty,
+      })),
+    );
+  }
+
+  if (cascadeStmts.length > 0) {
+    await c.env.DB.batch([updateStmt, ...cascadeStmts]);
+  } else {
+    await updateStmt.run();
+  }
 
   const updated = await c.env.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
@@ -354,10 +414,31 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Raw material not found" }, 404);
   }
-  // FK cascade on rm_batches.rmId removes dependent batch rows.
-  await c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?")
-    .bind(id)
-    .run();
+
+  // Fabric guard: block deletion if any active (non-cancelled) sales_order_items
+  // still reference this fabricCode. Otherwise cascade-delete mirror rows.
+  if (isFabricGroup(existing.itemGroup)) {
+    const refs = await countActiveSalesOrderRefs(c.env.DB, existing.itemCode);
+    if (refs > 0) {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot delete fabric ${existing.itemCode}: still referenced by ${refs} active sales order line(s)`,
+        },
+        409,
+      );
+    }
+    const cascadeStmts = buildFabricDeleteStatements(c.env.DB, existing.itemCode);
+    await c.env.DB.batch([
+      c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?").bind(id),
+      ...cascadeStmts,
+    ]);
+  } else {
+    // FK cascade on rm_batches.rmId removes dependent batch rows.
+    await c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?")
+      .bind(id)
+      .run();
+  }
   return c.json({ success: true, data: rowToApi(existing) });
 });
 
@@ -476,6 +557,17 @@ app.post("/bulk-import", async (c) => {
       );
       codeToId.set(itemCode, id);
       created++;
+    }
+
+    // Fabric cascade — mirror into fabrics + fabric_trackings for fabric groups.
+    if (isFabricGroup(itemGroup)) {
+      const cascadeStmts = await buildFabricUpsertStatements(c.env.DB, {
+        itemCode,
+        description,
+        itemGroup,
+        balanceQty: 0,
+      });
+      statements.push(...cascadeStmts);
     }
   }
 

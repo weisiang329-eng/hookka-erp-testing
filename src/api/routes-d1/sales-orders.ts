@@ -857,6 +857,164 @@ async function fetchSOWithItems(
   return rowToSO(so, itemsRes.results ?? []);
 }
 
+// ---------------------------------------------------------------------------
+// cascadeSOStatusToPOs — ON_HOLD / CANCELLED / RESUME cascade.
+//
+// When an SO flips to ON_HOLD or CANCELLED, every downstream production_order
+// that isn't already in a terminal state (COMPLETED / CANCELLED) must follow.
+// Likewise, when an ON_HOLD SO resumes (→ CONFIRMED / IN_PRODUCTION), every
+// ON_HOLD PO under that SO flips back to PENDING so the shop floor can
+// continue. job_cards follow the same policy:
+//
+//   SO → CANCELLED  : cascade CANCELLED to all non-terminal POs. Also flip
+//                     every job_card under those POs that isn't
+//                     COMPLETED/TRANSFERRED to CANCELLED.
+//   SO → ON_HOLD    : cascade ON_HOLD to all non-terminal POs. job_cards are
+//                     NOT mutated — the scan-complete + PATCH guards block
+//                     writes against ON_HOLD POs, so existing WAITING /
+//                     IN_PROGRESS states survive the pause untouched and
+//                     resume naturally when the SO comes back.
+//   SO → RESUME     : flip every ON_HOLD PO back to PENDING. job_cards are
+//                     left as-is (WAITING stays WAITING, etc).
+//
+// The returned `statements` are prepended to the caller's batch so the
+// cascade lands atomically with the SO UPDATE + status_changes INSERT.
+// `actions` is a human-readable log appended to the status-change row's
+// autoActions JSON array ("3 production orders moved to ON_HOLD").
+// ---------------------------------------------------------------------------
+type SOCascadeResult = {
+  statements: D1PreparedStatement[];
+  actions: string[];
+  affectedPoCount: number;
+  affectedJcCount: number;
+};
+
+async function cascadeSOStatusToPOs(
+  db: D1Database,
+  soId: string,
+  newStatus: string,
+  fromStatus: string,
+  now: string,
+): Promise<SOCascadeResult> {
+  const result: SOCascadeResult = {
+    statements: [],
+    actions: [],
+    affectedPoCount: 0,
+    affectedJcCount: 0,
+  };
+
+  // Only cascade on these transitions — all others no-op.
+  const isHold = newStatus === "ON_HOLD";
+  const isCancel = newStatus === "CANCELLED";
+  const isResume =
+    fromStatus === "ON_HOLD" &&
+    (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+  if (!isHold && !isCancel && !isResume) return result;
+
+  // Load downstream POs for this SO.
+  const posRes = await db
+    .prepare(
+      "SELECT id, poNo, status FROM production_orders WHERE salesOrderId = ?",
+    )
+    .bind(soId)
+    .all<{ id: string; poNo: string; status: string }>();
+  const pos = posRes.results ?? [];
+  if (pos.length === 0) return result;
+
+  if (isHold) {
+    const affected = pos.filter(
+      (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
+    );
+    if (affected.length === 0) {
+      result.actions.push("No active production orders to hold.");
+      return result;
+    }
+    for (const p of affected) {
+      result.statements.push(
+        db
+          .prepare(
+            "UPDATE production_orders SET status = 'ON_HOLD', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, p.id),
+      );
+    }
+    result.affectedPoCount = affected.length;
+    result.actions.push(
+      `${affected.length} production order(s) moved to ON_HOLD: ${affected.map((p) => p.poNo).join(", ")}`,
+    );
+    return result;
+  }
+
+  if (isCancel) {
+    const affected = pos.filter(
+      (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
+    );
+    if (affected.length === 0) {
+      result.actions.push("No active production orders to cancel.");
+      return result;
+    }
+    const poIds = affected.map((p) => p.id);
+    for (const p of affected) {
+      result.statements.push(
+        db
+          .prepare(
+            "UPDATE production_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, p.id),
+      );
+    }
+    // Cascade CANCELLED to any non-terminal job_cards under those POs.
+    // Uses placeholders so D1 parameter binding is safe against the id list.
+    const placeholders = poIds.map(() => "?").join(", ");
+    const jcRes = await db
+      .prepare(
+        `SELECT id FROM job_cards
+           WHERE productionOrderId IN (${placeholders})
+             AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
+      )
+      .bind(...poIds)
+      .all<{ id: string }>();
+    const jcIds = (jcRes.results ?? []).map((r) => r.id);
+    for (const jcId of jcIds) {
+      result.statements.push(
+        db
+          .prepare("UPDATE job_cards SET status = 'CANCELLED' WHERE id = ?")
+          .bind(jcId),
+      );
+    }
+    result.affectedPoCount = affected.length;
+    result.affectedJcCount = jcIds.length;
+    result.actions.push(
+      `${affected.length} production order(s) CANCELLED: ${affected.map((p) => p.poNo).join(", ")}`,
+    );
+    if (jcIds.length > 0) {
+      result.actions.push(`${jcIds.length} job card(s) CANCELLED under those POs.`);
+    }
+    return result;
+  }
+
+  // Resume path: ON_HOLD → CONFIRMED / IN_PRODUCTION.
+  const affected = pos.filter((p) => p.status === "ON_HOLD");
+  if (affected.length === 0) {
+    result.actions.push("No ON_HOLD production orders to resume.");
+    return result;
+  }
+  for (const p of affected) {
+    result.statements.push(
+      db
+        .prepare(
+          "UPDATE production_orders SET status = 'PENDING', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, p.id),
+    );
+  }
+  result.affectedPoCount = affected.length;
+  result.actions.push(
+    `${affected.length} production order(s) resumed to PENDING: ${affected.map((p) => p.poNo).join(", ")}`,
+  );
+  return result;
+}
+
 // Valid status transitions — mirrors the in-memory route
 const VALID_TRANSITIONS: Record<string, string[]> = {
   DRAFT: ["CONFIRMED", "CANCELLED"],

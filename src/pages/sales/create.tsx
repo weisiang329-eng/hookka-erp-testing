@@ -792,12 +792,13 @@ function LineItemCard({
     return match?.height || "";
   }, [item.divanHeightInches]);
 
-  // Derive leg dropdown value
+  // Derive leg dropdown value. Null / 0 / undefined all mean the customer
+  // declined a leg — show "No Leg" so the field always carries a selection
+  // that comes from the variants config (never blank, per user SOP).
   const legValue = useMemo(() => {
-    if (item.legHeightInches == null) return "";
-    if (item.legHeightInches === 0) return "No Leg";
+    if (item.legHeightInches == null || item.legHeightInches === 0) return "No Leg";
     const match = legHeightOptions.find(o => parseInches(o.height) === item.legHeightInches);
-    return match?.height || "";
+    return match?.height || "No Leg";
   }, [item.legHeightInches]);
 
   // Derive gap dropdown value

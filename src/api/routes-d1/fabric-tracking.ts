@@ -75,6 +75,119 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
+type FabricTrackingBody = {
+  fabricCode?: string;
+  fabricDescription?: string | null;
+  fabricCategory?: FabricTrackingRow["fabricCategory"];
+  priceTier?: "PRICE_1" | "PRICE_2";
+  price?: number;
+  soh?: number;
+  poOutstanding?: number;
+  lastMonthUsage?: number;
+  oneWeekUsage?: number;
+  twoWeeksUsage?: number;
+  oneMonthUsage?: number;
+  shortage?: number;
+  reorderPoint?: number;
+  supplier?: string | null;
+  leadTimeDays?: number;
+};
+
+function genTrackingId(): string {
+  return `ft-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// POST /api/fabric-tracking — create a new tracking row. In the LIVE cascade
+// model the canonical way to create is via POST /api/raw-materials, but this
+// endpoint covers direct edits from the Fabric Tracking tab.
+app.post("/", async (c) => {
+  let body: FabricTrackingBody;
+  try {
+    body = (await c.req.json()) as FabricTrackingBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON" }, 400);
+  }
+  const fabricCode = (body.fabricCode ?? "").trim();
+  if (!fabricCode) {
+    return c.json({ success: false, error: "fabricCode is required" }, 400);
+  }
+  const existing = await c.env.DB.prepare(
+    "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
+  )
+    .bind(fabricCode)
+    .first<{ id: string }>();
+  if (existing) {
+    return c.json(
+      {
+        success: false,
+        error: `Fabric tracking for ${fabricCode} already exists`,
+      },
+      400,
+    );
+  }
+  const fabricCategory = body.fabricCategory ?? "B.M-FABR";
+  const priceTier = body.priceTier ?? "PRICE_2";
+  const id = genTrackingId();
+  await c.env.DB.prepare(
+    `INSERT INTO fabric_trackings
+       (id, fabricCode, fabricDescription, fabricCategory, priceTier,
+        price, soh, poOutstanding, lastMonthUsage, oneWeekUsage,
+        twoWeeksUsage, oneMonthUsage, shortage, reorderPoint, supplier, leadTimeDays)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      id,
+      fabricCode,
+      body.fabricDescription ?? null,
+      fabricCategory,
+      priceTier,
+      Number(body.price) || 0,
+      Number(body.soh) || 0,
+      Number(body.poOutstanding) || 0,
+      Number(body.lastMonthUsage) || 0,
+      Number(body.oneWeekUsage) || 0,
+      Number(body.twoWeeksUsage) || 0,
+      Number(body.oneMonthUsage) || 0,
+      Number(body.shortage) || 0,
+      Number(body.reorderPoint) || 0,
+      body.supplier ?? null,
+      Number(body.leadTimeDays) || 0,
+    )
+    .run();
+  const created = await c.env.DB.prepare(
+    "SELECT * FROM fabric_trackings WHERE id = ?",
+  )
+    .bind(id)
+    .first<FabricTrackingRow>();
+  if (!created) {
+    return c.json(
+      { success: false, error: "Failed to create fabric tracking" },
+      500,
+    );
+  }
+  return c.json({ success: true, data: rowToTracking(created) }, 201);
+});
+
+// DELETE /api/fabric-tracking/:id
+app.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const existing = await c.env.DB.prepare(
+    "SELECT * FROM fabric_trackings WHERE id = ?",
+  )
+    .bind(id)
+    .first<FabricTrackingRow>();
+  if (!existing) {
+    return c.json(
+      { success: false, error: "Fabric tracking entry not found" },
+      404,
+    );
+  }
+  await c.env.DB.prepare("DELETE FROM fabric_trackings WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({ success: true, data: rowToTracking(existing) });
+});
+
 // PUT /api/fabric-tracking/:id — partial update (priceTier, price, soh,
 // reorderPoint). Mirrors the in-memory "only these four fields" behavior.
 app.put("/:id", async (c) => {

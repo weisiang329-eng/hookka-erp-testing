@@ -17,6 +17,7 @@ import {
   gapHeightOptions,
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/mock-data";
+import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 
 type SofaModule = {
   productId: string;
@@ -185,56 +186,63 @@ function CreateSalesOrderPage() {
     fetch("/api/products").then(r => r.json()).then(d => setProducts(d.data || []));
     fetch("/api/fabrics").then(r => r.json()).then(d => setFabrics(d.data || []));
     fetch("/api/fabric-tracking").then(r => r.json()).then(d => setFabricTrackings(d.data || []));
-    try {
-      const raw = localStorage.getItem("hookka-variants-config");
-      if (raw) {
-        setMaintenanceConfig(JSON.parse(raw));
+    // Variants now live in D1 under kv_config('variants-config'). Hydrate from
+    // the shared cache first (instant if any other page already fetched it)
+    // and fall back to factory defaults until the D1 round-trip resolves.
+    const FACTORY_DEFAULTS: Record<string, unknown[]> = {
+      divanHeights: [
+        { value: '8"', priceSen: 0 }, { value: '10"', priceSen: 5000 },
+        { value: '12"', priceSen: 10000 }, { value: '14"', priceSen: 18000 },
+      ],
+      totalHeights: [
+        { value: '22"', priceSen: 0 }, { value: '24"', priceSen: 5000 },
+        { value: '26"', priceSen: 10000 }, { value: '28"', priceSen: 15000 },
+      ],
+      gaps: ['4"', '5"', '6"', '7"', '8"', '9"', '10"'],
+      legHeights: [
+        { value: "No Leg", priceSen: 0 }, { value: '1"', priceSen: 0 },
+        { value: '2"', priceSen: 0 }, { value: '4"', priceSen: 0 },
+        { value: '6"', priceSen: 0 }, { value: '7"', priceSen: 16000 },
+      ],
+      specials: [
+        { value: "HB Fully Cover", priceSen: 5000 },
+        { value: "Divan Top Fully Cover", priceSen: 5000 },
+        { value: "Divan Full Cover", priceSen: 8000 },
+        { value: "Left Drawer", priceSen: 15000 },
+        { value: "Right Drawer", priceSen: 15000 },
+        { value: "Front Drawer", priceSen: 12000 },
+        { value: "HB Straight", priceSen: 0 },
+        { value: "Divan Top(W)", priceSen: 0 },
+        { value: "1 Piece Divan", priceSen: 25000 },
+        { value: "Divan Curve", priceSen: 5000 },
+        { value: "No Side Panel", priceSen: 4000 },
+        { value: "Headboard Only", priceSen: 0 },
+      ],
+      sofaSizes: ['24"', '28"', '30"', '32"', '35"'],
+      sofaLegHeights: [
+        { value: "No Leg", priceSen: 0 },
+        { value: '4"', priceSen: 0 },
+        { value: '6"', priceSen: 0 },
+      ],
+      sofaSpecials: [
+        { value: "Nylon Fabric", priceSen: 0 },
+        { value: "5537 Backrest", priceSen: 0 },
+        { value: "Separate Backrest Packing", priceSen: 0 },
+      ],
+    };
+
+    const applyCfg = (cfg: Record<string, unknown> | null) => {
+      if (cfg && Object.keys(cfg).length > 0) {
+        setMaintenanceConfig(cfg as Record<string, any[]>);
       } else {
-        // Use factory defaults so sofa/bedframe variant separation works
-        // even before user visits Products → Maintenance page
-        setMaintenanceConfig({
-          divanHeights: [
-            { value: '8"', priceSen: 0 }, { value: '10"', priceSen: 5000 },
-            { value: '12"', priceSen: 10000 }, { value: '14"', priceSen: 18000 },
-          ],
-          totalHeights: [
-            { value: '22"', priceSen: 0 }, { value: '24"', priceSen: 5000 },
-            { value: '26"', priceSen: 10000 }, { value: '28"', priceSen: 15000 },
-          ],
-          gaps: ['4"', '5"', '6"', '7"', '8"', '9"', '10"'],
-          legHeights: [
-            { value: "No Leg", priceSen: 0 }, { value: '1"', priceSen: 0 },
-            { value: '2"', priceSen: 0 }, { value: '4"', priceSen: 0 },
-            { value: '6"', priceSen: 0 }, { value: '7"', priceSen: 16000 },
-          ],
-          specials: [
-            { value: "HB Fully Cover", priceSen: 5000 },
-            { value: "Divan Top Fully Cover", priceSen: 5000 },
-            { value: "Divan Full Cover", priceSen: 8000 },
-            { value: "Left Drawer", priceSen: 15000 },
-            { value: "Right Drawer", priceSen: 15000 },
-            { value: "Front Drawer", priceSen: 12000 },
-            { value: "HB Straight", priceSen: 0 },
-            { value: "Divan Top(W)", priceSen: 0 },
-            { value: "1 Piece Divan", priceSen: 25000 },
-            { value: "Divan Curve", priceSen: 5000 },
-            { value: "No Side Panel", priceSen: 4000 },
-            { value: "Headboard Only", priceSen: 0 },
-          ],
-          sofaSizes: ['24"', '28"', '30"', '32"', '35"'],
-          sofaLegHeights: [
-            { value: "No Leg", priceSen: 0 },
-            { value: '4"', priceSen: 0 },
-            { value: '6"', priceSen: 0 },
-          ],
-          sofaSpecials: [
-            { value: "Nylon Fabric", priceSen: 0 },
-            { value: "5537 Backrest", priceSen: 0 },
-            { value: "Separate Backrest Packing", priceSen: 0 },
-          ],
-        });
+        setMaintenanceConfig(FACTORY_DEFAULTS as Record<string, any[]>);
       }
-    } catch { /* product-config fetch failed — use factory defaults */ }
+    };
+
+    applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
+    void fetchVariantsConfig().then((cfg) =>
+      applyCfg(cfg as Record<string, unknown> | null),
+    );
   }, []);
 
   // Load clone data from localStorage if navigated from Clone button

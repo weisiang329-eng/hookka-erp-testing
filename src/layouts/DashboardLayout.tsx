@@ -7,6 +7,7 @@ import { TabsProvider } from "@/contexts/tabs-context";
 import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
 import { ToastProvider } from "@/components/ui/toast";
 import { hydrateMasterTemplates } from "@/pages/bom";
+import { fetchVariantsConfig } from "@/lib/kv-config";
 
 const mockUser = {
   name: "Lim",
@@ -22,6 +23,9 @@ export default function DashboardLayout() {
   // and then wipes the legacy keys.
   useEffect(() => {
     void hydrateMasterTemplates();
+    // Prime the variants-config cache from D1 so downstream sync readers
+    // (getProductionMinutes, getCategoryOptions in bom.tsx) have real data.
+    void fetchVariantsConfig();
   }, []);
 
   return (

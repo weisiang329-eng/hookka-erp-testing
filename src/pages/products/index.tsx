@@ -3,6 +3,14 @@ import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Trash2, Save, AlertCircle, Check } from "lucide-react";
+import {
+  fetchVariantsConfig,
+  getVariantsConfigSync,
+  patchVariantsConfig,
+  subscribeKvConfig,
+  VARIANTS_CONFIG_KEY,
+  type VariantsConfig,
+} from "@/lib/kv-config";
 
 // ---------- Types matching mock-data ----------
 type DeptWorkingTime = {
@@ -358,7 +366,7 @@ type MaintenanceConfig = {
   sofaSizes: string[];
 };
 
-const MAINTENANCE_STORAGE_KEY = "hookka-variants-config";
+// Variants live in D1 under kv_config('variants-config'); see src/lib/kv-config.ts.
 
 const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
   divanHeights: [
@@ -451,13 +459,9 @@ const MAINTENANCE_TABS: { key: MaintenanceTab; label: string; description: strin
   { key: "fabrics", label: "Fabrics", description: "Fabric price tier assignment — determines Price 1 or Price 2 for bedframe pricing", section: "Common" },
 ];
 
-function loadMaintenanceConfig(): MaintenanceConfig {
-  if (typeof window === "undefined") return DEFAULT_MAINTENANCE_CONFIG;
+function parseMaintenanceConfig(parsed: VariantsConfig | null): MaintenanceConfig {
+  if (!parsed) return DEFAULT_MAINTENANCE_CONFIG;
   try {
-    const raw = localStorage.getItem(MAINTENANCE_STORAGE_KEY);
-    if (!raw) return DEFAULT_MAINTENANCE_CONFIG;
-    const parsed = JSON.parse(raw);
-
     function ensurePriced(val: unknown, defaults: PricedOption[]): PricedOption[] {
       if (!Array.isArray(val)) return defaults;
       if (val.length === 0) return defaults;
@@ -492,17 +496,9 @@ function loadMaintenanceConfig(): MaintenanceConfig {
 
 function saveMaintenanceConfig(cfg: MaintenanceConfig) {
   if (typeof window === "undefined") return;
-  try {
-    // Preserve productionTimes if they exist in storage
-    const raw = localStorage.getItem(MAINTENANCE_STORAGE_KEY);
-    let existing: Record<string, unknown> = {};
-    if (raw) {
-      try { existing = JSON.parse(raw); } catch { /* ignore */ }
-    }
-    localStorage.setItem(MAINTENANCE_STORAGE_KEY, JSON.stringify({ ...existing, ...cfg }));
-  } catch {
-    // ignore
-  }
+  // patchVariantsConfig merges into the existing blob, preserving
+  // productionTimes / fabricGroups that BOM owns. Save is debounced client-side.
+  patchVariantsConfig(cfg);
 }
 
 function MaintenanceView() {
@@ -522,13 +518,38 @@ function MaintenanceView() {
   const [fabricSearch, setFabricSearch] = useState("");
 
   useEffect(() => {
-    const loaded = loadMaintenanceConfig();
-    setConfig(loaded);
-    setSavedSnapshot(JSON.stringify(loaded));
+    // Render immediately from whatever the shared kv-config cache already has
+    // (prevents a flash of defaults when bouncing between pages). Then fetch
+    // fresh from D1 and overwrite — the snapshot keeps auto-save from
+    // re-pushing the hydrated value straight back to the server.
+    const cached = parseMaintenanceConfig(getVariantsConfigSync());
+    setConfig(cached);
+    setSavedSnapshot(JSON.stringify(cached));
+
+    let cancelled = false;
+    void fetchVariantsConfig().then((v) => {
+      if (cancelled) return;
+      const fresh = parseMaintenanceConfig(v);
+      setConfig(fresh);
+      setSavedSnapshot(JSON.stringify(fresh));
+    });
+
+    // Pick up writes from other tabs/pages (e.g. BOM's ProductionTimesDialog)
+    // so the Maintenance view never drifts from what's actually saved.
+    const off = subscribeKvConfig(VARIANTS_CONFIG_KEY, (v) => {
+      const latest = parseMaintenanceConfig(v as VariantsConfig | null);
+      setConfig(latest);
+      setSavedSnapshot(JSON.stringify(latest));
+    });
+    return () => {
+      cancelled = true;
+      off();
+    };
   }, []);
 
-  // Auto-save: persist config to localStorage whenever it changes (debounced).
-  // This ensures changes are never lost even if user forgets to click Save.
+  // Auto-save: persist config to D1 whenever it changes (debounced inside the
+  // kv-config helper itself). This ensures changes are never lost even if user
+  // forgets to click Save.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const snap = JSON.stringify(config);
@@ -944,7 +965,8 @@ function MaintenanceView() {
 
       {/* Info footer */}
       <div className="text-xs text-gray-400 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md p-3">
-        Variants are stored in browser localStorage (<code className="bg-white px-1 rounded">{MAINTENANCE_STORAGE_KEY}</code>) for now.
+        Variants are stored server-side in D1 under{' '}
+        <code className="bg-white px-1 rounded">/api/kv-config/{VARIANTS_CONFIG_KEY}</code>.
         Changes apply the next time BOM, SO, or Production forms are rendered.
       </div>
 

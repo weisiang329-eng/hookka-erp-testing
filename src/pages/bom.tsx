@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
+import {
+  fetchVariantsConfig,
+  getVariantsConfigSync,
+  patchVariantsConfig,
+  type VariantsConfig,
+} from "@/lib/kv-config";
 
 // ---------- Types ----------
 type BOMProcess = {
@@ -4017,7 +4023,9 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
   return out;
 }
 
-const PROD_TIMES_STORAGE_KEY = "hookka-variants-config";
+// Production times + fabricGroups are persisted in D1 under kv_config('variants-config').
+// We hydrate through the shared kv-config cache so the Products maintenance page and
+// this dialog never disagree about what's stored.
 
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [categories, setCategories] = useState<string[]>([]);
@@ -4027,28 +4035,25 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   const [editingCat, setEditingCat] = useState<{ index: number; value: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
-  // Load from localStorage on open
+  // Hydrate from D1 (via the kv-config cache) whenever the dialog opens.
   useEffect(() => {
     if (!open) return;
     const defaults = ["CAT 1", "CAT 2", "CAT 3", "CAT 4", "CAT 5", "CAT 6", "CAT 7"];
-    try {
-      const raw = localStorage.getItem(PROD_TIMES_STORAGE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const cats = parsed.fabricGroups && parsed.fabricGroups.length > 0 ? parsed.fabricGroups : defaults;
-        const pt = parsed.productionTimes && Object.keys(parsed.productionTimes).length > 0
-          ? parsed.productionTimes
+    const applyConfig = (cfg: VariantsConfig | null) => {
+      const fg = cfg?.fabricGroups;
+      const cats = Array.isArray(fg) && fg.length > 0 ? fg : defaults;
+      const pt =
+        cfg?.productionTimes && Object.keys(cfg.productionTimes).length > 0
+          ? cfg.productionTimes
           : buildDefaultProductionTimes(cats);
-        setCategories(cats);
-        setTimes(pt);
-      } else {
-        setCategories(defaults);
-        setTimes(buildDefaultProductionTimes(defaults));
-      }
-    } catch {
-      setCategories(defaults);
-      setTimes(buildDefaultProductionTimes(defaults));
-    }
+      setCategories(cats);
+      setTimes(pt);
+    };
+
+    // Optimistic render from the in-memory cache if already hydrated.
+    applyConfig(getVariantsConfigSync());
+    // Always re-fetch to pick up any changes since last hydrate.
+    void fetchVariantsConfig().then(applyConfig);
     setDirty(false);
   }, [open]);
 
@@ -4067,11 +4072,10 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
 
   function handleSave() {
     try {
-      const raw = localStorage.getItem(PROD_TIMES_STORAGE_KEY);
-      const existing = raw ? JSON.parse(raw) : {};
-      existing.productionTimes = times;
-      existing.fabricGroups = categories;
-      localStorage.setItem(PROD_TIMES_STORAGE_KEY, JSON.stringify(existing));
+      // patchVariantsConfig merges into whatever else is stored (divanHeights,
+      // specials, etc) so other settings remain untouched. Save is debounced
+      // on the client; we show the toast optimistically.
+      patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
       setDirty(false);
       showToast("Production times saved");
     } catch {
@@ -4173,11 +4177,8 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
             nextTimes[code][cats[j]] = isNaN(v) ? 0 : v;
           }
         }
-        // Also update categories in config
-        const raw = localStorage.getItem(PROD_TIMES_STORAGE_KEY);
-        const existing = raw ? JSON.parse(raw) : {};
-        if (cats.length > 0) existing.fabricGroups = cats;
-        localStorage.setItem(PROD_TIMES_STORAGE_KEY, JSON.stringify(existing));
+        // Also update categories in config (D1 via shared kv-config cache).
+        if (cats.length > 0) patchVariantsConfig({ fabricGroups: cats });
         setCategories(cats.length > 0 ? cats : categories);
         setTimes(nextTimes);
         setDirty(true);

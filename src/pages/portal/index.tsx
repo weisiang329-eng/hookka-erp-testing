@@ -54,11 +54,22 @@ export default function PortalDashboard() {
         const deliveriesData = await deliveriesRes.json();
         const accountData = await accountRes.json();
 
-        if (ordersData.success) setOrders(ordersData.data);
-        if (deliveriesData.success) setDeliveries(deliveriesData.data);
-        if (accountData.success) {
-          setInvoices(accountData.data.invoices);
-          setOutstandingSen(accountData.data.customer.outstandingSen);
+        const asArr = (v: unknown): unknown[] =>
+          Array.isArray(v) ? v : [];
+        setOrders(asArr((ordersData as { data?: unknown })?.data) as typeof orders);
+        setDeliveries(
+          asArr((deliveriesData as { data?: unknown })?.data) as typeof deliveries,
+        );
+        // /api/portal/account returns { data: { customer, invoices } } on success,
+        // or the stub shape { data: [] } when the route isn't mounted. Guard both.
+        const acctData = (accountData as { data?: unknown })?.data;
+        if (acctData && typeof acctData === "object" && !Array.isArray(acctData)) {
+          const a = acctData as {
+            customer?: { outstandingSen?: number };
+            invoices?: unknown;
+          };
+          setInvoices(asArr(a.invoices) as typeof invoices);
+          setOutstandingSen(a.customer?.outstandingSen ?? 0);
         }
       } catch {
         // silently ignore

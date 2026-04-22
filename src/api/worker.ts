@@ -126,6 +126,7 @@ import promiseDate from "./routes/promise-date";
 import qcInspections from "./routes/qc-inspections";
 import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
+import portal from "./routes/portal";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -191,6 +192,7 @@ app.route("/api/promise-date", promiseDate);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);
+app.route("/api/portal", portal);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

@@ -14,10 +14,11 @@
 // CRUD surface that the Inventory page + batch-import dialog call directly.
 //
 // Schema note: 0008_raw_materials.sql added minStock/maxStock/status/notes/
-// created_at/updated_at on top of the 0001 base schema. `baseUOM` / `unit`
-// are the same column — we accept either key in POST/PUT bodies for
-// consistency with the Inventory form + the mock-data RawMaterial type
-// (which uses baseUOM).  API response always exposes both `baseUOM` and
+// created_at/updated_at on top of the 0001 base schema. 0024 added AutoCount
+// mirror fields (uomCount/itemType/stockControl/mainSupplierCode).
+// `baseUOM` / `unit` are the same column — we accept either key in POST/PUT
+// bodies for consistency with the Inventory form + the mock-data RawMaterial
+// type (which uses baseUOM). API response always exposes both `baseUOM` and
 // `unit` with the same value for backwards compatibility.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
@@ -39,6 +40,10 @@ type RawMaterialRow = {
   notes: string | null;
   created_at: string | null;
   updated_at: string | null;
+  uomCount: number | null;
+  itemType: string | null;
+  stockControl: number | null;
+  mainSupplierCode: string | null;
 };
 
 type RawMaterialBody = {
@@ -53,6 +58,10 @@ type RawMaterialBody = {
   maxStock?: number;
   status?: string;
   notes?: string | null;
+  uomCount?: number;
+  itemType?: string | null;
+  stockControl?: boolean | number;
+  mainSupplierCode?: string | null;
 };
 
 function rowToApi(r: RawMaterialRow) {
@@ -71,7 +80,17 @@ function rowToApi(r: RawMaterialRow) {
     notes: r.notes ?? "",
     created_at: r.created_at ?? "",
     updated_at: r.updated_at ?? "",
+    uomCount: r.uomCount ?? 1,
+    itemType: r.itemType ?? null,
+    stockControl: (r.stockControl ?? 1) === 1,
+    mainSupplierCode: r.mainSupplierCode ?? null,
   };
+}
+
+function stockControlFromBody(body: RawMaterialBody, fallback = 1): number {
+  if (body.stockControl === undefined) return fallback;
+  if (typeof body.stockControl === "boolean") return body.stockControl ? 1 : 0;
+  return Number(body.stockControl) === 0 ? 0 : 1;
 }
 
 function genId(): string {
@@ -158,13 +177,24 @@ app.post("/", async (c) => {
   const minStock = Number(body.minStock) || 0;
   const maxStock = Number(body.maxStock) || 0;
   const notes = typeof body.notes === "string" ? body.notes : null;
+  const uomCount = body.uomCount !== undefined && Number.isFinite(Number(body.uomCount))
+    ? Number(body.uomCount)
+    : 1;
+  const itemType = typeof body.itemType === "string" && body.itemType.trim()
+    ? body.itemType.trim()
+    : null;
+  const stockControl = stockControlFromBody(body);
+  const mainSupplierCode = typeof body.mainSupplierCode === "string" && body.mainSupplierCode.trim()
+    ? body.mainSupplierCode.trim()
+    : null;
   const nowIso = new Date().toISOString();
 
   await c.env.DB.prepare(
     `INSERT INTO raw_materials
        (id, itemCode, description, baseUOM, itemGroup, isActive, balanceQty,
-        minStock, maxStock, status, notes, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        minStock, maxStock, status, notes, created_at, updated_at,
+        uomCount, itemType, stockControl, mainSupplierCode)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -180,6 +210,10 @@ app.post("/", async (c) => {
       notes,
       nowIso,
       nowIso,
+      uomCount,
+      itemType,
+      stockControl,
+      mainSupplierCode,
     )
     .run();
 
@@ -243,6 +277,26 @@ app.put("/:id", async (c) => {
       body.maxStock !== undefined ? Number(body.maxStock) : existing.maxStock ?? 0,
     status: statusFromBody(body, existing.status ?? "ACTIVE"),
     notes: body.notes !== undefined ? body.notes : existing.notes,
+    uomCount:
+      body.uomCount !== undefined && Number.isFinite(Number(body.uomCount))
+        ? Number(body.uomCount)
+        : existing.uomCount ?? 1,
+    itemType:
+      body.itemType !== undefined
+        ? (typeof body.itemType === "string" && body.itemType.trim()
+            ? body.itemType.trim()
+            : null)
+        : existing.itemType,
+    stockControl:
+      body.stockControl !== undefined
+        ? stockControlFromBody(body, existing.stockControl ?? 1)
+        : existing.stockControl ?? 1,
+    mainSupplierCode:
+      body.mainSupplierCode !== undefined
+        ? (typeof body.mainSupplierCode === "string" && body.mainSupplierCode.trim()
+            ? body.mainSupplierCode.trim()
+            : null)
+        : existing.mainSupplierCode,
   };
   const isActive = merged.status === "ACTIVE" ? 1 : 0;
   const nowIso = new Date().toISOString();
@@ -251,7 +305,8 @@ app.put("/:id", async (c) => {
     `UPDATE raw_materials SET
        itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?,
        isActive = ?, balanceQty = ?, minStock = ?, maxStock = ?,
-       status = ?, notes = ?, updated_at = ?
+       status = ?, notes = ?, updated_at = ?,
+       uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?
      WHERE id = ?`,
   )
     .bind(
@@ -266,6 +321,10 @@ app.put("/:id", async (c) => {
       merged.status,
       merged.notes,
       nowIso,
+      merged.uomCount,
+      merged.itemType,
+      merged.stockControl,
+      merged.mainSupplierCode,
       id,
     )
     .run();
@@ -304,6 +363,11 @@ app.delete("/:id", async (c) => {
 
 // POST /api/raw-materials/bulk-import
 // Upserts by itemCode.  Body: { rows: RawMaterialBody[] }
+//
+// IMPORTANT: On UPDATE we DO NOT touch balanceQty — D1 is the source of truth
+// for current stock (GRNs keep it fresh; the AutoCount sheet's `Total Bal.
+// Qty` gets stale the moment a GRN posts). On INSERT balanceQty defaults
+// to 0; the first GRN against the new code will bring it up to level.
 app.post("/bulk-import", async (c) => {
   let body: { rows?: RawMaterialBody[] };
   try {
@@ -336,44 +400,60 @@ app.post("/bulk-import", async (c) => {
     const itemGroup = (r.itemGroup ?? "OTHERS").trim() || "OTHERS";
     const status = statusFromBody(r);
     const isActive = status === "ACTIVE" ? 1 : 0;
-    const balanceQty = Number(r.balanceQty) || 0;
     const minStock = Number(r.minStock) || 0;
     const maxStock = Number(r.maxStock) || 0;
     const notes = typeof r.notes === "string" ? r.notes : null;
+    const uomCount = r.uomCount !== undefined && Number.isFinite(Number(r.uomCount))
+      ? Number(r.uomCount)
+      : 1;
+    const itemType = typeof r.itemType === "string" && r.itemType.trim()
+      ? r.itemType.trim()
+      : null;
+    const stockControl = stockControlFromBody(r);
+    const mainSupplierCode = typeof r.mainSupplierCode === "string" && r.mainSupplierCode.trim()
+      ? r.mainSupplierCode.trim()
+      : null;
 
     const existingId = codeToId.get(itemCode);
     if (existingId) {
+      // UPDATE — do NOT touch balanceQty (preserve current stock level).
       statements.push(
         c.env.DB.prepare(
           `UPDATE raw_materials SET
              description = ?, baseUOM = ?, itemGroup = ?, isActive = ?,
-             balanceQty = ?, minStock = ?, maxStock = ?, status = ?,
-             notes = ?, updated_at = ?
+             minStock = ?, maxStock = ?, status = ?,
+             notes = ?, updated_at = ?,
+             uomCount = ?, itemType = ?, stockControl = ?, mainSupplierCode = ?
            WHERE id = ?`,
         ).bind(
           description,
           baseUOM,
           itemGroup,
           isActive,
-          balanceQty,
           minStock,
           maxStock,
           status,
           notes,
           nowIso,
+          uomCount,
+          itemType,
+          stockControl,
+          mainSupplierCode,
           existingId,
         ),
       );
       updated++;
     } else {
+      // INSERT — balanceQty defaults to 0; the sheet's Total Bal. Qty is ignored.
       const id = genId();
       statements.push(
         c.env.DB.prepare(
           `INSERT INTO raw_materials
              (id, itemCode, description, baseUOM, itemGroup, isActive,
               balanceQty, minStock, maxStock, status, notes,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              created_at, updated_at,
+              uomCount, itemType, stockControl, mainSupplierCode)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           id,
           itemCode,
@@ -381,13 +461,17 @@ app.post("/bulk-import", async (c) => {
           baseUOM,
           itemGroup,
           isActive,
-          balanceQty,
+          0, // balanceQty defaults to 0 for new rows
           minStock,
           maxStock,
           status,
           notes,
           nowIso,
           nowIso,
+          uomCount,
+          itemType,
+          stockControl,
+          mainSupplierCode,
         ),
       );
       codeToId.set(itemCode, id);

@@ -313,6 +313,62 @@ export function useTabs(): TabsContextValue {
  * Only reacts to *pathname* changes. Depending on `tabs`/`activeId` creates
  * feedback loops because TabsNavigationSync mutates those in response.
  */
+// List / landing pages the user reaches via the sidebar. Navigating to one
+// of these does NOT open a persistent tab — the user is browsing, not
+// working on a specific record. Detail / create / edit pages (anything not
+// in this list) always open a tab because the user is actively editing
+// something they need to come back to.
+const NON_PERSISTENT_PATHS = new Set<string>([
+  "/notifications",
+  "/analytics/forecast",
+  "/sales",
+  "/delivery",
+  "/invoices",
+  "/invoices/credit-notes",
+  "/invoices/debit-notes",
+  "/invoices/payments",
+  "/invoices/e-invoice",
+  "/consignment",
+  "/consignment/note",
+  "/consignment/return",
+  "/customers",
+  "/production",
+  "/production/scan",
+  "/production/tracker",
+  "/production/fg-scan",
+  "/planning",
+  "/planning/mrp",
+  "/products",
+  "/bom",
+  "/inventory",
+  "/inventory/fabrics",
+  "/inventory/stock-value",
+  "/warehouse",
+  "/procurement",
+  "/procurement/in-transit",
+  "/procurement/grn",
+  "/procurement/pi",
+  "/procurement/pricing",
+  "/procurement/maintenance",
+  "/rd",
+  "/quality",
+  "/accounting",
+  "/accounting/cash-flow",
+  "/reports",
+  "/employees",
+  "/maintenance",
+  "/settings",
+  "/settings/users",
+  "/settings/organisations",
+]);
+
+function shouldPersistTab(path: string): boolean {
+  // Dashboard is the home tab — always persistent so there's something to
+  // come back to when all transient pages close.
+  if (path === "/dashboard") return true;
+  return !NON_PERSISTENT_PATHS.has(path);
+}
+
 function TabsUrlSync() {
   const { pathname } = useLocation();
   const { openTab, switchTab, tabs: tabsRef } = useTabs();
@@ -327,6 +383,11 @@ function TabsUrlSync() {
     const path = normalisePath(pathname);
     if (lastPath.current === path) return;
     lastPath.current = path;
+
+    // List / landing pages don't get a tab. The user navigates via the
+    // sidebar to browse, then any detail / edit click opens a persistent
+    // tab for the specific record they're working on.
+    if (!shouldPersistTab(path)) return;
 
     const id = makeTabId(path);
     const existing = tabsCurrent.current.find((t) => t.id === id);

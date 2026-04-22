@@ -1004,6 +1004,8 @@ export default function PlanningPage() {
                                     <span className="text-[#4F7C3A] font-medium">{formatDate(jc.completedDate)}</span>
                                   ) : isCurrent ? (
                                     <span className="text-[#9C6F1E] font-medium text-[10px]">IN PROGRESS</span>
+                                  ) : jc?.dueDate ? (
+                                    <span className="text-[#9CA3AF] text-[10px]">{formatDate(jc.dueDate)}</span>
                                   ) : (
                                     <span className="text-[#D1CBC5]">-</span>
                                   )}

@@ -20,7 +20,7 @@ import {
   addDays,
   DEPT_ORDER,
 } from "../lib/lead-times";
-import { breakBomIntoWips } from "../lib/bom-wip-breakdown";
+import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
 
 const app = new Hono<Env>();
 
@@ -329,7 +329,16 @@ async function createProductionOrdersForSO(
         .first<{ wipComponents: string | null }>();
     }
 
-    const wips = breakBomIntoWips(bomRow?.wipComponents ?? null, productCode);
+    const variants: BomVariantContext = {
+      productCode: item.productCode ?? "",
+      sizeLabel: item.sizeLabel ?? "",
+      sizeCode: item.sizeCode ?? "",
+      fabricCode: item.fabricCode ?? "",
+      divanHeightInches: item.divanHeightInches ?? null,
+      legHeightInches: item.legHeightInches ?? null,
+      gapInches: item.gapInches ?? null,
+    };
+    const wips = breakBomIntoWips(bomRow?.wipComponents ?? null, productCode, variants);
 
     // ------ Reverse-schedule dept dueDates ------
     // Goal: build a per-dept `dueDate` string for every (wip, dept) entry.
@@ -385,8 +394,8 @@ async function createProductionOrdersForSO(
           if (!deptMeta) continue;
           planned.push({
             wipType: wip.wipType,
-            wipCode: wip.wipCode,
-            wipLabel: wip.wipLabel,
+            wipCode: p.wipCode || wip.wipCode,
+            wipLabel: p.wipLabel || wip.wipLabel,
             wipKey: wip.wipKey,
             wipQty,
             sequence: i,
@@ -409,8 +418,8 @@ async function createProductionOrdersForSO(
           if (!deptMeta) continue;
           planned.push({
             wipType: wip.wipType,
-            wipCode: wip.wipCode,
-            wipLabel: wip.wipLabel,
+            wipCode: p.wipCode || wip.wipCode,
+            wipLabel: p.wipLabel || wip.wipLabel,
             wipKey: wip.wipKey,
             wipQty,
             sequence: i,
@@ -619,7 +628,20 @@ async function backfillJobCardsForPo(
       .bind(productCode)
       .first<{ wipComponents: string | null }>();
   }
-  const wips = breakBomIntoWips(bomRow?.wipComponents ?? null, productCode);
+  const backfillVariants: BomVariantContext = {
+    productCode: po.productCode ?? "",
+    sizeLabel: po.sizeLabel ?? "",
+    sizeCode: po.sizeCode ?? "",
+    fabricCode: po.fabricCode ?? "",
+    divanHeightInches: po.divanHeightInches ?? null,
+    legHeightInches: po.legHeightInches ?? null,
+    gapInches: po.gapInches ?? null,
+  };
+  const wips = breakBomIntoWips(
+    bomRow?.wipComponents ?? null,
+    productCode,
+    backfillVariants,
+  );
 
   const statements: D1PreparedStatement[] = [];
   let currentDept = po.currentDepartment ?? "FAB_CUT";
@@ -692,7 +714,9 @@ async function backfillJobCardsForPo(
         currentDeptIdx = idx;
         currentDept = p.deptCode;
       }
-      const jcId = `jc-${poId}-${wip.wipCode}-${p.deptCode}`
+      const deptWipCode = chain[p.sequence]?.wipCode || wip.wipCode;
+      const deptWipLabel = chain[p.sequence]?.wipLabel || wip.wipLabel;
+      const jcId = `jc-${poId}-${deptWipCode}-${p.deptCode}`
         .replace(/[^a-zA-Z0-9_-]/g, "_")
         .slice(0, 128);
       statements.push(
@@ -714,9 +738,9 @@ async function backfillJobCardsForPo(
             "WAITING",
             p.dueDate,
             wip.wipKey,
-            wip.wipCode,
+            deptWipCode,
             wip.wipType,
-            wip.wipLabel,
+            deptWipLabel,
             wipQty,
             p.sequence === 0 ? 1 : 0,
             null,

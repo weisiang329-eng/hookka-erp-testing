@@ -227,8 +227,63 @@ app.get("/", async (c) => {
 app.post("/", async (c) => {
   try {
     const body = await c.req.json();
-    const salesOrderId: string | undefined =
-      body.salesOrderId ?? undefined;
+
+    // Resolve salesOrderId + seed items from productionOrderIds when the
+    // caller came from Pending Delivery (bulk Create DO). All POs must belong
+    // to the same SO — otherwise we reject so the user can split the DO.
+    type PoRow = {
+      id: string;
+      poNo: string | null;
+      salesOrderId: string | null;
+      companySOId: string | null;
+      productCode: string | null;
+      productName: string | null;
+      sizeLabel: string | null;
+      fabricCode: string | null;
+      quantity: number | null;
+      rackingNumber: string | null;
+    };
+    const productionOrderIds: string[] = Array.isArray(body.productionOrderIds)
+      ? (body.productionOrderIds as unknown[]).filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        )
+      : [];
+    let poRowsForItems: PoRow[] = [];
+    let resolvedSalesOrderId: string | undefined = body.salesOrderId ?? undefined;
+    if (productionOrderIds.length > 0) {
+      const placeholders = productionOrderIds.map(() => "?").join(",");
+      const poRes = await c.env.DB.prepare(
+        `SELECT id, poNo, salesOrderId, companySOId, productCode, productName,
+                sizeLabel, fabricCode, quantity, rackingNumber
+           FROM production_orders WHERE id IN (${placeholders})`,
+      )
+        .bind(...productionOrderIds)
+        .all<PoRow>();
+      poRowsForItems = poRes.results ?? [];
+      if (poRowsForItems.length === 0) {
+        return c.json(
+          { success: false, error: "No matching production orders" },
+          400,
+        );
+      }
+      const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
+      soIds.delete("");
+      if (soIds.size > 1) {
+        return c.json(
+          {
+            success: false,
+            error:
+              "Selected production orders span multiple sales orders — split into separate DOs",
+          },
+          400,
+        );
+      }
+      if (!resolvedSalesOrderId && soIds.size === 1) {
+        resolvedSalesOrderId = [...soIds][0];
+      }
+    }
+
+    const salesOrderId: string | undefined = resolvedSalesOrderId;
 
     // Validate customer (salesOrder link optional at this phase).
     let salesOrderRow: {
@@ -305,7 +360,7 @@ app.post("/", async (c) => {
     const itemsInput: Array<Record<string, unknown>> = Array.isArray(body.items)
       ? body.items
       : [];
-    const items = itemsInput.map((item) => ({
+    const itemsFromInput = itemsInput.map((item) => ({
       id: (item.id as string) || genDoItemId(),
       productionOrderId: (item.productionOrderId as string) || "",
       salesOrderNo: (item.salesOrderNo as string) || "",
@@ -319,6 +374,25 @@ app.post("/", async (c) => {
       rackingNumber: (item.rackingNumber as string) || "",
       packingStatus: (item.packingStatus as string) || "PENDING",
     }));
+    // Fallback: if caller didn't pass items but gave productionOrderIds, seed
+    // line items from the POs we already loaded.
+    const items =
+      itemsFromInput.length > 0
+        ? itemsFromInput
+        : poRowsForItems.map((po) => ({
+            id: genDoItemId(),
+            productionOrderId: po.id,
+            salesOrderNo: po.companySOId ?? "",
+            poNo: po.poNo ?? "",
+            productCode: po.productCode ?? "",
+            productName: po.productName ?? "",
+            sizeLabel: po.sizeLabel ?? "",
+            fabricCode: po.fabricCode ?? "",
+            quantity: Number(po.quantity) || 0,
+            itemM3: 0,
+            rackingNumber: po.rackingNumber ?? "",
+            packingStatus: "PENDING" as const,
+          }));
 
     const totalM3 =
       Math.round(items.reduce((s, i) => s + i.itemM3 * i.quantity, 0) * 100) /

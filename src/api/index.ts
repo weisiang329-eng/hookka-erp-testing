@@ -47,7 +47,7 @@ import goodsInTransit from './routes/goods-in-transit';
 import historicalSales from './routes/historical-sales';
 import lorries from './routes/lorries';
 import productConfigs from './routes/product-configs';
-import productionLeadtimes from './routes/production-leadtimes';
+import productionLeadtimes from './routes-d1/production-leadtimes';
 import promiseDate from './routes/promise-date';
 import qcInspections from './routes/qc-inspections';
 import rdProjects from './routes/rd-projects';

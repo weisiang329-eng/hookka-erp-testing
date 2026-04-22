@@ -573,6 +573,39 @@ async function applyPoUpdate(
       return c.json({ success: false, error: "Job card not found" }, 404);
     }
 
+    // Upstream-lock rule: when an operator tries to edit dueDate or
+    // completedDate on this JC, refuse if any DOWNSTREAM JC in the same
+    // wipKey branch has already been COMPLETED / TRANSFERRED. The UI greys
+    // out the cell too, but this guard enforces the rule even when the PATCH
+    // comes from a stale client or a direct API call.
+    //
+    // Status changes are intentionally NOT blocked here — the operator un-
+    // completing the downstream dept is precisely the path the error message
+    // tells them to take.
+    if (body.dueDate !== undefined || body.completedDate !== undefined) {
+      const laterDone = await db
+        .prepare(
+          `SELECT 1 FROM job_cards
+           WHERE productionOrderId = ?
+             AND wipKey = ?
+             AND sequence > ?
+             AND status IN ('COMPLETED','TRANSFERRED')
+           LIMIT 1`,
+        )
+        .bind(jcRow.productionOrderId, jcRow.wipKey, jcRow.sequence)
+        .first();
+      if (laterDone) {
+        return c.json(
+          {
+            success: false,
+            error:
+              "Cannot modify — a later department is already completed. Undo that first.",
+          },
+          409,
+        );
+      }
+    }
+
     // Mutate a shallow copy — final UPDATE statement below writes it.
     const updated: JobCardRow = { ...jcRow };
 

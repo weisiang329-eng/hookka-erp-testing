@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Check, Plus } from "lucide-react";
+import { Check, Plus, Lock } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { getQRCodeUrl, getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
@@ -44,6 +44,23 @@ const DEPARTMENTS = [
   { name: "Webbing",    code: "WEBBING" },
   { name: "Upholstery", code: "UPHOLSTERY" },
   { name: "Packing",    code: "PACKING" },
+] as const;
+
+// Workflow order used by the upstream-lock rule: once a later dept's JC is
+// COMPLETED/TRANSFERRED we lock dueDate/completedDate edits on every earlier
+// dept's JC within the same wipKey. Mirrors src/api/lib/lead-times.ts DEPT_ORDER
+// (WOOD_CUT comes before FOAM there, but on the UI we keep the presentation
+// order the operator already knows — what matters is relative position between
+// a given pair for the lock decision).
+const DEPT_ORDER: readonly string[] = [
+  "FAB_CUT",
+  "FAB_SEW",
+  "FOAM",
+  "WOOD_CUT",
+  "FRAMING",
+  "WEBBING",
+  "UPHOLSTERY",
+  "PACKING",
 ] as const;
 
 // Simplified 3-state palette per user spec:
@@ -553,6 +570,12 @@ export default function ProductionPage() {
   const [fgStickers, setFgStickers] = useState<FgSticker[]>([]);
   // Loading flag shown on the header button while a batch of QRs pre-renders.
   const [printingJobCards, setPrintingJobCards] = useState(false);
+  // When true, the fgStickers useEffect will fire window.print() on next
+  // populate. Auto-population on UPH/PACK tab entry leaves this false so
+  // the preview tiles render without triggering a print dialog.
+  const [fgPrintRequested, setFgPrintRequested] = useState(false);
+  // Loading flag while the FG preview is being populated (tab entry).
+  const [loadingFgPreview, setLoadingFgPreview] = useState(false);
 
   // Stock PO creation dialog — lets the factory spin up a PO against a
   // placeholder SOH-YYMM-NNN when there's spare capacity. Item pool comes
@@ -776,6 +799,12 @@ export default function ProductionPage() {
     sortKey: number;     // overdue(3)>pending(2)>done(1)>none(0) — for column sort
     poId: string;        // parent production order id (for PATCH routing)
     jobCardId: string;   // the underlying job card id to patch
+    deptCode: string;    // this cell's dept code (needed for upstream-lock check)
+    wipKey: string;      // this cell's wipKey (scopes the upstream-lock check)
+    // True when any job card LATER in DEPT_ORDER within the same wipKey is
+    // already COMPLETED or TRANSFERRED. When true, the cell's date picker
+    // is disabled — the operator must un-complete the downstream dept first.
+    locked: boolean;
   };
   type DeptRow = {
     id: string;            // `${po.id}:${jc.id}`
@@ -820,13 +849,21 @@ export default function ProductionPage() {
   };
 
   // Build a DeptSched from a candidate JobCard (or null if no card exists).
+  // `siblings` is the list of job cards in the SAME wipKey branch on the
+  // same PO — used to compute the `locked` flag (true when any later-dept
+  // JC within the branch is COMPLETED or TRANSFERRED, which freezes this
+  // cell's dueDate / completedDate edits client-side).
   const buildSched = (
     card: JobCard | null,
     today: string,
     poId: string,
+    siblings: JobCard[] = [],
   ): DeptSched => {
     if (!card) {
-      return { due: "", completed: "", state: "none", sortKey: 0, poId, jobCardId: "" };
+      return {
+        due: "", completed: "", state: "none", sortKey: 0, poId,
+        jobCardId: "", deptCode: "", wipKey: "", locked: false,
+      };
     }
     const due = card.dueDate || "";
     const completed = card.completedDate || "";
@@ -836,7 +873,20 @@ export default function ProductionPage() {
     else if (due && due < today) state = "overdue";
     else state = "pending";
     const sortKey = state === "overdue" ? 3 : state === "pending" ? 2 : 1;
-    return { due, completed, state, sortKey, poId, jobCardId: card.id };
+    const myPos = DEPT_ORDER.indexOf(card.departmentCode);
+    const locked = myPos >= 0 && siblings.some((j) => {
+      if (j.id === card.id) return false;
+      const jPos = DEPT_ORDER.indexOf(j.departmentCode);
+      if (jPos <= myPos) return false;
+      return j.status === "COMPLETED" || j.status === "TRANSFERRED";
+    });
+    return {
+      due, completed, state, sortKey, poId,
+      jobCardId: card.id,
+      deptCode: card.departmentCode,
+      wipKey: card.wipKey || "",
+      locked,
+    };
   };
 
   const deptRows = useMemo<DeptRow[]>(() => {
@@ -865,6 +915,13 @@ export default function ProductionPage() {
             (a, b) => (b.dueDate || "").localeCompare(a.dueDate || ""),
           )[0];
         };
+
+        // Sibling JCs used by buildSched to compute the upstream-lock flag.
+        // Scope to same wipKey when the row carries one — fall back to every
+        // JC on the PO so legacy rows without wipKey still lock sensibly.
+        const siblings: JobCard[] = jc.wipKey
+          ? o.jobCards.filter((j) => j.wipKey === jc.wipKey)
+          : o.jobCards;
 
         rows.push({
           id: `${o.id}:${jc.id}`,
@@ -944,14 +1001,14 @@ export default function ProductionPage() {
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
-          sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id),
-          sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id),
-          sched_FOAM:       buildSched(picker("FOAM"),       today, o.id),
-          sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id),
-          sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id),
-          sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id),
-          sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id),
-          sched_PACKING:    buildSched(picker("PACKING"),    today, o.id),
+          sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, siblings),
+          sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, siblings),
+          sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, siblings),
+          sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, siblings),
+          sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, siblings),
+          sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, siblings),
+          sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, siblings),
+          sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, siblings),
         });
       }
     }
@@ -979,6 +1036,29 @@ export default function ProductionPage() {
     } else if (s.state === "overdue") {
       cls = "bg-[#F9E1DA] text-[#9A3A2D]";
       word = "OVERDUE";
+    }
+    // Upstream-lock: when a downstream dept (later in DEPT_ORDER) has already
+    // been COMPLETED/TRANSFERRED for this same wipKey, this cell becomes
+    // read-only. Greyed pill + lock icon + no onClick so the date picker
+    // stays shut. Server-side guard in production-orders.ts PATCH enforces
+    // the same rule even if the client state gets bypassed.
+    if (s.locked) {
+      return (
+        <div
+          className="relative w-full h-full cursor-not-allowed"
+          title="Locked — undo later department first."
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+        >
+          <span className={`${base} ${cls}`} style={{ opacity: 0.6 }}>
+            <span className="flex items-center gap-1">
+              <Lock className="w-2.5 h-2.5" strokeWidth={2.5} />
+              <span className="opacity-80">{word}</span>
+            </span>
+            <span>{fmtShortDate(date)}</span>
+          </span>
+        </div>
+      );
     }
     return (
       <div
@@ -1458,14 +1538,18 @@ export default function ProductionPage() {
     }
   }, [onScreenStickers, activeTab]);
 
-  const handlePrintFgStickers = useCallback(async () => {
+  // Populate `fgStickers` state without firing window.print(). Used in two
+  // places: (1) auto-fired on entry to UPHOLSTERY/PACKING tabs so the preview
+  // tiles render, (2) called by `handlePrintFgStickers` which then flips
+  // `fgPrintRequested` to trigger the print useEffect.
+  //
+  // Returns the populated list (also stored in state) so callers can short-
+  // circuit if nothing came back. Silent — no alerts.
+  const loadFgStickers = useCallback(async (): Promise<FgSticker[]> => {
     if (filteredOrders.length === 0) {
-      alert("No orders in the current filter.");
-      return;
+      setFgStickers([]);
+      return [];
     }
-    // For each PO in the filter: generate FG units (idempotent) and fetch the
-    // product to pick up SKU / fabric colour for the sticker. Then flatten to
-    // one sticker per unit.
     type ProductMini = {
       id: string; code: string;
       skuCode?: string; sizeCode?: string; fabricColor?: string;
@@ -1481,6 +1565,7 @@ export default function ProductionPage() {
       mfdDate: string | null;
     };
     const all: FgSticker[] = [];
+    setLoadingFgPreview(true);
     try {
       for (const o of filteredOrders) {
         const [gRes, pRes] = await Promise.all([
@@ -1516,17 +1601,44 @@ export default function ProductionPage() {
           });
         }
       }
-    } catch {
-      alert("Failed to generate FG units. Please try again.");
-      return;
-    }
-    if (all.length === 0) {
-      alert("No FG units to print.");
-      return;
+    } catch (err) {
+      console.error("[loadFgStickers] failed", err);
+      setLoadingFgPreview(false);
+      return [];
     }
     setJobCardStickers([]);
     setFgStickers(all);
+    setLoadingFgPreview(false);
+    return all;
   }, [filteredOrders]);
+
+  const handlePrintFgStickers = useCallback(async () => {
+    if (filteredOrders.length === 0) {
+      alert("No orders in the current filter.");
+      return;
+    }
+    // If tiles already populated (auto-loaded on tab entry), print directly.
+    // Otherwise fetch first, then request print.
+    const list = fgStickers.length > 0 ? fgStickers : await loadFgStickers();
+    if (list.length === 0) {
+      alert("No FG units to print.");
+      return;
+    }
+    setFgPrintRequested(true);
+  }, [filteredOrders, fgStickers, loadFgStickers]);
+
+  // Auto-populate the FG preview tiles when entering the UPHOLSTERY or
+  // PACKING tab. Orders change (dept switch, filter tweak) retrigger the
+  // load so the tiles stay in sync with what the operator is looking at.
+  // Other tabs clear the list so the hidden print container doesn't carry
+  // stale data into a job-card print job.
+  useEffect(() => {
+    if (activeTab === "UPHOLSTERY" || activeTab === "PACKING") {
+      loadFgStickers();
+    } else {
+      setFgStickers([]);
+    }
+  }, [activeTab, loadFgStickers]);
 
   // Once the batch container is rendered, fire the print dialog. Small
   // timeout lets React paint the hidden container first; QR images are
@@ -1543,13 +1655,19 @@ export default function ProductionPage() {
   }, [jobCardStickers]);
 
   useEffect(() => {
-    if (fgStickers.length === 0) return;
+    if (!fgPrintRequested) return;
+    if (fgStickers.length === 0) {
+      setFgPrintRequested(false);
+      return;
+    }
     const t = setTimeout(() => {
       window.print();
-      setTimeout(() => setFgStickers([]), 500);
+      // Don't clear fgStickers here anymore — the on-screen preview on UPH/
+      // PACK tabs depends on that state. Reset just the print-requested flag.
+      setTimeout(() => setFgPrintRequested(false), 500);
     }, 300);
     return () => clearTimeout(t);
-  }, [fgStickers]);
+  }, [fgStickers, fgPrintRequested]);
 
   // Print the current filtered schedule as an A4 landscape listing. Opens
   // a new window populated with inline HTML + @page size:A4 landscape so
@@ -2057,9 +2175,13 @@ export default function ProductionPage() {
       )}
 
       {/* On-screen QR tile row — mirrors the print stickers but always
-          visible. Dept-aware: when a dept tab is active, only that dept's
-          JCs are shown; on Overview, all depts are mixed. Horizontally
-          scrollable so the row stays one line regardless of count. */}
+          visible. Shown only on FAB_CUT/FAB_SEW/FOAM/WOOD_CUT/FRAMING/WEBBING
+          dept tabs (job-card sticker depts). HIDDEN on:
+            - Overview (ALL) — dashboard, not a print area
+            - UPHOLSTERY / PACKING — those depts use FG stickers instead,
+              rendered in the FG preview block below.
+          Horizontally scrollable so the row stays one line regardless of count. */}
+      {activeTab !== "ALL" && activeTab !== "UPHOLSTERY" && activeTab !== "PACKING" && (
       <div className="rounded-lg border border-[#E6E0D9] bg-white">
         <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2067,11 +2189,7 @@ export default function ProductionPage() {
             <h2 className="text-sm font-semibold text-[#1F1D1B]">
               QR Stickers
               <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                ({onScreenStickers.length} piece{onScreenStickers.length === 1 ? "" : "s"}
-                {activeTab === "ALL"
-                  ? " across all depts"
-                  : ` in ${activeDept?.name || activeTab}`}
-                )
+                ({onScreenStickers.length} piece{onScreenStickers.length === 1 ? "" : "s"} in {activeDept?.name || activeTab})
               </span>
             </h2>
           </div>
@@ -2141,6 +2259,104 @@ export default function ProductionPage() {
           </div>
         )}
       </div>
+      )}
+
+      {/* FG Sticker preview — shown only on UPHOLSTERY / PACKING tabs. Each
+          tile mirrors the 100×150 mm print layout (SKU, size, fabric color,
+          PO no, customer, MFD, 100×100 QR, piece N/M, short code) but sized
+          for screen. Auto-populated on tab entry via the useEffect that
+          calls loadFgStickers. Horizontally scrollable — same card width
+          pattern as the QR tiles. */}
+      {(activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
+        <div className="rounded-lg border border-[#E6E0D9] bg-white">
+          <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="h-2.5 w-2.5 rounded-full bg-[#6B5C32]" />
+              <h2 className="text-sm font-semibold text-[#1F1D1B]">
+                FG Sticker Preview
+                <span className="ml-2 text-xs font-normal text-[#8A7F73]">
+                  ({fgStickers.length} unit{fgStickers.length === 1 ? "" : "s"} in {activeDept?.name || activeTab})
+                </span>
+              </h2>
+            </div>
+          </div>
+          {loadingFgPreview ? (
+            <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
+              Loading FG units…
+            </div>
+          ) : fgStickers.length === 0 ? (
+            <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
+              No FG units for the current filter. FG units are generated when an
+              order reaches this department.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <div className="flex gap-3 p-3 min-w-min">
+                {fgStickers.map((s) => {
+                  const origin =
+                    typeof window !== "undefined" && window.location?.origin
+                      ? window.location.origin
+                      : "";
+                  const trackUrl = `${origin}/track?s=${encodeURIComponent(s.unitSerial)}`;
+                  const mfd = (() => {
+                    if (!s.mfdDate) return "-";
+                    const d = new Date(s.mfdDate);
+                    if (Number.isNaN(d.getTime())) return s.mfdDate.slice(0, 10);
+                    const yy = String(d.getFullYear()).slice(-2);
+                    const mm = String(d.getMonth() + 1).padStart(2, "0");
+                    const dd = String(d.getDate()).padStart(2, "0");
+                    return `${yy}-${mm}-${dd}`;
+                  })();
+                  const customerLine = s.customerHub
+                    ? `${s.customerName} (${s.customerHub})`
+                    : s.customerName;
+                  return (
+                    <div
+                      key={s.key}
+                      className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
+                      style={{ width: "230px" }}
+                      title={`${s.sku} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}`}
+                    >
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "11px" }}>
+                        {s.sku}
+                      </div>
+                      <div className="border-t border-[#E6E0D9] my-1" />
+                      <div className="space-y-[2px] text-[9px] leading-tight text-[#1F1D1B]">
+                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">SIZE</span>: {s.sizeLabel}</div>
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">COLOR</span>: {s.fabricColor || "-"}</div>
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO NO</span>: {s.poNo}</div>
+                        <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">CUST</span>: {customerLine}</div>
+                        <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
+                      </div>
+                      <div className="flex items-end gap-2 mt-2">
+                        <img
+                          src={getQRCodeUrl(trackUrl, 300)}
+                          alt="FG unit QR"
+                          style={{ width: "100px", height: "100px" }}
+                        />
+                        <div className="flex-1 text-center">
+                          <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
+                            {s.pieceNo}/{s.totalPieces}
+                          </div>
+                          <div className="leading-tight truncate" style={{ fontSize: "8px" }}>
+                            {s.pieceName}
+                          </div>
+                          <div className="font-semibold mt-1 leading-tight" style={{ fontSize: "10px" }}>
+                            {s.shortCode}
+                          </div>
+                          <div className="text-[#6B7280] mt-0.5 leading-tight" style={{ fontSize: "8px" }}>
+                            Unit {s.unitNo}/{s.totalUnits}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Single shared native date picker — see sharedDateInputRef above.
           One input node replaces ~3k per-cell inputs for much smoother

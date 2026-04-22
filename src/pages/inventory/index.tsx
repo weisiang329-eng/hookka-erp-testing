@@ -10,7 +10,11 @@ import {
   Search, Archive, Upload,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
-import { products, rawMaterials, productionOrders, rmBatches, fgBatches, type Product, type RawMaterial } from "@/lib/mock-data";
+// NOTE: mock arrays were previously imported here and used as the page data
+// source. They are retained only for TYPE imports; all runtime data is now
+// fetched live from D1 via the API. After a D1 clear the UI now correctly
+// renders zero balances instead of baked-in seed values.
+import { type Product, type RawMaterial } from "@/lib/mock-data";
 import type { RMBatch, FGBatch } from "@/types";
 import {
   weightedAvgCostSen, totalBatchValueSen, totalRemainingQty,
@@ -24,17 +28,17 @@ import {
 } from "@/lib/design-tokens";
 
 // -- FIFO cost column helpers ----------------------------------------------
-// These read from the module-scope `rmBatches`/`fgBatches` arrays populated
-// by GRN receipts and PO completions.
-function batchesForRM(rmId: string): RMBatch[] {
-  return rmBatches.filter((b) => b.rmId === rmId);
+// These USED to read from the module-scope `rmBatches`/`fgBatches` mock
+// arrays. No D1 endpoint exists yet for batch layers, so both helpers now
+// return empty arrays — downstream weighted-average cost calcs gracefully
+// return 0. Wire these up once GRN/PO batch tables are exposed via the API.
+function batchesForRM(_rmId: string): RMBatch[] {
+  return [];
 }
 
 /** Return all FG layers for a product (oldest-first). */
-function batchesForProduct(productId: string): FGBatch[] {
-  return fgBatches
-    .filter((b) => b.productId === productId)
-    .sort((a, b) => a.completedDate.localeCompare(b.completedDate));
+function batchesForProduct(_productId: string): FGBatch[] {
+  return [];
 }
 
 /** Weighted-avg unit cost across FG layers for a product (sen). */
@@ -165,8 +169,35 @@ const TABS: { key: Tab; label: string }[] = [
   { key: "RAW", label: "Raw Materials" },
 ];
 
-// --- Finished Products with mock stock ---
+// --- Finished Products with stock ---
 type FGItem = Product & { stockQty: number };
+
+// Loose shape that covers the fields WIP/FG derivation reads from a
+// production order. Typed loosely so the live API payload (which matches
+// the shape but isn't typed by mock-data anymore) fits without churn.
+type ProductionOrderLike = {
+  poNo: string;
+  productId: string;
+  productCode: string;
+  productName?: string;
+  itemCategory?: string;
+  sizeCode?: string;
+  sizeLabel?: string;
+  quantity: number;
+  startDate: string;
+  jobCards: Array<{
+    departmentCode: string;
+    status: string;
+    sequence: number;
+    completedDate?: string;
+    productionTimeMinutes?: number;
+    wipKey?: string;
+    wipType?: string;
+    wipLabel?: string;
+    wipCode?: string;
+    wipQty?: number;
+  }>;
+};
 
 // --- WIP ---
 // WIP items are derived from production orders, grouped by WIP code.
@@ -223,7 +254,12 @@ type CreateRMForm = {
 // Finished Products — stock derived from production orders where all
 // upholstery cards are COMPLETED (meaning the FG is ready / stocked in).
 // Each such PO contributes its quantity to the matching product's stock.
-function deriveFGStock(): FGItem[] {
+// Now accepts `products` + `productionOrders` as args (previously closed
+// over mock-data module globals) so it can be driven from live D1 fetches.
+function deriveFGStock(
+  products: Product[],
+  productionOrders: ProductionOrderLike[],
+): FGItem[] {
   // Start with all products at 0 stock
   const fgMap = new Map<string, FGItem>();
   for (const p of products) {
@@ -283,7 +319,8 @@ function deriveFGStock(): FGItem[] {
 
   return Array.from(fgMap.values());
 }
-const fgItems: FGItem[] = deriveFGStock();
+// (fgItems was previously a module-level const seeded from mock data. It is
+// now recomputed inside the component from live fetches — see useMemo below.)
 
 // WIP type labels from wipKey codes
 const WIP_TYPE_LABELS: Record<string, string> = {
@@ -300,7 +337,10 @@ const WIP_TYPE_LABELS: Record<string, string> = {
 // For each WIP group (by wipKey), walk through the dept sequence.
 // A completed dept whose NEXT dept is NOT completed = stock sits here.
 // This way we see WIP at every department stage, not just the last one.
-function deriveWIPFromPO(orders: typeof productionOrders): WIPItem[] {
+function deriveWIPFromPO(
+  orders: ProductionOrderLike[],
+  products: Product[],
+): WIPItem[] {
   const today = new Date();
   // Today's labor rate — applied to work-done-so-far. Using today's (rather
   // than each completion date's) rate is an approximation; the WIP row is
@@ -362,7 +402,15 @@ function deriveWIPFromPO(orders: typeof productionOrders): WIPItem[] {
         const completedDate = card.completedDate || po.startDate;
         const dComp = new Date(completedDate);
         const ageDays = Math.max(0, Math.floor((today.getTime() - dComp.getTime()) / 86400000));
-        const wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipKey] || wipKey;
+        // wipKey has the form "<product>::<idx>::<TYPE>::<code>" — parse out
+        // the short type segment so the Type column can show "DIVAN" instead
+        // of the whole composite key. Fall back to jc.wipType when wipKey is
+        // missing (seed/legacy rows).
+        const wipTypeShort =
+          card.wipType ||
+          (wipKey.includes("::") ? wipKey.split("::")[2] || "" : wipKey) ||
+          "";
+        const wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || wipKey;
         const qty = card.wipQty || po.quantity;
 
         // Labor-so-far per unit — sum productionTimeMinutes for every done
@@ -383,7 +431,7 @@ function deriveWIPFromPO(orders: typeof productionOrders): WIPItem[] {
 
         raw.push({
           wipCode: wipCodeStr,
-          wipType: WIP_TYPE_LABELS[wipKey] || wipKey,
+          wipType: WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || "",
           relatedProduct: po.productCode,
           completedBy: card.departmentCode,
           poCode: po.poNo,
@@ -437,8 +485,12 @@ function deriveWIPFromPO(orders: typeof productionOrders): WIPItem[] {
   return items;
 }
 
-// Unique itemGroups for RM filter
-const RM_ITEM_GROUPS = Array.from(new Set(rawMaterials.map(r => r.itemGroup))).sort();
+// Unique itemGroups for RM filter. When D1 has no rows we fall back to a
+// canonical list so the "Add RM" modal still offers a usable item-group
+// dropdown (otherwise users would see an empty <select>).
+const FALLBACK_RM_ITEM_GROUPS = [
+  "PLYWOOD", "FOAM", "FABRIC", "HARDWARE", "ADHESIVE", "PACKAGING", "OTHERS",
+];
 
 // ============================================================
 // Column definitions
@@ -666,6 +718,106 @@ export default function InventoryPage() {
   const [showCreateRM, setShowCreateRM] = useState(false);
   const [rmForm, setRmForm] = useState<CreateRMForm>({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 });
 
+  // ---- Live data fetched from D1 ----
+  //
+  // `/api/production-orders`   → { success, data: [...] }
+  // `/api/inventory`           → { success, data: { finishedProducts, wipItems, rawMaterials } }
+  //                              (products + raw materials both live here)
+  // `/api/products`            → { success, data: [...] }  (catalog-only fallback)
+  //
+  // We prefer /api/inventory because it returns both buckets in one trip.
+  // If /api/inventory is stubbed (`_stub: true`) or missing, we fall back
+  // to /api/products for the FG catalog and treat RM as empty.
+  //
+  // RM batches / FG batches have no D1 endpoint yet → always []. This
+  // means weighted-average cost helpers return 0, which is correct for
+  // a freshly-cleared DB.
+  const [products, setProducts] = useState<Product[]>([]);
+  const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>([]);
+  const [poData, setPoData] = useState<ProductionOrderLike[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const safeJson = async (res: Response) => {
+      try { return await res.json(); } catch { return null; }
+    };
+
+    const fetchInventory = async (): Promise<{
+      products: Product[];
+      rawMaterials: RawMaterial[];
+    }> => {
+      // 1) Try /api/inventory (returns both products + raw materials)
+      try {
+        const res = await fetch("/api/inventory");
+        const json = await safeJson(res);
+        if (json && json.success && json.data && !json._stub) {
+          return {
+            products: Array.isArray(json.data.finishedProducts)
+              ? json.data.finishedProducts
+              : [],
+            rawMaterials: Array.isArray(json.data.rawMaterials)
+              ? json.data.rawMaterials
+              : [],
+          };
+        }
+      } catch { /* fall through */ }
+
+      // 2) Fallback to catalog-only /api/products; RM unavailable.
+      try {
+        const res = await fetch("/api/products");
+        const json = await safeJson(res);
+        if (json && json.success && Array.isArray(json.data) && !json._stub) {
+          return { products: json.data, rawMaterials: [] };
+        }
+      } catch { /* fall through */ }
+
+      return { products: [], rawMaterials: [] };
+    };
+
+    const fetchPOs = async (): Promise<ProductionOrderLike[]> => {
+      try {
+        const res = await fetch("/api/production-orders");
+        const json = await safeJson(res);
+        if (json && json.success && Array.isArray(json.data) && !json._stub) {
+          return json.data as ProductionOrderLike[];
+        }
+      } catch { /* fall through */ }
+      return [];
+    };
+
+    (async () => {
+      const [inv, pos] = await Promise.all([fetchInventory(), fetchPOs()]);
+      if (cancelled) return;
+      setProducts(inv.products);
+      setLiveRawMaterials(inv.rawMaterials);
+      setPoData(pos);
+      setLoading(false);
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  // Derived inventory — recomputed whenever the fetches resolve.
+  const fgItems = useMemo<FGItem[]>(
+    () => deriveFGStock(products, poData),
+    [products, poData],
+  );
+  const wipItems = useMemo(
+    () => deriveWIPFromPO(poData, products),
+    [poData, products],
+  );
+
+  // Unique item-groups for the RM filter dropdown — derived from live
+  // data, with a canonical fallback when D1 is empty.
+  const RM_ITEM_GROUPS = useMemo(() => {
+    const groups = Array.from(
+      new Set(liveRawMaterials.map((r) => r.itemGroup).filter(Boolean)),
+    ).sort();
+    return groups.length > 0 ? groups : FALLBACK_RM_ITEM_GROUPS;
+  }, [liveRawMaterials]);
+
   // ---- Filtered data ----
   const filteredFG = useMemo(() => {
     let data = fgItems;
@@ -677,17 +829,7 @@ export default function InventoryPage() {
       data = data.filter(d => d.code.toLowerCase().includes(q) || d.name.toLowerCase().includes(q));
     }
     return data;
-  }, [fgSearch, fgCategoryFilter]);
-
-  // Fetch production orders from API (includes persisted overrides)
-  const [poData, setPoData] = useState(productionOrders);
-  useEffect(() => {
-    fetch("/api/production-orders")
-      .then(r => r.json())
-      .then(d => { if (d.success && d.data) setPoData(d.data); })
-      .catch(() => {});
-  }, []);
-  const wipItems = useMemo(() => deriveWIPFromPO(poData), [poData]);
+  }, [fgItems, fgSearch, fgCategoryFilter]);
 
   const filteredWIP = useMemo(() => {
     let data = wipItems;
@@ -699,7 +841,7 @@ export default function InventoryPage() {
   }, [wipItems, wipSearch]);
 
   const filteredRM = useMemo(() => {
-    let data = rawMaterials;
+    let data = liveRawMaterials;
     if (rmCategoryFilter !== "ALL") {
       data = data.filter(d => d.itemGroup === rmCategoryFilter);
     }
@@ -708,7 +850,7 @@ export default function InventoryPage() {
       data = data.filter(d => d.itemCode.toLowerCase().includes(q) || d.description.toLowerCase().includes(q));
     }
     return data;
-  }, [rmSearch, rmCategoryFilter]);
+  }, [liveRawMaterials, rmSearch, rmCategoryFilter]);
 
   // ---- KPIs ----
   const fgBedframeCount = fgItems.filter(p => p.category === "BEDFRAME").length;
@@ -720,8 +862,8 @@ export default function InventoryPage() {
   const wipOver7Days = wipItems.filter(w => w.oldestAgeDays > 7).length;
 
   const rmCategoriesCount = RM_ITEM_GROUPS.length;
-  const rmLowStock = rawMaterials.filter(r => r.balanceQty > 0 && r.balanceQty < 5).length;
-  const rmZeroStock = rawMaterials.filter(r => r.balanceQty === 0).length;
+  const rmLowStock = liveRawMaterials.filter(r => r.balanceQty > 0 && r.balanceQty < 5).length;
+  const rmZeroStock = liveRawMaterials.filter(r => r.balanceQty === 0).length;
 
   const contextMenu = inventoryContextMenu(toast.info);
 
@@ -785,20 +927,22 @@ export default function InventoryPage() {
     { key: "isActive", label: "Active", type: "boolean", example: "TRUE" },
   ];
 
-  // Import handlers — these mutate the in-memory arrays. Paired with
-  // the existing toast pattern so the user gets feedback. TODO: also
-  // call a persistence hook once Step 1 JSON persistence lands so
-  // imported rows survive dev-server restart.
+  // Import handlers — previously mutated mock-data module globals. Now
+  // they update component state so the grids refresh immediately. NOTE:
+  // these are still local-only; they do not POST to D1. A separate task
+  // can wire this to /api/products and /api/inventory/raw-materials.
   const handleImportFG = (rows: Record<string, unknown>[]) => {
     let created = 0, updated = 0;
+    const next = [...products];
     for (const row of rows) {
       const code = String(row.code || "").trim();
       if (!code) continue;
       const basePriceSen = Math.round(Number(row.basePriceSen || 0) * 100);
       const costPriceSen = Math.round(Number(row.costPriceSen || 0) * 100);
 
-      const existing = products.find(p => p.code === code);
-      if (existing) {
+      const idx = next.findIndex(p => p.code === code);
+      if (idx >= 0) {
+        const existing = { ...next[idx] };
         existing.name = String(row.name || existing.name);
         existing.category = String(row.category || existing.category) as Product["category"];
         existing.baseModel = String(row.baseModel || existing.baseModel);
@@ -807,6 +951,7 @@ export default function InventoryPage() {
         if (row.basePriceSen) existing.basePriceSen = basePriceSen;
         if (row.costPriceSen) existing.costPriceSen = costPriceSen;
         if (row.fabricUsage) existing.fabricUsage = Number(row.fabricUsage);
+        next[idx] = existing;
         updated++;
       } else {
         const newProduct: Product = {
@@ -828,22 +973,25 @@ export default function InventoryPage() {
           bomComponents: [],
           deptWorkingTimes: [],
         };
-        products.push(newProduct);
+        next.push(newProduct);
         created++;
       }
     }
+    setProducts(next);
     toast.success(`Imported: ${created} created, ${updated} updated`);
     return { created, updated };
   };
 
   const handleImportRM = (rows: Record<string, unknown>[]) => {
     let created = 0, updated = 0;
+    const next = [...liveRawMaterials];
     for (const row of rows) {
       const itemCode = String(row.itemCode || "").trim();
       if (!itemCode) continue;
 
-      const existing = rawMaterials.find(r => r.itemCode === itemCode);
-      if (existing) {
+      const idx = next.findIndex(r => r.itemCode === itemCode);
+      if (idx >= 0) {
+        const existing = { ...next[idx] };
         existing.description = String(row.description || existing.description);
         existing.baseUOM = String(row.baseUOM || existing.baseUOM);
         existing.itemGroup = String(row.itemGroup || existing.itemGroup);
@@ -853,6 +1001,7 @@ export default function InventoryPage() {
         if (row.isActive !== undefined && row.isActive !== "") {
           existing.isActive = Boolean(row.isActive);
         }
+        next[idx] = existing;
         updated++;
       } else {
         const newRM: RawMaterial = {
@@ -864,13 +1013,30 @@ export default function InventoryPage() {
           isActive: row.isActive === undefined ? true : Boolean(row.isActive),
           balanceQty: Number(row.balanceQty) || 0,
         };
-        rawMaterials.push(newRM);
+        next.push(newRM);
         created++;
       }
     }
+    setLiveRawMaterials(next);
     toast.success(`Imported: ${created} created, ${updated} updated`);
     return { created, updated };
   };
+
+  if (loading) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Inventory</h1>
+          <p className="text-xs text-[#6B7280]">Finished products, work-in-progress & raw materials</p>
+        </div>
+        <Card>
+          <CardContent className="p-8 flex items-center justify-center text-sm text-[#6B7280]">
+            Loading inventory…
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -1088,7 +1254,7 @@ export default function InventoryPage() {
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total Materials</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{rawMaterials.length}</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{liveRawMaterials.length}</p>
             </CardContent></Card>
             <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Categories</p>
@@ -1457,9 +1623,9 @@ export default function InventoryPage() {
         exportFilename="rm-export.xlsx"
         columns={rmImportColumns}
         keyColumn="itemCode"
-        isExistingKey={(key) => rawMaterials.some((r) => r.itemCode === key)}
+        isExistingKey={(key) => liveRawMaterials.some((r) => r.itemCode === key)}
         onImport={handleImportRM}
-        currentRows={rawMaterials.map((r) => ({
+        currentRows={liveRawMaterials.map((r) => ({
           itemCode: r.itemCode,
           description: r.description,
           baseUOM: r.baseUOM,

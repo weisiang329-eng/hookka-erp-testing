@@ -121,7 +121,7 @@ import mrp from "./routes/mrp";
 import notifications from "./routes/notifications";
 import payroll from "./routes/payroll";
 import payslips from "./routes/payslips";
-import productionLeadtimes from "./routes/production-leadtimes";
+import productionLeadtimes from "./routes-d1/production-leadtimes";
 import promiseDate from "./routes/promise-date";
 import qcInspections from "./routes/qc-inspections";
 import rdProjects from "./routes/rd-projects";

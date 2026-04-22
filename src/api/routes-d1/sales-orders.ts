@@ -663,15 +663,38 @@ app.post("/:id/confirm", async (c) => {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
 
-  // Only DRAFT / PENDING orders are confirmable
-  if (existing.status !== "DRAFT" && existing.status !== "PENDING") {
-    return c.json(
-      {
-        success: false,
-        error: `Cannot confirm order with status ${existing.status}. Only DRAFT orders can be confirmed.`,
-      },
-      400,
-    );
+  // DRAFT / PENDING orders are confirmable. Already-CONFIRMED orders are
+  // also allowed through IF they have no production orders yet — this
+  // handles the backfill case (SO was confirmed before the PO cascade
+  // existed, now it's CONFIRMED but missing downstream POs). The PO
+  // creation helper is idempotent, so this is safe.
+  const allowedStatuses = ["DRAFT", "PENDING"];
+  if (!allowedStatuses.includes(existing.status)) {
+    if (existing.status === "CONFIRMED") {
+      const existingPos = await c.env.DB.prepare(
+        "SELECT id FROM production_orders WHERE salesOrderId = ? LIMIT 1",
+      )
+        .bind(id)
+        .first<{ id: string }>();
+      if (existingPos) {
+        return c.json(
+          {
+            success: false,
+            error: `Order ${existing.companySOId ?? id} is already CONFIRMED and its production orders already exist.`,
+          },
+          400,
+        );
+      }
+      // Fall through: CONFIRMED + zero POs → run cascade to backfill.
+    } else {
+      return c.json(
+        {
+          success: false,
+          error: `Cannot confirm order with status ${existing.status}. Only DRAFT orders can be confirmed.`,
+        },
+        400,
+      );
+    }
   }
 
   // Customer PO uniqueness (BR-SO-010)

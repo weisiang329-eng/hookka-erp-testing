@@ -585,23 +585,36 @@ function ColumnCustomizer<T>({
         {orderedColumns.map((col, idx) => (
           <div
             key={col.key}
-            draggable
-            onDragStart={() => handleDragStart(idx)}
             onDragEnter={() => handleDragEnter(idx)}
             onDragEnd={handleDragEnd}
             onDragOver={(e) => e.preventDefault()}
-            className="flex cursor-grab items-center gap-2 px-3 py-1.5 text-[12px] text-[#333] hover:bg-[#F5F3F0] active:cursor-grabbing"
+            className="flex items-center gap-2 px-3 py-1.5 text-[12px] text-[#333] hover:bg-[#F5F3F0]"
           >
-            <svg className="h-3 w-3 text-[#BBB] shrink-0" viewBox="0 0 24 24" fill="currentColor">
-              <circle cx="9" cy="6" r="1.5" /><circle cx="15" cy="6" r="1.5" />
-              <circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" />
-              <circle cx="9" cy="18" r="1.5" /><circle cx="15" cy="18" r="1.5" />
-            </svg>
-            <label className="flex items-center gap-2 cursor-pointer flex-1">
+            {/* Drag handle — draggable is scoped to the grip icon only. When
+              * the whole row was draggable, Chrome occasionally swallowed the
+              * checkbox click (mousedown started a potential drag), leaving
+              * the column "unremovable" from the user's POV. */}
+            <span
+              draggable
+              onDragStart={(e) => {
+                e.stopPropagation();
+                handleDragStart(idx);
+              }}
+              className="cursor-grab active:cursor-grabbing shrink-0"
+              title="Drag to reorder"
+            >
+              <svg className="h-3 w-3 text-[#BBB]" viewBox="0 0 24 24" fill="currentColor">
+                <circle cx="9" cy="6" r="1.5" /><circle cx="15" cy="6" r="1.5" />
+                <circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" />
+                <circle cx="9" cy="18" r="1.5" /><circle cx="15" cy="18" r="1.5" />
+              </svg>
+            </span>
+            <label className="flex items-center gap-2 cursor-pointer flex-1 select-none">
               <input
                 type="checkbox"
                 checked={visibleKeys.has(col.key)}
                 onChange={() => onToggle(col.key)}
+                onMouseDown={(e) => e.stopPropagation()}
                 className="h-3.5 w-3.5 rounded border-[#CCC] accent-[#6B5C32]"
               />
               {col.label}

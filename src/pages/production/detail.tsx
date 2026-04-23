@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { generateJobCardPdf, generateFullPOPdf } from "@/lib/generate-po-pdf";
 import { getQRCodeUrl, generateStickerData } from "@/lib/qr-utils";
+import { QRImg } from "@/components/qr-img";
 
 type JobCard = {
   id: string; departmentId: string; departmentCode: string; departmentName: string; sequence: number;
@@ -624,18 +625,16 @@ export default function ProductionOrderDetailPage() {
                 style={{ width: "50mm", height: "75mm" }}
                 className="bg-white border border-[#D1CBC5] flex flex-col items-center justify-between p-[2mm] text-black overflow-hidden print:border-0"
               >
-                <img
-                  src={getQRCodeUrl(
-                    generateStickerData(
-                      order.poNo,
-                      qrJobCard.departmentCode,
-                      qrJobCard.id,
-                      "/production/scan"
-                    ),
-                    300
+                <QRImg
+                  data={generateStickerData(
+                    order.poNo,
+                    qrJobCard.departmentCode,
+                    qrJobCard.id,
+                    "/production/scan",
                   )}
+                  size={300}
                   alt="Job card QR"
-                  style={{ width: "34mm", height: "34mm" }}
+                  className="block"
                 />
                 <div
                   className="font-bold text-center leading-tight w-full"
@@ -873,10 +872,11 @@ function FGStickerBody({
         <div><span className="inline-block w-[22mm] font-semibold">MFD</span>: {fmtMfd(unit.mfdDate)}</div>
       </div>
       <div className="flex items-end gap-[2mm] mt-[1mm]">
-        <img
-          src={getQRCodeUrl(buildTrackUrl(unit.unitSerial), 500)}
+        <QRImg
+          data={buildTrackUrl(unit.unitSerial)}
+          size={500}
           alt="FG unit QR"
-          style={{ width: "42mm", height: "42mm" }}
+          className="block"
         />
         <div className="flex-1 text-center" style={{ fontSize: "10pt" }}>
           <div className="font-bold" style={{ fontSize: "14pt" }}>

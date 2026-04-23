@@ -5,6 +5,7 @@ import { Check, Plus, Lock } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { getQRCodeUrl, getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
+import { QRImg } from "@/components/qr-img";
 
 // ----- types -----
 type JobCard = {
@@ -675,7 +676,15 @@ export default function ProductionPage() {
     // worker portal can tell piece 1 from piece 2 and reject duplicates.
     pieceNo: number;
     totalPieces: number;
-    qrDataUrl: string;            // locally-generated base64 PNG (no network)
+    // Raw data the QR should encode (a URL to /production/scan). Preview
+    // tiles render this through <QRImg> which generates the PNG in-browser
+    // — no api.qrserver.com round-trips, so scrolling the preview grid
+    // doesn't stall the page.
+    qrPayload: string;
+    // Pre-rendered base64 PNG populated only when Print is clicked. Kept
+    // separate from qrPayload so the preview path doesn't await a batch
+    // QR generation just to show the thumbnails.
+    qrDataUrl?: string;
   };
   // Each FgSticker now = one FG unit (one physical box), NOT one PO.
   // A PO with qty=3 and 3 pieces/set produces 9 FgSticker rows.
@@ -1754,16 +1763,13 @@ export default function ProductionPage() {
             qty: o.quantity || 0,
             pieceNo: p,
             totalPieces: total,
-            qrDataUrl: getQRCodeUrl(
-              generateStickerData(
-                o.poNo,
-                jc.departmentCode,
-                jc.id,
-                "/production/scan",
-                p,
-                total,
-              ),
-              300,
+            qrPayload: generateStickerData(
+              o.poNo,
+              jc.departmentCode,
+              jc.id,
+              "/production/scan",
+              p,
+              total,
             ),
           });
         }
@@ -1797,17 +1803,7 @@ export default function ProductionPage() {
       const batch: JobCardSticker[] = await Promise.all(
         onScreenStickers.map(async (s) => ({
           ...s,
-          qrDataUrl: await getQRCodeDataURL(
-            generateStickerData(
-              s.poNo,
-              s.deptCode,
-              s.jobCardId,
-              "/production/scan",
-              s.pieceNo,
-              s.totalPieces,
-            ),
-            300,
-          ),
+          qrDataUrl: await getQRCodeDataURL(s.qrPayload, 300),
         })),
       );
       setFgStickers([]); // never mix modes in one print job
@@ -2556,11 +2552,7 @@ export default function ProductionPage() {
                   style={{ width: "130px" }}
                   title={`${s.wipName} — ${s.poNo} · ${s.deptCode} · ${s.sizeLabel} · Qty ${s.qty}`}
                 >
-                  <img
-                    src={s.qrDataUrl}
-                    alt="Job card QR"
-                    style={{ width: "100px", height: "100px" }}
-                  />
+                  <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
                   <div
                     className="mt-1.5 font-bold text-center leading-tight w-full truncate"
                     style={{ fontSize: "10px" }}
@@ -2667,11 +2659,7 @@ export default function ProductionPage() {
                         <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
                       </div>
                       <div className="flex items-end gap-2 mt-2">
-                        <img
-                          src={getQRCodeUrl(trackUrl, 300)}
-                          alt="FG unit QR"
-                          style={{ width: "100px", height: "100px" }}
-                        />
+                        <QRImg data={trackUrl} size={300} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center">
                           <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
                             {s.pieceNo}/{s.totalPieces}
@@ -2868,11 +2856,7 @@ export default function ProductionPage() {
                       <div><span className="inline-block w-[22mm] font-semibold">MFD</span>: {mfd}</div>
                     </div>
                     <div className="flex items-end gap-[2mm] mt-[1mm]">
-                      <img
-                        src={getQRCodeUrl(trackUrl, 500)}
-                        alt="FG unit QR"
-                        style={{ width: "42mm", height: "42mm" }}
-                      />
+                      <QRImg data={trackUrl} size={500} alt="FG unit QR" className="block" />
                       <div className="flex-1 text-center">
                         <div className="font-bold" style={{ fontSize: "14pt" }}>
                           {s.pieceNo} of {s.totalPieces}

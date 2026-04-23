@@ -981,6 +981,7 @@ export default function ProductionPage() {
     leg: string;
     totalHeight: string;  // gap + divan + leg, inches
     qty: number;
+    prodTime: number;     // per-jc production minutes (merged sum on FAB_CUT rows)
     rack: string;         // Packing dept — assigned rack location ("Rack 3")
     dueDate: string;
     completedDate: string;
@@ -1155,6 +1156,11 @@ export default function ProductionPage() {
             return sum > 0 ? `${sum}"` : "";
           })(),
           qty: (jc as JobCard & { wipQty?: number }).wipQty ?? o.quantity ?? 0,
+          // Per-jc production time (minutes). Populated on every dept sheet —
+          // the FAB_CUT merge step below aggregates this across the merged
+          // children so the collapsed row reports a sum, matching what the
+          // sticker prints. Everywhere else it's the raw job-card minutes.
+          prodTime: jc.productionTimeMinutes || jc.estMinutes || 0,
           rack: (jc as JobCard & { rackingNumber?: string }).rackingNumber || "",
           dueDate: jc.dueDate || "",
           completedDate: jc.completedDate || "",
@@ -1205,12 +1211,17 @@ export default function ProductionPage() {
         // Only treat the group as completed when every child has a date.
         const allDone = group.every((g) => !!g.completedDate);
         const anyDone = group.some((g) => !!g.completedDate);
+        // Aggregate production minutes across the merged components — the
+        // cutter lays the fabric down once for the whole PO, so the time
+        // to cut is the sum of every component's time, not any single one.
+        const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
         merged.push({
           ...first,
           id: `${first.poId}:fabcut-merged`,
           rowNo: rowN++,
           wipType: types || first.wipType,
           wip: wips || first.wip,
+          prodTime: totalMinutes,
           completedDate: allDone ? first.completedDate : "",
           status: allDone
             ? "COMPLETED"
@@ -1551,6 +1562,11 @@ export default function ProductionPage() {
     { key: "leg",           label: "Leg",            type: "text",   width: "60px",  sortable: true, align: "right" },
     { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right", hidden: true },
     { key: "qty",           label: "Qty",            type: "number", width: "60px",  sortable: true, align: "right" },
+    // Per-row production minutes — supervisors use this as a capacity /
+    // time-budget read. On FAB_CUT the merged row sums across all
+    // components (Base + Cushion + Arm cut together) so the number
+    // reflects the actual lay-down time, not any single component.
+    { key: "prodTime",      label: "Prod Time (min)", type: "number", width: "100px", sortable: true, align: "right" },
     // Rack — only meaningful for the Packing dept. Hidden on every other
     // tab so the sheet stays clean. Renders as a dropdown of warehouse rack
     // slots; selecting one PATCHes the PO's rackingNumber so the delivery

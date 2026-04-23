@@ -370,10 +370,18 @@ async function renderStickerLandscape(
   doc.text(`Colour: ${order.fabricCode}`, infoX, y);
   y += 3;
 
-  // CAT + production time
-  doc.setFontSize(5.5);
-  doc.text(`CAT ${jc.category} · ${jc.productionTimeMinutes || jc.estMinutes} min`, infoX, y);
-  y += 3;
+  // CAT + production time. Hidden when this is a merged FG-level sticker
+  // (FAB_CUT per-PO) — the number would aggregate the CATs of multiple
+  // components and mislead the cutter into thinking a single CAT rule
+  // applies. For upstream per-WIP stickers (Fab Sew / Foam / Wood Cut /
+  // Framing / Webbing / Upholstery) the minutes are the worker's time
+  // budget for that component, so keep showing them.
+  const isFgMerged = (jc.wipType || "").toUpperCase() === "FG";
+  if (!isFgMerged) {
+    doc.setFontSize(5.5);
+    doc.text(`CAT ${jc.category} · ${jc.productionTimeMinutes || jc.estMinutes} min`, infoX, y);
+    y += 3;
+  }
 
   // Due date (dept color)
   doc.setTextColor(color[0], color[1], color[2]);
@@ -569,6 +577,45 @@ async function renderSticker(
   }
 }
 
+// Synthesise a "merged" job card that represents every FAB_CUT card on
+// one PO cut in a single pass. Uses the first card as the template so
+// fields the renderer doesn't tweak (departmentCode, status, dueDate…)
+// still make sense, then overrides wipType to the FG sentinel so the
+// landscape renderer hides the per-WIP CAT/min line (would be meaningless
+// on a merged row) and prints a joined WIP label + summed minutes
+// instead. id is suffixed with ":FG-FAB_CUT" — any downstream code
+// reading that id should treat it as "all FAB_CUT jcs for this PO".
+function buildMergedFabCutJc(jcs: JobCard[]): JobCard {
+  const sorted = [...jcs].sort(
+    (a, b) => (a.wipType || "").localeCompare(b.wipType || ""),
+  );
+  const first = sorted[0];
+  const joinedLabel = sorted
+    .map((j) => j.wipLabel || j.wipCode || "")
+    .filter(Boolean)
+    .join("  |  ");
+  const totalMinutes = sorted.reduce(
+    (s, j) => s + (j.productionTimeMinutes || j.estMinutes || 0),
+    0,
+  );
+  // opId sentinel: the scan page keys off the "FG-" prefix to decide
+  // between the per-jc scan-complete endpoint and the fan-out
+  // scan-complete-dept endpoint. Keep this constant per dept so every
+  // FAB_CUT merged sticker produces the same sentinel — the PO id
+  // lives in the QR's `po` query param and is what the scanner uses to
+  // locate the matching job cards.
+  return {
+    ...first,
+    id: "FG-FAB_CUT",
+    wipType: "FG",
+    wipCode: first.wipCode,
+    wipLabel: joinedLabel || first.wipLabel,
+    wipQty: sorted.reduce((s, j) => s + (j.wipQty || 1), 0),
+    productionTimeMinutes: totalMinutes,
+    estMinutes: totalMinutes,
+  };
+}
+
 // Resolve a job card's piece range, preferring SO-level aggregation for
 // sofa FG-level Packing when the SO map contains it — otherwise falls
 // back to per-PO counting.
@@ -633,6 +680,21 @@ export async function generateBatchStickersPdf(
       continue;
     }
     const batchCode = genBatchCode(order);
+
+    // FAB_CUT merge: one FG-level sticker per PO regardless of how many
+    // WIPs are being cut. Matches the production-sheet row merge — the
+    // cutter lays down one bolt per PO and the QR it scans completes
+    // every FAB_CUT job card for that PO in one step. Build a synthetic
+    // "merged" job card that carries the summed minutes and joined WIP
+    // labels so the sticker renderer has the info it needs.
+    if (deptCode === "FAB_CUT") {
+      if (generated > 0) doc.addPage(format, orientation);
+      const mergedJc: JobCard = buildMergedFabCutJc(matchingJcs);
+      await renderSticker(doc, order, mergedJc, 1, 1, batchCode);
+      generated++;
+      continue;
+    }
+
     for (const jc of matchingJcs) {
       const { totalPieces, startPieceNo, count } = resolvePieces(order, jc, soMap);
       for (let i = 0; i < count; i++) {

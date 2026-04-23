@@ -362,8 +362,20 @@ export default function WorkerScanPage() {
       setLoading(true);
       setResult({ kind: "idle" });
       try {
-        let matches = await findMatches(primaryTerm, deptHint);
-        if (matches.length === 0 && parsed?.poNo && parsed.poNo !== primaryTerm) {
+        // Merged FG-level sticker (e.g. FG-FAB_CUT) — opId is a dept
+        // sentinel, not a real jc id, so findMatches by opId would come
+        // back empty. Jump straight to the PO lookup, filtered by the
+        // dept embedded in the sentinel, and swap the match's jobCard id
+        // to the sentinel so downstream scan-complete routes to the
+        // fan-out endpoint.
+        const fgMatch = /^FG-([A-Z_]+)$/.exec(primaryTerm);
+        let matches = fgMatch && parsed?.poNo
+          ? (await findMatches(parsed.poNo, fgMatch[1])).map((m) => ({
+              ...m,
+              jobCard: { ...m.jobCard, id: primaryTerm },
+            }))
+          : await findMatches(primaryTerm, deptHint);
+        if (matches.length === 0 && parsed?.poNo && parsed.poNo !== primaryTerm && !fgMatch) {
           // PO fallback — visible to the user so they understand the
           // lookup shifted scope when the op id went cold. Pass deptHint
           // through so we don't merge Divan + HB job cards together.
@@ -612,11 +624,18 @@ export default function WorkerScanPage() {
     }
     setLoading(true);
     try {
-      const res = await workerFetch(
-        `/api/production-orders/${ctx.order.id}/scan-complete`,
-        {
-          method: "POST",
-          body: JSON.stringify({
+      // FG-level merged sticker (today: FAB_CUT). The QR's opId is the
+      // sentinel "FG-<DEPT>" so we route to scan-complete-dept, which
+      // flips every matching dept card on the PO in one request. The
+      // per-piece FIFO routing below doesn't apply to a merged sticker
+      // because it spans multiple physical pieces by design.
+      const fgMatch = /^FG-([A-Z_]+)$/.exec(ctx.jobCard.id);
+      const endpoint = fgMatch
+        ? `/api/production-orders/${ctx.order.id}/scan-complete-dept`
+        : `/api/production-orders/${ctx.order.id}/scan-complete`;
+      const payload = fgMatch
+        ? { deptCode: fgMatch[1], workerId, ...(opts?.force ? { force: true } : {}) }
+        : {
             jobCardId: ctx.jobCard.id,
             workerId,
             // Piece-level routing: the QR carries `p=<pieceNo>&t=<total>` so
@@ -630,9 +649,11 @@ export default function WorkerScanPage() {
             // Forced overrides bypass the PREREQUISITE_NOT_MET / UPSTREAM_LOCKED
             // soft warnings. Server records an audit row in scan_override_audit.
             ...(opts?.force ? { force: true } : {}),
-          }),
-        },
-      );
+          };
+      const res = await workerFetch(endpoint, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
       const data = await res.json();
       // Soft-warning path — server returned HTTP 202 with
       // `requiresConfirmation`. Surface the confirm dialog instead of

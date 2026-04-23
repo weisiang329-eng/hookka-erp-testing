@@ -113,14 +113,23 @@ function ScannerPage() {
       setScannedPieceNo(parsed.pieceNo);
     }
     const opId = parsed?.opId || searchParams.get("op");
+    const poNoFromQr = parsed?.poNo || searchParams.get("po");
     if (opId) {
       setManualInput(opId);
-      doLookup(opId);
+      // Merged FG-level sticker (e.g. "FG-FAB_CUT") — lookup can't find a
+      // job card with that synthetic id, so search by PO number instead
+      // and keep the sentinel id on the jobCard so handleCompleteScan
+      // knows to hit the fan-out endpoint.
+      if (/^FG-[A-Z_]+$/.test(opId) && poNoFromQr) {
+        doLookup(poNoFromQr, opId);
+      } else {
+        doLookup(opId);
+      }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const doLookup = useCallback(async (query?: string) => {
+  const doLookup = useCallback(async (query?: string, fgSentinel?: string) => {
     const searchTerm = (query || manualInput).trim();
     if (!searchTerm) return;
 
@@ -142,12 +151,34 @@ function ScannerPage() {
       const orders: ProductionOrder[] = data.data;
       let found: { order: ProductionOrder; jobCard: JobCard } | null = null;
 
+      // Merged FG-level scan (e.g. FAB_CUT plan-B sticker). The sentinel
+      // id isn't a real job card; find the PO by poNo and synthesize a
+      // display job card that carries the sentinel id so the submit
+      // handler routes to scan-complete-dept.
+      if (fgSentinel) {
+        const deptCode = fgSentinel.replace(/^FG-/, "");
+        for (const order of orders) {
+          if (order.poNo.toLowerCase() === searchTerm.toLowerCase()) {
+            const anyDeptJc = order.jobCards.find((j) => j.departmentCode === deptCode);
+            if (anyDeptJc) {
+              found = {
+                order,
+                jobCard: { ...anyDeptJc, id: fgSentinel },
+              };
+            }
+            break;
+          }
+        }
+      }
+
       // Search by job card ID first
-      for (const order of orders) {
-        const jc = order.jobCards.find((j) => j.id === searchTerm);
-        if (jc) {
-          found = { order, jobCard: jc };
-          break;
+      if (!found) {
+        for (const order of orders) {
+          const jc = order.jobCards.find((j) => j.id === searchTerm);
+          if (jc) {
+            found = { order, jobCard: jc };
+            break;
+          }
         }
       }
 
@@ -182,12 +213,18 @@ function ScannerPage() {
     if (!lookupResult || !selectedWorkerId) return;
     setSubmitting(true);
     try {
-      const res = await fetch(
-        `/api/production-orders/${lookupResult.order.id}/scan-complete`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
+      // FG-level merged sticker path (today: FAB_CUT). The opId that came
+      // off the QR is the sentinel "FG-<DEPT>" — route to the fan-out
+      // endpoint which flips every matching dept job card on the PO in
+      // one request, instead of the per-jc scan-complete which only
+      // touches one card and leaves the others pending.
+      const fgMatch = /^FG-([A-Z_]+)$/.exec(lookupResult.jobCard.id);
+      const endpoint = fgMatch
+        ? `/api/production-orders/${lookupResult.order.id}/scan-complete-dept`
+        : `/api/production-orders/${lookupResult.order.id}/scan-complete`;
+      const payload = fgMatch
+        ? { deptCode: fgMatch[1], workerId: selectedWorkerId }
+        : {
             jobCardId: lookupResult.jobCard.id,
             workerId: selectedWorkerId,
             // Forward the per-piece number the QR sticker carried. Without
@@ -196,9 +233,12 @@ function ScannerPage() {
             // backend's sticker-binding + FIFO logic rely on pieceNo to
             // route the scan to the right piece_pics slot.
             pieceNo: scannedPieceNo,
-          }),
-        }
-      );
+          };
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
       const data = await res.json();
       if (data.success) {
         setSubmitResult({

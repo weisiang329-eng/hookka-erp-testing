@@ -1250,6 +1250,97 @@ app.post("/stock", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/production-orders/:id/scan-complete-dept
+// Fan-out completion for a merged FG-level sticker (today: FAB_CUT).
+// One QR → every matching dept job card on this PO is marked COMPLETED
+// in one request. Sticker side sets the QR opId to "FG-<DEPT>" so the
+// scan page knows to hit this endpoint instead of per-jc scan-complete.
+// ---------------------------------------------------------------------------
+app.post("/:id/scan-complete-dept", async (c) => {
+  const db = c.env.DB;
+  const poId = c.req.param("id");
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po) return c.json({ success: false, error: "Production order not found" }, 404);
+  if (po.status === "ON_HOLD") {
+    return c.json({ success: false, code: "PO_ON_HOLD", error: "此 Production Order 处于 ON_HOLD。主管恢复后才能扫描。" }, 409);
+  }
+  if (po.status === "CANCELLED") {
+    return c.json({ success: false, code: "PO_CANCELLED", error: "此 Production Order 已被取消,无法扫描。" }, 409);
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const body: any = await c.req.json().catch(() => ({}));
+  const { deptCode, workerId } = body || {};
+  if (!deptCode || !workerId) {
+    return c.json({ success: false, error: "deptCode and workerId are required" }, 400);
+  }
+
+  // Same worker-auth pattern as scan-complete — dashboard sessions pass
+  // the userId gate, worker portals bind via x-worker-token.
+  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  const workerToken = c.req.header("x-worker-token");
+  if (!ctxUserId) {
+    const resolvedWorkerId = await resolveWorkerToken(db, workerToken);
+    if (!resolvedWorkerId || resolvedWorkerId !== workerId) {
+      return c.json({ success: false, error: "Worker auth mismatch", code: "AUTH_MISMATCH" }, 403);
+    }
+  }
+
+  const worker = await db
+    .prepare("SELECT id, name FROM workers WHERE id = ?")
+    .bind(workerId)
+    .first<{ id: string; name: string }>();
+  if (!worker) return c.json({ success: false, error: "Worker not found" }, 400);
+
+  const jcRows = await db
+    .prepare(
+      `SELECT id, status FROM job_cards
+         WHERE productionOrderId = ? AND departmentCode = ?`,
+    )
+    .bind(poId, deptCode)
+    .all<{ id: string; status: string }>();
+  const pending = (jcRows.results ?? []).filter(
+    (r) => r.status !== "COMPLETED" && r.status !== "TRANSFERRED",
+  );
+  if (pending.length === 0) {
+    return c.json({
+      success: true,
+      completed: 0,
+      alreadyDone: (jcRows.results ?? []).length,
+      message: `All ${deptCode} job cards on this PO are already done`,
+    });
+  }
+
+  const nowIso = new Date().toISOString();
+  const today = nowIso.slice(0, 10);
+  const statements = pending.map((r) =>
+    db
+      .prepare(
+        `UPDATE job_cards
+             SET status = 'COMPLETED',
+                 completedDate = ?,
+                 pic1Id = COALESCE(pic1Id, ?),
+                 pic1Name = COALESCE(NULLIF(pic1Name, ''), ?)
+           WHERE id = ?`,
+      )
+      .bind(today, worker.id, worker.name, r.id),
+  );
+  await db.batch(statements);
+
+  return c.json({
+    success: true,
+    completed: pending.length,
+    alreadyDone: (jcRows.results ?? []).length - pending.length,
+    deptCode,
+    poId,
+    completedIds: pending.map((r) => r.id),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/production-orders/:id/scan-complete
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------

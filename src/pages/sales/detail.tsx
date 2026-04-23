@@ -199,12 +199,29 @@ export default function SalesOrderDetailPage() {
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
     setUpdating(true);
-    const res = await fetch(`/api/sales-orders/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    const data = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let res: Response; let data: any;
+    try {
+      res = await fetch(`/api/sales-orders/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+      data = await res.json().catch(() => ({}));
+    } catch (e) {
+      setUpdating(false);
+      setModal(prev => ({ ...prev, open: false }));
+      toast.error(e instanceof Error ? e.message : "Network error — status not updated");
+      return;
+    }
+    // res.ok guard — prevents a 500/401 from falling into the success
+    // branch just because the error body happens to lack {success:false}.
+    if (!res.ok) {
+      setUpdating(false);
+      setModal(prev => ({ ...prev, open: false }));
+      toast.error(data?.error || `Failed to update status (HTTP ${res.status})`);
+      return;
+    }
     if (data.success) {
       setOrder(data.data);
       if (data.linkedPOs) setLinkedPOs(data.linkedPOs);
@@ -238,23 +255,41 @@ export default function SalesOrderDetailPage() {
   const confirmOrder = useCallback(async () => {
     if (!order) return;
     setUpdating(true);
-    const res = await fetch(`/api/sales-orders/${id}/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ changedBy: "Admin" }),
-    });
-    const data = await res.json();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let res: Response; let data: any;
+    try {
+      res = await fetch(`/api/sales-orders/${id}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ changedBy: "Admin" }),
+      });
+      data = await res.json().catch(() => ({}));
+    } catch (e) {
+      setUpdating(false);
+      setModal(prev => ({ ...prev, open: false }));
+      toast.error(e instanceof Error ? e.message : "Network error — order not confirmed");
+      return;
+    }
+    // Confirm is critical — on failure production orders do NOT get created,
+    // and without this guard the UI would claim success while the backend
+    // never fired createProductionOrdersForSO, leaving the SO in limbo.
+    if (!res.ok) {
+      setUpdating(false);
+      setModal(prev => ({ ...prev, open: false }));
+      toast.error(data?.error || `Failed to confirm order (HTTP ${res.status})`);
+      return;
+    }
     if (data.success) {
       setOrder(data.data);
       setConfirmSuccess(data.message);
-      fetchOrder(); // Refresh all data
+      fetchOrder();
       setTimeout(() => setConfirmSuccess(null), 5000);
     } else {
       toast.error(data.error || "Failed to confirm order");
     }
     setUpdating(false);
     setModal(prev => ({ ...prev, open: false }));
-  }, [order, id, fetchOrder]);
+  }, [order, id, fetchOrder, toast]);
 
   const openConfirm = (title: string, message: string, confirmLabel: string, action: () => void, confirmVariant?: "primary" | "destructive") => {
     setModal({ open: true, title, message, confirmLabel, confirmVariant, action });

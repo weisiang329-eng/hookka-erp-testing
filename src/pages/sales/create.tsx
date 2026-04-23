@@ -575,22 +575,31 @@ function CreateSalesOrderPage() {
 
     setPendingStatus(status);
     setSaving(true);
-    const res = await fetch("/api/sales-orders", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        customerId, customerPOId, customerSOId, reference,
-        companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
-        status,
-      }),
-    });
-    const data = await res.json();
-    setSaving(false);
+    // Guard against silent HTTP failures. A 401 (expired token) or 500
+    // returns a body the JSON parse still accepts, so without checking
+    // res.ok the "success" branch could fire on an error response and the
+    // user would navigate to a detail page for a SO that was never created.
+    try {
+      const res = await fetch("/api/sales-orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customerId, customerPOId, customerSOId, reference,
+          companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+          status,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string } };
+      setSaving(false);
 
-    if (data.success) {
-      navigate(`/sales/${data.data.id}`);
-    } else {
-      toast.error(data.error || "Failed to create order");
+      if (!res.ok || !data.success) {
+        toast.error(data.error || `Failed to create order (HTTP ${res.status})`);
+        return;
+      }
+      if (data.data?.id) navigate(`/sales/${data.data.id}`);
+    } catch (e) {
+      setSaving(false);
+      toast.error(e instanceof Error ? e.message : "Network error — order not saved");
     }
   };
 

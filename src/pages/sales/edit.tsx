@@ -378,21 +378,29 @@ export default function EditSalesOrderPage() {
     }
 
     setSaving(true);
-    const res = await fetch(`/api/sales-orders/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        customerId, customerPOId, customerSOId, reference,
-        companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
-      }),
-    });
-    const data = await res.json();
-    setSaving(false);
-
-    if (data.success) {
+    try {
+      const res = await fetch(`/api/sales-orders/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customerId, customerPOId, customerSOId, reference,
+          companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+      setSaving(false);
+      // res.ok guard — see create.tsx for why this matters. Without it a
+      // rejected PUT (401/500) was indistinguishable from success because
+      // the JSON parser accepts error bodies and we only looked at
+      // data.success.
+      if (!res.ok || !data.success) {
+        toast.error(data.error || `Failed to update order (HTTP ${res.status})`);
+        return;
+      }
       navigate(`/sales/${id}`);
-    } else {
-      toast.error(data.error || "Failed to update order");
+    } catch (e) {
+      setSaving(false);
+      toast.error(e instanceof Error ? e.message : "Network error — changes not saved");
     }
   };
 

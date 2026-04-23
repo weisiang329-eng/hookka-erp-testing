@@ -171,6 +171,9 @@ function ProductDetailLine({ order }: { order: ProductionOrder }) {
 type HistoricalWip = {
   wipLabel: string;
   wipKey?: string;
+  wipCode?: string;
+  wipType?: string;       // DIVAN / HEADBOARD / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST
+  itemCategory?: string;  // BEDFRAME / SOFA
   sourcePoId: string;
   sourceJcId: string;
   sourcePoNo: string;
@@ -204,6 +207,16 @@ function CreateStockPODialog({
   const [fgs, setFgs] = useState<HistoricalFg[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [search, setSearch] = useState("");
+  // Dropdown filters layered on top of the search box. Category ("BEDFRAME"
+  // / "SOFA") narrows the pool to one product family; WIP type (Divan / HB /
+  // Base / Cushion / Arm, derived from wipType) narrows by component kind;
+  // size and fabric match the existing dedup-key fields. Blank = no filter
+  // on that axis. Applies to both the WIP and FG panes — FG rows have no
+  // wipType so the WIP filter collapses to itemCategory+size+fabric there.
+  const [filterCategory, setFilterCategory] = useState<string>("");
+  const [filterWipType, setFilterWipType] = useState<string>("");
+  const [filterSize, setFilterSize] = useState<string>("");
+  const [filterFabric, setFilterFabric] = useState<string>("");
   const [selectedKey, setSelectedKey] = useState<string>("");
   const [quantity, setQuantity] = useState<number>(1);
   const [targetEndDate, setTargetEndDate] = useState<string>(() => {
@@ -223,6 +236,10 @@ function CreateStockPODialog({
     if (!open) return;
     setSelectedKey("");
     setSearch("");
+    setFilterCategory("");
+    setFilterWipType("");
+    setFilterSize("");
+    setFilterFabric("");
     setErr("");
     setLoadingList(true);
     const url = type === "WIP"
@@ -241,35 +258,94 @@ function CreateStockPODialog({
       .catch(() => setLoadingList(false));
   }, [open, type]);
 
-  // Filtered list for the picker. Search matches against the label, product
-  // code, size, and fabric so the operator can type either "Divan" or "QN"
-  // or a fabric code and home in fast.
+  // Unique value lists used to populate the dropdown filters. Computed off
+  // whichever pane (WIP / FG) is active so the options always match what's
+  // pickable — e.g. the wipType dropdown is empty on the FG pane since FGs
+  // don't carry one.
+  const filterOptions = useMemo(() => {
+    const cats = new Set<string>();
+    const types = new Set<string>();
+    const sizes = new Set<string>();
+    const fabrics = new Set<string>();
+    const source = type === "WIP" ? wips : fgs;
+    for (const row of source) {
+      const r = row as HistoricalWip & { itemCategory?: string };
+      if (r.itemCategory) cats.add(r.itemCategory);
+      if ("wipType" in r && r.wipType) types.add(r.wipType);
+      if (r.sizeCode) sizes.add(r.sizeCode);
+      if (r.fabricCode) fabrics.add(r.fabricCode);
+    }
+    return {
+      categories: [...cats].sort(),
+      wipTypes: [...types].sort(),
+      sizes: [...sizes].sort(),
+      fabrics: [...fabrics].sort(),
+    };
+  }, [type, wips, fgs]);
+
+  // Filtered list for the picker. Dropdown filters narrow the pool first,
+  // then the free-text search runs against the label / product / size /
+  // fabric strings so the operator can still type "Divan" or "QN" to hit
+  // their target quickly.
   const filteredOptions = useMemo(() => {
     const q = search.trim().toLowerCase();
+    const matchFilters = (
+      cat: string | undefined,
+      wt: string | undefined,
+      sz: string,
+      fab: string,
+    ) =>
+      (!filterCategory || cat === filterCategory) &&
+      (!filterWipType || wt === filterWipType) &&
+      (!filterSize || sz === filterSize) &&
+      (!filterFabric || fab === filterFabric);
+
     if (type === "WIP") {
-      const rows = wips.map((w) => ({
-        key: `${w.sourcePoId}::${w.sourceJcId}`,
-        label: w.wipLabel,
-        sub: `${w.productName} · ${w.sizeLabel} · ${w.fabricCode || "—"}`,
-        ref: w.sourcePoNo,
-      }));
+      const rows = wips
+        .filter((w) =>
+          matchFilters(w.itemCategory, w.wipType, w.sizeCode, w.fabricCode),
+        )
+        .map((w) => ({
+          key: `${w.sourcePoId}::${w.sourceJcId}`,
+          label: w.wipLabel,
+          sub: `${w.productName} · ${w.sizeLabel} · ${w.fabricCode || "—"}`,
+          ref: w.sourcePoNo,
+        }));
       return q
         ? rows.filter((r) =>
             (r.label + " " + r.sub).toLowerCase().includes(q))
         : rows;
     } else {
-      const rows = fgs.map((f) => ({
-        key: f.sourcePoId,
-        label: `${f.productCode} — ${f.productName}`,
-        sub: `${f.sizeLabel} · ${f.fabricCode || "—"}`,
-        ref: f.sourcePoNo,
-      }));
+      const rows = fgs
+        .filter((f) =>
+          matchFilters(
+            (f as HistoricalFg & { itemCategory?: string }).itemCategory,
+            undefined,
+            f.sizeCode,
+            f.fabricCode,
+          ),
+        )
+        .map((f) => ({
+          key: f.sourcePoId,
+          label: `${f.productCode} — ${f.productName}`,
+          sub: `${f.sizeLabel} · ${f.fabricCode || "—"}`,
+          ref: f.sourcePoNo,
+        }));
       return q
         ? rows.filter((r) =>
             (r.label + " " + r.sub).toLowerCase().includes(q))
         : rows;
     }
-  }, [type, wips, fgs, search]);
+  }, [
+    type,
+    wips,
+    fgs,
+    search,
+    filterCategory,
+    filterWipType,
+    filterSize,
+    filterFabric,
+  ]);
 
   async function handleSubmit() {
     if (!selectedKey) { setErr("Pick an item first."); return; }
@@ -371,6 +447,54 @@ function CreateStockPODialog({
               onChange={(e) => setSearch(e.target.value)}
               className="w-full mt-1 px-3 py-2 text-sm border border-[#E2DDD8] rounded-md bg-[#FAF9F7] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40"
             />
+            {/* Dropdown filters — layered on top of the search box. Options
+              * come from the current list's own values so the dropdowns only
+              * ever show selectable choices. WIP Type hides on the FG pane
+              * because FGs don't carry one. */}
+            <div className="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <select
+                value={filterCategory}
+                onChange={(e) => setFilterCategory(e.target.value)}
+                className="px-2 py-1.5 text-xs border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40"
+              >
+                <option value="">All Categories</option>
+                {filterOptions.categories.map((c) => (
+                  <option key={c} value={c}>{c}</option>
+                ))}
+              </select>
+              {type === "WIP" && (
+                <select
+                  value={filterWipType}
+                  onChange={(e) => setFilterWipType(e.target.value)}
+                  className="px-2 py-1.5 text-xs border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40"
+                >
+                  <option value="">All WIP Types</option>
+                  {filterOptions.wipTypes.map((t) => (
+                    <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+                  ))}
+                </select>
+              )}
+              <select
+                value={filterSize}
+                onChange={(e) => setFilterSize(e.target.value)}
+                className="px-2 py-1.5 text-xs border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40"
+              >
+                <option value="">All Sizes</option>
+                {filterOptions.sizes.map((s) => (
+                  <option key={s} value={s}>{s}</option>
+                ))}
+              </select>
+              <select
+                value={filterFabric}
+                onChange={(e) => setFilterFabric(e.target.value)}
+                className="px-2 py-1.5 text-xs border border-[#E2DDD8] rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40"
+              >
+                <option value="">All Fabrics</option>
+                {filterOptions.fabrics.map((f) => (
+                  <option key={f} value={f}>{f}</option>
+                ))}
+              </select>
+            </div>
             <div className="mt-2 max-h-[260px] overflow-y-auto border border-[#E2DDD8] rounded-md divide-y divide-[#E2DDD8]">
               {loadingList ? (
                 <div className="px-4 py-6 text-center text-sm text-gray-400">Loading…</div>

@@ -2,7 +2,7 @@ import { lazy, Suspense } from 'react'
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import DashboardLayout from './layouts/DashboardLayout'
 import WorkerLayout from './layouts/WorkerLayout'
-import { ErrorFallback } from './components/ui/error-boundary'
+import { ErrorBoundary, ErrorFallback } from './components/ui/error-boundary'
 import { DASHBOARD_ROUTES } from './dashboard-routes'
 import RequireAuth from './components/RequireAuth'
 
@@ -33,8 +33,14 @@ function PageLoading() {
   )
 }
 
+// S() = Suspense + per-page ErrorBoundary. A crash in one page only blanks
+// that route; login / worker portal / other tabs stay functional.
 function S({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={<PageLoading />}>{children}</Suspense>
+  return (
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoading />}>{children}</Suspense>
+    </ErrorBoundary>
+  )
 }
 
 // ── Router ────────────────────────────────────────────────────────────────

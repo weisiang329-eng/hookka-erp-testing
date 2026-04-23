@@ -15,6 +15,20 @@ import React, {
   useMemo,
 } from "react";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
+import { getCurrentUser } from "@/lib/auth";
+
+// Stable identifier for namespacing per-user grid preferences in localStorage.
+// Using email (lowercased) so column visibility / order / saved views are
+// scoped to the logged-in user rather than shared across accounts on the
+// same browser. Falls back to "anon" when not signed in.
+function userKey(): string {
+  try {
+    const u = getCurrentUser();
+    return u?.email ? u.email.toLowerCase() : "anon";
+  } catch {
+    return "anon";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -688,7 +702,7 @@ export function DataGrid<T extends Record<string, any>>({
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(() => {
     if (gridId && typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem(`datagrid-cols-${gridId}`);
+        const saved = localStorage.getItem(`datagrid-cols-${gridId}-${userKey()}`);
         if (saved) return new Set(JSON.parse(saved));
       } catch { /* ignore */ }
     }
@@ -697,7 +711,7 @@ export function DataGrid<T extends Record<string, any>>({
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     if (gridId && typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem(`datagrid-colorder-${gridId}`);
+        const saved = localStorage.getItem(`datagrid-colorder-${gridId}-${userKey()}`);
         if (saved) return JSON.parse(saved);
       } catch { /* ignore */ }
     }
@@ -711,7 +725,7 @@ export function DataGrid<T extends Record<string, any>>({
       if (next.has(key)) next.delete(key);
       else next.add(key);
       if (gridId) {
-        try { localStorage.setItem(`datagrid-cols-${gridId}`, JSON.stringify([...next])); } catch { /* ignore */ }
+        try { localStorage.setItem(`datagrid-cols-${gridId}-${userKey()}`, JSON.stringify([...next])); } catch { /* ignore */ }
       }
       return next;
     });
@@ -720,7 +734,7 @@ export function DataGrid<T extends Record<string, any>>({
   const reorderColumns = useCallback((order: string[]) => {
     setColumnOrder(order);
     if (gridId) {
-      try { localStorage.setItem(`datagrid-colorder-${gridId}`, JSON.stringify(order)); } catch { /* ignore */ }
+      try { localStorage.setItem(`datagrid-colorder-${gridId}-${userKey()}`, JSON.stringify(order)); } catch { /* ignore */ }
     }
   }, [gridId]);
 
@@ -779,7 +793,7 @@ export function DataGrid<T extends Record<string, any>>({
   const [savedViews, setSavedViews] = useState<SavedView[]>(() => {
     if (viewStorageKey && typeof window !== "undefined") {
       try {
-        const raw = localStorage.getItem(`datagrid-views-${viewStorageKey}`);
+        const raw = localStorage.getItem(`datagrid-views-${viewStorageKey}-${userKey()}`);
         if (raw) return JSON.parse(raw);
       } catch { /* ignore */ }
     }
@@ -794,7 +808,7 @@ export function DataGrid<T extends Record<string, any>>({
   const persistViews = useCallback((views: SavedView[]) => {
     setSavedViews(views);
     if (viewStorageKey) {
-      try { localStorage.setItem(`datagrid-views-${viewStorageKey}`, JSON.stringify(views)); } catch { /* ignore */ }
+      try { localStorage.setItem(`datagrid-views-${viewStorageKey}-${userKey()}`, JSON.stringify(views)); } catch { /* ignore */ }
     }
   }, [viewStorageKey]);
 

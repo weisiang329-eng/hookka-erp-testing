@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { lazy, Suspense } from 'react'
 import { Navigate, Route, type RouteObject } from 'react-router-dom'
+import { ErrorBoundary } from './components/ui/error-boundary'
 
 // ── Lazy-loaded pages ─────────────────────────────────────────────────────
 
@@ -110,8 +111,16 @@ function PageLoading() {
   )
 }
 
+// S() = Suspense + per-page ErrorBoundary. Any lazy page that throws (render,
+// unhandled promise, ChunkLoadError) is caught and only that page shows the
+// fallback UI — the dashboard shell + sidebar + other open tabs keep working.
+// Without this a single page crash blanks the whole screen.
 function S({ children }: { children: React.ReactNode }) {
-  return <Suspense fallback={<PageLoading />}>{children}</Suspense>
+  return (
+    <ErrorBoundary>
+      <Suspense fallback={<PageLoading />}>{children}</Suspense>
+    </ErrorBoundary>
+  )
 }
 
 // ── Route entries ─────────────────────────────────────────────────────────

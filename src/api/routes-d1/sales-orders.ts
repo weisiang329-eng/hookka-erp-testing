@@ -167,6 +167,29 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
   };
 }
 
+type L1Process = { deptCode: string; category: string; minutes: number };
+
+// BOM.l1Processes stores FG-level operations that span every L2 WIP — e.g.
+// sofa Packing, where Base/Cushion/Arm have already been assembled into one
+// finished sofa by Upholstery. Column shape is documented in 0001_init.sql
+// as `JSON [{dept, deptCode, category, minutes}]`.
+function parseL1Processes(raw: string | null): L1Process[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((p) => ({
+        deptCode: String((p as { deptCode?: unknown }).deptCode ?? ""),
+        category: String((p as { category?: unknown }).category ?? ""),
+        minutes: Number((p as { minutes?: unknown }).minutes) || 0,
+      }))
+      .filter((p) => p.deptCode.length > 0);
+  } catch {
+    return [];
+  }
+}
+
 function parseAutoActions(raw: string | null): string[] {
   if (!raw) return [];
   try {
@@ -334,20 +357,20 @@ async function createProductionOrdersForSO(
     // to the latest template regardless of status.
     let bomRow = await db
       .prepare(
-        `SELECT wipComponents FROM bom_templates
+        `SELECT wipComponents, l1Processes FROM bom_templates
            WHERE productCode = ? AND versionStatus = 'ACTIVE'
            ORDER BY effectiveFrom DESC LIMIT 1`,
       )
       .bind(productCode)
-      .first<{ wipComponents: string | null }>();
+      .first<{ wipComponents: string | null; l1Processes: string | null }>();
     if (!bomRow) {
       bomRow = await db
         .prepare(
-          `SELECT wipComponents FROM bom_templates
+          `SELECT wipComponents, l1Processes FROM bom_templates
              WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
         )
         .bind(productCode)
-        .first<{ wipComponents: string | null }>();
+        .first<{ wipComponents: string | null; l1Processes: string | null }>();
     }
 
     const variants: BomVariantContext = {
@@ -575,6 +598,60 @@ async function createProductionOrdersForSO(
       );
     }
 
+    // ------ job_cards — FG-level (one per l1Process) ------
+    // BOM l1Processes live at the finished-good level: a single operation
+    // spanning all the L2 WIPs. The canonical example is sofa Packing —
+    // Base/Cushion/Arm get assembled during Upholstery, so Packing is one
+    // job for the assembled unit (unlike bedframes where each WIP is packed
+    // separately at L2). Emit one job card per l1Process with wipKey="FG",
+    // wipQty=po.quantity so a 2-unit order yields 2 piece-stickers, and
+    // prerequisiteMet=0 because the L2 chain has to finish first.
+    const l1Procs = parseL1Processes(bomRow?.l1Processes ?? null);
+    for (const l1p of l1Procs) {
+      const deptMeta = deptByCode.get(l1p.deptCode);
+      if (!deptMeta) continue;
+      const jcId = `jc-${poId}-FG-${l1p.deptCode}`
+        .replace(/[^a-zA-Z0-9_-]/g, "_")
+        .slice(0, 128);
+      statements.push(
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
+               departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
+               wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            jcId,
+            poId,
+            deptMeta.id,
+            l1p.deptCode,
+            deptMeta.name,
+            99, // high sequence so nothing else treats this as "first in chain"
+            "WAITING",
+            packingAnchor || poTargetEnd,
+            "FG",
+            productCode,
+            "FG",
+            productCode,
+            item.quantity,
+            0,
+            null,
+            "",
+            null,
+            "",
+            null,
+            l1p.minutes,
+            null,
+            l1p.category,
+            l1p.minutes,
+            "PENDING",
+            null,
+          ),
+      );
+    }
+
     created.push({
       id: poId,
       poNo,
@@ -648,20 +725,20 @@ async function backfillJobCardsForPo(
 
   let bomRow = await db
     .prepare(
-      `SELECT wipComponents FROM bom_templates
+      `SELECT wipComponents, l1Processes FROM bom_templates
          WHERE productCode = ? AND versionStatus = 'ACTIVE'
          ORDER BY effectiveFrom DESC LIMIT 1`,
     )
     .bind(productCode)
-    .first<{ wipComponents: string | null }>();
+    .first<{ wipComponents: string | null; l1Processes: string | null }>();
   if (!bomRow) {
     bomRow = await db
       .prepare(
-        `SELECT wipComponents FROM bom_templates
+        `SELECT wipComponents, l1Processes FROM bom_templates
            WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
       )
       .bind(productCode)
-      .first<{ wipComponents: string | null }>();
+      .first<{ wipComponents: string | null; l1Processes: string | null }>();
   }
   const backfillVariants: BomVariantContext = {
     productCode: po.productCode ?? "",
@@ -796,6 +873,60 @@ async function backfillJobCardsForPo(
       );
       jcCount++;
     }
+  }
+
+  // ------ job_cards — FG-level (one per l1Process) ------
+  // Matches createProductionOrdersForSO: anything the BOM declares at
+  // FG level (l1Processes JSON) becomes a single job card attached to
+  // the PO, with wipKey="FG" and wipQty=po.quantity so the sticker
+  // renderer treats it as one assembled unit (see generate-sticker-pdf
+  // for the piece-counting logic).
+  const l1Procs = parseL1Processes(bomRow?.l1Processes ?? null);
+  const packingDue = po.targetEndDate || po.startDate || "";
+  for (const l1p of l1Procs) {
+    const deptMeta = deptByCode.get(l1p.deptCode);
+    if (!deptMeta) continue;
+    const jcId = `jc-${po.id}-FG-${l1p.deptCode}`
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 128);
+    statements.push(
+      db
+        .prepare(
+          `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
+             departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
+             wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
+             estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          jcId,
+          po.id,
+          deptMeta.id,
+          l1p.deptCode,
+          deptMeta.name,
+          99,
+          "WAITING",
+          packingDue,
+          "FG",
+          productCode,
+          "FG",
+          productCode,
+          po.quantity || 1,
+          0,
+          null,
+          "",
+          null,
+          "",
+          null,
+          l1p.minutes,
+          null,
+          l1p.category,
+          l1p.minutes,
+          "PENDING",
+          null,
+        ),
+    );
+    jcCount++;
   }
 
   if (statements.length > 0) {

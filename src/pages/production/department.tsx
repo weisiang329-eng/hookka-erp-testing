@@ -810,7 +810,7 @@ export default function DepartmentProductionPage() {
                     <Button
                       variant="outline"
                       className="gap-2"
-                      onClick={() => generateStickerPdf(order, jc)}
+                      onClick={() => generateStickerPdf(order, jc, orders)}
                     >
                       <Printer className="h-4 w-4" />
                       Print Sticker
@@ -1136,7 +1136,7 @@ export default function DepartmentProductionPage() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5"
-                              onClick={() => generateStickerPdf(row, jc)}
+                              onClick={() => generateStickerPdf(row, jc, orders)}
                               title="Print Sticker"
                             >
                               <Printer className="h-3 w-3" />

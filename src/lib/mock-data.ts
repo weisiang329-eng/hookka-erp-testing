@@ -7306,8 +7306,14 @@ function bfHbChildren(productCode: string): BOMTemplateWIP[] {
 }
 
 // -- Sofa BOM process constants --
-// L1 (FG-level) processes intentionally empty — see BF_L1 note above.
-const SF_L1: BOMTemplateProcess[] = [];
+// Sofa assembles at Upholstery — Base/Cushion/Arm come out of earlier depts
+// as separate pieces, then Upholstery both upholsters and JOINS them into
+// one finished sofa. So Upholstery stays per-WIP (one job card + sticker per
+// piece), but Packing sits at FG/L1 level (a single job card + sticker for
+// the assembled unit — see BOM Builder screenshot at bom-structure tab).
+const SF_L1: BOMTemplateProcess[] = [
+  { dept: "Packing", deptCode: "PACKING", category: "CAT 1", minutes: 40 },
+];
 
 const SF_BASE: BOMTemplateProcess[] = [
   { dept: "Fabric Sewing", deptCode: "FAB_SEW", category: "CAT 4", minutes: 150 },
@@ -7316,7 +7322,6 @@ const SF_BASE: BOMTemplateProcess[] = [
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 4", minutes: 40  },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 4", minutes: 20  },
   { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 4", minutes: 45 },
-  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 3", minutes: 25 },
 ];
 const SF_CUSHION: BOMTemplateProcess[] = [
   { dept: "Fabric Sewing", deptCode: "FAB_SEW", category: "CAT 1", minutes: 40 },
@@ -7325,7 +7330,6 @@ const SF_CUSHION: BOMTemplateProcess[] = [
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 1", minutes: 15 },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 1", minutes: 15 },
   { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 1", minutes: 15 },
-  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 1", minutes: 10 },
 ];
 const SF_ARM: BOMTemplateProcess[] = [
   { dept: "Fabric Sewing", deptCode: "FAB_SEW", category: "CAT 2", minutes: 30 },
@@ -7334,7 +7338,6 @@ const SF_ARM: BOMTemplateProcess[] = [
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 3", minutes: 25 },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 1", minutes: 10 },
   { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 2", minutes: 25 },
-  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 2", minutes: 15 },
 ];
 
 function mkBedframeBOMTemplate(productCode: string, baseModel: string, sizeLabel: string, sizeCode: string): BOMTemplate {

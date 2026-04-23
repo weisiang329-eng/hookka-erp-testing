@@ -99,7 +99,7 @@ function stickerFormat(deptCode: string): {
 // bedframe PO, Divan jc (wipQty=2) contributes pieces 1-2 of 3, HB jc
 // (wipQty=1) contributes piece 3 of 3. Sorting by wipType keeps the order
 // stable across prints so Divan always comes before HB.
-function piecesForJobCard(order: ProductionOrder, jc: JobCard): {
+function piecesForJobCardWithinPo(order: ProductionOrder, jc: JobCard): {
   totalPieces: number;
   startPieceNo: number;
   count: number;
@@ -119,6 +119,53 @@ function piecesForJobCard(order: ProductionOrder, jc: JobCard): {
     startPieceNo += j.wipQty || 1;
   }
   return { totalPieces, startPieceNo, count: jc.wipQty || 1 };
+}
+
+// Piece numbering for sofa FG-level Packing — scoped to the WHOLE SO so
+// a customer ordering 2A(LHF) + L(RHF) in one SO gets stickers labelled
+// "1/2" and "2/2" across the PO boundary (each assembled sofa = one box,
+// the customer just sees a running box count for their delivery). Only
+// applies to jc.wipType === "FG" + departmentCode === "PACKING"; every
+// other path stays per-PO via piecesForJobCardWithinPo.
+function buildSoPackingPieceMap(orders: ProductionOrder[]): Map<
+  string,
+  { totalPieces: number; startPieceNo: number; count: number }
+> {
+  type Entry = { order: ProductionOrder; jc: JobCard };
+  const bySo = new Map<string, Entry[]>();
+  for (const order of orders) {
+    if ((order.itemCategory || "").toUpperCase() !== "SOFA") continue;
+    for (const jc of order.jobCards) {
+      if (jc.departmentCode !== "PACKING") continue;
+      if ((jc.wipType || "").toUpperCase() !== "FG") continue;
+      const soKey = order.companySOId || order.id;
+      if (!bySo.has(soKey)) bySo.set(soKey, []);
+      bySo.get(soKey)!.push({ order, jc });
+    }
+  }
+  const result = new Map<
+    string,
+    { totalPieces: number; startPieceNo: number; count: number }
+  >();
+  for (const [, entries] of bySo) {
+    // Stable sort by poNo so reprints of the same SO always produce the
+    // same piece numbering regardless of which PO the worker clicked first.
+    entries.sort((a, b) =>
+      (a.order.poNo || "").localeCompare(b.order.poNo || ""),
+    );
+    const totalPieces = entries.reduce((s, e) => s + (e.jc.wipQty || 1), 0);
+    let pieceNo = 1;
+    for (const e of entries) {
+      const count = e.jc.wipQty || 1;
+      result.set(`${e.order.id}|${e.jc.id}`, {
+        totalPieces,
+        startPieceNo: pieceNo,
+        count,
+      });
+      pieceNo += count;
+    }
+  }
+  return result;
 }
 
 // Deterministic 6-digit batch code so piece serials stay stable between
@@ -468,12 +515,18 @@ async function renderStickerPortrait(
   doc.text(`${pieceNo}/${totalPieces}`, rightX, ry);
   ry += 7;
 
-  // WIP name — replaces the "Full Product" line from the FG sticker so the
-  // packer can tell Divan from HB at a glance on bedframe multi-piece prints.
+  // Label under the piece ratio. For bedframe multi-piece Packing (one card
+  // per Divan/HB), the WIP label distinguishes them. For sofa FG Packing
+  // (assembled whole sofa), the WIP label would just be the productCode
+  // again — redundant with the big header — so show the sizeLabel instead
+  // (e.g. "2A(LHF)") which is the cross-SO identifier the user is tracking.
   doc.setFontSize(7);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(100, 100, 100);
-  const wipText = jc.wipLabel || jc.wipCode || "WIP";
+  const isFgLevel = (jc.wipType || "").toUpperCase() === "FG";
+  const wipText = isFgLevel
+    ? order.sizeLabel || order.sizeCode || order.productCode || ""
+    : jc.wipLabel || jc.wipCode || "WIP";
   const wipLines = doc.splitTextToSize(wipText, pw - rightX - 6);
   doc.text(wipLines, rightX, ry);
   ry += 3.6 * Math.min(wipLines.length, 3) + 3;
@@ -516,18 +569,36 @@ async function renderSticker(
   }
 }
 
+// Resolve a job card's piece range, preferring SO-level aggregation for
+// sofa FG-level Packing when the SO map contains it — otherwise falls
+// back to per-PO counting.
+function resolvePieces(
+  order: ProductionOrder,
+  jc: JobCard,
+  soMap: Map<string, { totalPieces: number; startPieceNo: number; count: number }>,
+): { totalPieces: number; startPieceNo: number; count: number } {
+  const key = `${order.id}|${jc.id}`;
+  const soScoped = soMap.get(key);
+  if (soScoped) return soScoped;
+  return piecesForJobCardWithinPo(order, jc);
+}
+
 /**
- * Generate a sticker PDF for one specific job card. Emits one page per piece
- * when the job card's wipQty > 1 (e.g. Queen bedframe Divan jc has wipQty=2
- * → two pages for the two physical divans).
+ * Generate a sticker PDF for one specific job card. `siblingOrders` lets the
+ * caller pass the other POs under the same SO so sofa FG Packing piece
+ * numbering spans the whole SO ("1/2", "2/2" across POs) rather than
+ * collapsing to "1/1" per PO. Single-print from the dept page should pass
+ * the full visible order list for correct cross-PO numbering.
  */
 export async function generateStickerPdf(
   order: ProductionOrder,
   jc: JobCard,
+  siblingOrders: ProductionOrder[] = [order],
 ): Promise<void> {
   const { format, orientation } = stickerFormat(jc.departmentCode);
   const doc = new jsPDF({ orientation, unit: "mm", format });
-  const { totalPieces, startPieceNo, count } = piecesForJobCard(order, jc);
+  const soMap = buildSoPackingPieceMap(siblingOrders);
+  const { totalPieces, startPieceNo, count } = resolvePieces(order, jc, soMap);
   const batchCode = genBatchCode(order);
 
   for (let i = 0; i < count; i++) {
@@ -541,9 +612,9 @@ export async function generateStickerPdf(
 
 /**
  * Batch sticker PDF across many orders for one department. Emits one page
- * per physical piece — so a Queen bedframe PO (Divan wipQty=2 + HB wipQty=1)
- * contributes 3 pages, not 1. Returns stats so the caller can surface a
- * meaningful toast when the batch was empty.
+ * per physical piece — a Queen bedframe PO (Divan wipQty=2 + HB wipQty=1)
+ * contributes 3 pages, and a sofa SO with two POs (2A + L) produces 2
+ * Packing pages numbered across the whole SO, not per-PO.
  */
 export async function generateBatchStickersPdf(
   orders: ProductionOrder[],
@@ -551,6 +622,7 @@ export async function generateBatchStickersPdf(
 ): Promise<{ generated: number; skipped: number }> {
   const { format, orientation } = stickerFormat(deptCode);
   const doc = new jsPDF({ orientation, unit: "mm", format });
+  const soMap = buildSoPackingPieceMap(orders);
 
   let generated = 0;
   let skipped = 0;
@@ -562,7 +634,7 @@ export async function generateBatchStickersPdf(
     }
     const batchCode = genBatchCode(order);
     for (const jc of matchingJcs) {
-      const { totalPieces, startPieceNo, count } = piecesForJobCard(order, jc);
+      const { totalPieces, startPieceNo, count } = resolvePieces(order, jc, soMap);
       for (let i = 0; i < count; i++) {
         if (generated > 0) doc.addPage(format, orientation);
         const pieceNo = startPieceNo + i;

@@ -567,12 +567,19 @@ export default function DepartmentProductionPage() {
         <Button
           variant="outline"
           className="gap-2"
-          onClick={() => {
+          onClick={async () => {
             const pendingOrders = orders.filter(o =>
               o.jobCards.some(jc => jc.departmentCode === deptCode && jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED")
             );
-            if (pendingOrders.length > 0) {
-              generateBatchStickersPdf(pendingOrders, deptCode);
+            if (pendingOrders.length === 0) {
+              toast.info(`No pending ${dept.name} stickers to print.`);
+              return;
+            }
+            const { generated, skipped } = await generateBatchStickersPdf(pendingOrders, deptCode);
+            if (generated === 0) {
+              toast.warning(`No stickers generated — no orders have a ${dept.name} job card. Check BOMs.`);
+            } else if (skipped > 0) {
+              toast.info(`Generated ${generated} stickers, skipped ${skipped} orders without a ${dept.name} job card.`);
             }
           }}
         >
@@ -803,7 +810,7 @@ export default function DepartmentProductionPage() {
                     <Button
                       variant="outline"
                       className="gap-2"
-                      onClick={() => generateStickerPdf(order, jc.departmentCode)}
+                      onClick={() => generateStickerPdf(order, jc)}
                     >
                       <Printer className="h-4 w-4" />
                       Print Sticker
@@ -1129,7 +1136,7 @@ export default function DepartmentProductionPage() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5"
-                              onClick={() => generateStickerPdf(row, jc.departmentCode)}
+                              onClick={() => generateStickerPdf(row, jc)}
                               title="Print Sticker"
                             >
                               <Printer className="h-3 w-3" />

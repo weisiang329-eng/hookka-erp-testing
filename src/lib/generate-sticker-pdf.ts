@@ -38,6 +38,10 @@ type JobCard = {
   category: string;
   productionTimeMinutes: number;
   overdue: string;
+  wipCode?: string;
+  wipType?: string;
+  wipLabel?: string;
+  wipQty?: number;
 };
 
 type ProductionOrder = {
@@ -66,6 +70,65 @@ function fmtDate(iso: string): string {
   if (!iso) return "-";
   const d = new Date(iso);
   return d.toLocaleDateString("en-MY", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// DD-MM-YY, used on the portrait Packing sticker so the date stays short
+// enough to sit on the same line as a label.
+function fmtShortDate(iso: string): string {
+  if (!iso) return "-";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "-";
+  const dd = String(d.getDate()).padStart(2, "0");
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const yy = String(d.getFullYear()).slice(2);
+  return `${dd}-${mm}-${yy}`;
+}
+
+// Sticker sheet sizes. Packing uses the tall 100×150mm FG-style label so
+// warehouse staff can see the full-FG model + piece N/total at a glance.
+// Everything else keeps the compact 100×60mm landscape dept sticker.
+function stickerFormat(deptCode: string): {
+  format: [number, number];
+  orientation: "landscape" | "portrait";
+} {
+  if (deptCode === "PACKING") return { format: [100, 150], orientation: "portrait" };
+  return { format: [100, 60], orientation: "landscape" };
+}
+
+// Piece numbering for one job card within its PO+department. For a Queen
+// bedframe PO, Divan jc (wipQty=2) contributes pieces 1-2 of 3, HB jc
+// (wipQty=1) contributes piece 3 of 3. Sorting by wipType keeps the order
+// stable across prints so Divan always comes before HB.
+function piecesForJobCard(order: ProductionOrder, jc: JobCard): {
+  totalPieces: number;
+  startPieceNo: number;
+  count: number;
+} {
+  const sameDept = order.jobCards
+    .filter((j) => j.departmentCode === jc.departmentCode)
+    .sort((a, b) => {
+      const typeA = a.wipType || "";
+      const typeB = b.wipType || "";
+      if (typeA !== typeB) return typeA.localeCompare(typeB);
+      return (a.wipCode || "").localeCompare(b.wipCode || "");
+    });
+  const totalPieces = sameDept.reduce((s, j) => s + (j.wipQty || 1), 0);
+  let startPieceNo = 1;
+  for (const j of sameDept) {
+    if (j.id === jc.id) break;
+    startPieceNo += j.wipQty || 1;
+  }
+  return { totalPieces, startPieceNo, count: jc.wipQty || 1 };
+}
+
+// Deterministic 6-digit batch code so piece serials stay stable between
+// reprints of the same PO — hash the PO id instead of using random/time.
+function genBatchCode(order: ProductionOrder): string {
+  let h = 0;
+  for (let i = 0; i < order.id.length; i++) {
+    h = ((h << 5) - h + order.id.charCodeAt(i)) | 0;
+  }
+  return String(100000 + (Math.abs(h) % 900000));
 }
 
 /**
@@ -175,25 +238,22 @@ function getDeptSpecificFields(
   return fields;
 }
 
-/**
- * Render one sticker page into the PDF at the current page.
- * Sticker dimensions: ~100 x 60mm
- */
-async function renderSticker(
+// ---------------------------------------------------------------------------
+// Landscape (100×60mm) renderer — Upholstery and all other non-Packing depts.
+// Adds parent FG code prominently, WIP label, and piece N/total tag.
+// ---------------------------------------------------------------------------
+async function renderStickerLandscape(
   doc: jsPDF,
   order: ProductionOrder,
-  deptCode: string
+  jc: JobCard,
+  pieceNo: number,
+  totalPieces: number,
 ): Promise<void> {
-  const jc = order.jobCards.find((j) => j.departmentCode === deptCode);
-  if (!jc) return;
-
-  const color = DEPT_COLORS[deptCode] || [31, 29, 27];
-  const deptName = DEPT_NAMES[deptCode] || deptCode;
-
-  // Page is 100x60mm. Origin at top-left.
+  const color = DEPT_COLORS[jc.departmentCode] || [31, 29, 27];
+  const deptName = DEPT_NAMES[jc.departmentCode] || jc.departmentCode;
   const pw = 100;
 
-  // --- Department header ---
+  // Header strip
   doc.setDrawColor(0, 0, 0);
   doc.setLineWidth(0.5);
   doc.line(0, 8, pw, 8);
@@ -204,21 +264,24 @@ async function renderSticker(
   doc.setFontSize(6);
   doc.text(order.poNo, pw - 3, 5.5, { align: "right" });
 
-  // --- QR Code placeholder area (top-left, below header) ---
+  // QR code
   const qrSize = 22;
   const qrX = 3;
   const qrY = 10;
-
-  // Draw QR placeholder box
   doc.setDrawColor(200, 200, 200);
   doc.setFillColor(255, 255, 255);
   doc.rect(qrX, qrY, qrSize, qrSize, "FD");
 
-  // Generate QR locally — avoids hundreds of external qrserver.com round-trips
-  // during batch prints. Falls back to a text placeholder if generation fails.
   try {
     const qrDataUrl = await getQRCodeDataURL(
-      generateStickerData(order.poNo, deptCode, jc.id),
+      generateStickerData(
+        order.poNo,
+        jc.departmentCode,
+        jc.id,
+        "/production/scan",
+        pieceNo,
+        totalPieces,
+      ),
       200,
     );
     doc.addImage(qrDataUrl, "PNG", qrX + 0.5, qrY + 0.5, qrSize - 1, qrSize - 1);
@@ -230,125 +293,283 @@ async function renderSticker(
     doc.text(jc.id.slice(0, 12), qrX + qrSize / 2, qrY + qrSize / 2 + 3, { align: "center" });
   }
 
-  // --- Product info to the right of QR ---
+  // Info block to the right of the QR
   const infoX = qrX + qrSize + 3;
-  let y = 12;
+  let y = 13;
 
+  // Parent FG code — big and bold so workers can group stickers by product
   doc.setTextColor(31, 29, 27);
+  doc.setFontSize(10);
+  doc.setFont("helvetica", "bold");
+  doc.text(order.productCode, infoX, y);
+  y += 4;
+
+  // WIP label + piece N/total
   doc.setFontSize(7);
-  doc.setFont("helvetica", "bold");
-  doc.text(`SO: ${order.companySOId}`, infoX, y);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(60, 60, 60);
+  const wipText = jc.wipLabel || jc.wipCode || order.sizeLabel || "";
+  const pieceTag = totalPieces > 1 ? `  ${pieceNo}/${totalPieces}` : "";
+  doc.text(`${wipText}${pieceTag}`, infoX, y);
   y += 3.5;
 
+  // SO + customer + fabric on a tighter row
   doc.setFontSize(6);
-  doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text(order.customerName, infoX, y);
-  y += 3.5;
-
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(31, 29, 27);
-  doc.text(`${order.productCode} - ${order.sizeLabel}`, infoX, y);
-  y += 3.5;
-
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
+  doc.text(`SO: ${order.companySOId}`, infoX, y);
+  y += 3;
+  doc.text(`${order.customerName}`, infoX, y);
+  y += 3;
   doc.text(`Colour: ${order.fabricCode}`, infoX, y);
-  y += 3.5;
-
-  // CAT + Production Time
-  doc.setFontSize(5.5);
-  doc.text(`CAT: ${jc.category}  |  ${jc.productionTimeMinutes || jc.estMinutes} min`, infoX, y);
   y += 3;
 
-  // Due date
+  // CAT + production time
+  doc.setFontSize(5.5);
+  doc.text(`CAT ${jc.category} · ${jc.productionTimeMinutes || jc.estMinutes} min`, infoX, y);
+  y += 3;
+
+  // Due date (dept color)
   doc.setTextColor(color[0], color[1], color[2]);
   doc.setFont("helvetica", "bold");
   doc.text(`DD: ${fmtDate(jc.dueDate)}`, infoX, y);
 
-  // --- Department-specific fields below QR ---
-  const deptFields = getDeptSpecificFields(order, deptCode, jc);
+  // Dept-specific fields below QR
+  const deptFields = getDeptSpecificFields(order, jc.departmentCode, jc);
   const fy = qrY + qrSize + 3;
-
   if (deptFields.length > 0) {
-    // Separator line
     doc.setDrawColor(220, 220, 220);
     doc.line(3, fy - 1, pw - 3, fy - 1);
-
     doc.setFontSize(5.5);
     const colWidth = (pw - 6) / Math.min(deptFields.length, 4);
-
     for (let i = 0; i < deptFields.length; i++) {
       const col = i % 4;
       const row = Math.floor(i / 4);
       const fx = 3 + col * colWidth;
       const ffy = fy + row * 7;
-
       doc.setFont("helvetica", "normal");
       doc.setTextColor(130, 130, 130);
       doc.text(deptFields[i].label, fx, ffy);
-
       doc.setFont("helvetica", "bold");
       doc.setTextColor(31, 29, 27);
       doc.text(deptFields[i].value, fx, ffy + 3);
     }
   }
 
-  // --- Bottom bar ---
+  // Bottom bar — piece label replaces Qty when we have >1 pieces
   doc.setDrawColor(180, 180, 180);
   doc.line(0, 55, pw, 55);
   doc.setFontSize(4.5);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(120, 120, 120);
   doc.text("HOOKKA INDUSTRIES SDN BHD", 3, 58.2);
-  doc.text(`Qty: ${order.quantity}`, pw - 3, 58.2, { align: "right" });
+  const pieceLabel = totalPieces > 1 ? `Piece ${pieceNo}/${totalPieces}` : `Qty: ${order.quantity}`;
+  doc.text(pieceLabel, pw - 3, 58.2, { align: "right" });
+}
+
+// ---------------------------------------------------------------------------
+// Portrait (100×150mm) renderer — Packing only.
+// Matches the FG Packing Sticker: big parent model, info grid, large QR
+// bottom-left, piece N/total + serial bottom-right.
+// ---------------------------------------------------------------------------
+async function renderStickerPortrait(
+  doc: jsPDF,
+  order: ProductionOrder,
+  jc: JobCard,
+  pieceNo: number,
+  totalPieces: number,
+  batchCode: string,
+): Promise<void> {
+  const pw = 100;
+  const ph = 150;
+
+  // Outer frame
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.5);
+  doc.rect(2, 2, pw - 4, ph - 4);
+
+  // Header: parent FG model, centered, big
+  doc.setTextColor(31, 29, 27);
+  doc.setFontSize(18);
+  doc.setFont("helvetica", "bold");
+  doc.text(order.productCode, pw / 2, 14, { align: "center" });
+
+  // Divider under header
+  doc.setDrawColor(200, 200, 200);
+  doc.setLineWidth(0.3);
+  doc.line(5, 20, pw - 5, 20);
+
+  // Info grid
+  const labelX = 8;
+  const colonX = 28;
+  const valueX = 32;
+  let iy = 30;
+  const rowGap = 8;
+
+  const mfd = jc.completedDate
+    ? fmtShortDate(jc.completedDate)
+    : jc.dueDate
+      ? fmtShortDate(jc.dueDate)
+      : "-";
+
+  const infoRows: Array<[string, string]> = [
+    ["SIZE", order.sizeLabel || order.sizeCode || "-"],
+    ["COLOR", order.fabricCode || "-"],
+    ["PO NO", order.companySOId || order.poNo || "-"],
+    ["CUST", order.customerName || "-"],
+    ["MFD", mfd],
+  ];
+
+  doc.setFontSize(9);
+  for (const [label, value] of infoRows) {
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(100, 100, 100);
+    doc.text(label, labelX, iy);
+    doc.text(":", colonX, iy);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(31, 29, 27);
+    const wrapped = doc.splitTextToSize(value, pw - valueX - 6);
+    doc.text(wrapped[0] || "-", valueX, iy);
+    iy += rowGap;
+  }
+
+  // QR area (bottom-left, large)
+  const qrSize = 42;
+  const qrX = 6;
+  const qrY = ph - qrSize - 14;
+  doc.setDrawColor(200, 200, 200);
+  doc.setFillColor(255, 255, 255);
+  doc.rect(qrX, qrY, qrSize, qrSize, "FD");
+  try {
+    const qrDataUrl = await getQRCodeDataURL(
+      generateStickerData(
+        order.poNo,
+        jc.departmentCode,
+        jc.id,
+        "/production/scan",
+        pieceNo,
+        totalPieces,
+      ),
+      300,
+    );
+    doc.addImage(qrDataUrl, "PNG", qrX + 0.5, qrY + 0.5, qrSize - 1, qrSize - 1);
+  } catch {
+    doc.setFontSize(6);
+    doc.setTextColor(150, 150, 150);
+    doc.text("QR CODE", qrX + qrSize / 2, qrY + qrSize / 2, { align: "center" });
+  }
+
+  // Right column: piece ratio + WIP label + serial
+  const rightX = qrX + qrSize + 5;
+  let ry = qrY + 8;
+
+  doc.setTextColor(31, 29, 27);
+  doc.setFontSize(22);
+  doc.setFont("helvetica", "bold");
+  doc.text(`${pieceNo}/${totalPieces}`, rightX, ry);
+  ry += 7;
+
+  // WIP name — replaces the "Full Product" line from the FG sticker so the
+  // packer can tell Divan from HB at a glance on bedframe multi-piece prints.
+  doc.setFontSize(7);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(100, 100, 100);
+  const wipText = jc.wipLabel || jc.wipCode || "WIP";
+  const wipLines = doc.splitTextToSize(wipText, pw - rightX - 6);
+  doc.text(wipLines, rightX, ry);
+  ry += 3.6 * Math.min(wipLines.length, 3) + 3;
+
+  // Serial (batchCode + pieceNo)
+  doc.setFontSize(11);
+  doc.setFont("helvetica", "bold");
+  doc.setTextColor(31, 29, 27);
+  doc.text(`${batchCode}-${pieceNo}`, rightX, ry);
+  ry += 5;
+
+  // Piece tag (small, grey)
+  doc.setFontSize(7);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(120, 120, 120);
+  doc.text(`Piece ${pieceNo}/${totalPieces}`, rightX, ry);
+
+  // Bottom branding
+  doc.setDrawColor(180, 180, 180);
+  doc.setLineWidth(0.2);
+  doc.line(5, ph - 8, pw - 5, ph - 8);
+  doc.setFontSize(5.5);
+  doc.setFont("helvetica", "normal");
+  doc.setTextColor(120, 120, 120);
+  doc.text("HOOKKA INDUSTRIES SDN BHD", pw / 2, ph - 4, { align: "center" });
+}
+
+async function renderSticker(
+  doc: jsPDF,
+  order: ProductionOrder,
+  jc: JobCard,
+  pieceNo: number,
+  totalPieces: number,
+  batchCode: string,
+): Promise<void> {
+  if (jc.departmentCode === "PACKING") {
+    await renderStickerPortrait(doc, order, jc, pieceNo, totalPieces, batchCode);
+  } else {
+    await renderStickerLandscape(doc, order, jc, pieceNo, totalPieces);
+  }
 }
 
 /**
- * Generate a single sticker PDF for one production order + department.
+ * Generate a sticker PDF for one specific job card. Emits one page per piece
+ * when the job card's wipQty > 1 (e.g. Queen bedframe Divan jc has wipQty=2
+ * → two pages for the two physical divans).
  */
 export async function generateStickerPdf(
   order: ProductionOrder,
-  deptCode: string
+  jc: JobCard,
 ): Promise<void> {
-  const doc = new jsPDF({
-    orientation: "landscape",
-    unit: "mm",
-    format: [100, 60],
-  });
+  const { format, orientation } = stickerFormat(jc.departmentCode);
+  const doc = new jsPDF({ orientation, unit: "mm", format });
+  const { totalPieces, startPieceNo, count } = piecesForJobCard(order, jc);
+  const batchCode = genBatchCode(order);
 
-  await renderSticker(doc, order, deptCode);
-  doc.save(`sticker-${order.poNo}-${deptCode}.pdf`);
+  for (let i = 0; i < count; i++) {
+    if (i > 0) doc.addPage(format, orientation);
+    const pieceNo = startPieceNo + i;
+    await renderSticker(doc, order, jc, pieceNo, totalPieces, batchCode);
+  }
+
+  doc.save(`sticker-${order.poNo}-${jc.departmentCode}-${jc.wipType || "WIP"}.pdf`);
 }
 
 /**
- * Generate batch sticker PDF - one sticker per page for all orders.
+ * Batch sticker PDF across many orders for one department. Emits one page
+ * per physical piece — so a Queen bedframe PO (Divan wipQty=2 + HB wipQty=1)
+ * contributes 3 pages, not 1. Returns stats so the caller can surface a
+ * meaningful toast when the batch was empty.
  */
 export async function generateBatchStickersPdf(
   orders: ProductionOrder[],
-  deptCode: string
+  deptCode: string,
 ): Promise<{ generated: number; skipped: number }> {
-  const doc = new jsPDF({
-    orientation: "landscape",
-    unit: "mm",
-    format: [100, 60],
-  });
+  const { format, orientation } = stickerFormat(deptCode);
+  const doc = new jsPDF({ orientation, unit: "mm", format });
 
   let generated = 0;
   let skipped = 0;
   for (const order of orders) {
-    const jc = order.jobCards.find((j) => j.departmentCode === deptCode);
-    if (!jc) {
+    const matchingJcs = order.jobCards.filter((j) => j.departmentCode === deptCode);
+    if (matchingJcs.length === 0) {
       skipped++;
       continue;
     }
-
-    if (generated > 0) {
-      doc.addPage([100, 60], "landscape");
+    const batchCode = genBatchCode(order);
+    for (const jc of matchingJcs) {
+      const { totalPieces, startPieceNo, count } = piecesForJobCard(order, jc);
+      for (let i = 0; i < count; i++) {
+        if (generated > 0) doc.addPage(format, orientation);
+        const pieceNo = startPieceNo + i;
+        await renderSticker(doc, order, jc, pieceNo, totalPieces, batchCode);
+        generated++;
+      }
     }
-    generated++;
-
-    await renderSticker(doc, order, deptCode);
   }
 
   if (generated === 0) {

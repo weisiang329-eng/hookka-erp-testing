@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatDateDMY } from "@/lib/utils";
 import { asArray } from "@/lib/safe-json";
@@ -403,6 +404,7 @@ function SimpleBar({ label, count, total, color }: { label: string; count: numbe
 // ─── Main component ───────────────────────────────────────────────────────────
 export default function QualityPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [tab, setTab] = useState<Tab>("inspections");
 
   // ── Inspections state ──────────────────────────────────────────────────────
@@ -599,18 +601,37 @@ export default function QualityPage() {
           notes: formNotes,
         }),
       });
-      const json = await res.json();
-      if (json.success) { setShowInspForm(false); resetInspForm(); fetchInspections(); }
-    } catch { /* ignore */ }
-    finally { setSubmitting(false); }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const json: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(json?.error || `Failed to save inspection (HTTP ${res.status})`);
+      } else if (json.success) {
+        setShowInspForm(false);
+        resetInspForm();
+        fetchInspections();
+      } else {
+        toast.error(json.error || "Failed to save inspection");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — inspection not saved");
+    } finally { setSubmitting(false); }
   };
 
   const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/qc-inspections/${id}`, { method: "DELETE" });
-      const json = await res.json();
-      if (json.success) fetchInspections();
-    } catch { /* ignore */ }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const json: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(json?.error || `Failed to delete inspection (HTTP ${res.status})`);
+      } else if (json.success) {
+        fetchInspections();
+      } else {
+        toast.error(json.error || "Failed to delete inspection");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — delete may have failed");
+    }
   };
 
   // Create rework entry from an inspection's defect

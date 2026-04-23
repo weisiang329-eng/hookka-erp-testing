@@ -183,6 +183,7 @@ type AttendanceRowDraft = {
   productType: string;
   saving: boolean;
   saved: boolean;
+  saveError?: string;
   existing: AttendanceRecord | null;
 };
 
@@ -261,6 +262,27 @@ function WorkingHoursTab({
     });
   };
 
+  // Attendance writes used to swallow HTTP errors silently — a 500 on the
+  // clock-in POST would leave the row marked "saved" in the UI while the
+  // server never recorded it, then payroll would compute incorrect hours
+  // for that worker. Keep the row in an unsaved state + mark it failed
+  // when any step of the save fails so the operator knows to retry.
+  const postAttendanceOrThrow = async (body: Record<string, unknown>): Promise<void> => {
+    const res = await fetch("/api/attendance", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      let msg = `HTTP ${res.status}`;
+      try {
+        const j = (await res.json()) as { error?: string };
+        if (j?.error) msg = j.error;
+      } catch { /* ignore */ }
+      throw new Error(msg);
+    }
+  };
+
   const saveRow = async (idx: number) => {
     const row = rows[idx];
     setRows((prev) => {
@@ -271,27 +293,19 @@ function WorkingHoursTab({
 
     try {
       if (row.clockIn) {
-        await fetch("/api/attendance", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            employeeId: row.employeeId,
-            action: "CLOCK_IN",
-            date: selectedDate,
-            time: row.clockIn,
-          }),
+        await postAttendanceOrThrow({
+          employeeId: row.employeeId,
+          action: "CLOCK_IN",
+          date: selectedDate,
+          time: row.clockIn,
         });
       }
       if (row.clockOut && row.clockIn) {
-        await fetch("/api/attendance", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            employeeId: row.employeeId,
-            action: "CLOCK_OUT",
-            date: selectedDate,
-            time: row.clockOut,
-          }),
+        await postAttendanceOrThrow({
+          employeeId: row.employeeId,
+          action: "CLOCK_OUT",
+          date: selectedDate,
+          time: row.clockOut,
         });
       }
       setRows((prev) => {
@@ -300,10 +314,14 @@ function WorkingHoursTab({
         return copy;
       });
       refreshAttendance(selectedDate);
-    } catch {
+    } catch (e) {
       setRows((prev) => {
         const copy = [...prev];
-        copy[idx] = { ...copy[idx], saving: false };
+        copy[idx] = {
+          ...copy[idx],
+          saving: false,
+          saveError: e instanceof Error ? e.message : "Save failed",
+        };
         return copy;
       });
     }
@@ -1602,8 +1620,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ period }),
       });
-      const data = await res.json();
-      if (data.success) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to generate payslips (HTTP ${res.status})`);
+      } else if (data.success) {
         fetchPayslips();
       } else {
         toast.error(data.error || "Failed to generate payslips");
@@ -1617,12 +1638,18 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const approveAll = async () => {
     setApproving(true);
     try {
-      await fetch("/api/payslips", {
+      const res = await fetch("/api/payslips", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ period, status: "APPROVED" }),
       });
-      fetchPayslips();
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const data: any = await res.json().catch(() => ({}));
+        toast.error(data?.error || `Failed to approve payslips (HTTP ${res.status})`);
+      } else {
+        fetchPayslips();
+      }
     } catch {
       toast.error("Error approving payslips");
     }

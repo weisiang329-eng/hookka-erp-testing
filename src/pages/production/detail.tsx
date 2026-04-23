@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import { formatDate } from "@/lib/utils";
 import {
   Factory, CheckCircle2, AlertTriangle, ArrowLeft,
@@ -75,6 +76,7 @@ function formatMinutes(m: number | null): string {
 export default function ProductionOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const { toast } = useToast();
   const [order, setOrder] = useState<ProductionOrder | null>(null);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState<string | null>(null);
@@ -195,10 +197,17 @@ export default function ProductionOrderDetailPage() {
       const r = await fetch(`/api/fg-units/generate/${encodeURIComponent(order.id)}`, {
         method: "POST",
       });
-      const d = await r.json();
-      if (d?.success) setFgUnitList(d.data);
-    } catch {
-      // silent
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d: any = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        toast.error(d?.error || `Failed to generate FG units (HTTP ${r.status})`);
+      } else if (d?.success) {
+        setFgUnitList(d.data);
+      } else {
+        toast.error(d?.error || "Failed to generate FG units");
+      }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — FG units not generated");
     } finally {
       setFgLoading(false);
     }

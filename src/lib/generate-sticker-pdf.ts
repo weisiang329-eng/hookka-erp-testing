@@ -1,5 +1,5 @@
 import jsPDF from "jspdf";
-import { getQRCodeUrl, generateStickerData } from "./qr-utils";
+import { getQRCodeDataURL, generateStickerData } from "./qr-utils";
 
 // Department colors
 const DEPT_COLORS: Record<string, [number, number, number]> = {
@@ -214,16 +214,15 @@ async function renderSticker(
   doc.setFillColor(255, 255, 255);
   doc.rect(qrX, qrY, qrSize, qrSize, "FD");
 
-  // Try to load QR code image
-  const qrUrl = getQRCodeUrl(
-    generateStickerData(order.poNo, deptCode, jc.id),
-    200
-  );
+  // Generate QR locally — avoids hundreds of external qrserver.com round-trips
+  // during batch prints. Falls back to a text placeholder if generation fails.
   try {
-    const img = await loadImage(qrUrl);
-    doc.addImage(img, "PNG", qrX + 0.5, qrY + 0.5, qrSize - 1, qrSize - 1);
+    const qrDataUrl = await getQRCodeDataURL(
+      generateStickerData(order.poNo, deptCode, jc.id),
+      200,
+    );
+    doc.addImage(qrDataUrl, "PNG", qrX + 0.5, qrY + 0.5, qrSize - 1, qrSize - 1);
   } catch {
-    // If QR fails to load, draw a text placeholder
     doc.setFontSize(5);
     doc.setTextColor(150, 150, 150);
     doc.text("QR CODE", qrX + qrSize / 2, qrY + qrSize / 2, { align: "center" });
@@ -306,27 +305,6 @@ async function renderSticker(
 }
 
 /**
- * Load an image from URL and return as base64 data URL.
- */
-function loadImage(url: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return reject(new Error("No canvas context"));
-      ctx.drawImage(img, 0, 0);
-      resolve(canvas.toDataURL("image/png"));
-    };
-    img.onerror = () => reject(new Error("Image load failed"));
-    img.src = url;
-  });
-}
-
-/**
  * Generate a single sticker PDF for one production order + department.
  */
 export async function generateStickerPdf(
@@ -349,30 +327,34 @@ export async function generateStickerPdf(
 export async function generateBatchStickersPdf(
   orders: ProductionOrder[],
   deptCode: string
-): Promise<void> {
+): Promise<{ generated: number; skipped: number }> {
   const doc = new jsPDF({
     orientation: "landscape",
     unit: "mm",
     format: [100, 60],
   });
 
-  let first = true;
+  let generated = 0;
+  let skipped = 0;
   for (const order of orders) {
     const jc = order.jobCards.find((j) => j.departmentCode === deptCode);
-    if (!jc) continue;
+    if (!jc) {
+      skipped++;
+      continue;
+    }
 
-    if (!first) {
+    if (generated > 0) {
       doc.addPage([100, 60], "landscape");
     }
-    first = false;
+    generated++;
 
     await renderSticker(doc, order, deptCode);
   }
 
-  if (first) {
-    // No stickers were generated
-    return;
+  if (generated === 0) {
+    return { generated, skipped };
   }
 
   doc.save(`stickers-${deptCode}-batch.pdf`);
+  return { generated, skipped };
 }

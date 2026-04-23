@@ -94,18 +94,69 @@ export function peekKvConfig<T = JsonValue>(key: string): T | null {
   return entry?.hydrated ? (entry.value as T) : null;
 }
 
-async function flushSave(key: string): Promise<void> {
+// Per-entry "save failed" listeners — products/index.tsx subscribes here so
+// it can flip the "Auto-saved" badge back to "Save failed" when the PUT
+// didn't make it to the server (4xx/5xx or offline).
+const saveErrorListeners = new Map<string, Set<(error: Error) => void>>();
+
+export function subscribeKvConfigSaveError(
+  key: string,
+  listener: (error: Error) => void,
+): () => void {
+  if (!saveErrorListeners.has(key)) saveErrorListeners.set(key, new Set());
+  saveErrorListeners.get(key)!.add(listener);
+  return () => {
+    saveErrorListeners.get(key)?.delete(listener);
+  };
+}
+
+async function flushSave(key: string): Promise<boolean> {
   const entry = cache.get(key);
-  if (!entry) return;
+  if (!entry) return false;
   try {
-    await fetch(`/api/kv-config/${encodeURIComponent(key)}`, {
+    const res = await fetch(`/api/kv-config/${encodeURIComponent(key)}`, {
       method: "PUT",
       headers: authHeaders(),
       body: JSON.stringify(entry.value),
     });
-  } catch {
-    // Network error — silent. Next mutation reschedules another save.
+    // fetch only throws on network error — an HTTP 4xx/5xx resolves
+    // normally with ok=false, so we must check explicitly. Before this
+    // guard a 401 (expired token) or 500 silently marked the change as
+    // saved, which is how users ended up losing entries after a
+    // refresh. Surface the failure via saveErrorListeners so the UI
+    // can prompt a retry.
+    if (!res.ok) {
+      const err = new Error(`kv-config save failed: HTTP ${res.status}`);
+      for (const cb of saveErrorListeners.get(key) ?? []) {
+        try { cb(err); } catch { /* ignore */ }
+      }
+      return false;
+    }
+    return true;
+  } catch (e) {
+    const err = e instanceof Error ? e : new Error(String(e));
+    for (const cb of saveErrorListeners.get(key) ?? []) {
+      try { cb(err); } catch { /* ignore */ }
+    }
+    return false;
   }
+}
+
+/**
+ * Flush any pending debounced save for this key immediately and await the
+ * server response. Returns true when the server accepted the write. Used by
+ * pages that need confirmation before telling the user "saved" — the bare
+ * `setKvConfig` schedules a debounced PUT and returns before the network
+ * round-trip, so its caller can't tell success from silent failure.
+ */
+export async function flushKvConfig(key: string): Promise<boolean> {
+  const entry = cache.get(key);
+  if (!entry) return true;
+  if (entry.saveTimer) {
+    clearTimeout(entry.saveTimer);
+    entry.saveTimer = null;
+  }
+  return flushSave(key);
 }
 
 /**

@@ -8,6 +8,8 @@ import {
   getVariantsConfigSync,
   patchVariantsConfig,
   subscribeKvConfig,
+  subscribeKvConfigSaveError,
+  flushKvConfig,
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
@@ -511,6 +513,14 @@ function MaintenanceView() {
   const [editingValue, setEditingValue] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMsg, setToastMsg] = useState("Saved");
+  // Server-side save state. Before this flag existed the UI flipped to
+  // "Auto-saved" as soon as setKvConfig returned — which is before the PUT
+  // even leaves the browser — so a 401 / 500 on the actual request left
+  // the badge green while the server still held the old value. Users
+  // would add a dozen gaps, see "Auto-saved", refresh, and find only the
+  // original 7. saveError is set from kv-config's error listener and
+  // cleared on the next successful save.
+  const [saveError, setSaveError] = useState<string>("");
 
   // Fabrics from API
   const [fabricsList, setFabricsList] = useState<FabricTrackingItem[]>([]);
@@ -541,26 +551,66 @@ function MaintenanceView() {
       setConfig(latest);
       setSavedSnapshot(JSON.stringify(latest));
     });
+    // Server rejected the PUT — flip the badge from green "Auto-saved" to
+    // amber "Save failed" and surface the HTTP error so the user knows
+    // their edits haven't actually persisted yet. Cleared on next
+    // successful flush below.
+    const offErr = subscribeKvConfigSaveError(VARIANTS_CONFIG_KEY, (e) => {
+      setSaveError(e.message);
+    });
     return () => {
       cancelled = true;
       off();
+      offErr();
     };
   }, []);
 
-  // Auto-save: persist config to D1 whenever it changes (debounced inside the
-  // kv-config helper itself). This ensures changes are never lost even if user
-  // forgets to click Save.
+  // Auto-save: push every config change to D1 and wait for server
+  // confirmation before marking the snapshot as saved. The previous
+  // implementation optimistically advanced savedSnapshot the instant the
+  // setTimeout fired, which meant a rejected PUT (expired auth, 500,
+  // offline) silently dropped changes while the UI still said
+  // "Auto-saved". Now: schedule a 500ms debounce, write to the in-memory
+  // cache via patchVariantsConfig, then flushKvConfig to force the
+  // pending PUT and await the HTTP response. Only on ok=true do we move
+  // the snapshot forward; on failure the saveError listener flips the
+  // badge to amber and leaves isDirty true so the user can retry.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const snap = JSON.stringify(config);
-    if (snap === savedSnapshot) return; // nothing changed
-    const t = setTimeout(() => {
+    if (snap === savedSnapshot) return;
+    let cancelled = false;
+    const t = setTimeout(async () => {
       saveMaintenanceConfig(config);
-      setSavedSnapshot(snap);
+      const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
+      if (cancelled) return;
+      if (ok) {
+        setSavedSnapshot(snap);
+        setSaveError("");
+      }
     }, 500);
-    return () => clearTimeout(t);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
+
+  // Best-effort flush of any pending save when the user navigates away or
+  // closes the tab while we still have dirty state. Without this, a quick
+  // add-then-refresh loses the add because the 500ms debounce never fires.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const handler = () => {
+      if (JSON.stringify(config) !== savedSnapshot) {
+        // Fire-and-forget; the browser usually gives us enough time for a
+        // small JSON PUT. We can't await here — unload is synchronous.
+        void flushKvConfig(VARIANTS_CONFIG_KEY);
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [config, savedSnapshot]);
 
   // Fetch fabrics when tab switches to fabrics
   useEffect(() => {
@@ -651,10 +701,16 @@ function MaintenanceView() {
     setEditingValue("");
   }
 
-  function handleSave() {
+  async function handleSave() {
     saveMaintenanceConfig(config);
-    setSavedSnapshot(JSON.stringify(config));
-    showToast("Variants saved");
+    const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
+    if (ok) {
+      setSavedSnapshot(JSON.stringify(config));
+      setSaveError("");
+      showToast("Variants saved");
+    } else {
+      showToast("Save failed — check your connection and try again");
+    }
   }
 
   function handleReset() {
@@ -670,13 +726,22 @@ function MaintenanceView() {
           Centralized master data for product variants. Used by BOM, Sales Orders, and Production.
         </p>
         <div className="flex items-center gap-2">
-          {isDirty ? (
+          {saveError ? (
+            <span
+              className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D] bg-[#F9E1DA] border border-[#E4B3A7] rounded-md px-2 py-1"
+              title={saveError}
+            >
+              <AlertCircle className="w-3.5 h-3.5" />
+              Save failed — click Save Changes
+            </span>
+          ) : isDirty ? (
             <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D597] rounded-md px-2 py-1">
               <AlertCircle className="w-3.5 h-3.5" />
               Saving...
             </span>
           ) : savedSnapshot !== JSON.stringify(DEFAULT_MAINTENANCE_CONFIG) ? (
             <span className="inline-flex items-center gap-1.5 text-xs text-[#4F7C3A] bg-[#EEF3E4] border border-[#C6DBA8] rounded-md px-2 py-1">
+              <Check className="w-3.5 h-3.5" />
               Auto-saved
             </span>
           ) : null}
@@ -1296,7 +1361,16 @@ export default function ProductsPage() {
               <tr>
                 <th colSpan={colSpanN} className="p-0">
                   <div className="grid" style={{ gridTemplateColumns: gridCols }}>
-                    <div className={`${thCls} text-left`}>Product Code</div>
+                    {/* Product Code header carries an invisible chevron
+                      * spacer so the "Product Code" label lines up with
+                      * the body cell's code text — the body row renders
+                      * an expand arrow before the code, and without this
+                      * placeholder the header text sat ~20px to the left
+                      * of the code values below. */}
+                    <div className={`${thCls} text-left flex items-center gap-1.5`}>
+                      <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
+                      Product Code
+                    </div>
                     <div className={`${thCls} text-left`}>Description</div>
                     {isSofa ? (
                       <>

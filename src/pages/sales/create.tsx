@@ -481,8 +481,18 @@ function CreateSalesOrderPage() {
       return;
     }
     const tier = prod.seatHeightPrices.find(t => t.height === value);
+    // For sofa items, the "Size" column downstream (SO detail / production
+    // sheet) reads item.sizeLabel. The module code already lives in the
+    // productCode (e.g. "5530-2A(LHF)") so "Size" should carry the seat
+    // height — the variable variant — instead of the module. Propagate
+    // the seat-height value into sizeLabel + sizeCode whenever it's
+    // picked here so new rows are stored consistently; old rows keep
+    // whatever was saved originally (data migration is a separate task).
+    const sizeCode = value.replace(/"/g, "").trim();
     propagateSofaVariant(idx, {
       seatHeight: value,
+      sizeLabel: value,
+      sizeCode,
       basePriceSen: tier?.priceSen || 0,
     });
   };

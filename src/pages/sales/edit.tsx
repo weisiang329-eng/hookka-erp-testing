@@ -336,6 +336,10 @@ export default function EditSalesOrderPage() {
     }
   };
 
+  // For sofa, propagate seat-height into sizeLabel + sizeCode so the "Size"
+  // column downstream (detail page, production sheet) carries the seat
+  // height — the variable variant — instead of the module code, which
+  // already lives in productCode. Mirrors the same fix in create.tsx.
   const selectSeatHeight = (idx: number, value: string) => {
     const item = items[idx];
     const prod = products.find(p => p.id === item.productId);
@@ -344,8 +348,11 @@ export default function EditSalesOrderPage() {
       return;
     }
     const tier = prod.seatHeightPrices.find(t => t.height === value);
+    const sizeCode = value.replace(/"/g, "").trim();
     updateItem(idx, {
       seatHeight: value,
+      sizeLabel: value,
+      sizeCode,
       basePriceSen: tier?.priceSen || 0,
     });
   };

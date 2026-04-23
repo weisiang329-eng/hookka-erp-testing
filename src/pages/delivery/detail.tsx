@@ -162,8 +162,16 @@ export default function DeliveryDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: target }),
       });
-      const data = await res.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to advance status (HTTP ${res.status})`);
+        return;
+      }
       if (data.success) setOrder(data.data);
+      else toast.error(data.error || "Failed to advance status");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — status unchanged");
     } finally {
       setUpdating(false);
     }
@@ -181,13 +189,20 @@ export default function DeliveryDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = await res.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast.error(data?.error || `Failed to save proof of delivery (HTTP ${res.status})`);
+        return;
+      }
       if (data.success) {
         setOrder(data.data);
         setPodOpen(false);
       } else {
         toast.error(data.error || "Failed to save proof of delivery");
       }
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — POD not saved");
     } finally {
       setUpdating(false);
     }

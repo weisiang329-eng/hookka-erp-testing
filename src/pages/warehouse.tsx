@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/toast";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
@@ -104,6 +105,28 @@ export default function WarehousePage() {
   const [historyTo, setHistoryTo] = useState("");
 
   const [actionLoading, setActionLoading] = useState(false);
+  const { toast } = useToast();
+
+  // Small helper to assert a fetch succeeded before trusting its JSON body.
+  // Warehouse mutations chain 2-3 calls (rack assign → movement log → PO
+  // update) and a silent mid-sequence failure leaves the inventory books
+  // drifting from reality — item shows stocked in UI, server hasn't
+  // recorded the movement, next audit finds ghost stock. throw's caught
+  // by the calling try/catch which surfaces a toast + aborts the chain.
+  async function postOrThrow(url: string, opts: RequestInit): Promise<void> {
+    let res: Response;
+    try {
+      res = await fetch(url, opts);
+    } catch (e) {
+      throw new Error(e instanceof Error ? e.message : "Network error");
+    }
+    if (!res.ok) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let body: any = {};
+      try { body = await res.json(); } catch { /* ignore */ }
+      throw new Error(body?.error || `${opts.method || "GET"} ${url} failed (HTTP ${res.status})`);
+    }
+  }
 
   // ---------- Data Fetching ----------
   const fetchRackLocations = useCallback(async () => {
@@ -163,7 +186,7 @@ export default function WarehousePage() {
       if (!po) return;
 
       // 1. Assign rack location
-      await fetch("/api/warehouse", {
+      await postOrThrow("/api/warehouse", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -178,7 +201,7 @@ export default function WarehousePage() {
       });
 
       // 2. Record stock movement
-      await fetch("/api/warehouse/movements", {
+      await postOrThrow("/api/warehouse/movements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -195,7 +218,7 @@ export default function WarehousePage() {
       });
 
       // 3. Update production order stockedIn status
-      await fetch(`/api/production-orders/${po.id}`, {
+      await postOrThrow(`/api/production-orders/${po.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -210,8 +233,9 @@ export default function WarehousePage() {
       setStockInTarget("");
       setSelectedPO("");
       setStockInNote("");
+      toast.success("Stocked in");
     } catch (e) {
-      console.error("Stock in failed", e);
+      toast.error(e instanceof Error ? e.message : "Stock in failed — nothing saved");
     } finally {
       setActionLoading(false);
     }
@@ -224,7 +248,7 @@ export default function WarehousePage() {
     setActionLoading(true);
     try {
       // 1. Record stock movement for the specific item being removed.
-      await fetch("/api/warehouse/movements", {
+      await postOrThrow("/api/warehouse/movements", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -241,7 +265,7 @@ export default function WarehousePage() {
       });
 
       // 2. Remove only the selected item from the rack (by productCode).
-      await fetch(
+      await postOrThrow(
         `/api/warehouse/${stockOutTarget.id}?productCode=${encodeURIComponent(item.productCode)}`,
         { method: "DELETE" }
       );
@@ -251,8 +275,9 @@ export default function WarehousePage() {
       setStockOutTarget(null);
       setStockOutItemIndex(0);
       setStockOutReason("");
+      toast.success("Stocked out");
     } catch (e) {
-      console.error("Stock out failed", e);
+      toast.error(e instanceof Error ? e.message : "Stock out failed — inventory unchanged");
     } finally {
       setActionLoading(false);
     }

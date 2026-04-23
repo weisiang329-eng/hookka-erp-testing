@@ -1174,21 +1174,20 @@ export default function ProductionPage() {
       }
     }
 
-    // Fab Cut merge: the cutter lays one bolt of fabric down and cuts every
-    // same-fabric component for the PO in a single pass, so collapsing the
-    // per-WIP rows (e.g. sofa Base + Cushion + Arm) into one super-row
-    // matches the physical workflow. Grouping key is (poId, colour, size)
-    // because those are the attributes that actually force a re-lay of the
-    // fabric — different size on the same bolt still means a separate cut.
-    // One-component groups are left untouched. Other depts (Fab Sew, Foam,
-    // Wood Cut, Framing, Webbing, Upholstery, Packing) keep per-WIP rows
-    // since each component is handled individually from that point on.
+    // Fab Cut merge: one finished good = one row. The cutter lays a bolt
+    // down once per PO and cuts every component (Base + Cushion + Arm for
+    // sofa, or Divan + HB for bedframe) in a single pass, so collapsing
+    // all FAB_CUT job cards that belong to the same PO into one super-row
+    // matches the physical workflow. Grouping key is poId because a single
+    // PO = a single FG and inherits one productCode / fabric / size from
+    // the SO line. Other depts (Fab Sew, Foam, Wood Cut, Framing, Webbing,
+    // Upholstery, Packing) keep per-WIP rows since each component is
+    // handled individually from that point on.
     if (activeTab === "FAB_CUT") {
       const groups = new Map<string, DeptRow[]>();
       for (const r of rows) {
-        const key = `${r.poId}::${r.colour}::${r.size}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(r);
+        if (!groups.has(r.poId)) groups.set(r.poId, []);
+        groups.get(r.poId)!.push(r);
       }
       const merged: DeptRow[] = [];
       let rowN = 1;
@@ -1208,7 +1207,7 @@ export default function ProductionPage() {
         const anyDone = group.some((g) => !!g.completedDate);
         merged.push({
           ...first,
-          id: `${first.poId}:fabcut-merged:${first.colour}:${first.size}`,
+          id: `${first.poId}:fabcut-merged`,
           rowNo: rowN++,
           wipType: types || first.wipType,
           wip: wips || first.wip,

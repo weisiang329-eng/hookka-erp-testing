@@ -1000,6 +1000,12 @@ export default function ProductionPage() {
     sched_WEBBING: DeptSched;
     sched_UPHOLSTERY: DeptSched;
     sched_PACKING: DeptSched;
+    // Set on the FAB_CUT tab when multiple same-fabric WIPs on the same PO
+    // get merged into one row (so the operator lays one bolt down and cuts
+    // all components in one pass). Completing / clearing the row fans the
+    // patch across every id in this array; other depts leave it undefined
+    // and keep per-WIP behaviour.
+    _mergedJobCardIds?: string[];
   };
 
   // Build a DeptSched from a candidate JobCard (or null if no card exists).
@@ -1167,6 +1173,57 @@ export default function ProductionPage() {
         });
       }
     }
+
+    // Fab Cut merge: the cutter lays one bolt of fabric down and cuts every
+    // same-fabric component for the PO in a single pass, so collapsing the
+    // per-WIP rows (e.g. sofa Base + Cushion + Arm) into one super-row
+    // matches the physical workflow. Grouping key is (poId, colour, size)
+    // because those are the attributes that actually force a re-lay of the
+    // fabric — different size on the same bolt still means a separate cut.
+    // One-component groups are left untouched. Other depts (Fab Sew, Foam,
+    // Wood Cut, Framing, Webbing, Upholstery, Packing) keep per-WIP rows
+    // since each component is handled individually from that point on.
+    if (activeTab === "FAB_CUT") {
+      const groups = new Map<string, DeptRow[]>();
+      for (const r of rows) {
+        const key = `${r.poId}::${r.colour}::${r.size}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
+      }
+      const merged: DeptRow[] = [];
+      let rowN = 1;
+      for (const group of groups.values()) {
+        if (group.length === 1) {
+          merged.push({ ...group[0], rowNo: rowN++ });
+          continue;
+        }
+        const first = group[0];
+        // Sort children for stable display order (Base → Cushion → Arm,
+        // Divan → HB, etc.) — wipType's alpha order happens to match.
+        group.sort((a, b) => (a.wipType || "").localeCompare(b.wipType || ""));
+        const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
+        const wips = group.map((g) => g.wip).filter(Boolean).join("  |  ");
+        // Only treat the group as completed when every child has a date.
+        const allDone = group.every((g) => !!g.completedDate);
+        const anyDone = group.some((g) => !!g.completedDate);
+        merged.push({
+          ...first,
+          id: `${first.poId}:fabcut-merged:${first.colour}:${first.size}`,
+          rowNo: rowN++,
+          wipType: types || first.wipType,
+          wip: wips || first.wip,
+          completedDate: allDone ? first.completedDate : "",
+          status: allDone
+            ? "COMPLETED"
+            : anyDone
+              ? "IN_PROGRESS"
+              : first.status,
+          _mergedJobCardIds: group.map((g) => g.jobCardId),
+        });
+      }
+      return merged;
+    }
+
     return rows;
   }, [filteredOrders, activeTab]);
 
@@ -1333,7 +1390,14 @@ export default function ProductionPage() {
             if (leavingDone) {
               patch.completedDate = "";
             }
-            patchJobCard(row.poId, row.jobCardId, patch);
+            // Fan-out for FAB_CUT merged rows so a status change applies
+            // to every component that was cut in the same pass.
+            const ids = row._mergedJobCardIds && row._mergedJobCardIds.length > 0
+              ? row._mergedJobCardIds
+              : [row.jobCardId];
+            for (const jcId of ids) {
+              patchJobCard(row.poId, jcId, patch);
+            }
           }}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -1358,6 +1422,12 @@ export default function ProductionPage() {
   // UX so the user can fill/clear from one place.
   const renderCompletionCell = (row: DeptRow) => {
     const has = !!row.completedDate;
+    // Fan-out for FAB_CUT merged rows — stamp / clear the date on every
+    // child job card so the whole cut-batch flips state together. Single-
+    // row jcs fall through the default single-id path.
+    const ids = row._mergedJobCardIds && row._mergedJobCardIds.length > 0
+      ? row._mergedJobCardIds
+      : [row.jobCardId];
     return (
       <div
         className="relative w-full h-full min-h-[22px] cursor-pointer"
@@ -1366,16 +1436,18 @@ export default function ProductionPage() {
           openDatePicker(
             row.completedDate,
             (v) => {
-              patchJobCard(row.poId, row.jobCardId, {
-                completedDate: v,
-                status: v ? "COMPLETED" : "WAITING",
-              });
+              for (const jcId of ids) {
+                patchJobCard(row.poId, jcId, {
+                  completedDate: v,
+                  status: v ? "COMPLETED" : "WAITING",
+                });
+              }
             },
             e.currentTarget,
           );
         }}
         onDoubleClick={(e) => e.stopPropagation()}
-        title="Click to set completion date"
+        title={ids.length > 1 ? `Click to set completion date (${ids.length} components)` : "Click to set completion date"}
       >
         <span
           className={`flex items-center justify-center px-1.5 py-[2px] rounded-sm text-[10px] font-semibold whitespace-nowrap leading-tight w-full ${

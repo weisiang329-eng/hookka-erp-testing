@@ -25,24 +25,31 @@ jobs:
 
       - run: npm run build
 
-      # Apply D1 migrations to the remote database ONLY when deploying main.
-      # Feature branches share the same D1 (no preview binding configured)
-      # so we deliberately do not mutate production schema from a preview.
-      - name: Apply D1 migrations (production only)
-        if: github.ref == 'refs/heads/main'
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply hookka-erp-db --remote
-
-      # Deploy. For main this hits the production branch; for any other
-      # branch (e.g. claude/review-xxx) Cloudflare Pages creates a preview
-      # deployment at https://<branch-slug>.hookka-erp-testing.pages.dev
-      # so you can click through the changes before merging.
+      # Deploy first so code changes always reach production/preview even
+      # if the follow-up migration step fails (e.g. API token missing
+      # D1:Edit scope). For main this hits the production branch; any
+      # other branch (e.g. claude/review-xxx) becomes a preview at
+      # https://<branch-slug>.hookka-erp-testing.pages.dev.
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
+
+      # Apply D1 migrations after the deploy, and only for main. Feature
+      # branches share the same D1 so preview pushes must never mutate
+      # the production schema. `continue-on-error: true` keeps a failing
+      # migration (typically insufficient API-token scope) from masking
+      # an otherwise-successful deploy — the step still surfaces red in
+      # the Actions UI so the missing permission is visible, but the
+      # workflow as a whole reports success and future pushes aren't
+      # blocked.
+      - name: Apply D1 migrations (production only)
+        if: github.ref == 'refs/heads/main'
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: d1 migrations apply hookka-erp-db --remote

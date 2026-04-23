@@ -825,18 +825,37 @@ function LineItemCard({
 
   const isSofa = item.itemCategory === "SOFA";
 
-  // Filter options based on maintenance config — bedframe vs sofa
+  // Options derived from the maintenance config (kv_config:variants-config)
+  // — treat the config as the source of truth. The hardcoded *Options lists
+  // are fallbacks used only when the config hasn't hydrated yet; they must
+  // not be used to filter the config's contents, otherwise any value the
+  // user adds in Product Maintenance above the hardcoded range (e.g. gap
+  // 11"–20", a custom special-order name) silently drops out of the SO
+  // dropdowns. Map each config entry into the existing option shape and
+  // carry its saved priceSen through as the surcharge so pricing still
+  // works for user-added entries.
+  function configToHeightOptions(arr: unknown[]): { height: string; surcharge: number }[] {
+    return arr.map((v) => ({
+      height:
+        typeof v === "object" && v && "value" in v
+          ? String((v as { value: unknown }).value)
+          : String(v),
+      surcharge:
+        typeof v === "object" && v && "priceSen" in v
+          ? Number((v as { priceSen: unknown }).priceSen) || 0
+          : 0,
+    }));
+  }
+
   const availableDivanHeights = useMemo(() => {
     if (!maintenanceConfig?.divanHeights) return divanHeightOptions;
-    const vals = extractValues(maintenanceConfig.divanHeights);
-    return divanHeightOptions.filter(o => vals.includes(o.height));
+    return configToHeightOptions(maintenanceConfig.divanHeights);
   }, [maintenanceConfig]);
 
   const availableLegHeights = useMemo(() => {
     const key = isSofa ? "sofaLegHeights" : "legHeights";
     if (!maintenanceConfig?.[key]) return legHeightOptions;
-    const vals = extractValues(maintenanceConfig[key]);
-    return legHeightOptions.filter(o => vals.includes(o.height));
+    return configToHeightOptions(maintenanceConfig[key]);
   }, [maintenanceConfig, isSofa]);
 
   const availableSofaSizes = useMemo(() => {
@@ -846,15 +865,34 @@ function LineItemCard({
 
   const availableGapHeights = useMemo(() => {
     if (!maintenanceConfig?.gaps) return gapHeightOptions;
-    const vals = extractValues(maintenanceConfig.gaps);
-    return gapHeightOptions.filter(g => vals.includes(g));
+    return extractValues(maintenanceConfig.gaps);
   }, [maintenanceConfig]);
 
   const availableSpecials = useMemo(() => {
     const key = isSofa ? "sofaSpecials" : "specials";
     if (!maintenanceConfig?.[key]) return specialOrderOptions;
-    const vals = extractValues(maintenanceConfig[key]);
-    return specialOrderOptions.filter(o => vals.includes(o.name));
+    return maintenanceConfig[key].map((v) => {
+      const value =
+        typeof v === "object" && v && "value" in v
+          ? String((v as { value: unknown }).value)
+          : String(v);
+      const surcharge =
+        typeof v === "object" && v && "priceSen" in v
+          ? Number((v as { priceSen: unknown }).priceSen) || 0
+          : 0;
+      // Fall back to matching an existing hardcoded option's code/notes so
+      // any pricing rule tied to the code keeps working; otherwise derive
+      // a stable code from the name.
+      const matched = specialOrderOptions.find((o) => o.name === value);
+      return matched
+        ? { ...matched, surcharge }
+        : {
+            code: value.toUpperCase().replace(/[^A-Z0-9]+/g, "_"),
+            name: value,
+            surcharge,
+            notes: "",
+          };
+    });
   }, [maintenanceConfig, isSofa]);
 
   // Helper: get config surcharge for a given option value, or fall back to default

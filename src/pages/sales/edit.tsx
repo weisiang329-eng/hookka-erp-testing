@@ -167,15 +167,37 @@ export default function EditSalesOrderPage() {
     return fallback;
   };
 
-  // Get available special orders for a category, filtered from config
+  // Build the available special-order list from the maintenance config
+  // (kv_config:variants-config). The config is the source of truth; the
+  // hardcoded specialOrderOptions array is only a shape reference so we
+  // can preserve the `code` + `notes` for entries that happen to match by
+  // name. User-added entries (not in the hardcoded list) still show up
+  // with a derived code and their saved priceSen carried through — this
+  // is what the old filter-against-hardcoded approach was silently
+  // dropping whenever Product Maintenance gained a new option.
   const getAvailableSpecials = (isSofa: boolean) => {
     const key = isSofa ? "sofaSpecials" : "specials";
     const cfg = maintenanceConfig?.[key];
-    if (!Array.isArray(cfg)) return specialOrderOptions;
-    const names = cfg.map((c) =>
-      typeof c === "object" && c && "value" in c ? (c as { value: string }).value : String(c),
-    );
-    return specialOrderOptions.filter((o) => names.includes(o.name));
+    if (!Array.isArray(cfg) || cfg.length === 0) return specialOrderOptions;
+    return cfg.map((c) => {
+      const value =
+        typeof c === "object" && c && "value" in c
+          ? String((c as { value: unknown }).value)
+          : String(c);
+      const priceSen =
+        typeof c === "object" && c && "priceSen" in c
+          ? Number((c as { priceSen: unknown }).priceSen) || 0
+          : 0;
+      const matched = specialOrderOptions.find((o) => o.name === value);
+      return matched
+        ? { ...matched, surcharge: priceSen }
+        : {
+            code: value.toUpperCase().replace(/[^A-Z0-9]+/g, "_"),
+            name: value,
+            surcharge: priceSen,
+            notes: "",
+          };
+    });
   };
 
   const toggleSpecialOrder = (idx: number, code: string) => {

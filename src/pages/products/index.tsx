@@ -831,7 +831,10 @@ function MaintenanceView() {
                   />
                   {isPricedTab && (
                     <div className="flex items-center gap-1">
-                      <span className="text-xs text-gray-500">+RM</span>
+                      {/* Surcharge can be negative — some variants are a
+                        * discount off the base price (e.g. "No Leg" = -RM10).
+                        * Label stays neutral; the number carries its sign. */}
+                      <span className="text-xs text-gray-500">RM</span>
                       <input
                         type="number"
                         step="0.01"
@@ -891,7 +894,7 @@ function MaintenanceView() {
                         </div>
                         <div className="flex items-center gap-3 flex-shrink-0">
                           <div className="flex items-center gap-1">
-                            <span className="text-xs text-gray-400">+RM</span>
+                            <span className="text-xs text-gray-400">RM</span>
                             <input
                               type="number"
                               step="0.01"

@@ -1334,7 +1334,12 @@ export function DataGrid<T extends Record<string, any>>({
                       "select-none"
                     )}
                   >
-                    <span className="inline-flex items-center gap-0.5">
+                    <span
+                      className={cn(
+                        "inline-flex items-center gap-0.5",
+                        (col.align === "right" || col.type === "currency" || col.type === "number") && "flex-row-reverse"
+                      )}
+                    >
                       <span
                         className="cursor-pointer hover:text-[#000] hover:bg-[#E5E5E5] rounded px-0.5"
                         onClick={() => handleSort(col)}

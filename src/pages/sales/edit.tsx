@@ -656,7 +656,21 @@ export default function EditSalesOrderPage() {
                       <SearchableSelect
                         value={item.seatHeight}
                         onChange={(val) => selectSeatHeight(idx, val)}
-                        options={SEAT_HEIGHT_OPTIONS.map(h => ({ value: h, label: h }))}
+                        options={(() => {
+                          // Source from kv_config.sofaSizes so anything the user
+                          // adds in Product Maintenance is picked up. Fall back
+                          // to the hardcoded list only when the config hasn't
+                          // hydrated yet.
+                          const cfg = maintenanceConfig?.sofaSizes;
+                          const arr = Array.isArray(cfg) && cfg.length > 0
+                            ? cfg.map((v) =>
+                                typeof v === "object" && v && "value" in v
+                                  ? String((v as { value: unknown }).value)
+                                  : String(v),
+                              )
+                            : (SEAT_HEIGHT_OPTIONS as unknown as string[]);
+                          return arr.map(h => ({ value: h, label: h }));
+                        })()}
                         placeholder="Select size..."
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"
                       />

@@ -7315,6 +7315,8 @@ const SF_BASE: BOMTemplateProcess[] = [
   { dept: "Wood Cutting",  deptCode: "WOOD_CUT", category: "CAT 4", minutes: 30 },
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 4", minutes: 40  },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 4", minutes: 20  },
+  { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 4", minutes: 45 },
+  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 3", minutes: 25 },
 ];
 const SF_CUSHION: BOMTemplateProcess[] = [
   { dept: "Fabric Sewing", deptCode: "FAB_SEW", category: "CAT 1", minutes: 40 },
@@ -7322,6 +7324,8 @@ const SF_CUSHION: BOMTemplateProcess[] = [
   { dept: "Wood Cutting",  deptCode: "WOOD_CUT", category: "CAT 1", minutes: 15 },
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 1", minutes: 15 },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 1", minutes: 15 },
+  { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 1", minutes: 15 },
+  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 1", minutes: 10 },
 ];
 const SF_ARM: BOMTemplateProcess[] = [
   { dept: "Fabric Sewing", deptCode: "FAB_SEW", category: "CAT 2", minutes: 30 },
@@ -7329,6 +7333,8 @@ const SF_ARM: BOMTemplateProcess[] = [
   { dept: "Wood Cutting",  deptCode: "WOOD_CUT", category: "CAT 1", minutes: 10 },
   { dept: "Framing",       deptCode: "FRAMING", category: "CAT 3", minutes: 25 },
   { dept: "Webbing",       deptCode: "WEBBING", category: "CAT 1", minutes: 10 },
+  { dept: "Upholstery",    deptCode: "UPHOLSTERY", category: "CAT 2", minutes: 25 },
+  { dept: "Packing",       deptCode: "PACKING",    category: "CAT 2", minutes: 15 },
 ];
 
 function mkBedframeBOMTemplate(productCode: string, baseModel: string, sizeLabel: string, sizeCode: string): BOMTemplate {

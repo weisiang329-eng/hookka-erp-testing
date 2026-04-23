@@ -76,6 +76,16 @@ export default function MaintenancePage() {
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [logs, setLogs] = useState<MaintenanceLog[]>([]);
 
+  // Equipment-type options seeded from the system defaults plus every
+  // distinct `type` already recorded in the equipment master, so adding a
+  // machine with a brand-new type makes that type instantly reusable via
+  // the datalist without a separate admin screen.
+  const knownEquipmentTypes = useMemo(() => {
+    const set = new Set<string>(EQUIPMENT_TYPES);
+    for (const e of equipment) if (e.type) set.add(e.type);
+    return [...set].sort();
+  }, [equipment]);
+
   // Forms
   const [showAddForm, setShowAddForm] = useState(false);
   const [showLogForm, setShowLogForm] = useState<string | null>(null); // equipmentId
@@ -257,6 +267,16 @@ export default function MaintenancePage() {
 
   return (
     <div className="space-y-6">
+      {/* Shared equipment-type suggestions for the add/edit forms. Datalist
+        * is the cheapest way to let the user pick a common type *or* type a
+        * brand-new one — the input stays free-text so nothing is gated by
+        * a predefined enum, while the suggestions cover the hardcoded
+        * defaults plus every type already on record. */}
+      <datalist id="equipment-type-options">
+        {knownEquipmentTypes.map((t) => (
+          <option key={t} value={t}>{t.replace(/_/g, " ")}</option>
+        ))}
+      </datalist>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -354,9 +374,7 @@ export default function MaintenancePage() {
                     <option value="">Select Department</option>
                     {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
-                  <select name="type" required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]">
-                    {EQUIPMENT_TYPES.map((t) => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
-                  </select>
+                  <input name="type" list="equipment-type-options" required placeholder="Equipment Type (type or pick)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="maintenanceCycleDays" type="number" defaultValue={30} placeholder="Cycle (days)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="purchaseDate" type="date" required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="notes" placeholder="Notes (optional)" className="sm:col-span-2 h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
@@ -385,9 +403,7 @@ export default function MaintenancePage() {
                   <select name="department" defaultValue={editingEquipment.department} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]">
                     {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
-                  <select name="type" defaultValue={editingEquipment.type} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]">
-                    {EQUIPMENT_TYPES.map((t) => <option key={t} value={t}>{t.replace(/_/g, " ")}</option>)}
-                  </select>
+                  <input name="type" list="equipment-type-options" defaultValue={editingEquipment.type} required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <select name="status" defaultValue={editingEquipment.status} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]">
                     <option value="OPERATIONAL">OPERATIONAL</option>
                     <option value="MAINTENANCE">MAINTENANCE</option>

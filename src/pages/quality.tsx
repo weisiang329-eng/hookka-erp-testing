@@ -70,12 +70,19 @@ const RESPONSIBLE_DEPT_LABELS: Record<string, string> = {
 const QC_DEPARTMENTS = ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"] as const;
 type QCDepartment = (typeof QC_DEPARTMENTS)[number];
 
+// Fallback labels for QC inspection views — covers both legacy keys from the
+// old hardcoded dropdown and the current BOM wipType values. Unknown keys
+// fall back to the raw code via `|| componentType` at the call site.
 const COMPONENT_TYPE_LABELS: Record<string, string> = {
   HB: "Headboard",
+  HEADBOARD: "Headboard",
   DIVAN: "Divan",
   BACK_CUSHION: "Back Cushion",
   ARMREST: "Armrest",
   SEAT_CUSHION: "Seat Cushion",
+  SOFA_BASE: "Base",
+  SOFA_CUSHION: "Cushion",
+  SOFA_ARMREST: "Armrest",
 };
 
 const DEPT_CHECKLIST: Record<string, string[]> = {
@@ -414,6 +421,17 @@ export default function QualityPage() {
   const [formChecklist, setFormChecklist] = useState<Record<string, boolean>>({});
   const [submitting, setSubmitting] = useState(false);
 
+  // BOM templates — used to derive the Component Type dropdown from the
+  // actual WIP types in the chosen product category. Replaces the old
+  // hardcoded [HB, DIVAN] / [BACK_CUSHION, ARMREST, SEAT_CUSHION] lists
+  // which drifted from the real wipType values (DIVAN / HEADBOARD /
+  // SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST) in bom_templates.
+  type BomTemplateLite = {
+    category?: string;
+    wipComponents?: Array<{ wipType?: string; wipCode?: string }>;
+  };
+  const [bomTemplates, setBomTemplates] = useState<BomTemplateLite[]>([]);
+
   // ── Returns state ──────────────────────────────────────────────────────────
   // D1 is source of truth; SAMPLE_RETURNS kept only as a silent fallback if
   // the API is unreachable, so the page always renders with something.
@@ -488,11 +506,49 @@ export default function QualityPage() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d) setDefects(unwrap(d) as DefectEntry[]); })
       .catch(() => {});
+    fetch("/api/bom/templates")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (!d) return;
+        const list = unwrap(d) as BomTemplateLite[];
+        setBomTemplates(list);
+      })
+      .catch(() => {});
     fetch("/api/supplier-ncrs")
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => { if (d) setNcrs(unwrap(d) as SupplierNCR[]); })
       .catch(() => {});
   }, []);
+
+  // Component type options — derived from BOM templates for the selected
+  // product category. Pulls unique wipType values off the top-level
+  // wipComponents so the list always matches what the BOM Builder has
+  // defined (DIVAN / HEADBOARD for bedframes, SOFA_BASE / SOFA_CUSHION /
+  // SOFA_ARMREST for sofas). User-added WIP types show up automatically
+  // without touching this page.
+  const componentTypeOptions = useMemo(() => {
+    const byType = new Map<string, string>(); // value → label
+    for (const tpl of bomTemplates) {
+      if ((tpl.category || "").toUpperCase() !== formProductType) continue;
+      for (const wip of tpl.wipComponents || []) {
+        const t = (wip.wipType || "").trim();
+        if (!t) continue;
+        if (!byType.has(t)) {
+          // Prefer a short human label — use wipCode if it looks like a
+          // type name (short, no product-specific suffix), otherwise
+          // prettify the wipType itself.
+          const code = (wip.wipCode || "").trim();
+          const friendly = code && code.length <= 20 && !/\d/.test(code)
+            ? code
+            : t.replace(/_/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+          byType.set(t, friendly);
+        }
+      }
+    }
+    return [...byType.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [bomTemplates, formProductType]);
 
   // ── Inspection KPIs ────────────────────────────────────────────────────────
   const kpis = useMemo(() => {
@@ -1076,10 +1132,9 @@ export default function QualityPage() {
                 <FormField label="Component Type">
                   <select value={formComponentType} onChange={(e) => setFormComponentType(e.target.value)} className={INPUT_CLS}>
                     <option value="">Select component...</option>
-                    {formProductType === "BEDFRAME"
-                      ? [["HB", "Headboard"], ["DIVAN", "Divan"]].map(([k, v]) => <option key={k} value={k}>{v}</option>)
-                      : [["BACK_CUSHION", "Back Cushion"], ["ARMREST", "Armrest"], ["SEAT_CUSHION", "Seat Cushion"]].map(([k, v]) => <option key={k} value={k}>{v}</option>)
-                    }
+                    {componentTypeOptions.map(({ value, label }) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
                   </select>
                 </FormField>
 

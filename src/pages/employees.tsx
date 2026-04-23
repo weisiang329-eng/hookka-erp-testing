@@ -630,8 +630,18 @@ function EmployeeMasterTab({
 
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to delete this employee?")) return;
-    await fetch(`/api/workers/${id}`, { method: "DELETE" });
-    refreshWorkers();
+    try {
+      const res = await fetch(`/api/workers/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json().catch(() => ({}));
+        toast.error(body?.error || `Failed to delete employee (HTTP ${res.status})`);
+        return;
+      }
+      refreshWorkers();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — employee not deleted");
+    }
   };
 
   const columns: Column<Worker>[] = useMemo(

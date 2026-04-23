@@ -134,8 +134,18 @@ export default function InvoiceDetailPage() {
 
   const deleteInvoice = async () => {
     if (!confirm("Delete this invoice?")) return;
-    await fetch(`/api/invoices/${id}`, { method: "DELETE" });
-    navigate("/invoices");
+    try {
+      const res = await fetch(`/api/invoices/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json().catch(() => ({}));
+        setToast(body?.error || `Failed to delete invoice (HTTP ${res.status})`);
+        return;
+      }
+      navigate("/invoices");
+    } catch (e) {
+      setToast(e instanceof Error ? e.message : "Network error — invoice not deleted");
+    }
   };
 
   if (loading) {

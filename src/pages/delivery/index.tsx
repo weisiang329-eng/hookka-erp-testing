@@ -463,10 +463,16 @@ export default function DeliveryPage() {
   const deleteProvider = async (id: string) => {
     if (!confirm("Delete this 3PL provider?")) return;
     try {
-      await fetch(`/api/drivers/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/drivers/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json().catch(() => ({}));
+        toast.error(body?.error || `Failed to delete (HTTP ${res.status})`);
+        return;
+      }
       fetchProviders();
-    } catch {
-      toast.error("Failed to delete");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error — 3PL not deleted");
     }
   };
 

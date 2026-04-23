@@ -649,8 +649,18 @@ function JournalsTab({
   };
 
   const handleDelete = async (id: string) => {
-    await fetch(`/api/accounting/journals/${id}`, { method: "DELETE" });
-    onRefresh();
+    try {
+      const res = await fetch(`/api/accounting/journals/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const body: any = await res.json().catch(() => ({}));
+        alert(body?.error || `Failed to delete journal entry (HTTP ${res.status})`);
+        return;
+      }
+      onRefresh();
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Network error — journal not deleted");
+    }
   };
 
   const columns: Column<JournalEntry>[] = [

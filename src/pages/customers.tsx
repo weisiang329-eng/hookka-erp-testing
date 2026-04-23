@@ -104,12 +104,22 @@ export default function CustomersPage() {
     if (!confirm(`Delete customer "${customer.name}"?`)) return;
     try {
       const res = await fetch(`/api/customers/${customer.id}`, { method: "DELETE" });
-      const json = await res.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const json: any = await res.json().catch(() => ({}));
+      // res.ok guard — a failed DELETE (foreign-key block, 401, 500) would
+      // otherwise let the row disappear from the list locally while the
+      // customer stays in the DB. On next reload it reappears "zombie" style.
+      if (!res.ok) {
+        alert(json?.error || `Failed to delete customer (HTTP ${res.status})`);
+        return;
+      }
       if (json.success) {
         setData((prev) => prev.filter((c) => c.id !== customer.id));
+      } else {
+        alert(json.error || "Failed to delete customer");
       }
-    } catch {
-      // silently ignore
+    } catch (e) {
+      alert(e instanceof Error ? e.message : "Network error — customer not deleted");
     }
   };
 

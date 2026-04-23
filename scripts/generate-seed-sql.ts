@@ -1761,7 +1761,7 @@ write(`-- Total inserted rows: ${totalRows}`);
 
 // ---- Write file ------------------------------------------------------------
 
-const outPath = path.resolve(process.cwd(), "migrations", "seed.sql");
+const outPath = path.resolve(process.cwd(), "scripts", "seed.sql");
 fs.mkdirSync(path.dirname(outPath), { recursive: true });
 fs.writeFileSync(outPath, out.join("\n"), "utf8");
 

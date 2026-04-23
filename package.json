@@ -15,7 +15,7 @@
     "db:create": "wrangler d1 create hookka-erp-db",
     "db:migrate:local": "wrangler d1 migrations apply hookka-erp-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply hookka-erp-db --remote",
-    "db:seed:local": "wrangler d1 execute hookka-erp-db --local --file=./migrations/seed.sql",
+    "db:seed:local": "wrangler d1 execute hookka-erp-db --local --file=./scripts/seed.sql",
     "db:studio": "wrangler d1 execute hookka-erp-db --local --command=\"SELECT name FROM sqlite_master WHERE type='table'\""
   },
   "dependencies": {

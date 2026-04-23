@@ -11,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const SEED = path.resolve(__dirname, "../migrations/seed.sql");
+const SEED = path.resolve(__dirname, "./seed.sql");
 const OUT_DIR = path.resolve(__dirname, "../migrations/seed-chunks");
 const TARGET_BYTES = 400_000;
 

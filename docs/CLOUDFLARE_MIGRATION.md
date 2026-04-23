@@ -157,7 +157,7 @@ app.post("/", async (c) => {
 
 1. Verify all migrated routes work locally with `wrangler pages dev`
 2. `wrangler d1 migrations apply hookka-erp-db --remote` (applies schema to prod D1)
-3. Seed prod once: `wrangler d1 execute hookka-erp-db --remote --file=./migrations/seed.sql`
+3. Seed prod once: `wrangler d1 execute hookka-erp-db --remote --file=./scripts/seed.sql`
 4. Connect GitHub repo to Cloudflare Pages dashboard → auto-deploy on push to main
 5. First deploy → validate all routes on `https://hookka-erp-testing.pages.dev`
 6. (Optional) add custom domain

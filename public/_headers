@@ -1,0 +1,38 @@
+# Cloudflare Pages — cache policy to prevent stale-chunk crashes
+#
+# Problem:  after a deploy, chunk filenames change (they're hash-fingerprinted),
+# but if browsers still serve index.html from cache, it references the OLD
+# chunk names → ChunkLoadError → "Something went wrong" on every page except
+# the one whose chunk happened to still be warm.
+#
+# Fix:  tell the browser/CDN to always re-validate index.html, but cache the
+# hashed assets aggressively (their filename changes on every deploy so
+# "immutable" is safe — different content = different URL).
+
+# Never cache the HTML entry point — always re-fetch to get latest chunk refs
+/
+  Cache-Control: no-cache, no-store, must-revalidate
+  Pragma: no-cache
+  Expires: 0
+
+/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+  Pragma: no-cache
+  Expires: 0
+
+# Hashed assets (Vite fingerprints every chunk + stylesheet) — safe to cache
+# forever. `immutable` tells the browser it won't change, skip conditional
+# revalidation. One-year max-age.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable
+
+# Static public files (no hash) — short cache with must-revalidate so a new
+# favicon/icon still propagates within minutes.
+/favicon.svg
+  Cache-Control: public, max-age=300, must-revalidate
+
+/icons.svg
+  Cache-Control: public, max-age=300, must-revalidate
+
+/pdf.worker.min.mjs
+  Cache-Control: public, max-age=31536000, immutable

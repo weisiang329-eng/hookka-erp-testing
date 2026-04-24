@@ -88,6 +88,9 @@ import payments from "./routes-d1/payments";
 // Phase 4 — production / inventory / supplier
 import productionOrders from "./routes-d1/production-orders";
 import inventory from "./routes-d1/inventory";
+// Phase 4.5 — aggregated WIP endpoint (supersedes client-side
+// deriveWIPFromPO + mergeSofaWIPSets in src/pages/inventory/index.tsx).
+import inventoryWip from "./routes-d1/inventory-wip";
 import rawMaterials from "./routes-d1/raw-materials";
 import rmBatches from "./routes-d1/rm-batches";
 import grn from "./routes-d1/grn";
@@ -165,6 +168,9 @@ app.route("/api/invoices", invoices);
 app.route("/api/payments", payments);
 // Phase 4
 app.route("/api/production-orders", productionOrders);
+// Phase 4.5 — MUST come before /api/inventory so the more-specific path
+// wins route matching (Hono picks the first mounted subapp that matches).
+app.route("/api/inventory/wip", inventoryWip);
 app.route("/api/inventory", inventory);
 app.route("/api/raw-materials", rawMaterials);
 app.route("/api/rm-batches", rmBatches);

@@ -369,6 +369,64 @@ const WIP_TYPE_LABELS: Record<string, string> = {
   SOFA_HEADREST: "Headrest",
 };
 
+// Row shape for the merged-sofa-set grid. Populated from the
+// /api/inventory/wip endpoint's SET rows (wipType === "SET") — the
+// backend owns the (SO, fabric) merge logic as of Phase 4.5.
+type SofaSetRow = {
+  id: string;
+  setLabel: string;
+  salesOrderNo: string;
+  fabric: string;
+  totalQty: number;
+  oldestAgeDays: number;
+  estTotalValueSen: number;
+  components: { wipType: string; qty: number }[];
+  members: WIPItem[];
+};
+
+// Raw response shape from GET /api/inventory/wip. Each row is either a
+// per-component WIPItem (wipType != "SET") or a merged sofa set
+// (wipType === "SET"); the UI splits them at render time.
+type BackendWipRow = {
+  id: string;
+  wipCode: string;
+  wipType: string;
+  category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+  completedBy: string;
+  relatedProduct: string;
+  setQty: number;
+  pieceQty: number;
+  salesOrderNo: string | null;
+  fabric: string;
+  oldestAgeDays: number;
+  estUnitCostSen: number;
+  estTotalValueSen: number;
+  members: Array<{
+    poNo: string;
+    jobCardId: string;
+    wipType: string;
+    quantity: number;
+  }>;
+  components?: Array<{ wipType: string; qty: number }>;
+  memberItemIds?: string[];
+  totalQty: number;
+  sources: Array<{
+    poCode: string;
+    quantity: number;
+    poQty: number;
+    completedDate: string;
+    ageDays: number;
+    fabricCode: string;
+    baseModel: string;
+    itemCategory: string;
+  }>;
+};
+
+// LEGACY — superseded by /api/inventory/wip endpoint (Phase 4.5).
+// The backend now owns edge-detection + label building for FAB_CUT rows.
+// Kept here (commented out below) as a dead-code reference so a grep can
+// resurrect it if we ever see a regression between the two surfaces.
+/*
 // Derive WIP items from production orders.
 // For each WIP group (by wipKey), walk through the dept sequence.
 // A completed dept whose NEXT dept is NOT completed = stock sits here.
@@ -690,6 +748,8 @@ function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
   rows.sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
   return rows;
 }
+*/
+// END LEGACY — /api/inventory/wip owns this logic now.
 
 // Unique itemGroups for RM filter. When D1 has no rows we fall back to a
 // canonical list so the "Add RM" modal still offers a usable item-group
@@ -1027,6 +1087,9 @@ export default function InventoryPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>([]);
   const [poData, setPoData] = useState<ProductionOrderLike[]>([]);
+  // Phase 4.5 — raw rows from /api/inventory/wip. Replaces the old
+  // client-side deriveWIPFromPO + mergeSofaWIPSets pipeline.
+  const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1085,12 +1148,31 @@ export default function InventoryPage() {
       return [];
     };
 
+    // Phase 4.5 — WIP rows come from /api/inventory/wip now. The endpoint
+    // returns a single array containing BOTH per-component rows (wipType !=
+    // "SET") and merged sofa-set rows (wipType === "SET"); the UI splits
+    // them at render time.
+    const fetchWipRows = async (): Promise<BackendWipRow[]> => {
+      try {
+        const json = await cachedFetchJson<{ success?: boolean; data?: BackendWipRow[]; _stub?: boolean }>("/api/inventory/wip");
+        if (json && json.success && Array.isArray(json.data) && !json._stub) {
+          return json.data as BackendWipRow[];
+        }
+      } catch { /* fall through */ }
+      return [];
+    };
+
     (async () => {
-      const [inv, pos] = await Promise.all([fetchInventory(), fetchPOs()]);
+      const [inv, pos, wipRows] = await Promise.all([
+        fetchInventory(),
+        fetchPOs(),
+        fetchWipRows(),
+      ]);
       if (cancelled) return;
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setPoData(pos);
+      setBackendWipRows(wipRows);
       setLoading(false);
     })();
 
@@ -1102,9 +1184,26 @@ export default function InventoryPage() {
     () => deriveFGStock(products, poData),
     [products, poData],
   );
-  const wipItems = useMemo(
-    () => deriveWIPFromPO(poData, products),
-    [poData, products],
+  // Per-component WIPItem rows — projected from backend rows where
+  // wipType !== "SET". Shape preserved so existing wipColumns /
+  // handleDoubleClickWIP / wipDetail dialog work without changes.
+  const wipItems = useMemo<WIPItem[]>(
+    () =>
+      backendWipRows
+        .filter((r) => r.wipType !== "SET")
+        .map((r) => ({
+          id: r.id,
+          wipCode: r.wipCode,
+          wipType: r.wipType,
+          relatedProduct: r.relatedProduct,
+          completedBy: r.completedBy,
+          totalQty: r.totalQty,
+          oldestAgeDays: r.oldestAgeDays,
+          sources: r.sources,
+          estUnitCostSen: r.estUnitCostSen,
+          estTotalValueSen: r.estTotalValueSen,
+        })),
+    [backendWipRows],
   );
 
   // Unique item-groups for the RM filter dropdown — derived from live
@@ -1138,13 +1237,52 @@ export default function InventoryPage() {
     return data;
   }, [wipItems, wipSearch]);
 
-  // Merged-view derivations. Applied to filteredWIP so search narrows both
-  // the set rows (via their member WIPs) and the non-sofa fallback list.
-  const sofaSetRows = useMemo(
-    () => mergeSofaWIPSets(filteredWIP),
-    [filteredWIP],
-  );
+  // Merged-view derivations — both derived from the /api/inventory/wip
+  // response (Phase 4.5). Backend has already merged sofa rows by
+  // (SO, fabric); we just project the SET rows into SofaSetRow shape and
+  // resolve their members from the per-component wipItems array.
+  const wipItemsById = useMemo(() => {
+    const map = new Map<string, WIPItem>();
+    for (const w of wipItems) map.set(w.id, w);
+    return map;
+  }, [wipItems]);
+
+  const sofaSetRows = useMemo<SofaSetRow[]>(() => {
+    const q = wipSearch.trim().toLowerCase();
+    const matchSearch = (row: BackendWipRow): boolean => {
+      if (!q) return true;
+      if (row.wipCode.toLowerCase().includes(q)) return true;
+      if ((row.relatedProduct || "").toLowerCase().includes(q)) return true;
+      if ((row.fabric || "").toLowerCase().includes(q)) return true;
+      if ((row.salesOrderNo || "").toLowerCase().includes(q)) return true;
+      if (row.members.some((m) => m.poNo.toLowerCase().includes(q))) return true;
+      return false;
+    };
+    return backendWipRows
+      .filter((r) => r.wipType === "SET" && matchSearch(r))
+      .map<SofaSetRow>((r) => {
+        const members = (r.memberItemIds || [])
+          .map((id) => wipItemsById.get(id))
+          .filter((w): w is WIPItem => !!w);
+        return {
+          id: r.id,
+          setLabel: r.wipCode,
+          salesOrderNo: r.salesOrderNo || "",
+          fabric: r.fabric,
+          totalQty: r.setQty,
+          oldestAgeDays: r.oldestAgeDays,
+          estTotalValueSen: r.estTotalValueSen,
+          components: r.components || [],
+          members,
+        };
+      })
+      .sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
+  }, [backendWipRows, wipSearch, wipItemsById]);
+
   // Non-sofa WIPs shown alongside sofa set rows when merged-view is on.
+  // Per-component SOFA rows are filtered out here so they only appear when
+  // the user switches to PER_COMPONENT view (otherwise they'd double-count
+  // against the merged SET rows).
   const filteredWIPNonSofa = useMemo(
     () => filteredWIP.filter(
       (w) => !(w.sources.length > 0 && w.sources.every((s) => s.itemCategory === "SOFA")),

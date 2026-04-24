@@ -201,6 +201,76 @@ function parseAutoActions(raw: string | null): string[] {
   }
 }
 
+type IncompleteProduct = {
+  productCode: string;
+  productName: string;
+  reason: string;
+};
+
+// BOM completeness guard: a product is confirm-incomplete when its ACTIVE
+// bom_templates row is missing OR both wipComponents[] AND l1Processes[] are
+// empty. Accessory SKUs (pillows) legitimately have empty wipComponents but
+// at least one l1Process (FAB_CUT/FAB_SEW/PACKING), so those pass. Falls back
+// to the most recent version if no ACTIVE row exists — mirrors the cascade's
+// reverse-schedule lookup.
+async function findIncompleteBomProducts(
+  db: D1Database,
+  items: SalesOrderItemRow[],
+): Promise<IncompleteProduct[]> {
+  const incomplete: IncompleteProduct[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    const productCode = item.productCode ?? "";
+    if (!item.productId || !productCode) continue;
+    if (seen.has(productCode)) continue;
+    seen.add(productCode);
+
+    let bomRow = await db
+      .prepare(
+        `SELECT wipComponents, l1Processes FROM bom_templates
+           WHERE productCode = ? AND versionStatus = 'ACTIVE'
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ wipComponents: string | null; l1Processes: string | null }>();
+    if (!bomRow) {
+      bomRow = await db
+        .prepare(
+          `SELECT wipComponents, l1Processes FROM bom_templates
+             WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+        )
+        .bind(productCode)
+        .first<{ wipComponents: string | null; l1Processes: string | null }>();
+    }
+
+    const parseLen = (raw: string | null): number => {
+      if (!raw) return 0;
+      try {
+        const arr = JSON.parse(raw);
+        return Array.isArray(arr) ? arr.length : 0;
+      } catch {
+        return 0;
+      }
+    };
+
+    const isIncomplete =
+      !bomRow ||
+      (parseLen(bomRow.wipComponents) === 0 &&
+        parseLen(bomRow.l1Processes) === 0);
+
+    if (isIncomplete) {
+      incomplete.push({
+        productCode,
+        productName: item.productName ?? productCode,
+        reason: !bomRow
+          ? "No BOM template exists"
+          : "BOM has no WIP components and no FG-level processes",
+      });
+    }
+  }
+  return incomplete;
+}
+
 function rowToStatusChange(r: SOStatusChangeRow) {
   return {
     id: r.id,
@@ -1572,6 +1642,21 @@ app.post("/:id/confirm", async (c) => {
     .all<SalesOrderItemRow>();
   const items = itemsRes.results ?? [];
 
+  // BOM completeness guard — blocks confirm if any line's product has an
+  // incomplete BOM. Runs BEFORE the status flip and PO cascade so a 422
+  // leaves the SO in its prior status and no production_orders are created.
+  const incompleteProducts = await findIncompleteBomProducts(c.env.DB, items);
+  if (incompleteProducts.length > 0) {
+    return c.json(
+      {
+        success: false,
+        error: "BOM incomplete — cannot confirm. Save as draft first.",
+        details: { incompleteProducts },
+      },
+      422,
+    );
+  }
+
   const { statements: poStmts, created: productionOrders, preExisting } =
     await createProductionOrdersForSO(c.env.DB, existing, items);
 
@@ -2004,6 +2089,59 @@ app.put("/:id", async (c) => {
     // --- DRAFT -> CONFIRMED cascade: auto-create production_orders ---
     let createdProductionOrders: CreatedProductionOrder[] = [];
     if (isDraftToConfirmed) {
+      // BOM completeness guard — checks the items that will actually be
+      // persisted (body.items if provided, else current DB rows). Fires
+      // before batch runs so a 422 leaves the SO + PO tables untouched.
+      const bomCheckItems: SalesOrderItemRow[] = body.items
+        ? (body.items as Array<Record<string, unknown>>).map((item, idx) => ({
+            id: (item.id as string) || "",
+            salesOrderId: id,
+            lineNo: idx + 1,
+            lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
+            productId: (item.productId as string) || "",
+            productCode: (item.productCode as string) || "",
+            productName: (item.productName as string) || "",
+            itemCategory: (item.itemCategory as string) || "BEDFRAME",
+            sizeCode: (item.sizeCode as string) || "",
+            sizeLabel: (item.sizeLabel as string) || "",
+            fabricId: (item.fabricId as string) || "",
+            fabricCode: (item.fabricCode as string) || "",
+            quantity: Number(item.quantity) || 0,
+            gapInches: (item.gapInches as number | null) ?? null,
+            divanHeightInches: (item.divanHeightInches as number | null) ?? null,
+            divanPriceSen: Number(item.divanPriceSen) || 0,
+            legHeightInches: (item.legHeightInches as number | null) ?? null,
+            legPriceSen: Number(item.legPriceSen) || 0,
+            specialOrder: (item.specialOrder as string) || "",
+            specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            basePriceSen: Number(item.basePriceSen) || 0,
+            unitPriceSen: 0,
+            lineTotalSen: 0,
+            notes: (item.notes as string) || "",
+          }))
+        : (
+            await c.env.DB.prepare(
+              "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
+            )
+              .bind(id)
+              .all<SalesOrderItemRow>()
+          ).results ?? [];
+
+      const incompleteProducts = await findIncompleteBomProducts(
+        c.env.DB,
+        bomCheckItems,
+      );
+      if (incompleteProducts.length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: "BOM incomplete — cannot confirm. Save as draft first.",
+            details: { incompleteProducts },
+          },
+          422,
+        );
+      }
+
       // Build the "effective" SO row (merged fields) so the PO cascade uses
       // the freshest customer/hub/date values — body.items may also have
       // replaced items already queued for delete+insert above.

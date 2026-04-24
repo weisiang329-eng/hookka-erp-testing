@@ -8,7 +8,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { calculateUnitPrice, calculateLineTotal } from "@/lib/pricing";
-import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check, AlertTriangle, X } from "lucide-react";
 import type { Customer, Product, FabricItem } from "@/lib/mock-data";
 import {
   divanHeightOptions,
@@ -181,6 +181,13 @@ function CreateSalesOrderPage() {
   const [saving, setSaving] = useState(false);
   const [isClone, setIsClone] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED">("DRAFT");
+  // BOM-incomplete error modal — shown when /confirm returns 422. soId is set
+  // so the "Open SO as Draft" button can navigate to the newly-created SO.
+  const [bomError, setBomError] = useState<{
+    open: boolean;
+    incompleteProducts: Array<{ productCode: string; productName: string; reason: string }>;
+    soId: string | null;
+  }>({ open: false, incompleteProducts: [], soId: null });
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, any[]> | null>(null);
 
@@ -637,15 +644,50 @@ function CreateSalesOrderPage() {
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string } };
-      setSaving(false);
 
       if (!res.ok || !data.success) {
+        setSaving(false);
         toast.error(data.error || `Failed to create order (HTTP ${res.status})`);
         return;
       }
       invalidateCachePrefix("/api/sales-orders");
       invalidateCachePrefix("/api/production-orders");
-      if (data.data?.id) navigate(`/sales/${data.data.id}`);
+      const newId = data.data?.id;
+
+      // POST / always persists as DRAFT. If the user clicked "Create"
+      // (CONFIRMED branch), immediately fire /confirm to run the BOM
+      // guard + PO cascade. A 422 here leaves the SO as DRAFT on the
+      // server — we surface the BOM-incomplete modal and keep the user
+      // on the new SO's detail page.
+      if (status === "CONFIRMED" && newId) {
+        const confirmRes = await fetch(`/api/sales-orders/${newId}/confirm`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ changedBy: "Admin" }),
+        });
+        const confirmData = (await confirmRes.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+          details?: { incompleteProducts?: Array<{ productCode: string; productName: string; reason: string }> };
+        };
+        setSaving(false);
+        if (confirmRes.status === 422 && confirmData.details?.incompleteProducts) {
+          setBomError({ open: true, incompleteProducts: confirmData.details.incompleteProducts, soId: newId });
+          return;
+        }
+        if (!confirmRes.ok || !confirmData.success) {
+          toast.error(confirmData.error || `Order created as DRAFT but confirm failed (HTTP ${confirmRes.status})`);
+          navigate(`/sales/${newId}`);
+          return;
+        }
+        invalidateCachePrefix("/api/sales-orders");
+        invalidateCachePrefix("/api/production-orders");
+        navigate(`/sales/${newId}`);
+        return;
+      }
+
+      setSaving(false);
+      if (newId) navigate(`/sales/${newId}`);
     } catch (e) {
       setSaving(false);
       toast.error(e instanceof Error ? e.message : "Network error — order not saved");
@@ -656,6 +698,60 @@ function CreateSalesOrderPage() {
 
   return (
     <div className="space-y-6">
+      {/* BOM Incomplete Modal — shown on 422 from /confirm after create. */}
+      {bomError.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setBomError({ open: false, incompleteProducts: [], soId: null })} />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Cannot Confirm — BOM Incomplete</h3>
+              </div>
+              <button onClick={() => setBomError({ open: false, incompleteProducts: [], soId: null })} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="text-sm text-[#374151]">
+              Cannot confirm — the following products have no BOM yet:
+            </p>
+            <ul className="space-y-1 text-sm bg-[#FBF3F1] border border-[#E8B2A1] rounded-md p-3 max-h-64 overflow-y-auto">
+              {bomError.incompleteProducts.map((p) => (
+                <li key={p.productCode} className="font-mono text-[#7A2E24]">
+                  {p.productCode}: {p.productName}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-[#6B7280]">
+              Please complete their BOM in Products &rarr; BOM first, then retry. The order has been saved as DRAFT.
+            </p>
+            <div className="flex justify-end gap-3">
+              {bomError.incompleteProducts.length === 1 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const code = bomError.incompleteProducts[0].productCode;
+                    navigate(`/products/bom?sku=${encodeURIComponent(code)}`);
+                  }}
+                >
+                  Open BOM for {bomError.incompleteProducts[0].productCode}
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => {
+                  const soId = bomError.soId;
+                  setBomError({ open: false, incompleteProducts: [], soId: null });
+                  if (soId) navigate(`/sales/${soId}`);
+                }}
+              >
+                Open SO as Draft
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate("/sales")}>
           <ArrowLeft className="h-5 w-5" />

@@ -168,6 +168,12 @@ export default function SalesOrderDetailPage() {
     action: () => void;
   }>({ open: false, title: "", message: "", confirmLabel: "", action: () => {} });
 
+  // BOM-incomplete error modal — shown when /confirm returns 422.
+  const [bomError, setBomError] = useState<{
+    open: boolean;
+    incompleteProducts: Array<{ productCode: string; productName: string; reason: string }>;
+  }>({ open: false, incompleteProducts: [] });
+
   const fetchOrder = useCallback(() => {
     invalidateCachePrefix("/api/sales-orders");
     refreshOrder();
@@ -272,7 +278,13 @@ export default function SalesOrderDetailPage() {
     if (!res.ok) {
       setUpdating(false);
       setModal(prev => ({ ...prev, open: false }));
-      toast.error(data?.error || `Failed to confirm order (HTTP ${res.status})`);
+      // 422 = BOM incomplete. Pop the dedicated modal with the SKU list
+      // instead of a bare toast — server has already left SO in DRAFT.
+      if (res.status === 422 && data?.details?.incompleteProducts) {
+        setBomError({ open: true, incompleteProducts: data.details.incompleteProducts });
+      } else {
+        toast.error(data?.error || `Failed to confirm order (HTTP ${res.status})`);
+      }
       return;
     }
     if (data.success) {
@@ -358,6 +370,56 @@ export default function SalesOrderDetailPage() {
         onConfirm={modal.action}
         onCancel={() => setModal(prev => ({ ...prev, open: false }))}
       />
+
+      {/* BOM Incomplete Modal — shown on 422 from /confirm. */}
+      {bomError.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setBomError({ open: false, incompleteProducts: [] })} />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Cannot Confirm — BOM Incomplete</h3>
+              </div>
+              <button onClick={() => setBomError({ open: false, incompleteProducts: [] })} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="text-sm text-[#374151]">
+              Cannot confirm — the following products have no BOM yet:
+            </p>
+            <ul className="space-y-1 text-sm bg-[#FBF3F1] border border-[#E8B2A1] rounded-md p-3 max-h-64 overflow-y-auto">
+              {bomError.incompleteProducts.map((p) => (
+                <li key={p.productCode} className="font-mono text-[#7A2E24]">
+                  {p.productCode}: {p.productName}
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-[#6B7280]">
+              Please complete their BOM in Products &rarr; BOM first, then retry. The order remains in DRAFT status.
+            </p>
+            <div className="flex justify-end gap-3">
+              {bomError.incompleteProducts.length === 1 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const code = bomError.incompleteProducts[0].productCode;
+                    navigate(`/products/bom?sku=${encodeURIComponent(code)}`);
+                  }}
+                >
+                  Open BOM for {bomError.incompleteProducts[0].productCode}
+                </Button>
+              )}
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setBomError({ open: false, incompleteProducts: [] })}
+              >
+                OK
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Success Banner */}
       {confirmSuccess && (

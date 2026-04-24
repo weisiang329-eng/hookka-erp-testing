@@ -64,6 +64,14 @@ type ProductOption = {
   category: string;
   basePriceSen: number;
   price1Sen?: number | null;
+  // Extra SKU-master fields pulled from /api/products so the quotation
+  // PDF can mirror the Products page column layouts per category.
+  sizeCode?: string | null;
+  sizeLabel?: string | null;
+  baseModel?: string | null;
+  unitM3?: number | null;
+  fabricUsage?: number | null;
+  productionTimeMinutes?: number | null;
 };
 
 // ---------- State badge colours ----------
@@ -327,8 +335,13 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
 
   // Exports the full assignment list (ignores the category tab + search filter)
   // because a quotation is per-customer contract scope, not UI view.
+  // Cross-references /api/products (already cached on this page for the Assign
+  // modal) to fill in sizeCode/unitM3/fabricUsage/productionTimeMinutes — the
+  // customer_products response only coalesces price columns, so these SKU
+  // master fields come from the global product record.
   const handleExportQuotation = () => {
     const defaultHub = customer.deliveryHubs?.find((h) => h.isDefault) ?? customer.deliveryHubs?.[0];
+    const productByCode = new Map(allProducts.map((p) => [p.code, p]));
     const doc = generateCustomerQuotationPdf({
       customer: {
         name: customer.name,
@@ -336,14 +349,28 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
         phone: defaultHub?.phone ?? customer.phone ?? null,
         email: defaultHub?.email ?? customer.email ?? null,
       },
-      products: rows.map((r) => ({
-        code: r.productCode,
-        name: r.productName,
-        category: r.category,
-        basePriceSen: r.basePriceSen,
-        price1Sen: r.price1Sen,
-        seatHeightPrices: r.seatHeightPrices,
-      })),
+      products: rows.map((r) => {
+        const g = productByCode.get(r.productCode);
+        return {
+          code: r.productCode,
+          name: r.productName,
+          category: r.category,
+          basePriceSen: r.basePriceSen,
+          price1Sen: r.price1Sen,
+          seatHeightPrices: r.seatHeightPrices,
+          sizeCode: g?.sizeCode ?? null,
+          sizeLabel: g?.sizeLabel ?? null,
+          baseModel: g?.baseModel ?? null,
+          unitM3: g?.unitM3 ?? null,
+          fabricUsage: g?.fabricUsage ?? null,
+          productionTimeMinutes: g?.productionTimeMinutes ?? null,
+          // gap/divan/leg only live on sales_order_lines — no per-product
+          // default today, but the field is accepted for forward-compat.
+          gapInches: null,
+          divanHeightInches: null,
+          legHeightInches: null,
+        };
+      }),
     });
     const d = new Date();
     const yyyymmdd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;

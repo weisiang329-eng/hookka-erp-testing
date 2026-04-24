@@ -282,9 +282,18 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 }
 
 // GET /api/invoices — list all, nested items + payments. Optional filters.
+//
+// Filters: ?customerId= and ?status= (existing; applied at the SQL layer).
+// Pagination: opt-in via ?page=N&limit=M. When either is supplied, SQL
+// LIMIT/OFFSET applies to the filtered set, and items + payments are
+// scoped to only the page's invoice IDs. Default limit=50, cap=500.
 app.get("/", async (c) => {
+  const db = c.env.DB;
   const customerId = c.req.query("customerId");
   const status = c.req.query("status");
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
 
   const where: string[] = [];
   const params: unknown[] = [];
@@ -298,34 +307,78 @@ app.get("/", async (c) => {
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const [invs, items, payments] = await Promise.all([
-    c.env.DB.prepare(
-      `SELECT * FROM invoices ${clause} ORDER BY created_at DESC`,
-    )
-      .bind(...params)
-      .all<InvoiceRow>(),
-    c.env.DB.prepare(
-      customerId || status
-        ? `SELECT i.* FROM invoice_items i
-             INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
-        : "SELECT * FROM invoice_items",
-    )
-      .bind(...params)
-      .all<InvoiceItemRow>(),
-    c.env.DB.prepare(
-      customerId || status
-        ? `SELECT p.* FROM invoice_payments p
-             INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
-        : "SELECT * FROM invoice_payments",
-    )
-      .bind(...params)
-      .all<InvoicePaymentRow>(),
-  ]);
+  if (!paginate) {
+    const [invs, items, payments] = await Promise.all([
+      db
+        .prepare(`SELECT * FROM invoices ${clause} ORDER BY created_at DESC`)
+        .bind(...params)
+        .all<InvoiceRow>(),
+      db
+        .prepare(
+          customerId || status
+            ? `SELECT i.* FROM invoice_items i
+                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
+            : "SELECT * FROM invoice_items",
+        )
+        .bind(...params)
+        .all<InvoiceItemRow>(),
+      db
+        .prepare(
+          customerId || status
+            ? `SELECT p.* FROM invoice_payments p
+                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
+            : "SELECT * FROM invoice_payments",
+        )
+        .bind(...params)
+        .all<InvoicePaymentRow>(),
+    ]);
 
-  const data = (invs.results ?? []).map((inv) =>
-    rowToInvoice(inv, items.results ?? [], payments.results ?? []),
-  );
-  return c.json({ success: true, data, total: data.length });
+    const data = (invs.results ?? []).map((inv) =>
+      rowToInvoice(inv, items.results ?? [], payments.results ?? []),
+    );
+    return c.json({ success: true, data, total: data.length });
+  }
+
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
+  const limit = Math.min(500, Math.max(1, rawLimit));
+  const offset = (page - 1) * limit;
+
+  const [countRes, pageRes] = await Promise.all([
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM invoices ${clause}`)
+      .bind(...params)
+      .first<{ n: number }>(),
+    db
+      .prepare(
+        `SELECT * FROM invoices ${clause} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+      )
+      .bind(...params, limit, offset)
+      .all<InvoiceRow>(),
+  ]);
+  const total = countRes?.n ?? 0;
+  const invRows = pageRes.results ?? [];
+
+  let items: InvoiceItemRow[] = [];
+  let payments: InvoicePaymentRow[] = [];
+  if (invRows.length > 0) {
+    const ids = invRows.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const [itemsRes, paymentsRes] = await Promise.all([
+      db
+        .prepare(`SELECT * FROM invoice_items WHERE invoiceId IN (${placeholders})`)
+        .bind(...ids)
+        .all<InvoiceItemRow>(),
+      db
+        .prepare(`SELECT * FROM invoice_payments WHERE invoiceId IN (${placeholders})`)
+        .bind(...ids)
+        .all<InvoicePaymentRow>(),
+    ]);
+    items = itemsRes.results ?? [];
+    payments = paymentsRes.results ?? [];
+  }
+  const data = invRows.map((inv) => rowToInvoice(inv, items, payments));
+  return c.json({ success: true, data, page, limit, total });
 });
 
 // POST /api/invoices — create from a DELIVERED delivery order.

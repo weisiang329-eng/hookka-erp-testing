@@ -5,6 +5,13 @@ on:
     branches:
       - main
       - 'claude/**'
+  # Also run on every PR targeting main so the required `deploy` status
+  # check is produced regardless of the PR's source branch. Without this,
+  # PRs from teammate / feature branches can never satisfy the branch
+  # protection rule because no push event ever runs for them.
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
@@ -25,23 +32,25 @@ jobs:
 
       - run: npm run build
 
-      # Deploy first so code reaches production before any schema change.
-      # For main this hits the production branch; any other branch (e.g.
-      # claude/review-xxx) becomes a preview at
-      # https://<branch-slug>.hookka-erp-testing.pages.dev.
+      # Deploy to Cloudflare Pages — only on push events. PRs just exercise
+      # the build to produce the required status check; they don't deploy a
+      # preview (the PR merge ref `<N>/merge` isn't a meaningful branch
+      # slug for Pages, and the teammate's source branch already gets its
+      # own preview on push anyway).
       - name: Deploy to Cloudflare Pages
+        if: github.event_name == 'push'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
 
-      # Apply D1 migrations after the deploy, only for main. Feature
-      # branches share the same D1 so preview pushes must never mutate
-      # the production schema. Failure here fails the whole run — schema
-      # drift must not slip in silently.
+      # Apply D1 migrations after the deploy, only for main pushes. Feature
+      # branches share the same D1 so preview pushes must never mutate the
+      # production schema, and PRs must never touch it either. Failure here
+      # fails the whole run — schema drift must not slip in silently.
       - name: Apply D1 migrations (production only)
-        if: github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

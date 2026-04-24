@@ -1274,28 +1274,18 @@ export default function ProductionPage() {
         const i = code.indexOf("-");
         return i > 0 ? code.slice(0, i) : code;
       };
-      // WIP label formatter for Fab Cut rows — layout differs by category:
-      //   SOFA: '{model} ({seatSize}) | {fabric} | (FC)' — seat size is
-      //     glued to the model string with a space so the combined module
-      //     list stays visually attached to the size it was cut for.
-      //   BEDFRAME: '{model} | ({bedSize}) | ({totalHeights}) | {fabric} | (FC)'
-      //     — heights are their own token after size because BF chooses
-      //     them per line and the cutter needs them visible.
-      //   ACCESSORY: '{model} | ({size}) | {fabric} | (FC)' when the SKU
-      //     carries a sizeLabel; otherwise the size token drops out.
-      const fabCutWIP = (r: DeptRow, modelText: string): string => {
-        if (r.category === "SOFA") {
-          const head = r.size ? `${modelText} (${r.size})` : modelText;
-          return [head, r.colour, "(FC)"].filter(Boolean).join(" | ");
-        }
-        return [
+      // WIP label formatter for Fab Cut rows — same pipe-separated shape
+      // for every category so sorting / eyeballing the column is uniform.
+      // BF also carries (totalHeight) between size and fabric; sofa and
+      // accessory skip that token because it's not applicable to them.
+      const fabCutWIP = (r: DeptRow, modelText: string): string =>
+        [
           modelText,
           r.size ? `(${r.size})` : "",
           r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
           r.colour,
           "(FC)",
         ].filter(Boolean).join(" | ");
-      };
       for (const group of groups.values()) {
         if (group.length === 1) {
           const r = group[0];

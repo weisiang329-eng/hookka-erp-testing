@@ -170,10 +170,10 @@ app.post("/recalc-all", async (c) => {
 
     const poRes = await c.var.DB
       .prepare(
-        `SELECT po.id AS id, po.itemCategory AS itemCategory,
-                po.targetEndDate AS targetEndDate,
-                so.customerDeliveryDate AS customerDeliveryDate,
-                so.hookkaExpectedDD AS hookkaExpectedDD
+        `SELECT po.id AS id, po.itemCategory AS "itemCategory",
+                po.targetEndDate AS "targetEndDate",
+                so.customerDeliveryDate AS "customerDeliveryDate",
+                so.hookkaExpectedDD AS "hookkaExpectedDD"
            FROM production_orders po
            LEFT JOIN sales_orders so ON so.id = po.salesOrderId`,
       )

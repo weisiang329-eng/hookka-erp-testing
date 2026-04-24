@@ -461,8 +461,8 @@ app.get("/invites", async (c) => {
   const nowIso = new Date().toISOString();
   const res = await c.var.DB.prepare(
     `SELECT i.*,
-            u.displayName AS inviterDisplayName,
-            u.email AS inviterEmail
+            u.displayName AS "inviterDisplayName",
+            u.email AS "inviterEmail"
        FROM user_invites i
        LEFT JOIN users u ON u.id = i.invitedBy
       WHERE i.acceptedAt IS NULL

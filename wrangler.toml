@@ -44,6 +44,31 @@ id = "b0fc9d10217c42bfa793b050d1abed65"
 binding = "SESSION_CACHE"
 id = "8f4c4b7ac1f142ff8378eada4602458a"
 
+# ---------------------------------------------------------------------------
+# TODO: Cron Trigger for dashboard materialized views.
+# ---------------------------------------------------------------------------
+# `migrations-postgres/9901_dashboard_mat_views.sql` creates 4 MVs that need
+# periodic REFRESH.  The endpoint `POST /api/internal/refresh-mvs` (secret-
+# gated by CRON_SECRET) triggers the refresh.  WHAT'S MISSING: something
+# actually hitting that endpoint on a schedule.
+#
+# Pages Functions do NOT support `[triggers] crons = [...]` natively
+# (scheduled events are Workers-only).  Three options:
+#
+#   1. Deploy a tiny companion Worker with `[triggers] crons = ["*/5 * * * *"]`
+#      whose `scheduled()` handler does:
+#        await fetch("https://<prod>/api/internal/refresh-mvs",
+#                    { method:"POST", headers:{ "x-cron-secret": env.CRON_SECRET } })
+#      This is the CF-native path.
+#   2. External cron service (cron-job.org / EasyCron / a GitHub Action on a
+#      schedule) POSTing to the refresh endpoint.  Zero infra but an external
+#      dependency.
+#   3. Invalidate MVs on write (add cache-invalidate calls where SO/PO/JC
+#      mutations happen).  Lowest latency, most code touch points.
+#
+# Until one of the above ships, dashboard tiles will reflect the MV state at
+# the last manual refresh — see docs/d1-retirement-plan.md for the runbook.
+
 # Runtime env vars — override per environment (dev/preview/prod) on the
 # Cloudflare dashboard or via wrangler secret put.
 #

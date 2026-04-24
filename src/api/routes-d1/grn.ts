@@ -381,13 +381,16 @@ async function cascadePOStatusAfterGRNPost(
 
   const poItemsRes = await db
     .prepare(
-      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ?",
+      // ORDER BY id — SQLite happened to return rows in insertion order, but
+      // Postgres heap-scan order is undefined and can shift after any UPDATE.
+      // GRN lines key to PO lines by index, so a scan-order flip silently
+      // routes acceptedQty to the WRONG PO line (wrong stock, wrong status).
+      // IDs are time-ordered (chronological suffix) so ORDER BY id matches
+      // insertion order deterministically.
+      "SELECT id, quantity, receivedQty FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
     )
     .bind(poId)
     .all<{ id: string; quantity: number; receivedQty: number }>();
-  // The GRN creation flow in POST /api/grn keys GRN lines to PO lines via
-  // insertion-order array index. D1's SELECT without ORDER BY preserves
-  // insertion order so using the raw results array here matches that.
   const poItemsOrdered = poItemsRes.results ?? [];
 
   const statements: D1PreparedStatement[] = [];

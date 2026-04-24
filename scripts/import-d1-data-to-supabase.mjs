@@ -49,6 +49,16 @@ function translateIdent(raw) {
   return renameMap[name] ?? name
 }
 
+/** Transform SQLite-specific function calls in a VALUES fragment to Postgres
+ *  equivalents. Called on the VALUES portion of every INSERT so we don't
+ *  accidentally rewrite inside identifiers. */
+function translateSqliteFunctions(values) {
+  // char(N) → chr(N).  SQLite exposes char() and chr() interchangeably for
+  // single-byte codepoints; Postgres only has chr().  Seen in the D1 dump as
+  // `replace(..., '\n', char(10))` — dropping rows with embedded newlines.
+  return values.replace(/\bchar\(/gi, 'chr(')
+}
+
 /** Transform a single INSERT line. Returns null to skip. */
 function transformInsertLine(line) {
   // Match: INSERT INTO "table" ("c1","c2",...) VALUES ...
@@ -67,7 +77,7 @@ function transformInsertLine(line) {
     .map((c) => translateIdent(c.trim()))
     .join(', ')
 
-  return `INSERT INTO ${tablePg} (${cols}) VALUES ${valuesPart};`
+  return `INSERT INTO ${tablePg} (${cols}) VALUES ${translateSqliteFunctions(valuesPart)};`
 }
 
 const inserts = []

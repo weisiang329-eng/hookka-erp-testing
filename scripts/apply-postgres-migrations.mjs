@@ -36,8 +36,24 @@ const files = fs
   .filter((f) => f.endsWith('.sql'))
   .sort()
 
-// Nuke partial state from a prior failed run.  Safe because we're the only
-// writer and the DB was empty before this script.
+// Safety guard — refuse to DROP SCHEMA if the target DB already has
+// populated tables, unless the caller explicitly passes --reset.  Prevents
+// a mis-configured .dev.vars from nuking production on re-run.
+const forceReset = process.argv.includes('--reset')
+const [{ n: existingTables }] = await sql`
+  SELECT count(*)::int AS n FROM pg_tables WHERE schemaname = 'public'
+`
+if (existingTables > 0 && !forceReset) {
+  const url = new URL(env.DATABASE_URL)
+  console.error(
+    `\n❌ Refusing to reset.  Target DB at ${url.host}${url.pathname} already has ${existingTables} tables in public schema.\n` +
+      `   This script drops the entire public schema — it would delete real data.\n` +
+      `   If this is intentional, re-run with --reset.  Otherwise verify your DATABASE_URL.`,
+  )
+  await sql.end()
+  process.exit(1)
+}
+
 console.log('▸ resetting public schema...')
 await sql`DROP SCHEMA IF EXISTS public CASCADE`
 await sql`CREATE SCHEMA public`

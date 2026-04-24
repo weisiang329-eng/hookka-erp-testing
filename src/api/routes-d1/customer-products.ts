@@ -121,12 +121,12 @@ app.get("/", async (c) => {
 
   const res = await c.var.DB.prepare(
     `SELECT cp.*,
-            p.code     AS productCode,
-            p.name     AS productName,
-            p.category AS productCategory,
-            p.basePriceSen      AS productBasePriceSen,
-            p.price1Sen         AS productPrice1Sen,
-            p.seatHeightPrices  AS productSeatHeightPrices
+            p.code     AS "productCode",
+            p.name     AS "productName",
+            p.category AS "productCategory",
+            p.basePriceSen      AS "productBasePriceSen",
+            p.price1Sen         AS "productPrice1Sen",
+            p.seatHeightPrices  AS "productSeatHeightPrices"
        FROM customer_products cp
        INNER JOIN products p ON p.id = cp.productId
        WHERE cp.customerId = ?
@@ -200,10 +200,10 @@ app.get("/by-product/:productId", async (c) => {
   const productId = c.req.param("productId");
   const res = await c.var.DB.prepare(
     `SELECT cp.*,
-            cu.name AS customerName,
-            p.basePriceSen      AS productBasePriceSen,
-            p.price1Sen         AS productPrice1Sen,
-            p.seatHeightPrices  AS productSeatHeightPrices
+            cu.name AS "customerName",
+            p.basePriceSen      AS "productBasePriceSen",
+            p.price1Sen         AS "productPrice1Sen",
+            p.seatHeightPrices  AS "productSeatHeightPrices"
        FROM customer_products cp
        INNER JOIN customers cu ON cu.id = cp.customerId
        INNER JOIN products p   ON p.id  = cp.productId
@@ -275,12 +275,12 @@ app.post("/", async (c) => {
     // Fetch the current row (either the one we just inserted, or the pre-existing one)
     const row = await c.var.DB.prepare(
       `SELECT cp.*,
-              p.code     AS productCode,
-              p.name     AS productName,
-              p.category AS productCategory,
-              p.basePriceSen      AS productBasePriceSen,
-              p.price1Sen         AS productPrice1Sen,
-              p.seatHeightPrices  AS productSeatHeightPrices
+              p.code     AS "productCode",
+              p.name     AS "productName",
+              p.category AS "productCategory",
+              p.basePriceSen      AS "productBasePriceSen",
+              p.price1Sen         AS "productPrice1Sen",
+              p.seatHeightPrices  AS "productSeatHeightPrices"
          FROM customer_products cp
          INNER JOIN products p ON p.id = cp.productId
          WHERE cp.customerId = ? AND cp.productId = ?`,
@@ -514,12 +514,12 @@ app.put("/:id", async (c) => {
 
     const row = await c.var.DB.prepare(
       `SELECT cp.*,
-              p.code     AS productCode,
-              p.name     AS productName,
-              p.category AS productCategory,
-              p.basePriceSen      AS productBasePriceSen,
-              p.price1Sen         AS productPrice1Sen,
-              p.seatHeightPrices  AS productSeatHeightPrices
+              p.code     AS "productCode",
+              p.name     AS "productName",
+              p.category AS "productCategory",
+              p.basePriceSen      AS "productBasePriceSen",
+              p.price1Sen         AS "productPrice1Sen",
+              p.seatHeightPrices  AS "productSeatHeightPrices"
          FROM customer_products cp
          INNER JOIN products p ON p.id = cp.productId
          WHERE cp.id = ?`,
@@ -678,13 +678,13 @@ async function resolveCustomerPriceAsOf(
   // Step 1: product + assignment row (legacy overrides kept as fallback).
   const row = await db
     .prepare(
-      `SELECT p.basePriceSen     AS productBasePriceSen,
-              p.price1Sen        AS productPrice1Sen,
-              p.seatHeightPrices AS productSeatHeightPrices,
-              cp.id              AS cpId,
-              cp.basePriceSen    AS cpBasePriceSen,
-              cp.price1Sen       AS cpPrice1Sen,
-              cp.seatHeightPrices AS cpSeatHeightPrices
+      `SELECT p.basePriceSen     AS "productBasePriceSen",
+              p.price1Sen        AS "productPrice1Sen",
+              p.seatHeightPrices AS "productSeatHeightPrices",
+              cp.id              AS "cpId",
+              cp.basePriceSen    AS "cpBasePriceSen",
+              cp.price1Sen       AS "cpPrice1Sen",
+              cp.seatHeightPrices AS "cpSeatHeightPrices"
          FROM products p
          LEFT JOIN customer_products cp
            ON cp.productId = p.id AND cp.customerId = ?

@@ -73,10 +73,10 @@ app.get("/", async (c) => {
 
   const sql = `
     SELECT substr(i.invoiceDate, 1, 7) AS period,
-           ii.productCode              AS productCode,
-           ii.productName              AS productName,
-           i.customerId                AS customerId,
-           i.customerName              AS customerName,
+           ii.productCode              AS "productCode",
+           ii.productName              AS "productName",
+           i.customerId                AS "customerId",
+           i.customerName              AS "customerName",
            SUM(ii.quantity)            AS quantity,
            SUM(ii.totalSen)            AS revenue
       FROM invoices i

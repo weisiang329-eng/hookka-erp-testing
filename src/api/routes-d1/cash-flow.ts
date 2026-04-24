@@ -151,7 +151,7 @@ app.get("/", async (c) => {
     safeAll<JournalLineRow>(c.var.DB, "SELECT * FROM journal_lines"),
     safeAll<InvoiceRow>(
       c.var.DB,
-      "SELECT id, status, dueDate, totalSen, COALESCE(paidAmount, 0) AS paidAmount FROM invoices",
+      `SELECT id, status, dueDate, totalSen, COALESCE(paidAmount, 0) AS "paidAmount" FROM invoices`,
     ),
     safeAll<PoRow>(
       c.var.DB,

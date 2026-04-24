@@ -203,8 +203,8 @@ app.get("/invite/:token", async (c) => {
 
   const row = await c.var.DB.prepare(
     `SELECT i.email, i.displayName, i.expiresAt, i.acceptedAt,
-            u.displayName AS inviterDisplayName,
-            u.email AS inviterEmail
+            u.displayName AS "inviterDisplayName",
+            u.email AS "inviterEmail"
        FROM user_invites i
        LEFT JOIN users u ON u.id = i.invitedBy
       WHERE i.token = ?

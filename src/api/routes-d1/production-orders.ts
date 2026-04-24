@@ -402,12 +402,12 @@ async function fetchFilteredPOs(
   // a projected '' archivedAt so the column lists align with the archive
   // table. rowToPO ignores columns it doesn't know about.
   const poSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM production_orders
+    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM job_cards
+    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
@@ -483,12 +483,12 @@ async function fetchPaginatedPOs(
   const offset = (page - 1) * limit;
 
   const poSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM production_orders
+    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM job_cards
+    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
@@ -714,7 +714,7 @@ async function applyWipInventoryChange(
       // wip_items row in that group.
       const siblingLabels = await db
         .prepare(
-          `SELECT DISTINCT jc.wipLabel AS wipLabel
+          `SELECT DISTINCT jc.wipLabel AS "wipLabel"
              FROM production_orders po
              JOIN job_cards jc ON jc.productionOrderId = po.id
             WHERE po.salesOrderId = ?
@@ -841,7 +841,7 @@ async function applyWipInventoryChange(
     if (isFabSew && isSofa && poRow.salesOrderId && poRow.fabricCode) {
       const siblingLabels = await db
         .prepare(
-          `SELECT DISTINCT jc.wipLabel AS wipLabel
+          `SELECT DISTINCT jc.wipLabel AS "wipLabel"
              FROM production_orders po
              JOIN job_cards jc ON jc.productionOrderId = po.id
             WHERE po.salesOrderId = ?

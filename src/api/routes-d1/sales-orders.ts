@@ -1258,13 +1258,13 @@ app.get("/", async (c) => {
   // column list matches the archive table. Kept as a CTE-ish inline
   // subquery rather than a real view so we stay in one-file-per-route.
   const soSourceSql = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM sales_orders
+    ? `(SELECT *, '' AS "archivedAt" FROM sales_orders
         UNION ALL
         SELECT * FROM sales_orders_archive)`
     : "sales_orders";
 
   const itemsSourceSql = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM sales_order_items
+    ? `(SELECT *, '' AS "archivedAt" FROM sales_order_items
         UNION ALL
         SELECT * FROM sales_order_items_archive)`
     : "sales_order_items";

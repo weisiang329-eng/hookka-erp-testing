@@ -1,15 +1,27 @@
 // ---------------------------------------------------------------------------
-// Hono app for Cloudflare Workers runtime.
+// Hono app for Cloudflare Pages Functions — the hookka-erp backend.
 //
-// This file mirrors src/api/index.ts but:
-//   - does NOT call serve() from @hono/node-server (Workers don't need it)
-//   - types `Env` bindings so routes can access `c.env.DB` (D1 client)
-//   - exports the Hono `app` as default so Pages Functions can call
-//     `app.fetch(request, env, ctx)`
+// Data layer (post Phase 0-7 migration, see docs/d1-retirement-plan.md):
+//   Browser → Pages Functions (this app) → D1-compat adapter (c.var.DB)
+//     → postgres.js → Hyperdrive (CF pool) → Supabase Postgres (Singapore)
 //
-// Routes are being progressively migrated from src/api/routes/*.ts (which
-// still use the in-memory mock-data arrays) to Workers-compatible versions
-// that query D1. Until migration is complete, both files coexist.
+// Key bindings (wrangler.toml):
+//   HYPERDRIVE       — production/preview Postgres connection
+//   SESSION_CACHE    — KV cache for auth sessions + hot lookup tables
+//   DB (D1Database)  — LEGACY, retained for rollback only.  Routes MUST use
+//                      c.var.DB, NOT c.env.DB.  See the DB-injection
+//                      middleware below.
+//
+// Per-request lifecycle:
+//   1. CORS       — allow Pages origin + local Vite dev
+//   2. timingMdw  — emits [req] / [slow-req] log lines for wrangler tail
+//   3. dbInject   — constructs a D1-compat adapter over Hyperdrive and
+//                   stashes it on c.var.DB.  Every authenticated route
+//                   below this line transacts via c.var.DB.
+//   4. authMdw    — Bearer-token gate with KV session cache (see
+//                   lib/auth-middleware.ts); public endpoints registered
+//                   BEFORE this line bypass auth by virtue of order.
+//   5. Route handlers — imported from routes-d1/*.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -71,14 +83,18 @@ app.use("/api/*", timingMiddleware);
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
 // adapter and exposes it as `c.var.DB`.  Routes use this instead of raw D1.
 // Must run before authMiddleware (which itself hits the DB to verify tokens).
+// The adapter is further wrapped in instrumentD1 so every prepare/all/first/
+// run/batch emits a [slow-query] line when it exceeds SLOW_QUERY_MS.
 app.use("/api/*", async (c, next) => {
   const { D1Compat } = await import("./lib/d1-compat");
   const { getSql } = await import("./lib/db-pg");
+  const { instrumentD1 } = await import("./lib/observability");
   // Prefer Hyperdrive binding (production / preview on Cloudflare).  Fall
   // back to DATABASE_URL env var only for local dev without Hyperdrive.
   const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
-  c.set("DB", new D1Compat(getSql(url)) as unknown as D1Database);
+  const adapter = new D1Compat(getSql(url)) as unknown as D1Database;
+  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname));
   await next();
 });
 

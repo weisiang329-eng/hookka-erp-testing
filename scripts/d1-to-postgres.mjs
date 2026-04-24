@@ -187,14 +187,13 @@ for (const f of files) {
   total++
 }
 
-// Persist the rename map.  Two copies:
-//   migrations-postgres/_rename_map.json — reference / tooling
-//   src/api/lib/column-rename-map.json    — bundled into the Worker so the
-//     D1-compat adapter can translate SQL strings at request time.
+// Single-source the rename map at `src/api/lib/column-rename-map.json` —
+// that's the copy bundled into the Worker and imported by d1-compat.ts.
+// Keeping a second copy (as we used to at `migrations-postgres/_rename_map.json`)
+// just invites drift.
 const mapObj = Object.fromEntries([...renameMap.entries()].sort())
 const mapJson = JSON.stringify(mapObj, null, 2)
-fs.writeFileSync(path.join(OUT_DIR, '_rename_map.json'), mapJson, 'utf8')
 fs.writeFileSync('src/api/lib/column-rename-map.json', mapJson, 'utf8')
 
 console.log(`✓ Converted ${total} migration files → ${OUT_DIR}/`)
-console.log(`✓ Wrote ${Object.keys(mapObj).length} renames → ${OUT_DIR}/_rename_map.json + src/api/lib/`)
+console.log(`✓ Wrote ${Object.keys(mapObj).length} renames → src/api/lib/column-rename-map.json`)

@@ -1855,33 +1855,43 @@ export default function ProductionPage() {
   const onScreenStickers = useMemo<JobCardSticker[]>(() => {
     const stickers: JobCardSticker[] = [];
 
-    // Overview: one sticker per job card across every dept (no piece fan-out).
-    // Matches the 8684 total shown in the Overview tab header — production
-    // sheet rows = QR stickers, strictly 1:1.
+    // Overview: one sticker per job card across every dept, fanned out to
+    // qty physical pieces when the job card covers more than one. Each
+    // piece gets its own QR payload (p=N&t=M) so the worker portal can
+    // reject duplicate scans on the same sticker.
     if (activeTab === "ALL") {
       for (const o of filteredOrders) {
         for (const jc of o.jobCards) {
           const jcWipQty = (jc as { wipQty?: number }).wipQty;
           const rowQty = Math.max(1, Math.floor(jcWipQty || o.quantity || 0) || 1);
-          stickers.push({
-            key: `${o.id}:${jc.id}`,
-            poNo: o.poNo,
-            deptCode: jc.departmentCode,
-            jobCardId: jc.id,
-            wipName: wipNameFor(jc, o),
-            wipCode: jc.wipCode,
-            sizeLabel: o.sizeLabel || o.sizeCode || "",
-            qty: rowQty,
-            customerPOId: o.customerPOId || "",
-            customerState: o.customerState || "",
-            model: o.productCode || "",
-            wipType: (jc as { wipType?: string }).wipType || "",
-            category: o.itemCategory || "",
-            colour: o.fabricCode || "",
-            pieceNo: 1,
-            totalPieces: 1,
-            qrPayload: generateStickerData(o.poNo, jc.departmentCode, jc.id),
-          });
+          for (let p = 1; p <= rowQty; p++) {
+            stickers.push({
+              key: `${o.id}:${jc.id}:${p}`,
+              poNo: o.poNo,
+              deptCode: jc.departmentCode,
+              jobCardId: jc.id,
+              wipName: wipNameFor(jc, o),
+              wipCode: jc.wipCode,
+              sizeLabel: o.sizeLabel || o.sizeCode || "",
+              qty: rowQty,
+              customerPOId: o.customerPOId || "",
+              customerState: o.customerState || "",
+              model: o.productCode || "",
+              wipType: (jc as { wipType?: string }).wipType || "",
+              category: o.itemCategory || "",
+              colour: o.fabricCode || "",
+              pieceNo: p,
+              totalPieces: rowQty,
+              qrPayload: generateStickerData(
+                o.poNo,
+                jc.departmentCode,
+                jc.id,
+                "/production/scan",
+                rowQty > 1 ? p : undefined,
+                rowQty > 1 ? rowQty : undefined,
+              ),
+            });
+          }
         }
       }
       return stickers;
@@ -1907,30 +1917,43 @@ export default function ProductionPage() {
         !!row._mergedJobCardIds &&
         row._mergedJobCardIds.length > 1;
       const opId = isMergedFabCut ? "FG-FAB_CUT" : row.jobCardId;
-      stickers.push({
-        key: row.id,
-        poNo: order.poNo,
-        deptCode: activeTab,
-        jobCardId: opId,
-        wipName: row.wip,
-        wipCode: "",
-        sizeLabel: row.size || "",
-        qty: row.qty || 1,
-        customerPOId: row.customerPOId || "",
-        customerState: row.customerState || "",
-        model: row.model || "",
-        wipType: row.wipType || "",
-        category: row.category || "",
-        colour: row.colour || "",
-        gap: row.gap || "",
-        divan: row.divan || "",
-        leg: row.leg || "",
-        totalHeight: row.totalHeight || "",
-        specialOrder: row.specialOrder || "",
-        pieceNo: 1,
-        totalPieces: 1,
-        qrPayload: generateStickerData(order.poNo, activeTab, opId),
-      });
+      // qty > 1 fans the row into N physical piece stickers, each with
+      // its own p=N&t=M marker so the worker portal can reject double-
+      // scans. qty=1 stays single-sticker.
+      const pieceCount = Math.max(1, row.qty || 1);
+      for (let p = 1; p <= pieceCount; p++) {
+        stickers.push({
+          key: pieceCount > 1 ? `${row.id}:${p}` : row.id,
+          poNo: order.poNo,
+          deptCode: activeTab,
+          jobCardId: opId,
+          wipName: row.wip,
+          wipCode: "",
+          sizeLabel: row.size || "",
+          qty: pieceCount,
+          customerPOId: row.customerPOId || "",
+          customerState: row.customerState || "",
+          model: row.model || "",
+          wipType: row.wipType || "",
+          category: row.category || "",
+          colour: row.colour || "",
+          gap: row.gap || "",
+          divan: row.divan || "",
+          leg: row.leg || "",
+          totalHeight: row.totalHeight || "",
+          specialOrder: row.specialOrder || "",
+          pieceNo: p,
+          totalPieces: pieceCount,
+          qrPayload: generateStickerData(
+            order.poNo,
+            activeTab,
+            opId,
+            "/production/scan",
+            pieceCount > 1 ? p : undefined,
+            pieceCount > 1 ? pieceCount : undefined,
+          ),
+        });
+      }
     }
     return stickers;
   }, [filteredOrders, activeTab, wipNameFor, deptRows, gridFilteredDeptRows]);

@@ -534,11 +534,18 @@ function CreateSalesOrderPage() {
     // Persist as semicolon-separated canonical names; each token is guaranteed
     // to come from the config dropdown, so no free text leaks into specialOrder.
     const label = next.map(c => specialOrderOptions.find(o => o.code === c)?.name || c).join("; ");
-    updateItem(idx, {
+    const patch = {
       specialOrders: next,
       specialOrder: label,
       specialOrderPriceSen: surcharge,
-    });
+    };
+    // Sofa sibling modules share the same special-order selection — per the
+    // "variants cascade from first item" rule. Non-sofa lines edit in isolation.
+    if (isSofa) {
+      propagateSofaVariant(idx, patch);
+    } else {
+      updateItem(idx, patch);
+    }
   };
 
   const getUnitPrice = (item: LineItem) =>

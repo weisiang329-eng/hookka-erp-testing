@@ -44,6 +44,11 @@ app.use(
   }),
 );
 
+// Request timing — emits `[req] ...` / `[slow-req] ...` lines to console so
+// `wrangler tail` surfaces per-request duration. Registered before auth so
+// even 401s are timed.
+app.use("/api/*", timingMiddleware);
+
 // Health check — used by Pages build step and uptime monitors.
 app.get("/api/health", (c) =>
   c.json({
@@ -105,6 +110,7 @@ import presence from "./routes-d1/presence";
 import bomMasterTemplates from "./routes-d1/bom-master-templates";
 import kvConfig from "./routes-d1/kv-config";
 import { authMiddleware } from "./lib/auth-middleware";
+import { timingMiddleware } from "./lib/observability";
 
 // Phase 5 — mock-backed routes mounted until each is migrated to D1.
 // Pure Hono handlers + in-memory data from src/lib/mock-data.ts, fully

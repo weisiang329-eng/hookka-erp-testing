@@ -587,7 +587,23 @@ export default function ProductionPage() {
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [activeTab, setActiveTab] = useState<"ALL" | string>("ALL");
+  const [activeTab, setActiveTabRaw] = useState<"ALL" | string>("ALL");
+  // Wrapped setter that marks tab-switch start time; the matching end is
+  // recorded at the top of the next render via useEffect below. Over 200ms
+  // gets a [slow-tab] warn.
+  const tabSwitchStart = useRef<number | null>(null);
+  const setActiveTab = useCallback((next: "ALL" | string) => {
+    tabSwitchStart.current = performance.now();
+    setActiveTabRaw(next);
+  }, []);
+  useEffect(() => {
+    if (tabSwitchStart.current == null) return;
+    const dur = Math.round(performance.now() - tabSwitchStart.current);
+    tabSwitchStart.current = null;
+    if (dur >= 200) {
+      console.warn(`[slow-tab] tab=${activeTab} dur_ms=${dur}`);
+    }
+  }, [activeTab]);
   const [workers, setWorkers] = useState<Worker[]>([]);
   // Warehouse rack slots — fetched once, used by the Packing dept Rack
   // column's dropdown. Each entry carries its occupancy state so the <select>

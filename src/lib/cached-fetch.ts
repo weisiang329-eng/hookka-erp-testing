@@ -158,10 +158,18 @@ export function useCachedJson<T = unknown>(
     if (isFresh && tick === 0) return;
 
     let cancelled = false;
+    const t0 = performance.now();
     fetch(url)
       .then((r) => r.json())
       .then((raw) => {
         if (cancelled) return;
+        // Client-side timing — anything over 500ms gets a warn so slow
+        // endpoints surface in devtools without adding a dashboard.
+        const dur = Math.round(performance.now() - t0);
+        if (dur >= 500) {
+          // eslint-disable-next-line no-console
+          console.warn(`[slow-fetch] url=${url} dur_ms=${dur}`);
+        }
         // Canonicalise Hono's `{ success, data }` envelope into `data` only
         // when we're confident that's what the caller wants. We DO NOT strip
         // the envelope here — callers decide how to interpret the response —

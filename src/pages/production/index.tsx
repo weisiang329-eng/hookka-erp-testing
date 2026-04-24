@@ -1311,7 +1311,7 @@ export default function ProductionPage() {
         const wips = [
           modelLabel || first.model,
           first.colour,
-          first.size,
+          first.size ? `(${first.size})` : "",
           "(FC)",
         ].filter(Boolean).join(" · ");
         merged.push({

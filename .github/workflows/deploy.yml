@@ -25,10 +25,9 @@ jobs:
 
       - run: npm run build
 
-      # Deploy first so code changes always reach production/preview even
-      # if the follow-up migration step fails (e.g. API token missing
-      # D1:Edit scope). For main this hits the production branch; any
-      # other branch (e.g. claude/review-xxx) becomes a preview at
+      # Deploy first so code reaches production before any schema change.
+      # For main this hits the production branch; any other branch (e.g.
+      # claude/review-xxx) becomes a preview at
       # https://<branch-slug>.hookka-erp-testing.pages.dev.
       - name: Deploy to Cloudflare Pages
         uses: cloudflare/wrangler-action@v3
@@ -37,17 +36,12 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
 
-      # Apply D1 migrations after the deploy, and only for main. Feature
+      # Apply D1 migrations after the deploy, only for main. Feature
       # branches share the same D1 so preview pushes must never mutate
-      # the production schema. `continue-on-error: true` keeps a failing
-      # migration (typically insufficient API-token scope) from masking
-      # an otherwise-successful deploy — the step still surfaces red in
-      # the Actions UI so the missing permission is visible, but the
-      # workflow as a whole reports success and future pushes aren't
-      # blocked.
+      # the production schema. Failure here fails the whole run — schema
+      # drift must not slip in silently.
       - name: Apply D1 migrations (production only)
         if: github.ref == 'refs/heads/main'
-        continue-on-error: true
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}

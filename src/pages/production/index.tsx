@@ -585,7 +585,12 @@ type Worker = { id: string; name: string; departmentCode?: string };
 export default function ProductionPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD");
+  // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
+  // entire piece_pics tree on the wire. The Production page never reads
+  // them and this response ships ~530 POs × ~9k JCs — the largest payload
+  // in the app. Server still returns the full shape by default for
+  // backward compat with the PO detail page + other consumers.
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal");
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
@@ -1197,15 +1202,21 @@ export default function ProductionPage() {
     };
   };
 
-  const deptRows = useMemo<DeptRow[]>(() => {
-    if (activeTab === "ALL") return [];
+  // Heavy row-building pass — keyed on `filteredOrders` only so tab
+  // switches don't trigger the full JC-to-row transformation + every
+  // per-JC picker chain. Each row carries its own `_deptCode` so the
+  // cheap `deptRows` memo below can filter without re-running picker
+  // logic or buildSched per dept.
+  //
+  // Attaching _deptCode on the row (rather than filtering JCs upstream)
+  // keeps the sched_FAB_CUT…sched_PACKING grid-column data intact for
+  // every row — those columns are user-toggleable on any dept tab.
+  const baseRows = useMemo<Array<DeptRow & { _deptCode: string }>>(() => {
     const today = new Date().toISOString().slice(0, 10);
-    const rows: DeptRow[] = [];
+    const rows: Array<DeptRow & { _deptCode: string }> = [];
     let n = 1;
     for (const o of filteredOrders) {
       for (const jc of o.jobCards) {
-        if (jc.departmentCode !== activeTab) continue;
-
         // For every department in the workflow, find the JobCard in the
         // same wipKey branch (so Divan Fab Sew is scoped to the Divan side,
         // not HB). Fall back to any card in that dept for this PO if the
@@ -1331,9 +1342,32 @@ export default function ProductionPage() {
           sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, siblings),
           sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, siblings),
           sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, siblings),
+          _deptCode: jc.departmentCode,
         });
       }
     }
+    return rows;
+    // buildSched is stable (defined in render) but references no state we
+    // care about beyond `today`; excluding it keeps the memo from recomputing
+    // on every render. Intentionally not listed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredOrders]);
+
+  const deptRows = useMemo<DeptRow[]>(() => {
+    if (activeTab === "ALL") return [];
+    // Cheap pass: filter the precomputed flat row list by the active tab's
+    // departmentCode. Previously this pass rebuilt every row (with the full
+    // picker + buildSched chain) on every tab switch.
+    const rows: DeptRow[] = baseRows
+      .filter((r) => r._deptCode === activeTab)
+      .map((r, i) => {
+        // Drop the internal _deptCode marker + renumber rowNo for the
+        // filtered view. Spreading into a fresh object avoids mutating
+        // baseRows (which React would otherwise see as unchanged refs).
+        const { _deptCode: _drop, ...clean } = r;
+        void _drop;
+        return { ...clean, rowNo: i + 1 };
+      });
 
     // Fab Cut merge: a cutter lays one bolt of fabric down and cuts every
     // component of every module that shares that fabric in a single pass.
@@ -1532,7 +1566,7 @@ export default function ProductionPage() {
     }
 
     return rows;
-  }, [filteredOrders, activeTab]);
+  }, [baseRows, activeTab]);
 
   // Per-dept pill renderer. Click anywhere on the pill to fill the
   // completion date for that department's underlying JobCard. Filling

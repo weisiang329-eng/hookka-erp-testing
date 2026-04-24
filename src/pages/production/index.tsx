@@ -849,8 +849,11 @@ export default function ProductionPage() {
           };
         }),
       );
-      // Parallel PATCH — fires all in flight, no awaits. Cache invalidation
-      // is batched too: one invalidate at the end, not N.
+      // Parallel PATCH — fires all in flight, no awaits. No cache invalidation:
+      // optimistic setOrders above already reflects the change, and invalidating
+      // the list prefix would force a full re-download on next mount (hundreds
+      // of rows × dept columns). Single-entity detail pages do their own
+      // per-id invalidation if needed.
       Promise.all(
         edits.map(({ poId, jobCardId, patch }) =>
           fetch(`/api/production-orders/${poId}`, {
@@ -859,12 +862,7 @@ export default function ProductionPage() {
             body: JSON.stringify({ jobCardId, ...patch }),
           }),
         ),
-      )
-        .then(() => {
-          invalidateCachePrefix("/api/production-orders");
-          invalidateCachePrefix("/api/sales-orders");
-        })
-        .catch((err) => console.error("[patchJobCardsBatch] network error", err));
+      ).catch((err) => console.error("[patchJobCardsBatch] network error", err));
     },
     [],
   );
@@ -894,13 +892,13 @@ export default function ProductionPage() {
       // response on every edit caused a second full-table re-render per
       // click (457 rows × closures), which felt laggy. Optimistic state is
       // enough; explicit refetch only happens on mount / tab switch.
+      // Fire-and-forget — no invalidation. Optimistic setOrders above already
+      // reflects the edit; invalidating the list prefix would force a full
+      // re-download on every single inline edit (hundreds of rows).
       fetch(`/api/production-orders/${poId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobCardId, ...patch }),
-      }).then(() => {
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
       }).catch((err) => {
         console.error("[patchJobCard] network error", err);
       });
@@ -926,13 +924,11 @@ export default function ProductionPage() {
               },
         ),
       );
+      // No invalidation — optimistic setOrders already reflects the rack change.
       fetch(`/api/production-orders/${poId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobCardId, rackingNumber: rack }),
-      }).then(() => {
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
       }).catch((err) => console.error("[patchRack] network error", err));
     },
     [],

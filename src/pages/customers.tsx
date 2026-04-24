@@ -90,6 +90,7 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
   );
 
   const [query, setQuery] = useState("");
+  const [categoryTab, setCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY">("ALL");
   const [showAssign, setShowAssign] = useState(false);
   const [assignQuery, setAssignQuery] = useState("");
   const [assignPicked, setAssignPicked] = useState<Set<string>>(new Set());
@@ -106,10 +107,30 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
   const [editSaving, setEditSaving] = useState(false);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return rows;
     const q = query.trim().toLowerCase();
-    return rows.filter((r) => r.productCode.toLowerCase().includes(q) || r.productName.toLowerCase().includes(q));
-  }, [rows, query]);
+    return rows.filter((r) => {
+      if (categoryTab !== "ALL" && r.category !== categoryTab) return false;
+      if (!q) return true;
+      return r.productCode.toLowerCase().includes(q) || r.productName.toLowerCase().includes(q);
+    });
+  }, [rows, query, categoryTab]);
+
+  // Counts come from the full assignment list so numbers stay stable as the user types/tabs.
+  const categoryTabs: { key: "ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY"; label: string }[] = [
+    { key: "ALL", label: "All" },
+    { key: "BEDFRAME", label: "Bedframe" },
+    { key: "SOFA", label: "Sofa" },
+    { key: "ACCESSORY", label: "Accessory" },
+  ];
+  const categoryCounts = useMemo(() => {
+    const c = { ALL: rows.length, BEDFRAME: 0, SOFA: 0, ACCESSORY: 0 } as Record<"ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY", number>;
+    for (const r of rows) {
+      if (r.category === "BEDFRAME" || r.category === "SOFA" || r.category === "ACCESSORY") {
+        c[r.category] += 1;
+      }
+    }
+    return c;
+  }, [rows]);
 
   const assignedIds = useMemo(() => new Set(rows.map((r) => r.productId)), [rows]);
   const assignOptions = useMemo(() => {
@@ -228,95 +249,60 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
             <Package className="h-5 w-5 text-[#6B5C32]" />
             Customer Products — {customerName} ({rows.length})
           </CardTitle>
-          <div className="flex items-center gap-2">
-            <div className="relative">
-              <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <Input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search SKUs..."
-                className="h-8 pl-8 w-48"
-              />
-            </div>
-            <Button variant="primary" size="sm" onClick={() => setShowAssign((v) => !v)}>
-              {showAssign ? <X className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
-              {showAssign ? "Cancel" : "Assign SKU"}
-            </Button>
+          <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
+            <Plus className="h-4 w-4 mr-1" />
+            Assign SKU
+          </Button>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap mt-3">
+          {categoryTabs.map((tab) => (
+            <button
+              key={tab.key}
+              onClick={() => setCategoryTab(tab.key)}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                categoryTab === tab.key
+                  ? "bg-[#111827] text-white"
+                  : "bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6]"
+              }`}
+            >
+              {tab.label} ({categoryCounts[tab.key]})
+            </button>
+          ))}
+        </div>
+        <div className="mt-2">
+          <div className="relative w-48">
+            <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search SKUs..."
+              className="h-8 pl-8"
+            />
           </div>
         </div>
       </CardHeader>
       <CardContent>
-        {showAssign && (
-          <div className="mb-4 p-4 rounded-lg border-2 border-dashed border-[#6B5C32]/30 bg-[#FAF9F7] space-y-3">
-            <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[#6B5C32]">Assign SKUs to {customerName}</h3>
-              <span className="text-xs text-[#6B7280]">{assignPicked.size} selected</span>
-            </div>
-            <div className="relative">
-              <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
-              <Input
-                value={assignQuery}
-                onChange={(e) => setAssignQuery(e.target.value)}
-                placeholder="Filter by code or name..."
-                className="h-8 pl-8"
-              />
-            </div>
-            <div className="max-h-64 overflow-y-auto border border-[#E2DDD8] rounded bg-white">
-              {assignOptions.length === 0 ? (
-                <p className="text-xs text-[#9CA3AF] py-4 text-center">
-                  {assignedIds.size === allProducts.length && allProducts.length > 0
-                    ? "All SKUs already assigned."
-                    : "No matching SKUs."}
-                </p>
-              ) : (
-                <ul className="divide-y divide-[#E2DDD8]">
-                  {assignOptions.map((p) => {
-                    const picked = assignPicked.has(p.id);
-                    return (
-                      <li
-                        key={p.id}
-                        onClick={() => toggleAssignPick(p.id)}
-                        className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-[#FAF9F7] ${picked ? "bg-[#F4F0E8]" : ""}`}
-                      >
-                        <div className={`h-4 w-4 rounded border flex items-center justify-center ${picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#C8C2BB]"}`}>
-                          {picked && <Check className="h-3 w-3 text-white" />}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="doc-number text-xs text-[#1F1D1B]">{p.code}</span>
-                            <Badge className="text-[10px]">{p.category}</Badge>
-                          </div>
-                          <p className="text-xs text-[#6B7280] truncate">{p.name}</p>
-                        </div>
-                        <span className="text-xs tabular-nums text-[#6B7280]">{formatRM(p.basePriceSen)}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => { setShowAssign(false); setAssignPicked(new Set()); }}>
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" disabled={assignPicked.size === 0 || assignSaving} onClick={submitAssign}>
-                {assignSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plus className="h-4 w-4 mr-1" />}
-                Assign {assignPicked.size} SKU{assignPicked.size === 1 ? "" : "s"}
-              </Button>
-            </div>
-          </div>
-        )}
+        {/* Assign SKU modal — full-screen overlay. The old inline expand didn't scale for bulk assign. */}
+        <AssignSkuModal
+          open={showAssign}
+          customerName={customerName}
+          candidates={allProducts.filter((p) => !assignedIds.has(p.id))}
+          picked={assignPicked}
+          togglePick={toggleAssignPick}
+          setPicked={setAssignPicked}
+          saving={assignSaving}
+          onClose={() => { setShowAssign(false); setAssignPicked(new Set()); setAssignQuery(""); }}
+          onSubmit={submitAssign}
+        />
 
         {rows.length === 0 ? (
           <div className="py-8 text-center space-y-3">
             <p className="text-sm text-[#9CA3AF]">
               No SKUs assigned. Pillows and bedframes assigned to this customer will show here.
             </p>
-            {!showAssign && (
-              <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
-                <Plus className="h-4 w-4 mr-1" /> Assign SKU
-              </Button>
-            )}
+            <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
+              <Plus className="h-4 w-4 mr-1" /> Assign SKU
+            </Button>
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -431,7 +417,9 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
                 {filtered.length === 0 && rows.length > 0 && (
                   <tr>
                     <td colSpan={7} className="py-4 text-center text-xs text-[#9CA3AF]">
-                      No SKUs match "{query}".
+                      {categoryTab !== "ALL"
+                        ? "No SKUs in this category"
+                        : `No SKUs match "${query}".`}
                     </td>
                   </tr>
                 )}
@@ -441,6 +429,204 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
         )}
       </CardContent>
     </Card>
+  );
+}
+
+// =====================================================================
+// AssignSkuModal — full-screen overlay for bulk-assigning unassigned SKUs
+// to a customer. Replaces the earlier inline expand, which didn't scale
+// once customers had dozens of candidate SKUs to pick from.
+// =====================================================================
+type ModalCategory = "ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY";
+
+function AssignSkuModal({
+  open,
+  customerName,
+  candidates,
+  picked,
+  togglePick,
+  setPicked,
+  saving,
+  onClose,
+  onSubmit,
+}: {
+  open: boolean;
+  customerName: string;
+  candidates: ProductOption[];
+  picked: Set<string>;
+  togglePick: (id: string) => void;
+  setPicked: (next: Set<string>) => void;
+  saving: boolean;
+  onClose: () => void;
+  onSubmit: () => void;
+}) {
+  const [modalTab, setModalTab] = useState<ModalCategory>("ALL");
+  const [modalQuery, setModalQuery] = useState("");
+
+  // Reset local state on every open so stale tab/search never bleed across customers.
+  useEffect(() => {
+    if (open) {
+      setModalTab("ALL");
+      setModalQuery("");
+    }
+  }, [open]);
+
+  // ESC closes the modal.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  const tabs: { key: ModalCategory; label: string }[] = [
+    { key: "ALL", label: "All" },
+    { key: "BEDFRAME", label: "Bedframe" },
+    { key: "SOFA", label: "Sofa" },
+    { key: "ACCESSORY", label: "Accessory" },
+  ];
+
+  const tabCounts = useMemo(() => {
+    const c: Record<ModalCategory, number> = { ALL: candidates.length, BEDFRAME: 0, SOFA: 0, ACCESSORY: 0 };
+    for (const p of candidates) {
+      if (p.category === "BEDFRAME" || p.category === "SOFA" || p.category === "ACCESSORY") {
+        c[p.category] += 1;
+      }
+    }
+    return c;
+  }, [candidates]);
+
+  const visible = useMemo(() => {
+    const q = modalQuery.trim().toLowerCase();
+    return candidates.filter((p) => {
+      if (modalTab !== "ALL" && p.category !== modalTab) return false;
+      if (!q) return true;
+      return p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q);
+    });
+  }, [candidates, modalTab, modalQuery]);
+
+  const selectAllVisible = () => {
+    const next = new Set(picked);
+    for (const p of visible) next.add(p.id);
+    setPicked(next);
+  };
+  const clearSelection = () => setPicked(new Set());
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl flex flex-col w-[80vw] h-[80vh] max-w-6xl mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">Assign SKUs to {customerName}</h2>
+          <button onClick={onClose} className="p-1 rounded hover:bg-[#E2DDD8]" aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Sub-header: tabs + search + bulk shortcuts */}
+        <div className="px-6 py-3 border-b border-[#E2DDD8] space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            {tabs.map((t) => (
+              <button
+                key={t.key}
+                onClick={() => setModalTab(t.key)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  modalTab === t.key
+                    ? "bg-[#111827] text-white"
+                    : "bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                }`}
+              >
+                {t.label} ({tabCounts[t.key]})
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="relative flex-1 min-w-[200px] max-w-md">
+              <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <Input
+                value={modalQuery}
+                onChange={(e) => setModalQuery(e.target.value)}
+                placeholder="Search by code or name..."
+                className="h-8 pl-8"
+                autoFocus
+              />
+            </div>
+            <Button variant="outline" size="sm" onClick={selectAllVisible} disabled={visible.length === 0}>
+              Select All visible
+            </Button>
+            <Button variant="outline" size="sm" onClick={clearSelection} disabled={picked.size === 0}>
+              Clear
+            </Button>
+            <span className="text-xs text-[#6B7280] ml-auto">{picked.size} selected</span>
+          </div>
+        </div>
+
+        {/* Body: scrollable grid of SKU rows */}
+        <div className="flex-1 overflow-y-auto px-6 py-3">
+          {candidates.length === 0 ? (
+            <p className="text-sm text-[#9CA3AF] py-12 text-center">
+              All SKUs are already assigned to this customer.
+            </p>
+          ) : visible.length === 0 ? (
+            <p className="text-sm text-[#9CA3AF] py-12 text-center">
+              No SKUs match the current filter.
+            </p>
+          ) : (
+            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {visible.map((p) => {
+                const isPicked = picked.has(p.id);
+                return (
+                  <li
+                    key={p.id}
+                    onClick={() => togglePick(p.id)}
+                    className={`flex items-center gap-3 px-3 py-2 border rounded cursor-pointer transition-colors ${
+                      isPicked
+                        ? "bg-[#F4F0E8] border-[#6B5C32]"
+                        : "bg-white border-[#E2DDD8] hover:bg-[#FAF9F7]"
+                    }`}
+                  >
+                    <div className={`h-4 w-4 rounded border flex items-center justify-center flex-shrink-0 ${isPicked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#C8C2BB]"}`}>
+                      {isPicked && <Check className="h-3 w-3 text-white" />}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="doc-number text-xs text-[#1F1D1B]">{p.code}</span>
+                        <Badge className="text-[10px]">{p.category}</Badge>
+                      </div>
+                      <p className="text-xs text-[#6B7280] truncate">{p.name}</p>
+                    </div>
+                    <span className="text-xs tabular-nums text-[#6B7280] flex-shrink-0">{formatRM(p.basePriceSen)}</span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+          <Button variant="outline" onClick={onClose}>Cancel</Button>
+          <Button
+            variant="primary"
+            disabled={picked.size === 0 || saving}
+            onClick={onSubmit}
+          >
+            {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plus className="h-4 w-4 mr-1" />}
+            Assign {picked.size} item{picked.size === 1 ? "" : "s"}
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

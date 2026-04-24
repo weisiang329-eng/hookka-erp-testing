@@ -38,7 +38,9 @@ type CustomerProduct = {
   category: string;
   basePriceSen: number;
   price1Sen: number | null;
-  seatHeightPrices: Record<string, number> | null;
+  // Backend returns an array of { height, priceSen } objects — matches the
+  // shape of products.seatHeightPrices after migration 0031 (string heights).
+  seatHeightPrices: Array<{ height: string; priceSen: number }> | null;
   notes: string | null;
 };
 
@@ -234,10 +236,10 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
     }
   };
 
-  const formatSeatHeights = (sh: Record<string, number> | null) => {
-    if (!sh || Object.keys(sh).length === 0) return "—";
-    return Object.entries(sh)
-      .map(([h, sen]) => `${h}:${(sen / 100).toFixed(0)}`)
+  const formatSeatHeights = (sh: Array<{ height: string; priceSen: number }> | null) => {
+    if (!sh || sh.length === 0) return "—";
+    return sh
+      .map((t) => `${t.height}":${(t.priceSen / 100).toFixed(0)}`)
       .join(" ");
   };
 

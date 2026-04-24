@@ -1047,18 +1047,17 @@ function LineItemCard({
                 <SearchableSelect
                   value={item.productId}
                   onChange={(val) => onSelectProduct(idx, val)}
-                  // Before any product is picked, search the full catalog across
-                  // every category — selectProduct() reads the chosen product's
-                  // own fields and auto-sets itemCategory / baseModel / sizeLabel.
-                  // Once bound, subsequent edits stay within the same category
-                  // (filteredProducts) so the line doesn't accidentally re-bind.
-                  options={(item.itemCategory ? filteredProducts : products).map(p => ({
+                  // Always show the full catalog across every category so the
+                  // user can switch between BEDFRAME / SOFA / ACCESSORY on the
+                  // same line without a separate Category dropdown to clear —
+                  // selectProduct() rebinds itemCategory from the chosen
+                  // product. Category suffix on the label makes the jump
+                  // visible in the dropdown.
+                  options={products.map(p => ({
                     value: p.id,
-                    label: item.itemCategory
-                      ? `${p.code} - ${p.name}`
-                      : `${p.code} - ${p.name} · ${p.category}`,
+                    label: `${p.code} - ${p.name} · ${p.category}`,
                   }))}
-                  placeholder={item.itemCategory ? "Select product..." : "Search any product..."}
+                  placeholder="Search any product..."
                   className={selectClass}
                 />
               )}

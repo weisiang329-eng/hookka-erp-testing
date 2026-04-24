@@ -304,7 +304,7 @@ export default function DepartmentProductionPage() {
   const deptCode = (code ?? "").toUpperCase();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const fetchedOrders: ProductionOrder[] = useMemo(
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
@@ -383,7 +383,6 @@ export default function DepartmentProductionPage() {
         setOrders((prev) => prev.map((o) => (o.id === order.id ? data.data : o)));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
-        refreshOrders();
       }
     } finally {
       setSaving(null);
@@ -449,7 +448,6 @@ export default function DepartmentProductionPage() {
         setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
-        refreshOrders();
       }
     } finally {
       setSaving(null);
@@ -486,7 +484,6 @@ export default function DepartmentProductionPage() {
         setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
-        refreshOrders();
         setDoneDialog(null);
       }
     } finally {
@@ -518,7 +515,6 @@ export default function DepartmentProductionPage() {
       setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
-      refreshOrders();
       // Clear edit for this job card
       setEdits(prev => {
         const next = { ...prev };

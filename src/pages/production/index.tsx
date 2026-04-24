@@ -1303,14 +1303,17 @@ export default function ProductionPage() {
         // once, so the total cut time is the sum of every component.
         const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
         const groupKey = `${first.salesOrderNo || first.poId}:${first.colour || ""}`;
-        // Compact WIP label: "{model} {colour} {size} (FC)" — size is seat
-        // size for sofa (e.g. "30"), bed size for bedframe (e.g. "6FT"),
-        // already normalised in row.size.
+        // Compact WIP label: "{model} · {colour} · {size} · (FC)" —
+        // middle-dot separator so the parts don't run into one another
+        // when fabric codes / sizes share characters with the model.
+        // Size is seat size for sofa (e.g. "30"), bed size for bedframe
+        // (e.g. "6FT"), already normalised in row.size.
         const wips = [
           modelLabel || first.model,
           first.colour,
           first.size,
-        ].filter(Boolean).join(" ") + " (FC)";
+          "(FC)",
+        ].filter(Boolean).join(" · ");
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,

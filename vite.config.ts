@@ -52,6 +52,12 @@ export default defineConfig({
           if (id.includes('node_modules/date-fns/')) {
             return 'date-fns'
           }
+          // Lucide ships each icon as its own ESM module.  Vite's default
+          // chunker makes ONE chunk PER icon — 45+ tiny HTTP requests on
+          // every page load.  Merge them all into a single `icons` chunk.
+          if (id.includes('node_modules/lucide-react/')) {
+            return 'icons'
+          }
         },
       },
     },

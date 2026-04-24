@@ -78,7 +78,7 @@ function nextDNNo(): string {
 
 // GET /api/debit-notes — list all
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM debit_notes ORDER BY date DESC",
   ).all<DebitNoteRow>();
   const data = (res.results ?? []).map(rowToDebitNote);
@@ -99,7 +99,7 @@ app.post("/", async (c) => {
         400,
       );
     }
-    const invoice = await c.env.DB.prepare(
+    const invoice = await c.var.DB.prepare(
       "SELECT id, invoiceNo, customerId, customerName FROM invoices WHERE id = ?",
     )
       .bind(invoiceId)
@@ -127,7 +127,7 @@ app.post("/", async (c) => {
     const noteNumber = nextDNNo();
     const date = new Date().toISOString().split("T")[0];
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO debit_notes (id, noteNumber, invoiceId, invoiceNumber, customerId,
          customerName, date, reason, reasonDetail, totalAmount, status, approvedBy, items)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -149,7 +149,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM debit_notes WHERE id = ?",
     )
       .bind(id)
@@ -169,7 +169,7 @@ app.post("/", async (c) => {
 // GET /api/debit-notes/:id — single
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM debit_notes WHERE id = ?",
   )
     .bind(id)
@@ -188,7 +188,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM debit_notes WHERE id = ?",
     )
       .bind(id)
@@ -210,7 +210,7 @@ app.put("/:id", async (c) => {
       existing.status !== "POSTED" && status === "POSTED";
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE debit_notes SET status = ?, approvedBy = ? WHERE id = ?",
       ).bind(status, approvedBy, id),
     ];
@@ -218,7 +218,7 @@ app.put("/:id", async (c) => {
     if (transitionedToPosted && existing.totalAmount > 0) {
       // Customer A/R: a debit note adds to what the customer owes.
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
         ).bind(existing.totalAmount, existing.customerId),
       );
@@ -227,7 +227,7 @@ app.put("/:id", async (c) => {
       if (existing.invoiceId) {
         const now = new Date().toISOString();
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `UPDATE invoices
                SET totalSen = totalSen + ?,
                    subtotalSen = subtotalSen + ?,
@@ -243,9 +243,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM debit_notes WHERE id = ?",
     )
       .bind(id)

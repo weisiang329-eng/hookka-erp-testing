@@ -157,7 +157,7 @@ app.get("/", async (c) => {
   if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
   sql += " ORDER BY period DESC, employeeNo";
 
-  const stmt = c.env.DB.prepare(sql);
+  const stmt = c.var.DB.prepare(sql);
   const res = await (binds.length ? stmt.bind(...binds) : stmt).all<PayslipRow>();
   const data = (res.results ?? []).map(rowToPayslip);
   return c.json({ success: true, data, total: data.length });
@@ -177,7 +177,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT COUNT(*) AS c FROM payslips WHERE period = ?",
     )
       .bind(period)
@@ -189,7 +189,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const wres = await c.env.DB.prepare(
+    const wres = await c.var.DB.prepare(
       "SELECT id, empNo, name, departmentCode, status, basicSalarySen, workingDaysPerMonth FROM workers WHERE status = 'ACTIVE'",
     ).all<WorkerRow>();
     const activeWorkers = wres.results ?? [];
@@ -210,8 +210,8 @@ app.post("/", async (c) => {
       const netPay = grossPay - totalDeductions;
       const bankAccount = `CIMB-${worker.empNo.replace("EMP-", "")}XXXX`;
 
-      const id = await nextPayslipId(c.env.DB);
-      await c.env.DB.prepare(
+      const id = await nextPayslipId(c.var.DB);
+      await c.var.DB.prepare(
         `INSERT OR IGNORE INTO payslips (
            id, employeeId, employeeName, employeeNo, departmentCode, period,
            basicSalarySen, workingDays, otWeekdayHours, otSundayHours, otPhHours,
@@ -260,7 +260,7 @@ app.post("/", async (c) => {
         )
         .run();
 
-      const inserted = await c.env.DB.prepare(
+      const inserted = await c.var.DB.prepare(
         "SELECT * FROM payslips WHERE id = ?",
       )
         .bind(id)
@@ -288,7 +288,7 @@ app.put("/", async (c) => {
         400,
       );
     }
-    const res = await c.env.DB.prepare(
+    const res = await c.var.DB.prepare(
       `UPDATE payslips
          SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
        WHERE period = ?`,
@@ -306,7 +306,7 @@ app.put("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const payslip = await c.env.DB.prepare("SELECT * FROM payslips WHERE id = ?")
+  const payslip = await c.var.DB.prepare("SELECT * FROM payslips WHERE id = ?")
     .bind(id)
     .first<PayslipRow>();
   if (!payslip) {
@@ -314,7 +314,7 @@ app.get("/:id", async (c) => {
   }
 
   const year = payslip.period.split("-")[0];
-  const ytdRes = await c.env.DB.prepare(
+  const ytdRes = await c.var.DB.prepare(
     "SELECT * FROM payslips WHERE employeeId = ? AND period LIKE ?",
   )
     .bind(payslip.employeeId, `${year}-%`)

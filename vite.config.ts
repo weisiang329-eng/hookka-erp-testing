@@ -14,6 +14,48 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Manual vendor chunk splitting so the main bundle doesn't
+        // ship heavy libs (recharts, jspdf, xlsx, pdfjs-dist) that
+        // are only needed on specific pages. Everything else stays
+        // in the main chunk.
+        manualChunks: (id) => {
+          if (!id.includes('node_modules')) return
+          if (
+            id.includes('node_modules/react/') ||
+            id.includes('node_modules/react-dom/') ||
+            id.includes('node_modules/react-router-dom/') ||
+            id.includes('node_modules/react-router/') ||
+            id.includes('node_modules/scheduler/')
+          ) {
+            return 'react-vendor'
+          }
+          if (id.includes('node_modules/recharts/') || id.includes('node_modules/d3-')) {
+            return 'charts'
+          }
+          if (
+            id.includes('node_modules/jspdf/') ||
+            id.includes('node_modules/jspdf-autotable/') ||
+            id.includes('node_modules/html2canvas/') ||
+            id.includes('node_modules/pdfjs-dist/')
+          ) {
+            return 'pdf'
+          }
+          if (id.includes('node_modules/xlsx/')) {
+            return 'xlsx'
+          }
+          if (id.includes('node_modules/@tanstack/react-table/') || id.includes('node_modules/@tanstack/table-core/')) {
+            return 'tanstack'
+          }
+          if (id.includes('node_modules/date-fns/')) {
+            return 'date-fns'
+          }
+        },
+      },
+    },
+  },
   server: {
     port: 3000,
     // Bind to 0.0.0.0 so other devices on the same Wi-Fi (phones,

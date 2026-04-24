@@ -75,8 +75,8 @@ function genId(): string {
 // GET /api/customers — list all customers + their hubs
 app.get("/", async (c) => {
   const [customers, hubs] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM customers ORDER BY code").all<CustomerRow>(),
-    c.env.DB.prepare("SELECT * FROM delivery_hubs").all<HubRow>(),
+    c.var.DB.prepare("SELECT * FROM customers ORDER BY code").all<CustomerRow>(),
+    c.var.DB.prepare("SELECT * FROM delivery_hubs").all<HubRow>(),
   ]);
   const data = (customers.results ?? []).map((r) =>
     rowToCustomer(r, hubs.results ?? []),
@@ -98,7 +98,7 @@ app.post("/", async (c) => {
     const id = genId();
     const isActive = body.isActive === false ? 0 : 1;
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO customers (id, code, name, ssmNo, companyAddress, creditTerms,
          creditLimitSen, outstandingSen, isActive, contactName, phone, email)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -119,7 +119,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM customers WHERE id = ?",
     )
       .bind(id)
@@ -140,10 +140,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [cust, hubsRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM customers WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM customers WHERE id = ?")
       .bind(id)
       .first<CustomerRow>(),
-    c.env.DB.prepare("SELECT * FROM delivery_hubs WHERE customerId = ?")
+    c.var.DB.prepare("SELECT * FROM delivery_hubs WHERE customerId = ?")
       .bind(id)
       .all<HubRow>(),
   ]);
@@ -157,7 +157,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM customers WHERE id = ?",
     )
       .bind(id)
@@ -186,7 +186,7 @@ app.put("/:id", async (c) => {
       email: body.email ?? existing.email ?? "",
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE customers SET
          code = ?, name = ?, ssmNo = ?, companyAddress = ?, creditTerms = ?,
          creditLimitSen = ?, outstandingSen = ?, isActive = ?,
@@ -209,7 +209,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const hubsRes = await c.env.DB.prepare(
+    const hubsRes = await c.var.DB.prepare(
       "SELECT * FROM delivery_hubs WHERE customerId = ?",
     )
       .bind(id)
@@ -226,7 +226,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/customers/:id — cascades via FK to delivery_hubs
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM customers WHERE id = ?",
   )
     .bind(id)
@@ -234,7 +234,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Customer not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM customers WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM customers WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToCustomer(existing, []) });
 });
 

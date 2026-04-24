@@ -50,8 +50,8 @@ app.get("/", async (c) => {
     ? "SELECT * FROM maintenance_logs WHERE equipmentId = ? ORDER BY date DESC"
     : "SELECT * FROM maintenance_logs ORDER BY date DESC";
   const stmt = equipmentId
-    ? c.env.DB.prepare(sql).bind(equipmentId)
-    : c.env.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(equipmentId)
+    : c.var.DB.prepare(sql);
   const res = await stmt.all<MaintenanceLogRow>();
   const data = (res.results ?? []).map(rowToLog);
   return c.json({ success: true, data, total: data.length });
@@ -67,7 +67,7 @@ app.post("/", async (c) => {
         400,
       );
     }
-    const eq = await c.env.DB.prepare(
+    const eq = await c.var.DB.prepare(
       "SELECT id, name FROM equipment WHERE id = ?",
     )
       .bind(body.equipmentId)
@@ -77,7 +77,7 @@ app.post("/", async (c) => {
     }
     const id = genId();
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO maintenance_logs (id, equipmentId, equipmentName, type,
          description, performedBy, date, costSen, downtimeHours, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -95,7 +95,7 @@ app.post("/", async (c) => {
         now,
       )
       .run();
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM maintenance_logs WHERE id = ?",
     )
       .bind(id)
@@ -109,7 +109,7 @@ app.post("/", async (c) => {
 // GET /api/maintenance-logs/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM maintenance_logs WHERE id = ?",
   )
     .bind(id)
@@ -126,7 +126,7 @@ app.get("/:id", async (c) => {
 // DELETE /api/maintenance-logs/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM maintenance_logs WHERE id = ?",
   )
     .bind(id)
@@ -137,7 +137,7 @@ app.delete("/:id", async (c) => {
       404,
     );
   }
-  await c.env.DB.prepare("DELETE FROM maintenance_logs WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM maintenance_logs WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true, data: rowToLog(existing) });

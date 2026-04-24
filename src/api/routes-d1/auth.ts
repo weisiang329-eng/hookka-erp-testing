@@ -55,7 +55,7 @@ app.post("/login", async (c) => {
     );
   }
 
-  const user = await c.env.DB.prepare(
+  const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
   )
     .bind(email.trim())
@@ -77,11 +77,11 @@ app.post("/login", async (c) => {
   const expires = new Date(now.getTime() + SESSION_TTL_MS);
 
   // Atomic: write session + update lastLoginAt in one batch.
-  await c.env.DB.batch([
-    c.env.DB.prepare(
+  await c.var.DB.batch([
+    c.var.DB.prepare(
       "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
     ).bind(token, user.id, now.toISOString(), expires.toISOString()),
-    c.env.DB.prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?").bind(
+    c.var.DB.prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?").bind(
       now.toISOString(),
       user.id,
     ),
@@ -94,13 +94,20 @@ app.post("/login", async (c) => {
 });
 
 // ----- POST /api/auth/logout ----------------------------------------------
-// Deletes the caller's session. Idempotent: unknown/missing token → still ok.
+// Deletes the caller's session AND purges the KV session cache so the token
+// stops working immediately (otherwise auth-middleware's KV cache would keep
+// the logged-out session alive for up to SESSION_CACHE_TTL_S).
+// Idempotent: unknown/missing token → still ok.
 app.post("/logout", async (c) => {
   const token = bearerTokenFrom(c.req.raw);
   if (token) {
-    await c.env.DB.prepare("DELETE FROM user_sessions WHERE token = ?")
-      .bind(token)
-      .run();
+    const { invalidateSessionCache } = await import("../lib/auth-middleware");
+    await Promise.all([
+      c.var.DB.prepare("DELETE FROM user_sessions WHERE token = ?")
+        .bind(token)
+        .run(),
+      invalidateSessionCache(c.env.SESSION_CACHE, token),
+    ]);
   }
   return c.json({ success: true });
 });
@@ -114,7 +121,7 @@ app.get("/me", async (c) => {
   if (!userId) {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
-  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(userId)
     .first<UserRow>();
   if (!user) {
@@ -150,7 +157,7 @@ app.post("/change-password", async (c) => {
     );
   }
 
-  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(userId)
     .first<UserRow>();
   if (!user) {
@@ -162,7 +169,7 @@ app.post("/change-password", async (c) => {
   }
 
   const newHash = await hashPassword(newPassword);
-  await c.env.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
+  await c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
     .bind(newHash, userId)
     .run();
 
@@ -194,10 +201,10 @@ app.get("/invite/:token", async (c) => {
   const token = c.req.param("token");
   const nowIso = new Date().toISOString();
 
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     `SELECT i.email, i.displayName, i.expiresAt, i.acceptedAt,
-            u.displayName AS inviterDisplayName,
-            u.email AS inviterEmail
+            u.displayName AS "inviterDisplayName",
+            u.email AS "inviterEmail"
        FROM user_invites i
        LEFT JOIN users u ON u.id = i.invitedBy
       WHERE i.token = ?
@@ -256,7 +263,7 @@ app.post("/accept-invite", async (c) => {
   }
 
   const nowIso = new Date().toISOString();
-  const invite = await c.env.DB.prepare(
+  const invite = await c.var.DB.prepare(
     "SELECT * FROM user_invites WHERE token = ? LIMIT 1",
   )
     .bind(token)
@@ -267,7 +274,7 @@ app.post("/accept-invite", async (c) => {
 
   // Race condition: someone else (re-)created a user with this email between
   // invite send and now. Bail loudly rather than silently overwriting.
-  const existingUser = await c.env.DB.prepare(
+  const existingUser = await c.var.DB.prepare(
     "SELECT id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
   )
     .bind(invite.email)
@@ -291,8 +298,8 @@ app.post("/accept-invite", async (c) => {
   ).toISOString();
 
   // Atomic: create user, mark invite accepted, issue session in one batch.
-  await c.env.DB.batch([
-    c.env.DB.prepare(
+  await c.var.DB.batch([
+    c.var.DB.prepare(
       `INSERT INTO users (id, email, passwordHash, role, isActive, createdAt, lastLoginAt, displayName)
        VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
     ).bind(
@@ -304,10 +311,10 @@ app.post("/accept-invite", async (c) => {
       nowIso,
       resolvedDisplayName,
     ),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "UPDATE user_invites SET acceptedAt = ? WHERE token = ?",
     ).bind(nowIso, token),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "INSERT INTO user_sessions (token, userId, createdAt, expiresAt) VALUES (?, ?, ?, ?)",
     ).bind(sessionToken, userId, nowIso, sessionExpires),
   ]);

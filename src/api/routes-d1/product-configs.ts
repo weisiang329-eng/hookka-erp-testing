@@ -72,7 +72,7 @@ function rowToConfig(row: ProductDeptConfigRow) {
 
 // GET /api/product-configs — list all product dept configs
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM product_dept_configs ORDER BY productCode",
   ).all<ProductDeptConfigRow>();
   const data = (res.results ?? []).map(rowToConfig);

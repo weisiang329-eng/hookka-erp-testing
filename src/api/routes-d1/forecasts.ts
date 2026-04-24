@@ -61,7 +61,7 @@ app.get("/", async (c) => {
     "SELECT * FROM forecast_entries" +
     (where.length > 0 ? " WHERE " + where.join(" AND ") : "") +
     " ORDER BY period DESC, productCode";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<ForecastRow>();
   return c.json((res.results ?? []).map(rowToForecast));
@@ -96,7 +96,7 @@ app.post("/", async (c) => {
   const confidence =
     body.confidence === undefined ? 50 : Math.max(0, Math.min(100, Number(body.confidence)));
 
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO forecast_entries
        (id, productId, productName, productCode, period, forecastQty, actualQty, method, confidence, createdDate)
      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
@@ -114,7 +114,7 @@ app.post("/", async (c) => {
     )
     .run();
 
-  const created = await c.env.DB.prepare(
+  const created = await c.var.DB.prepare(
     "SELECT * FROM forecast_entries WHERE id = ?",
   )
     .bind(id)

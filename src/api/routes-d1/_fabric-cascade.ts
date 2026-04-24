@@ -17,7 +17,7 @@
 //     / fabric_trackings.fabricCode.
 //
 // All functions here return arrays of prepared D1 statements so the caller
-// can fold them into a single `c.env.DB.batch([...])` for atomicity with the
+// can fold them into a single `c.var.DB.batch([...])` for atomicity with the
 // raw_materials write.
 // ---------------------------------------------------------------------------
 

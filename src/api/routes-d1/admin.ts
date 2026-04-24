@@ -140,7 +140,7 @@ async function countCold(
 //   { success, dryRun, cutoff, moved: { production_orders, job_cards, ... } }
 // ---------------------------------------------------------------------------
 app.post("/archive/run", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
 
@@ -202,7 +202,7 @@ app.post("/archive/run", async (c) => {
     db
       .prepare(
         `INSERT INTO sales_order_items_archive
-           SELECT soi.*, ? AS archivedAt
+           SELECT soi.*, ? AS "archivedAt"
              FROM sales_order_items soi
             WHERE EXISTS (
               SELECT 1 FROM sales_orders s
@@ -235,7 +235,7 @@ app.post("/archive/run", async (c) => {
     db
       .prepare(
         `INSERT INTO sales_orders_archive
-           SELECT s.*, ? AS archivedAt
+           SELECT s.*, ? AS "archivedAt"
              FROM sales_orders s
             WHERE s.status IN ('CLOSED','CANCELLED')
               AND COALESCE(s.updated_at, '') <> ''
@@ -260,7 +260,7 @@ app.post("/archive/run", async (c) => {
     db
       .prepare(
         `INSERT INTO job_cards_archive
-           SELECT jc.*, ? AS archivedAt
+           SELECT jc.*, ? AS "archivedAt"
              FROM job_cards jc
             WHERE EXISTS (
               SELECT 1 FROM production_orders p
@@ -293,7 +293,7 @@ app.post("/archive/run", async (c) => {
     db
       .prepare(
         `INSERT INTO production_orders_archive
-           SELECT p.*, ? AS archivedAt
+           SELECT p.*, ? AS "archivedAt"
              FROM production_orders p
             WHERE p.status = 'COMPLETED'
               AND COALESCE(p.updated_at, '') <> ''
@@ -513,7 +513,7 @@ async function rebuildSingleSO(
 // POST /api/admin/rebuild-all-pos
 // ---------------------------------------------------------------------------
 app.post("/rebuild-all-pos", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
   const confirm = c.req.query("confirm") ?? "";
@@ -615,7 +615,7 @@ app.post("/rebuild-all-pos", async (c) => {
 // POST /api/admin/rebuild-pos/:soId
 // ---------------------------------------------------------------------------
 app.post("/rebuild-pos/:soId", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const soId = c.req.param("soId");
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";

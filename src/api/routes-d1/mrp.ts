@@ -242,27 +242,27 @@ app.post("/", async (c) => {
   const horizonParam = c.req.query("horizon") || "all";
 
   const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       `SELECT id, poNo, productCode, itemCategory, fabricCode, quantity,
               targetEndDate, status
          FROM production_orders
         WHERE status IN ('PENDING','IN_PROGRESS')`,
     ).all<ProductionOrderRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT productionOrderId, status, dueDate FROM job_cards",
     ).all<JobCardRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT id, productCode, wipComponents, versionStatus FROM bom_templates",
     ).all<BomTemplateRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT itemCode, itemGroup, balanceQty FROM raw_materials",
     ).all<RawMaterialRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       `SELECT supplierId, materialCode, leadTimeDays, moq, isMainSupplier
          FROM supplier_material_bindings`,
     ).all<SupplierBindingRow>(),
-    c.env.DB.prepare("SELECT id, name FROM suppliers").all<SupplierRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare("SELECT id, name FROM suppliers").all<SupplierRow>(),
+    c.var.DB.prepare(
       "SELECT id, code, name, category, sohMeters FROM fabrics",
     ).all<FabricRow>(),
   ]);

@@ -119,14 +119,14 @@ app.get("/", async (c) => {
 
   const today = todayIso();
 
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT cp.*,
-            p.code     AS productCode,
-            p.name     AS productName,
-            p.category AS productCategory,
-            p.basePriceSen      AS productBasePriceSen,
-            p.price1Sen         AS productPrice1Sen,
-            p.seatHeightPrices  AS productSeatHeightPrices
+            p.code     AS "productCode",
+            p.name     AS "productName",
+            p.category AS "productCategory",
+            p.basePriceSen      AS "productBasePriceSen",
+            p.price1Sen         AS "productPrice1Sen",
+            p.seatHeightPrices  AS "productSeatHeightPrices"
        FROM customer_products cp
        INNER JOIN products p ON p.id = cp.productId
        WHERE cp.customerId = ?
@@ -143,7 +143,7 @@ app.get("/", async (c) => {
   let pendingCpIds = new Set<string>();
   if (cpIds.length > 0) {
     const placeholders = cpIds.map(() => "?").join(",");
-    const histRes = await c.env.DB.prepare(
+    const histRes = await c.var.DB.prepare(
       `SELECT * FROM customer_product_prices
         WHERE customerProductId IN (${placeholders})
         ORDER BY effectiveFrom DESC, created_at DESC`,
@@ -198,12 +198,12 @@ app.get("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/by-product/:productId", async (c) => {
   const productId = c.req.param("productId");
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT cp.*,
-            cu.name AS customerName,
-            p.basePriceSen      AS productBasePriceSen,
-            p.price1Sen         AS productPrice1Sen,
-            p.seatHeightPrices  AS productSeatHeightPrices
+            cu.name AS "customerName",
+            p.basePriceSen      AS "productBasePriceSen",
+            p.price1Sen         AS "productPrice1Sen",
+            p.seatHeightPrices  AS "productSeatHeightPrices"
        FROM customer_products cp
        INNER JOIN customers cu ON cu.id = cp.customerId
        INNER JOIN products p   ON p.id  = cp.productId
@@ -256,7 +256,7 @@ app.post("/", async (c) => {
         ? null
         : JSON.stringify(body.seatHeightPrices);
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT OR IGNORE INTO customer_products
          (id, customerId, productId, basePriceSen, price1Sen, seatHeightPrices, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -273,14 +273,14 @@ app.post("/", async (c) => {
       .run();
 
     // Fetch the current row (either the one we just inserted, or the pre-existing one)
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       `SELECT cp.*,
-              p.code     AS productCode,
-              p.name     AS productName,
-              p.category AS productCategory,
-              p.basePriceSen      AS productBasePriceSen,
-              p.price1Sen         AS productPrice1Sen,
-              p.seatHeightPrices  AS productSeatHeightPrices
+              p.code     AS "productCode",
+              p.name     AS "productName",
+              p.category AS "productCategory",
+              p.basePriceSen      AS "productBasePriceSen",
+              p.price1Sen         AS "productPrice1Sen",
+              p.seatHeightPrices  AS "productSeatHeightPrices"
          FROM customer_products cp
          INNER JOIN products p ON p.id = cp.productId
          WHERE cp.customerId = ? AND cp.productId = ?`,
@@ -335,7 +335,7 @@ app.post("/", async (c) => {
 // GET /:customerProductId/price-history
 app.get("/:customerProductId/price-history", async (c) => {
   const cpId = c.req.param("customerProductId");
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT * FROM customer_product_prices
       WHERE customerProductId = ?
       ORDER BY effectiveFrom DESC, created_at DESC`,
@@ -358,7 +358,7 @@ app.get("/:customerProductId/price-history", async (c) => {
 app.post("/:customerProductId/prices", async (c) => {
   const cpId = c.req.param("customerProductId");
   try {
-    const parent = await c.env.DB.prepare(
+    const parent = await c.var.DB.prepare(
       "SELECT id FROM customer_products WHERE id = ?",
     )
       .bind(cpId)
@@ -388,7 +388,7 @@ app.post("/:customerProductId/prices", async (c) => {
         ? null
         : JSON.stringify(body.seatHeightPrices);
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO customer_product_prices
          (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
           effectiveFrom, notes, createdBy)
@@ -406,7 +406,7 @@ app.post("/:customerProductId/prices", async (c) => {
       )
       .run();
 
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       "SELECT * FROM customer_product_prices WHERE id = ?",
     )
       .bind(id)
@@ -445,7 +445,7 @@ app.post("/:customerProductId/prices", async (c) => {
 // DELETE /price-row/:priceRowId
 app.delete("/price-row/:priceRowId", async (c) => {
   const id = c.req.param("priceRowId");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id, customerProductId FROM customer_product_prices WHERE id = ?",
   )
     .bind(id)
@@ -453,7 +453,7 @@ app.delete("/price-row/:priceRowId", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Price row not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM customer_product_prices WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM customer_product_prices WHERE id = ?")
     .bind(id)
     .run();
   return c.json({
@@ -468,7 +468,7 @@ app.delete("/price-row/:priceRowId", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM customer_products WHERE id = ?",
     )
       .bind(id)
@@ -494,7 +494,7 @@ app.put("/:id", async (c) => {
       notes: body.notes === undefined ? existing.notes : body.notes,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE customer_products
          SET basePriceSen = ?,
              price1Sen = ?,
@@ -512,14 +512,14 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       `SELECT cp.*,
-              p.code     AS productCode,
-              p.name     AS productName,
-              p.category AS productCategory,
-              p.basePriceSen      AS productBasePriceSen,
-              p.price1Sen         AS productPrice1Sen,
-              p.seatHeightPrices  AS productSeatHeightPrices
+              p.code     AS "productCode",
+              p.name     AS "productName",
+              p.category AS "productCategory",
+              p.basePriceSen      AS "productBasePriceSen",
+              p.price1Sen         AS "productPrice1Sen",
+              p.seatHeightPrices  AS "productSeatHeightPrices"
          FROM customer_products cp
          INNER JOIN products p ON p.id = cp.productId
          WHERE cp.id = ?`,
@@ -565,7 +565,7 @@ app.put("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM customer_products WHERE id = ?",
   )
     .bind(id)
@@ -573,7 +573,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Assignment not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM customer_products WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM customer_products WHERE id = ?")
     .bind(id)
     .run();
   return c.json({
@@ -617,7 +617,7 @@ app.post("/bulk-assign", async (c) => {
     // Figure out which pairs already exist so we can report duplicate count
     // accurately (D1 doesn't surface per-statement rowcount in batch results).
     const placeholders = productIds.map(() => "?").join(",");
-    const existingRes = await c.env.DB.prepare(
+    const existingRes = await c.var.DB.prepare(
       `SELECT productId FROM customer_products
         WHERE customerId = ?
           AND productId IN (${placeholders})`,
@@ -631,13 +631,13 @@ app.post("/bulk-assign", async (c) => {
 
     if (toInsert.length > 0) {
       const statements = toInsert.map((pid) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT OR IGNORE INTO customer_products
              (id, customerId, productId)
            VALUES (?, ?, ?)`,
         ).bind(genId(), customerId, pid),
       );
-      await c.env.DB.batch(statements);
+      await c.var.DB.batch(statements);
     }
 
     return c.json({
@@ -678,13 +678,13 @@ async function resolveCustomerPriceAsOf(
   // Step 1: product + assignment row (legacy overrides kept as fallback).
   const row = await db
     .prepare(
-      `SELECT p.basePriceSen     AS productBasePriceSen,
-              p.price1Sen        AS productPrice1Sen,
-              p.seatHeightPrices AS productSeatHeightPrices,
-              cp.id              AS cpId,
-              cp.basePriceSen    AS cpBasePriceSen,
-              cp.price1Sen       AS cpPrice1Sen,
-              cp.seatHeightPrices AS cpSeatHeightPrices
+      `SELECT p.basePriceSen     AS "productBasePriceSen",
+              p.price1Sen        AS "productPrice1Sen",
+              p.seatHeightPrices AS "productSeatHeightPrices",
+              cp.id              AS "cpId",
+              cp.basePriceSen    AS "cpBasePriceSen",
+              cp.price1Sen       AS "cpPrice1Sen",
+              cp.seatHeightPrices AS "cpSeatHeightPrices"
          FROM products p
          LEFT JOIN customer_products cp
            ON cp.productId = p.id AND cp.customerId = ?
@@ -760,7 +760,7 @@ async function resolveCustomerPrice(
 app.get("/price-for/:productId/:customerId", async (c) => {
   const productId = c.req.param("productId");
   const customerId = c.req.param("customerId");
-  const data = await resolveCustomerPrice(c.env.DB, productId, customerId);
+  const data = await resolveCustomerPrice(c.var.DB, productId, customerId);
   if (!data) {
     return c.json({ success: false, error: "Product not found" }, 404);
   }

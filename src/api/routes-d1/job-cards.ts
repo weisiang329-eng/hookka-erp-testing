@@ -58,7 +58,7 @@ app.get("/:id/events", async (c) => {
   const limit = Math.min(500, Math.max(1, rawLimit));
   const offset = (page - 1) * limit;
 
-  const db = c.env.DB;
+  const db = c.var.DB;
   const [countRes, pageRes] = await Promise.all([
     db
       .prepare("SELECT COUNT(*) AS n FROM job_card_events WHERE jobCardId = ?")

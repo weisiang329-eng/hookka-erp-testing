@@ -43,7 +43,7 @@ const ALLOWED_STATUS = ["AVAILABLE", "IN_USE", "MAINTENANCE"] as const;
 
 // GET /api/lorries
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM lorries ORDER BY name",
   ).all<LorryRow>();
   const data = (res.results ?? []).map(rowToLorry);
@@ -65,7 +65,7 @@ app.post("/", async (c) => {
       (ALLOWED_STATUS as readonly string[]).includes(body.status)
         ? body.status
         : "AVAILABLE";
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO lorries (id, name, plateNumber, capacity, driverName, driverContact, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
@@ -81,7 +81,7 @@ app.post("/", async (c) => {
         now,
       )
       .run();
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM lorries WHERE id = ?",
     )
       .bind(id)
@@ -100,7 +100,7 @@ app.put("/", async (c) => {
     if (!id) {
       return c.json({ success: false, error: "id is required" }, 400);
     }
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM lorries WHERE id = ?",
     )
       .bind(id)
@@ -124,7 +124,7 @@ app.put("/", async (c) => {
           : existing.driverContact,
     };
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE lorries SET status = ?, driverName = ?, driverContact = ?, updated_at = ? WHERE id = ?`,
     )
       .bind(
@@ -135,7 +135,7 @@ app.put("/", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM lorries WHERE id = ?",
     )
       .bind(id)
@@ -149,7 +149,7 @@ app.put("/", async (c) => {
 // GET /api/lorries/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare("SELECT * FROM lorries WHERE id = ?")
+  const row = await c.var.DB.prepare("SELECT * FROM lorries WHERE id = ?")
     .bind(id)
     .first<LorryRow>();
   if (!row) {
@@ -162,7 +162,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM lorries WHERE id = ?",
     )
       .bind(id)
@@ -187,7 +187,7 @@ app.put("/:id", async (c) => {
           : existing.status,
     };
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE lorries SET name = ?, plateNumber = ?, capacity = ?,
          driverName = ?, driverContact = ?, status = ?, updated_at = ?
        WHERE id = ?`,
@@ -203,7 +203,7 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM lorries WHERE id = ?",
     )
       .bind(id)
@@ -217,13 +217,13 @@ app.put("/:id", async (c) => {
 // DELETE /api/lorries/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM lorries WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM lorries WHERE id = ?")
     .bind(id)
     .first<LorryRow>();
   if (!existing) {
     return c.json({ success: false, error: "Lorry not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM lorries WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM lorries WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToLorry(existing) });
 });
 

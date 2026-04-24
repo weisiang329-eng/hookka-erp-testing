@@ -1,28 +1,59 @@
 // ---------------------------------------------------------------------------
-// Hono app for Cloudflare Workers runtime.
+// Hono app for Cloudflare Pages Functions — the hookka-erp backend.
 //
-// This file mirrors src/api/index.ts but:
-//   - does NOT call serve() from @hono/node-server (Workers don't need it)
-//   - types `Env` bindings so routes can access `c.env.DB` (D1 client)
-//   - exports the Hono `app` as default so Pages Functions can call
-//     `app.fetch(request, env, ctx)`
+// Data layer (post Phase 0-7 migration, see docs/d1-retirement-plan.md):
+//   Browser → Pages Functions (this app) → D1-compat adapter (c.var.DB)
+//     → postgres.js → Hyperdrive (CF pool) → Supabase Postgres (Singapore)
 //
-// Routes are being progressively migrated from src/api/routes/*.ts (which
-// still use the in-memory mock-data arrays) to Workers-compatible versions
-// that query D1. Until migration is complete, both files coexist.
+// Key bindings (wrangler.toml):
+//   HYPERDRIVE       — production/preview Postgres connection
+//   SESSION_CACHE    — KV cache for auth sessions + hot lookup tables
+//   DB (D1Database)  — LEGACY, retained for rollback only.  Routes MUST use
+//                      c.var.DB, NOT c.env.DB.  See the DB-injection
+//                      middleware below.
+//
+// Per-request lifecycle:
+//   1. CORS       — allow Pages origin + local Vite dev
+//   2. timingMdw  — emits [req] / [slow-req] log lines for wrangler tail
+//   3. dbInject   — constructs a D1-compat adapter over Hyperdrive and
+//                   stashes it on c.var.DB.  Every authenticated route
+//                   below this line transacts via c.var.DB.
+//   4. authMdw    — Bearer-token gate with KV session cache (see
+//                   lib/auth-middleware.ts); public endpoints registered
+//                   BEFORE this line bypass auth by virtue of order.
+//   5. Route handlers — imported from routes-d1/*.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 
 export type Env = {
   Bindings: {
-    DB: D1Database;
+    DB: D1Database;               // legacy D1 binding (kept for rollback; routes use c.var.DB)
     ENVIRONMENT: string;
     API_CORS_ORIGIN: string;
     APP_URL: string;              // e.g. "http://localhost:8788" or "https://hookka-erp-testing.pages.dev"
     RESEND_API_KEY?: string;      // Optional — set via wrangler secret for prod, .dev.vars for local
     RESEND_FROM_EMAIL: string;    // e.g. "Hookka ERP <onboarding@resend.dev>"
     ANTHROPIC_API_KEY?: string;   // Claude API key — set via `wrangler secret put ANTHROPIC_API_KEY`. Used by routes-d1/scan-po.ts.
+    // Supabase (Phase 2+). Transaction-mode pooler on port 6543.
+    // Local dev uses DATABASE_URL directly from .dev.vars.
+    // Production / preview use the HYPERDRIVE binding below (required to
+    // avoid Workers subrequest limits; see wrangler.toml).
+    DATABASE_URL?: string;
+    SUPABASE_URL?: string;
+    SUPABASE_SERVICE_KEY?: string;
+    HYPERDRIVE: Hyperdrive;
+    // Shared secret expected on /api/internal/* routes that are meant to
+    // be invoked by cron / ops tooling only (not public traffic).
+    CRON_SECRET?: string;
+    // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
+    SESSION_CACHE: KVNamespace;
+  };
+  // Per-request variables.  DB is the Supabase-backed D1-compat adapter
+  // installed by the middleware below; typed as D1Database so existing route
+  // code keeps its D1 type surface without any `any` casts.
+  Variables: {
+    DB: D1Database;
   };
 };
 
@@ -49,6 +80,28 @@ app.use(
 // even 401s are timed.
 app.use("/api/*", timingMiddleware);
 
+// DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
+// adapter and exposes it as `c.var.DB`.  Routes use this instead of raw D1.
+// Must run before authMiddleware (which itself hits the DB to verify tokens).
+// The adapter is further wrapped in instrumentD1 so every prepare/all/first/
+// run/batch emits a [slow-query] line when it exceeds SLOW_QUERY_MS.
+app.use("/api/*", async (c, next) => {
+  const { D1Compat } = await import("./lib/d1-compat");
+  const { getSql } = await import("./lib/db-pg");
+  const { instrumentD1 } = await import("./lib/observability");
+  // Prefer Hyperdrive binding (production / preview on Cloudflare).  Fall
+  // back to DATABASE_URL env var only for local dev without Hyperdrive.
+  const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
+  if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
+  const adapter = new D1Compat(getSql(url)) as unknown as D1Database;
+  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname));
+  await next();
+});
+
+// ---------------------------------------------------------------------------
+// Public routes (registered BEFORE authMiddleware)
+// ---------------------------------------------------------------------------
+
 // Health check — used by Pages build step and uptime monitors.
 app.get("/api/health", (c) =>
   c.json({
@@ -59,9 +112,117 @@ app.get("/api/health", (c) =>
   }),
 );
 
+// Heartbeat — used to monitor the Hyperdrive → Supabase path stays healthy.
+// Reveals only Postgres `NOW()` and a table count — no business data.  Kept
+// public so uptime monitors and the CI smoke run without an auth dance.
+app.get("/api/pg-ping", async (c) => {
+  try {
+    const { getSql } = await import("./lib/db-pg");
+    const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
+    if (!url) throw new Error("No database connection string");
+    const sql = getSql(url);
+    const t0 = Date.now();
+    const rows = (await sql`SELECT NOW() AS now, (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count`) as unknown as { now: unknown; tableCount: number }[];
+    const ms = Date.now() - t0;
+    return c.json({
+      ok: true,
+      elapsedMs: ms,
+      via: c.env.HYPERDRIVE ? "hyperdrive" : "direct",
+      ...rows[0],
+    });
+  } catch (e) {
+    // Do NOT echo driver error messages — they can leak schema / table names.
+    console.error("[pg-ping] error:", e);
+    return c.json({ ok: false, error: "health check failed" }, 500);
+  }
+});
+
+// Phase 4 — refresh all dashboard materialized views.  Meant to be hit by
+// a Cron Trigger (external cron service or a separate Worker with scheduled
+// handler — Pages Functions doesn't support scheduled events directly).
+// Gated by CRON_SECRET + constant-time compare.  Returns 503 (not 403)
+// when the secret env var is missing on the server, so a misconfigured
+// deploy fails closed instead of allowing anonymous calls.
+app.post("/api/internal/refresh-mvs", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[refresh-mvs] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    await c.var.DB.prepare("SELECT refresh_dashboard_mvs()").run();
+    const { invalidate } = await import("./lib/kv-cache");
+    await invalidate(c, "dashboard:summary:v1");
+    return c.json({ ok: true, elapsedMs: Date.now() - t0 });
+  } catch (e) {
+    console.error("[refresh-mvs] error:", e);
+    return c.json({ ok: false, error: "refresh failed" }, 500);
+  }
+});
+
+/**
+ * Constant-time string equality.  Hashes both sides before comparing so the
+ * comparison time depends only on the hash output length, never on the
+ * secret contents.  Returns false on any length mismatch at the hash stage,
+ * which is safe because the hash output is fixed-size.
+ */
+async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  if (va.length !== vb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
 // Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
+// MUST be registered BEFORE any route that touches business data.
 app.use("/api/*", authMiddleware);
+
+// ---------------------------------------------------------------------------
+// Auth-gated routes (registered AFTER authMiddleware)
+// ---------------------------------------------------------------------------
+
+// Phase 4 — dashboard summary from materialized views.  Auth-gated: aggregate
+// revenue + production volume are competitively sensitive.  30s KV cache.
+app.get("/api/dashboard/summary", async (c) => {
+  const { cached } = await import("./lib/kv-cache");
+  try {
+    const data = await cached(c, "dashboard:summary:v1", 30, async () => {
+      // MV columns are snake_case (not in the rename map used by the D1-
+      // compat adapter since they weren't in the SQLite source schema) —
+      // reference them literally.  postgres.js's toCamel transform still
+      // hands camelCase keys to the handler body.
+      const [so, po, jc] = await Promise.all([
+        c.var.DB.prepare("SELECT status, order_count, total_sen FROM mv_so_summary").all(),
+        c.var.DB.prepare("SELECT status, po_count FROM mv_po_pipeline").all(),
+        c.var.DB
+          .prepare("SELECT department_code, status, jc_count FROM mv_jc_by_dept")
+          .all(),
+      ]);
+      return {
+        salesOrders: so.results ?? [],
+        productionOrders: po.results ?? [],
+        jobCards: jc.results ?? [],
+      };
+    });
+    return c.json({ ok: true, ...data });
+  } catch (e) {
+    console.error("[dashboard/summary] error:", e);
+    return c.json({ ok: false, error: "dashboard unavailable" }, 500);
+  }
+});
 
 // ---------------------------------------------------------------------------
 // Route registrations — add each migrated route here.

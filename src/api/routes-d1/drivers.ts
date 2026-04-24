@@ -57,7 +57,7 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 
 // GET /api/drivers
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM drivers ORDER BY name",
   ).all<DriverRow>();
   const data = (res.results ?? []).map(rowToDriver);
@@ -80,7 +80,7 @@ app.post("/", async (c) => {
     const now = new Date().toISOString();
     const status = coerceStatus(body.status);
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO drivers (id, name, phone, contactPerson, vehicleNo, vehicleType,
          capacityM3, ratePerTripSen, ratePerExtraDropSen, status, remarks, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -102,7 +102,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM drivers WHERE id = ?",
     )
       .bind(id)
@@ -116,7 +116,7 @@ app.post("/", async (c) => {
 // GET /api/drivers/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare("SELECT * FROM drivers WHERE id = ?")
+  const row = await c.var.DB.prepare("SELECT * FROM drivers WHERE id = ?")
     .bind(id)
     .first<DriverRow>();
   if (!row) {
@@ -129,7 +129,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM drivers WHERE id = ?",
     )
       .bind(id)
@@ -179,7 +179,7 @@ app.put("/:id", async (c) => {
           : existing.remarks,
     };
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE drivers SET
          name = ?, phone = ?, contactPerson = ?, vehicleNo = ?, vehicleType = ?,
          capacityM3 = ?, ratePerTripSen = ?, ratePerExtraDropSen = ?, status = ?,
@@ -201,7 +201,7 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM drivers WHERE id = ?",
     )
       .bind(id)
@@ -215,13 +215,13 @@ app.put("/:id", async (c) => {
 // DELETE /api/drivers/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM drivers WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM drivers WHERE id = ?")
     .bind(id)
     .first<DriverRow>();
   if (!existing) {
     return c.json({ success: false, error: "3PL provider not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM drivers WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM drivers WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToDriver(existing) });
 });
 

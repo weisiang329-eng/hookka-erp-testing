@@ -138,7 +138,7 @@ function nextCNNo(): string {
 
 // GET /api/credit-notes — list all
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM credit_notes ORDER BY date DESC",
   ).all<CreditNoteRow>();
   const data = (res.results ?? []).map(rowToCreditNote);
@@ -159,7 +159,7 @@ app.post("/", async (c) => {
         400,
       );
     }
-    const invoice = await c.env.DB.prepare(
+    const invoice = await c.var.DB.prepare(
       "SELECT id, invoiceNo, customerId, customerName FROM invoices WHERE id = ?",
     )
       .bind(invoiceId)
@@ -202,7 +202,7 @@ app.post("/", async (c) => {
         : null;
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO credit_notes (id, noteNumber, invoiceId, invoiceNumber, customerId,
            customerName, date, reason, reasonDetail, totalAmount, status, approvedBy, items)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -227,12 +227,12 @@ app.post("/", async (c) => {
       // Mirror the PUT-POSTED path: decrement customer A/R and, if a specific
       // invoice is pinned, re-evaluate invoice totals + status.
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(totalAmount, invoice.customerId),
       );
       const invStmts = await buildInvoiceCascadeForCN(
-        c.env.DB,
+        c.var.DB,
         invoice.id,
         totalAmount,
         now,
@@ -240,9 +240,9 @@ app.post("/", async (c) => {
       statements.push(...invStmts);
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM credit_notes WHERE id = ?",
     )
       .bind(id)
@@ -262,7 +262,7 @@ app.post("/", async (c) => {
 // GET /api/credit-notes/:id — single
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM credit_notes WHERE id = ?",
   )
     .bind(id)
@@ -284,7 +284,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM credit_notes WHERE id = ?",
     )
       .bind(id)
@@ -310,7 +310,7 @@ app.put("/:id", async (c) => {
       !isIssuedStatus(existing.status) && isIssuedStatus(status);
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE credit_notes SET status = ?, approvedBy = ? WHERE id = ?",
       ).bind(status, approvedBy, id),
     ];
@@ -318,7 +318,7 @@ app.put("/:id", async (c) => {
     if (transitionedToIssued && existing.totalAmount > 0) {
       // Customer A/R: a credit note reduces what the customer owes.
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(existing.totalAmount, existing.customerId),
       );
@@ -329,7 +329,7 @@ app.put("/:id", async (c) => {
       if (existing.invoiceId) {
         const now = new Date().toISOString();
         const invStmts = await buildInvoiceCascadeForCN(
-          c.env.DB,
+          c.var.DB,
           existing.invoiceId,
           existing.totalAmount,
           now,
@@ -338,9 +338,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM credit_notes WHERE id = ?",
     )
       .bind(id)

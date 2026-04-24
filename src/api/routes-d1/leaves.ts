@@ -64,7 +64,7 @@ app.get("/", async (c) => {
   }
 
   const sql = `SELECT * FROM leaves${wheres.length ? " WHERE " + wheres.join(" AND ") : ""} ORDER BY startDate DESC`;
-  const res = await c.env.DB.prepare(sql).bind(...binds).all<LeaveRow>();
+  const res = await c.var.DB.prepare(sql).bind(...binds).all<LeaveRow>();
   const data = (res.results ?? []).map(rowToLeave);
   return c.json({ success: true, data, total: data.length });
 });
@@ -82,7 +82,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const worker = await c.env.DB.prepare(
+    const worker = await c.var.DB.prepare(
       "SELECT id, name FROM workers WHERE id = ?",
     )
       .bind(workerId)
@@ -95,7 +95,7 @@ app.post("/", async (c) => {
     const now = new Date().toISOString();
     const daysNum = Number(days) || 1;
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO leaves (id, workerId, workerName, type, startDate, endDate,
          days, status, reason, approvedBy, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?, NULL, ?, ?)`,
@@ -114,7 +114,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM leaves WHERE id = ?",
     )
       .bind(id)
@@ -136,7 +136,7 @@ app.put("/", async (c) => {
     if (!id) {
       return c.json({ success: false, error: "id is required" }, 400);
     }
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM leaves WHERE id = ?",
     )
       .bind(id)
@@ -148,12 +148,12 @@ app.put("/", async (c) => {
     const nextApprover =
       approvedBy !== undefined ? approvedBy : existing.approvedBy;
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE leaves SET status = ?, approvedBy = ?, updated_at = ? WHERE id = ?",
     )
       .bind(nextStatus, nextApprover, now, id)
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM leaves WHERE id = ?",
     )
       .bind(id)
@@ -168,7 +168,7 @@ app.put("/", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM leaves WHERE id = ?",
     )
       .bind(id)
@@ -188,7 +188,7 @@ app.put("/:id", async (c) => {
       type: body.type ?? existing.type,
     };
     const now = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE leaves SET status = ?, approvedBy = ?, reason = ?, days = ?,
          startDate = ?, endDate = ?, type = ?, updated_at = ?
        WHERE id = ?`,
@@ -205,7 +205,7 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM leaves WHERE id = ?",
     )
       .bind(id)
@@ -219,13 +219,13 @@ app.put("/:id", async (c) => {
 // DELETE /api/leaves/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM leaves WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM leaves WHERE id = ?")
     .bind(id)
     .first<LeaveRow>();
   if (!existing) {
     return c.json({ success: false, error: "Leave record not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM leaves WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM leaves WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToLeave(existing) });
 });
 

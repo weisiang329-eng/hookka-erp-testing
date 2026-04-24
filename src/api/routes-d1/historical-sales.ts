@@ -43,7 +43,7 @@ app.get("/", async (c) => {
   // invoice_items stores productCode only, not productId).
   let filterCode: string | null = null;
   if (productId) {
-    const prod = await c.env.DB.prepare(
+    const prod = await c.var.DB.prepare(
       "SELECT id, code, name FROM products WHERE id = ?",
     )
       .bind(productId)
@@ -73,10 +73,10 @@ app.get("/", async (c) => {
 
   const sql = `
     SELECT substr(i.invoiceDate, 1, 7) AS period,
-           ii.productCode              AS productCode,
-           ii.productName              AS productName,
-           i.customerId                AS customerId,
-           i.customerName              AS customerName,
+           ii.productCode              AS "productCode",
+           ii.productName              AS "productName",
+           i.customerId                AS "customerId",
+           i.customerName              AS "customerName",
            SUM(ii.quantity)            AS quantity,
            SUM(ii.totalSen)            AS revenue
       FROM invoices i
@@ -85,12 +85,12 @@ app.get("/", async (c) => {
      GROUP BY period, ii.productCode, i.customerId
      ORDER BY period DESC, ii.productCode
   `;
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<SalesAggRow>();
 
   // Map productCode back to productId via a single products lookup.
-  const productsRes = await c.env.DB.prepare(
+  const productsRes = await c.var.DB.prepare(
     "SELECT id, code, name FROM products",
   ).all<ProductLookupRow>();
   const byCode = new Map<string, ProductLookupRow>();

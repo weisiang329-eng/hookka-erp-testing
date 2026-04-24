@@ -183,7 +183,7 @@ function calculateHookkaDD(
 
 // GET /api/scheduling
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM schedule_entries",
   ).all<ScheduleEntryRow>();
   const data = (res.results ?? []).map(rowToEntry);
@@ -208,7 +208,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const leadRes = await c.env.DB.prepare(
+    const leadRes = await c.var.DB.prepare(
       "SELECT deptCode, deptName, bedframeDays, sofaDays FROM dept_lead_times",
     ).all<DeptLeadTimeRow>();
     const leadTimes = leadRes.results ?? [];
@@ -229,7 +229,7 @@ app.post("/", async (c) => {
     };
 
     if (body.apply) {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `INSERT INTO schedule_entries (id, productionOrderId, soNumber, productCode,
            category, customerDeliveryDate, customerName, hookkaExpectedDD, deptSchedule)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -271,13 +271,13 @@ function addDays(d: Date, n: number): Date {
 
 app.get("/capacity", async (c) => {
   const [deptRes, workerRes, schedRes] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT id, code, name, shortName, sequence, color, workingHoursPerDay FROM departments ORDER BY sequence",
     ).all<DepartmentRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT id, departmentCode, status FROM workers",
     ).all<WorkerRow>(),
-    c.env.DB.prepare("SELECT * FROM schedule_entries").all<ScheduleEntryRow>(),
+    c.var.DB.prepare("SELECT * FROM schedule_entries").all<ScheduleEntryRow>(),
   ]);
 
   const departments = deptRes.results ?? [];

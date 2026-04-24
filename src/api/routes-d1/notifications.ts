@@ -57,7 +57,7 @@ app.get("/", async (c) => {
     "SELECT * FROM notifications" +
     (where.length > 0 ? " WHERE " + where.join(" AND ") : "") +
     " ORDER BY created_at DESC";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<NotificationRow>();
   return c.json((res.results ?? []).map(rowToNotification));
@@ -79,7 +79,7 @@ app.put("/", async (c) => {
 
   // D1 needs the IN-list expanded.
   const placeholders = ids.map(() => "?").join(", ");
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `UPDATE notifications SET isRead = 1 WHERE id IN (${placeholders})`,
   )
     .bind(...(ids as string[]))

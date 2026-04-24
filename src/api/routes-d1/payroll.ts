@@ -94,10 +94,10 @@ async function nextPayrollId(db: D1Database): Promise<string> {
 app.get("/", async (c) => {
   const period = c.req.query("period");
   const stmt = period
-    ? c.env.DB.prepare(
+    ? c.var.DB.prepare(
         "SELECT * FROM payroll_records WHERE period = ? ORDER BY workerId",
       ).bind(period)
-    : c.env.DB.prepare("SELECT * FROM payroll_records ORDER BY period DESC, workerId");
+    : c.var.DB.prepare("SELECT * FROM payroll_records ORDER BY period DESC, workerId");
   const res = await stmt.all<PayrollRow>();
   const data = (res.results ?? []).map(rowToPayroll);
   return c.json({ success: true, data, total: data.length });
@@ -117,7 +117,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT COUNT(*) AS c FROM payroll_records WHERE period = ?",
     )
       .bind(period)
@@ -132,7 +132,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const wres = await c.env.DB.prepare(
+    const wres = await c.var.DB.prepare(
       "SELECT id, empNo, name, status, basicSalarySen, workingDaysPerMonth FROM workers WHERE status = 'ACTIVE'",
     ).all<WorkerRow>();
     const activeWorkers = wres.results ?? [];
@@ -163,8 +163,8 @@ app.post("/", async (c) => {
       const totalDeductionsSen = epfEmployeeSen + socsoEmployeeSen + eisEmployeeSen + pcbSen;
       const netPaySen = grossSalarySen - totalDeductionsSen;
 
-      const id = await nextPayrollId(c.env.DB);
-      await c.env.DB.prepare(
+      const id = await nextPayrollId(c.var.DB);
+      await c.var.DB.prepare(
         `INSERT OR IGNORE INTO payroll_records (
            id, workerId, workerName, period, basicSalarySen, workingDays,
            otHoursWeekday, otHoursSunday, otHoursHoliday, otAmountSen, grossSalarySen,
@@ -196,7 +196,7 @@ app.post("/", async (c) => {
         )
         .run();
 
-      const inserted = await c.env.DB.prepare(
+      const inserted = await c.var.DB.prepare(
         "SELECT * FROM payroll_records WHERE id = ?",
       )
         .bind(id)
@@ -224,7 +224,7 @@ app.put("/", async (c) => {
         400,
       );
     }
-    const res = await c.env.DB.prepare(
+    const res = await c.var.DB.prepare(
       `UPDATE payroll_records
          SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
        WHERE period = ?`,

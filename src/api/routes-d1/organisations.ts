@@ -74,7 +74,7 @@ async function loadAll(db: D1Database) {
 
 // GET /api/organisations
 app.get("/", async (c) => {
-  const payload = await loadAll(c.env.DB);
+  const payload = await loadAll(c.var.DB);
   return c.json(payload);
 });
 
@@ -87,13 +87,13 @@ app.put("/", async (c) => {
   const body = await c.req.json().catch(() => ({}));
 
   if (body.orgId) {
-    const org = await c.env.DB.prepare(
+    const org = await c.var.DB.prepare(
       "SELECT * FROM organisations WHERE id = ?",
     )
       .bind(body.orgId)
       .first<OrganisationRow>();
     if (!org) return c.json({ error: "Organisation not found" }, 404);
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE inter_company_config SET activeOrgId = ? WHERE id = 1",
     )
       .bind(body.orgId)
@@ -104,7 +104,7 @@ app.put("/", async (c) => {
   if (body.organisation) {
     const patch = body.organisation;
     if (!patch.id) return c.json({ error: "organisation.id required" }, 400);
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM organisations WHERE id = ?",
     )
       .bind(patch.id)
@@ -130,7 +130,7 @@ app.put("/", async (c) => {
             : 0,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE organisations SET
          code = ?, name = ?, regNo = ?, tin = ?, msic = ?,
          address = ?, phone = ?, email = ?,
@@ -152,7 +152,7 @@ app.put("/", async (c) => {
       )
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM organisations WHERE id = ?",
     )
       .bind(patch.id)
@@ -161,7 +161,7 @@ app.put("/", async (c) => {
   }
 
   if (body.interCompanyConfig) {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM inter_company_config WHERE id = 1",
     ).first<InterCompanyConfigRow>();
     if (!existing) {
@@ -178,7 +178,7 @@ app.put("/", async (c) => {
             ? 1
             : 0,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE inter_company_config
          SET hookkaToOhanaRate = ?, autoCreateMirrorDocs = ?
        WHERE id = 1`,

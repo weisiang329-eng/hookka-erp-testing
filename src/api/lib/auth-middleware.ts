@@ -53,6 +53,67 @@ type SessionJoinRow = {
   isActive: number;
 };
 
+// KV session cache (Phase 2.6a).  Key = "sess:" + sha256(token) to avoid
+// storing tokens in plaintext as KV keys.  Value = SessionJoinRow JSON.
+// TTL = 5 minutes — short enough that role revocation and session
+// invalidation propagate within a tolerable window, long enough to absorb
+// the hot API-call pattern (dashboard loads fire 5-10 calls/sec per user).
+const SESSION_CACHE_TTL_S = 300;
+
+export async function sessionCacheKey(token: string): Promise<string> {
+  const buf = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(token),
+  );
+  const hex = Array.from(new Uint8Array(buf))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  return `sess:${hex}`;
+}
+
+/**
+ * Called from /api/auth/logout and any endpoint that deletes user_sessions
+ * rows — invalidates the KV cache entry so a logged-out user cannot keep
+ * using the token for up to TTL seconds.
+ */
+export async function invalidateSessionCache(
+  kv: KVNamespace | undefined,
+  token: string,
+): Promise<void> {
+  if (!kv || !token) return;
+  const key = await sessionCacheKey(token);
+  await kv.delete(key);
+}
+
+/**
+ * Purge ALL active sessions for a user — both the DB rows AND the KV cache
+ * entries keyed by each token's hash.  Used when deactivating or deleting
+ * a user, resetting a password, or rotating roles.  Without the KV purge a
+ * banned user would keep API access for up to SESSION_CACHE_TTL_S.
+ */
+export async function purgeUserSessions(
+  db: D1Database,
+  kv: KVNamespace | undefined,
+  userId: string,
+): Promise<void> {
+  // Collect tokens BEFORE deleting the rows — once rows are gone we have no
+  // way to know which KV keys to purge.
+  const tokensRes = await db
+    .prepare("SELECT token FROM user_sessions WHERE userId = ?")
+    .bind(userId)
+    .all<{ token: string }>();
+  const tokens = (tokensRes.results ?? []).map((r) => r.token);
+
+  await db
+    .prepare("DELETE FROM user_sessions WHERE userId = ?")
+    .bind(userId)
+    .run();
+
+  if (kv && tokens.length > 0) {
+    await Promise.all(tokens.map((t) => invalidateSessionCache(kv, t)));
+  }
+}
+
 export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   const path = c.req.path;
 
@@ -77,16 +138,40 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
-  const row = await c.env.DB.prepare(
-    `SELECT s.userId AS userId, s.expiresAt AS expiresAt,
-            u.role AS role, u.isActive AS isActive
-       FROM user_sessions s
-       JOIN users u ON u.id = s.userId
-      WHERE s.token = ?
-      LIMIT 1`,
-  )
-    .bind(token)
-    .first<SessionJoinRow>();
+  // KV first — saves the Hyperdrive round trip on cache hit.
+  const cacheKey = await sessionCacheKey(token);
+  let row: SessionJoinRow | null = null;
+  const kv = c.env.SESSION_CACHE;
+  if (kv) {
+    const cached = await kv.get(cacheKey, { type: "json" });
+    if (cached) row = cached as SessionJoinRow;
+  }
+
+  if (!row) {
+    row = await c.var.DB.prepare(
+      `SELECT s.userId AS userId, s.expiresAt AS expiresAt,
+              u.role AS role, u.isActive AS isActive
+         FROM user_sessions s
+         JOIN users u ON u.id = s.userId
+        WHERE s.token = ?
+        LIMIT 1`,
+    )
+      .bind(token)
+      .first<SessionJoinRow>();
+    if (row && kv) {
+      // expirationTtl capped at the session expiry to avoid serving a stale
+      // session past its real expiry.  min(300s, remaining-lifetime).
+      const remainingMs = new Date(row.expiresAt).getTime() - Date.now();
+      const ttl = Math.max(
+        1,
+        Math.min(SESSION_CACHE_TTL_S, Math.floor(remainingMs / 1000)),
+      );
+      // Fire-and-forget — don't block the request on cache writes.
+      c.executionCtx.waitUntil(
+        kv.put(cacheKey, JSON.stringify(row), { expirationTtl: ttl }),
+      );
+    }
+  }
 
   if (!row) {
     return c.json({ success: false, error: "Unauthorized" }, 401);

@@ -151,13 +151,13 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
 // GET /api/products — list ACTIVE products with nested BOM + dept times
 app.get("/", async (c) => {
   const [products, boms, dwts] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM products WHERE status = 'ACTIVE' ORDER BY code",
     ).all<ProductRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT b.* FROM bom_components b INNER JOIN products p ON p.id = b.productId WHERE p.status = 'ACTIVE'",
     ).all<BomComponentRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT d.* FROM dept_working_times d INNER JOIN products p ON p.id = d.productId WHERE p.status = 'ACTIVE'",
     ).all<DeptWorkingTimeRow>(),
   ]);
@@ -181,7 +181,7 @@ app.post("/", async (c) => {
     }
 
     // Duplicate code check
-    const dup = await c.env.DB.prepare(
+    const dup = await c.var.DB.prepare(
       "SELECT id FROM products WHERE code = ?",
     )
       .bind(code)
@@ -214,7 +214,7 @@ app.post("/", async (c) => {
 
     // Build batch: insert product + bom components + dept times atomically
     const statements = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO products (id, code, name, category, description, baseModel,
            sizeCode, sizeLabel, fabricUsage, unitM3, status, costPriceSen,
            basePriceSen, price1Sen, productionTimeMinutes, subAssemblies,
@@ -243,7 +243,7 @@ app.post("/", async (c) => {
         body.seatHeightPrices ? JSON.stringify(body.seatHeightPrices) : null,
       ),
       ...bomComponentsInput.map((comp) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO bom_components (id, productId, materialCategory, materialName,
              qtyPerUnit, unit, wastePct)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -258,16 +258,16 @@ app.post("/", async (c) => {
         ),
       ),
       ...deptWorkingTimesInput.map((dwt) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO dept_working_times (productId, departmentCode, minutes, category)
            VALUES (?, ?, ?, ?)`,
         ).bind(id, dwt.departmentCode, dwt.minutes || 0, dwt.category ?? null),
       ),
     ];
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchProductWithChildren(c.env.DB, id);
+    const created = await fetchProductWithChildren(c.var.DB, id);
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create product" },
@@ -282,7 +282,7 @@ app.post("/", async (c) => {
 
 // GET /api/products/:id — single product + BOM + dept times
 app.get("/:id", async (c) => {
-  const product = await fetchProductWithChildren(c.env.DB, c.req.param("id"));
+  const product = await fetchProductWithChildren(c.var.DB, c.req.param("id"));
   if (!product) {
     return c.json({ success: false, error: "Product not found" }, 404);
   }
@@ -293,7 +293,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM products WHERE id = ?",
     )
       .bind(id)
@@ -304,7 +304,7 @@ app.put("/:id", async (c) => {
     const body = await c.req.json();
 
     // deptWorkingTimes — if provided, replace entirely; otherwise keep existing
-    const existingDwtsRes = await c.env.DB.prepare(
+    const existingDwtsRes = await c.var.DB.prepare(
       "SELECT * FROM dept_working_times WHERE productId = ?",
     )
       .bind(id)
@@ -366,7 +366,7 @@ app.put("/:id", async (c) => {
     };
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE products SET
            code = ?, name = ?, category = ?, description = ?, baseModel = ?,
            sizeCode = ?, sizeLabel = ?, fabricUsage = ?, unitM3 = ?, status = ?,
@@ -409,13 +409,13 @@ app.put("/:id", async (c) => {
         wastePct?: number;
       }> = body.bomComponents ?? [];
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM bom_components WHERE productId = ?",
         ).bind(id),
       );
       for (const comp of bomsInput) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO bom_components (id, productId, materialCategory, materialName,
                qtyPerUnit, unit, wastePct)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -440,13 +440,13 @@ app.put("/:id", async (c) => {
         category?: string;
       }> = body.deptWorkingTimes ?? [];
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM dept_working_times WHERE productId = ?",
         ).bind(id),
       );
       for (const dwt of dwtsInput) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO dept_working_times (productId, departmentCode, minutes, category)
              VALUES (?, ?, ?, ?)`,
           ).bind(
@@ -459,9 +459,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await fetchProductWithChildren(c.env.DB, id);
+    const updated = await fetchProductWithChildren(c.var.DB, id);
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -471,7 +471,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/products/:id — soft delete (status = 'INACTIVE')
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM products WHERE id = ?",
   )
     .bind(id)
@@ -479,13 +479,13 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Product not found" }, 404);
   }
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     "UPDATE products SET status = 'INACTIVE' WHERE id = ?",
   )
     .bind(id)
     .run();
 
-  const updated = await fetchProductWithChildren(c.env.DB, id);
+  const updated = await fetchProductWithChildren(c.var.DB, id);
   return c.json({ success: true, data: updated });
 });
 

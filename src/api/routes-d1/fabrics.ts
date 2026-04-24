@@ -33,7 +33,7 @@ function rowToFabric(r: FabricRow) {
 
 // GET /api/fabrics — list all fabrics
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM fabrics ORDER BY code",
   ).all<FabricRow>();
   const data = (res.results ?? []).map(rowToFabric);
@@ -70,7 +70,7 @@ app.post("/", async (c) => {
   const name = (body.name ?? "").trim() || code;
   if (!code) return c.json({ success: false, error: "code is required" }, 400);
 
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
   )
     .bind(code)
@@ -83,7 +83,7 @@ app.post("/", async (c) => {
   }
 
   const id = genId();
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO fabrics (id, code, name, category, priceSen, sohMeters, reorderLevel)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
@@ -97,7 +97,7 @@ app.post("/", async (c) => {
       Number(body.reorderLevel) || 0,
     )
     .run();
-  const created = await c.env.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
+  const created = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)
     .first<FabricRow>();
   if (!created) {
@@ -109,7 +109,7 @@ app.post("/", async (c) => {
 // PUT /api/fabrics/:id — partial update (name/category/priceSen/sohMeters/reorderLevel).
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)
     .first<FabricRow>();
   if (!existing) {
@@ -133,7 +133,7 @@ app.put("/:id", async (c) => {
         ? Number(body.reorderLevel)
         : existing.reorderLevel,
   };
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `UPDATE fabrics SET name = ?, category = ?, priceSen = ?, sohMeters = ?, reorderLevel = ?
        WHERE id = ?`,
   )
@@ -146,7 +146,7 @@ app.put("/:id", async (c) => {
       id,
     )
     .run();
-  const updated = await c.env.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
+  const updated = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)
     .first<FabricRow>();
   if (!updated) {
@@ -158,13 +158,13 @@ app.put("/:id", async (c) => {
 // DELETE /api/fabrics/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)
     .first<FabricRow>();
   if (!existing) {
     return c.json({ success: false, error: "Fabric not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM fabrics WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM fabrics WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToFabric(existing) });
 });
 

@@ -86,7 +86,7 @@ function addDays(isoDate: string, days: number): string {
 
 // GET /api/equipment
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM equipment ORDER BY name",
   ).all<EquipmentRow>();
   const data = (res.results ?? []).map(rowToEquipment);
@@ -100,7 +100,7 @@ app.post("/", async (c) => {
     const id = genId("eq");
     const now = new Date().toISOString();
     const today = now.split("T")[0];
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO equipment (id, code, name, department, type, status,
          lastMaintenanceDate, nextMaintenanceDate, maintenanceCycleDays,
          purchaseDate, notes, created_at, updated_at)
@@ -122,7 +122,7 @@ app.post("/", async (c) => {
         now,
       )
       .run();
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM equipment WHERE id = ?",
     )
       .bind(id)
@@ -137,10 +137,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [eq, logsRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM equipment WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM equipment WHERE id = ?")
       .bind(id)
       .first<EquipmentRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM maintenance_logs WHERE equipmentId = ? ORDER BY date DESC",
     )
       .bind(id)
@@ -160,7 +160,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM equipment WHERE id = ?",
     )
       .bind(id)
@@ -177,7 +177,7 @@ app.put("/:id", async (c) => {
       const today = now.split("T")[0];
       const logDate = lm.date || today;
       const logId = genId("ml");
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `INSERT INTO maintenance_logs (id, equipmentId, equipmentName, type,
            description, performedBy, date, costSen, downtimeHours, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -202,7 +202,7 @@ app.put("/:id", async (c) => {
         newStatus = "OPERATIONAL";
       }
 
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `UPDATE equipment SET
            lastMaintenanceDate = ?, nextMaintenanceDate = ?, status = ?, updated_at = ?
          WHERE id = ?`,
@@ -211,10 +211,10 @@ app.put("/:id", async (c) => {
         .run();
 
       const [updated, logRow] = await Promise.all([
-        c.env.DB.prepare("SELECT * FROM equipment WHERE id = ?")
+        c.var.DB.prepare("SELECT * FROM equipment WHERE id = ?")
           .bind(id)
           .first<EquipmentRow>(),
-        c.env.DB.prepare("SELECT * FROM maintenance_logs WHERE id = ?")
+        c.var.DB.prepare("SELECT * FROM maintenance_logs WHERE id = ?")
           .bind(logId)
           .first<MaintenanceLogRow>(),
       ]);
@@ -247,7 +247,7 @@ app.put("/:id", async (c) => {
           : existing.maintenanceCycleDays,
       notes: body.notes !== undefined ? body.notes : existing.notes,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE equipment SET
          code = ?, name = ?, department = ?, type = ?, status = ?,
          lastMaintenanceDate = ?, nextMaintenanceDate = ?, maintenanceCycleDays = ?,
@@ -268,7 +268,7 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM equipment WHERE id = ?",
     )
       .bind(id)
@@ -282,7 +282,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/equipment/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM equipment WHERE id = ?",
   )
     .bind(id)
@@ -290,7 +290,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Equipment not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM equipment WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM equipment WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToEquipment(existing) });
 });
 

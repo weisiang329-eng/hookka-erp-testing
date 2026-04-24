@@ -72,18 +72,18 @@ app.post("/", async (c) => {
   }
 
   const now = nowIso();
-  const displayName = await getDisplayName(c.env.DB, userId);
+  const displayName = await getDisplayName(c.var.DB, userId);
 
   // Opportunistic sweep of ancient stale rows so the table doesn't grow
   // unbounded. Anything older than 5 minutes is definitely abandoned.
   const sweepCutoff = new Date(Date.now() - 5 * 60_000).toISOString();
-  await c.env.DB.prepare("DELETE FROM edit_presence WHERE heartbeatAt < ?")
+  await c.var.DB.prepare("DELETE FROM edit_presence WHERE heartbeatAt < ?")
     .bind(sweepCutoff)
     .run();
 
   // Upsert keyed by (recordType, recordId, userId).
   const id = `${recordType}:${recordId}:${userId}`;
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO edit_presence
        (id, recordType, recordId, userId, displayName, acquiredAt, heartbeatAt)
      VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -110,7 +110,7 @@ app.get("/", async (c) => {
     return c.json({ success: true, data: [] });
   }
 
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT userId, displayName, acquiredAt, heartbeatAt
        FROM edit_presence
       WHERE recordType = ? AND recordId = ?
@@ -144,7 +144,7 @@ app.delete("/", async (c) => {
     );
   }
 
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     "DELETE FROM edit_presence WHERE recordType = ? AND recordId = ? AND userId = ?",
   )
     .bind(recordType, recordId, userId)

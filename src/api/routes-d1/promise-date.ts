@@ -84,7 +84,7 @@ async function loadCoreState(db: D1Database) {
     ).all<DepartmentRow>(),
     // Active queue load: pending/in-progress job cards on non-completed POs.
     db.prepare(
-      `SELECT po.productId AS productId, SUM(jc.estMinutes) AS totalMinutes
+      `SELECT po.productId AS "productId", SUM(jc.estMinutes) AS "totalMinutes"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE jc.status IN ('WAITING','IN_PROGRESS','PAUSED','BLOCKED')
@@ -94,7 +94,7 @@ async function loadCoreState(db: D1Database) {
     // RM stock snapshot for the coarse material-availability heuristic.
     db.prepare(
       `SELECT COUNT(*) AS total,
-              SUM(CASE WHEN balanceQty <= 0 THEN 1 ELSE 0 END) AS zeroCount
+              SUM(CASE WHEN balanceQty <= 0 THEN 1 ELSE 0 END) AS "zeroCount"
          FROM raw_materials
         WHERE isActive = 1`,
     ).first<StockRow>(),
@@ -166,7 +166,7 @@ function buildCalc(
 // GET /api/promise-date?productId=xxx
 app.get("/", async (c) => {
   const productId = c.req.query("productId");
-  const { products, dwts, depts, queue, stock } = await loadCoreState(c.env.DB);
+  const { products, dwts, depts, queue, stock } = await loadCoreState(c.var.DB);
 
   const dwtByProduct = new Map<string, DeptWorkingTimeRow[]>();
   for (const row of dwts) {

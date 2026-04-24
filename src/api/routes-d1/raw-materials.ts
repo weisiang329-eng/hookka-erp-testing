@@ -124,8 +124,8 @@ app.get("/", async (c) => {
     ? "SELECT * FROM raw_materials WHERE status = ? ORDER BY itemCode"
     : "SELECT * FROM raw_materials ORDER BY itemCode";
   const stmt = status
-    ? c.env.DB.prepare(sql).bind(status)
-    : c.env.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(status)
+    : c.var.DB.prepare(sql);
   const res = await stmt.all<RawMaterialRow>();
   const data = (res.results ?? []).map(rowToApi);
   return c.json({ success: true, data, total: data.length });
@@ -134,7 +134,7 @@ app.get("/", async (c) => {
 // GET /api/raw-materials/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
   )
     .bind(id)
@@ -162,7 +162,7 @@ app.post("/", async (c) => {
     );
   }
 
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id FROM raw_materials WHERE itemCode = ? LIMIT 1",
   )
     .bind(itemCode)
@@ -195,7 +195,7 @@ app.post("/", async (c) => {
     : null;
   const nowIso = new Date().toISOString();
 
-  const insertStmt = c.env.DB.prepare(
+  const insertStmt = c.var.DB.prepare(
     `INSERT INTO raw_materials
        (id, itemCode, description, baseUOM, itemGroup, isActive, balanceQty,
         minStock, maxStock, status, notes, created_at, updated_at,
@@ -224,18 +224,18 @@ app.post("/", async (c) => {
   // If this row is a fabric group, cascade into fabrics + fabric_trackings
   // atomically in a single batch. Non-fabrics take the single-statement path.
   if (isFabricGroup(itemGroup)) {
-    const cascadeStmts = await buildFabricUpsertStatements(c.env.DB, {
+    const cascadeStmts = await buildFabricUpsertStatements(c.var.DB, {
       itemCode,
       description,
       itemGroup,
       balanceQty,
     });
-    await c.env.DB.batch([insertStmt, ...cascadeStmts]);
+    await c.var.DB.batch([insertStmt, ...cascadeStmts]);
   } else {
     await insertStmt.run();
   }
 
-  const created = await c.env.DB.prepare(
+  const created = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
   )
     .bind(id)
@@ -252,7 +252,7 @@ app.post("/", async (c) => {
 // PUT /api/raw-materials/:id
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
   )
     .bind(id)
@@ -269,7 +269,7 @@ app.put("/:id", async (c) => {
 
   // Reject itemCode collisions on rename.
   if (body.itemCode && body.itemCode !== existing.itemCode) {
-    const dupe = await c.env.DB.prepare(
+    const dupe = await c.var.DB.prepare(
       "SELECT id FROM raw_materials WHERE itemCode = ? AND id != ? LIMIT 1",
     )
       .bind(body.itemCode, id)
@@ -319,7 +319,7 @@ app.put("/:id", async (c) => {
   const isActive = merged.status === "ACTIVE" ? 1 : 0;
   const nowIso = new Date().toISOString();
 
-  const updateStmt = c.env.DB.prepare(
+  const updateStmt = c.var.DB.prepare(
     `UPDATE raw_materials SET
        itemCode = ?, description = ?, baseUOM = ?, itemGroup = ?,
        isActive = ?, balanceQty = ?, minStock = ?, maxStock = ?,
@@ -357,11 +357,11 @@ app.put("/:id", async (c) => {
     // If the code changed, drop old mirror rows (old code) then upsert new.
     if (existing.itemCode !== merged.itemCode) {
       cascadeStmts.push(
-        ...buildFabricDeleteStatements(c.env.DB, existing.itemCode),
+        ...buildFabricDeleteStatements(c.var.DB, existing.itemCode),
       );
     }
     cascadeStmts.push(
-      ...(await buildFabricUpsertStatements(c.env.DB, {
+      ...(await buildFabricUpsertStatements(c.var.DB, {
         itemCode: merged.itemCode,
         description: merged.description,
         itemGroup: merged.itemGroup,
@@ -370,11 +370,11 @@ app.put("/:id", async (c) => {
     );
   } else if (wasFabric && !isFab) {
     cascadeStmts.push(
-      ...buildFabricDeleteStatements(c.env.DB, existing.itemCode),
+      ...buildFabricDeleteStatements(c.var.DB, existing.itemCode),
     );
   } else if (!wasFabric && isFab) {
     cascadeStmts.push(
-      ...(await buildFabricUpsertStatements(c.env.DB, {
+      ...(await buildFabricUpsertStatements(c.var.DB, {
         itemCode: merged.itemCode,
         description: merged.description,
         itemGroup: merged.itemGroup,
@@ -384,12 +384,12 @@ app.put("/:id", async (c) => {
   }
 
   if (cascadeStmts.length > 0) {
-    await c.env.DB.batch([updateStmt, ...cascadeStmts]);
+    await c.var.DB.batch([updateStmt, ...cascadeStmts]);
   } else {
     await updateStmt.run();
   }
 
-  const updated = await c.env.DB.prepare(
+  const updated = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
   )
     .bind(id)
@@ -406,7 +406,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/raw-materials/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
   )
     .bind(id)
@@ -418,7 +418,7 @@ app.delete("/:id", async (c) => {
   // Fabric guard: block deletion if any active (non-cancelled) sales_order_items
   // still reference this fabricCode. Otherwise cascade-delete mirror rows.
   if (isFabricGroup(existing.itemGroup)) {
-    const refs = await countActiveSalesOrderRefs(c.env.DB, existing.itemCode);
+    const refs = await countActiveSalesOrderRefs(c.var.DB, existing.itemCode);
     if (refs > 0) {
       return c.json(
         {
@@ -428,14 +428,14 @@ app.delete("/:id", async (c) => {
         409,
       );
     }
-    const cascadeStmts = buildFabricDeleteStatements(c.env.DB, existing.itemCode);
-    await c.env.DB.batch([
-      c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?").bind(id),
+    const cascadeStmts = buildFabricDeleteStatements(c.var.DB, existing.itemCode);
+    await c.var.DB.batch([
+      c.var.DB.prepare("DELETE FROM raw_materials WHERE id = ?").bind(id),
       ...cascadeStmts,
     ]);
   } else {
     // FK cascade on rm_batches.rmId removes dependent batch rows.
-    await c.env.DB.prepare("DELETE FROM raw_materials WHERE id = ?")
+    await c.var.DB.prepare("DELETE FROM raw_materials WHERE id = ?")
       .bind(id)
       .run();
   }
@@ -462,7 +462,7 @@ app.post("/bulk-import", async (c) => {
   }
 
   // Fetch existing itemCodes in one shot for the match test.
-  const existingRes = await c.env.DB.prepare(
+  const existingRes = await c.var.DB.prepare(
     "SELECT id, itemCode FROM raw_materials",
   ).all<{ id: string; itemCode: string }>();
   const codeToId = new Map<string, string>();
@@ -499,7 +499,7 @@ app.post("/bulk-import", async (c) => {
     if (existingId) {
       // UPDATE — do NOT touch balanceQty (preserve current stock level).
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE raw_materials SET
              description = ?, baseUOM = ?, itemGroup = ?, isActive = ?,
              minStock = ?, maxStock = ?, status = ?,
@@ -528,7 +528,7 @@ app.post("/bulk-import", async (c) => {
       // INSERT — balanceQty defaults to 0; the sheet's Total Bal. Qty is ignored.
       const id = genId();
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO raw_materials
              (id, itemCode, description, baseUOM, itemGroup, isActive,
               balanceQty, minStock, maxStock, status, notes,
@@ -561,7 +561,7 @@ app.post("/bulk-import", async (c) => {
 
     // Fabric cascade — mirror into fabrics + fabric_trackings for fabric groups.
     if (isFabricGroup(itemGroup)) {
-      const cascadeStmts = await buildFabricUpsertStatements(c.env.DB, {
+      const cascadeStmts = await buildFabricUpsertStatements(c.var.DB, {
         itemCode,
         description,
         itemGroup,
@@ -572,7 +572,7 @@ app.post("/bulk-import", async (c) => {
   }
 
   if (statements.length > 0) {
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
   }
 
   return c.json({ success: true, data: { created, updated } });

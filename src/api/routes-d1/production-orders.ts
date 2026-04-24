@@ -402,12 +402,12 @@ async function fetchFilteredPOs(
   // a projected '' archivedAt so the column lists align with the archive
   // table. rowToPO ignores columns it doesn't know about.
   const poSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM production_orders
+    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM job_cards
+    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
@@ -483,12 +483,12 @@ async function fetchPaginatedPOs(
   const offset = (page - 1) * limit;
 
   const poSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM production_orders
+    ? `(SELECT *, '' AS "archivedAt" FROM production_orders
         UNION ALL
         SELECT * FROM production_orders_archive)`
     : "production_orders";
   const jcSource = includeArchive
-    ? `(SELECT *, '' AS archivedAt FROM job_cards
+    ? `(SELECT *, '' AS "archivedAt" FROM job_cards
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
@@ -714,7 +714,7 @@ async function applyWipInventoryChange(
       // wip_items row in that group.
       const siblingLabels = await db
         .prepare(
-          `SELECT DISTINCT jc.wipLabel AS wipLabel
+          `SELECT DISTINCT jc.wipLabel AS "wipLabel"
              FROM production_orders po
              JOIN job_cards jc ON jc.productionOrderId = po.id
             WHERE po.salesOrderId = ?
@@ -841,7 +841,7 @@ async function applyWipInventoryChange(
     if (isFabSew && isSofa && poRow.salesOrderId && poRow.fabricCode) {
       const siblingLabels = await db
         .prepare(
-          `SELECT DISTINCT jc.wipLabel AS wipLabel
+          `SELECT DISTINCT jc.wipLabel AS "wipLabel"
              FROM production_orders po
              JOIN job_cards jc ON jc.productionOrderId = po.id
             WHERE po.salesOrderId = ?
@@ -1010,7 +1010,7 @@ async function applyPoUpdate(
   c: Context<Env>,
   id: string,
 ): Promise<Response> {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const existing = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
     .bind(id)
@@ -1351,7 +1351,7 @@ app.get("/", async (c) => {
 
   if (!paginate) {
     const data = await fetchFilteredPOs(
-      c.env.DB,
+      c.var.DB,
       statuses,
       includeJobCards,
       includeArchive,
@@ -1365,7 +1365,7 @@ app.get("/", async (c) => {
   const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
   const limit = Math.min(500, Math.max(1, rawLimit));
   const { data, total } = await fetchPaginatedPOs(
-    c.env.DB,
+    c.var.DB,
     statuses,
     includeJobCards,
     page,
@@ -1382,7 +1382,7 @@ app.get("/", async (c) => {
 // Distinct WIPs that have appeared in any JobCard to date.
 // ---------------------------------------------------------------------------
 app.get("/historical-wips", async (c) => {
-  const all = await fetchAllPOs(c.env.DB);
+  const all = await fetchAllPOs(c.var.DB);
   type H = {
     wipLabel: string;
     wipKey?: string;
@@ -1436,7 +1436,7 @@ app.get("/historical-wips", async (c) => {
 // GET /api/production-orders/historical-fgs
 // ---------------------------------------------------------------------------
 app.get("/historical-fgs", async (c) => {
-  const all = await fetchAllPOs(c.env.DB);
+  const all = await fetchAllPOs(c.var.DB);
   type H = {
     sourcePoId: string;
     sourcePoNo: string;
@@ -1481,7 +1481,7 @@ app.get("/historical-fgs", async (c) => {
 // and creates a new PO linked to it.
 // ---------------------------------------------------------------------------
 app.post("/stock", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const body = await c.req.json().catch(() => ({}));
   const type = body?.type as "WIP" | "FG" | undefined;
   const sourcePoId = body?.sourcePoId as string | undefined;
@@ -1790,7 +1790,7 @@ app.post("/stock", async (c) => {
 // scan page knows to hit this endpoint instead of per-jc scan-complete.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete-dept", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const poId = c.req.param("id");
   const po = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -1878,7 +1878,7 @@ app.post("/:id/scan-complete-dept", async (c) => {
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const scannedId = c.req.param("id");
   const scannedPo = await db
     .prepare("SELECT * FROM production_orders WHERE id = ?")
@@ -2480,7 +2480,7 @@ app.post("/:id/scan-complete", async (c) => {
 // GET /api/production-orders/:id
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
-  const po = await fetchPO(c.env.DB, c.req.param("id"));
+  const po = await fetchPO(c.var.DB, c.req.param("id"));
   if (!po) {
     return c.json({ success: false, error: "Production order not found" }, 404);
   }

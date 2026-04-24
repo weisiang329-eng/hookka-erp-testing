@@ -76,7 +76,7 @@ function templateToRow(t: TemplateBody, id: string): Row {
 
 // GET /api/bom-master-templates
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM bom_master_templates ORDER BY category, isDefault DESC, label ASC",
   ).all<Row>();
   const data = (res.results ?? []).map(rowToTemplate);
@@ -86,7 +86,7 @@ app.get("/", async (c) => {
 // GET /api/bom-master-templates/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM bom_master_templates WHERE id = ?",
   )
     .bind(id)
@@ -115,14 +115,14 @@ app.put("/:id", async (c) => {
 
   // If this one is flagged default, clear any other default in the same cat.
   if (row.isDefault === 1) {
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE bom_master_templates SET isDefault = 0 WHERE category = ? AND id != ?",
     )
       .bind(row.category, id)
       .run();
   }
 
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO bom_master_templates (id, category, label, moduleKey, isDefault, data, updatedAt)
      VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET
@@ -150,7 +150,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/bom-master-templates/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  await c.env.DB.prepare("DELETE FROM bom_master_templates WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM bom_master_templates WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true });
@@ -171,14 +171,14 @@ app.put("/", async (c) => {
 
   const statements = [];
   if (body.replaceAll) {
-    statements.push(c.env.DB.prepare("DELETE FROM bom_master_templates"));
+    statements.push(c.var.DB.prepare("DELETE FROM bom_master_templates"));
   }
   for (const t of templates) {
     if (t.category !== "BEDFRAME" && t.category !== "SOFA") continue;
     const id = t.id || `tpl-${crypto.randomUUID().slice(0, 8)}`;
     const row = templateToRow(t, id);
     statements.push(
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO bom_master_templates (id, category, label, moduleKey, isDefault, data, updatedAt)
          VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
@@ -199,9 +199,9 @@ app.put("/", async (c) => {
       ),
     );
   }
-  await c.env.DB.batch(statements);
+  await c.var.DB.batch(statements);
 
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM bom_master_templates ORDER BY category, isDefault DESC, label ASC",
   ).all<Row>();
   const data = (res.results ?? []).map(rowToTemplate);

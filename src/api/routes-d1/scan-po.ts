@@ -165,7 +165,7 @@ app.post("/extract", async (c) => {
   const pdfBase64 = toBase64(arrayBuffer);
 
   // Few-shot examples — last 3 user-corrected samples.
-  const examples = await c.env.DB.prepare(
+  const examples = await c.var.DB.prepare(
     "SELECT id, correctedJson FROM po_scan_samples WHERE correctedJson IS NOT NULL ORDER BY createdAt DESC LIMIT 3",
   )
     .all<SampleRow>()
@@ -253,7 +253,7 @@ app.post("/extract", async (c) => {
   const customerHint = parsed?.customerName ?? customerHintGuess;
 
   try {
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO po_scan_samples (id, customerHint, poIdentifier, rawExtracted, correctedJson, createdBy)
        VALUES (?, ?, ?, ?, NULL, ?)`,
     )
@@ -311,7 +311,7 @@ app.post("/samples/:id/confirm", async (c) => {
       ? body.correctedJson
       : JSON.stringify(body.correctedJson);
 
-  const result = await c.env.DB.prepare(
+  const result = await c.var.DB.prepare(
     "UPDATE po_scan_samples SET correctedJson = ? WHERE id = ?",
   )
     .bind(payload, id)

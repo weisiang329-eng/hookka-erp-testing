@@ -684,6 +684,8 @@ export default function ProductionPage() {
     gap?: string;
     divan?: string;
     leg?: string;
+    totalHeight?: string;
+    specialOrder?: string;
     pieceNo: number;
     totalPieces: number;
     // Raw data the QR should encode (a URL to /production/scan). Preview
@@ -1014,6 +1016,7 @@ export default function ProductionPage() {
     leg: string;
     totalHeight: string;  // gap + divan + leg, inches
     qty: number;
+    specialOrder: string; // free-text note from the SO line ("custom legs", "no piping", etc.)
     prodTime: number;     // per-jc production minutes (merged sum on FAB_CUT rows)
     rack: string;         // Packing dept — assigned rack location ("Rack 3")
     dueDate: string;
@@ -1189,6 +1192,7 @@ export default function ProductionPage() {
             return sum > 0 ? `${sum}"` : "";
           })(),
           qty: (jc as JobCard & { wipQty?: number }).wipQty ?? o.quantity ?? 0,
+          specialOrder: o.specialOrder || "",
           // Per-jc production time (minutes). Populated on every dept sheet —
           // the FAB_CUT merge step below aggregates this across the merged
           // children so the collapsed row reports a sum, matching what the
@@ -1593,7 +1597,8 @@ export default function ProductionPage() {
     { key: "gap",           label: "Gap",            type: "text",   width: "60px",  sortable: true, align: "right" },
     { key: "divan",         label: "Divan",          type: "text",   width: "70px",  sortable: true, align: "right" },
     { key: "leg",           label: "Leg",            type: "text",   width: "60px",  sortable: true, align: "right" },
-    { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right", hidden: true },
+    { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right" },
+    { key: "specialOrder",  label: "Special Order",  type: "text",   width: "130px", sortable: true },
     { key: "qty",           label: "Qty",            type: "number", width: "60px",  sortable: true, align: "right" },
     // Per-row production minutes — supervisors use this as a capacity /
     // time-budget read. On FAB_CUT the merged row sums across all
@@ -1818,6 +1823,8 @@ export default function ProductionPage() {
         gap: row.gap || "",
         divan: row.divan || "",
         leg: row.leg || "",
+        totalHeight: row.totalHeight || "",
+        specialOrder: row.specialOrder || "",
         pieceNo: 1,
         totalPieces: 1,
         qrPayload: generateStickerData(order.poNo, activeTab, opId),
@@ -2597,8 +2604,14 @@ export default function ProductionPage() {
               {onScreenStickers.map((s) => {
                 // Mirror the fields the user sees in the Production Sheet row
                 // above: Customer PO · State · Model · Type (WIP category) ·
-                // WIP label · Size · Colour · (bedframe heights) · Qty.
-                const heightLine = [s.gap, s.divan, s.leg].filter(Boolean).join(" · ");
+                // WIP label · Size · Colour · (bedframe heights) · Qty ·
+                // Special Order (when the SO line carries a custom note).
+                // For bedframes the height line surfaces gap/divan/leg + total;
+                // for sofas the seat size is already in sizeLabel.
+                const heightLine = s.totalHeight
+                  ? [s.gap, s.divan, s.leg].filter(Boolean).join(" · ") +
+                    (s.totalHeight ? ` = ${s.totalHeight}` : "")
+                  : [s.gap, s.divan, s.leg].filter(Boolean).join(" · ");
                 return (
                   <div
                     key={s.key}
@@ -2647,6 +2660,11 @@ export default function ProductionPage() {
                       </div>
                       {heightLine && (
                         <div className="truncate">{heightLine}</div>
+                      )}
+                      {s.specialOrder && (
+                        <div className="truncate text-[#9A3A2D] font-semibold">
+                          ★ {s.specialOrder}
+                        </div>
                       )}
                       <div className="font-semibold text-[#1F1D1B]">
                         Qty {s.qty}

@@ -582,7 +582,19 @@ function CreateStockPODialog({
 // ----- main page -----
 type Worker = { id: string; name: string; departmentCode?: string };
 
-export default function ProductionPage() {
+// Rendering mode — injected by the per-route wrappers in overview.tsx / dept.tsx.
+//   - full (default): legacy behavior — all tabs visible, starts on Overview.
+//   - overview:       hides the dept tab bar + dept sub-view; shows only
+//                     the overview matrix. Served at /production.
+//   - dept:           hides the tab bar; locks activeTab to `deptCode` and
+//                     narrows the network fetch to that dept only. Served at
+//                     /production/<code> (e.g. /production/fab-cut).
+export type ProductionPageMode = "full" | "overview" | "dept";
+
+export default function ProductionPage({
+  mode = "full",
+  deptCode,
+}: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
   const { toast } = useToast();
   // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
@@ -590,11 +602,36 @@ export default function ProductionPage() {
   // them and this response ships ~530 POs × ~9k JCs — the largest payload
   // in the app. Server still returns the full shape by default for
   // backward compat with the PO detail page + other consumers.
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal");
+  //
+  // When mounted in dept mode, also pass ?dept=CODE so the backend narrows
+  // each PO's jobCards array to only that dept's rows. For a typical PO
+  // with 15 JCs spread across 8 depts, this drops the response to ~1/8 the
+  // size (minimal ~1.5MB → ~200KB for FAB_CUT, less for depts with fewer
+  // JCs like FOAM / WEBBING).
+  const ordersUrl =
+    mode === "dept" && deptCode
+      ? `/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal&dept=${encodeURIComponent(deptCode)}`
+      : "/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal";
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [activeTab, setActiveTabRaw] = useState<"ALL" | string>("ALL");
+  // When mounted at /production/<code>, lock activeTab to that dept code
+  // immediately so the first render skips the Overview matrix. overview.tsx
+  // leaves it at ALL. The plain /production mount (mode=full) also starts
+  // on ALL, matching legacy behavior.
+  const initialTab = mode === "dept" && deptCode ? deptCode : "ALL";
+  const [activeTab, setActiveTabRaw] = useState<"ALL" | string>(initialTab);
+  // Keep activeTab in sync with the deptCode prop when navigating between
+  // sibling dept routes (React Router reuses the component instance on
+  // /production/fab-cut → /production/fab-sew transitions).
+  useEffect(() => {
+    if (mode === "dept" && deptCode && deptCode !== activeTab) {
+      setActiveTabRaw(deptCode);
+    } else if (mode === "overview" && activeTab !== "ALL") {
+      setActiveTabRaw("ALL");
+    }
+  }, [mode, deptCode, activeTab]);
   // Wrapped setter that marks tab-switch start time; the matching end is
   // recorded at the top of the next render via useEffect below. Over 200ms
   // gets a [slow-tab] warn.
@@ -2704,7 +2741,11 @@ export default function ProductionPage() {
         </span>
       </div>
 
-      {/* Tab bar: Overview + 8 depts, all equal width (grid-cols-9) */}
+      {/* Tab bar: Overview + 8 depts, all equal width (grid-cols-9).
+          Only rendered in legacy "full" mode. The per-route pages
+          (/production vs /production/<code>) navigate via the sidebar
+          instead, so the in-page tab bar would be redundant. */}
+      {mode === "full" && (
       <div className="rounded-lg border border-[#E6E0D9] bg-[#FAF8F4] p-1">
         <div className="grid grid-cols-9 gap-1">
           <button
@@ -2732,6 +2773,7 @@ export default function ProductionPage() {
           ))}
         </div>
       </div>
+      )}
 
       {/* Legend — only for Overview matrix */}
       {activeTab === "ALL" && (

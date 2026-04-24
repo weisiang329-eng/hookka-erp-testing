@@ -22,7 +22,13 @@ const SalesDetail = lazy(() => import('./pages/sales/detail'))
 const SalesEdit = lazy(() => import('./pages/sales/edit'))
 
 // Production
-const Production = lazy(() => import('./pages/production'))
+// The split-by-dept refactor introduced overview.tsx (/production) and
+// dept.tsx (/production/:deptCode) as thin wrappers over the main
+// ProductionPage component. Importing ./pages/production (the index) is
+// still kept so any legacy direct consumer keeps working, but the active
+// routes below point at the new wrappers.
+const ProductionOverview = lazy(() => import('./pages/production/overview'))
+const ProductionDeptPage = lazy(() => import('./pages/production/dept'))
 const ProductionDetail = lazy(() => import('./pages/production/detail'))
 const DepartmentDetail = lazy(() => import('./pages/production/department'))
 const ProductionScan = lazy(() => import('./pages/production/scan'))
@@ -140,12 +146,28 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/sales/:id/edit', element: <S><SalesEdit /></S> },
 
   // Production
-  { path: '/production', element: <S><Production /></S> },
-  { path: '/production/:id', element: <S><ProductionDetail /></S> },
-  { path: '/production/department/:code', element: <S><DepartmentDetail /></S> },
+  // Order matters: specific literal child paths (scan, fg-scan, the 8 dept
+  // codes, department/:code) must come BEFORE the `/production/:id` PO
+  // detail wildcard, otherwise React Router matches the dynamic segment
+  // first and swallows "/production/fab-cut" into the detail route.
+  { path: '/production', element: <S><ProductionOverview /></S> },
   { path: '/production/scan', element: <S><ProductionScan /></S> },
   { path: '/production/fg-scan', element: <S><FGScan /></S> },
   { path: '/production/tracker', element: <Navigate to="/planning" replace /> },
+  { path: '/production/department/:code', element: <S><DepartmentDetail /></S> },
+  // Per-department split routes — each renders the shared ProductionPage
+  // with mode="dept" and narrows the backend fetch to that dept's JCs only.
+  { path: '/production/fab-cut', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/fab-sew', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/foam', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/wood-cut', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/framing', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/webbing', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/upholstery', element: <S><ProductionDeptPage /></S> },
+  { path: '/production/packing', element: <S><ProductionDeptPage /></S> },
+  // PO detail — keep LAST under /production/ so its :id wildcard only
+  // catches what the literal paths above don't (i.e. pord-xxxx ids).
+  { path: '/production/:id', element: <S><ProductionDetail /></S> },
 
   // Legacy redirects
   { path: '/production-test', element: <Navigate to="/production" replace /> },

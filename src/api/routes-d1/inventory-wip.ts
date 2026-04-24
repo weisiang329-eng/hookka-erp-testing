@@ -604,12 +604,11 @@ app.get("/", async (c) => {
     });
   }
 
-  // Non-sofa pass-through rows (BF / accessory). Keep the per-component
-  // shape — frontend renders these in the "Other WIP" card unchanged.
+  // Non-sofa pass-through rows (BF / accessory) — per-component at every
+  // stage. User intentionally wants BF to show HB / Divan / etc. as
+  // separate Inventory rows even at Fab Cut stage (they are physically
+  // separate stock piles).
   for (const g of nonSofaItems) {
-    // Derive salesOrderNo from the first source (they all share the same
-    // PO when the group is non-sofa by definition — sources only differ
-    // by PO-code when multiple POs feed the same (wipCode, dept) cell).
     const firstSrc = g.sources[0];
     const salesOrderNo = firstSrc ? stripPoSuffix(firstSrc.poCode) : null;
     const category: WIPRow["category"] =
@@ -618,9 +617,6 @@ app.get("/", async (c) => {
         : firstSrc?.itemCategory === "SOFA"
           ? "SOFA"
           : "ACCESSORY";
-
-    // setQty for BF/ACC — total pieces (each WIP row = pcs on shelf, no
-    // "set" concept), matches frontend's pre-merge WIPItem.totalQty.
     const setQty = g.totalQty;
 
     rows.push({

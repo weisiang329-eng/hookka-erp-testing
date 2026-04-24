@@ -85,7 +85,21 @@ const navigationGroups: NavGroup[] = [
   {
     label: "PRODUCTION",
     items: [
-      { name: "Production", href: "/production", icon: Factory },
+      // Production is now an expandable parent: Overview (the matrix that
+      // used to be the sole /production page) + one child per department.
+      // Each dept page fetches ONLY its own JCs via ?dept=CODE, so the
+      // payload drops ~8× vs. the old monolithic page.
+      { name: "Production", href: "/production", icon: Factory, children: [
+        { name: "Overview", href: "/production", icon: Layers },
+        { name: "Fab Cut", href: "/production/fab-cut", icon: Shirt },
+        { name: "Fab Sew", href: "/production/fab-sew", icon: Shirt },
+        { name: "Foam", href: "/production/foam", icon: Package },
+        { name: "Wood Cut", href: "/production/wood-cut", icon: Wrench },
+        { name: "Framing", href: "/production/framing", icon: Wrench },
+        { name: "Webbing", href: "/production/webbing", icon: Wrench },
+        { name: "Upholstery", href: "/production/upholstery", icon: Shirt },
+        { name: "Packing", href: "/production/packing", icon: Package },
+      ]},
       { name: "Planning", href: "/planning", icon: Calendar },
       { name: "Scanner", href: "/production/scan", icon: QrCode },
     ],
@@ -175,7 +189,19 @@ type OrgInfo = {
 export function Sidebar() {
   const { pathname } = useLocation();
   const [collapsed, setCollapsed] = useState(false);
-  const [expandedMenus, setExpandedMenus] = useState<Set<string>>(new Set(["Consignment"]));
+  // Auto-expand Production when viewing any /production/* route so the
+  // user can see which dept child they're on, plus Consignment (existing
+  // behavior).
+  const [expandedMenus, setExpandedMenus] = useState<Set<string>>(() => {
+    const initial = new Set(["Consignment"]);
+    if (
+      typeof window !== "undefined" &&
+      window.location.pathname.startsWith("/production")
+    ) {
+      initial.add("Production");
+    }
+    return initial;
+  });
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [unreadCount, setUnreadCount] = useState(0);
   const [orgs, setOrgs] = useState<OrgInfo[]>([]);
@@ -294,8 +320,31 @@ export function Sidebar() {
     if (href === "/production/scan") {
       return pathname === "/production/scan" || pathname.startsWith("/production/scan/");
     }
+    if (href === "/production/fg-scan") {
+      return pathname === "/production/fg-scan" || pathname.startsWith("/production/fg-scan/");
+    }
+    // Per-dept pages — each child highlights ONLY on its own URL, no
+    // prefix-match fallback (otherwise all dept children would light up
+    // simultaneously or Overview would stay active on a dept subpage).
+    if (
+      href === "/production/fab-cut" ||
+      href === "/production/fab-sew" ||
+      href === "/production/foam" ||
+      href === "/production/wood-cut" ||
+      href === "/production/framing" ||
+      href === "/production/webbing" ||
+      href === "/production/upholstery" ||
+      href === "/production/packing"
+    ) {
+      return pathname === href;
+    }
     if (href === "/production") {
-      return (pathname === "/production" || (pathname.startsWith("/production/") && !pathname.startsWith("/production/scan")));
+      // Overview + parent "Production" share this href. Exact-match only
+      // so the Overview child isn't left highlighted while a user is on
+      // /production/fab-cut. The parent's own highlight is driven by
+      // `childActive` (any dept child matching), so it still lights up
+      // on dept subroutes correctly.
+      return pathname === "/production";
     }
     if (href === "/planning/mrp") {
       return pathname === "/planning/mrp" || pathname.startsWith("/planning/mrp/");

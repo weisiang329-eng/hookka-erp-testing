@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
-import { cachedFetchJson } from "@/lib/cached-fetch";
+import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { SearchableSelect } from "@/components/ui/searchable-select";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -237,6 +238,24 @@ type CreateFGForm = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
+  // Extra fields cloned from an existing product when the user hits
+  // "Copy from existing" — stay blank on a from-scratch create. The POST
+  // payload forwards anything non-empty; server slots defaults where
+  // undefined so we don't have to special-case fresh rows here.
+  description?: string;
+  basePriceSen?: number;
+  price1Sen?: number;
+  unitM3?: number;
+  fabricUsage?: number;
+  subAssemblies?: unknown;
+  pieces?: unknown;
+  seatHeightPrices?: unknown;
+  skuCode?: string;
+  fabricColor?: string;
+};
+
+const EMPTY_FG_FORM: CreateFGForm = {
+  code: "", name: "", category: "BEDFRAME", baseModel: "", sizeCode: "", sizeLabel: "",
 };
 
 // --- Create RM form ---
@@ -713,7 +732,9 @@ export default function InventoryPage() {
 
   // Create FG modal
   const [showCreateFG, setShowCreateFG] = useState(false);
-  const [fgForm, setFgForm] = useState<CreateFGForm>({ code: "", name: "", category: "BEDFRAME", baseModel: "", sizeCode: "", sizeLabel: "" });
+  const [fgForm, setFgForm] = useState<CreateFGForm>(EMPTY_FG_FORM);
+  const [fgCopySourceId, setFgCopySourceId] = useState<string>("");
+  const [fgSaving, setFgSaving] = useState(false);
 
   // Create RM modal
   const [showCreateRM, setShowCreateRM] = useState(false);
@@ -1139,6 +1160,53 @@ export default function InventoryPage() {
                 </div>
               </CardHeader>
               <CardContent>
+                {/* Copy-from-existing: lazy-person shortcut. Picking a product
+                    clones every field that makes sense (category / baseModel /
+                    sizeCode / sizeLabel / description / prices / unitM3 /
+                    fabricUsage / JSON trios) into the form below. User edits
+                    what's different (typically just code + name + size) and
+                    hits Save. Leave blank to create from scratch. */}
+                <div className="mb-3 pb-3 border-b border-[#E2DDD8]">
+                  <label className="block text-xs text-[#6B7280] mb-1">Copy from existing (optional)</label>
+                  <SearchableSelect
+                    value={fgCopySourceId}
+                    onChange={(val) => {
+                      setFgCopySourceId(val);
+                      if (!val) {
+                        setFgForm(EMPTY_FG_FORM);
+                        return;
+                      }
+                      const src = products.find((p) => p.id === val);
+                      if (!src) return;
+                      // Code + name deliberately blank — the whole point is to
+                      // type a NEW code. Everything else clones over.
+                      setFgForm({
+                        code: "",
+                        name: "",
+                        category: src.category || "BEDFRAME",
+                        baseModel: src.baseModel || "",
+                        sizeCode: src.sizeCode || "",
+                        sizeLabel: src.sizeLabel || "",
+                        description: src.description || "",
+                        basePriceSen: src.basePriceSen,
+                        price1Sen: src.price1Sen,
+                        unitM3: src.unitM3,
+                        fabricUsage: src.fabricUsage,
+                        subAssemblies: src.subAssemblies,
+                        pieces: src.pieces,
+                        seatHeightPrices: src.seatHeightPrices,
+                        skuCode: src.skuCode || "",
+                        fabricColor: src.fabricColor || "",
+                      });
+                    }}
+                    options={products.map((p) => ({
+                      value: p.id,
+                      label: `${p.code} - ${p.name} · ${p.category}`,
+                    }))}
+                    placeholder="Search an existing SKU to clone from..."
+                    className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                  />
+                </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Code *</label>
@@ -1170,9 +1238,66 @@ export default function InventoryPage() {
                   </div>
                 </div>
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateFG(false)}>Cancel</Button>
-                  <Button variant="primary" size="sm" disabled={!fgForm.code || !fgForm.name} onClick={() => { toast.success("Product created: " + fgForm.code); setShowCreateFG(false); setFgForm({ code: "", name: "", category: "BEDFRAME", baseModel: "", sizeCode: "", sizeLabel: "" }); }}>
-                    Save Product
+                  <Button variant="outline" size="sm" onClick={() => setShowCreateFG(false)} disabled={fgSaving}>Cancel</Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!fgForm.code || !fgForm.name || fgSaving}
+                    onClick={async () => {
+                      // POST to /api/products. Send every field the form carries —
+                      // server tolerates missing optional fields and the copy-
+                      // from path forwards all the cloned JSON (subAssemblies,
+                      // pieces, seatHeightPrices) as-is so the new SKU truly
+                      // mirrors the source.
+                      setFgSaving(true);
+                      try {
+                        const body: Record<string, unknown> = {
+                          code: fgForm.code,
+                          name: fgForm.name,
+                          category: fgForm.category,
+                          baseModel: fgForm.baseModel || fgForm.code,
+                          sizeCode: fgForm.sizeCode,
+                          sizeLabel: fgForm.sizeLabel,
+                        };
+                        if (fgForm.description !== undefined) body.description = fgForm.description;
+                        if (fgForm.basePriceSen !== undefined) body.basePriceSen = fgForm.basePriceSen;
+                        if (fgForm.price1Sen !== undefined) body.price1Sen = fgForm.price1Sen;
+                        if (fgForm.unitM3 !== undefined) body.unitM3 = fgForm.unitM3;
+                        if (fgForm.fabricUsage !== undefined) body.fabricUsage = fgForm.fabricUsage;
+                        if (fgForm.subAssemblies !== undefined) body.subAssemblies = fgForm.subAssemblies;
+                        if (fgForm.pieces !== undefined) body.pieces = fgForm.pieces;
+                        if (fgForm.seatHeightPrices !== undefined) body.seatHeightPrices = fgForm.seatHeightPrices;
+                        if (fgForm.skuCode) body.skuCode = fgForm.skuCode;
+                        if (fgForm.fabricColor) body.fabricColor = fgForm.fabricColor;
+
+                        const res = await fetch("/api/products", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify(body),
+                        });
+                        const json = (await res.json()) as { success?: boolean; data?: Product; error?: string };
+                        if (!res.ok || !json.success) {
+                          toast.error(json.error || `Failed to create product (HTTP ${res.status})`);
+                          return;
+                        }
+                        // Optimistic local insert + cache invalidation so every
+                        // other page that has /api/products cached (Sales
+                        // Create, BOM, Products) refreshes on next mount.
+                        if (json.data) setProducts((prev) => [...prev, json.data as Product]);
+                        invalidateCachePrefix("/api/products");
+                        invalidateCachePrefix("/api/inventory");
+                        toast.success(`Product created: ${fgForm.code}`);
+                        setShowCreateFG(false);
+                        setFgForm(EMPTY_FG_FORM);
+                        setFgCopySourceId("");
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Failed to create product");
+                      } finally {
+                        setFgSaving(false);
+                      }
+                    }}
+                  >
+                    {fgSaving ? "Saving…" : "Save Product"}
                   </Button>
                 </div>
               </CardContent>

@@ -1388,6 +1388,14 @@ export default function ProductionPage() {
         // Size is seat size for sofa (e.g. "30"), bed size for bedframe
         // (e.g. "6FT"), already normalised in row.size.
         const wips = fabCutWIP(first, modelLabel || first.model);
+        // BF merged rows: qty is HB's if present, else Divan's (first).
+        // Sofa stays on `first.qty` (one set per SO). Rationale: HB is the
+        // canonical BF piece count — Divan may pair 1:1 with HB but when
+        // the shop orders HB-only or Divan-only the remaining one is the
+        // source of truth for the row's qty.
+        const bfQty = first.category === "BEDFRAME"
+          ? (group.find((g) => (g.wipType || "").toUpperCase() === "HB")?.qty ?? first.qty)
+          : first.qty;
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,
@@ -1399,6 +1407,7 @@ export default function ProductionPage() {
           model: stripToBase(first.model),
           wipType: types || first.wipType,
           wip: wips,
+          qty: bfQty,
           prodTime: totalMinutes,
           dueDate: earliestDue || first.dueDate,
           completedDate: allDone ? (latestCompleted || first.completedDate) : "",

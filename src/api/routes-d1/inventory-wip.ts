@@ -207,6 +207,7 @@ app.get("/", async (c) => {
     ageDays: number;
     estValueSen: number;
     fabricCode: string;
+    sizeLabel: string;    // piped into sofa SET label so "5535-L(LHF)+2A(RHF) | (30) | PC151-02 | (FC)" matches Production Fab Cut tab
     baseModel: string;
     itemCategory: string;
   };
@@ -334,6 +335,7 @@ app.get("/", async (c) => {
           ageDays,
           estValueSen: unitCostSen * qty,
           fabricCode: po.fabricCode || "",
+          sizeLabel: po.sizeLabel || "",
           baseModel: (po.productCode || "").split("-")[0],
           itemCategory: po.itemCategory || "",
         });
@@ -359,6 +361,7 @@ app.get("/", async (c) => {
       completedDate: string;
       ageDays: number;
       fabricCode: string;
+      sizeLabel: string;
       baseModel: string;
       itemCategory: string;
     }>;
@@ -394,6 +397,7 @@ app.get("/", async (c) => {
       completedDate: r.completedDate,
       ageDays: r.ageDays,
       fabricCode: r.fabricCode,
+      sizeLabel: r.sizeLabel,
       baseModel: r.baseModel,
       itemCategory: r.itemCategory,
     });
@@ -414,8 +418,10 @@ app.get("/", async (c) => {
   type SofaBucket = {
     salesOrderNo: string;
     fabric: string;
+    sizeLabel: string;                              // shared across variants in the same SO+fabric bucket
     qtyByComponent: Map<string, number>;
     modelSet: Set<string>;
+    baseModelSet: Set<string>;                      // base models (e.g. "5535") — used for the Product column
     setQty: number;
     oldestAgeDays: number;
     estTotalValueSen: number;
@@ -442,8 +448,10 @@ app.get("/", async (c) => {
         b = {
           salesOrderNo: so,
           fabric: s.fabricCode,
+          sizeLabel: s.sizeLabel,
           qtyByComponent: new Map(),
           modelSet: new Set(),
+          baseModelSet: new Set(),
           setQty: 0,
           oldestAgeDays: 0,
           estTotalValueSen: 0,
@@ -458,6 +466,7 @@ app.get("/", async (c) => {
         (b.qtyByComponent.get(g.wipType) || 0) + s.quantity,
       );
       b.modelSet.add(g.relatedProduct);
+      if (s.baseModel) b.baseModelSet.add(s.baseModel);
       if (s.poQty > b.setQty) b.setQty = s.poQty;
       if (s.ageDays > b.oldestAgeDays) b.oldestAgeDays = s.ageDays;
       if (g.totalQty > 0) {
@@ -540,7 +549,28 @@ app.get("/", async (c) => {
         }
       }
     }
-    const wipCode = [modelLabel, b.fabric].filter(Boolean).join(" ");
+    // Sofa SET label — lockstep with Production page's fabCutWIP() helper so
+    // Inventory and Production Fab Cut display exactly the same wipCode:
+    //   "5535-L(LHF)+2A(RHF) | (30) | PC151-02 | (FC)"
+    // Sofa skips the BF-only height tokens; only model | (size) | fabric | (FC).
+    const wipCode = [
+      modelLabel,
+      b.sizeLabel ? `(${b.sizeLabel})` : "",
+      b.fabric,
+      "(FC)",
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    // Product column shows the base model (e.g. "5535") — variant suffixes
+    // already live in the wipCode so duplicating them here just clutters the
+    // column. Fall back to modelLabel for edge cases (product codes without
+    // a "-" separator).
+    const productLabel =
+      b.baseModelSet.size === 1
+        ? Array.from(b.baseModelSet)[0]
+        : b.baseModelSet.size > 1
+          ? Array.from(b.baseModelSet).sort().join("/")
+          : modelLabel;
     const components = Array.from(b.qtyByComponent.entries())
       .map(([wipType, qty]) => ({ wipType, qty }))
       .sort((a, b2) => a.wipType.localeCompare(b2.wipType));
@@ -552,7 +582,7 @@ app.get("/", async (c) => {
       wipType: "SET",
       category: "SOFA",
       completedBy: "FAB_CUT",
-      relatedProduct: modelLabel,
+      relatedProduct: productLabel,
       setQty,
       pieceQty: b.pieceQty,
       salesOrderNo: b.salesOrderNo || null,

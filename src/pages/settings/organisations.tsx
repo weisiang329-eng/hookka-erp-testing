@@ -37,10 +37,17 @@ export default function OrganisationsPage() {
 
   const orgs: Organisation[] = useMemo(() => orgResp?.organisations ?? [], [orgResp]);
   const activeOrgId: string = useMemo(() => orgResp?.activeOrgId ?? "", [orgResp]);
+  // Local draft — user edits accumulate here until Save.  Reads through to
+  // the fetched config when draft is null.  Save + refresh clears the draft
+  // so the UI snaps back to the server value.
+  const [configDraft, setConfigDraft] = useState<InterCompanyConfig | null>(null);
   const config: InterCompanyConfig = useMemo(
-    () => orgResp?.interCompanyConfig ?? { hookkaToOhanaRate: 0.65, autoCreateMirrorDocs: true },
-    [orgResp]
+    () => configDraft
+      ?? orgResp?.interCompanyConfig
+      ?? { hookkaToOhanaRate: 0.65, autoCreateMirrorDocs: true },
+    [configDraft, orgResp]
   );
+  const setConfig = setConfigDraft;
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/organisations");
@@ -88,6 +95,7 @@ export default function OrganisationsPage() {
       body: JSON.stringify({ interCompanyConfig: config }),
     });
     await fetchData();
+    setConfigDraft(null); // snap back to the fresh server value
     setSaving(false);
     flash("Inter-company config saved");
   };

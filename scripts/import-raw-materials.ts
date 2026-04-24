@@ -26,7 +26,7 @@ import { execSync } from "node:child_process";
 
 const require = createRequire(import.meta.url);
 // xlsx is a CJS module — import via require so tsx doesn't choke on it.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+ 
 const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/raw material.xlsx";

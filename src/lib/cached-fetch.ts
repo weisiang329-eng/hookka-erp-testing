@@ -167,7 +167,7 @@ export function useCachedJson<T = unknown>(
         // endpoints surface in devtools without adding a dashboard.
         const dur = Math.round(performance.now() - t0);
         if (dur >= 500) {
-          // eslint-disable-next-line no-console
+           
           console.warn(`[slow-fetch] url=${url} dur_ms=${dur}`);
         }
         // Canonicalise Hono's `{ success, data }` envelope into `data` only

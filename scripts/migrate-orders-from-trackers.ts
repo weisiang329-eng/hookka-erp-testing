@@ -24,7 +24,7 @@
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+ 
 const xl = require("xlsx") as typeof import("xlsx");
 
 const SHEET = "C:/Users/User/Downloads/Production Sheet (9).xlsx";

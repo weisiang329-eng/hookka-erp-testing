@@ -49,7 +49,9 @@ async function pbkdf2(
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      salt,
+      // Cast to BufferSource — modern TS types Uint8Array as
+      // Uint8Array<ArrayBufferLike> which isn't assignable without a hint.
+      salt: salt as BufferSource,
       iterations,
     },
     key,

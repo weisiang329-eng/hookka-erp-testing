@@ -34,7 +34,7 @@ export function notifySupplierPoSubmitted(args: {
   supplierName: string;
   supplierId: string;
 }): void {
-  // eslint-disable-next-line no-console
+   
   console.log(
     `[email stub] PO ${args.poNo} submitted to supplier ${args.supplierName} (${args.supplierId})`,
   );

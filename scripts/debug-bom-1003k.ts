@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import type * as XLSX from "xlsx";
 
 const require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-require-imports
+ 
 const xl = require("xlsx") as typeof XLSX;
 
 const SHEET = "C:/Users/User/Downloads/Production Sheet (9).xlsx";

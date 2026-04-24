@@ -13,7 +13,7 @@ async function main() {
   console.log(`Total SOs in D1: ${sosJson.data.length}`);
 
   let totalSF = 0, totalBF = 0, sfWithGap = 0, bfWithGap = 0, sfWithDivan = 0, bfWithDivan = 0;
-  let sosSfWithGap = new Set<string>(), sosBfWithGap = new Set<string>(), sosWithDivan = new Set<string>();
+  const sosSfWithGap = new Set<string>(), sosBfWithGap = new Set<string>(), sosWithDivan = new Set<string>();
   for (const so of sosJson.data) {
     const detail = await (await fetch(`${PROD}/api/sales-orders/${so.id}`, { headers: auth })).json() as any;
     for (const item of (detail.data?.items || [])) {

@@ -139,8 +139,8 @@ app.get("/", async (c) => {
   const cpIds = cpRows.map((r) => r.id);
 
   // Batch-load history once so the list stays one round-trip per customer.
-  let activeHistoryByCp = new Map<string, CustomerProductPriceRow>();
-  let pendingCpIds = new Set<string>();
+  const activeHistoryByCp = new Map<string, CustomerProductPriceRow>();
+  const pendingCpIds = new Set<string>();
   if (cpIds.length > 0) {
     const placeholders = cpIds.map(() => "?").join(",");
     const histRes = await c.var.DB.prepare(

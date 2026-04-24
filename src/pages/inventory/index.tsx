@@ -1196,7 +1196,15 @@ export default function InventoryPage() {
     () =>
       backendWipRows
         .filter((r) => {
-          if (r.category === "SOFA") return r.wipType === "SET";
+          // SOFA at Fab Cut stage: show the merged SET row only (mirrors
+          // Production Fab Cut tab — one row per set).
+          // SOFA at Fab Sew / Foam / Wood Cut / ... stages: show per-
+          // component rows (Base / Cushion / Armrest are individually
+          // tracked once they leave Fab Cut).
+          // BF / ACCESSORY: always per-component.
+          if (r.category === "SOFA" && r.completedBy === "FAB_CUT") {
+            return r.wipType === "SET";
+          }
           return r.wipType !== "SET";
         })
         .map((r) => ({
@@ -1206,7 +1214,10 @@ export default function InventoryPage() {
           category: r.category,
           relatedProduct: r.relatedProduct,
           completedBy: r.completedBy,
-          totalQty: r.category === "SOFA" ? r.setQty : r.totalQty,
+          totalQty:
+            r.category === "SOFA" && r.wipType === "SET"
+              ? r.setQty
+              : r.totalQty,
           oldestAgeDays: r.oldestAgeDays,
           sources: r.sources,
           estUnitCostSen: r.estUnitCostSen,

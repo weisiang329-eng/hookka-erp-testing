@@ -185,6 +185,8 @@ type ProductionOrderLike = {
   itemCategory?: string;
   sizeCode?: string;
   sizeLabel?: string;
+  // Fabric code — needed for the sofa-set merge key (SO + fabric).
+  fabricCode?: string;
   quantity: number;
   startDate: string;
   jobCards: Array<{
@@ -209,6 +211,11 @@ type WIPSource = {
   quantity: number;
   completedDate: string;
   ageDays: number;
+  // Carried on each source so the sofa-set merge can compute
+  // (salesOrderNo, fabricCode) keys without re-fetching the PO.
+  fabricCode: string;
+  baseModel: string;
+  itemCategory: string;
 };
 type WIPItem = {
   id: string;
@@ -374,6 +381,8 @@ function deriveWIPFromPO(
     completedDate: string; ageDays: number;
     // Cost per this source emission (already × qty)
     estValueSen: number;  // doneMinsInGroup × (BOM/totalPOMins + rate) × qty
+    // Extra per-source context used by the sofa-set merge.
+    fabricCode: string; baseModel: string; itemCategory: string;
   };
   const raw: RawEntry[] = [];
 
@@ -459,6 +468,9 @@ function deriveWIPFromPO(
           completedDate,
           ageDays,
           estValueSen: unitCostSen * qty,
+          fabricCode: po.fabricCode || "",
+          baseModel: (po.productCode || "").split("-")[0],
+          itemCategory: po.itemCategory || "",
         });
       }
     }
@@ -491,6 +503,9 @@ function deriveWIPFromPO(
       quantity: r.quantity,
       completedDate: r.completedDate,
       ageDays: r.ageDays,
+      fabricCode: r.fabricCode,
+      baseModel: r.baseModel,
+      itemCategory: r.itemCategory,
     });
   }
 
@@ -503,6 +518,122 @@ function deriveWIPFromPO(
   // Sort by oldest age descending (FIFO)
   items.sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
   return items;
+}
+
+// Synthetic row produced by mergeSofaWIPSets — one row per
+// (salesOrderNo, fabric) for sofa WIPs. Mirrors Fab Cut's merge key.
+type SofaSetRow = {
+  id: string;
+  setLabel: string;           // e.g. "5537-1A(LHF)+1NA+1A(RHF) BO315-2"
+  salesOrderNo: string;
+  fabric: string;
+  totalQty: number;           // sum across all component WIPs
+  oldestAgeDays: number;
+  estTotalValueSen: number;
+  components: { wipType: string; qty: number }[];
+  members: WIPItem[];         // underlying component rows, for expansion
+};
+
+// Strip the trailing "-NN" line-number suffix from a PO code
+// (e.g. "SO-2604-212-01" → "SO-2604-212"). Returns input unchanged
+// when no suffix is present so non-SO codes pass through.
+function stripPoSuffix(poCode: string): string {
+  return poCode.replace(/-\d+$/, "");
+}
+
+// Group sofa WIP rows into one synthetic "set" row per (SO, fabric).
+// Non-sofa WIPs are left untouched by this helper — the UI renders them
+// separately when merged-view is on.
+function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
+  // Map key `${so}::${fabric}` → accumulator
+  const buckets = new Map<string, {
+    salesOrderNo: string;
+    fabric: string;
+    qtyByComponent: Map<string, number>; // wipType → qty
+    modelSet: Set<string>;               // product codes participating
+    oldestAgeDays: number;
+    estTotalValueSen: number;
+    memberIds: Set<string>;              // WIPItem.id set for members
+  }>();
+
+  for (const w of wipItems) {
+    // Only merge sofas — a single non-sofa source kicks the whole WIP
+    // out of the merge (keeps BF / accessory rows intact).
+    const allSofa =
+      w.sources.length > 0 &&
+      w.sources.every((s) => s.itemCategory === "SOFA");
+    if (!allSofa) continue;
+
+    for (const s of w.sources) {
+      const so = stripPoSuffix(s.poCode);
+      const key = `${so}::${s.fabricCode}`;
+      let b = buckets.get(key);
+      if (!b) {
+        b = {
+          salesOrderNo: so,
+          fabric: s.fabricCode,
+          qtyByComponent: new Map(),
+          modelSet: new Set(),
+          oldestAgeDays: 0,
+          estTotalValueSen: 0,
+          memberIds: new Set(),
+        };
+        buckets.set(key, b);
+      }
+      b.qtyByComponent.set(
+        w.wipType,
+        (b.qtyByComponent.get(w.wipType) || 0) + s.quantity,
+      );
+      b.modelSet.add(w.relatedProduct);
+      if (s.ageDays > b.oldestAgeDays) b.oldestAgeDays = s.ageDays;
+      // Prorate the WIPItem's estTotalValueSen by this source's share.
+      if (w.totalQty > 0) {
+        b.estTotalValueSen += (s.quantity / w.totalQty) * w.estTotalValueSen;
+      }
+      b.memberIds.add(w.id);
+    }
+  }
+
+  const wipById = new Map(wipItems.map((w) => [w.id, w]));
+  const rows: SofaSetRow[] = [];
+  for (const [key, b] of buckets) {
+    const uniqueModels = Array.from(b.modelSet);
+    // Compact label: strip shared baseModel prefix, join with "+"
+    // (same rule Fab Cut uses in production/index.tsx).
+    let modelLabel = uniqueModels.join("+");
+    if (uniqueModels.length > 1) {
+      const firstDash = uniqueModels[0].indexOf("-");
+      if (firstDash > 0) {
+        const prefix = uniqueModels[0].slice(0, firstDash + 1);
+        if (uniqueModels.every((m) => m.startsWith(prefix))) {
+          modelLabel =
+            prefix + uniqueModels.map((m) => m.slice(prefix.length)).join("+");
+        }
+      }
+    }
+    const setLabel = [modelLabel, b.fabric].filter(Boolean).join(" ");
+    const components = Array.from(b.qtyByComponent.entries())
+      .map(([wipType, qty]) => ({ wipType, qty }))
+      .sort((a, b) => a.wipType.localeCompare(b.wipType));
+    const totalQty = components.reduce((s, c) => s + c.qty, 0);
+    const members = Array.from(b.memberIds)
+      .map((id) => wipById.get(id))
+      .filter((x): x is WIPItem => !!x);
+
+    rows.push({
+      id: `set::${key}`,
+      setLabel,
+      salesOrderNo: b.salesOrderNo,
+      fabric: b.fabric,
+      totalQty,
+      oldestAgeDays: b.oldestAgeDays,
+      estTotalValueSen: b.estTotalValueSen,
+      components,
+      members,
+    });
+  }
+  rows.sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
+  return rows;
 }
 
 // Unique itemGroups for RM filter. When D1 has no rows we fall back to a
@@ -679,6 +810,77 @@ const wipColumns: Column<WIPItem>[] = [
   },
 ];
 
+// Columns for the merged sofa-set view. The first column doubles as an
+// expand/collapse caret — click handling is wired up at the DataGrid level
+// since the underlying component rows live in a separate nested grid.
+const sofaSetColumns = (
+  expandedIds: Set<string>,
+  toggle: (id: string) => void,
+): Column<SofaSetRow>[] => [
+  {
+    key: "setLabel",
+    label: "Set",
+    render: (_v, row) => (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); toggle(row.id); }}
+        className="flex items-center gap-1.5 text-left"
+      >
+        <span className="inline-block w-3 text-[#9CA3AF]">
+          {expandedIds.has(row.id) ? "v" : ">"}
+        </span>
+        <span className="text-sm font-medium text-[#1F1D1B]">{row.setLabel}</span>
+      </button>
+    ),
+  },
+  {
+    key: "fabric",
+    label: "Fabric",
+    render: (_v, row) => <span className="text-sm text-[#4B5563]">{row.fabric || "—"}</span>,
+  },
+  {
+    key: "components",
+    label: "Components",
+    render: (_v, row) => (
+      <div className="flex flex-wrap gap-1">
+        {row.components.map((c) => (
+          <span
+            key={c.wipType}
+            className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-[#F5F1E8] text-[#6B5C32] border border-[#E2DDD8]"
+          >
+            {c.wipType} × {c.qty}
+          </span>
+        ))}
+      </div>
+    ),
+  },
+  {
+    key: "totalQty",
+    label: "Total Qty",
+    align: "right",
+    render: (_v, row) => <span className="font-medium text-[#1F1D1B]">{row.totalQty}</span>,
+  },
+  {
+    key: "oldestAgeDays",
+    label: "Oldest Age (days)",
+    align: "right",
+    render: (_v, row) => renderAgeCell(row.oldestAgeDays),
+  },
+  {
+    key: "estTotalValueSen",
+    label: "Est. Value (RM)",
+    align: "right",
+    render: (_v, row) => (
+      <div className="text-right tabular-nums">
+        <div className="text-[#1F1D1B] text-sm font-medium">
+          {formatValue(row.estTotalValueSen)}
+        </div>
+        <div className="text-[10px] text-[#9CA3AF]">est.</div>
+      </div>
+    ),
+  },
+];
+
 const rmColumns: Column<RawMaterial>[] = [
   {
     key: "itemCode",
@@ -726,6 +928,18 @@ export default function InventoryPage() {
   const [fgCategoryFilter, setFgCategoryFilter] = useState<string>("ALL");
 
   const [wipSearch, setWipSearch] = useState("");
+  // WIP view mode: "PER_COMPONENT" preserves the existing one-row-per-WIP
+  // layout; "MERGED" collapses sofa components into (SO, fabric) set rows.
+  const [wipViewMode, setWipViewMode] = useState<"PER_COMPONENT" | "MERGED">("PER_COMPONENT");
+  // Which sofa-set rows are expanded to show their underlying component WIPs.
+  const [expandedSetIds, setExpandedSetIds] = useState<Set<string>>(new Set());
+  const toggleExpandedSet = (id: string) => {
+    setExpandedSetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
 
   const [rmSearch, setRmSearch] = useState("");
   const [rmCategoryFilter, setRmCategoryFilter] = useState<string>("ALL");
@@ -867,6 +1081,20 @@ export default function InventoryPage() {
     }
     return data;
   }, [wipItems, wipSearch]);
+
+  // Merged-view derivations. Applied to filteredWIP so search narrows both
+  // the set rows (via their member WIPs) and the non-sofa fallback list.
+  const sofaSetRows = useMemo(
+    () => mergeSofaWIPSets(filteredWIP),
+    [filteredWIP],
+  );
+  // Non-sofa WIPs shown alongside sofa set rows when merged-view is on.
+  const filteredWIPNonSofa = useMemo(
+    () => filteredWIP.filter(
+      (w) => !(w.sources.length > 0 && w.sources.every((s) => s.itemCategory === "SOFA")),
+    ),
+    [filteredWIP],
+  );
 
   const filteredRM = useMemo(() => {
     let data = liveRawMaterials;
@@ -1392,7 +1620,12 @@ export default function InventoryPage() {
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total WIP Items</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{wipItems.length}</p>
+              <p className="text-xl font-bold text-[#1F1D1B]">
+                {wipItems.length}
+                {wipViewMode === "MERGED" && (
+                  <span className="text-sm font-medium text-[#6B7280]"> · {sofaSetRows.length} sofa sets</span>
+                )}
+              </p>
             </CardContent></Card>
             <Card><CardContent className="p-2.5 flex items-center justify-between">
               <div><p className="text-xs text-[#6B7280]">Total Qty</p><p className="text-xl font-bold text-[#6B5C32]">{wipTotalQty}</p></div>
@@ -1408,7 +1641,7 @@ export default function InventoryPage() {
             </CardContent></Card>
           </div>
 
-          {/* Search only — no filter buttons */}
+          {/* Search + view toggle */}
           <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
             <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
@@ -1419,24 +1652,107 @@ export default function InventoryPage() {
                 className="pl-9 h-9"
               />
             </div>
+            <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setWipViewMode("PER_COMPONENT")}
+                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                  wipViewMode === "PER_COMPONENT"
+                    ? "bg-[#6B5C32] text-white"
+                    : "bg-white text-[#4B5563] hover:bg-[#FAF9F7]"
+                }`}
+              >
+                Per-component
+              </button>
+              <button
+                type="button"
+                onClick={() => setWipViewMode("MERGED")}
+                className={`px-3 py-1.5 text-xs font-medium border-l border-[#E2DDD8] transition-colors ${
+                  wipViewMode === "MERGED"
+                    ? "bg-[#6B5C32] text-white"
+                    : "bg-white text-[#4B5563] hover:bg-[#FAF9F7]"
+                }`}
+              >
+                Merged sets
+              </button>
+            </div>
           </div>
 
-          {/* DataGrid */}
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <DataGrid
-                columns={wipColumns}
-                data={filteredWIP}
-                keyField="id"
-                gridId="inventory-wip"
-                contextMenuItems={contextMenu}
-                onDoubleClick={handleDoubleClickWIP}
-              />
-            </CardContent>
-          </Card>
+          {wipViewMode === "PER_COMPONENT" ? (
+            <Card>
+              <CardHeader className="pb-3">
+                <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <DataGrid
+                  columns={wipColumns}
+                  data={filteredWIP}
+                  keyField="id"
+                  gridId="inventory-wip"
+                  contextMenuItems={contextMenu}
+                  onDoubleClick={handleDoubleClickWIP}
+                />
+              </CardContent>
+            </Card>
+          ) : (
+            <div className="space-y-4">
+              {/* Sofa sets — merged by (SO, fabric). Each row is expandable
+                  to reveal the underlying component WIPItems. */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Sofa Sets ({sofaSetRows.length})</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {sofaSetRows.length === 0 ? (
+                    <div className="py-6 text-sm text-[#6B7280] text-center">No sofa WIP to merge.</div>
+                  ) : (
+                    <div className="space-y-2">
+                      {sofaSetRows.map((row) => (
+                        <div key={row.id} className="border border-[#E2DDD8] rounded-md">
+                          <DataGrid
+                            columns={sofaSetColumns(expandedSetIds, toggleExpandedSet)}
+                            data={[row]}
+                            keyField="id"
+                            gridId={`inventory-wip-set-${row.id}`}
+                          />
+                          {expandedSetIds.has(row.id) && (
+                            <div className="border-t border-[#E2DDD8] bg-[#FAF9F7] p-3">
+                              <DataGrid
+                                columns={wipColumns}
+                                data={row.members}
+                                keyField="id"
+                                gridId={`inventory-wip-set-members-${row.id}`}
+                                contextMenuItems={contextMenu}
+                                onDoubleClick={handleDoubleClickWIP}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Non-sofa WIPs (BF / accessory) — untouched by the merge so
+                  they don't disappear when merged-view is active. */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Other WIP ({filteredWIPNonSofa.length})</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <DataGrid
+                    columns={wipColumns}
+                    data={filteredWIPNonSofa}
+                    keyField="id"
+                    gridId="inventory-wip-nonsofa"
+                    contextMenuItems={contextMenu}
+                    onDoubleClick={handleDoubleClickWIP}
+                  />
+                </CardContent>
+              </Card>
+            </div>
+          )}
         </div>
       )}
 

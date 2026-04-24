@@ -4774,11 +4774,24 @@ export default function BOMManagementPage() {
 
         if (pData && pData.success) setProducts(pData.data as Product[]);
         if (tData && tData.success) {
+          // Normalise every template: l1Processes / wipComponents are
+          // accessed with .forEach / .reduce / .map all over render, so
+          // any null from D1 or a stale cache entry would crash the whole
+          // page (the caller then hits the ErrorBoundary). Coerce to []
+          // on read — safer than null-guarding every downstream call site.
+          const raw = tData.data as BOMTemplate[];
+          const safe = Array.isArray(raw)
+            ? raw.map((t) => ({
+                ...t,
+                l1Processes: Array.isArray(t?.l1Processes) ? t.l1Processes : [],
+                wipComponents: Array.isArray(t?.wipComponents) ? t.wipComponents : [],
+              }))
+            : [];
+          setTemplates(safe);
           // D1 is authoritative now. The old localStorage overlay (from
           // pre-D1 days) would otherwise keep resurrecting stale BOMs and
           // pushing them back to the server on every mount, undoing every
           // bulk reapply run.
-          setTemplates(tData.data as BOMTemplate[]);
           if (typeof window !== "undefined") {
             try { localStorage.removeItem(BOM_TEMPLATES_KEY); } catch { /* ignore */ }
           }

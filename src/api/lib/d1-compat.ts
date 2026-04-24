@@ -61,6 +61,7 @@ function transformBody(sql: string): string {
     if (c === "'") {
       out += c
       i++
+      let closed = false
       while (i < n) {
         if (sql[i] === "'" && sql[i + 1] === "'") {
           out += "''"
@@ -70,9 +71,19 @@ function transformBody(sql: string): string {
         out += sql[i]
         if (sql[i] === "'") {
           i++
+          closed = true
           break
         }
         i++
+      }
+      // Unterminated string literals would let the rest of the SQL run
+      // through the identifier rewriter with quoting disabled — a silent
+      // footgun if a future caller interpolates user input into the raw
+      // SQL template.  Fail loud.
+      if (!closed) {
+        throw new Error(
+          "translateSql: unterminated string literal in SQL — refuse to rewrite identifiers past it",
+        )
       }
       continue
     }

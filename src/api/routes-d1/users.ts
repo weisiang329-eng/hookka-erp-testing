@@ -190,14 +190,11 @@ app.put("/:id", async (c) => {
       .bind(merged.email, merged.role, merged.displayName, merged.isActive, id)
       .run();
 
-    // If we just disabled the user, nuke their sessions so the token the
-    // frontend is holding stops working on the next request.
+    // If we just disabled the user, nuke their sessions (DB + KV cache) so
+    // the token the frontend is holding stops working on the next request.
     if (merged.isActive === 0 && existing.isActive === 1) {
-      await c.var.DB.prepare(
-        "DELETE FROM user_sessions WHERE userId = ?",
-      )
-        .bind(id)
-        .run();
+      const { purgeUserSessions } = await import("../lib/auth-middleware");
+      await purgeUserSessions(c.var.DB, c.env.SESSION_CACHE, id);
     }
 
     const updated = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
@@ -222,10 +219,12 @@ app.delete("/:id", async (c) => {
     return c.json({ success: false, error: "User not found" }, 404);
   }
 
-  await c.var.DB.batch([
-    c.var.DB.prepare("UPDATE users SET isActive = 0 WHERE id = ?").bind(id),
-    c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
-  ]);
+  const { purgeUserSessions } = await import("../lib/auth-middleware");
+  await c.var.DB
+    .prepare("UPDATE users SET isActive = 0 WHERE id = ?")
+    .bind(id)
+    .run();
+  await purgeUserSessions(c.var.DB, c.env.SESSION_CACHE, id);
 
   const updated = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
@@ -263,14 +262,14 @@ app.post("/:id/reset-password", async (c) => {
   }
 
   const newHash = await hashPassword(newPassword);
-  // Also purge sessions — force the user to log in again with the new password.
-  await c.var.DB.batch([
-    c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?").bind(
-      newHash,
-      id,
-    ),
-    c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
-  ]);
+  // Also purge sessions (DB + KV cache) — force the user to log in again
+  // with the new password instead of riding the old token for 5 minutes.
+  const { purgeUserSessions } = await import("../lib/auth-middleware");
+  await c.var.DB
+    .prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
+    .bind(newHash, id)
+    .run();
+  await purgeUserSessions(c.var.DB, c.env.SESSION_CACHE, id);
 
   return c.json({ success: true });
 });

@@ -82,6 +82,10 @@ app.use("/api/*", async (c, next) => {
   await next();
 });
 
+// ---------------------------------------------------------------------------
+// Public routes (registered BEFORE authMiddleware)
+// ---------------------------------------------------------------------------
+
 // Health check — used by Pages build step and uptime monitors.
 app.get("/api/health", (c) =>
   c.json({
@@ -92,22 +96,90 @@ app.get("/api/health", (c) =>
   }),
 );
 
-// Quick diagnostic — import postgres.js only, no connection
-app.get("/api/pg-import", async (c) => {
-  console.log("[pg-import] enter");
+// Heartbeat — used to monitor the Hyperdrive → Supabase path stays healthy.
+// Reveals only Postgres `NOW()` and a table count — no business data.  Kept
+// public so uptime monitors and the CI smoke run without an auth dance.
+app.get("/api/pg-ping", async (c) => {
   try {
-    const m = await import("postgres");
-    console.log("[pg-import] import done");
-    return c.json({ ok: true, imported: typeof m.default });
+    const { getSql } = await import("./lib/db-pg");
+    const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
+    if (!url) throw new Error("No database connection string");
+    const sql = getSql(url);
+    const t0 = Date.now();
+    const rows = (await sql`SELECT NOW() AS now, (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count`) as unknown as { now: unknown; tableCount: number }[];
+    const ms = Date.now() - t0;
+    return c.json({
+      ok: true,
+      elapsedMs: ms,
+      via: c.env.HYPERDRIVE ? "hyperdrive" : "direct",
+      ...rows[0],
+    });
   } catch (e) {
-    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
+    // Do NOT echo driver error messages — they can leak schema / table names.
+    console.error("[pg-ping] error:", e);
+    return c.json({ ok: false, error: "health check failed" }, 500);
   }
 });
 
-// Phase 4 — dashboard summary from materialized views (Singapore-round-
-// trip, no table scan).  Reads mv_so_summary / mv_po_pipeline / mv_jc_by_dept
-// then wraps the result in a 30-second KV cache so repeat loads are ~0ms.
-// Public for now; gate behind auth once frontend wires it up.
+// Phase 4 — refresh all dashboard materialized views.  Meant to be hit by
+// a Cron Trigger (external cron service or a separate Worker with scheduled
+// handler — Pages Functions doesn't support scheduled events directly).
+// Gated by CRON_SECRET + constant-time compare.  Returns 503 (not 403)
+// when the secret env var is missing on the server, so a misconfigured
+// deploy fails closed instead of allowing anonymous calls.
+app.post("/api/internal/refresh-mvs", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[refresh-mvs] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    await c.var.DB.prepare("SELECT refresh_dashboard_mvs()").run();
+    const { invalidate } = await import("./lib/kv-cache");
+    await invalidate(c, "dashboard:summary:v1");
+    return c.json({ ok: true, elapsedMs: Date.now() - t0 });
+  } catch (e) {
+    console.error("[refresh-mvs] error:", e);
+    return c.json({ ok: false, error: "refresh failed" }, 500);
+  }
+});
+
+/**
+ * Constant-time string equality.  Hashes both sides before comparing so the
+ * comparison time depends only on the hash output length, never on the
+ * secret contents.  Returns false on any length mismatch at the hash stage,
+ * which is safe because the hash output is fixed-size.
+ */
+async function constantTimeEqual(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(a)),
+    crypto.subtle.digest("SHA-256", enc.encode(b)),
+  ]);
+  const va = new Uint8Array(ha);
+  const vb = new Uint8Array(hb);
+  if (va.length !== vb.length) return false;
+  let diff = 0;
+  for (let i = 0; i < va.length; i++) diff |= va[i] ^ vb[i];
+  return diff === 0;
+}
+
+// Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
+// PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
+// MUST be registered BEFORE any route that touches business data.
+app.use("/api/*", authMiddleware);
+
+// ---------------------------------------------------------------------------
+// Auth-gated routes (registered AFTER authMiddleware)
+// ---------------------------------------------------------------------------
+
+// Phase 4 — dashboard summary from materialized views.  Auth-gated: aggregate
+// revenue + production volume are competitively sensitive.  30s KV cache.
 app.get("/api/dashboard/summary", async (c) => {
   const { cached } = await import("./lib/kv-cache");
   try {
@@ -131,66 +203,10 @@ app.get("/api/dashboard/summary", async (c) => {
     });
     return c.json({ ok: true, ...data });
   } catch (e) {
-    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
+    console.error("[dashboard/summary] error:", e);
+    return c.json({ ok: false, error: "dashboard unavailable" }, 500);
   }
 });
-
-// Phase 4 — refresh all dashboard materialized views.  Meant to be hit by
-// a Cron Trigger (external cron service or a separate Worker with scheduled
-// handler — Pages Functions doesn't support scheduled events directly).
-// No-auth but gated by a secret header so it can only be called by our
-// cron, not by any caller with the URL.
-app.post("/api/internal/refresh-mvs", async (c) => {
-  const secret = c.req.header("x-cron-secret");
-  if (!secret || secret !== c.env.CRON_SECRET) {
-    return c.json({ ok: false, error: "forbidden" }, 403);
-  }
-  const t0 = Date.now();
-  await c.var.DB.prepare("SELECT refresh_dashboard_mvs()").run();
-  const { invalidate } = await import("./lib/kv-cache");
-  await invalidate(c, "dashboard:summary:v1");
-  return c.json({ ok: true, elapsedMs: Date.now() - t0 });
-});
-
-// Phase 3 smoke — queries a real table via the D1-compat adapter to prove
-// camelCase return + snake_case-rewritten SQL work end-to-end against live
-// imported data.  Public (no auth) so we can test pre-KV-cache.
-app.get("/api/pg-customers", async (c) => {
-  try {
-    const rows = await c.var.DB
-      .prepare("SELECT id, code, name, creditLimitSen, isActive FROM customers ORDER BY code LIMIT 5")
-      .all();
-    return c.json({ ok: true, count: rows.results?.length ?? 0, rows: rows.results });
-  } catch (e) {
-    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
-  }
-});
-
-// Phase 2 smoke test — confirms Supabase is reachable from the Worker via
-// Hyperdrive and that the camelCase transform is wired.
-app.get("/api/pg-ping", async (c) => {
-  try {
-    const { getSql } = await import("./lib/db-pg");
-    const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
-    if (!url) throw new Error("No database connection string");
-    const sql = getSql(url);
-    const t0 = Date.now();
-    const rows = (await sql`SELECT NOW() AS now, (SELECT count(*)::int FROM pg_tables WHERE schemaname = 'public') AS table_count`) as unknown as { now: unknown; tableCount: number }[];
-    const ms = Date.now() - t0;
-    return c.json({
-      ok: true,
-      elapsedMs: ms,
-      via: c.env.HYPERDRIVE ? "hyperdrive" : "direct",
-      ...rows[0],
-    });
-  } catch (e) {
-    return c.json({ ok: false, error: e instanceof Error ? e.message : String(e) }, 500);
-  }
-});
-
-// Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
-// PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
-app.use("/api/*", authMiddleware);
 
 // ---------------------------------------------------------------------------
 // Route registrations — add each migrated route here.

@@ -52,7 +52,10 @@ export function getSql(databaseUrl: string): Sql {
         transform: { column: { from: postgres.toCamel } },
       })
     : postgres(databaseUrl, {
-        ssl: 'require',
+        // verify-full validates the cert chain AND the hostname against the
+        // cert's SAN — without it, `require` only checks that TLS is offered,
+        // letting any valid cert through (MITM possible on the public pooler).
+        ssl: 'verify-full',
         prepare: false,
         max: 1,
         idle_timeout: 20,

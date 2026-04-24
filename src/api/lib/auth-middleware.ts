@@ -60,7 +60,7 @@ type SessionJoinRow = {
 // the hot API-call pattern (dashboard loads fire 5-10 calls/sec per user).
 const SESSION_CACHE_TTL_S = 300;
 
-async function sessionCacheKey(token: string): Promise<string> {
+export async function sessionCacheKey(token: string): Promise<string> {
   const buf = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(token),
@@ -69,6 +69,49 @@ async function sessionCacheKey(token: string): Promise<string> {
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
   return `sess:${hex}`;
+}
+
+/**
+ * Called from /api/auth/logout and any endpoint that deletes user_sessions
+ * rows — invalidates the KV cache entry so a logged-out user cannot keep
+ * using the token for up to TTL seconds.
+ */
+export async function invalidateSessionCache(
+  kv: KVNamespace | undefined,
+  token: string,
+): Promise<void> {
+  if (!kv || !token) return;
+  const key = await sessionCacheKey(token);
+  await kv.delete(key);
+}
+
+/**
+ * Purge ALL active sessions for a user — both the DB rows AND the KV cache
+ * entries keyed by each token's hash.  Used when deactivating or deleting
+ * a user, resetting a password, or rotating roles.  Without the KV purge a
+ * banned user would keep API access for up to SESSION_CACHE_TTL_S.
+ */
+export async function purgeUserSessions(
+  db: D1Database,
+  kv: KVNamespace | undefined,
+  userId: string,
+): Promise<void> {
+  // Collect tokens BEFORE deleting the rows — once rows are gone we have no
+  // way to know which KV keys to purge.
+  const tokensRes = await db
+    .prepare("SELECT token FROM user_sessions WHERE userId = ?")
+    .bind(userId)
+    .all<{ token: string }>();
+  const tokens = (tokensRes.results ?? []).map((r) => r.token);
+
+  await db
+    .prepare("DELETE FROM user_sessions WHERE userId = ?")
+    .bind(userId)
+    .run();
+
+  if (kv && tokens.length > 0) {
+    await Promise.all(tokens.map((t) => invalidateSessionCache(kv, t)));
+  }
 }
 
 export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {

@@ -92,11 +92,12 @@ const sql = postgres(env.DATABASE_URL, {
 })
 
 try {
-  // NO transaction wrapper — allows partial progress when a subset of rows
-  // fail (FK / CHECK / data encoding).  session_replication_role is session-
-  // scoped, so we set it on the connection, not inside a tx.
-  console.log('SET session_replication_role = replica')
-  await sql`SET session_replication_role = replica`
+  // session_replication_role MUST be scoped to a single transaction (SET
+  // LOCAL) — if we set it globally on a Supavisor transaction-mode pooler
+  // connection, the pooler may hand the same backend to another request
+  // afterwards with FK triggers still disabled (known PgBouncer/Supavisor
+  // footgun).  Per-batch transactions keep the setting local to the tx.
+  console.log('using per-batch transactions with SET LOCAL session_replication_role = replica')
 
   const BATCH = 200
   let done = 0
@@ -104,16 +105,24 @@ try {
   const t0 = Date.now()
   for (let i = 0; i < inserts.length; i += BATCH) {
     const chunkStmts = inserts.slice(i, i + BATCH)
-    const chunk = chunkStmts.join('\n')
     try {
-      await sql.unsafe(chunk)
+      // SET LOCAL is committed/rolled back with the transaction — never
+      // leaks to the next pooled tenant.
+      await sql.begin(async (tx) => {
+        await tx.unsafe('SET LOCAL session_replication_role = replica')
+        await tx.unsafe(chunkStmts.join('\n'))
+      })
     } catch (e) {
       // Batch failed. Retry each statement individually so we can pinpoint
-      // the bad one(s) without aborting the whole import.
+      // the bad one(s) without aborting the whole import.  Same tx scope
+      // for each single-stmt retry.
       console.log(`  batch ${i} failed: "${e.message.slice(0, 80)}"  — retrying one-by-one`)
       for (let k = 0; k < chunkStmts.length; k++) {
         try {
-          await sql.unsafe(chunkStmts[k])
+          await sql.begin(async (tx) => {
+            await tx.unsafe('SET LOCAL session_replication_role = replica')
+            await tx.unsafe(chunkStmts[k])
+          })
         } catch (e2) {
           failures.push({
             index: i + k,
@@ -139,7 +148,6 @@ try {
     if (failures.length > 10) console.log(`  ... +${failures.length - 10} more`)
   }
 
-  await sql`SET session_replication_role = DEFAULT`
   console.log(`\n✅ Processed ${done} rows in ${Date.now() - t0}ms (${failures.length} failed)`)
 
   // Sanity: row counts in a few pilot tables

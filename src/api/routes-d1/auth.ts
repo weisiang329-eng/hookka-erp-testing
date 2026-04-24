@@ -94,13 +94,20 @@ app.post("/login", async (c) => {
 });
 
 // ----- POST /api/auth/logout ----------------------------------------------
-// Deletes the caller's session. Idempotent: unknown/missing token → still ok.
+// Deletes the caller's session AND purges the KV session cache so the token
+// stops working immediately (otherwise auth-middleware's KV cache would keep
+// the logged-out session alive for up to SESSION_CACHE_TTL_S).
+// Idempotent: unknown/missing token → still ok.
 app.post("/logout", async (c) => {
   const token = bearerTokenFrom(c.req.raw);
   if (token) {
-    await c.var.DB.prepare("DELETE FROM user_sessions WHERE token = ?")
-      .bind(token)
-      .run();
+    const { invalidateSessionCache } = await import("../lib/auth-middleware");
+    await Promise.all([
+      c.var.DB.prepare("DELETE FROM user_sessions WHERE token = ?")
+        .bind(token)
+        .run(),
+      invalidateSessionCache(c.env.SESSION_CACHE, token),
+    ]);
   }
   return c.json({ success: true });
 });

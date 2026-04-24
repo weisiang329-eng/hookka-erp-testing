@@ -24,6 +24,7 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
+import { resolveCustomerPrice } from "./customer-products";
 
 const app = new Hono<Env>();
 
@@ -1279,10 +1280,39 @@ app.post("/", async (c) => {
           }
         }
 
-        let basePriceSen = Number(item.basePriceSen) || 0;
+        const incomingBasePrice = Number(item.basePriceSen) || 0;
+        let basePriceSen = incomingBasePrice;
+
+        // Customer-specific price override: only consulted when the request
+        // didn't explicitly supply a price. A failed lookup must not break
+        // the SO create — fall through to the product-level default below.
+        let cpSeatHeightPrices: Array<{ height: string; priceSen: number }> | null = null;
+        let cpBasePrice: number | null = null;
+        const productIdForLookup = (item.productId as string) || resolvedProduct?.id || "";
+        if (incomingBasePrice === 0 && productIdForLookup && customer.id) {
+          try {
+            const cp = await resolveCustomerPrice(
+              c.env.DB,
+              productIdForLookup,
+              customer.id,
+            );
+            if (cp) {
+              cpBasePrice = cp.basePriceSen;
+              cpSeatHeightPrices = cp.seatHeightPrices ?? null;
+            }
+          } catch {
+            // Non-fatal: fall back to product-level pricing.
+          }
+        }
+
         if (basePriceSen === 0 && resolvedProduct) {
           const seatHeight = String(item.seatHeight ?? "");
-          if (resolvedProduct.seatHeightPrices && seatHeight) {
+          if (cpSeatHeightPrices && cpSeatHeightPrices.length > 0 && seatHeight) {
+            const shp = cpSeatHeightPrices.find(
+              (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+            );
+            basePriceSen = shp?.priceSen || cpBasePrice || resolvedProduct.basePriceSen || 0;
+          } else if (resolvedProduct.seatHeightPrices && seatHeight) {
             try {
               const shpList = JSON.parse(resolvedProduct.seatHeightPrices) as Array<{
                 height: string;
@@ -1291,12 +1321,12 @@ app.post("/", async (c) => {
               const shp = shpList.find(
                 (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
               );
-              basePriceSen = shp?.priceSen || resolvedProduct.basePriceSen || 0;
+              basePriceSen = shp?.priceSen || cpBasePrice || resolvedProduct.basePriceSen || 0;
             } catch {
-              basePriceSen = resolvedProduct.basePriceSen || 0;
+              basePriceSen = cpBasePrice ?? resolvedProduct.basePriceSen ?? 0;
             }
           } else {
-            basePriceSen = resolvedProduct.basePriceSen || 0;
+            basePriceSen = cpBasePrice ?? resolvedProduct.basePriceSen ?? 0;
           }
         }
 
@@ -1763,8 +1793,33 @@ app.put("/:id", async (c) => {
       const oldItems = oldItemsRes.results ?? [];
 
       const rawItems: Array<Record<string, unknown>> = body.items;
-      const newItems = rawItems.map((item, idx) => {
-        const basePriceSen = Number(item.basePriceSen) || 0;
+      const newItems = await Promise.all(rawItems.map(async (item, idx) => {
+        const incomingBase = Number(item.basePriceSen) || 0;
+        let basePriceSen = incomingBase;
+        // Customer-specific override: only when request didn't supply a price.
+        const productIdForLookup = (item.productId as string) || "";
+        if (incomingBase === 0 && productIdForLookup && customerId) {
+          try {
+            const cp = await resolveCustomerPrice(
+              c.env.DB,
+              productIdForLookup,
+              customerId,
+            );
+            if (cp) {
+              const seatHeight = String(item.seatHeight ?? "");
+              if (cp.seatHeightPrices && cp.seatHeightPrices.length > 0 && seatHeight) {
+                const shp = cp.seatHeightPrices.find(
+                  (p) => p.height === seatHeight || p.height === `${seatHeight}"`,
+                );
+                basePriceSen = shp?.priceSen ?? cp.basePriceSen ?? 0;
+              } else {
+                basePriceSen = cp.basePriceSen ?? 0;
+              }
+            }
+          } catch {
+            // Non-fatal — keep basePriceSen at 0 if lookup fails.
+          }
+        }
         const divanPriceSen = Number(item.divanPriceSen) || 0;
         const legPriceSen = Number(item.legPriceSen) || 0;
         const specialOrderPriceSen = Number(item.specialOrderPriceSen) || 0;
@@ -1824,7 +1879,7 @@ app.put("/:id", async (c) => {
           _priceOverride: priceOverride,
           _lineIndex: idx,
         };
-      });
+      }));
 
       subtotalSen = newItems.reduce((sum, i) => sum + i.lineTotalSen, 0);
       totalSen = subtotalSen;

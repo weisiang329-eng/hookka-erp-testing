@@ -18,26 +18,9 @@ import {
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
-import { useCachedJson, invalidateCachePrefix, cachedFetchJson } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 type SeatHeightTier = { height: string; priceSen: number };
-type PriceInfo = {
-  productId: string;
-  customerId: string;
-  hasCustomerOverride: boolean;
-  basePriceSen: number;
-  price1Sen: number | null;
-  seatHeightPrices: SeatHeightTier[];
-};
-
-async function resolveCustomerPrice(
-  productId: string,
-  customerId: string,
-): Promise<PriceInfo | null> {
-  const url = `/api/products/${encodeURIComponent(productId)}/price-for-customer/${encodeURIComponent(customerId)}`;
-  const resp = await cachedFetchJson<{ success?: boolean; data?: PriceInfo }>(url, 60);
-  return resp?.data ?? null;
-}
 
 type SofaModule = {
   productId: string;
@@ -382,6 +365,18 @@ function CreateSalesOrderPage() {
     setItems(prev => {
       const source = prev[idx];
       if (!source || source.itemCategory !== "SOFA" || !source.baseModel) return prev;
+      // Cascade only when the edit lands on the FIRST sofa line of this
+      // baseModel — that line seeds defaults for the sibling modules.
+      // Edits on any later sibling stay local so the user can override
+      // fabric / seat / leg / special orders per-module without the
+      // change bleeding back into Line 1 and re-cascading out again.
+      // (Rule: defaults follow first item, per-line overrides stay local.)
+      const firstSofaIdx = prev.findIndex(
+        (it) => it.itemCategory === "SOFA" && it.baseModel === source.baseModel,
+      );
+      if (idx !== firstSofaIdx) {
+        return prev.map((item, i) => (i === idx ? { ...item, ...updates } : item));
+      }
       return prev.map((item, i) => {
         if (i === idx) return { ...item, ...updates };
         if (item.itemCategory !== "SOFA" || item.baseModel !== source.baseModel) return item;
@@ -414,8 +409,8 @@ function CreateSalesOrderPage() {
       sizeCode: prod.sizeCode,
       sizeLabel: prod.sizeLabel,
       basePriceSen: 0, // Don't set base price yet — fabric determines Price 1 vs Price 2
-      // Seed price hints from the global product record; will be overwritten
-      // by the customer-aware lookup below if a customer is selected.
+      // Seed price hints from the global product record. Customer-specific
+      // pricing is resolved server-side on SO create.
       price1Sen: prod.price1Sen ?? null,
       seatHeightPrices: prod.seatHeightPrices ?? [],
       // Reset category-specific fields
@@ -426,23 +421,6 @@ function CreateSalesOrderPage() {
       legHeightInches: isSofa ? null : items[idx].legHeightInches,
       legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
     });
-    // If a customer has already been picked, resolve the customer-specific
-    // price and overwrite the hints on the line. Fabric-driven base price
-    // (selectFabric) will then read from the cached price1Sen.
-    if (customerId) {
-      void resolveCustomerPrice(prod.id, customerId).then((info) => {
-        if (!info) return;
-        setItems(prev => prev.map((it, i) =>
-          i === idx && it.productId === prod.id
-            ? {
-                ...it,
-                price1Sen: info.price1Sen,
-                seatHeightPrices: info.seatHeightPrices ?? [],
-              }
-            : it
-        ));
-      });
-    }
   };
 
   const selectFabric = (idx: number, fabricId: string) => {

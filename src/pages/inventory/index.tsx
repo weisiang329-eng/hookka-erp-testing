@@ -1178,11 +1178,11 @@ export default function InventoryPage() {
                       }
                       const src = products.find((p) => p.id === val);
                       if (!src) return;
-                      // Code + name deliberately blank — the whole point is to
-                      // type a NEW code. Everything else clones over.
+                      // Pre-fill code + name from source so the user only
+                      // tweaks what differs (e.g. bump a size suffix).
                       setFgForm({
-                        code: "",
-                        name: "",
+                        code: src.code,
+                        name: src.name,
                         category: src.category || "BEDFRAME",
                         baseModel: src.baseModel || "",
                         sizeCode: src.sizeCode || "",
@@ -1236,7 +1236,67 @@ export default function InventoryPage() {
                     <label className="block text-xs text-[#6B7280] mb-1">Size Label</label>
                     <input value={fgForm.sizeLabel} onChange={e => setFgForm(f => ({ ...f, sizeLabel: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 6FT" />
                   </div>
+                  <div className="sm:col-span-3">
+                    <label className="block text-xs text-[#6B7280] mb-1">Description</label>
+                    <input value={fgForm.description ?? ""} onChange={e => setFgForm(f => ({ ...f, description: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="Optional description / notes" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
+                    <input
+                      type="number" step="0.01" min={0}
+                      value={fgForm.basePriceSen !== undefined ? (fgForm.basePriceSen / 100).toFixed(2) : ""}
+                      onChange={e => setFgForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                      className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                      placeholder="0.00"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM)</label>
+                    <input
+                      type="number" step="0.01" min={0}
+                      value={fgForm.price1Sen !== undefined && fgForm.price1Sen !== null ? (fgForm.price1Sen / 100).toFixed(2) : ""}
+                      onChange={e => setFgForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
+                      className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                      placeholder="Optional (bedframe tier 1)"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Unit M3</label>
+                    <input
+                      type="number" step="0.01" min={0}
+                      value={fgForm.unitM3 !== undefined ? String(fgForm.unitM3) : ""}
+                      onChange={e => setFgForm(f => ({ ...f, unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
+                      className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                      placeholder="e.g. 0.69"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Fabric Usage (m)</label>
+                    <input
+                      type="number" step="0.1" min={0}
+                      value={fgForm.fabricUsage !== undefined ? String(fgForm.fabricUsage) : ""}
+                      onChange={e => setFgForm(f => ({ ...f, fabricUsage: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
+                      className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                      placeholder="e.g. 6"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">SKU Code</label>
+                    <input value={fgForm.skuCode ?? ""} onChange={e => setFgForm(f => ({ ...f, skuCode: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="e.g. 5530-1NA-SIZE-BASE" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">Fabric Colour</label>
+                    <input value={fgForm.fabricColor ?? ""} onChange={e => setFgForm(f => ({ ...f, fabricColor: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="Optional" />
+                  </div>
                 </div>
+                {Boolean(fgForm.seatHeightPrices || fgForm.subAssemblies || fgForm.pieces) && (
+                  <div className="mt-3 p-3 rounded border border-dashed border-[#E2DDD8] bg-[#FAF9F7] text-[11px] text-[#6B7280]">
+                    <div className="font-semibold text-[#6B5C32] mb-1">Carried over from source (not editable here — adjust on Products page after save):</div>
+                    {fgForm.seatHeightPrices ? <div>· Seat-height price ladder (sofa tier JSON)</div> : null}
+                    {fgForm.subAssemblies ? <div>· Sub-assemblies</div> : null}
+                    {fgForm.pieces ? <div>· Pieces breakdown</div> : null}
+                  </div>
+                )}
                 <div className="flex justify-end gap-2 pt-4">
                   <Button variant="outline" size="sm" onClick={() => setShowCreateFG(false)} disabled={fgSaving}>Cancel</Button>
                   <Button

@@ -2471,11 +2471,12 @@ export default function ProductionPage() {
         {/* Header row */}
         <div
           className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9]"
-          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 50px 70px repeat(8,minmax(0,1fr))" }}
+          style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
         >
           <div className="px-3 py-2.5">SO ID</div>
           <div className="px-3 py-2.5">Product</div>
           <div className="px-3 py-2.5">Customer</div>
+          <div className="px-3 py-2.5">Special Order</div>
           <div className="px-2 py-2.5 text-center">Qty</div>
           <div className="px-2 py-2.5">Due</div>
           {DEPARTMENTS.map((d) => (
@@ -2519,7 +2520,7 @@ export default function ProductionPage() {
             <div
               key={order.id}
               className={`grid items-stretch border-b border-[#F0EBE3] last:border-b-0 cursor-pointer ${rowCls}`}
-              style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 50px 70px repeat(8,minmax(0,1fr))" }}
+              style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
               onDoubleClick={() => navigate(`/production/${order.id}`)}
             >
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
@@ -2535,6 +2536,14 @@ export default function ProductionPage() {
                 <ProductDetailLine order={order} />
               </div>
               <div className="px-3 py-1.5 text-xs text-[#6B7280] truncate flex items-center">{order.customerName}</div>
+              <div
+                className={`px-3 py-1.5 text-xs truncate flex items-center ${
+                  order.specialOrder ? "text-[#9A3A2D] font-semibold" : "text-[#D1CCC4]"
+                }`}
+                title={order.specialOrder || ""}
+              >
+                {order.specialOrder || "—"}
+              </div>
               <div className="px-2 py-1.5 text-xs text-center text-[#6B7280] flex items-center justify-center">{order.quantity}</div>
               <div
                 className="px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center cursor-pointer hover:text-[#6B5C32] hover:underline"

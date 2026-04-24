@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,13 +27,27 @@ type AgingRow = {
   total: number;
 };
 
+const PAGE_SIZE = 50;
+
 export default function InvoicesPage() {
   const navigate = useNavigate();
-  const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>("/api/invoices");
+
+  // Pagination — server-side. Filter changes reset to page 1 (see effect below).
+  const [page, setPage] = useState(1);
+
+  const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{
+    success?: boolean;
+    data?: Invoice[];
+    page?: number;
+    limit?: number;
+    total?: number;
+  }>(`/api/invoices?page=${page}&limit=${PAGE_SIZE}`);
   const invoices: Invoice[] = useMemo(
     () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
     [invResp]
   );
+  const totalInvoicesServer = invResp?.total ?? invoices.length;
+  const totalPages = Math.max(1, Math.ceil(totalInvoicesServer / PAGE_SIZE));
   const [showCreateModal, setShowCreateModal] = useState(false);
   const { data: doResp, refresh: refreshDOs } = useCachedJson<{ success?: boolean; data?: { id: string; doNo: string; customerName: string; status: string }[] }>(showCreateModal ? "/api/delivery-orders" : null);
   const deliveryOrders = useMemo(() => {
@@ -48,6 +62,11 @@ export default function InvoicesPage() {
   const [filterCustomer, setFilterCustomer] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+
+  // Reset to page 1 when any filter changes (stale page could be empty).
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
 
   // Tabs
   const [activeTab, setActiveTab] = useState<"list" | "aging">("list");
@@ -149,8 +168,10 @@ export default function InvoicesPage() {
     });
   }, [invoices, filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
 
-  // KPI calculations from all invoices (unfiltered)
-  const totalInvoices = invoices.length;
+  // KPI calculations — Total uses server count; other KPIs reflect the
+  // currently-fetched page only (pagination tradeoff, documented in the
+  // footer's total-count badge).
+  const totalInvoices = totalInvoicesServer;
   const outstandingSen = invoices
     .filter((inv) => ["SENT", "OVERDUE", "PARTIAL_PAID"].includes(inv.status))
     .reduce((s, inv) => s + (inv.totalSen - inv.paidAmount), 0);
@@ -460,6 +481,35 @@ export default function InvoicesPage() {
                 maxHeight="calc(100vh - 300px)"
                 emptyMessage="No invoices found."
               />
+
+              {/* Pagination footer */}
+              <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+                <span>
+                  {totalInvoicesServer.toLocaleString()} invoice
+                  {totalInvoicesServer === 1 ? "" : "s"}
+                </span>
+                <div className="flex items-center gap-3">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    disabled={page <= 1 || loading}
+                  >
+                    ← Prev
+                  </Button>
+                  <span className="tabular-nums text-[#1F1D1B]">
+                    Page {page} / {totalPages}
+                  </span>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                    disabled={page >= totalPages || loading}
+                  >
+                    Next →
+                  </Button>
+                </div>
+              </div>
             </CardContent>
           </Card>
         </>

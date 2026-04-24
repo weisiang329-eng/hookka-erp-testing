@@ -7,6 +7,7 @@ import type { Column } from "@/components/ui/data-grid";
 import { getQRCodeUrl, getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
 
 // ----- types -----
 type JobCard = {
@@ -583,6 +584,7 @@ type Worker = { id: string; name: string; departmentCode?: string };
 
 export default function ProductionPage() {
   const navigate = useNavigate();
+  const { toast } = useToast();
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD");
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
@@ -854,17 +856,39 @@ export default function ProductionPage() {
       // the list prefix would force a full re-download on next mount (hundreds
       // of rows × dept columns). Single-entity detail pages do their own
       // per-id invalidation if needed.
-      Promise.all(
+      //
+      // Post-fan-out verification: allSettled (not all) so one failure doesn't
+      // abort sibling checks. Each response is verified for res.ok + JSON
+      // success; any partial failure raises a toast so shop floor sees it.
+      Promise.allSettled(
         edits.map(({ poId, jobCardId, patch }) =>
           fetch(`/api/production-orders/${poId}`, {
             method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jobCardId, ...patch }),
+          }).then(async (res) => {
+            const body = await res.json().catch(() => null);
+            return { res, body, poId, jobCardId };
           }),
         ),
-      ).catch((err) => console.error("[patchJobCardsBatch] network error", err));
+      ).then((results) => {
+        const failed: Array<{ poId: string; jobCardId: string; reason: string }> = [];
+        for (let i = 0; i < results.length; i++) {
+          const r = results[i];
+          if (r.status === "rejected") {
+            failed.push({ poId: edits[i].poId, jobCardId: edits[i].jobCardId, reason: String(r.reason) });
+          } else if (!r.value.res.ok || (r.value.body && r.value.body.success === false)) {
+            failed.push({ poId: r.value.poId, jobCardId: r.value.jobCardId, reason: `HTTP ${r.value.res.status}` });
+          }
+        }
+        if (failed.length > 0) {
+          const okCount = edits.length - failed.length;
+          console.error("[patchJobCardsBatch] partial failure", failed);
+          toast.error(`Fab Cut complete applied to ${okCount}/${edits.length} components. ${failed.length} failed — check Overview tab for mismatches.`);
+        }
+      });
     },
-    [],
+    [toast],
   );
 
   // Optimistic PATCH helper for inline job-card edits (due date, completion,

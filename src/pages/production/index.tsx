@@ -1313,7 +1313,7 @@ export default function ProductionPage() {
           first.colour,
           first.size ? `(${first.size})` : "",
           "(FC)",
-        ].filter(Boolean).join(" · ");
+        ].filter(Boolean).join(" | ");
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,

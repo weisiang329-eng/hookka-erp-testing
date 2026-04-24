@@ -1353,7 +1353,10 @@ export default function ProductsPage() {
         const isSofa = categoryFilter === "SOFA";
         const colSpanN = isSofa ? 13 : 10;
         const gridCols = isSofa
-          ? "1.3fr 1.8fr 0.7fr 0.65fr 0.65fr 0.65fr 0.65fr 0.65fr 0.6fr 0.5fr 0.6fr 0.7fr"
+          // 24/28/30/32/35 price columns need room for "RM 1,000.00" with
+          // thousands separators — 0.65fr clipped the text; widened to 0.95fr.
+          // Description + Model compressed slightly to claim the headroom.
+          ? "1.3fr 1.5fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.6fr 0.7fr"
           : "1.3fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.7fr 0.8fr";
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         return (

@@ -1285,6 +1285,7 @@ export default function ProductionPage() {
             r.model,
             r.colour,
             r.size ? `(${r.size})` : "",
+            r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
             "(FC)",
           ].filter(Boolean).join(" | ");
           merged.push({ ...r, rowNo: rowN++, model: stripToBase(r.model), wip });
@@ -1345,6 +1346,7 @@ export default function ProductionPage() {
           modelLabel || first.model,
           first.colour,
           first.size ? `(${first.size})` : "",
+          first.category === "BEDFRAME" && first.totalHeight ? `(${first.totalHeight})` : "",
           "(FC)",
         ].filter(Boolean).join(" | ");
         merged.push({

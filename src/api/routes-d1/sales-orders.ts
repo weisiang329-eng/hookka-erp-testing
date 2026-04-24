@@ -24,7 +24,7 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
-import { resolveCustomerPrice } from "./customer-products";
+import { resolveCustomerPrice, resolveCustomerPriceAsOf } from "./customer-products";
 
 const app = new Hono<Env>();
 
@@ -1252,6 +1252,13 @@ app.post("/", async (c) => {
       ? body.items
       : [];
 
+    // Price-resolution date: use companySODate (may be future-dated) when given,
+    // fall back to today so price history resolves correctly on confirm.
+    const priceAsOf =
+      typeof body.companySODate === "string" && body.companySODate
+        ? body.companySODate.slice(0, 10)
+        : new Date().toISOString().slice(0, 10);
+
     // Build items — resolve product basePrice fallback
     const items = await Promise.all(
       rawItems.map(async (item, idx) => {
@@ -1291,10 +1298,11 @@ app.post("/", async (c) => {
         const productIdForLookup = (item.productId as string) || resolvedProduct?.id || "";
         if (incomingBasePrice === 0 && productIdForLookup && customer.id) {
           try {
-            const cp = await resolveCustomerPrice(
+            const cp = await resolveCustomerPriceAsOf(
               c.env.DB,
               productIdForLookup,
               customer.id,
+              priceAsOf,
             );
             if (cp) {
               cpBasePrice = cp.basePriceSen;
@@ -1793,6 +1801,10 @@ app.put("/:id", async (c) => {
       const oldItems = oldItemsRes.results ?? [];
 
       const rawItems: Array<Record<string, unknown>> = body.items;
+      const priceAsOf =
+        typeof merged.companySODate === "string" && merged.companySODate
+          ? merged.companySODate.slice(0, 10)
+          : new Date().toISOString().slice(0, 10);
       const newItems = await Promise.all(rawItems.map(async (item, idx) => {
         const incomingBase = Number(item.basePriceSen) || 0;
         let basePriceSen = incomingBase;
@@ -1800,10 +1812,11 @@ app.put("/:id", async (c) => {
         const productIdForLookup = (item.productId as string) || "";
         if (incomingBase === 0 && productIdForLookup && customerId) {
           try {
-            const cp = await resolveCustomerPrice(
+            const cp = await resolveCustomerPriceAsOf(
               c.env.DB,
               productIdForLookup,
               customerId,
+              priceAsOf,
             );
             if (cp) {
               const seatHeight = String(item.seatHeight ?? "");

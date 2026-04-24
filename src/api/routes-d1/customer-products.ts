@@ -67,7 +67,27 @@ function genId(): string {
   return `cp-${crypto.randomUUID().replace(/-/g, "").slice(0, 6)}`;
 }
 
+function genPriceRowId(): string {
+  return `cpp-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 type SeatHeightPrice = { height: string; priceSen: number };
+
+type CustomerProductPriceRow = {
+  id: string;
+  customerProductId: string;
+  basePriceSen: number | null;
+  price1Sen: number | null;
+  seatHeightPrices: string | null;
+  effectiveFrom: string;
+  notes: string | null;
+  created_at: string;
+  createdBy: string | null;
+};
 
 // Resolve coalesced price fields given the override row + the product's globals.
 function resolvePrices(
@@ -97,6 +117,8 @@ app.get("/", async (c) => {
     );
   }
 
+  const today = todayIso();
+
   const res = await c.env.DB.prepare(
     `SELECT cp.*,
             p.code     AS productCode,
@@ -113,11 +135,42 @@ app.get("/", async (c) => {
     .bind(customerId)
     .all<JoinedByCustomerRow>();
 
-  const data = (res.results ?? []).map((r) => {
+  const cpRows = res.results ?? [];
+  const cpIds = cpRows.map((r) => r.id);
+
+  // Batch-load history once so the list stays one round-trip per customer.
+  let activeHistoryByCp = new Map<string, CustomerProductPriceRow>();
+  let pendingCpIds = new Set<string>();
+  if (cpIds.length > 0) {
+    const placeholders = cpIds.map(() => "?").join(",");
+    const histRes = await c.env.DB.prepare(
+      `SELECT * FROM customer_product_prices
+        WHERE customerProductId IN (${placeholders})
+        ORDER BY effectiveFrom DESC, created_at DESC`,
+    )
+      .bind(...cpIds)
+      .all<CustomerProductPriceRow>();
+    for (const h of histRes.results ?? []) {
+      if (h.effectiveFrom > today) {
+        pendingCpIds.add(h.customerProductId);
+        continue;
+      }
+      if (!activeHistoryByCp.has(h.customerProductId)) {
+        activeHistoryByCp.set(h.customerProductId, h);
+      }
+    }
+  }
+
+  const data = cpRows.map((r) => {
+    const hist = activeHistoryByCp.get(r.id);
+    // History row wins over legacy cp overrides when present.
+    const baseOverride = hist ? hist.basePriceSen : r.basePriceSen;
+    const price1Override = hist ? hist.price1Sen : r.price1Sen;
+    const seatOverride = hist ? hist.seatHeightPrices : r.seatHeightPrices;
     const prices = resolvePrices(
-      r.basePriceSen,
-      r.price1Sen,
-      r.seatHeightPrices,
+      baseOverride,
+      price1Override,
+      seatOverride,
       r.productBasePriceSen,
       r.productPrice1Sen,
       r.productSeatHeightPrices,
@@ -133,6 +186,7 @@ app.get("/", async (c) => {
       price1Sen: prices.price1Sen,
       seatHeightPrices: prices.seatHeightPrices,
       notes: r.notes ?? "",
+      hasPendingPriceChange: pendingCpIds.has(r.id),
     };
   });
 
@@ -271,6 +325,141 @@ app.post("/", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Price history endpoints — registered BEFORE /:id routes so the static
+// prefixes aren't swallowed by the single-segment wildcard.
+// ---------------------------------------------------------------------------
+
+// GET /:customerProductId/price-history
+app.get("/:customerProductId/price-history", async (c) => {
+  const cpId = c.req.param("customerProductId");
+  const res = await c.env.DB.prepare(
+    `SELECT * FROM customer_product_prices
+      WHERE customerProductId = ?
+      ORDER BY effectiveFrom DESC, created_at DESC`,
+  )
+    .bind(cpId)
+    .all<CustomerProductPriceRow>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    basePriceSen: r.basePriceSen,
+    price1Sen: r.price1Sen,
+    seatHeightPrices: parseJson<SeatHeightPrice[]>(r.seatHeightPrices, []),
+    effectiveFrom: r.effectiveFrom,
+    notes: r.notes ?? "",
+    created_at: r.created_at,
+  }));
+  return c.json({ success: true, data });
+});
+
+// POST /:customerProductId/prices — append a new history row
+app.post("/:customerProductId/prices", async (c) => {
+  const cpId = c.req.param("customerProductId");
+  try {
+    const parent = await c.env.DB.prepare(
+      "SELECT id FROM customer_products WHERE id = ?",
+    )
+      .bind(cpId)
+      .first<{ id: string }>();
+    if (!parent) {
+      return c.json(
+        { success: false, error: "customer_products row not found" },
+        404,
+      );
+    }
+
+    const body = await c.req.json();
+    const effectiveFrom = String(body.effectiveFrom ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return c.json(
+        {
+          success: false,
+          error: "effectiveFrom (YYYY-MM-DD) is required",
+        },
+        400,
+      );
+    }
+
+    const id = genPriceRowId();
+    const seatJson =
+      body.seatHeightPrices === undefined || body.seatHeightPrices === null
+        ? null
+        : JSON.stringify(body.seatHeightPrices);
+
+    await c.env.DB.prepare(
+      `INSERT INTO customer_product_prices
+         (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
+          effectiveFrom, notes, createdBy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        id,
+        cpId,
+        body.basePriceSen ?? null,
+        body.price1Sen ?? null,
+        seatJson,
+        effectiveFrom,
+        body.notes ?? null,
+        body.createdBy ?? null,
+      )
+      .run();
+
+    const row = await c.env.DB.prepare(
+      "SELECT * FROM customer_product_prices WHERE id = ?",
+    )
+      .bind(id)
+      .first<CustomerProductPriceRow>();
+    if (!row) {
+      return c.json(
+        { success: false, error: "Failed to create price history row" },
+        500,
+      );
+    }
+
+    return c.json(
+      {
+        success: true,
+        data: {
+          id: row.id,
+          customerProductId: row.customerProductId,
+          basePriceSen: row.basePriceSen,
+          price1Sen: row.price1Sen,
+          seatHeightPrices: parseJson<SeatHeightPrice[]>(
+            row.seatHeightPrices,
+            [],
+          ),
+          effectiveFrom: row.effectiveFrom,
+          notes: row.notes ?? "",
+          created_at: row.created_at,
+        },
+      },
+      201,
+    );
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// DELETE /price-row/:priceRowId
+app.delete("/price-row/:priceRowId", async (c) => {
+  const id = c.req.param("priceRowId");
+  const existing = await c.env.DB.prepare(
+    "SELECT id, customerProductId FROM customer_product_prices WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; customerProductId: string }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Price row not found" }, 404);
+  }
+  await c.env.DB.prepare("DELETE FROM customer_product_prices WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({
+    success: true,
+    data: { id: existing.id, customerProductId: existing.customerProductId },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -480,11 +669,13 @@ type PriceResolutionRow = {
   cpSeatHeightPrices: string | null;
 };
 
-async function resolveCustomerPrice(
+async function resolveCustomerPriceAsOf(
   db: D1Database,
   productId: string,
   customerId: string,
+  isoDate: string,
 ) {
+  // Step 1: product + assignment row (legacy overrides kept as fallback).
   const row = await db
     .prepare(
       `SELECT p.basePriceSen     AS productBasePriceSen,
@@ -504,11 +695,44 @@ async function resolveCustomerPrice(
 
   if (!row) return null;
 
-  const hasCustomerOverride = row.cpId !== null;
+  // Step 2: newest history row where effectiveFrom <= isoDate wins over the
+  // legacy customer_products columns. Falls back gracefully when no history.
+  let histBase: number | null = null;
+  let histPrice1: number | null = null;
+  let histSeat: string | null = null;
+  let hasHistory = false;
+  if (row.cpId) {
+    const hist = await db
+      .prepare(
+        `SELECT basePriceSen, price1Sen, seatHeightPrices
+           FROM customer_product_prices
+          WHERE customerProductId = ?
+            AND effectiveFrom <= ?
+          ORDER BY effectiveFrom DESC, created_at DESC
+          LIMIT 1`,
+      )
+      .bind(row.cpId, isoDate)
+      .first<{
+        basePriceSen: number | null;
+        price1Sen: number | null;
+        seatHeightPrices: string | null;
+      }>();
+    if (hist) {
+      hasHistory = true;
+      histBase = hist.basePriceSen;
+      histPrice1 = hist.price1Sen;
+      histSeat = hist.seatHeightPrices;
+    }
+  }
+
+  const baseOverride = hasHistory ? histBase : row.cpBasePriceSen;
+  const price1Override = hasHistory ? histPrice1 : row.cpPrice1Sen;
+  const seatOverride = hasHistory ? histSeat : row.cpSeatHeightPrices;
+
   const prices = resolvePrices(
-    row.cpBasePriceSen,
-    row.cpPrice1Sen,
-    row.cpSeatHeightPrices,
+    baseOverride,
+    price1Override,
+    seatOverride,
     row.productBasePriceSen,
     row.productPrice1Sen,
     row.productSeatHeightPrices,
@@ -517,11 +741,20 @@ async function resolveCustomerPrice(
   return {
     productId,
     customerId,
-    hasCustomerOverride,
+    hasCustomerOverride: row.cpId !== null,
     basePriceSen: prices.basePriceSen,
     price1Sen: prices.price1Sen,
     seatHeightPrices: prices.seatHeightPrices,
   };
+}
+
+// Back-compat wrapper: today's effective price.
+async function resolveCustomerPrice(
+  db: D1Database,
+  productId: string,
+  customerId: string,
+) {
+  return resolveCustomerPriceAsOf(db, productId, customerId, todayIso());
 }
 
 app.get("/price-for/:productId/:customerId", async (c) => {
@@ -535,4 +768,4 @@ app.get("/price-for/:productId/:customerId", async (c) => {
 });
 
 export default app;
-export { resolveCustomerPrice };
+export { resolveCustomerPrice, resolveCustomerPriceAsOf };

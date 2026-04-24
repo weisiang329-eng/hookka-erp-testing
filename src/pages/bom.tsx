@@ -51,11 +51,13 @@ type WIPComponent = {
   children?: WIPComponent[];
 };
 
+type BOMCategory = "BEDFRAME" | "SOFA" | "ACCESSORY";
+
 type BOMTemplate = {
   id: string;
   productCode: string;
   baseModel: string;
-  category: "BEDFRAME" | "SOFA";
+  category: BOMCategory;
   l1Processes: BOMProcess[];
   l1Materials?: WIPMaterial[];
   wipComponents: WIPComponent[];
@@ -159,8 +161,8 @@ function buildWipCode(segments: CodeSegment[]): string {
 type MasterWIPItem = WIPComponent;
 
 type MasterTemplate = {
-  id: string;          // unique per template, e.g. "BEDFRAME", "SOFA", "SOFA-1A(LHF)"
-  category: "BEDFRAME" | "SOFA";
+  id: string;          // unique per template, e.g. "BEDFRAME", "SOFA", "ACCESSORY", "SOFA-1A(LHF)"
+  category: BOMCategory;
   label: string;       // display name, e.g. "Default", "1A(LHF)"
   moduleKey?: string;  // for sofas: matches Product.sizeCode (e.g. "1A(LHF)")
   isDefault?: boolean; // category fallback used when no moduleKey matches
@@ -243,13 +245,13 @@ async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {
       templates.push({
         id: parsed.id || id,
         category:
-          (parsed.category as "BEDFRAME" | "SOFA") ||
-          (id === "SOFA" ? "SOFA" : "BEDFRAME"),
+          (parsed.category as BOMCategory) ||
+          (id === "SOFA" ? "SOFA" : id === "ACCESSORY" ? "ACCESSORY" : "BEDFRAME"),
         label:
           parsed.label ||
-          (id === "BEDFRAME" || id === "SOFA" ? "Default" : id),
+          (id === "BEDFRAME" || id === "SOFA" || id === "ACCESSORY" ? "Default" : id),
         moduleKey: parsed.moduleKey,
-        isDefault: parsed.isDefault ?? (id === "BEDFRAME" || id === "SOFA"),
+        isDefault: parsed.isDefault ?? (id === "BEDFRAME" || id === "SOFA" || id === "ACCESSORY"),
         l1Processes: parsed.l1Processes || [],
         l1Materials: parsed.l1Materials || [],
         wipItems: parsed.wipItems || [],
@@ -313,7 +315,7 @@ export function onMasterTemplatesHydrated(cb: () => void): () => void {
 
 function loadMasterTemplateIndex(): string[] {
   if (cachedMasters.length > 0) return cachedMasters.map((t) => t.id);
-  return ["BEDFRAME", "SOFA"];
+  return ["BEDFRAME", "SOFA", "ACCESSORY"];
 }
 
 function loadMasterTemplateById(id: string): MasterTemplate | null {
@@ -355,7 +357,7 @@ function deleteMasterTemplateById(id: string) {
 
 // Loads every master template (bedframe + sofa + all sofa modules) for the
 // given category, ensuring a "Default" fallback always exists.
-function loadAllMasterTemplates(cat: "BEDFRAME" | "SOFA"): MasterTemplate[] {
+function loadAllMasterTemplates(cat: BOMCategory): MasterTemplate[] {
   const ids = loadMasterTemplateIndex();
   const list: MasterTemplate[] = [];
   for (const id of ids) {
@@ -370,7 +372,27 @@ function loadAllMasterTemplates(cat: "BEDFRAME" | "SOFA"): MasterTemplate[] {
 }
 
 // Default/fallback master templates used on first open of Master Templates dialog.
-function buildFallbackMasterTemplate(cat: "BEDFRAME" | "SOFA"): MasterTemplate {
+function buildFallbackMasterTemplate(cat: BOMCategory): MasterTemplate {
+  if (cat === "ACCESSORY") {
+    // Pillows and other accessories — no WIP components, just the three
+    // finished-good processes (fabric cut / sew / packing).
+    return {
+      id: "ACCESSORY",
+      label: "Default",
+      isDefault: true,
+      category: "ACCESSORY",
+      l1Processes: [
+        { dept: "Fab Cut", deptCode: "FAB_CUT", category: "CAT 1", minutes: 10 },
+        { dept: "Fab Sew", deptCode: "FAB_SEW", category: "CAT 1", minutes: 20 },
+        { dept: "Packing", deptCode: "PACKING", category: "CAT 1", minutes: 5 },
+      ],
+      l1Materials: [
+        { code: "", name: "Fabric (from order)", qty: 1, unit: "MTR", autoDetect: "FABRIC" },
+      ],
+      wipItems: [],
+      updatedAt: new Date().toISOString(),
+    };
+  }
   if (cat === "BEDFRAME") {
     return {
       id: "BEDFRAME",
@@ -501,7 +523,10 @@ function buildFallbackMasterTemplate(cat: "BEDFRAME" | "SOFA"): MasterTemplate {
 // Falls back to the category default. Bedframes always use the bedframe default
 // today, but the same pick logic is reused for symmetry.
 function getEffectiveMasterTemplateForProduct(product: Product): MasterTemplate {
-  const cat = (product.category === "SOFA" ? "SOFA" : "BEDFRAME") as "BEDFRAME" | "SOFA";
+  const cat: BOMCategory =
+    product.category === "SOFA" ? "SOFA"
+    : product.category === "ACCESSORY" ? "ACCESSORY"
+    : "BEDFRAME";
   const all = loadAllMasterTemplates(cat);
   // Try moduleKey match first (case-insensitive, exact).
   const sizeKey = (product.sizeCode || "").trim().toUpperCase();
@@ -1594,7 +1619,10 @@ function generateDefaultBOMParts(
   l1Materials: WIPMaterial[];
   wipComponents: WIPComponent[];
 } {
-  const cat = (product.category === "SOFA" ? "SOFA" : "BEDFRAME") as "BEDFRAME" | "SOFA";
+  const cat: BOMCategory =
+    product.category === "SOFA" ? "SOFA"
+    : product.category === "ACCESSORY" ? "ACCESSORY"
+    : "BEDFRAME";
   const isBedframe = cat === "BEDFRAME";
   // Use the explicit override when the user picked one from the Load Default
   // menu; otherwise fall back to the product-aware resolver (SOFA-1A(LHF)
@@ -1931,7 +1959,7 @@ function CreateBOMDialog({
       id: `bom-new-${Date.now()}`,
       productCode: selected.code,
       baseModel: selected.baseModel,
-      category: selected.category as "BEDFRAME" | "SOFA",
+      category: selected.category as BOMCategory,
       l1Processes,
       l1Materials,
       wipComponents: wipComponents.map((w, i) => ({
@@ -3249,15 +3277,17 @@ function MasterTemplatesDialog({
   fabricOptions: string[];
 }) {
   const { toast } = useToast();
-  const [tab, setTab] = useState<"BEDFRAME" | "SOFA">("BEDFRAME");
+  const [tab, setTab] = useState<BOMCategory>("BEDFRAME");
   // We now keep a LIST of master templates per category. Bedframes typically
   // have one ("Default"), sofas can have many — one per module type
   // (1NA, 2A(LHF), L(RHF), CNR, 1S, ...). selectedId tracks which template
   // in the list is currently being edited.
   const [bedframeList, setBedframeList] = useState<MasterTemplate[]>(() => [buildFallbackMasterTemplate("BEDFRAME")]);
   const [sofaList, setSofaList] = useState<MasterTemplate[]>(() => [buildFallbackMasterTemplate("SOFA")]);
+  const [accessoryList, setAccessoryList] = useState<MasterTemplate[]>(() => [buildFallbackMasterTemplate("ACCESSORY")]);
   const [selectedBedframeId, setSelectedBedframeId] = useState<string>("BEDFRAME");
   const [selectedSofaId, setSelectedSofaId] = useState<string>("SOFA");
+  const [selectedAccessoryId, setSelectedAccessoryId] = useState<string>("ACCESSORY");
   const [deletedIds, setDeletedIds] = useState<string[]>([]);
   // Default to edit mode on so Save always works. Edit lock was causing
   // confusion — users tried to save without realising the inputs were
@@ -3278,13 +3308,20 @@ function MasterTemplatesDialog({
         { category: "FABRIC", label: "Fabric" },
         { category: "SPECIAL", label: "Special" },
       ]
-    : [
+    : tab === "SOFA"
+    ? [
         { category: "PRODUCT_CODE", label: "Product Code" },
         { category: "MODEL", label: "Model" },
         { category: "SEAT_SIZE", label: "Seat Size" },
         { category: "MODULE", label: "Module" },
         { category: "FABRIC", label: "Fabric" },
         { category: "SPECIAL", label: "Special" },
+      ]
+    : [
+        // ACCESSORY — pillows etc.; minimal variant set.
+        { category: "PRODUCT_CODE", label: "Product Code" },
+        { category: "SIZE", label: "Size" },
+        { category: "FABRIC", label: "Fabric" },
       ];
 
   useEffect(() => {
@@ -3292,13 +3329,18 @@ function MasterTemplatesDialog({
     const load = () => {
       const bf = loadAllMasterTemplates("BEDFRAME");
       const sf = loadAllMasterTemplates("SOFA");
+      const ac = loadAllMasterTemplates("ACCESSORY");
       setBedframeList(bf);
       setSofaList(sf);
+      setAccessoryList(ac);
       setSelectedBedframeId(
         (prev) => prev || bf.find((t) => t.isDefault)?.id || bf[0]?.id || "BEDFRAME",
       );
       setSelectedSofaId(
         (prev) => prev || sf.find((t) => t.isDefault)?.id || sf[0]?.id || "SOFA",
+      );
+      setSelectedAccessoryId(
+        (prev) => prev || ac.find((t) => t.isDefault)?.id || ac[0]?.id || "ACCESSORY",
       );
     };
     load();
@@ -3310,10 +3352,14 @@ function MasterTemplatesDialog({
     return onMasterTemplatesHydrated(load);
   }, [open]);
 
-  const currentList = tab === "BEDFRAME" ? bedframeList : sofaList;
-  const setCurrentList = tab === "BEDFRAME" ? setBedframeList : setSofaList;
-  const selectedId = tab === "BEDFRAME" ? selectedBedframeId : selectedSofaId;
-  const setSelectedId = tab === "BEDFRAME" ? setSelectedBedframeId : setSelectedSofaId;
+  const currentList =
+    tab === "BEDFRAME" ? bedframeList : tab === "SOFA" ? sofaList : accessoryList;
+  const setCurrentList =
+    tab === "BEDFRAME" ? setBedframeList : tab === "SOFA" ? setSofaList : setAccessoryList;
+  const selectedId =
+    tab === "BEDFRAME" ? selectedBedframeId : tab === "SOFA" ? selectedSofaId : selectedAccessoryId;
+  const setSelectedId =
+    tab === "BEDFRAME" ? setSelectedBedframeId : tab === "SOFA" ? setSelectedSofaId : setSelectedAccessoryId;
   const current = currentList.find((t) => t.id === selectedId) || currentList[0] || buildFallbackMasterTemplate(tab);
 
   const setCurrent = (updater: (prev: MasterTemplate) => MasterTemplate) => {
@@ -3326,7 +3372,7 @@ function MasterTemplatesDialog({
     const tpl: MasterTemplate = {
       id,
       category: tab,
-      label: tab === "SOFA" ? "New Module" : "New Variant",
+      label: tab === "SOFA" ? "New Module" : tab === "ACCESSORY" ? "New Accessory" : "New Variant",
       moduleKey: "",
       isDefault: false,
       l1Processes: [],
@@ -3464,8 +3510,14 @@ function MasterTemplatesDialog({
     return { ...wip, children: (wip.children || []).map((c, i) => i === head ? updateAtPath(c, rest, updater) : c) };
   }
 
-  function makeEmptyWIP(category: "BEDFRAME" | "SOFA"): WIPComponent {
-    const wipType = (category === "BEDFRAME" ? "DIVAN" : "SOFA_BASE") as WIPComponent["wipType"];
+  function makeEmptyWIP(category: BOMCategory): WIPComponent {
+    // Accessory has no canonical WIP type — fall back to SOFA_BASE just as a
+    // neutral placeholder if a user adds a WIP to an accessory master template.
+    const wipType = (
+      category === "BEDFRAME" ? "DIVAN"
+      : category === "SOFA" ? "SOFA_BASE"
+      : "SOFA_BASE"
+    ) as WIPComponent["wipType"];
     // Seed default code segments: {PRODUCT_CODE from order} + WIP-type word
     // (e.g. "DIVAN", "HEADBOARD"). The user can then add size / heights /
     // fabric segments as needed.
@@ -3592,14 +3644,14 @@ function MasterTemplatesDialog({
 
   function handleSave() {
     const now = new Date().toISOString();
-    // Persist every template in both lists. saveMasterTemplate updates the
+    // Persist every template in all lists. saveMasterTemplate updates the
     // in-memory cache and fires an async PUT to /api/bom-master-templates/:id.
-    [...bedframeList, ...sofaList].forEach((t) => saveMasterTemplate({ ...t, updatedAt: now }));
+    [...bedframeList, ...sofaList, ...accessoryList].forEach((t) => saveMasterTemplate({ ...t, updatedAt: now }));
     // Apply pending deletions (also async to D1).
     deletedIds.forEach((id) => deleteMasterTemplateById(id));
     setEditMode(false);
     toast.success(
-      `Master templates saved — Bedframe: ${bedframeList.length}, Sofa: ${sofaList.length}` +
+      `Master templates saved — Bedframe: ${bedframeList.length}, Sofa: ${sofaList.length}, Accessory: ${accessoryList.length}` +
       (deletedIds.length > 0 ? `, Deleted: ${deletedIds.length}` : "")
     );
     onClose();
@@ -3650,6 +3702,12 @@ function MasterTemplatesDialog({
               className={`px-3 py-1.5 text-xs font-medium rounded-md ${tab === "SOFA" ? "bg-[#6B5C32] text-white" : "bg-[#FAF9F7] text-gray-600 hover:bg-[#E2DDD8]"}`}
             >
               Sofa
+            </button>
+            <button
+              onClick={() => setTab("ACCESSORY")}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md ${tab === "ACCESSORY" ? "bg-[#6B5C32] text-white" : "bg-[#FAF9F7] text-gray-600 hover:bg-[#E2DDD8]"}`}
+            >
+              Accessory
             </button>
           </div>
           <div className="flex items-center gap-2">
@@ -3716,15 +3774,15 @@ function MasterTemplatesDialog({
                 {showCopyPicker && editMode && (
                   <div className="absolute right-0 top-full mt-1 z-50 w-64 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-80 overflow-y-auto">
                     <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-gray-500 border-b border-[#E2DDD8] bg-[#FAF9F7] sticky top-0">
-                      Copy into <span className="text-[#6B5C32] font-semibold">{tab === "BEDFRAME" ? "Bedframe" : "Sofa"}</span> from…
+                      Copy into <span className="text-[#6B5C32] font-semibold">{tab === "BEDFRAME" ? "Bedframe" : tab === "SOFA" ? "Sofa" : "Accessory"}</span> from…
                     </div>
-                    {(["BEDFRAME", "SOFA"] as const).map((cat) => {
-                      const list = cat === "BEDFRAME" ? bedframeList : sofaList;
+                    {(["BEDFRAME", "SOFA", "ACCESSORY"] as const).map((cat) => {
+                      const list = cat === "BEDFRAME" ? bedframeList : cat === "SOFA" ? sofaList : accessoryList;
                       if (list.length === 0) return null;
                       return (
                         <div key={cat}>
                           <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wide text-gray-400">
-                            {cat === "BEDFRAME" ? "Bedframe templates" : "Sofa templates"}
+                            {cat === "BEDFRAME" ? "Bedframe templates" : cat === "SOFA" ? "Sofa templates" : "Accessory templates"}
                           </div>
                           {list.map((t) => (
                             <button
@@ -3772,7 +3830,7 @@ function MasterTemplatesDialog({
               value={current?.moduleKey || ""}
               onChange={(e) => updateTemplateMeta("moduleKey", e.target.value)}
               disabled={!editMode}
-              placeholder={tab === "SOFA" ? "matches Product.sizeCode (e.g. 1A(LHF))" : "(leave blank — used as fallback)"}
+              placeholder={tab === "SOFA" ? "matches Product.sizeCode (e.g. 1A(LHF))" : tab === "ACCESSORY" ? "(optional — accessory sub-type)" : "(leave blank — used as fallback)"}
               className="text-xs border border-[#E2DDD8] rounded px-2 py-1 bg-white flex-1 disabled:bg-gray-50"
             />
             {current?.isDefault && (
@@ -4387,7 +4445,7 @@ function BatchEditCategoriesDialog({
   const [newCategory, setNewCategory] = useState("");
   // Smart filters
   const [searchText, setSearchText] = useState("");
-  const [filterCategory, setFilterCategory] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
+  const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
   const [filterBaseModel, setFilterBaseModel] = useState("");
   const [filterCurrentCat, setFilterCurrentCat] = useState("");
 
@@ -4611,12 +4669,13 @@ function BatchEditCategoriesDialog({
               />
               <select
                 value={filterCategory}
-                onChange={(e) => setFilterCategory(e.target.value as "ALL" | "BEDFRAME" | "SOFA")}
+                onChange={(e) => setFilterCategory(e.target.value as "ALL" | BOMCategory)}
                 className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
               >
                 <option value="ALL">All Types</option>
                 <option value="BEDFRAME">Bedframe</option>
                 <option value="SOFA">Sofa</option>
+                <option value="ACCESSORY">Accessory</option>
               </select>
               <select
                 value={filterBaseModel}
@@ -4757,7 +4816,11 @@ export default function BOMManagementPage() {
   const [loading, setLoading] = useState(true);
   const [selectedProductCode, setSelectedProductCode] = useState<string>("");
   const [search, setSearch] = useState("");
-  const [categoryFilter, setCategoryFilter] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
+  const [categoryFilter, setCategoryFilter] = useState<"ALL" | BOMCategory>("ALL");
+  // Pending-only filter: toggled by clicking the "N pending BOM" badge.
+  // When true, the product list filters down to products that don't yet
+  // have a BOM template (i.e. code not in `existingCodes`).
+  const [pendingOnly, setPendingOnly] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
   const [showMaster, setShowMaster] = useState(false);
   const [showProductionTimes, setShowProductionTimes] = useState(false);
@@ -4889,6 +4952,9 @@ export default function BOMManagementPage() {
     if (categoryFilter !== "ALL") {
       list = list.filter((p) => p.category === categoryFilter);
     }
+    if (pendingOnly) {
+      list = list.filter((p) => !existingCodes.has(p.code));
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
@@ -4899,7 +4965,7 @@ export default function BOMManagementPage() {
       );
     }
     return list;
-  }, [products, categoryFilter, search]);
+  }, [products, categoryFilter, search, pendingOnly, existingCodes]);
 
   // Group by baseModel
   const groupedProducts = useMemo(() => {
@@ -4980,10 +5046,23 @@ export default function BOMManagementPage() {
         </div>
         <div className="flex items-center gap-2">
           {pendingCount > 0 && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-[#FAEFCB] border border-[#E8D597] rounded-lg">
-              <span className="w-2 h-2 rounded-full bg-[#9C6F1E] animate-pulse" />
-              <span className="text-sm text-[#9C6F1E] font-medium">{pendingCount} pending BOM</span>
-            </div>
+            <button
+              type="button"
+              onClick={() => setPendingOnly((v) => !v)}
+              title={pendingOnly ? "Clear pending-only filter" : "Show only products without a BOM template"}
+              aria-pressed={pendingOnly}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors border ${
+                pendingOnly
+                  ? "bg-[#9C6F1E] border-[#9C6F1E] text-white ring-2 ring-[#9C6F1E]/30"
+                  : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E] hover:bg-[#F6E4A4]"
+              }`}
+            >
+              <span className={`w-2 h-2 rounded-full ${pendingOnly ? "bg-white" : "bg-[#9C6F1E] animate-pulse"}`} />
+              <span className="text-sm font-medium">{pendingCount} pending BOM</span>
+              {pendingOnly && (
+                <span className="text-[10px] uppercase tracking-wide opacity-80">filter on</span>
+              )}
+            </button>
           )}
           <input
             ref={bomCsvInputRef}
@@ -5076,7 +5155,7 @@ export default function BOMManagementPage() {
               />
             </div>
             <div className="flex gap-1">
-              {(["ALL", "BEDFRAME", "SOFA"] as const).map((cat) => (
+              {(["ALL", "BEDFRAME", "SOFA", "ACCESSORY"] as const).map((cat) => (
                 <button
                   key={cat}
                   onClick={() => setCategoryFilter(cat)}
@@ -5086,10 +5165,22 @@ export default function BOMManagementPage() {
                       : "bg-[#FAF9F7] text-gray-600 hover:bg-[#E2DDD8]"
                   }`}
                 >
-                  {cat === "ALL" ? "All" : cat === "BEDFRAME" ? "Bedframe" : "Sofa"}
+                  {cat === "ALL" ? "All" : cat === "BEDFRAME" ? "Bedframe" : cat === "SOFA" ? "Sofa" : "Accessory"}
                 </button>
               ))}
             </div>
+            {pendingOnly && (
+              <div className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-[#FAEFCB] border border-[#E8D597] text-[11px] text-[#9C6F1E]">
+                <span>Showing {filteredProducts.length} pending</span>
+                <button
+                  type="button"
+                  onClick={() => setPendingOnly(false)}
+                  className="text-[10px] uppercase tracking-wide hover:underline"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
             <div className="text-xs text-gray-400">
               {filteredProducts.length} products in {groupedProducts.length} groups
             </div>
@@ -5153,7 +5244,7 @@ export default function BOMManagementPage() {
                       id: `bom-${Date.now()}`,
                       productCode: selectedProduct.code,
                       baseModel: selectedProduct.baseModel,
-                      category: selectedProduct.category as "BEDFRAME" | "SOFA",
+                      category: selectedProduct.category as BOMCategory,
                       l1Processes: parts.l1Processes,
                       l1Materials: parts.l1Materials,
                       wipComponents: parts.wipComponents,
@@ -5174,7 +5265,7 @@ export default function BOMManagementPage() {
                       id: `bom-${Date.now()}`,
                       productCode: selectedProduct.code,
                       baseModel: selectedProduct.baseModel,
-                      category: selectedProduct.category as "BEDFRAME" | "SOFA",
+                      category: selectedProduct.category as BOMCategory,
                       l1Processes: [],
                       l1Materials: [],
                       wipComponents: [],

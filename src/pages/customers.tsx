@@ -7,6 +7,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/lib/mock-data";
+import generateCustomerQuotationPdf from "@/lib/generate-customer-quotation-pdf";
 import {
   Plus,
   Building2,
@@ -24,6 +25,7 @@ import {
   Package,
   Search,
   Check,
+  FileDown,
 } from "lucide-react";
 
 // =====================================================================
@@ -42,6 +44,17 @@ type CustomerProduct = {
   // shape of products.seatHeightPrices after migration 0031 (string heights).
   seatHeightPrices: Array<{ height: string; priceSen: number }> | null;
   notes: string | null;
+  hasPendingPriceChange?: boolean;
+};
+
+type PriceHistoryRow = {
+  id: string;
+  basePriceSen: number | null;
+  price1Sen: number | null;
+  seatHeightPrices: Array<{ height: string; priceSen: number }>;
+  effectiveFrom: string;
+  notes: string;
+  created_at: string;
 };
 
 type ProductOption = {
@@ -76,7 +89,7 @@ function StateBadge({ state }: { state: string }) {
 // Customer Products Panel — shown inside the expanded-customer detail.
 // Lists SKUs assigned to this customer with per-customer price overrides.
 // =====================================================================
-function CustomerProductsPanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+function CustomerProductsPanel({ customerId, customerName, customer }: { customerId: string; customerName: string; customer: Customer }) {
   const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CustomerProduct[] }>(
     customerId ? `/api/customer-products?customerId=${customerId}` : null
   );
@@ -100,13 +113,66 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
 
   // Inline edit form state
   const [editId, setEditId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<{ basePriceRm: string; price1Rm: string; seatHeightsJson: string; notes: string }>({
+  const [editForm, setEditForm] = useState<{
+    basePriceRm: string;
+    price1Rm: string;
+    seatHeightsJson: string;
+    notes: string;
+    effectiveFrom: string;
+  }>({
     basePriceRm: "",
     price1Rm: "",
     seatHeightsJson: "",
     notes: "",
+    effectiveFrom: "",
   });
   const [editSaving, setEditSaving] = useState(false);
+
+  // Price-history disclosure: history rows keyed by cpId, plus open/loading state.
+  const [historyOpenId, setHistoryOpenId] = useState<string | null>(null);
+  const [historyRows, setHistoryRows] = useState<PriceHistoryRow[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+
+  const todayIso = () => new Date().toISOString().slice(0, 10);
+
+  const loadHistory = async (cpId: string) => {
+    setHistoryLoading(true);
+    try {
+      const res = await fetch(`/api/customer-products/${cpId}/price-history`);
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: PriceHistoryRow[];
+      };
+      setHistoryRows(j.success ? j.data ?? [] : []);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const toggleHistory = async (cpId: string) => {
+    if (historyOpenId === cpId) {
+      setHistoryOpenId(null);
+      setHistoryRows([]);
+      return;
+    }
+    setHistoryOpenId(cpId);
+    await loadHistory(cpId);
+  };
+
+  const deleteHistoryRow = async (rowId: string, cpId: string) => {
+    if (!confirm("Delete this price history entry?")) return;
+    const res = await fetch(`/api/customer-products/price-row/${rowId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
+      return;
+    }
+    invalidateCachePrefix("/api/customer-products");
+    await loadHistory(cpId);
+    refresh();
+  };
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -150,22 +216,36 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
       price1Rm: row.price1Sen != null ? (row.price1Sen / 100).toFixed(2) : "",
       seatHeightsJson: row.seatHeightPrices ? JSON.stringify(row.seatHeightPrices) : "",
       notes: row.notes ?? "",
+      effectiveFrom: todayIso(),
     });
   };
 
+  // Save now appends a new price-history row (POST /:cpId/prices). The legacy
+  // override columns on customer_products stay untouched — the history table is
+  // the new authoritative source for price resolution.
   const saveEdit = async () => {
     if (!editId) return;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(editForm.effectiveFrom)) {
+      alert("Effective From date is required (YYYY-MM-DD).");
+      return;
+    }
     setEditSaving(true);
     try {
-      const body: Record<string, unknown> = {};
-      if (editForm.basePriceRm !== "") body.basePriceSen = Math.round(Number(editForm.basePriceRm) * 100);
-      if (editForm.price1Rm !== "") body.price1Sen = Math.round(Number(editForm.price1Rm) * 100);
+      const body: Record<string, unknown> = {
+        effectiveFrom: editForm.effectiveFrom,
+      };
+      if (editForm.basePriceRm !== "")
+        body.basePriceSen = Math.round(Number(editForm.basePriceRm) * 100);
+      if (editForm.price1Rm !== "")
+        body.price1Sen = Math.round(Number(editForm.price1Rm) * 100);
       else body.price1Sen = null;
       if (editForm.seatHeightsJson.trim()) {
         try {
           body.seatHeightPrices = JSON.parse(editForm.seatHeightsJson);
         } catch {
-          alert("Seat-height prices must be valid JSON (e.g. {\"24\":51700,\"28\":57200}) in sen.");
+          alert(
+            'Seat-height prices must be valid JSON (e.g. [{"height":"24","priceSen":51700}]).',
+          );
           setEditSaving(false);
           return;
         }
@@ -173,18 +253,20 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
         body.seatHeightPrices = null;
       }
       body.notes = editForm.notes || null;
-      const res = await fetch(`/api/customer-products/${editId}`, {
-        method: "PUT",
+      const res = await fetch(`/api/customer-products/${editId}/prices`, {
+        method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
       if (!res.ok) {
         const j = await res.json().catch(() => ({}));
-        alert((j as { error?: string }).error || `Failed to update (HTTP ${res.status})`);
+        alert((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
         return;
       }
       invalidateCachePrefix("/api/customer-products");
       refresh();
+      // Refresh open history panel if this row is the one being inspected.
+      if (historyOpenId === editId) await loadHistory(editId);
       setEditId(null);
     } finally {
       setEditSaving(false);
@@ -243,6 +325,32 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
       .join(" ");
   };
 
+  // Exports the full assignment list (ignores the category tab + search filter)
+  // because a quotation is per-customer contract scope, not UI view.
+  const handleExportQuotation = () => {
+    const defaultHub = customer.deliveryHubs?.find((h) => h.isDefault) ?? customer.deliveryHubs?.[0];
+    const doc = generateCustomerQuotationPdf({
+      customer: {
+        name: customer.name,
+        address: defaultHub?.address ?? customer.companyAddress ?? null,
+        phone: defaultHub?.phone ?? customer.phone ?? null,
+        email: defaultHub?.email ?? customer.email ?? null,
+      },
+      products: rows.map((r) => ({
+        code: r.productCode,
+        name: r.productName,
+        category: r.category,
+        basePriceSen: r.basePriceSen,
+        price1Sen: r.price1Sen,
+        seatHeightPrices: r.seatHeightPrices,
+      })),
+    });
+    const d = new Date();
+    const yyyymmdd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+    const safeName = customerName.replace(/[^a-zA-Z0-9_-]+/g, "_");
+    doc.save(`Quotation-${safeName}-${yyyymmdd}.pdf`);
+  };
+
   return (
     <Card className="border-[#6B5C32] border-2">
       <CardHeader className="pb-3">
@@ -251,10 +359,16 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
             <Package className="h-5 w-5 text-[#6B5C32]" />
             Customer Products — {customerName} ({rows.length})
           </CardTitle>
-          <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
-            <Plus className="h-4 w-4 mr-1" />
-            Assign SKU
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={rows.length === 0} onClick={handleExportQuotation}>
+              <FileDown className="h-4 w-4 mr-1" />
+              Export Quotation PDF
+            </Button>
+            <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
+              <Plus className="h-4 w-4 mr-1" />
+              Assign SKU
+            </Button>
+          </div>
         </div>
         <div className="flex items-center gap-2 flex-wrap mt-3">
           {categoryTabs.map((tab) => (
@@ -353,15 +467,24 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
                                 className="h-8"
                               />
                             </div>
+                            <div>
+                              <label className="block text-xs text-[#6B7280] mb-1">Effective From</label>
+                              <Input
+                                type="date"
+                                value={editForm.effectiveFrom}
+                                onChange={(e) => setEditForm((f) => ({ ...f, effectiveFrom: e.target.value }))}
+                                className="h-8"
+                              />
+                            </div>
                             {row.category === "SOFA" && (
                               <div className="sm:col-span-3">
                                 <label className="block text-xs text-[#6B7280] mb-1">
-                                  Seat-Height Prices (JSON, sen) — sofa only
+                                  Seat-Height Prices (JSON) — sofa only
                                 </label>
                                 <Input
                                   value={editForm.seatHeightsJson}
                                   onChange={(e) => setEditForm((f) => ({ ...f, seatHeightsJson: e.target.value }))}
-                                  placeholder='e.g. {"24":51700,"28":57200}'
+                                  placeholder='e.g. [{"height":"24","priceSen":51700}]'
                                   className="h-8"
                                 />
                               </div>
@@ -375,13 +498,88 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
                               />
                             </div>
                           </div>
-                          <div className="flex justify-end gap-2">
-                            <Button variant="outline" size="sm" onClick={() => setEditId(null)}>Cancel</Button>
-                            <Button variant="primary" size="sm" disabled={editSaving} onClick={saveEdit}>
-                              {editSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
-                              Save
-                            </Button>
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => toggleHistory(row.id)}
+                              className="text-xs text-[#6B5C32] underline hover:text-[#1F1D1B]"
+                            >
+                              {historyOpenId === row.id ? "Hide price history" : "Price history"}
+                            </button>
+                            <div className="flex justify-end gap-2">
+                              <Button variant="outline" size="sm" onClick={() => setEditId(null)}>Cancel</Button>
+                              <Button variant="primary" size="sm" disabled={editSaving} onClick={saveEdit}>
+                                {editSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                                Save
+                              </Button>
+                            </div>
                           </div>
+                          {historyOpenId === row.id && (
+                            <div className="mt-2 border border-[#E2DDD8] rounded-md bg-white">
+                              <div className="px-3 py-2 border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                                Price history ({historyRows.length})
+                              </div>
+                              {historyLoading ? (
+                                <div className="p-4 text-xs text-[#9CA3AF] flex items-center gap-2">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+                                </div>
+                              ) : historyRows.length === 0 ? (
+                                <div className="p-4 text-xs text-[#9CA3AF]">No history yet.</div>
+                              ) : (
+                                <table className="w-full text-xs">
+                                  <thead>
+                                    <tr className="bg-[#FAF9F7] text-[#6B7280]">
+                                      <th className="text-left py-1.5 px-2 font-medium">Effective From</th>
+                                      <th className="text-right py-1.5 px-2 font-medium">Base (RM)</th>
+                                      <th className="text-right py-1.5 px-2 font-medium">Price 1 (RM)</th>
+                                      <th className="text-left py-1.5 px-2 font-medium">Seat Heights</th>
+                                      <th className="text-left py-1.5 px-2 font-medium">Notes</th>
+                                      <th className="text-right py-1.5 px-2 font-medium">Status</th>
+                                      <th className="text-right py-1.5 px-2 font-medium"></th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {historyRows.map((h) => {
+                                      const isPending = h.effectiveFrom > todayIso();
+                                      return (
+                                        <tr key={h.id} className="border-t border-[#E2DDD8]">
+                                          <td className="py-1.5 px-2 doc-number">{h.effectiveFrom}</td>
+                                          <td className="py-1.5 px-2 text-right tabular-nums">
+                                            {h.basePriceSen != null ? (h.basePriceSen / 100).toFixed(2) : "—"}
+                                          </td>
+                                          <td className="py-1.5 px-2 text-right tabular-nums">
+                                            {h.price1Sen != null ? (h.price1Sen / 100).toFixed(2) : "—"}
+                                          </td>
+                                          <td className="py-1.5 px-2 text-[#6B7280]">
+                                            {formatSeatHeights(h.seatHeightPrices?.length ? h.seatHeightPrices : null)}
+                                          </td>
+                                          <td className="py-1.5 px-2 text-[#6B7280]">{h.notes || "—"}</td>
+                                          <td className="py-1.5 px-2 text-right">
+                                            {isPending ? (
+                                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]">
+                                                Pending
+                                              </span>
+                                            ) : (
+                                              <span className="text-[10px] text-[#9CA3AF]">Active</span>
+                                            )}
+                                          </td>
+                                          <td className="py-1.5 px-2 text-right">
+                                            <button
+                                              onClick={() => deleteHistoryRow(h.id, row.id)}
+                                              className="p-1 rounded hover:bg-[#F9E1DA]"
+                                              title="Delete history row"
+                                            >
+                                              <Trash2 className="h-3 w-3 text-[#9A3A2D]" />
+                                            </button>
+                                          </td>
+                                        </tr>
+                                      );
+                                    })}
+                                  </tbody>
+                                </table>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -390,7 +588,19 @@ function CustomerProductsPanel({ customerId, customerName }: { customerId: strin
                       <td className="py-2 px-2 doc-number text-xs text-[#1F1D1B]">{row.productCode}</td>
                       <td className="py-2 px-2 text-[#1F1D1B]">{row.productName}</td>
                       <td className="py-2 px-2"><Badge className="text-[10px]">{row.category}</Badge></td>
-                      <td className="py-2 px-2 text-right tabular-nums">{formatRM(row.basePriceSen)}</td>
+                      <td className="py-2 px-2 text-right tabular-nums">
+                        <span className="inline-flex items-center gap-1.5">
+                          {formatRM(row.basePriceSen)}
+                          {row.hasPendingPriceChange && (
+                            <span
+                              title="A future-dated price change is queued"
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]"
+                            >
+                              Pending
+                            </span>
+                          )}
+                        </span>
+                      </td>
                       <td className="py-2 px-2 text-right tabular-nums text-[#6B7280]">
                         {row.price1Sen != null ? formatRM(row.price1Sen) : "—"}
                       </td>
@@ -1245,7 +1455,7 @@ export default function CustomersPage() {
               )}
             </CardContent>
           </Card>
-          <CustomerProductsPanel customerId={cust.id} customerName={cust.name} />
+          <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
           </>
         );
       })()}

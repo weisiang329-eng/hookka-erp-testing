@@ -398,16 +398,24 @@ async function createProductionOrdersForSO(
   const startDate = so.companySODate || today;
   const companySoId = so.companySOId ?? "";
 
+  // Fan-out counter — each piece of a BF/ACC item becomes its own PO, so
+  // we reuse `poSequence` for both the -NN poNo suffix and the PO.lineNo
+  // column. Sofa stays as one PO per SO line (one set per SO by convention).
+  let poSequence = 0;
   for (const item of sortedItems) {
-    const lineSuffix =
-      item.lineSuffix ?? `-${String(item.lineNo).padStart(2, "0")}`;
+    const isSetItem = (item.itemCategory ?? "BEDFRAME") === "SOFA";
+    const pieceCount = isSetItem ? 1 : Math.max(1, item.quantity || 1);
+    const perPoQty = isSetItem ? (item.quantity || 1) : 1;
+    for (let pieceIdx = 0; pieceIdx < pieceCount; pieceIdx++) {
+    poSequence++;
+    const lineSuffix = `-${String(poSequence).padStart(2, "0")}`;
     // poNo follows production-order-builder convention: companySOId + lineSuffix
     const poNo = companySoId
       ? `${companySoId}${lineSuffix}`
       : `${so.id}${lineSuffix}`;
     // Deterministic id — re-running a failed confirm regenerates the same id so
     // UNIQUE on production_orders.id still catches retries.
-    const poId = `pord-${so.id}-${String(item.lineNo).padStart(2, "0")}`;
+    const poId = `pord-${so.id}-${String(poSequence).padStart(2, "0")}`;
 
     const category = item.itemCategory ?? "BEDFRAME";
     const productCode = item.productCode ?? "";
@@ -479,7 +487,7 @@ async function createProductionOrdersForSO(
     for (const wip of wips) {
       // Each wip has its own independent dept chain; reverse-schedule it end
       // at delivery (or forward-schedule from start).
-      const wipQty = Math.max(1, Math.floor(item.quantity * wip.quantityMultiplier));
+      const wipQty = Math.max(1, Math.floor(perPoQty * wip.quantityMultiplier));
 
       // Compute per-dept dueDate for this wip's chain. We iterate in DEPT_ORDER
       // so the `sequence` matches the forward chain (0-based).
@@ -578,7 +586,7 @@ async function createProductionOrdersForSO(
           poNo,
           so.id,
           companySoId,
-          item.lineNo,
+          poSequence,
           so.customerPOId ?? "",
           so.reference ?? "",
           so.customerName,
@@ -591,7 +599,7 @@ async function createProductionOrdersForSO(
           item.sizeCode ?? "",
           item.sizeLabel ?? "",
           item.fabricCode ?? "",
-          item.quantity,
+          perPoQty,
           item.gapInches,
           item.divanHeightInches,
           item.legHeightInches,
@@ -698,7 +706,7 @@ async function createProductionOrdersForSO(
             productCode,
             "FG",
             productCode,
-            item.quantity,
+            perPoQty,
             0,
             null,
             "",
@@ -719,9 +727,10 @@ async function createProductionOrdersForSO(
       id: poId,
       poNo,
       productName: item.productName ?? "",
-      quantity: item.quantity,
+      quantity: perPoQty,
       status: "PENDING",
     });
+    }
   }
 
   return { statements, created, preExisting: false };

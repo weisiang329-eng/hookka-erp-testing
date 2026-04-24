@@ -264,14 +264,28 @@ async function fetchFilteredPOs(
   db: D1Database,
   statuses: string[] | null,
   includeJobCards: boolean,
+  includeArchive = false,
 ): Promise<ProductionOrderOut[]> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
     ? statuses.map(() => "?").join(",")
     : "";
+  // Phase-5: when includeArchive is set, UNION hot + archive. Hot rows get
+  // a projected '' archivedAt so the column lists align with the archive
+  // table. rowToPO ignores columns it doesn't know about.
+  const poSource = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM production_orders
+        UNION ALL
+        SELECT * FROM production_orders_archive)`
+    : "production_orders";
+  const jcSource = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM job_cards
+        UNION ALL
+        SELECT * FROM job_cards_archive)`
+    : "job_cards";
   const poSql = hasFilter
-    ? `SELECT * FROM production_orders WHERE status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
-    : "SELECT * FROM production_orders ORDER BY created_at DESC, id DESC";
+    ? `SELECT * FROM ${poSource} WHERE status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
     ? db.prepare(poSql).bind(...(statuses as string[]))
     : db.prepare(poSql);
@@ -283,7 +297,7 @@ async function fetchFilteredPOs(
 
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
-    db.prepare("SELECT * FROM job_cards").all<JobCardRow>(),
+    db.prepare(`SELECT * FROM ${jcSource}`).all<JobCardRow>(),
     db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
@@ -301,6 +315,7 @@ async function fetchPaginatedPOs(
   includeJobCards: boolean,
   page: number,
   limit: number,
+  includeArchive = false,
 ): Promise<{ data: ProductionOrderOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
@@ -308,12 +323,23 @@ async function fetchPaginatedPOs(
     : "";
   const offset = (page - 1) * limit;
 
+  const poSource = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM production_orders
+        UNION ALL
+        SELECT * FROM production_orders_archive)`
+    : "production_orders";
+  const jcSource = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM job_cards
+        UNION ALL
+        SELECT * FROM job_cards_archive)`
+    : "job_cards";
+
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM production_orders WHERE status IN (${statusPlaceholders})`
-    : "SELECT COUNT(*) AS n FROM production_orders";
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE status IN (${statusPlaceholders})`
+    : `SELECT COUNT(*) AS n FROM ${poSource}`;
   const pageSql = hasFilter
-    ? `SELECT * FROM production_orders WHERE status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : "SELECT * FROM production_orders ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?";
+    ? `SELECT * FROM ${poSource} WHERE status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
     ? db.prepare(countSql).bind(...(statuses as string[]))
@@ -337,7 +363,7 @@ async function fetchPaginatedPOs(
   const poIds = posRows.map((p) => p.id);
   const jcPlaceholders = poIds.map(() => "?").join(",");
   const jcsRes = await db
-    .prepare(`SELECT * FROM job_cards WHERE productionOrderId IN (${jcPlaceholders})`)
+    .prepare(`SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`)
     .bind(...poIds)
     .all<JobCardRow>();
   const jcs = jcsRes.results ?? [];
@@ -1006,6 +1032,11 @@ async function applyPoUpdate(
 //     default limit=50, hard cap limit=500. Slicing happens AFTER status
 //     filter and AFTER rowToPO shaping, so `total` is always the filtered
 //     total (not the page length).
+//
+//   ?includeArchive=true
+//     Phase-5 historical-report hook. When set, UNIONs
+//     production_orders + production_orders_archive (and same for
+//     job_cards) before filtering/ordering. Default off — hot only.
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam
@@ -1029,9 +1060,15 @@ app.get("/", async (c) => {
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
+  const includeArchive = c.req.query("includeArchive") === "true";
 
   if (!paginate) {
-    const data = await fetchFilteredPOs(c.env.DB, statuses, includeJobCards);
+    const data = await fetchFilteredPOs(
+      c.env.DB,
+      statuses,
+      includeJobCards,
+      includeArchive,
+    );
     return c.json({ success: true, data, total: data.length });
   }
 
@@ -1044,6 +1081,7 @@ app.get("/", async (c) => {
     includeJobCards,
     page,
     limit,
+    includeArchive,
   );
   return c.json({ success: true, data, page, limit, total });
 });

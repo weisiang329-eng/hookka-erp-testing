@@ -1267,9 +1267,27 @@ export default function ProductionPage() {
       }
       const merged: DeptRow[] = [];
       let rowN = 1;
+      // Helper: strip variant suffix from a product code so '5530-1A(LHF)'
+      // or '1003-(K)' both yield just the baseModel prefix.
+      const stripToBase = (code: string): string => {
+        if (!code) return code;
+        const i = code.indexOf("-");
+        return i > 0 ? code.slice(0, i) : code;
+      };
       for (const group of groups.values()) {
         if (group.length === 1) {
-          merged.push({ ...group[0], rowNo: rowN++ });
+          const r = group[0];
+          // Single-row Fab Cut (e.g. pillow or single-component module)
+          // uses the same "{full code} | {fabric} | ({size}) | (FC)" label
+          // pattern as merged rows, with the Model column showing only
+          // the baseModel — full variant info lives in WIP.
+          const wip = [
+            r.model,
+            r.colour,
+            r.size ? `(${r.size})` : "",
+            "(FC)",
+          ].filter(Boolean).join(" | ");
+          merged.push({ ...r, rowNo: rowN++, model: stripToBase(r.model), wip });
           continue;
         }
         const first = group[0];
@@ -1333,7 +1351,11 @@ export default function ProductionPage() {
           ...first,
           id: `${groupKey}:fabcut-merged`,
           rowNo: rowN++,
-          model: modelLabel || first.model,
+          // Model column keeps just the baseModel (e.g. '5530') — the
+          // combined variants (e.g. '5530-1A(LHF)+1NA+1A(RHF)') land in
+          // the WIP label so operators see one at a glance, details on
+          // demand.
+          model: stripToBase(first.model),
           wipType: types || first.wipType,
           wip: wips,
           prodTime: totalMinutes,

@@ -451,7 +451,50 @@ async function applyWipInventoryChange(
   }
 
   if (newStatus === "IN_PROGRESS") {
-    // Find the immediate child (same wipKey, lower sequence) to consume from.
+    const isFabSew =
+      (jcRow.departmentCode || "").toUpperCase() === "FAB_SEW";
+    const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
+
+    // Sofa Fab Sew special case: the Fab Cut merge groups a full sofa
+    // set (1A(LHF) + 1NA + 1A(RHF) sharing the same bolt) into one
+    // sticker. The moment Fab Sew picks up the stack to start sewing
+    // ANY piece of the set, the whole batch has left Fab Cut's shelf
+    // — it's physically impossible to only grab one. So the first
+    // FAB_SEW IN_PROGRESS in a (SO, fabric) group zeroes every
+    // upstream FAB_CUT wip_items row in that group. Subsequent sibling
+    // FAB_SEW scans are no-ops because the stock is already 0.
+    if (isFabSew && isSofa && poRow.salesOrderId && poRow.fabricCode) {
+      const siblingLabels = await db
+        .prepare(
+          `SELECT DISTINCT jc.wipLabel AS wipLabel
+             FROM production_orders po
+             JOIN job_cards jc ON jc.productionOrderId = po.id
+            WHERE po.salesOrderId = ?
+              AND po.fabricCode = ?
+              AND po.itemCategory = 'SOFA'
+              AND jc.departmentCode = 'FAB_CUT'
+              AND jc.wipLabel IS NOT NULL`,
+        )
+        .bind(poRow.salesOrderId, poRow.fabricCode)
+        .all<{ wipLabel: string | null }>();
+      const labels = (siblingLabels.results ?? [])
+        .map((r) => r.wipLabel)
+        .filter((l): l is string => !!l);
+      for (const label of labels) {
+        await db
+          .prepare(
+            "UPDATE wip_items SET stockQty = 0, status = 'IN_PRODUCTION' WHERE code = ?",
+          )
+          .bind(label)
+          .run();
+      }
+      return;
+    }
+
+    // Default path (BF / accessory / non-sofa Fab Sew chains): consume
+    // the immediate upstream wip_items row within the same wipKey by
+    // this JC's own qty. Per-JC consumption — each child scan
+    // decrements exactly its own share.
     const children = allJcRows
       .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
       .sort((a, b) => b.sequence - a.sequence);

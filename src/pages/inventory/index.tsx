@@ -229,7 +229,8 @@ type WIPSource = {
 type WIPItem = {
   id: string;
   wipCode: string;      // e.g. "1013-(Q) -HB 20" (WD)"
-  wipType: string;      // e.g. "Divan", "Headboard", "Base", "Cushion"
+  wipType: string;      // e.g. "Divan", "Headboard", "Base", "Cushion", "SET"
+  category: "SOFA" | "BEDFRAME" | "ACCESSORY";
   relatedProduct: string;
   completedBy: string;  // department that completed this WIP
   totalQty: number;     // summed qty across all POs
@@ -859,11 +860,11 @@ const wipColumns: Column<WIPItem>[] = [
     render: (_v, row) => <span className="text-sm font-medium text-[#1F1D1B]">{row.wipCode}</span>,
   },
   {
-    key: "wipType",
-    label: "Type",
+    key: "category",
+    label: "Category",
     render: (_v, row) => {
-      const sem = INVENTORY_TYPE_COLOR[row.wipType] ?? NEUTRAL;
-      return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${sem.bg} ${sem.text} ${sem.border}`}>{row.wipType}</span>;
+      const sem = INVENTORY_TYPE_COLOR[row.category] ?? NEUTRAL;
+      return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${sem.bg} ${sem.text} ${sem.border}`}>{row.category}</span>;
     },
   },
   {
@@ -1184,20 +1185,28 @@ export default function InventoryPage() {
     () => deriveFGStock(products, poData),
     [products, poData],
   );
-  // Per-component WIPItem rows — projected from backend rows where
-  // wipType !== "SET". Shape preserved so existing wipColumns /
-  // handleDoubleClickWIP / wipDetail dialog work without changes.
+  // Inventory WIP table — mirrors Production Order's Fab Cut tab exactly:
+  //   - SOFA: one row per (SO, fabric) SET, label "5530-L(LHF)+2A(RHF) | (30)
+  //     | CH141-12 | (FC)", Qty = set count, Category = SOFA.
+  //   - BEDFRAME / ACCESSORY: one row per PO's Fab Cut edge, Qty = piece
+  //     count, Category = BEDFRAME / ACCESSORY.
+  // So we keep SOFA SET rows, drop SOFA per-component, and keep BF/ACC
+  // per-component as-is.
   const wipItems = useMemo<WIPItem[]>(
     () =>
       backendWipRows
-        .filter((r) => r.wipType !== "SET")
+        .filter((r) => {
+          if (r.category === "SOFA") return r.wipType === "SET";
+          return r.wipType !== "SET";
+        })
         .map((r) => ({
           id: r.id,
           wipCode: r.wipCode,
           wipType: r.wipType,
+          category: r.category,
           relatedProduct: r.relatedProduct,
           completedBy: r.completedBy,
-          totalQty: r.totalQty,
+          totalQty: r.category === "SOFA" ? r.setQty : r.totalQty,
           oldestAgeDays: r.oldestAgeDays,
           sources: r.sources,
           estUnitCostSen: r.estUnitCostSen,
@@ -1814,12 +1823,7 @@ export default function InventoryPage() {
           <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
             <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Total WIP Items</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">
-                {wipItems.length}
-                {wipViewMode === "MERGED" && (
-                  <span className="text-sm font-medium text-[#6B7280]"> · {sofaSetRows.length} sofa sets</span>
-                )}
-              </p>
+              <p className="text-xl font-bold text-[#1F1D1B]">{wipItems.length}</p>
             </CardContent></Card>
             <Card><CardContent className="p-2.5 flex items-center justify-between">
               <div><p className="text-xs text-[#6B7280]">Total Qty</p><p className="text-xl font-bold text-[#6B5C32]">{wipTotalQty}</p></div>
@@ -1835,7 +1839,7 @@ export default function InventoryPage() {
             </CardContent></Card>
           </div>
 
-          {/* Search + view toggle */}
+          {/* Search */}
           <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center">
             <div className="relative flex-1 max-w-sm">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-[#9CA3AF]" />
@@ -1846,107 +1850,23 @@ export default function InventoryPage() {
                 className="pl-9 h-9"
               />
             </div>
-            <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
-              <button
-                type="button"
-                onClick={() => setWipViewMode("PER_COMPONENT")}
-                className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                  wipViewMode === "PER_COMPONENT"
-                    ? "bg-[#6B5C32] text-white"
-                    : "bg-white text-[#4B5563] hover:bg-[#FAF9F7]"
-                }`}
-              >
-                Per-component
-              </button>
-              <button
-                type="button"
-                onClick={() => setWipViewMode("MERGED")}
-                className={`px-3 py-1.5 text-xs font-medium border-l border-[#E2DDD8] transition-colors ${
-                  wipViewMode === "MERGED"
-                    ? "bg-[#6B5C32] text-white"
-                    : "bg-white text-[#4B5563] hover:bg-[#FAF9F7]"
-                }`}
-              >
-                Merged sets
-              </button>
-            </div>
           </div>
 
-          {wipViewMode === "PER_COMPONENT" ? (
-            <Card>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <DataGrid
-                  columns={wipColumns}
-                  data={filteredWIP}
-                  keyField="id"
-                  gridId="inventory-wip"
-                  contextMenuItems={contextMenu}
-                  onDoubleClick={handleDoubleClickWIP}
-                />
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="space-y-4">
-              {/* Sofa sets — merged by (SO, fabric). Each row is expandable
-                  to reveal the underlying component WIPItems. */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Sofa Sets ({sofaSetRows.length})</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {sofaSetRows.length === 0 ? (
-                    <div className="py-6 text-sm text-[#6B7280] text-center">No sofa WIP to merge.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {sofaSetRows.map((row) => (
-                        <div key={row.id} className="border border-[#E2DDD8] rounded-md">
-                          <DataGrid
-                            columns={sofaSetColumns(expandedSetIds, toggleExpandedSet)}
-                            data={[row]}
-                            keyField="id"
-                            gridId={`inventory-wip-set-${row.id}`}
-                          />
-                          {expandedSetIds.has(row.id) && (
-                            <div className="border-t border-[#E2DDD8] bg-[#FAF9F7] p-3">
-                              <DataGrid
-                                columns={wipColumns}
-                                data={row.members}
-                                keyField="id"
-                                gridId={`inventory-wip-set-members-${row.id}`}
-                                contextMenuItems={contextMenu}
-                                onDoubleClick={handleDoubleClickWIP}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-
-              {/* Non-sofa WIPs (BF / accessory) — untouched by the merge so
-                  they don't disappear when merged-view is active. */}
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Other WIP ({filteredWIPNonSofa.length})</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <DataGrid
-                    columns={wipColumns}
-                    data={filteredWIPNonSofa}
-                    keyField="id"
-                    gridId="inventory-wip-nonsofa"
-                    contextMenuItems={contextMenu}
-                    onDoubleClick={handleDoubleClickWIP}
-                  />
-                </CardContent>
-              </Card>
-            </div>
-          )}
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2"><Layers className="h-5 w-5 text-[#6B5C32]" /> Work in Progress ({filteredWIP.length})</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <DataGrid
+                columns={wipColumns}
+                data={filteredWIP}
+                keyField="id"
+                gridId="inventory-wip"
+                contextMenuItems={contextMenu}
+                onDoubleClick={handleDoubleClickWIP}
+              />
+            </CardContent>
+          </Card>
         </div>
       )}
 

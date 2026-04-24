@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { resolveCustomerPrice } from "./customer-products";
 
 const app = new Hono<Env>();
 
@@ -278,6 +279,19 @@ app.post("/", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// GET /api/products/:productId/price-for-customer/:customerId —
+// resolve the effective price for a (productId, customerId) pair.
+// Must be registered BEFORE /:id so the more-specific path wins.
+app.get("/:productId/price-for-customer/:customerId", async (c) => {
+  const productId = c.req.param("productId");
+  const customerId = c.req.param("customerId");
+  const data = await resolveCustomerPrice(c.env.DB, productId, customerId);
+  if (!data) {
+    return c.json({ success: false, error: "Product not found" }, 404);
+  }
+  return c.json({ success: true, data });
 });
 
 // GET /api/products/:id — single product + BOM + dept times

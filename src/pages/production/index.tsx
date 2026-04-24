@@ -2805,7 +2805,7 @@ export default function ProductionPage() {
                         <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">MFD</span>: {mfd}</div>
                       </div>
                       <div className="flex items-end gap-2 mt-2">
-                        <QRImg data={trackUrl} size={300} alt="FG unit QR" className="block" />
+                        <QRImg data={trackUrl} size={110} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center">
                           <div className="font-bold leading-tight" style={{ fontSize: "13px" }}>
                             {s.pieceNo}/{s.totalPieces}

@@ -1107,7 +1107,7 @@ export default function InventoryPage() {
               />
             </div>
             <div className="flex gap-2">
-              {["ALL", "BEDFRAME", "SOFA"].map(cat => (
+              {["ALL", "BEDFRAME", "SOFA", "ACCESSORY"].map(cat => (
                 <button
                   key={cat}
                   onClick={() => setFgCategoryFilter(cat)}
@@ -1153,6 +1153,7 @@ export default function InventoryPage() {
                     <select value={fgForm.category} onChange={e => setFgForm(f => ({ ...f, category: e.target.value }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none">
                       <option value="BEDFRAME">Bedframe</option>
                       <option value="SOFA">Sofa</option>
+                      <option value="ACCESSORY">Accessory</option>
                     </select>
                   </div>
                   <div>

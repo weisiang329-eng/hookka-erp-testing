@@ -18,7 +18,26 @@ import {
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCachePrefix, cachedFetchJson } from "@/lib/cached-fetch";
+
+type SeatHeightTier = { height: string; priceSen: number };
+type PriceInfo = {
+  productId: string;
+  customerId: string;
+  hasCustomerOverride: boolean;
+  basePriceSen: number;
+  price1Sen: number | null;
+  seatHeightPrices: SeatHeightTier[];
+};
+
+async function resolveCustomerPrice(
+  productId: string,
+  customerId: string,
+): Promise<PriceInfo | null> {
+  const url = `/api/products/${encodeURIComponent(productId)}/price-for-customer/${encodeURIComponent(customerId)}`;
+  const resp = await cachedFetchJson<{ success?: boolean; data?: PriceInfo }>(url, 60);
+  return resp?.data ?? null;
+}
 
 type SofaModule = {
   productId: string;
@@ -54,6 +73,12 @@ type LineItem = {
   specialOrderPriceSen: number;
   specialOrder: string; // comma-joined text for submission
   notes: string;
+  // Price hints cached on the line so seat-height / fabric pickers can resolve
+  // the correct tier without re-fetching. Populated from the customer-aware
+  // price endpoint when a customer is selected; otherwise falls back to the
+  // global product record.
+  price1Sen: number | null;
+  seatHeightPrices: SeatHeightTier[];
 };
 
 const EMPTY_LINE: LineItem = {
@@ -63,6 +88,7 @@ const EMPTY_LINE: LineItem = {
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", notes: "",
+  price1Sen: null, seatHeightPrices: [],
 };
 
 /** Extract FT portion from sizeLabel, e.g. "Queen 5FT" → "5FT", "Super King 200x200CM" → "200x200CM" */
@@ -359,11 +385,15 @@ function CreateSalesOrderPage() {
       return prev.map((item, i) => {
         if (i === idx) return { ...item, ...updates };
         if (item.itemCategory !== "SOFA" || item.baseModel !== source.baseModel) return item;
-        // For seat height: re-resolve the other line's basePrice from its own
-        // product's seatHeightPrices (prices can differ by module).
+        // For seat height: re-resolve the other line's basePrice from its
+        // own cached seatHeightPrices (customer-specific when available,
+        // global product otherwise). Prices can differ by module.
         if ("seatHeight" in updates) {
           const prod = products.find(p => p.id === item.productId);
-          const tier = prod?.seatHeightPrices?.find(t => t.height === updates.seatHeight);
+          const tiers = (item.seatHeightPrices && item.seatHeightPrices.length > 0)
+            ? item.seatHeightPrices
+            : prod?.seatHeightPrices;
+          const tier = tiers?.find(t => t.height === updates.seatHeight);
           return { ...item, ...updates, basePriceSen: tier?.priceSen ?? item.basePriceSen };
         }
         return { ...item, ...updates };
@@ -384,6 +414,10 @@ function CreateSalesOrderPage() {
       sizeCode: prod.sizeCode,
       sizeLabel: prod.sizeLabel,
       basePriceSen: 0, // Don't set base price yet — fabric determines Price 1 vs Price 2
+      // Seed price hints from the global product record; will be overwritten
+      // by the customer-aware lookup below if a customer is selected.
+      price1Sen: prod.price1Sen ?? null,
+      seatHeightPrices: prod.seatHeightPrices ?? [],
       // Reset category-specific fields
       seatHeight: "",
       gapInches: isSofa ? null : items[idx].gapInches,
@@ -392,6 +426,23 @@ function CreateSalesOrderPage() {
       legHeightInches: isSofa ? null : items[idx].legHeightInches,
       legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
     });
+    // If a customer has already been picked, resolve the customer-specific
+    // price and overwrite the hints on the line. Fabric-driven base price
+    // (selectFabric) will then read from the cached price1Sen.
+    if (customerId) {
+      void resolveCustomerPrice(prod.id, customerId).then((info) => {
+        if (!info) return;
+        setItems(prev => prev.map((it, i) =>
+          i === idx && it.productId === prod.id
+            ? {
+                ...it,
+                price1Sen: info.price1Sen,
+                seatHeightPrices: info.seatHeightPrices ?? [],
+              }
+            : it
+        ));
+      });
+    }
   };
 
   const selectFabric = (idx: number, fabricId: string) => {
@@ -408,8 +459,11 @@ function CreateSalesOrderPage() {
       const prod = products.find(p => p.id === item.productId);
       let newPrice = item.basePriceSen;
       if (prod) {
-        newPrice = priceTier === "PRICE_1" && prod.price1Sen
-          ? prod.price1Sen
+        // Prefer customer-resolved price1Sen cached on the line; fall back
+        // to global product price1Sen, then global basePriceSen.
+        const p1 = item.price1Sen ?? prod.price1Sen ?? null;
+        newPrice = priceTier === "PRICE_1" && p1
+          ? p1
           : (prod.basePriceSen || 0);
       }
       updateItem(idx, { fabricId: fab.id, fabricCode: fab.code, basePriceSen: newPrice });
@@ -474,14 +528,21 @@ function CreateSalesOrderPage() {
 
   const selectSeatHeight = (idx: number, value: string) => {
     const item = items[idx];
+    // Read from the line's cached seatHeightPrices (populated by selectProduct
+    // or customer-change re-fetch). Falls back to the global product record
+    // only if no cached tiers are present.
+    const cachedTiers = item.seatHeightPrices;
     const prod = products.find(p => p.id === item.productId);
-    if (!value || !prod?.seatHeightPrices) {
+    const tiers = (cachedTiers && cachedTiers.length > 0)
+      ? cachedTiers
+      : prod?.seatHeightPrices;
+    if (!value || !tiers) {
       // propagateSofaVariant handles the basePrice reset on other lines via
-      // its per-product seatHeightPrices lookup (here `undefined tier`).
+      // its per-line seatHeightPrices lookup (here `undefined tier`).
       propagateSofaVariant(idx, { seatHeight: "", basePriceSen: 0 });
       return;
     }
-    const tier = prod.seatHeightPrices.find(t => t.height === value);
+    const tier = tiers.find(t => t.height === value);
     // For sofa items, the "Size" column downstream (SO detail / production
     // sheet) reads item.sizeLabel. The module code already lives in the
     // productCode (e.g. "5530-2A(LHF)") so "Size" should carry the seat
@@ -1053,7 +1114,33 @@ function LineItemCard({
               ) : (
                 <SearchableSelect
                   value={item.productId}
-                  onChange={(val) => onSelectProduct(idx, val)}
+                  onChange={(val) => {
+                    // SOFA lines are built through the multi-module checkbox
+                    // picker — a single pick here must NOT lock the line to
+                    // one module. Seed itemCategory + baseModel only, drop
+                    // the picked module into checkedModules, and flip the
+                    // dropdown open so the user can add sibling modules in
+                    // the same action before clicking "Add N Items".
+                    // BEDFRAME / ACCESSORY stay on the single-select path.
+                    const picked = products.find((p) => p.id === val);
+                    if (picked?.category === "SOFA") {
+                      onUpdate(idx, {
+                        itemCategory: "SOFA",
+                        baseModel: picked.baseModel,
+                        productId: "",
+                        productCode: "",
+                        productName: "",
+                        sizeCode: "",
+                        sizeLabel: "",
+                        basePriceSen: 0,
+                        seatHeight: "",
+                      });
+                      setCheckedModules([picked.id]);
+                      setShowModuleDropdown(true);
+                    } else {
+                      onSelectProduct(idx, val);
+                    }
+                  }}
                   // Always show the full catalog across every category so the
                   // user can switch between BEDFRAME / SOFA / ACCESSORY on the
                   // same line without a separate Category dropdown to clear —

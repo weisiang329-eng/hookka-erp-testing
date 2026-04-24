@@ -21,7 +21,35 @@ import {
   Trash2,
   RefreshCw,
   Warehouse,
+  Package,
+  Search,
+  Check,
 } from "lucide-react";
+
+// =====================================================================
+// Customer Products types (per-customer SKU assignments with price overrides)
+// =====================================================================
+type CustomerProduct = {
+  id: string;
+  customerId: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  category: string;
+  basePriceSen: number;
+  price1Sen: number | null;
+  seatHeightPrices: Record<string, number> | null;
+  notes: string | null;
+};
+
+type ProductOption = {
+  id: string;
+  code: string;
+  name: string;
+  category: string;
+  basePriceSen: number;
+  price1Sen?: number | null;
+};
 
 // ---------- State badge colours ----------
 const stateBadgeColors: Record<string, string> = {
@@ -39,6 +67,380 @@ function StateBadge({ state }: { state: string }) {
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${colors}`}>
       {state}
     </span>
+  );
+}
+
+// =====================================================================
+// Customer Products Panel — shown inside the expanded-customer detail.
+// Lists SKUs assigned to this customer with per-customer price overrides.
+// =====================================================================
+function CustomerProductsPanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CustomerProduct[] }>(
+    customerId ? `/api/customer-products?customerId=${customerId}` : null
+  );
+  const rows: CustomerProduct[] = useMemo(
+    () => (resp?.success ? resp.data ?? [] : Array.isArray(resp) ? (resp as CustomerProduct[]) : []),
+    [resp]
+  );
+
+  const { data: productsResp } = useCachedJson<{ success?: boolean; data?: ProductOption[] }>("/api/products");
+  const allProducts: ProductOption[] = useMemo(
+    () => (productsResp?.success ? productsResp.data ?? [] : Array.isArray(productsResp) ? (productsResp as ProductOption[]) : []),
+    [productsResp]
+  );
+
+  const [query, setQuery] = useState("");
+  const [showAssign, setShowAssign] = useState(false);
+  const [assignQuery, setAssignQuery] = useState("");
+  const [assignPicked, setAssignPicked] = useState<Set<string>>(new Set());
+  const [assignSaving, setAssignSaving] = useState(false);
+
+  // Inline edit form state
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<{ basePriceRm: string; price1Rm: string; seatHeightsJson: string; notes: string }>({
+    basePriceRm: "",
+    price1Rm: "",
+    seatHeightsJson: "",
+    notes: "",
+  });
+  const [editSaving, setEditSaving] = useState(false);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return rows;
+    const q = query.trim().toLowerCase();
+    return rows.filter((r) => r.productCode.toLowerCase().includes(q) || r.productName.toLowerCase().includes(q));
+  }, [rows, query]);
+
+  const assignedIds = useMemo(() => new Set(rows.map((r) => r.productId)), [rows]);
+  const assignOptions = useMemo(() => {
+    const q = assignQuery.trim().toLowerCase();
+    return allProducts
+      .filter((p) => !assignedIds.has(p.id))
+      .filter((p) => !q || p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+      .slice(0, 100);
+  }, [allProducts, assignedIds, assignQuery]);
+
+  const openEdit = (row: CustomerProduct) => {
+    setEditId(row.id);
+    setEditForm({
+      basePriceRm: (row.basePriceSen / 100).toFixed(2),
+      price1Rm: row.price1Sen != null ? (row.price1Sen / 100).toFixed(2) : "",
+      seatHeightsJson: row.seatHeightPrices ? JSON.stringify(row.seatHeightPrices) : "",
+      notes: row.notes ?? "",
+    });
+  };
+
+  const saveEdit = async () => {
+    if (!editId) return;
+    setEditSaving(true);
+    try {
+      const body: Record<string, unknown> = {};
+      if (editForm.basePriceRm !== "") body.basePriceSen = Math.round(Number(editForm.basePriceRm) * 100);
+      if (editForm.price1Rm !== "") body.price1Sen = Math.round(Number(editForm.price1Rm) * 100);
+      else body.price1Sen = null;
+      if (editForm.seatHeightsJson.trim()) {
+        try {
+          body.seatHeightPrices = JSON.parse(editForm.seatHeightsJson);
+        } catch {
+          alert("Seat-height prices must be valid JSON (e.g. {\"24\":51700,\"28\":57200}) in sen.");
+          setEditSaving(false);
+          return;
+        }
+      } else {
+        body.seatHeightPrices = null;
+      }
+      body.notes = editForm.notes || null;
+      const res = await fetch(`/api/customer-products/${editId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert((j as { error?: string }).error || `Failed to update (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/customer-products");
+      refresh();
+      setEditId(null);
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleRemove = async (row: CustomerProduct) => {
+    if (!confirm(`Remove "${row.productCode} ${row.productName}" from ${customerName}?`)) return;
+    const res = await fetch(`/api/customer-products/${row.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert((j as { error?: string }).error || `Failed to remove (HTTP ${res.status})`);
+      return;
+    }
+    invalidateCachePrefix("/api/customer-products");
+    refresh();
+  };
+
+  const toggleAssignPick = (id: string) => {
+    setAssignPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const submitAssign = async () => {
+    if (assignPicked.size === 0) return;
+    setAssignSaving(true);
+    try {
+      const res = await fetch("/api/customer-products/bulk-assign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId, productIds: Array.from(assignPicked) }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert((j as { error?: string }).error || `Failed to assign (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/customer-products");
+      refresh();
+      setAssignPicked(new Set());
+      setAssignQuery("");
+      setShowAssign(false);
+    } finally {
+      setAssignSaving(false);
+    }
+  };
+
+  const formatSeatHeights = (sh: Record<string, number> | null) => {
+    if (!sh || Object.keys(sh).length === 0) return "—";
+    return Object.entries(sh)
+      .map(([h, sen]) => `${h}:${(sen / 100).toFixed(0)}`)
+      .join(" ");
+  };
+
+  return (
+    <Card className="border-[#6B5C32] border-2">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Package className="h-5 w-5 text-[#6B5C32]" />
+            Customer Products — {customerName} ({rows.length})
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search SKUs..."
+                className="h-8 pl-8 w-48"
+              />
+            </div>
+            <Button variant="primary" size="sm" onClick={() => setShowAssign((v) => !v)}>
+              {showAssign ? <X className="h-4 w-4 mr-1" /> : <Plus className="h-4 w-4 mr-1" />}
+              {showAssign ? "Cancel" : "Assign SKU"}
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {showAssign && (
+          <div className="mb-4 p-4 rounded-lg border-2 border-dashed border-[#6B5C32]/30 bg-[#FAF9F7] space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-[#6B5C32]">Assign SKUs to {customerName}</h3>
+              <span className="text-xs text-[#6B7280]">{assignPicked.size} selected</span>
+            </div>
+            <div className="relative">
+              <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <Input
+                value={assignQuery}
+                onChange={(e) => setAssignQuery(e.target.value)}
+                placeholder="Filter by code or name..."
+                className="h-8 pl-8"
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto border border-[#E2DDD8] rounded bg-white">
+              {assignOptions.length === 0 ? (
+                <p className="text-xs text-[#9CA3AF] py-4 text-center">
+                  {assignedIds.size === allProducts.length && allProducts.length > 0
+                    ? "All SKUs already assigned."
+                    : "No matching SKUs."}
+                </p>
+              ) : (
+                <ul className="divide-y divide-[#E2DDD8]">
+                  {assignOptions.map((p) => {
+                    const picked = assignPicked.has(p.id);
+                    return (
+                      <li
+                        key={p.id}
+                        onClick={() => toggleAssignPick(p.id)}
+                        className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-[#FAF9F7] ${picked ? "bg-[#F4F0E8]" : ""}`}
+                      >
+                        <div className={`h-4 w-4 rounded border flex items-center justify-center ${picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#C8C2BB]"}`}>
+                          {picked && <Check className="h-3 w-3 text-white" />}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="doc-number text-xs text-[#1F1D1B]">{p.code}</span>
+                            <Badge className="text-[10px]">{p.category}</Badge>
+                          </div>
+                          <p className="text-xs text-[#6B7280] truncate">{p.name}</p>
+                        </div>
+                        <span className="text-xs tabular-nums text-[#6B7280]">{formatRM(p.basePriceSen)}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => { setShowAssign(false); setAssignPicked(new Set()); }}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" disabled={assignPicked.size === 0 || assignSaving} onClick={submitAssign}>
+                {assignSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plus className="h-4 w-4 mr-1" />}
+                Assign {assignPicked.size} SKU{assignPicked.size === 1 ? "" : "s"}
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {rows.length === 0 ? (
+          <div className="py-8 text-center space-y-3">
+            <p className="text-sm text-[#9CA3AF]">
+              No SKUs assigned. Pillows and bedframes assigned to this customer will show here.
+            </p>
+            {!showAssign && (
+              <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
+                <Plus className="h-4 w-4 mr-1" /> Assign SKU
+              </Button>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+                  <th className="text-left font-medium py-2 px-2">Code</th>
+                  <th className="text-left font-medium py-2 px-2">Name</th>
+                  <th className="text-left font-medium py-2 px-2">Category</th>
+                  <th className="text-right font-medium py-2 px-2">Base Price</th>
+                  <th className="text-right font-medium py-2 px-2">Price 1</th>
+                  <th className="text-left font-medium py-2 px-2">Seat Heights</th>
+                  <th className="text-right font-medium py-2 px-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filtered.map((row) => (
+                  editId === row.id ? (
+                    <tr key={row.id} className="border-b border-[#E2DDD8] bg-[#FAF9F7]">
+                      <td colSpan={7} className="p-3">
+                        <div className="space-y-3">
+                          <div className="flex items-center gap-2">
+                            <span className="doc-number text-xs text-[#1F1D1B]">{row.productCode}</span>
+                            <span className="text-xs text-[#6B7280]">{row.productName}</span>
+                            <Badge className="text-[10px]">{row.category}</Badge>
+                          </div>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                            <div>
+                              <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
+                              <Input
+                                type="number"
+                                step="0.01"
+                                value={editForm.basePriceRm}
+                                onChange={(e) => setEditForm((f) => ({ ...f, basePriceRm: e.target.value }))}
+                                className="h-8"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM) — optional</label>
+                              <Input
+                                type="number"
+                                step="0.01"
+                                value={editForm.price1Rm}
+                                onChange={(e) => setEditForm((f) => ({ ...f, price1Rm: e.target.value }))}
+                                placeholder="leave blank to clear"
+                                className="h-8"
+                              />
+                            </div>
+                            {row.category === "SOFA" && (
+                              <div className="sm:col-span-3">
+                                <label className="block text-xs text-[#6B7280] mb-1">
+                                  Seat-Height Prices (JSON, sen) — sofa only
+                                </label>
+                                <Input
+                                  value={editForm.seatHeightsJson}
+                                  onChange={(e) => setEditForm((f) => ({ ...f, seatHeightsJson: e.target.value }))}
+                                  placeholder='e.g. {"24":51700,"28":57200}'
+                                  className="h-8"
+                                />
+                              </div>
+                            )}
+                            <div className="sm:col-span-3">
+                              <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
+                              <Input
+                                value={editForm.notes}
+                                onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))}
+                                className="h-8"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex justify-end gap-2">
+                            <Button variant="outline" size="sm" onClick={() => setEditId(null)}>Cancel</Button>
+                            <Button variant="primary" size="sm" disabled={editSaving} onClick={saveEdit}>
+                              {editSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
+                              Save
+                            </Button>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : (
+                    <tr key={row.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
+                      <td className="py-2 px-2 doc-number text-xs text-[#1F1D1B]">{row.productCode}</td>
+                      <td className="py-2 px-2 text-[#1F1D1B]">{row.productName}</td>
+                      <td className="py-2 px-2"><Badge className="text-[10px]">{row.category}</Badge></td>
+                      <td className="py-2 px-2 text-right tabular-nums">{formatRM(row.basePriceSen)}</td>
+                      <td className="py-2 px-2 text-right tabular-nums text-[#6B7280]">
+                        {row.price1Sen != null ? formatRM(row.price1Sen) : "—"}
+                      </td>
+                      <td className="py-2 px-2 text-xs text-[#6B7280]">{formatSeatHeights(row.seatHeightPrices)}</td>
+                      <td className="py-2 px-2 text-right">
+                        <div className="flex justify-end gap-1">
+                          <button
+                            onClick={() => openEdit(row)}
+                            className="p-1.5 rounded hover:bg-[#E2DDD8]"
+                            title="Edit"
+                          >
+                            <Pencil className="h-3.5 w-3.5 text-[#6B5C32]" />
+                          </button>
+                          <button
+                            onClick={() => handleRemove(row)}
+                            className="p-1.5 rounded hover:bg-[#F9E1DA]"
+                            title="Remove"
+                          >
+                            <Trash2 className="h-3.5 w-3.5 text-[#9A3A2D]" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                ))}
+                {filtered.length === 0 && rows.length > 0 && (
+                  <tr>
+                    <td colSpan={7} className="py-4 text-center text-xs text-[#9CA3AF]">
+                      No SKUs match "{query}".
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -460,11 +862,12 @@ export default function CustomersPage() {
         </CardContent>
       </Card>
 
-      {/* Expanded Customer Detail (Delivery Hubs) */}
+      {/* Expanded Customer Detail (Delivery Hubs + Customer Products) */}
       {expandedCustomer && (() => {
         const cust = data.find((c) => c.id === expandedCustomer);
         if (!cust) return null;
         return (
+          <>
           <Card className="border-[#6B5C32] border-2">
             <CardHeader className="pb-3">
               <div className="flex items-center justify-between">
@@ -654,6 +1057,8 @@ export default function CustomersPage() {
               )}
             </CardContent>
           </Card>
+          <CustomerProductsPanel customerId={cust.id} customerName={cust.name} />
+          </>
         );
       })()}
 

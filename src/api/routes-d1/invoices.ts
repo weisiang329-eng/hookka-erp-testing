@@ -386,6 +386,26 @@ app.get("/", async (c) => {
   return c.json({ success: true, data, page, limit, total });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/invoices/stats — whole-dataset status bucket counts.
+//
+// Returns { byStatus: Record<string, number>, total }. Used by the invoices
+// list page KPI cards so counts reflect the full table rather than only the
+// current paginated page. Registered BEFORE /:id (Hono route ordering).
+// ---------------------------------------------------------------------------
+app.get("/stats", async (c) => {
+  const res = await c.env.DB
+    .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
+    .all<{ status: string; n: number }>();
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  for (const row of res.results ?? []) {
+    byStatus[row.status] = row.n;
+    total += row.n;
+  }
+  return c.json({ success: true, byStatus, total });
+});
+
 // POST /api/invoices — create from a DELIVERED delivery order.
 app.post("/", async (c) => {
   try {

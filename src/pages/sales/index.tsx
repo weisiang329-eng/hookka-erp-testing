@@ -65,6 +65,14 @@ export default function SalesPage() {
     limit?: number;
     total?: number;
   }>(`/api/sales-orders?page=${page}&limit=${PAGE_SIZE}`);
+  // Whole-dataset status bucket counts — tab badges read from this so
+  // "Draft (N)" / "Confirmed (N)" reflect the full table, not just the
+  // current page of rows.
+  const { data: statsResp, refresh: refreshStats } = useCachedJson<{
+    success?: boolean;
+    byStatus?: Record<string, number>;
+    total?: number;
+  }>("/api/sales-orders/stats");
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
@@ -74,6 +82,18 @@ export default function SalesPage() {
   );
   const totalOrdersServer = ordersResp?.total ?? orders.length;
   const totalPages = Math.max(1, Math.ceil(totalOrdersServer / PAGE_SIZE));
+  // Tab badge counts come from the server-side /stats aggregate so they
+  // reflect the whole dataset, not just the current paginated page.
+  // "Confirmed" is anything that isn't DRAFT.
+  const statsByStatus = statsResp?.byStatus ?? {};
+  const statsTotal = statsResp?.total ?? totalOrdersServer;
+  const sumStatuses = (statuses: string[]): number =>
+    statuses.reduce((n, s) => n + (statsByStatus[s] ?? 0), 0);
+  const draftCount = statsByStatus.DRAFT ?? 0;
+  const confirmedCount = Math.max(0, statsTotal - draftCount);
+  const outstandingCount = sumStatuses(["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"]);
+  const pendingDeliveryCount = sumStatuses(["READY_TO_SHIP", "SHIPPED"]);
+  const completedCount = sumStatuses(["DELIVERED", "INVOICED", "CLOSED"]);
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -124,6 +144,7 @@ export default function SalesPage() {
     invalidateCachePrefix("/api/customers");
     invalidateCachePrefix("/api/production-orders");
     refreshOrders();
+    refreshStats();
     refreshCustomers();
     refreshProductionOrders();
     refreshStatusChanges();
@@ -370,11 +391,11 @@ export default function SalesPage() {
       </div>
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{orders.length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Revenue</p><p className="text-xl font-bold">{formatCurrency(totalRevenue)}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{orders.filter(o => ["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{orders.filter(o => ["READY_TO_SHIP", "SHIPPED"].includes(o.status)).length}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{orders.filter(o => ["DELIVERED", "INVOICED", "CLOSED"].includes(o.status)).length}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
+        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{completedCount}</p></CardContent></Card>
       </div>
 
       {/* Filters */}
@@ -468,7 +489,7 @@ export default function SalesPage() {
                     : "text-[#6B7280] hover:text-[#1F1D1B]"
                 )}
               >
-                Draft ({orders.filter(o => o.status === "DRAFT").length})
+                Draft ({draftCount})
               </button>
               <button
                 onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
@@ -479,7 +500,7 @@ export default function SalesPage() {
                     : "text-[#6B7280] hover:text-[#1F1D1B]"
                 )}
               >
-                Confirmed ({orders.filter(o => o.status !== "DRAFT").length})
+                Confirmed ({confirmedCount})
               </button>
             </div>
           </div>

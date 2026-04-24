@@ -279,6 +279,14 @@ export default function DeliveryPage() {
     limit?: number;
     total?: number;
   }>(`/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`);
+  // Whole-dataset status bucket counts — summary cards and tab badges read
+  // from this so counts reflect the full table, not just the current
+  // paginated page.
+  const { data: doStatsRaw, refresh: refreshDOStats } = useCachedJson<{
+    success?: boolean;
+    byStatus?: Record<string, number>;
+    total?: number;
+  }>("/api/delivery-orders/stats");
   const totalDOsServer = doRaw?.total ?? (doRaw?.data?.length ?? 0);
   const totalPages = Math.max(1, Math.ceil(totalDOsServer / PAGE_SIZE));
 
@@ -296,10 +304,11 @@ export default function DeliveryPage() {
     invalidateCachePrefix("/api/sales-orders");
     invalidateCachePrefix("/api/customers");
     refreshDOs();
+    refreshDOStats();
     refreshPOs();
     refreshSOs();
     refreshCustomers();
-  }, [refreshDOs, refreshPOs, refreshSOs, refreshCustomers]);
+  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshCustomers]);
 
   useEffect(() => {
     const anyLoading = doLoading || poLoading || soLoading || custLoading;
@@ -513,17 +522,18 @@ export default function DeliveryPage() {
   }, [deliveryOrders, activeTab]);
 
   // ---------- Summary counts (unique DOs, not rows) ----------
+  // Read from /api/delivery-orders/stats so counts reflect the whole
+  // dataset rather than just the current paginated page.
   const uniqueDOsByStatus = useMemo(() => {
-    const countByStatus = (status: DOStatus) =>
-      deliveryOrders.filter((d) => d.status === status).length;
+    const byStatus = doStatsRaw?.byStatus ?? {};
     return {
-      draft: countByStatus("DRAFT"),
-      dispatched: countByStatus("DISPATCHED"),
-      inTransit: countByStatus("IN_TRANSIT"),
-      delivered: countByStatus("DELIVERED"),
-      invoiced: countByStatus("INVOICED"),
+      draft: byStatus.DRAFT ?? 0,
+      dispatched: byStatus.DISPATCHED ?? 0,
+      inTransit: byStatus.IN_TRANSIT ?? 0,
+      delivered: byStatus.DELIVERED ?? 0,
+      invoiced: byStatus.INVOICED ?? 0,
     };
-  }, [deliveryOrders]);
+  }, [doStatsRaw]);
   const pendingDispatchCount = uniqueDOsByStatus.draft;
   const dispatchedCount = uniqueDOsByStatus.dispatched;
   const inTransitCount = uniqueDOsByStatus.inTransit;

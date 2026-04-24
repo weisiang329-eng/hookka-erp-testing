@@ -44,6 +44,13 @@ export default function InvoicesPage() {
     limit?: number;
     total?: number;
   }>(`/api/invoices?page=${page}&limit=${PAGE_SIZE}`);
+  // Whole-dataset status bucket counts — KPI cards read from this so they
+  // reflect the full table, not just the current paginated page.
+  const { data: invStatsResp, refresh: refreshInvStats } = useCachedJson<{
+    success?: boolean;
+    byStatus?: Record<string, number>;
+    total?: number;
+  }>("/api/invoices/stats");
   const invoices: Invoice[] = useMemo(
     () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
     [invResp]
@@ -105,6 +112,7 @@ export default function InvoicesPage() {
       invalidateCachePrefix("/api/delivery-orders");
       invalidateCachePrefix("/api/sales-orders");
       refreshInvoices();
+      refreshInvStats();
       navigate(`/invoices/${data.data.id}`);
     }
   };
@@ -121,6 +129,7 @@ export default function InvoicesPage() {
       invalidateCachePrefix("/api/delivery-orders");
       invalidateCachePrefix("/api/sales-orders");
       refreshInvoices();
+      refreshInvStats();
     }
   };
 
@@ -149,6 +158,7 @@ export default function InvoicesPage() {
       invalidateCachePrefix("/api/delivery-orders");
       invalidateCachePrefix("/api/sales-orders");
       refreshInvoices();
+      refreshInvStats();
     }
     setPaymentSubmitting(false);
   };
@@ -170,10 +180,13 @@ export default function InvoicesPage() {
     });
   }, [invoices, filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
 
-  // KPI calculations — Total uses server count; other KPIs reflect the
-  // currently-fetched page only (pagination tradeoff, documented in the
-  // footer's total-count badge).
-  const totalInvoices = totalInvoicesServer;
+  // KPI calculations. Count-based KPIs (Total, Overdue) read from the
+  // server /stats aggregate so they reflect the whole dataset. Dollar KPIs
+  // (Outstanding, Collected MTD) still iterate the current page because
+  // they need per-row totalSen/paidAmount — documented in the footer's
+  // total-count badge.
+  const invStatsByStatus = invStatsResp?.byStatus ?? {};
+  const totalInvoices = invStatsResp?.total ?? totalInvoicesServer;
   const outstandingSen = invoices
     .filter((inv) => ["SENT", "OVERDUE", "PARTIAL_PAID"].includes(inv.status))
     .reduce((s, inv) => s + (inv.totalSen - inv.paidAmount), 0);
@@ -182,10 +195,10 @@ export default function InvoicesPage() {
   const paidMTDSen = invoices
     .filter((inv) => inv.status === "PAID" && inv.invoiceDate.startsWith(currentMonth))
     .reduce((s, inv) => s + inv.paidAmount, 0);
-  const overdueCount = invoices.filter((inv) => {
-    if (["PAID", "CANCELLED", "DRAFT"].includes(inv.status)) return false;
-    return new Date(inv.dueDate) < now;
-  }).length;
+  // OVERDUE is a first-class status in the invoices table (advanced by the
+  // backend when dueDate passes). Use the stats bucket rather than iterating
+  // the current page, so the KPI reflects the whole dataset.
+  const overdueCount = invStatsByStatus.OVERDUE ?? 0;
 
   // AR Aging data
   const agingData = useMemo((): AgingRow[] => {
@@ -280,8 +293,8 @@ export default function InvoicesPage() {
       disabled: row.status !== "DRAFT",
     },
     { label: "", separator: true, action: () => {} },
-    { label: "Refresh", action: () => refreshInvoices() },
-  ], [navigate, refreshInvoices]);
+    { label: "Refresh", action: () => { refreshInvoices(); refreshInvStats(); } },
+  ], [navigate, refreshInvoices, refreshInvStats]);
 
   if (loading) {
     return (

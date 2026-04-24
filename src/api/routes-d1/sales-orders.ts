@@ -1227,16 +1227,65 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders — list all SOs with nested items
+//
+// Query params (opt-in pagination; omitting them preserves backward-compatible
+// "full list" behavior for legacy consumers):
+//
+//   ?page=N&limit=M
+//     When either is supplied, response includes { page, limit } and `data`
+//     is the sliced page. Default page=1, default limit=50, hard cap 500.
+//     Uses SQL LIMIT/OFFSET on sales_orders, then scopes
+//     sales_order_items to only the page's SO IDs — so a 50-row page no
+//     longer pulls every SO item row.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const [sos, items] = await Promise.all([
-    c.env.DB.prepare(
-      "SELECT * FROM sales_orders ORDER BY created_at DESC, id DESC",
-    ).all<SalesOrderRow>(),
-    c.env.DB.prepare("SELECT * FROM sales_order_items").all<SalesOrderItemRow>(),
+  const db = c.env.DB;
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
+
+  if (!paginate) {
+    const [sos, items] = await Promise.all([
+      db
+        .prepare("SELECT * FROM sales_orders ORDER BY created_at DESC, id DESC")
+        .all<SalesOrderRow>(),
+      db.prepare("SELECT * FROM sales_order_items").all<SalesOrderItemRow>(),
+    ]);
+    const data = (sos.results ?? []).map((s) =>
+      rowToSO(s, items.results ?? []),
+    );
+    return c.json({ success: true, data, total: data.length });
+  }
+
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
+  const limit = Math.min(500, Math.max(1, rawLimit));
+  const offset = (page - 1) * limit;
+
+  const [countRes, pageRes] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS n FROM sales_orders").first<{ n: number }>(),
+    db
+      .prepare(
+        "SELECT * FROM sales_orders ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+      )
+      .bind(limit, offset)
+      .all<SalesOrderRow>(),
   ]);
-  const data = (sos.results ?? []).map((s) => rowToSO(s, items.results ?? []));
-  return c.json({ success: true, data, total: data.length });
+  const total = countRes?.n ?? 0;
+  const soRows = pageRes.results ?? [];
+
+  let items: SalesOrderItemRow[] = [];
+  if (soRows.length > 0) {
+    const ids = soRows.map((s) => s.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const itemsRes = await db
+      .prepare(`SELECT * FROM sales_order_items WHERE salesOrderId IN (${placeholders})`)
+      .bind(...ids)
+      .all<SalesOrderItemRow>();
+    items = itemsRes.results ?? [];
+  }
+  const data = soRows.map((s) => rowToSO(s, items));
+  return c.json({ success: true, data, page, limit, total });
 });
 
 // ---------------------------------------------------------------------------

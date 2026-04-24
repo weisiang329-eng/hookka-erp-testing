@@ -1277,7 +1277,21 @@ export default function ProductionPage() {
         // Arm, Divan → HB, etc.) — alpha order on wipType happens to match.
         group.sort((a, b) => (a.wipType || "").localeCompare(b.wipType || ""));
         const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
-        const wips = group.map((g) => g.wip).filter(Boolean).join("  |  ");
+        // WIP column on merged rows used to dump every child's full label
+        // (model + component + fabric + "(FC)") with " | " separators —
+        // most of it redundant with Model / Type / Colour. Collapse to a
+        // compact per-type count like "BASE×3 + CUSHION×2 + ARMREST×2" so
+        // the cutter sees exactly how many pieces of each kind to produce
+        // without reading a wrapped paragraph.
+        const typeCounts: Record<string, number> = {};
+        for (const g of group) {
+          const t = g.wipType || "MISC";
+          typeCounts[t] = (typeCounts[t] || 0) + 1;
+        }
+        const wips = Object.entries(typeCounts)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([t, c]) => (c > 1 ? `${t}×${c}` : t))
+          .join(" + ");
         // Model column on a combined row shows the module variants joined
         // with '+', matching the Google-sheet convention
         // (e.g. 5537-1A(LHF)+1NA+1A(RHF)). Strip the shared baseModel

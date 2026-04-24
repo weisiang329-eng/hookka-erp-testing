@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatRM } from "@/lib/utils";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/lib/mock-data";
 import generateCustomerQuotationPdf from "@/lib/generate-customer-quotation-pdf";
 import {
@@ -177,7 +177,9 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
       alert((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
       return;
     }
-    invalidateCachePrefix("/api/customer-products");
+    // Only this customer's products changed — per-URL invalidation leaves
+    // other customers' cached product lists alone.
+    invalidateCache(`/api/customer-products?customerId=${customerId}`);
     await loadHistory(cpId);
     refresh();
   };
@@ -271,7 +273,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
         alert((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
         return;
       }
-      invalidateCachePrefix("/api/customer-products");
+      invalidateCache(`/api/customer-products?customerId=${customerId}`);
       refresh();
       // Refresh open history panel if this row is the one being inspected.
       if (historyOpenId === editId) await loadHistory(editId);
@@ -289,7 +291,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
       alert((j as { error?: string }).error || `Failed to remove (HTTP ${res.status})`);
       return;
     }
-    invalidateCachePrefix("/api/customer-products");
+    invalidateCache(`/api/customer-products?customerId=${customerId}`);
     refresh();
   };
 
@@ -316,7 +318,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
         alert((j as { error?: string }).error || `Failed to assign (HTTP ${res.status})`);
         return;
       }
-      invalidateCachePrefix("/api/customer-products");
+      invalidateCache(`/api/customer-products?customerId=${customerId}`);
       refresh();
       setAssignPicked(new Set());
       setAssignQuery("");
@@ -959,7 +961,10 @@ export default function CustomersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
     });
-    invalidateCachePrefix("/api/customers");
+    // Only this customer changed — don't nuke the whole list cache. Hub
+    // add/edit/delete flows call persistCustomer multiple times in a row;
+    // per-id scoping keeps those flows cheap.
+    invalidateCache(`/api/customers/${updated.id}`);
   };
 
   // ---------- Edit Customer ----------

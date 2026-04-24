@@ -1273,9 +1273,24 @@ export default function ProductionPage() {
           continue;
         }
         const first = group[0];
-        // Stable display order: group by component type (Base → Cushion →
-        // Arm, Divan → HB, etc.) — alpha order on wipType happens to match.
-        group.sort((a, b) => (a.wipType || "").localeCompare(b.wipType || ""));
+        // Stable display order:
+        //   1. Modules with LHF handedness come first (arm on the left)
+        //   2. Non-handed modules (1NA, CNR, 2S, centre pieces, etc.) in
+        //      the middle
+        //   3. Modules with RHF handedness come last (arm on the right)
+        // Within each bucket fall back to component-type alpha so the
+        // ordering is stable for BF / accessory groups too.
+        const handBucket = (m: string): number => {
+          const s = m.toUpperCase();
+          if (s.includes("LHF")) return 0;
+          if (s.includes("RHF")) return 2;
+          return 1;
+        };
+        group.sort((a, b) => {
+          const bucketDiff = handBucket(a.model || "") - handBucket(b.model || "");
+          if (bucketDiff !== 0) return bucketDiff;
+          return (a.wipType || "").localeCompare(b.wipType || "");
+        });
         const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
         // WIP column on merged Fab Cut rows: show a single compact label
         // '{model} {fabric} {size} (FC)' so the cutter sees exactly what

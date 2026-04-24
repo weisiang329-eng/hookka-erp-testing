@@ -181,6 +181,124 @@ function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
   };
 }
 
+// Slim output shape for ?fields=minimal — only the fields the Production
+// page actually reads off the wire. Dropping the ~20 unused PO fields
+// (progress, startDate, targetEndDate, notes, etc.) and the full piece_pics
+// tree typically halves the payload on a ~530-PO / ~9k-JC response.
+type MinimalJobCardOut = {
+  id: string;
+  departmentCode: string;
+  wipKey?: string;
+  wipCode?: string;
+  wipType?: string;
+  wipLabel?: string;
+  wipQty?: number;
+  sequence: number;
+  status: string;
+  dueDate: string;
+  completedDate: string | null;
+  pic1Id: string | null;
+  pic1Name: string;
+  pic2Id: string | null;
+  pic2Name: string;
+  prerequisiteMet: boolean;
+  productionTimeMinutes: number;
+  estMinutes: number;
+  rackingNumber?: string;
+  category: string;
+};
+type MinimalPOOut = {
+  id: string;
+  poNo: string;
+  salesOrderId: string;
+  salesOrderNo: string;
+  companySOId: string;
+  customerPOId: string;
+  customerReference: string;
+  customerName: string;
+  customerState: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  itemCategory: string;
+  sizeCode: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  specialOrder: string;
+  status: string;
+  currentDepartment: string;
+  lineNo: number;
+  targetEndDate: string;
+  jobCards: MinimalJobCardOut[];
+};
+
+function rowToMinimalJobCard(r: JobCardRow): MinimalJobCardOut {
+  return {
+    id: r.id,
+    departmentCode: r.departmentCode ?? "",
+    sequence: r.sequence,
+    status: r.status,
+    dueDate: r.dueDate ?? "",
+    wipKey: r.wipKey ?? undefined,
+    wipCode: r.wipCode ?? undefined,
+    wipType: r.wipType ?? undefined,
+    wipLabel: r.wipLabel ?? undefined,
+    wipQty: r.wipQty ?? undefined,
+    prerequisiteMet: r.prerequisiteMet === 1,
+    pic1Id: r.pic1Id,
+    pic1Name: r.pic1Name ?? "",
+    pic2Id: r.pic2Id,
+    pic2Name: r.pic2Name ?? "",
+    completedDate: r.completedDate,
+    productionTimeMinutes: r.productionTimeMinutes,
+    estMinutes: r.estMinutes,
+    category: r.category ?? "",
+    rackingNumber: r.rackingNumber ?? undefined,
+  };
+}
+
+function rowToMinimalPO(
+  row: ProductionOrderRow,
+  jobCards: JobCardRow[] = [],
+): MinimalPOOut {
+  const myJCs = jobCards
+    .filter((j) => j.productionOrderId === row.id)
+    .sort((a, b) => a.sequence - b.sequence)
+    .map(rowToMinimalJobCard);
+  return {
+    id: row.id,
+    poNo: row.poNo,
+    salesOrderId: row.salesOrderId ?? "",
+    salesOrderNo: row.salesOrderNo ?? "",
+    companySOId: row.companySOId ?? "",
+    customerPOId: row.customerPOId ?? "",
+    customerReference: row.customerReference ?? "",
+    customerName: row.customerName ?? "",
+    customerState: row.customerState ?? "",
+    productId: row.productId ?? "",
+    productCode: row.productCode ?? "",
+    productName: row.productName ?? "",
+    itemCategory: row.itemCategory ?? "BEDFRAME",
+    sizeCode: row.sizeCode ?? "",
+    sizeLabel: row.sizeLabel ?? "",
+    fabricCode: row.fabricCode ?? "",
+    quantity: row.quantity,
+    gapInches: row.gapInches,
+    divanHeightInches: row.divanHeightInches,
+    legHeightInches: row.legHeightInches,
+    specialOrder: row.specialOrder ?? "",
+    status: row.status,
+    currentDepartment: row.currentDepartment ?? "",
+    lineNo: row.lineNo,
+    targetEndDate: row.targetEndDate ?? "",
+    jobCards: myJCs,
+  };
+}
+
 function rowToPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
@@ -273,7 +391,8 @@ async function fetchFilteredPOs(
   statuses: string[] | null,
   includeJobCards: boolean,
   includeArchive = false,
-): Promise<ProductionOrderOut[]> {
+  minimal = false,
+): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
     ? statuses.map(() => "?").join(",")
@@ -300,7 +419,24 @@ async function fetchFilteredPOs(
 
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
+    if (minimal) {
+      return (pos.results ?? []).map((p) => rowToMinimalPO(p, []));
+    }
     return (pos.results ?? []).map((p) => rowToPO(p, [], []));
+  }
+
+  // Minimal path: skip piece_pics entirely (the Production page never reads
+  // them) and return the narrow projection. This is the hot path for the
+  // Production page — the dropped fields + table save several MB on the
+  // ~530 PO / ~9k JC response.
+  if (minimal) {
+    const [pos, jcs] = await Promise.all([
+      poStmt.all<ProductionOrderRow>(),
+      db.prepare(`SELECT * FROM ${jcSource}`).all<JobCardRow>(),
+    ]);
+    return (pos.results ?? []).map((p) =>
+      rowToMinimalPO(p, jcs.results ?? []),
+    );
   }
 
   const [pos, jcs, pics] = await Promise.all([
@@ -324,7 +460,8 @@ async function fetchPaginatedPOs(
   page: number,
   limit: number,
   includeArchive = false,
-): Promise<{ data: ProductionOrderOut[]; total: number }> {
+  minimal = false,
+): Promise<{ data: ProductionOrderOut[] | MinimalPOOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
     ? statuses.map(() => "?").join(",")
@@ -364,6 +501,9 @@ async function fetchPaginatedPOs(
   const posRows = pageRes.results ?? [];
 
   if (!includeJobCards || posRows.length === 0) {
+    if (minimal) {
+      return { data: posRows.map((p) => rowToMinimalPO(p, [])), total };
+    }
     return { data: posRows.map((p) => rowToPO(p, [], [])), total };
   }
 
@@ -375,6 +515,11 @@ async function fetchPaginatedPOs(
     .bind(...poIds)
     .all<JobCardRow>();
   const jcs = jcsRes.results ?? [];
+
+  // Minimal path: skip piece_pics entirely.
+  if (minimal) {
+    return { data: posRows.map((p) => rowToMinimalPO(p, jcs)), total };
+  }
 
   let pics: PiecePicRow[] = [];
   if (jcs.length > 0) {
@@ -522,6 +667,70 @@ async function applyWipInventoryChange(
     if (t === "SOFA_ARMREST") return "ARMREST";
     return t || "WIP";
   })();
+
+  // FAB_SEW consume gate — runs whether the JC becomes IN_PROGRESS or goes
+  // straight to COMPLETED (date-cell clicks skip IN_PROGRESS, which used to
+  // orphan Fab Cut stock). Idempotent: re-calling on an already-zeroed
+  // wip_item is a no-op update.
+  const deptUpper = (jcRow.departmentCode || "").toUpperCase();
+  const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
+  const isFabSew = deptUpper === "FAB_SEW";
+  const becomingActive =
+    newStatus === "IN_PROGRESS" ||
+    newStatus === "COMPLETED" ||
+    newStatus === "TRANSFERRED";
+
+  if (isFabSew && becomingActive) {
+    if (isSofa && poRow.salesOrderId && poRow.fabricCode) {
+      // Sofa Fab Sew — the whole (SO, fabric) bolt leaves Fab Cut's shelf
+      // the moment ANY piece enters sewing. Zero every upstream FAB_CUT
+      // wip_items row in that group.
+      const siblingLabels = await db
+        .prepare(
+          `SELECT DISTINCT jc.wipLabel AS wipLabel
+             FROM production_orders po
+             JOIN job_cards jc ON jc.productionOrderId = po.id
+            WHERE po.salesOrderId = ?
+              AND po.fabricCode = ?
+              AND po.itemCategory = 'SOFA'
+              AND jc.departmentCode = 'FAB_CUT'
+              AND jc.wipLabel IS NOT NULL`,
+        )
+        .bind(poRow.salesOrderId, poRow.fabricCode)
+        .all<{ wipLabel: string | null }>();
+      const labels = (siblingLabels.results ?? [])
+        .map((r) => r.wipLabel)
+        .filter((l): l is string => !!l);
+      for (const label of labels) {
+        await db
+          .prepare(
+            "UPDATE wip_items SET stockQty = 0, status = 'IN_PRODUCTION' WHERE code = ?",
+          )
+          .bind(label)
+          .run();
+      }
+    } else if (!isSofa && wipKey) {
+      // BF / accessory Fab Sew — consume the immediate upstream wip_items
+      // row within the same wipKey by this JC's own qty.
+      const children = allJcRows
+        .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
+        .sort((a, b) => b.sequence - a.sequence);
+      const child = children[0];
+      if (child?.wipLabel) {
+        const consumeQty = jcRow.wipQty || poRow.quantity || 1;
+        await db
+          .prepare(
+            "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
+          )
+          .bind(consumeQty, child.wipLabel)
+          .run();
+      }
+    }
+    // For IN_PROGRESS-only we stop here — the existing code below used to
+    // return early after the consume. COMPLETED needs to fall through to
+    // also upsert its own FAB_SEW wip_items row.
+    if (newStatus === "IN_PROGRESS") return;
+  }
 
   if (newStatus === "COMPLETED" || newStatus === "TRANSFERRED") {
     if (isUpholstery) {
@@ -1098,6 +1307,10 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
   const includeArchive = c.req.query("includeArchive") === "true";
+  // Opt-in slim payload for the Production page: drops ~20 unused PO fields
+  // and the whole piece_pics tree. Default stays full-response for backward
+  // compat (the PO detail page + other consumers need the full shape).
+  const minimal = c.req.query("fields") === "minimal";
 
   if (!paginate) {
     const data = await fetchFilteredPOs(
@@ -1105,6 +1318,7 @@ app.get("/", async (c) => {
       statuses,
       includeJobCards,
       includeArchive,
+      minimal,
     );
     return c.json({ success: true, data, total: data.length });
   }
@@ -1119,6 +1333,7 @@ app.get("/", async (c) => {
     page,
     limit,
     includeArchive,
+    minimal,
   );
   return c.json({ success: true, data, page, limit, total });
 });

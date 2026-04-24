@@ -252,6 +252,45 @@ async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
   );
 }
 
+// Variant of fetchAllPOs that supports server-side status filtering and
+// optional omission of inlined jobCards. Used by the list endpoint so the
+// Production page can avoid shipping every PO + every JC on mount.
+//
+// - statuses: if provided (non-empty), applies `WHERE status IN (...)` at the
+//   SQL layer.
+// - includeJobCards: when false, skip the job_cards + piece_pics fetches and
+//   return POs with `jobCards: []`. Defaults to true for backward compat.
+async function fetchFilteredPOs(
+  db: D1Database,
+  statuses: string[] | null,
+  includeJobCards: boolean,
+): Promise<ProductionOrderOut[]> {
+  const hasFilter = Array.isArray(statuses) && statuses.length > 0;
+  const placeholders = hasFilter
+    ? statuses.map(() => "?").join(",")
+    : "";
+  const poSql = hasFilter
+    ? `SELECT * FROM production_orders WHERE status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
+    : "SELECT * FROM production_orders ORDER BY created_at DESC, id DESC";
+  const poStmt = hasFilter
+    ? db.prepare(poSql).bind(...(statuses as string[]))
+    : db.prepare(poSql);
+
+  if (!includeJobCards) {
+    const pos = await poStmt.all<ProductionOrderRow>();
+    return (pos.results ?? []).map((p) => rowToPO(p, [], []));
+  }
+
+  const [pos, jcs, pics] = await Promise.all([
+    poStmt.all<ProductionOrderRow>(),
+    db.prepare("SELECT * FROM job_cards").all<JobCardRow>(),
+    db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+  ]);
+  return (pos.results ?? []).map((p) =>
+    rowToPO(p, jcs.results ?? [], pics.results ?? []),
+  );
+}
+
 async function fetchPO(
   db: D1Database,
   id: string,
@@ -882,8 +921,39 @@ async function applyPoUpdate(
 // ---------------------------------------------------------------------------
 
 // GET /api/production-orders
+//
+// Query params (all optional; omitting them preserves backward-compatible
+// "return everything with JCs inlined" behavior for any legacy consumer):
+//
+//   ?status=PENDING,IN_PROGRESS,ON_HOLD
+//     Comma-separated list. Applied as SQL `WHERE status IN (...)` so we
+//     don't ship COMPLETED/CANCELLED POs to the Production page.
+//
+//   ?include=jobCards
+//     Whether to inline job_cards (and piece_pics) on each PO. Defaults to
+//     `jobCards` (included) to stay backward-compatible. Callers that only
+//     need PO headers can pass `?include=` to skip the JC joins.
 app.get("/", async (c) => {
-  const data = await fetchAllPOs(c.env.DB);
+  const statusParam = c.req.query("status");
+  const statuses = statusParam
+    ? statusParam
+        .split(",")
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0)
+    : null;
+
+  const includeParam = c.req.query("include");
+  // Backward compat: if `include` is not passed at all, inline jobCards.
+  // If it IS passed, only include jobCards when the list contains "jobCards".
+  const includeJobCards =
+    includeParam === undefined
+      ? true
+      : includeParam
+          .split(",")
+          .map((s) => s.trim())
+          .includes("jobCards");
+
+  const data = await fetchFilteredPOs(c.env.DB, statuses, includeJobCards);
   return c.json({ success: true, data, total: data.length });
 });
 

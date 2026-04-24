@@ -291,6 +291,71 @@ async function fetchFilteredPOs(
   );
 }
 
+// Paginated variant of fetchFilteredPOs. Returns the page's POs + the total
+// filtered count in one round-trip group. Uses SQL LIMIT/OFFSET on the PO
+// table and then fetches job_cards/piece_pics for ONLY the page's PO IDs
+// (not the whole table), which is the big win when the list is paginated.
+async function fetchPaginatedPOs(
+  db: D1Database,
+  statuses: string[] | null,
+  includeJobCards: boolean,
+  page: number,
+  limit: number,
+): Promise<{ data: ProductionOrderOut[]; total: number }> {
+  const hasFilter = Array.isArray(statuses) && statuses.length > 0;
+  const statusPlaceholders = hasFilter
+    ? statuses.map(() => "?").join(",")
+    : "";
+  const offset = (page - 1) * limit;
+
+  const countSql = hasFilter
+    ? `SELECT COUNT(*) AS n FROM production_orders WHERE status IN (${statusPlaceholders})`
+    : "SELECT COUNT(*) AS n FROM production_orders";
+  const pageSql = hasFilter
+    ? `SELECT * FROM production_orders WHERE status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : "SELECT * FROM production_orders ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?";
+
+  const countStmt = hasFilter
+    ? db.prepare(countSql).bind(...(statuses as string[]))
+    : db.prepare(countSql);
+  const pageStmt = hasFilter
+    ? db.prepare(pageSql).bind(...(statuses as string[]), limit, offset)
+    : db.prepare(pageSql).bind(limit, offset);
+
+  const [countRes, pageRes] = await Promise.all([
+    countStmt.first<{ n: number }>(),
+    pageStmt.all<ProductionOrderRow>(),
+  ]);
+  const total = countRes?.n ?? 0;
+  const posRows = pageRes.results ?? [];
+
+  if (!includeJobCards || posRows.length === 0) {
+    return { data: posRows.map((p) => rowToPO(p, [], [])), total };
+  }
+
+  // Scope JC + piece_pics queries to only this page's PO IDs.
+  const poIds = posRows.map((p) => p.id);
+  const jcPlaceholders = poIds.map(() => "?").join(",");
+  const jcsRes = await db
+    .prepare(`SELECT * FROM job_cards WHERE productionOrderId IN (${jcPlaceholders})`)
+    .bind(...poIds)
+    .all<JobCardRow>();
+  const jcs = jcsRes.results ?? [];
+
+  let pics: PiecePicRow[] = [];
+  if (jcs.length > 0) {
+    const jcIds = jcs.map((j) => j.id);
+    const picPlaceholders = jcIds.map(() => "?").join(",");
+    const picsRes = await db
+      .prepare(`SELECT * FROM piece_pics WHERE jobCardId IN (${picPlaceholders})`)
+      .bind(...jcIds)
+      .all<PiecePicRow>();
+    pics = picsRes.results ?? [];
+  }
+
+  return { data: posRows.map((p) => rowToPO(p, jcs, pics)), total };
+}
+
 async function fetchPO(
   db: D1Database,
   id: string,
@@ -933,6 +998,14 @@ async function applyPoUpdate(
 //     Whether to inline job_cards (and piece_pics) on each PO. Defaults to
 //     `jobCards` (included) to stay backward-compatible. Callers that only
 //     need PO headers can pass `?include=` to skip the JC joins.
+//
+//   ?page=N&limit=M
+//     Opt-in pagination. When either is supplied, response includes
+//     { page, limit } and `data` is sliced. When both omitted, the full
+//     result set is returned (backward compatible). Default page=1,
+//     default limit=50, hard cap limit=500. Slicing happens AFTER status
+//     filter and AFTER rowToPO shaping, so `total` is always the filtered
+//     total (not the page length).
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam
@@ -953,8 +1026,26 @@ app.get("/", async (c) => {
           .map((s) => s.trim())
           .includes("jobCards");
 
-  const data = await fetchFilteredPOs(c.env.DB, statuses, includeJobCards);
-  return c.json({ success: true, data, total: data.length });
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
+
+  if (!paginate) {
+    const data = await fetchFilteredPOs(c.env.DB, statuses, includeJobCards);
+    return c.json({ success: true, data, total: data.length });
+  }
+
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
+  const limit = Math.min(500, Math.max(1, rawLimit));
+  const { data, total } = await fetchPaginatedPOs(
+    c.env.DB,
+    statuses,
+    includeJobCards,
+    page,
+    limit,
+  );
+  return c.json({ success: true, data, page, limit, total });
 });
 
 // ---------------------------------------------------------------------------

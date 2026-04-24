@@ -27,7 +27,9 @@ type AgingRow = {
   total: number;
 };
 
-const PAGE_SIZE = 50;
+// Page size 200 — client-side search only sees the current page, so big
+// enough to fit typical working set in one go.
+const PAGE_SIZE = 200;
 
 export default function InvoicesPage() {
   const navigate = useNavigate();

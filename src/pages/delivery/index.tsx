@@ -266,7 +266,9 @@ export default function DeliveryPage() {
   // Server-side pagination for the DO fetch; PO-based tabs (planning,
   // pending_delivery) and the other sibling fetches (POs, SOs, customers)
   // remain full-set and unaffected.
-  const PAGE_SIZE = 50;
+  // 200 — same rationale as sales/invoices: big enough that daily working
+  // set fits on page 1 so search works normally.
+  const PAGE_SIZE = 200;
   const [page, setPage] = useState(1);
 
   // ---------- Fetch ----------

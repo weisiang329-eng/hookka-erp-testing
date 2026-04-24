@@ -45,7 +45,11 @@ const ALL_STATUSES = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
-const PAGE_SIZE = 50;
+// Page size 200 — enough to fit the entire current SO list on one page
+// so search/filter work normally (client-side search can't see other
+// pages). Pagination still kicks in past 200 rows, but day-to-day users
+// stay on page 1.
+const PAGE_SIZE = 200;
 
 export default function SalesPage() {
   const { toast } = useToast();

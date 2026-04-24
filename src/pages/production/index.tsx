@@ -1349,10 +1349,10 @@ export default function ProductionPage() {
         [
           modelText,
           r.size ? `(${r.size})` : "",
-          // BF-only: show the Divan height on its own because the cutter
-          // sizes the bolt to the divan first; total height is reference.
-          r.category === "BEDFRAME" && r.divan ? `(DV ${r.divan})` : "",
+          // BF-only: total height first (overall dimension), then Divan
+          // height for the specific panel the cutter sizes the bolt to.
           r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
+          r.category === "BEDFRAME" && r.divan ? `(DV ${r.divan})` : "",
           r.colour,
           "(FC)",
         ].filter(Boolean).join(" | ");

@@ -466,12 +466,12 @@ function deriveWIPFromPO(
           wipCodeStr = [
             po.productCode,
             po.sizeLabel ? `(${po.sizeLabel})` : "",
-            // BF-only: Divan height first (cutter sizes the bolt to divan),
-            // total height after for reference. Kept in lockstep with
-            // Production page's fabCutWIP() helper so Inventory WIP codes
-            // match exactly what operators see on the Fab Cut tab.
-            isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
+            // BF-only: total height first, Divan height after. Kept in
+            // lockstep with Production page's fabCutWIP() helper so
+            // Inventory WIP codes match exactly what operators see on the
+            // Fab Cut tab.
             isBF && totalH > 0 ? `(${totalH}")` : "",
+            isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
             po.fabricCode || "",
             "(FC)",
           ].filter(Boolean).join(" | ");

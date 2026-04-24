@@ -1064,6 +1064,11 @@ export default function ProductionPage() {
     // patch across every id in this array; other depts leave it undefined
     // and keep per-WIP behaviour.
     _mergedJobCardIds?: string[];
+    // Per-JC (poId, jobCardId) pairs for merged Fab Cut rows. Required when
+    // the merge spans multiple POs (sofa variants on one SO cut from the
+    // same cloth each live under their own PO) — patching every JC under
+    // `row.poId` silently drops updates for siblings on other POs.
+    _mergedJobCardRefs?: Array<{ poId: string; jobCardId: string }>;
   };
 
   // Build a DeptSched from a candidate JobCard (or null if no card exists).
@@ -1420,6 +1425,7 @@ export default function ProductionPage() {
           // when every component in the merge is actually complete.
           sched_FAB_CUT: aggSched,
           _mergedJobCardIds: group.map((g) => g.jobCardId),
+          _mergedJobCardRefs: group.map((g) => ({ poId: g.poId, jobCardId: g.jobCardId })),
         });
       }
       return merged;
@@ -1592,12 +1598,13 @@ export default function ProductionPage() {
               patch.completedDate = "";
             }
             // Fan-out for FAB_CUT merged rows so a status change applies
-            // to every component that was cut in the same pass.
-            const ids = row._mergedJobCardIds && row._mergedJobCardIds.length > 0
-              ? row._mergedJobCardIds
-              : [row.jobCardId];
-            for (const jcId of ids) {
-              patchJobCard(row.poId, jcId, patch);
+            // to every component that was cut in the same pass. Use the
+            // per-JC poId refs because a sofa merge can span multiple POs.
+            const refs = row._mergedJobCardRefs && row._mergedJobCardRefs.length > 0
+              ? row._mergedJobCardRefs
+              : [{ poId: row.poId, jobCardId: row.jobCardId }];
+            for (const { poId, jobCardId } of refs) {
+              patchJobCard(poId, jobCardId, patch);
             }
           }}
           onClick={(e) => e.stopPropagation()}
@@ -1624,11 +1631,11 @@ export default function ProductionPage() {
   const renderCompletionCell = (row: DeptRow) => {
     const has = !!row.completedDate;
     // Fan-out for FAB_CUT merged rows — stamp / clear the date on every
-    // child job card so the whole cut-batch flips state together. Single-
-    // row jcs fall through the default single-id path.
-    const ids = row._mergedJobCardIds && row._mergedJobCardIds.length > 0
-      ? row._mergedJobCardIds
-      : [row.jobCardId];
+    // child job card so the whole cut-batch flips state together. Use the
+    // per-JC poId refs because a sofa merge can span multiple POs.
+    const refs = row._mergedJobCardRefs && row._mergedJobCardRefs.length > 0
+      ? row._mergedJobCardRefs
+      : [{ poId: row.poId, jobCardId: row.jobCardId }];
     return (
       <div
         className="relative w-full h-full min-h-[22px] cursor-pointer"
@@ -1637,8 +1644,8 @@ export default function ProductionPage() {
           openDatePicker(
             row.completedDate,
             (v) => {
-              for (const jcId of ids) {
-                patchJobCard(row.poId, jcId, {
+              for (const { poId, jobCardId } of refs) {
+                patchJobCard(poId, jobCardId, {
                   completedDate: v,
                   status: v ? "COMPLETED" : "WAITING",
                 });
@@ -1648,7 +1655,7 @@ export default function ProductionPage() {
           );
         }}
         onDoubleClick={(e) => e.stopPropagation()}
-        title={ids.length > 1 ? `Click to set completion date (${ids.length} components)` : "Click to set completion date"}
+        title={refs.length > 1 ? `Click to set completion date (${refs.length} components)` : "Click to set completion date"}
       >
         <span
           className={`flex items-center justify-center px-1.5 py-[2px] rounded-sm text-[10px] font-semibold whitespace-nowrap leading-tight w-full ${

@@ -1439,7 +1439,13 @@ export default function ProductsPage() {
                             <div className="px-3 py-1.5 text-sm text-[#111827]">{p.baseModel}</div>
                             {(['24"', '28"', '30"', '32"', '35"'] as const).map((h) => {
                               const hNum = h.replace('"', '');
-                              const sh = (p.seatHeightPrices || []).find((s) => s.height === h || s.height === hNum);
+                              // Match heights regardless of storage type — DB has carried
+                              // int 24, string "24", and string '24"' at different times, so
+                              // normalise both sides before comparing. Prevents the find()
+                              // miss that caused the Products page to show blank sofa prices
+                              // and produced duplicate entries on edit.
+                              const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
+                              const sh = (p.seatHeightPrices || []).find((s) => norm(s.height) === hNum);
                               const editKey = `${p.id}__${h}`;
                               const isEditingThis = editingSeatPrices === editKey;
                               return (
@@ -1456,12 +1462,16 @@ export default function ProductsPage() {
                                         setEditingSeatPrices(null);
                                         const hN = h.replace('"', '');
                                         let arr = p.seatHeightPrices || [];
-                                        // If height entry doesn't exist yet, add it
-                                        if (!arr.find((s) => s.height === h || s.height === hN)) {
+                                        // Same normalisation rule as the read path so we never
+                                        // accidentally append a duplicate entry (string "28"
+                                        // next to int 28, or '28"' next to "28"). The canonical
+                                        // stored form is the plain string "24".."35" — set by
+                                        // migration 0031 and maintained on every write below.
+                                        if (!arr.find((s) => norm(s.height) === hN)) {
                                           arr = [...arr, { height: hN, priceSen: val }];
                                         }
                                         const updated = arr.map((s) =>
-                                          (s.height === h || s.height === hN) ? { ...s, priceSen: val } : s
+                                          norm(s.height) === hN ? { ...s, height: hN, priceSen: val } : s
                                         );
                                         setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, seatHeightPrices: updated } : pr));
                                         fetch(`/api/products/${p.id}`, {

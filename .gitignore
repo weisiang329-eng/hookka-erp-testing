@@ -40,6 +40,11 @@ tsc-out.txt
 # Derived from seed.sql via scripts/chunk-seed.ts
 migrations/seed-chunks/
 
+# D1 → Supabase migration artifacts — D1 export contains live customer /
+# order / job-card data; keep out of the repo.
+d1-backup.sql
+d1-*.sql
+
 # Recovered localStorage snapshot (one-shot, not versioned)
 recovered-bom-templates.json
 tmp-*.json

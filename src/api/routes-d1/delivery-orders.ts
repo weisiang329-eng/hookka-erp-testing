@@ -220,7 +220,7 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
 // other three list endpoints but never changes the result set. Left as
 // a param so callers can pass the same query string uniformly.
 app.get("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
@@ -282,7 +282,7 @@ app.get("/", async (c) => {
 // (Hono route ordering: static routes before wildcards).
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
-  const res = await c.env.DB
+  const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM delivery_orders GROUP BY status")
     .all<{ status: string; n: number }>();
   const byStatus: Record<string, number> = {};
@@ -323,7 +323,7 @@ app.post("/", async (c) => {
     let resolvedSalesOrderId: string | undefined = body.salesOrderId ?? undefined;
     if (productionOrderIds.length > 0) {
       const placeholders = productionOrderIds.map(() => "?").join(",");
-      const poRes = await c.env.DB.prepare(
+      const poRes = await c.var.DB.prepare(
         `SELECT id, poNo, salesOrderId, companySOId, productCode, productName,
                 sizeLabel, fabricCode, quantity, rackingNumber
            FROM production_orders WHERE id IN (${placeholders})`,
@@ -369,7 +369,7 @@ app.post("/", async (c) => {
       hookkaExpectedDD: string | null;
     } | null = null;
     if (salesOrderId) {
-      salesOrderRow = await c.env.DB.prepare(
+      salesOrderRow = await c.var.DB.prepare(
         `SELECT id, customerId, customerName, customerState, customerPOId,
                 companySO, companySOId, hubId, hookkaExpectedDD
            FROM sales_orders WHERE id = ?`,
@@ -392,7 +392,7 @@ app.post("/", async (c) => {
         400,
       );
     }
-    const customerRow = await c.env.DB.prepare(
+    const customerRow = await c.var.DB.prepare(
       `SELECT id, name, contactName, phone FROM customers WHERE id = ?`,
     )
       .bind(customerId)
@@ -415,13 +415,13 @@ app.post("/", async (c) => {
     } | null = null;
     const hubTarget = body.hubId ?? salesOrderRow?.hubId ?? null;
     if (hubTarget) {
-      defaultHub = await c.env.DB.prepare(
+      defaultHub = await c.var.DB.prepare(
         "SELECT id, shortName, address FROM delivery_hubs WHERE id = ?",
       )
         .bind(hubTarget)
         .first();
     } else {
-      defaultHub = await c.env.DB.prepare(
+      defaultHub = await c.var.DB.prepare(
         "SELECT id, shortName, address FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 1",
       )
         .bind(customerId)
@@ -474,7 +474,7 @@ app.post("/", async (c) => {
     const doNo: string = body.doNo || genNextDoNo();
 
     const statements = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO delivery_orders (
            id, doNo, salesOrderId, companySO, companySOId, customerId,
            customerPOId, customerName, customerState, hubId, hubName,
@@ -527,7 +527,7 @@ app.post("/", async (c) => {
         now,
       ),
       ...items.map((item) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO delivery_order_items (
              id, deliveryOrderId, productionOrderId, poNo, productCode,
              productName, sizeLabel, fabricCode, quantity, itemM3,
@@ -555,7 +555,7 @@ app.post("/", async (c) => {
     // knows a DO exists. We do this inside the batch so it rolls back together.
     if (salesOrderRow) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "UPDATE sales_orders SET hookkaDeliveryOrder = ?, updated_at = ? WHERE id = ?",
         ).bind(doNo, now, salesOrderRow.id),
       );
@@ -567,12 +567,12 @@ app.post("/", async (c) => {
     if (poRowsForItems.length > 0) {
       for (const po of poRowsForItems) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `UPDATE fg_units
                 SET doId = ?, status = 'LOADED', loadedAt = ?
               WHERE poId = ? AND (doId IS NULL OR doId = '')`,
           ).bind(id, now, po.id),
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO stock_movements (
                id, type, rackLocationId, rackLabel, productionOrderId,
                productCode, productName, quantity, reason, performedBy,
@@ -593,9 +593,9 @@ app.post("/", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchOrderWithItems(c.env.DB, id);
+    const created = await fetchOrderWithItems(c.var.DB, id);
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create delivery order" },
@@ -610,7 +610,7 @@ app.post("/", async (c) => {
 
 // GET /api/delivery-orders/:id — single
 app.get("/:id", async (c) => {
-  const order = await fetchOrderWithItems(c.env.DB, c.req.param("id"));
+  const order = await fetchOrderWithItems(c.var.DB, c.req.param("id"));
   if (!order) {
     return c.json({ success: false, error: "Delivery order not found" }, 404);
   }
@@ -622,7 +622,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM delivery_orders WHERE id = ?",
     )
       .bind(id)
@@ -732,7 +732,7 @@ app.put("/:id", async (c) => {
 
     // --- lorry lookup: if a new lorryId is provided, pick up driver/plate ---
     if (body.lorryId !== undefined && body.lorryId) {
-      const lorry = await c.env.DB.prepare(
+      const lorry = await c.var.DB.prepare(
         "SELECT id, name, plateNumber, driverName FROM lorries WHERE id = ?",
       )
         .bind(body.lorryId)
@@ -755,7 +755,7 @@ app.put("/:id", async (c) => {
 
     // --- driver → 3PL lookup: auto-fill vehicle + recompute cost ---
     if (body.driverId !== undefined && body.driverId) {
-      const provider = await c.env.DB.prepare(
+      const provider = await c.var.DB.prepare(
         "SELECT id, name, vehicleNo, ratePerTripSen, ratePerExtraDropSen FROM three_pl_providers WHERE id = ?",
       )
         .bind(body.driverId)
@@ -809,7 +809,7 @@ app.put("/:id", async (c) => {
 
     // --- batch the update + optional items replacement ---
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE delivery_orders SET
            deliveryDate = ?, driverId = ?, driverName = ?, vehicleNo = ?,
            deliveryAddress = ?, contactPerson = ?, contactPhone = ?,
@@ -845,13 +845,13 @@ app.put("/:id", async (c) => {
 
     if (newItems !== null) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM delivery_order_items WHERE deliveryOrderId = ?",
         ).bind(id),
       );
       for (const item of newItems) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO delivery_order_items (
                id, deliveryOrderId, productionOrderId, poNo, productCode,
                productName, sizeLabel, fabricCode, quantity, itemM3,
@@ -889,7 +889,7 @@ app.put("/:id", async (c) => {
     if (cascadedToDelivered) {
       // fg_units sync: flip every unit whose doId matches.
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE fg_units SET status = 'DELIVERED', deliveredAt = ? WHERE doId = ?`,
         ).bind(nextDeliveredAt ?? now, id),
       );
@@ -906,7 +906,7 @@ app.put("/:id", async (c) => {
             quantity: i.quantity,
           }))
         : (
-            await c.env.DB.prepare(
+            await c.var.DB.prepare(
               `SELECT id, productCode, productName, quantity
                  FROM delivery_order_items WHERE deliveryOrderId = ?`,
             )
@@ -919,7 +919,7 @@ app.put("/:id", async (c) => {
               }>()
           ).results ?? [];
       const cogs = await consumeFGBatchesForDO(
-        c.env.DB,
+        c.var.DB,
         id,
         existing.doNo,
         itemsForCogs,
@@ -931,7 +931,7 @@ app.put("/:id", async (c) => {
 
       // SO status cascade — only if this DO is linked to a SO.
       if (existing.salesOrderId) {
-        const soRow = await c.env.DB.prepare(
+        const soRow = await c.var.DB.prepare(
           "SELECT id, status, totalSen FROM sales_orders WHERE id = ?",
         )
           .bind(existing.salesOrderId)
@@ -939,10 +939,10 @@ app.put("/:id", async (c) => {
 
         if (soRow && soRow.status !== "DELIVERED") {
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               "UPDATE sales_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
             ).bind(now, soRow.id),
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO so_status_changes
                  (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -960,7 +960,7 @@ app.put("/:id", async (c) => {
         }
 
         // Auto-create DRAFT invoice — idempotent check.
-        const existingInvoice = await c.env.DB.prepare(
+        const existingInvoice = await c.var.DB.prepare(
           "SELECT id FROM invoices WHERE deliveryOrderId = ? LIMIT 1",
         )
           .bind(id)
@@ -971,7 +971,7 @@ app.put("/:id", async (c) => {
           // (same pattern used by the invoices POST route). Fall back to the
           // SO items themselves if the DO has no lines.
           const [doItemsRes, soItemsRes] = await Promise.all([
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `SELECT productCode, productName, sizeLabel, fabricCode, quantity
                  FROM delivery_order_items WHERE deliveryOrderId = ?`,
             )
@@ -983,7 +983,7 @@ app.put("/:id", async (c) => {
                 fabricCode: string | null;
                 quantity: number;
               }>(),
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `SELECT productCode, productName, sizeLabel, fabricCode, quantity, unitPriceSen, lineTotalSen
                  FROM sales_order_items WHERE salesOrderId = ?`,
             )
@@ -1063,7 +1063,7 @@ app.put("/:id", async (c) => {
           const dueDate = due.toISOString().split("T")[0];
 
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO invoices (
                  id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
                  customerId, customerName, customerState, hubId, hubName,
@@ -1097,7 +1097,7 @@ app.put("/:id", async (c) => {
           );
           for (const item of invItems) {
             statements.push(
-              c.env.DB.prepare(
+              c.var.DB.prepare(
                 `INSERT INTO invoice_items (
                    id, invoiceId, productCode, productName, sizeLabel, fabricCode,
                    quantity, unitPriceSen, totalSen
@@ -1119,9 +1119,9 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await fetchOrderWithItems(c.env.DB, id);
+    const updated = await fetchOrderWithItems(c.var.DB, id);
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -1131,7 +1131,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/delivery-orders/:id — only DRAFT rows are deletable.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id, status FROM delivery_orders WHERE id = ?",
   )
     .bind(id)
@@ -1148,11 +1148,11 @@ app.delete("/:id", async (c) => {
       400,
     );
   }
-  await c.env.DB.batch([
-    c.env.DB.prepare(
+  await c.var.DB.batch([
+    c.var.DB.prepare(
       "DELETE FROM delivery_order_items WHERE deliveryOrderId = ?",
     ).bind(id),
-    c.env.DB.prepare("DELETE FROM delivery_orders WHERE id = ?").bind(id),
+    c.var.DB.prepare("DELETE FROM delivery_orders WHERE id = ?").bind(id),
   ]);
   return c.json({ success: true });
 });

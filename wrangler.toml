@@ -19,14 +19,30 @@ compatibility_flags = ["nodejs_compat"]
 # Pages project (SPA + Pages Functions)
 pages_build_output_dir = "dist"
 
-# D1 database binding — the single source of truth for all business data.
-# Create the DB after first deploy with:
-#   wrangler d1 create hookka-erp-db
-# then paste the returned `database_id` below.
+# D1 database binding — legacy source of truth. Being phased out in favor
+# of Supabase behind Hyperdrive (see [[hyperdrive]] below). Routes now go
+# through the D1Compat adapter that targets Supabase; the D1 binding is
+# retained so fallback / rollback remains one config toggle away until
+# Phase 7 retires it.
 [[d1_databases]]
 binding = "DB"
 database_name = "hookka-erp-db"
 database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
+
+# Hyperdrive — proxies the Supabase pooler (Singapore) from Workers with
+# edge connection pooling. Without this, postgres wire-protocol round trips
+# blow through the Workers subrequest budget on the first query.
+# Connection string stored on the Hyperdrive config itself (set at creation).
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "b0fc9d10217c42bfa793b050d1abed65"
+
+# SESSION_CACHE — KV for per-request hot data.  Primary use: auth session
+# lookup (saves ~15ms DB round trip on every authenticated request).  Also
+# used by Phase 4 for BOM / SKU / permission cache.
+[[kv_namespaces]]
+binding = "SESSION_CACHE"
+id = "8f4c4b7ac1f142ff8378eada4602458a"
 
 # Runtime env vars — override per environment (dev/preview/prod) on the
 # Cloudflare dashboard or via wrangler secret put.

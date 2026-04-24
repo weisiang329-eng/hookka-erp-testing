@@ -134,9 +134,9 @@ function genRmId(): string {
 // GET /api/inventory — all three buckets
 app.get("/", async (c) => {
   const [productsRes, wipRes, rmRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM products ORDER BY code").all<ProductRow>(),
-    c.env.DB.prepare("SELECT * FROM wip_items ORDER BY id").all<WipItemRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare("SELECT * FROM products ORDER BY code").all<ProductRow>(),
+    c.var.DB.prepare("SELECT * FROM wip_items ORDER BY id").all<WipItemRow>(),
+    c.var.DB.prepare(
       "SELECT * FROM raw_materials ORDER BY itemCode",
     ).all<RawMaterialRow>(),
   ]);
@@ -171,7 +171,7 @@ app.post("/raw-materials", async (c) => {
     }
 
     // Duplicate check — matches in-memory uniqueness on itemCode
-    const exists = await c.env.DB.prepare(
+    const exists = await c.var.DB.prepare(
       "SELECT id FROM raw_materials WHERE itemCode = ? LIMIT 1",
     )
       .bind(itemCode)
@@ -189,7 +189,7 @@ app.post("/raw-materials", async (c) => {
     const balanceQty = Number(body.balanceQty) || 0;
     const uom = baseUOM || "PCS";
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO raw_materials (id, itemCode, description, baseUOM, itemGroup,
          isActive, balanceQty)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -197,7 +197,7 @@ app.post("/raw-materials", async (c) => {
       .bind(id, itemCode, description, uom, itemGroup, isActive, balanceQty)
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM raw_materials WHERE id = ?",
     )
       .bind(id)

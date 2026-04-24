@@ -142,19 +142,19 @@ async function safeAll<T>(db: D1Database, sql: string): Promise<T[]> {
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const [accountsRes, txsRes, entriesRes, linesRes, invoices, pos] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM bank_accounts").all<BankAccountRow>(),
-    c.env.DB.prepare("SELECT * FROM bank_transactions ORDER BY date DESC").all<BankTxRow>(),
+    c.var.DB.prepare("SELECT * FROM bank_accounts").all<BankAccountRow>(),
+    c.var.DB.prepare("SELECT * FROM bank_transactions ORDER BY date DESC").all<BankTxRow>(),
     safeAll<JournalEntryRow>(
-      c.env.DB,
+      c.var.DB,
       "SELECT id, entryNo, date, description, status FROM journal_entries ORDER BY date DESC",
     ),
-    safeAll<JournalLineRow>(c.env.DB, "SELECT * FROM journal_lines"),
+    safeAll<JournalLineRow>(c.var.DB, "SELECT * FROM journal_lines"),
     safeAll<InvoiceRow>(
-      c.env.DB,
+      c.var.DB,
       "SELECT id, status, dueDate, totalSen, COALESCE(paidAmount, 0) AS paidAmount FROM invoices",
     ),
     safeAll<PoRow>(
-      c.env.DB,
+      c.var.DB,
       "SELECT id, status, expectedDate, totalSen FROM purchase_orders",
     ),
   ]);
@@ -248,7 +248,7 @@ app.post("/", async (c) => {
       }
 
       const id = genId();
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `INSERT INTO bank_transactions
            (id, bankAccountId, date, description, amountSen, type, reference, isReconciled)
          VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
@@ -257,13 +257,13 @@ app.post("/", async (c) => {
         .run();
 
       // Adjust bank account balance.
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE bank_accounts SET balanceSen = balanceSen + ? WHERE id = ?",
       )
         .bind(amountSen, bankAccountId)
         .run();
 
-      const tx = await c.env.DB.prepare(
+      const tx = await c.var.DB.prepare(
         "SELECT * FROM bank_transactions WHERE id = ?",
       )
         .bind(id)
@@ -276,7 +276,7 @@ app.post("/", async (c) => {
       if (!bankTransactionId) {
         return c.json({ error: "bankTransactionId is required" }, 400);
       }
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE bank_transactions SET isReconciled = 1, matchedJournalId = ? WHERE id = ?",
       )
         .bind(journalEntryId ?? null, bankTransactionId)

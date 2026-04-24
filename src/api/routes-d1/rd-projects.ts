@@ -140,10 +140,10 @@ app.get("/", async (c) => {
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const [projRes, protoRes] = await Promise.all([
-    c.env.DB.prepare(`SELECT * FROM rd_projects ${where}`)
+    c.var.DB.prepare(`SELECT * FROM rd_projects ${where}`)
       .bind(...params)
       .all<ProjectRow>(),
-    c.env.DB.prepare("SELECT * FROM rd_prototypes").all<PrototypeRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes").all<PrototypeRow>(),
   ]);
   const data = (projRes.results ?? []).map((r) =>
     rowToProject(r, protoRes.results ?? []),
@@ -166,7 +166,7 @@ app.post("/", async (c) => {
     const now = new Date();
     const yy = String(now.getFullYear()).slice(-2);
     const mm = String(now.getMonth() + 1).padStart(2, "0");
-    const countRes = await c.env.DB.prepare(
+    const countRes = await c.var.DB.prepare(
       "SELECT COUNT(*) as n FROM rd_projects",
     ).first<{ n: number }>();
     const seq = String((countRes?.n ?? 0) + 1).padStart(3, "0");
@@ -189,7 +189,7 @@ app.post("/", async (c) => {
 
     const id = genId("rd");
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO rd_projects (id, code, name, description, projectType, productCategory,
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
          milestones, productionBOM, materialIssuances, labourLogs, createdDate, status)
@@ -217,7 +217,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM rd_projects WHERE id = ?",
     )
       .bind(id)
@@ -238,10 +238,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, protos] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
       .bind(id)
       .first<ProjectRow>(),
-    c.env.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
       .bind(id)
       .all<PrototypeRow>(),
   ]);
@@ -258,7 +258,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM rd_projects WHERE id = ?",
     )
       .bind(id)
@@ -302,7 +302,7 @@ app.put("/:id", async (c) => {
       status: body.status ?? existing.status,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE rd_projects SET
          name = ?, description = ?, projectType = ?, serviceId = ?,
          productCategory = ?, currentStage = ?, targetLaunchDate = ?,
@@ -332,10 +332,10 @@ app.put("/:id", async (c) => {
       .run();
 
     const [updated, protos] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
         .bind(id)
         .first<ProjectRow>(),
-      c.env.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
         .bind(id)
         .all<PrototypeRow>(),
     ]);
@@ -355,7 +355,7 @@ app.put("/:id", async (c) => {
 app.post("/:id/issue-material", async (c) => {
   const id = c.req.param("id");
   try {
-    const project = await c.env.DB.prepare(
+    const project = await c.var.DB.prepare(
       "SELECT * FROM rd_projects WHERE id = ?",
     )
       .bind(id)
@@ -372,7 +372,7 @@ app.post("/:id/issue-material", async (c) => {
       );
     }
 
-    const rm = await c.env.DB.prepare(
+    const rm = await c.var.DB.prepare(
       "SELECT id, itemCode, description, itemGroup, baseUOM, balanceQty FROM raw_materials WHERE id = ?",
     )
       .bind(materialId)
@@ -395,7 +395,7 @@ app.post("/:id/issue-material", async (c) => {
     const totalCostSen = Math.round(unitCostSen * qty);
 
     // Deduct raw material stock
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE raw_materials SET balanceQty = balanceQty - ? WHERE id = ?",
     )
       .bind(qty, materialId)
@@ -428,17 +428,17 @@ app.post("/:id/issue-material", async (c) => {
       0,
     );
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
     )
       .bind(JSON.stringify(nextIssuances), nextActualCost, id)
       .run();
 
     const [updated, protos] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
         .bind(id)
         .first<ProjectRow>(),
-      c.env.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
         .bind(id)
         .all<PrototypeRow>(),
     ]);
@@ -461,7 +461,7 @@ app.post("/:id/issue-material", async (c) => {
 app.post("/:id/labour-log", async (c) => {
   const id = c.req.param("id");
   try {
-    const project = await c.env.DB.prepare(
+    const project = await c.var.DB.prepare(
       "SELECT * FROM rd_projects WHERE id = ?",
     )
       .bind(id)
@@ -496,17 +496,17 @@ app.post("/:id/labour-log", async (c) => {
     };
     const nextLogs = [...existingLogs, log];
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE rd_projects SET labourLogs = ? WHERE id = ?",
     )
       .bind(JSON.stringify(nextLogs), id)
       .run();
 
     const [updated, protos] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
         .bind(id)
         .first<ProjectRow>(),
-      c.env.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
         .bind(id)
         .all<PrototypeRow>(),
     ]);
@@ -526,17 +526,17 @@ app.post("/:id/labour-log", async (c) => {
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, protos] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
       .bind(id)
       .first<ProjectRow>(),
-    c.env.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
       .bind(id)
       .all<PrototypeRow>(),
   ]);
   if (!row) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM rd_projects WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM rd_projects WHERE id = ?")
     .bind(id)
     .run();
   return c.json({

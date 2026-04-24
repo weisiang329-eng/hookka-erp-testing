@@ -32,13 +32,11 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   }
 }
 
-// Wrap a D1Database so every .prepare().all()/first()/run() logs when slow.
-// Drop-in replacement — `const db = instrumentD1(c.env.DB, c.req.url)`.
-//
-// Works by proxying `prepare` to return a proxied statement whose terminal
-// methods (.all, .first, .run, .raw) record the elapsed ms. No change needed
-// at callsites.
-export function instrumentD1(db: D1Database, routeLabel: string): D1Database {
+// Wrap a D1Database (or Postgres-compat D1Compat) so every
+// .prepare().all()/first()/run() logs when slow.  Drop-in replacement —
+//   const db = instrumentD1(c.var.DB, c.req.url)
+// Generic preserves the concrete DB type for the caller.
+export function instrumentD1<T extends object>(db: T, routeLabel: string): T {
   return new Proxy(db, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);
@@ -49,7 +47,7 @@ export function instrumentD1(db: D1Database, routeLabel: string): D1Database {
         };
       }
       if (prop === "batch" && typeof orig === "function") {
-        return async (statements: D1PreparedStatement[]) => {
+        return async (statements: unknown[]) => {
           const start = Date.now();
           const res = await orig.call(target, statements);
           const dur = Date.now() - start;
@@ -63,10 +61,10 @@ export function instrumentD1(db: D1Database, routeLabel: string): D1Database {
       }
       return typeof orig === "function" ? orig.bind(target) : orig;
     },
-  });
+  }) as T;
 }
 
-function wrapStatement(stmt: D1PreparedStatement, sql: string, routeLabel: string): D1PreparedStatement {
+function wrapStatement(stmt: object, sql: string, routeLabel: string): object {
   return new Proxy(stmt, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);

@@ -191,8 +191,8 @@ function boolToInt(v: unknown, fallback: 0 | 1): 0 | 1 {
 // GET /api/suppliers — list all suppliers + their materials
 app.get("/", async (c) => {
   const [suppliers, materials] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM suppliers ORDER BY code").all<SupplierRow>(),
-    c.env.DB.prepare("SELECT * FROM supplier_materials").all<SupplierMaterialRow>(),
+    c.var.DB.prepare("SELECT * FROM suppliers ORDER BY code").all<SupplierRow>(),
+    c.var.DB.prepare("SELECT * FROM supplier_materials").all<SupplierMaterialRow>(),
   ]);
   const data = (suppliers.results ?? []).map((s) =>
     rowToSupplier(s, materials.results ?? []),
@@ -215,7 +215,7 @@ app.post("/", async (c) => {
     const materials = sanitizeMaterials(body.materials);
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO suppliers (id, code, name, contactPerson, phone, email,
            address, state, paymentTerms, status, rating,
            controlAccount, creditorType, registrationNo, taxEntityTin,
@@ -268,7 +268,7 @@ app.post("/", async (c) => {
     ];
     for (const m of materials) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO supplier_materials (supplierId, materialCategory,
              supplierSKU, unitPriceSen, leadTimeDays, minOrderQty, priority)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -283,13 +283,13 @@ app.post("/", async (c) => {
         ),
       );
     }
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     const [created, matsRes] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
         .bind(id)
         .first<SupplierRow>(),
-      c.env.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
+      c.var.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
         .bind(id)
         .all<SupplierMaterialRow>(),
     ]);
@@ -312,10 +312,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [supplier, matsRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
       .bind(id)
       .first<SupplierRow>(),
-    c.env.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
+    c.var.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
       .bind(id)
       .all<SupplierMaterialRow>(),
   ]);
@@ -332,7 +332,7 @@ app.get("/:id", async (c) => {
 // body.materials is supplied. DELETE + re-INSERT as one batch for atomicity.
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
     .bind(id)
     .first<SupplierRow>();
   if (!existing) {
@@ -406,7 +406,7 @@ app.put("/:id", async (c) => {
     };
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE suppliers SET code = ?, name = ?, contactPerson = ?, phone = ?,
            email = ?, address = ?, state = ?, paymentTerms = ?, status = ?,
            rating = ?,
@@ -461,13 +461,13 @@ app.put("/:id", async (c) => {
     if (body.materials !== undefined) {
       const materials = sanitizeMaterials(body.materials);
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM supplier_materials WHERE supplierId = ?",
         ).bind(id),
       );
       for (const m of materials) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO supplier_materials (supplierId, materialCategory,
                supplierSKU, unitPriceSen, leadTimeDays, minOrderQty, priority)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -484,13 +484,13 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     const [updated, matsRes] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
         .bind(id)
         .first<SupplierRow>(),
-      c.env.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
+      c.var.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
         .bind(id)
         .all<SupplierMaterialRow>(),
     ]);
@@ -513,17 +513,17 @@ app.put("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const [existing, matsRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
       .bind(id)
       .first<SupplierRow>(),
-    c.env.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
+    c.var.DB.prepare("SELECT * FROM supplier_materials WHERE supplierId = ?")
       .bind(id)
       .all<SupplierMaterialRow>(),
   ]);
   if (!existing) {
     return c.json({ success: false, error: "Supplier not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM suppliers WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM suppliers WHERE id = ?").bind(id).run();
   return c.json({
     success: true,
     data: rowToSupplier(existing, matsRes.results ?? []),

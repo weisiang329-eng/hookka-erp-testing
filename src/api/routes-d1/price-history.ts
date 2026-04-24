@@ -65,7 +65,7 @@ app.get("/", async (c) => {
     where.length > 0
       ? `SELECT * FROM price_histories WHERE ${where.join(" AND ")} ORDER BY changedDate DESC`
       : "SELECT * FROM price_histories ORDER BY changedDate DESC";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<PriceHistoryRow>();
   const data = (res.results ?? []).map(rowToHistory);
@@ -110,7 +110,7 @@ app.post("/", async (c) => {
           ? body.approvalStatus
           : "PENDING",
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO price_histories (id, bindingId, supplierId, materialCode,
          oldPrice, newPrice, currency, changedDate, changedBy, reason,
          approvalStatus)
@@ -130,7 +130,7 @@ app.post("/", async (c) => {
         row.approvalStatus,
       )
       .run();
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM price_histories WHERE id = ?",
     )
       .bind(id)

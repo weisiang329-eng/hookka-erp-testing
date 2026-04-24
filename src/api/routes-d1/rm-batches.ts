@@ -62,8 +62,8 @@ app.get("/", async (c) => {
     ? "SELECT * FROM rm_batches WHERE rmId = ? ORDER BY receivedDate DESC"
     : "SELECT * FROM rm_batches ORDER BY receivedDate DESC";
   const stmt = rmId
-    ? c.env.DB.prepare(sql).bind(rmId)
-    : c.env.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(rmId)
+    : c.var.DB.prepare(sql);
   const res = await stmt.all<RmBatchRow>();
   const data = (res.results ?? []).map(rowToApi);
   return c.json({ success: true, data, total: data.length });
@@ -72,7 +72,7 @@ app.get("/", async (c) => {
 // GET /api/rm-batches/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM rm_batches WHERE id = ?",
   )
     .bind(id)

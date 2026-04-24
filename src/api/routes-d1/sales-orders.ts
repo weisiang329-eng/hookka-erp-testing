@@ -1247,7 +1247,7 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 //     row mapper.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
@@ -1318,7 +1318,7 @@ app.get("/", async (c) => {
 // (defined BEFORE /:id so the route matches first)
 // ---------------------------------------------------------------------------
 app.get("/status-changes", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM so_status_changes ORDER BY timestamp DESC",
   ).all<SOStatusChangeRow>();
   const data = (res.results ?? []).map(rowToStatusChange);
@@ -1334,7 +1334,7 @@ app.get("/status-changes", async (c) => {
 // Registered BEFORE /:id (Hono route ordering: static before wildcards).
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
-  const res = await c.env.DB
+  const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM sales_orders GROUP BY status")
     .all<{ status: string; n: number }>();
   const byStatus: Record<string, number> = {};
@@ -1358,7 +1358,7 @@ app.get("/stats", async (c) => {
 // any PO that already has at least one job_cards row.
 // ---------------------------------------------------------------------------
 app.post("/backfill-job-cards", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const empties = await db
     .prepare(
       `SELECT p.id FROM production_orders p
@@ -1395,7 +1395,7 @@ app.post("/", async (c) => {
     const body = await c.req.json();
 
     // Validate customer
-    const customer = await c.env.DB.prepare(
+    const customer = await c.var.DB.prepare(
       "SELECT id, name FROM customers WHERE id = ?",
     )
       .bind(body.customerId)
@@ -1408,14 +1408,14 @@ app.post("/", async (c) => {
     const hubIdField: string = body.hubId || body.deliveryHubId || "";
     let chosenHub: { id: string; state: string | null; shortName: string } | null = null;
     if (hubIdField) {
-      chosenHub = await c.env.DB.prepare(
+      chosenHub = await c.var.DB.prepare(
         "SELECT id, state, shortName FROM delivery_hubs WHERE id = ? AND customerId = ?",
       )
         .bind(hubIdField, customer.id)
         .first<{ id: string; state: string | null; shortName: string }>();
     }
     if (!chosenHub) {
-      chosenHub = await c.env.DB.prepare(
+      chosenHub = await c.var.DB.prepare(
         "SELECT id, state, shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC LIMIT 1",
       )
         .bind(customer.id)
@@ -1447,13 +1447,13 @@ app.post("/", async (c) => {
           seatHeightPrices: string | null;
         } | null = null;
         if (productCode) {
-          resolvedProduct = await c.env.DB.prepare(
+          resolvedProduct = await c.var.DB.prepare(
             "SELECT id, name, category, sizeCode, sizeLabel, basePriceSen, seatHeightPrices FROM products WHERE code = ? LIMIT 1",
           )
             .bind(productCode)
             .first();
           if (!resolvedProduct) {
-            resolvedProduct = await c.env.DB.prepare(
+            resolvedProduct = await c.var.DB.prepare(
               "SELECT id, name, category, sizeCode, sizeLabel, basePriceSen, seatHeightPrices FROM products WHERE LOWER(code) = LOWER(?) LIMIT 1",
             )
               .bind(productCode)
@@ -1473,7 +1473,7 @@ app.post("/", async (c) => {
         if (incomingBasePrice === 0 && productIdForLookup && customer.id) {
           try {
             const cp = await resolveCustomerPriceAsOf(
-              c.env.DB,
+              c.var.DB,
               productIdForLookup,
               customer.id,
               priceAsOf,
@@ -1565,7 +1565,7 @@ app.post("/", async (c) => {
 
     const subtotalSen = items.reduce((sum, i) => sum + i.lineTotalSen, 0);
     const now = new Date().toISOString();
-    const companySOId = await generateCompanySOId(c.env.DB);
+    const companySOId = await generateCompanySOId(c.var.DB);
     const soId = genSoId();
     const today = now.split("T")[0];
 
@@ -1575,7 +1575,7 @@ app.post("/", async (c) => {
       "";
 
     const statements = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO sales_orders (id, customerPO, customerPOId, customerPODate,
            customerSO, customerSOId, reference, customerId, customerName,
            customerState, hubId, hubName, companySO, companySOId, companySODate,
@@ -1610,7 +1610,7 @@ app.post("/", async (c) => {
         now,
       ),
       ...items.map((item) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricId, fabricCode, quantity, gapInches, divanHeightInches,
@@ -1646,9 +1646,9 @@ app.post("/", async (c) => {
       ),
     ];
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchSOWithItems(c.env.DB, soId);
+    const created = await fetchSOWithItems(c.var.DB, soId);
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create sales order" },
@@ -1671,7 +1671,7 @@ app.post("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM sales_orders WHERE id = ?",
   )
     .bind(id)
@@ -1688,7 +1688,7 @@ app.post("/:id/confirm", async (c) => {
   const allowedStatuses = ["DRAFT", "PENDING"];
   if (!allowedStatuses.includes(existing.status)) {
     if (existing.status === "CONFIRMED") {
-      const existingPos = await c.env.DB.prepare(
+      const existingPos = await c.var.DB.prepare(
         "SELECT id FROM production_orders WHERE salesOrderId = ? LIMIT 1",
       )
         .bind(id)
@@ -1716,7 +1716,7 @@ app.post("/:id/confirm", async (c) => {
 
   // Customer PO uniqueness (BR-SO-010)
   if (existing.customerPOId) {
-    const dup = await c.env.DB.prepare(
+    const dup = await c.var.DB.prepare(
       `SELECT id, companySOId FROM sales_orders
          WHERE id != ? AND customerPOId = ? AND customerId = ? AND status != 'CANCELLED'
          LIMIT 1`,
@@ -1739,7 +1739,7 @@ app.post("/:id/confirm", async (c) => {
   const fromStatus = existing.status;
 
   // Load SO items for PO cascade.
-  const itemsRes = await c.env.DB.prepare(
+  const itemsRes = await c.var.DB.prepare(
     "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
   )
     .bind(id)
@@ -1749,7 +1749,7 @@ app.post("/:id/confirm", async (c) => {
   // BOM completeness guard — blocks confirm if any line's product has an
   // incomplete BOM. Runs BEFORE the status flip and PO cascade so a 422
   // leaves the SO in its prior status and no production_orders are created.
-  const incompleteProducts = await findIncompleteBomProducts(c.env.DB, items);
+  const incompleteProducts = await findIncompleteBomProducts(c.var.DB, items);
   if (incompleteProducts.length > 0) {
     return c.json(
       {
@@ -1762,17 +1762,17 @@ app.post("/:id/confirm", async (c) => {
   }
 
   const { statements: poStmts, created: productionOrders, preExisting } =
-    await createProductionOrdersForSO(c.env.DB, existing, items);
+    await createProductionOrdersForSO(c.var.DB, existing, items);
 
   const autoActions = preExisting
     ? ["Production orders already exist for this SO — skipped duplicate creation."]
     : productionOrders.map((po) => `Created PO ${po.poNo}`);
 
-  await c.env.DB.batch([
-    c.env.DB.prepare(
+  await c.var.DB.batch([
+    c.var.DB.prepare(
       "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
     ).bind(now, id),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       `INSERT INTO so_status_changes
          (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1789,7 +1789,7 @@ app.post("/:id/confirm", async (c) => {
     ...poStmts,
   ]);
 
-  const order = await fetchSOWithItems(c.env.DB, id);
+  const order = await fetchSOWithItems(c.var.DB, id);
 
   return c.json({
     success: true,
@@ -1809,18 +1809,18 @@ app.post("/:id/confirm", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [so, itemsRes, statusRes, overridesRes] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM sales_orders WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM sales_orders WHERE id = ?")
       .bind(id)
       .first<SalesOrderRow>(),
-    c.env.DB.prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ?")
+    c.var.DB.prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ?")
       .bind(id)
       .all<SalesOrderItemRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM so_status_changes WHERE soId = ? ORDER BY timestamp DESC",
     )
       .bind(id)
       .all<SOStatusChangeRow>(),
-    c.env.DB.prepare("SELECT * FROM price_overrides WHERE soId = ?")
+    c.var.DB.prepare("SELECT * FROM price_overrides WHERE soId = ?")
       .bind(id)
       .all<PriceOverrideRow>(),
   ]);
@@ -1842,7 +1842,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM sales_orders WHERE id = ?",
     )
       .bind(id)
@@ -1883,7 +1883,7 @@ app.put("/:id", async (c) => {
       // (ON_HOLD → CONFIRMED / IN_PRODUCTION). cascadeSOStatusToPOs is a no-op
       // for any other transition, so calling it unconditionally is cheap.
       cascade = await cascadeSOStatusToPOs(
-        c.env.DB,
+        c.var.DB,
         id,
         newStatus,
         existing.status,
@@ -1895,7 +1895,7 @@ app.put("/:id", async (c) => {
       pendingStatusChangeId = genStatusId();
       if (!isDraftToConfirmed) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO so_status_changes
                (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1925,7 +1925,7 @@ app.put("/:id", async (c) => {
     let hubName = existing.hubName ?? "";
 
     if (body.customerId) {
-      const customer = await c.env.DB.prepare(
+      const customer = await c.var.DB.prepare(
         "SELECT id, name FROM customers WHERE id = ?",
       )
         .bind(body.customerId)
@@ -1938,7 +1938,7 @@ app.put("/:id", async (c) => {
 
     if (body.hubId !== undefined) {
       if (body.hubId) {
-        const hub = await c.env.DB.prepare(
+        const hub = await c.var.DB.prepare(
           "SELECT id, state, shortName FROM delivery_hubs WHERE id = ? AND customerId = ?",
         )
           .bind(body.hubId, customerId)
@@ -1982,7 +1982,7 @@ app.put("/:id", async (c) => {
     let totalSen = existing.totalSen;
 
     if (body.items) {
-      const oldItemsRes = await c.env.DB.prepare(
+      const oldItemsRes = await c.var.DB.prepare(
         "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
       )
         .bind(id)
@@ -2002,7 +2002,7 @@ app.put("/:id", async (c) => {
         if (incomingBase === 0 && productIdForLookup && customerId) {
           try {
             const cp = await resolveCustomerPriceAsOf(
-              c.env.DB,
+              c.var.DB,
               productIdForLookup,
               customerId,
               priceAsOf,
@@ -2088,13 +2088,13 @@ app.put("/:id", async (c) => {
 
       // Delete old, insert new
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM sales_order_items WHERE salesOrderId = ?",
         ).bind(id),
       );
       for (const item of newItems) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO sales_order_items (id, salesOrderId, lineNo, lineSuffix,
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricId, fabricCode, quantity, gapInches, divanHeightInches,
@@ -2131,7 +2131,7 @@ app.put("/:id", async (c) => {
 
         if (item._priceOverride) {
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO price_overrides
                  (id, soId, soNumber, lineIndex, originalPrice, overridePrice,
                   reason, approvedBy, timestamp)
@@ -2153,7 +2153,7 @@ app.put("/:id", async (c) => {
     }
 
     statements.push(
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE sales_orders SET
            customerPO = ?, customerPOId = ?, customerPODate = ?,
            customerSO = ?, customerSOId = ?, reference = ?,
@@ -2224,7 +2224,7 @@ app.put("/:id", async (c) => {
             notes: (item.notes as string) || "",
           }))
         : (
-            await c.env.DB.prepare(
+            await c.var.DB.prepare(
               "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
             )
               .bind(id)
@@ -2232,7 +2232,7 @@ app.put("/:id", async (c) => {
           ).results ?? [];
 
       const incompleteProducts = await findIncompleteBomProducts(
-        c.env.DB,
+        c.var.DB,
         bomCheckItems,
       );
       if (incompleteProducts.length > 0) {
@@ -2299,7 +2299,7 @@ app.put("/:id", async (c) => {
           };
         });
       } else {
-        const itemsRes = await c.env.DB.prepare(
+        const itemsRes = await c.var.DB.prepare(
           "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
         )
           .bind(id)
@@ -2309,7 +2309,7 @@ app.put("/:id", async (c) => {
 
       const { statements: poStmts, created, preExisting } =
         await createProductionOrdersForSO(
-          c.env.DB,
+          c.var.DB,
           effectiveSO,
           effectiveItems,
         );
@@ -2320,7 +2320,7 @@ app.put("/:id", async (c) => {
         : created.map((po) => `Created PO ${po.poNo}`);
 
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO so_status_changes
              (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2338,9 +2338,9 @@ app.put("/:id", async (c) => {
       statements.push(...poStmts);
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await fetchSOWithItems(c.env.DB, id);
+    const updated = await fetchSOWithItems(c.var.DB, id);
     return c.json({
       success: true,
       data: updated,
@@ -2367,7 +2367,7 @@ app.put("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id FROM sales_orders WHERE id = ?",
   )
     .bind(id)
@@ -2375,7 +2375,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM sales_orders WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM sales_orders WHERE id = ?").bind(id).run();
   return c.json({ success: true });
 });
 

@@ -109,10 +109,10 @@ app.get("/", async (c) => {
   const sql = `SELECT * FROM qc_inspections ${where} ORDER BY created_at DESC`;
 
   const [inspRes, defRes] = await Promise.all([
-    c.env.DB.prepare(sql)
+    c.var.DB.prepare(sql)
       .bind(...params)
       .all<InspectionRow>(),
-    c.env.DB.prepare("SELECT * FROM qc_defects").all<DefectRow>(),
+    c.var.DB.prepare("SELECT * FROM qc_defects").all<DefectRow>(),
   ]);
   const data = (inspRes.results ?? []).map((r) =>
     rowToInspection(r, defRes.results ?? []),
@@ -125,12 +125,12 @@ app.post("/", async (c) => {
   try {
     const body = await c.req.json();
     const id = genId("qc");
-    const inspectionNo = await getNextQCNo(c.env.DB);
+    const inspectionNo = await getNextQCNo(c.var.DB);
     const createdAt = new Date().toISOString();
     const inspectionDate =
       body.inspectionDate || new Date().toISOString().split("T")[0];
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO qc_inspections (id, inspectionNo, productionOrderId, poNo, productCode,
          productName, customerName, department, inspectorId, inspectorName, result,
          notes, inspectionDate, created_at)
@@ -168,7 +168,7 @@ app.post("/", async (c) => {
           actionTaken: (d.actionTaken as string) ?? "ACCEPT",
         };
         defectRows.push(row);
-        return c.env.DB.prepare(
+        return c.var.DB.prepare(
           "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
         ).bind(
           row.id,
@@ -179,10 +179,10 @@ app.post("/", async (c) => {
           row.actionTaken,
         );
       });
-      await c.env.DB.batch(stmts);
+      await c.var.DB.batch(stmts);
     }
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM qc_inspections WHERE id = ?",
     )
       .bind(id)
@@ -203,10 +203,10 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, defs] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
       .bind(id)
       .first<InspectionRow>(),
-    c.env.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+    c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
       .bind(id)
       .all<DefectRow>(),
   ]);
@@ -223,7 +223,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM qc_inspections WHERE id = ?",
     )
       .bind(id)
@@ -237,7 +237,7 @@ app.put("/:id", async (c) => {
       notes: body.notes ?? existing.notes ?? "",
       department: body.department ?? existing.department,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE qc_inspections SET result = ?, notes = ?, department = ? WHERE id = ?",
     )
       .bind(merged.result, merged.notes, merged.department, id)
@@ -245,14 +245,14 @@ app.put("/:id", async (c) => {
 
     // Defects replace on full array
     if (Array.isArray(body.defects)) {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "DELETE FROM qc_defects WHERE qcInspectionId = ?",
       )
         .bind(id)
         .run();
       if (body.defects.length) {
         const stmts = body.defects.map((d: Record<string, unknown>) =>
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
           ).bind(
             (d.id as string) || genId("qcd"),
@@ -263,13 +263,13 @@ app.put("/:id", async (c) => {
             (d.actionTaken as string) ?? "ACCEPT",
           ),
         );
-        await c.env.DB.batch(stmts);
+        await c.var.DB.batch(stmts);
       }
     }
 
     if (body.addDefect) {
       const d = body.addDefect as Record<string, unknown>;
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
       )
         .bind(
@@ -284,10 +284,10 @@ app.put("/:id", async (c) => {
     }
 
     const [updated, defs] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
         .bind(id)
         .first<InspectionRow>(),
-      c.env.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+      c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
         .bind(id)
         .all<DefectRow>(),
     ]);
@@ -307,17 +307,17 @@ app.put("/:id", async (c) => {
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, defs] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
       .bind(id)
       .first<InspectionRow>(),
-    c.env.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+    c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
       .bind(id)
       .all<DefectRow>(),
   ]);
   if (!row) {
     return c.json({ success: false, error: "QC inspection not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM qc_inspections WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM qc_inspections WHERE id = ?")
     .bind(id)
     .run();
   // qc_defects cascades via FK

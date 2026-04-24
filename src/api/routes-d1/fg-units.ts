@@ -337,7 +337,7 @@ app.get("/", async (c) => {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const sql = `SELECT * FROM fg_units ${where} ORDER BY id ASC`;
 
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<FGUnitRow>();
   const rows = (res.results ?? []).map(rowToFGUnit);
@@ -349,7 +349,7 @@ app.get("/", async (c) => {
 // routes match first — Hono picks in insertion order)
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const unit = await c.env.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
+  const unit = await c.var.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
     .bind(id)
     .first<FGUnitRow>();
   if (!unit) {
@@ -364,7 +364,7 @@ app.get("/:id", async (c) => {
 // (unit, piece) combination derived from PO quantity and product pieces.
 app.post("/generate/:poId", async (c) => {
   const poId = c.req.param("poId");
-  const result = await generateFGUnitsForPO(c.env.DB, poId);
+  const result = await generateFGUnitsForPO(c.var.DB, poId);
   if (result.status === "not-found") {
     return c.json(
       { success: false, error: "Production order not found" },
@@ -398,7 +398,7 @@ app.post("/scan", async (c) => {
     );
   }
 
-  const unit = await c.env.DB.prepare(
+  const unit = await c.var.DB.prepare(
     "SELECT * FROM fg_units WHERE unitSerial = ? OR shortCode = ? LIMIT 1",
   )
     .bind(serial, serial)
@@ -431,7 +431,7 @@ app.post("/scan", async (c) => {
           400,
         );
       }
-      const worker = await c.env.DB.prepare(
+      const worker = await c.var.DB.prepare(
         "SELECT id, name FROM workers WHERE id = ?",
       )
         .bind(workerId)
@@ -488,11 +488,11 @@ app.post("/scan", async (c) => {
       );
   }
 
-  await c.env.DB.prepare(updateSql)
+  await c.var.DB.prepare(updateSql)
     .bind(...binds)
     .run();
 
-  const updated = await c.env.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
+  const updated = await c.var.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
     .bind(unit.id)
     .first<FGUnitRow>();
   return c.json({ success: true, data: updated ? rowToFGUnit(updated) : null });

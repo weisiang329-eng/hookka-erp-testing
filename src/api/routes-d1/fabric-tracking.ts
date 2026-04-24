@@ -68,7 +68,7 @@ app.get("/", async (c) => {
     where.length > 0
       ? `SELECT * FROM fabric_trackings WHERE ${where.join(" AND ")} ORDER BY fabricCode`
       : "SELECT * FROM fabric_trackings ORDER BY fabricCode";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<FabricTrackingRow>();
   const data = (res.results ?? []).map(rowToTracking);
@@ -111,7 +111,7 @@ app.post("/", async (c) => {
   if (!fabricCode) {
     return c.json({ success: false, error: "fabricCode is required" }, 400);
   }
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
   )
     .bind(fabricCode)
@@ -128,7 +128,7 @@ app.post("/", async (c) => {
   const fabricCategory = body.fabricCategory ?? "B.M-FABR";
   const priceTier = body.priceTier ?? "PRICE_2";
   const id = genTrackingId();
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO fabric_trackings
        (id, fabricCode, fabricDescription, fabricCategory, priceTier,
         price, soh, poOutstanding, lastMonthUsage, oneWeekUsage,
@@ -154,7 +154,7 @@ app.post("/", async (c) => {
       Number(body.leadTimeDays) || 0,
     )
     .run();
-  const created = await c.env.DB.prepare(
+  const created = await c.var.DB.prepare(
     "SELECT * FROM fabric_trackings WHERE id = ?",
   )
     .bind(id)
@@ -171,7 +171,7 @@ app.post("/", async (c) => {
 // DELETE /api/fabric-tracking/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM fabric_trackings WHERE id = ?",
   )
     .bind(id)
@@ -182,7 +182,7 @@ app.delete("/:id", async (c) => {
       404,
     );
   }
-  await c.env.DB.prepare("DELETE FROM fabric_trackings WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM fabric_trackings WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true, data: rowToTracking(existing) });
@@ -192,7 +192,7 @@ app.delete("/:id", async (c) => {
 // reorderPoint). Mirrors the in-memory "only these four fields" behavior.
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM fabric_trackings WHERE id = ?",
   )
     .bind(id)
@@ -220,14 +220,14 @@ app.put("/:id", async (c) => {
         ? Number(body.reorderPoint)
         : existing.reorderPoint;
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE fabric_trackings SET priceTier = ?, price = ?, soh = ?, reorderPoint = ?
        WHERE id = ?`,
     )
       .bind(priceTier, price, soh, reorderPoint, id)
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM fabric_trackings WHERE id = ?",
     )
       .bind(id)

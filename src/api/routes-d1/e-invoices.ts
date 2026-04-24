@@ -114,7 +114,7 @@ function generateEInvoiceXml(
 
 // GET /api/e-invoices — list all
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM e_invoices ORDER BY created_at DESC",
   ).all<EInvoiceRow>();
   const data = (res.results ?? []).map(rowToEInvoice);
@@ -133,7 +133,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const invoice = await c.env.DB.prepare(
+    const invoice = await c.var.DB.prepare(
       "SELECT id, invoiceNo, invoiceDate, customerName, totalSen FROM invoices WHERE id = ?",
     )
       .bind(invoiceId)
@@ -148,7 +148,7 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: "Invoice not found" }, 404);
     }
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT id FROM e_invoices WHERE invoiceId = ?",
     )
       .bind(invoiceId)
@@ -176,7 +176,7 @@ app.post("/", async (c) => {
     );
 
     const id = genId();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO e_invoices (id, invoiceId, invoiceNo, customerName, customerTIN,
          submissionId, uuid, status, submittedAt, validatedAt, errorMessage,
          xmlContent, totalExcludingTax, taxAmount, totalIncludingTax, created_at)
@@ -202,7 +202,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM e_invoices WHERE id = ?",
     )
       .bind(id)
@@ -222,7 +222,7 @@ app.post("/", async (c) => {
 // GET /api/e-invoices/:id — single
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM e_invoices WHERE id = ?",
   )
     .bind(id)
@@ -237,7 +237,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM e_invoices WHERE id = ?",
     )
       .bind(id)
@@ -270,14 +270,14 @@ app.put("/:id", async (c) => {
       ).join("");
 
       // Mock auto-validation: SUBMITTED → VALID immediately
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `UPDATE e_invoices SET status = ?, submittedAt = ?, validatedAt = ?,
            submissionId = ?, uuid = ?, errorMessage = NULL WHERE id = ?`,
       )
         .bind("VALID", now, now, submissionId, uuid, id)
         .run();
 
-      const updated = await c.env.DB.prepare(
+      const updated = await c.var.DB.prepare(
         "SELECT * FROM e_invoices WHERE id = ?",
       )
         .bind(id)
@@ -298,13 +298,13 @@ app.put("/:id", async (c) => {
           400,
         );
       }
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE e_invoices SET status = ? WHERE id = ?",
       )
         .bind("CANCELLED", id)
         .run();
 
-      const updated = await c.env.DB.prepare(
+      const updated = await c.var.DB.prepare(
         "SELECT * FROM e_invoices WHERE id = ?",
       )
         .bind(id)

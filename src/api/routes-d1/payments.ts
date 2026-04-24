@@ -106,7 +106,7 @@ app.get("/", async (c) => {
   }
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT * FROM payment_records ${clause} ORDER BY date DESC, id DESC`,
   )
     .bind(...params)
@@ -129,7 +129,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const customer = await c.env.DB.prepare(
+    const customer = await c.var.DB.prepare(
       "SELECT id, name FROM customers WHERE id = ?",
     )
       .bind(customerId)
@@ -160,7 +160,7 @@ app.post("/", async (c) => {
     if (allocInput.length > 0) {
       const ids = allocInput.map((a) => a.invoiceId);
       const placeholders = ids.map(() => "?").join(",");
-      const invs = await c.env.DB.prepare(
+      const invs = await c.var.DB.prepare(
         `SELECT id, invoiceNo, paidAmount, totalSen, salesOrderId, deliveryOrderId
            FROM invoices WHERE id IN (${placeholders})`,
       )
@@ -196,7 +196,7 @@ app.post("/", async (c) => {
     const now = new Date().toISOString();
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO payment_records (
            id, receiptNumber, customerId, customerName, date, amount, method,
            reference, status, allocations
@@ -248,7 +248,7 @@ app.post("/", async (c) => {
         });
       }
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
              VALUES (?, ?, ?, ?, ?, ?)`,
         ).bind(
@@ -261,7 +261,7 @@ app.post("/", async (c) => {
         ),
       );
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE invoices
              SET paidAmount = ?, status = ?, paymentDate = ?, updated_at = ?
            WHERE id = ?`,
@@ -282,7 +282,7 @@ app.post("/", async (c) => {
     // append a so_status_changes audit row.
     if (totalAllocatedSen > 0) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `UPDATE customers SET outstandingSen = MAX(0, outstandingSen - ?) WHERE id = ?`,
         ).bind(totalAllocatedSen, customer.id),
       );
@@ -291,7 +291,7 @@ app.post("/", async (c) => {
     if (fullyPaidSOIds.length > 0) {
       const uniqueSOIds = [...new Set(fullyPaidSOIds)];
       const placeholders = uniqueSOIds.map(() => "?").join(",");
-      const soRows = await c.env.DB.prepare(
+      const soRows = await c.var.DB.prepare(
         `SELECT id, status FROM sales_orders WHERE id IN (${placeholders})`,
       )
         .bind(...uniqueSOIds)
@@ -299,10 +299,10 @@ app.post("/", async (c) => {
       for (const so of soRows.results ?? []) {
         if (so.status === "DELIVERED" || so.status === "READY_TO_SHIP") {
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               "UPDATE sales_orders SET status = 'INVOICED', updated_at = ? WHERE id = ?",
             ).bind(now, so.id),
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO so_status_changes
                  (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -337,7 +337,7 @@ app.post("/", async (c) => {
       const soKey = snap?.salesOrderId;
       if (!soKey || seenClosedSO.has(soKey)) continue;
       const closeStmts = await previewCascadeSOClosed(
-        c.env.DB,
+        c.var.DB,
         fp.invoiceId,
         fp.deliveryOrderId,
         now,
@@ -347,9 +347,9 @@ app.post("/", async (c) => {
       statements.push(...closeStmts);
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM payment_records WHERE id = ?",
     )
       .bind(id)
@@ -368,7 +368,7 @@ app.post("/", async (c) => {
 
 // GET /api/payments/:id — single
 app.get("/:id", async (c) => {
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM payment_records WHERE id = ?",
   )
     .bind(c.req.param("id"))
@@ -384,7 +384,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM payment_records WHERE id = ?",
     )
       .bind(id)
@@ -413,7 +413,7 @@ app.put("/:id", async (c) => {
 
     const allocs = parseAllocations(existing.allocations);
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE payment_records SET status = ? WHERE id = ?",
       ).bind(body.status, id),
     ];
@@ -428,7 +428,7 @@ app.put("/:id", async (c) => {
       let totalRolledBack = 0;
       if (invoiceIds.length > 0) {
         const placeholders = invoiceIds.map(() => "?").join(",");
-        const invs = await c.env.DB.prepare(
+        const invs = await c.var.DB.prepare(
           `SELECT id, paidAmount, totalSen FROM invoices WHERE id IN (${placeholders})`,
         )
           .bind(...invoiceIds)
@@ -456,7 +456,7 @@ app.put("/:id", async (c) => {
                 : "PAID";
           totalRolledBack += Math.min(delta, inv.paidAmount);
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `UPDATE invoices SET paidAmount = ?, status = ?, updated_at = ? WHERE id = ?`,
             ).bind(newPaid, newStatus, now, invoiceId),
           );
@@ -465,16 +465,16 @@ app.put("/:id", async (c) => {
       // Restore the customer's A/R — bounce means the money never cleared.
       if (totalRolledBack > 0) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
           ).bind(totalRolledBack, existing.customerId),
         );
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM payment_records WHERE id = ?",
     )
       .bind(id)

@@ -20,7 +20,7 @@ type DepartmentRow = {
 
 // GET /api/departments
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM departments ORDER BY sequence",
   ).all<DepartmentRow>();
   return c.json({ success: true, data: res.results ?? [] });

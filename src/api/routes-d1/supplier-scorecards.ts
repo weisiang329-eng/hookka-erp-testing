@@ -38,7 +38,7 @@ function rowToScorecard(r: ScorecardRow) {
 app.get("/", async (c) => {
   const supplierId = c.req.query("supplierId");
   if (supplierId) {
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       "SELECT * FROM supplier_scorecards WHERE supplierId = ?",
     )
       .bind(supplierId)
@@ -48,7 +48,7 @@ app.get("/", async (c) => {
     }
     return c.json({ success: true, data: rowToScorecard(row) });
   }
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM supplier_scorecards ORDER BY supplierId",
   ).all<ScorecardRow>();
   const data = (res.results ?? []).map(rowToScorecard);

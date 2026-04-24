@@ -90,10 +90,10 @@ function genId(): string {
 app.get("/", async (c) => {
   const date = c.req.query("date");
   const stmt = date
-    ? c.env.DB.prepare(
+    ? c.var.DB.prepare(
         "SELECT * FROM attendance_records WHERE date = ? ORDER BY employeeId",
       ).bind(date)
-    : c.env.DB.prepare(
+    : c.var.DB.prepare(
         "SELECT * FROM attendance_records ORDER BY date DESC, employeeId",
       );
   const res = await stmt.all<AttendanceRow>();
@@ -108,7 +108,7 @@ app.post("/", async (c) => {
   try {
     const body = await c.req.json();
 
-    const worker = await c.env.DB.prepare(
+    const worker = await c.var.DB.prepare(
       "SELECT id, name, departmentId, departmentCode, workingHoursPerDay FROM workers WHERE id = ?",
     )
       .bind(body.employeeId)
@@ -123,7 +123,7 @@ app.post("/", async (c) => {
       body.time ||
       `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM attendance_records WHERE employeeId = ? AND date = ?",
     )
       .bind(worker.id, date)
@@ -132,7 +132,7 @@ app.post("/", async (c) => {
     if (body.action === "CLOCK_IN") {
       if (existing) {
         // Update the clock-in time on an existing row.
-        await c.env.DB.prepare(
+        await c.var.DB.prepare(
           `UPDATE attendance_records
              SET clockIn = ?, status = 'PRESENT',
                  updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -140,7 +140,7 @@ app.post("/", async (c) => {
         )
           .bind(time, existing.id)
           .run();
-        const row = await c.env.DB.prepare(
+        const row = await c.var.DB.prepare(
           "SELECT * FROM attendance_records WHERE id = ?",
         )
           .bind(existing.id)
@@ -149,7 +149,7 @@ app.post("/", async (c) => {
       }
 
       const dept = worker.departmentId
-        ? await c.env.DB.prepare(
+        ? await c.var.DB.prepare(
             "SELECT id, shortName FROM departments WHERE id = ?",
           )
             .bind(worker.departmentId)
@@ -164,7 +164,7 @@ app.post("/", async (c) => {
           productCode: "",
         },
       ]);
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `INSERT INTO attendance_records (
            id, employeeId, employeeName, departmentCode, departmentName,
            date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
@@ -183,7 +183,7 @@ app.post("/", async (c) => {
         )
         .run();
 
-      const row = await c.env.DB.prepare(
+      const row = await c.var.DB.prepare(
         "SELECT * FROM attendance_records WHERE id = ?",
       )
         .bind(id)
@@ -224,7 +224,7 @@ app.post("/", async (c) => {
         ]);
       }
 
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `UPDATE attendance_records
            SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
                efficiencyPct = ?, overtimeMinutes = ?, deptBreakdown = ?,
@@ -242,7 +242,7 @@ app.post("/", async (c) => {
         )
         .run();
 
-      const row = await c.env.DB.prepare(
+      const row = await c.var.DB.prepare(
         "SELECT * FROM attendance_records WHERE id = ?",
       )
         .bind(existing.id)

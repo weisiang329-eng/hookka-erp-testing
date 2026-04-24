@@ -25,7 +25,7 @@ type Row = {
 // GET /api/kv-config/:key
 app.get("/:key", async (c) => {
   const key = c.req.param("key");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT key, value, updated_at FROM kv_config WHERE key = ?",
   )
     .bind(key)
@@ -65,7 +65,7 @@ app.put("/:key", async (c) => {
   const value = JSON.stringify(body);
   const now = new Date().toISOString();
 
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     `INSERT INTO kv_config (key, value, updated_at)
      VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET

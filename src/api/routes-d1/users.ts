@@ -81,7 +81,7 @@ function genId(): string {
 
 // GET /api/users — list all users
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM users ORDER BY createdAt DESC",
   ).all<UserRow>();
   const data = (res.results ?? []).map(publicUser);
@@ -117,7 +117,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT id FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
     )
       .bind(email.trim())
@@ -133,7 +133,7 @@ app.post("/", async (c) => {
     const passwordHash = await hashPassword(password);
     const createdAt = new Date().toISOString();
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO users (id, email, passwordHash, role, isActive, createdAt, lastLoginAt, displayName)
        VALUES (?, ?, ?, ?, 1, ?, NULL, ?)`,
     )
@@ -147,7 +147,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    const created = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
       .bind(id)
       .first<UserRow>();
     if (!created) {
@@ -164,7 +164,7 @@ app.post("/", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
       .bind(id)
       .first<UserRow>();
     if (!existing) {
@@ -184,7 +184,7 @@ app.put("/:id", async (c) => {
             : 0,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE users SET email = ?, role = ?, displayName = ?, isActive = ? WHERE id = ?`,
     )
       .bind(merged.email, merged.role, merged.displayName, merged.isActive, id)
@@ -193,14 +193,14 @@ app.put("/:id", async (c) => {
     // If we just disabled the user, nuke their sessions so the token the
     // frontend is holding stops working on the next request.
     if (merged.isActive === 0 && existing.isActive === 1) {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "DELETE FROM user_sessions WHERE userId = ?",
       )
         .bind(id)
         .run();
     }
 
-    const updated = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+    const updated = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
       .bind(id)
       .first<UserRow>();
     if (!updated) {
@@ -215,19 +215,19 @@ app.put("/:id", async (c) => {
 // DELETE /api/users/:id — soft delete + session purge
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
   if (!existing) {
     return c.json({ success: false, error: "User not found" }, 404);
   }
 
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE users SET isActive = 0 WHERE id = ?").bind(id),
-    c.env.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
+  await c.var.DB.batch([
+    c.var.DB.prepare("UPDATE users SET isActive = 0 WHERE id = ?").bind(id),
+    c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
   ]);
 
-  const updated = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const updated = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
   return c.json({
@@ -255,7 +255,7 @@ app.post("/:id/reset-password", async (c) => {
     );
   }
 
-  const existing = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
   if (!existing) {
@@ -264,12 +264,12 @@ app.post("/:id/reset-password", async (c) => {
 
   const newHash = await hashPassword(newPassword);
   // Also purge sessions — force the user to log in again with the new password.
-  await c.env.DB.batch([
-    c.env.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?").bind(
+  await c.var.DB.batch([
+    c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?").bind(
       newHash,
       id,
     ),
-    c.env.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
+    c.var.DB.prepare("DELETE FROM user_sessions WHERE userId = ?").bind(id),
   ]);
 
   return c.json({ success: true });
@@ -339,7 +339,7 @@ app.post("/invite", async (c) => {
     const nowIso = new Date().toISOString();
 
     // Collision: existing active user with this email?
-    const existingUser = await c.env.DB.prepare(
+    const existingUser = await c.var.DB.prepare(
       "SELECT id FROM users WHERE LOWER(email) = LOWER(?) AND isActive = 1 LIMIT 1",
     )
       .bind(trimmedEmail)
@@ -352,7 +352,7 @@ app.post("/invite", async (c) => {
     }
 
     // Collision: pending (unexpired, unaccepted) invite?
-    const existingInvite = await c.env.DB.prepare(
+    const existingInvite = await c.var.DB.prepare(
       `SELECT token FROM user_invites
          WHERE LOWER(email) = LOWER(?)
            AND acceptedAt IS NULL
@@ -374,7 +374,7 @@ app.post("/invite", async (c) => {
 
     // Purge any stale (expired or accepted) row on the same email so the
     // UNIQUE(email) constraint doesn't fight us.
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "DELETE FROM user_invites WHERE LOWER(email) = LOWER(?)",
     )
       .bind(trimmedEmail)
@@ -390,7 +390,7 @@ app.post("/invite", async (c) => {
     const token = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + INVITE_TTL_MS).toISOString();
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO user_invites
          (token, email, role, displayName, invitedBy, createdAt, expiresAt,
           acceptedAt, emailSentAt, emailResendId)
@@ -408,7 +408,7 @@ app.post("/invite", async (c) => {
       .run();
 
     // Pull the inviter's displayName for the email greeting.
-    const inviter = await c.env.DB.prepare(
+    const inviter = await c.var.DB.prepare(
       "SELECT displayName, email FROM users WHERE id = ?",
     )
       .bind(userId)
@@ -433,7 +433,7 @@ app.post("/invite", async (c) => {
 
     const emailRes = await sendInviteEmail(c.env, invite, inviterName);
     if (emailRes.ok) {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
       )
         .bind(new Date().toISOString(), emailRes.id ?? null, token)
@@ -460,7 +460,7 @@ app.post("/invite", async (c) => {
 // GET /api/users/invites — list pending (unaccepted, unexpired) invites
 app.get("/invites", async (c) => {
   const nowIso = new Date().toISOString();
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     `SELECT i.*,
             u.displayName AS inviterDisplayName,
             u.email AS inviterEmail
@@ -481,7 +481,7 @@ app.post("/invites/:token/resend", async (c) => {
   const token = c.req.param("token");
   const nowIso = new Date().toISOString();
 
-  const invite = await c.env.DB.prepare(
+  const invite = await c.var.DB.prepare(
     "SELECT * FROM user_invites WHERE token = ? LIMIT 1",
   )
     .bind(token)
@@ -499,7 +499,7 @@ app.post("/invites/:token/resend", async (c) => {
     return c.json({ success: false, error: "Invite expired" }, 410);
   }
 
-  const inviter = await c.env.DB.prepare(
+  const inviter = await c.var.DB.prepare(
     "SELECT displayName, email FROM users WHERE id = ?",
   )
     .bind(invite.invitedBy)
@@ -511,7 +511,7 @@ app.post("/invites/:token/resend", async (c) => {
 
   const emailRes = await sendInviteEmail(c.env, invite, inviterName);
   if (emailRes.ok) {
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
     )
       .bind(new Date().toISOString(), emailRes.id ?? null, token)
@@ -530,7 +530,7 @@ app.post("/invites/:token/resend", async (c) => {
 // DELETE /api/users/invites/:token — revoke a pending invite
 app.delete("/invites/:token", async (c) => {
   const token = c.req.param("token");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT token, acceptedAt FROM user_invites WHERE token = ?",
   )
     .bind(token)
@@ -544,7 +544,7 @@ app.delete("/invites/:token", async (c) => {
       409,
     );
   }
-  await c.env.DB.prepare("DELETE FROM user_invites WHERE token = ?")
+  await c.var.DB.prepare("DELETE FROM user_invites WHERE token = ?")
     .bind(token)
     .run();
   return c.json({ success: true });
@@ -556,7 +556,7 @@ app.delete("/invites/:token", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?")
+  const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
     .first<UserRow>();
   if (!user) {

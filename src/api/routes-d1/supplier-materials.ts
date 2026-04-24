@@ -69,7 +69,7 @@ app.get("/", async (c) => {
     where.length > 0
       ? `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`
       : "SELECT * FROM supplier_material_bindings ORDER BY materialCode";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<BindingRow>();
   const data = (res.results ?? []).map(rowToBinding);
@@ -115,7 +115,7 @@ app.post("/", async (c) => {
       priceValidTo: body.priceValidTo ?? "2026-12-31",
       isMainSupplier: body.isMainSupplier ? 1 : 0,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO supplier_material_bindings (id, supplierId, materialCode,
          materialName, supplierSku, unitPrice, currency, leadTimeDays,
          paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
@@ -137,7 +137,7 @@ app.post("/", async (c) => {
         row.isMainSupplier,
       )
       .run();
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM supplier_material_bindings WHERE id = ?",
     )
       .bind(id)
@@ -157,7 +157,7 @@ app.post("/", async (c) => {
 // GET /api/supplier-materials/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",
   )
     .bind(id)
@@ -169,7 +169,7 @@ app.get("/:id", async (c) => {
 // PUT /api/supplier-materials/:id — shallow merge partial update
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",
   )
     .bind(id)
@@ -205,7 +205,7 @@ app.put("/:id", async (c) => {
             ? 1
             : 0,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE supplier_material_bindings SET
          supplierId = ?, materialCode = ?, materialName = ?, supplierSku = ?,
          unitPrice = ?, currency = ?, leadTimeDays = ?, paymentTerms = ?,
@@ -228,7 +228,7 @@ app.put("/:id", async (c) => {
         id,
       )
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM supplier_material_bindings WHERE id = ?",
     )
       .bind(id)
@@ -248,7 +248,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/supplier-materials/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",
   )
     .bind(id)
@@ -256,7 +256,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Binding not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM supplier_material_bindings WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM supplier_material_bindings WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true, data: rowToBinding(existing) });

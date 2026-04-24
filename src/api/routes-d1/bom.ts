@@ -108,8 +108,8 @@ app.get("/", async (c) => {
     ? "SELECT * FROM bom_versions WHERE productId = ? ORDER BY id"
     : "SELECT * FROM bom_versions ORDER BY id";
   const stmt = productId
-    ? c.env.DB.prepare(sql).bind(productId)
-    : c.env.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(productId)
+    : c.var.DB.prepare(sql);
   const res = await stmt.all<BOMVersionRow>();
   const data = (res.results ?? []).map(rowToVersion);
   return c.json({ success: true, data });
@@ -157,7 +157,7 @@ app.post("/", async (c) => {
       totalCost: Number(totalCost) || 0,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO bom_versions (id, productId, productCode, version, status,
          effectiveFrom, effectiveTo, tree, totalMinutes, labourCost,
          materialCost, totalCost)
@@ -179,7 +179,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM bom_versions WHERE id = ?",
     )
       .bind(id)
@@ -245,7 +245,7 @@ app.get("/templates", async (c) => {
       ? `SELECT * FROM bom_templates WHERE ${where.join(" AND ")} ORDER BY productCode`
       : "SELECT * FROM bom_templates ORDER BY productCode";
 
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<BOMTemplateRow>();
   const data = (res.results ?? []).map(rowToTemplate);
@@ -286,7 +286,7 @@ app.post("/templates", async (c) => {
       changeLog: body.changeLog ?? null,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO bom_templates (id, productCode, baseModel, category,
          l1Processes, wipComponents, version, versionStatus, effectiveFrom,
          effectiveTo, changeLog)
@@ -307,7 +307,7 @@ app.post("/templates", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM bom_templates WHERE id = ?",
     )
       .bind(id)
@@ -388,9 +388,9 @@ app.put("/templates", async (c) => {
 
     // Single atomic batch: wipe + re-insert.
     const statements = [
-      c.env.DB.prepare("DELETE FROM bom_templates"),
+      c.var.DB.prepare("DELETE FROM bom_templates"),
       ...sanitized.map((t) =>
-        c.env.DB
+        c.var.DB
           .prepare(
             `INSERT INTO bom_templates (id, productCode, baseModel, category,
                l1Processes, wipComponents, version, versionStatus,
@@ -412,7 +412,7 @@ app.put("/templates", async (c) => {
           ),
       ),
     ];
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     return c.json({ success: true, count: sanitized.length });
   } catch {
@@ -428,7 +428,7 @@ app.put("/templates", async (c) => {
 // id doesn't exist — callers should POST /templates to create new rows.
 app.put("/templates/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_templates WHERE id = ?",
   )
     .bind(id)
@@ -469,14 +469,14 @@ app.put("/templates/:id", async (c) => {
     const keys = Object.keys(patch);
     if (keys.length > 0) {
       const setClause = keys.map((k) => `${k} = ?`).join(", ");
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         `UPDATE bom_templates SET ${setClause} WHERE id = ?`,
       )
         .bind(...keys.map((k) => patch[k]), id)
         .run();
     }
 
-    const refreshed = await c.env.DB.prepare(
+    const refreshed = await c.var.DB.prepare(
       "SELECT * FROM bom_templates WHERE id = ?",
     )
       .bind(id)
@@ -500,7 +500,7 @@ app.put("/templates/:id", async (c) => {
 // GET /api/bom/:id — single BOM version
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare("SELECT * FROM bom_versions WHERE id = ?")
+  const row = await c.var.DB.prepare("SELECT * FROM bom_versions WHERE id = ?")
     .bind(id)
     .first<BOMVersionRow>();
   if (!row) {
@@ -512,7 +512,7 @@ app.get("/:id", async (c) => {
 // PUT /api/bom/:id — update BOM version (shallow merge over existing)
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_versions WHERE id = ?",
   )
     .bind(id)
@@ -544,7 +544,7 @@ app.put("/:id", async (c) => {
       totalCost: Number(merged.totalCost) || 0,
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE bom_versions SET
          productId = ?, productCode = ?, version = ?, status = ?,
          effectiveFrom = ?, effectiveTo = ?, tree = ?, totalMinutes = ?,
@@ -567,7 +567,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM bom_versions WHERE id = ?",
     )
       .bind(id)

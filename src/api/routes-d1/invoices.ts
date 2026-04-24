@@ -293,7 +293,7 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 // retention rules). So this is a no-op on the invoices endpoint; the
 // query param is consumed-and-ignored rather than forwarded to SQL.
 app.get("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const customerId = c.req.query("customerId");
   const status = c.req.query("status");
   const pageParam = c.req.query("page");
@@ -394,7 +394,7 @@ app.get("/", async (c) => {
 // current paginated page. Registered BEFORE /:id (Hono route ordering).
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
-  const res = await c.env.DB
+  const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
     .all<{ status: string; n: number }>();
   const byStatus: Record<string, number> = {};
@@ -418,7 +418,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const doRow = await c.env.DB.prepare(
+    const doRow = await c.var.DB.prepare(
       `SELECT id, doNo, salesOrderId, companySOId, customerId, customerName,
               customerState, hubId, hubName, status
          FROM delivery_orders WHERE id = ?`,
@@ -454,7 +454,7 @@ app.post("/", async (c) => {
 
     // Pull the DO items + the SO items to get unit prices (mirrors the old impl).
     const [doItemsRes, soItemsRes] = await Promise.all([
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `SELECT productCode, productName, sizeLabel, fabricCode, quantity
            FROM delivery_order_items WHERE deliveryOrderId = ?`,
       )
@@ -467,7 +467,7 @@ app.post("/", async (c) => {
           quantity: number;
         }>(),
       doRow.salesOrderId
-        ? c.env.DB.prepare(
+        ? c.var.DB.prepare(
             "SELECT productCode, unitPriceSen FROM sales_order_items WHERE salesOrderId = ?",
           )
             .bind(doRow.salesOrderId)
@@ -507,7 +507,7 @@ app.post("/", async (c) => {
     const invoiceNo = body.invoiceNo || genNextInvoiceNo();
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO invoices (
            id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
            customerId, customerName, customerState, hubId, hubName,
@@ -539,7 +539,7 @@ app.post("/", async (c) => {
         now,
       ),
       ...items.map((item) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO invoice_items (
              id, invoiceId, productCode, productName, sizeLabel, fabricCode,
              quantity, unitPriceSen, totalSen
@@ -557,14 +557,14 @@ app.post("/", async (c) => {
         ),
       ),
       // Flip DO to INVOICED in the same batch so we roll back together.
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE delivery_orders SET status = 'INVOICED', overdue = 'INVOICED', updated_at = ? WHERE id = ?`,
       ).bind(now, doRow.id),
     ];
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchInvoiceWithChildren(c.env.DB, id);
+    const created = await fetchInvoiceWithChildren(c.var.DB, id);
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create invoice" },
@@ -579,7 +579,7 @@ app.post("/", async (c) => {
 
 // GET /api/invoices/:id — single
 app.get("/:id", async (c) => {
-  const inv = await fetchInvoiceWithChildren(c.env.DB, c.req.param("id"));
+  const inv = await fetchInvoiceWithChildren(c.var.DB, c.req.param("id"));
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
@@ -590,7 +590,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM invoices WHERE id = ?",
     )
       .bind(id)
@@ -660,7 +660,7 @@ app.put("/:id", async (c) => {
     };
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE invoices SET
            status = ?, paidAmount = ?, paymentDate = ?, paymentMethod = ?,
            notes = ?, dueDate = ?, updated_at = ?
@@ -679,7 +679,7 @@ app.put("/:id", async (c) => {
 
     if (newInvoicePayment) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO invoice_payments (id, invoiceId, date, amountSen, method, reference)
              VALUES (?, ?, ?, ?, ?, ?)`,
         ).bind(
@@ -696,7 +696,7 @@ app.put("/:id", async (c) => {
     // --- items replacement (optional) ---
     if (Array.isArray(body.items)) {
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM invoice_items WHERE invoiceId = ?",
         ).bind(id),
       );
@@ -707,7 +707,7 @@ app.put("/:id", async (c) => {
         const totalSen = Number(raw.totalSen) || unitPriceSen * quantity;
         computedSubtotal += totalSen;
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO invoice_items (
                id, invoiceId, productCode, productName, sizeLabel, fabricCode,
                quantity, unitPriceSen, totalSen
@@ -726,7 +726,7 @@ app.put("/:id", async (c) => {
         );
       }
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "UPDATE invoices SET subtotalSen = ?, totalSen = ? WHERE id = ?",
         ).bind(computedSubtotal, computedSubtotal, id),
       );
@@ -737,7 +737,7 @@ app.put("/:id", async (c) => {
     // previewCascadeSOClosed() for the "this invoice is in-flight" logic.
     if (nextStatus === "PAID" && existing.status !== "PAID") {
       const cascadeStmts = await previewCascadeSOClosed(
-        c.env.DB,
+        c.var.DB,
         id,
         existing.deliveryOrderId,
         now,
@@ -745,9 +745,9 @@ app.put("/:id", async (c) => {
       statements.push(...cascadeStmts);
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const updated = await fetchInvoiceWithChildren(c.env.DB, id);
+    const updated = await fetchInvoiceWithChildren(c.var.DB, id);
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -757,7 +757,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/invoices/:id — only DRAFT. Cascades via FK to items + payments.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT id, status FROM invoices WHERE id = ?",
   )
     .bind(id)
@@ -771,7 +771,7 @@ app.delete("/:id", async (c) => {
       400,
     );
   }
-  await c.env.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id).run();
+  await c.var.DB.prepare("DELETE FROM invoices WHERE id = ?").bind(id).run();
   return c.json({ success: true });
 });
 

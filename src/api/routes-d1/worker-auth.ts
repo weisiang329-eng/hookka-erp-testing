@@ -74,7 +74,7 @@ app.post("/login", async (c) => {
   if (!empNo) return c.json({ success: false, error: "empNo required" }, 400);
 
   // Match by case-insensitive empNo.
-  const worker = await c.env.DB.prepare(
+  const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",
   )
     .bind(empNo.trim())
@@ -86,7 +86,7 @@ app.post("/login", async (c) => {
     return c.json({ success: false, error: "Employee account inactive" }, 403);
   }
 
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM worker_pins WHERE workerId = ?",
   )
     .bind(worker.id)
@@ -102,7 +102,7 @@ app.post("/login", async (c) => {
       );
     }
     const hashed = await hashPin(firstTimePin);
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)",
     )
       .bind(worker.id, hashed, new Date().toISOString())
@@ -124,7 +124,7 @@ app.post("/login", async (c) => {
       return c.json({ success: false, error: "Wrong PIN" }, 401);
     }
     if (!storedIsHashed) {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE worker_pins SET pin = ?, updatedAt = ? WHERE workerId = ?",
       )
         .bind(submittedHash, new Date().toISOString(), worker.id)
@@ -133,7 +133,7 @@ app.post("/login", async (c) => {
   }
 
   const token = newToken();
-  await c.env.DB.prepare(
+  await c.var.DB.prepare(
     "INSERT INTO worker_tokens (token, workerId, issuedAt) VALUES (?, ?, ?)",
   )
     .bind(token, worker.id, Date.now())
@@ -164,7 +164,7 @@ app.post("/reset-pin", async (c) => {
     return c.json({ success: false, error: "PIN must be 4 digits" }, 400);
   }
 
-  const worker = await c.env.DB.prepare(
+  const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",
   )
     .bind(empNo.trim())
@@ -183,14 +183,15 @@ app.post("/reset-pin", async (c) => {
   }
 
   const hashedNew = await hashPin(newPin);
-  await c.env.DB.prepare(
-    "INSERT OR REPLACE INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)",
+  await c.var.DB.prepare(
+    `INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)
+     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt`,
   )
     .bind(worker.id, hashedNew, new Date().toISOString())
     .run();
 
   // Invalidate any active tokens for this worker — force re-login.
-  await c.env.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?")
+  await c.var.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?")
     .bind(worker.id)
     .run();
 
@@ -204,7 +205,7 @@ app.post("/logout", async (c) => {
   const token =
     c.req.header("x-worker-token") || (body as { token?: string }).token;
   if (token) {
-    await c.env.DB.prepare("DELETE FROM worker_tokens WHERE token = ?")
+    await c.var.DB.prepare("DELETE FROM worker_tokens WHERE token = ?")
       .bind(token)
       .run();
   }
@@ -219,7 +220,7 @@ app.get("/me", async (c) => {
   if (!token) {
     return c.json({ success: false, error: "Not authenticated" }, 401);
   }
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM worker_tokens WHERE token = ?",
   )
     .bind(token)
@@ -227,7 +228,7 @@ app.get("/me", async (c) => {
   if (!row) {
     return c.json({ success: false, error: "Not authenticated" }, 401);
   }
-  const worker = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
+  const worker = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(row.workerId)
     .first<WorkerRow>();
   if (!worker) {

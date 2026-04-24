@@ -101,10 +101,10 @@ app.get("/", async (c) => {
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const [notesRes, itemsRes] = await Promise.all([
-    c.env.DB.prepare(`SELECT * FROM consignment_notes ${where}`)
+    c.var.DB.prepare(`SELECT * FROM consignment_notes ${where}`)
       .bind(...params)
       .all<NoteRow>(),
-    c.env.DB.prepare("SELECT * FROM consignment_items").all<ItemRow>(),
+    c.var.DB.prepare("SELECT * FROM consignment_items").all<ItemRow>(),
   ]);
   const data = (notesRes.results ?? []).map((r) =>
     rowToNote(r, itemsRes.results ?? []),
@@ -117,7 +117,7 @@ app.post("/", async (c) => {
   try {
     const body = await c.req.json();
     const now = new Date();
-    const noteNumber = await nextConsignmentNumber(c.env.DB, now);
+    const noteNumber = await nextConsignmentNumber(c.var.DB, now);
     const id = genId("con");
 
     const rawItems = Array.isArray(body.items) ? body.items : [];
@@ -142,7 +142,7 @@ app.post("/", async (c) => {
 
     const stmts: D1PreparedStatement[] = [];
     stmts.push(
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO consignment_notes (id, noteNumber, type, customerId, customerName,
            branchName, sentDate, status, totalValue, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -161,7 +161,7 @@ app.post("/", async (c) => {
     );
     for (const it of itemRows) {
       stmts.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO consignment_items (id, consignmentNoteId, productId, productName,
              productCode, quantity, unitPrice, status, soldDate, returnedDate)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -179,9 +179,9 @@ app.post("/", async (c) => {
         ),
       );
     }
-    await c.env.DB.batch(stmts);
+    await c.var.DB.batch(stmts);
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM consignment_notes WHERE id = ?",
     )
       .bind(id)
@@ -205,7 +205,7 @@ app.patch("/", async (c) => {
     if (!body.id) {
       return c.json({ success: false, error: "id required in body" }, 400);
     }
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM consignment_notes WHERE id = ?",
     )
       .bind(body.id)
@@ -221,17 +221,17 @@ app.patch("/", async (c) => {
       notes: body.notes ?? existing.notes ?? "",
       branchName: body.branchName ?? existing.branchName ?? "",
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       "UPDATE consignment_notes SET status = ?, notes = ?, branchName = ? WHERE id = ?",
     )
       .bind(merged.status, merged.notes, merged.branchName, body.id)
       .run();
 
     const [updated, items] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
         .bind(body.id)
         .first<NoteRow>(),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
       )
         .bind(body.id)

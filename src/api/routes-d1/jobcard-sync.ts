@@ -181,7 +181,7 @@ function chunk<T>(arr: T[], n: number): T[][] {
 // POST /api/production/sync-jobcards-from-bom
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const poIdParam = c.req.query("poId");
 
   // Load departments once — every INSERT needs deptId + deptName lookups.

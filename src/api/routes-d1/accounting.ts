@@ -177,8 +177,8 @@ async function nextJeNo(db: D1Database): Promise<string> {
 // ---------------------------------------------------------------------------
 app.get("/aging", async (c) => {
   const [ar, ap] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
-    c.env.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
+    c.var.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
+    c.var.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
   ]);
   return c.json({
     success: true,
@@ -207,7 +207,7 @@ app.post("/aging", async (c) => {
     const table = type === "ar" ? "ar_aging" : "ap_aging";
     const idCol = type === "ar" ? "customerId" : "supplierId";
 
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       `SELECT * FROM ${table} WHERE ${idCol} = ?`,
     )
       .bind(id)
@@ -244,7 +244,7 @@ app.post("/aging", async (c) => {
       }
     }
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE ${table}
          SET currentSen = ?, days30Sen = ?, days60Sen = ?, days90Sen = ?, over90Sen = ?,
              updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -260,7 +260,7 @@ app.post("/aging", async (c) => {
       )
       .run();
 
-    const after = await c.env.DB.prepare(
+    const after = await c.var.DB.prepare(
       `SELECT * FROM ${table} WHERE ${idCol} = ?`,
     )
       .bind(id)
@@ -275,7 +275,7 @@ app.post("/aging", async (c) => {
 // CHART OF ACCOUNTS
 // ---------------------------------------------------------------------------
 app.get("/coa", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM chart_of_accounts WHERE isActive = 1 ORDER BY code",
   ).all<CoaRow>();
   const data = (res.results ?? []).map(rowToCoa);
@@ -296,7 +296,7 @@ app.post("/coa", async (c) => {
     if (!validTypes.includes(type)) {
       return c.json({ success: false, error: "Invalid account type" }, 400);
     }
-    const dup = await c.env.DB.prepare(
+    const dup = await c.var.DB.prepare(
       "SELECT code FROM chart_of_accounts WHERE code = ?",
     )
       .bind(code)
@@ -305,14 +305,14 @@ app.post("/coa", async (c) => {
       return c.json({ success: false, error: "Account code already exists" }, 400);
     }
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO chart_of_accounts (code, name, type, parentCode, balanceSen, isActive)
        VALUES (?, ?, ?, ?, 0, 1)`,
     )
       .bind(code, name, type, parentCode ?? null)
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM chart_of_accounts WHERE code = ?",
     )
       .bind(code)
@@ -330,7 +330,7 @@ app.put("/coa", async (c) => {
     if (!code) {
       return c.json({ success: false, error: "code is required" }, 400);
     }
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM chart_of_accounts WHERE code = ?",
     )
       .bind(code)
@@ -349,12 +349,12 @@ app.put("/coa", async (c) => {
             ? 1
             : 0,
     };
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE chart_of_accounts SET name = ?, parentCode = ?, isActive = ? WHERE code = ?`,
     )
       .bind(merged.name, merged.parentCode, merged.isActive, code)
       .run();
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM chart_of_accounts WHERE code = ?",
     )
       .bind(code)
@@ -370,10 +370,10 @@ app.put("/coa", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/journals", async (c) => {
   const [entries, lines] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM journal_entries ORDER BY date DESC, entryNo DESC",
     ).all<JournalEntryRow>(),
-    c.env.DB.prepare("SELECT * FROM journal_lines").all<JournalLineRow>(),
+    c.var.DB.prepare("SELECT * FROM journal_lines").all<JournalLineRow>(),
   ]);
   const data = (entries.results ?? []).map((e) =>
     rowToJournal(e, lines.results ?? []),
@@ -410,10 +410,10 @@ app.post("/journals", async (c) => {
     }
 
     const id = genId("je");
-    const entryNo = await nextJeNo(c.env.DB);
+    const entryNo = await nextJeNo(c.var.DB);
     const createdBy = body.createdBy || "admin";
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO journal_entries (id, entryNo, date, description, status, createdBy)
        VALUES (?, ?, ?, ?, 'DRAFT', ?)`,
     )
@@ -428,7 +428,7 @@ app.post("/journals", async (c) => {
         creditSen?: number;
         description?: string;
       }, idx: number) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO journal_lines
              (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -442,14 +442,14 @@ app.post("/journals", async (c) => {
           l.description ?? "",
         ),
     );
-    await c.env.DB.batch(inserts);
+    await c.var.DB.batch(inserts);
 
-    const entry = await c.env.DB.prepare(
+    const entry = await c.var.DB.prepare(
       "SELECT * FROM journal_entries WHERE id = ?",
     )
       .bind(id)
       .first<JournalEntryRow>();
-    const lineRows = await c.env.DB.prepare(
+    const lineRows = await c.var.DB.prepare(
       "SELECT * FROM journal_lines WHERE journalEntryId = ? ORDER BY lineOrder",
     )
       .bind(id)
@@ -465,7 +465,7 @@ app.post("/journals", async (c) => {
 
 app.get("/journals/:id", async (c) => {
   const id = c.req.param("id");
-  const entry = await c.env.DB.prepare(
+  const entry = await c.var.DB.prepare(
     "SELECT * FROM journal_entries WHERE id = ?",
   )
     .bind(id)
@@ -473,7 +473,7 @@ app.get("/journals/:id", async (c) => {
   if (!entry) {
     return c.json({ success: false, error: "Journal entry not found" }, 404);
   }
-  const lines = await c.env.DB.prepare(
+  const lines = await c.var.DB.prepare(
     "SELECT * FROM journal_lines WHERE journalEntryId = ? ORDER BY lineOrder",
   )
     .bind(id)
@@ -487,7 +487,7 @@ app.get("/journals/:id", async (c) => {
 app.put("/journals/:id", async (c) => {
   try {
     const id = c.req.param("id");
-    const entry = await c.env.DB.prepare(
+    const entry = await c.var.DB.prepare(
       "SELECT * FROM journal_entries WHERE id = ?",
     )
       .bind(id)
@@ -499,18 +499,18 @@ app.put("/journals/:id", async (c) => {
 
     // Status transitions — post or reverse the entry and adjust account balances.
     if (body.status === "POSTED" && entry.status === "DRAFT") {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE journal_entries SET status = 'POSTED' WHERE id = ?",
       )
         .bind(id)
         .run();
-      const lines = await c.env.DB.prepare(
+      const lines = await c.var.DB.prepare(
         "SELECT * FROM journal_lines WHERE journalEntryId = ?",
       )
         .bind(id)
         .all<JournalLineRow>();
       for (const l of lines.results ?? []) {
-        const acct = await c.env.DB.prepare(
+        const acct = await c.var.DB.prepare(
           "SELECT * FROM chart_of_accounts WHERE code = ?",
         )
           .bind(l.accountCode)
@@ -520,25 +520,25 @@ app.put("/journals/:id", async (c) => {
           acct.type === "ASSET" || acct.type === "EXPENSE"
             ? l.debitSen - l.creditSen
             : l.creditSen - l.debitSen;
-        await c.env.DB.prepare(
+        await c.var.DB.prepare(
           "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
         )
           .bind(delta, l.accountCode)
           .run();
       }
     } else if (body.status === "REVERSED" && entry.status === "POSTED") {
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE journal_entries SET status = 'REVERSED' WHERE id = ?",
       )
         .bind(id)
         .run();
-      const lines = await c.env.DB.prepare(
+      const lines = await c.var.DB.prepare(
         "SELECT * FROM journal_lines WHERE journalEntryId = ?",
       )
         .bind(id)
         .all<JournalLineRow>();
       for (const l of lines.results ?? []) {
-        const acct = await c.env.DB.prepare(
+        const acct = await c.var.DB.prepare(
           "SELECT * FROM chart_of_accounts WHERE code = ?",
         )
           .bind(l.accountCode)
@@ -548,7 +548,7 @@ app.put("/journals/:id", async (c) => {
           acct.type === "ASSET" || acct.type === "EXPENSE"
             ? -(l.debitSen - l.creditSen)
             : -(l.creditSen - l.debitSen);
-        await c.env.DB.prepare(
+        await c.var.DB.prepare(
           "UPDATE chart_of_accounts SET balanceSen = balanceSen + ? WHERE code = ?",
         )
           .bind(delta, l.accountCode)
@@ -557,7 +557,7 @@ app.put("/journals/:id", async (c) => {
     } else if (entry.status === "DRAFT") {
       // Draft-only edits of header + lines.
       if (body.date !== undefined || body.description !== undefined) {
-        await c.env.DB.prepare(
+        await c.var.DB.prepare(
           "UPDATE journal_entries SET date = ?, description = ? WHERE id = ?",
         )
           .bind(body.date ?? entry.date, body.description ?? entry.description, id)
@@ -578,7 +578,7 @@ app.put("/journals/:id", async (c) => {
             400,
           );
         }
-        await c.env.DB.prepare(
+        await c.var.DB.prepare(
           "DELETE FROM journal_lines WHERE journalEntryId = ?",
         )
           .bind(id)
@@ -591,7 +591,7 @@ app.put("/journals/:id", async (c) => {
             creditSen?: number;
             description?: string;
           }, idx: number) =>
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO journal_lines
                  (journalEntryId, lineOrder, accountCode, accountName, debitSen, creditSen, description)
                VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -605,16 +605,16 @@ app.put("/journals/:id", async (c) => {
               l.description ?? "",
             ),
         );
-        if (inserts.length) await c.env.DB.batch(inserts);
+        if (inserts.length) await c.var.DB.batch(inserts);
       }
     }
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM journal_entries WHERE id = ?",
     )
       .bind(id)
       .first<JournalEntryRow>();
-    const lines = await c.env.DB.prepare(
+    const lines = await c.var.DB.prepare(
       "SELECT * FROM journal_lines WHERE journalEntryId = ? ORDER BY lineOrder",
     )
       .bind(id)
@@ -630,7 +630,7 @@ app.put("/journals/:id", async (c) => {
 
 app.delete("/journals/:id", async (c) => {
   const id = c.req.param("id");
-  const entry = await c.env.DB.prepare(
+  const entry = await c.var.DB.prepare(
     "SELECT * FROM journal_entries WHERE id = ?",
   )
     .bind(id)
@@ -641,7 +641,7 @@ app.delete("/journals/:id", async (c) => {
   if (entry.status !== "DRAFT") {
     return c.json({ success: false, error: "Only DRAFT entries can be deleted" }, 400);
   }
-  await c.env.DB.prepare("DELETE FROM journal_entries WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM journal_entries WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true });
@@ -656,7 +656,7 @@ app.get("/pl", async (c) => {
   const customerId = c.req.query("customerId");
   const state = c.req.query("state");
 
-  const res = await c.env.DB.prepare("SELECT * FROM pl_entries").all<PlRow>();
+  const res = await c.var.DB.prepare("SELECT * FROM pl_entries").all<PlRow>();
   let entries = (res.results ?? []).slice();
 
   if (period) {
@@ -730,7 +730,7 @@ app.get("/pl", async (c) => {
       opexByAccount[e.accountName] = (opexByAccount[e.accountName] || 0) + e.amount;
     });
 
-  const bsRes = await c.env.DB.prepare("SELECT * FROM balance_sheet_entries").all<BalanceSheetRow>();
+  const bsRes = await c.var.DB.prepare("SELECT * FROM balance_sheet_entries").all<BalanceSheetRow>();
   const balanceSheet = (bsRes.results ?? []).map(rowToBalanceSheet);
 
   return c.json({

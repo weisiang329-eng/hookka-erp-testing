@@ -460,10 +460,10 @@ app.get("/", async (c) => {
   const grnsSql = `SELECT * FROM grns ${where} ORDER BY grnNumber DESC`;
 
   const [grnsRes, itemsRes] = await Promise.all([
-    c.env.DB.prepare(grnsSql)
+    c.var.DB.prepare(grnsSql)
       .bind(...binds)
       .all<GRNRow>(),
-    c.env.DB.prepare("SELECT * FROM grn_items").all<GRNItemRow>(),
+    c.var.DB.prepare("SELECT * FROM grn_items").all<GRNItemRow>(),
   ]);
   const data = (grnsRes.results ?? []).map((g) =>
     rowToGRN(g, itemsRes.results ?? []),
@@ -485,12 +485,12 @@ app.post("/", async (c) => {
 
     // Fetch PO + its items
     const [po, poItemsRes] = await Promise.all([
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT id, poNo, supplierId, supplierName FROM purchase_orders WHERE id = ?",
       )
         .bind(poId)
         .first<PurchaseOrderRow>(),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
       )
         .bind(poId)
@@ -551,13 +551,13 @@ app.post("/", async (c) => {
       0,
     );
     const grnId = genGrnId();
-    const grnNumber = await generateGrnNumber(c.env.DB);
+    const grnNumber = await generateGrnNumber(c.var.DB);
     const receiveDate =
       body.receiveDate || new Date().toISOString().split("T")[0];
     const finalQcStatus = (qcStatus as string) || "PENDING";
 
     const statements: D1PreparedStatement[] = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
            supplierName, receiveDate, receivedBy, totalAmount, qcStatus,
            status, notes)
@@ -576,7 +576,7 @@ app.post("/", async (c) => {
         notes || "",
       ),
       ...grnItems.map((item) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
              orderedQty, receivedQty, acceptedQty, rejectedQty,
              rejectionReason, unitPrice)
@@ -596,9 +596,9 @@ app.post("/", async (c) => {
       ),
     ];
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchGRN(c.env.DB, grnId);
+    const created = await fetchGRN(c.var.DB, grnId);
     if (!created) {
       return c.json({ success: false, error: "Failed to create GRN" }, 500);
     }
@@ -610,7 +610,7 @@ app.post("/", async (c) => {
 
 // GET /api/grn/:id — single GRN + items
 app.get("/:id", async (c) => {
-  const grn = await fetchGRN(c.env.DB, c.req.param("id"));
+  const grn = await fetchGRN(c.var.DB, c.req.param("id"));
   if (!grn) {
     return c.json({ success: false, error: "GRN not found" }, 404);
   }
@@ -621,7 +621,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM grns WHERE id = ?",
     )
       .bind(id)
@@ -663,11 +663,11 @@ app.put("/:id", async (c) => {
         0,
       );
       statements.push(
-        c.env.DB.prepare("DELETE FROM grn_items WHERE grnId = ?").bind(id),
+        c.var.DB.prepare("DELETE FROM grn_items WHERE grnId = ?").bind(id),
       );
       for (const item of newItems) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO grn_items (grnId, poItemIndex, materialCode, materialName,
                orderedQty, receivedQty, acceptedQty, rejectedQty,
                rejectionReason, unitPrice)
@@ -689,13 +689,13 @@ app.put("/:id", async (c) => {
     }
 
     statements.push(
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE grns SET qcStatus = ?, status = ?, notes = ?,
            receivedBy = ?, totalAmount = ? WHERE id = ?`,
       ).bind(newQcStatus, newStatus, newNotes, newReceivedBy, totalAmount, id),
     );
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     // Post to stock when we crossed into a committed status
     let postSummary:
@@ -706,16 +706,16 @@ app.put("/:id", async (c) => {
       COMMITTED_STATUSES.has(newStatus) &&
       !COMMITTED_STATUSES.has(prevStatus)
     ) {
-      postSummary = await postGRNToStock(c.env.DB, id);
+      postSummary = await postGRNToStock(c.var.DB, id);
       // Cascade to the parent PO — bump receivedQty per line and transition
       // status to PARTIAL_RECEIVED / RECEIVED. Only runs on the
       // non-committed → committed boundary, matching postGRNToStock.
       if (newStatus === "POSTED") {
-        await cascadePOStatusAfterGRNPost(c.env.DB, id);
+        await cascadePOStatusAfterGRNPost(c.var.DB, id);
       }
     }
 
-    const updated = await fetchGRN(c.env.DB, id);
+    const updated = await fetchGRN(c.var.DB, id);
     return c.json({ success: true, data: updated, costing: postSummary });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

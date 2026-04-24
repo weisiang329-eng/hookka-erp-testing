@@ -26,7 +26,7 @@ function rowToAccount(r: StockAccountRow) {
 
 // GET /api/stock-accounts — list all stock accounts
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM stock_accounts ORDER BY code",
   ).all<StockAccountRow>();
   const data = (res.results ?? []).map(rowToAccount);

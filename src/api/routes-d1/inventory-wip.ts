@@ -146,7 +146,7 @@ type WIPRow = {
 // Endpoint
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
 
   // One big fetch — POs whose status is still active (pending / in progress /
   // on hold), plus every JC for those POs. COMPLETED / CANCELLED POs have

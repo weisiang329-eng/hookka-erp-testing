@@ -93,9 +93,9 @@ async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> 
 
 // GET /
 app.get("/", async (c) => {
-  await ensureLeadTimesSeeded(c.env.DB);
-  await ensureHookkaDDBufferSeeded(c.env.DB);
-  const data = await buildResponsePayload(c.env.DB);
+  await ensureLeadTimesSeeded(c.var.DB);
+  await ensureHookkaDDBufferSeeded(c.var.DB);
+  const data = await buildResponsePayload(c.var.DB);
   return c.json({ success: true, data });
 });
 
@@ -108,8 +108,8 @@ app.put("/", async (c) => {
     return c.json({ success: false, error: "Body must be an object" }, 400);
   }
 
-  await ensureLeadTimesSeeded(c.env.DB);
-  await ensureHookkaDDBufferSeeded(c.env.DB);
+  await ensureLeadTimesSeeded(c.var.DB);
+  await ensureHookkaDDBufferSeeded(c.var.DB);
 
   const statements: D1PreparedStatement[] = [];
   for (const cat of CATEGORIES) {
@@ -123,8 +123,9 @@ app.put("/", async (c) => {
       if (!Number.isFinite(n) || n < 0) continue;
       const days = Math.round(n);
       statements.push(
-        c.env.DB.prepare(
-          "INSERT OR REPLACE INTO production_lead_times (category, deptCode, days) VALUES (?, ?, ?)",
+        c.var.DB.prepare(
+          `INSERT INTO production_lead_times (category, deptCode, days) VALUES (?, ?, ?)
+           ON CONFLICT (category, deptCode) DO UPDATE SET days = EXCLUDED.days`,
         ).bind(cat as Category, deptCode, days),
       );
     }
@@ -139,18 +140,19 @@ app.put("/", async (c) => {
       if (!Number.isFinite(n) || n < 0) continue;
       const days = Math.round(n);
       statements.push(
-        c.env.DB.prepare(
-          "INSERT OR REPLACE INTO hookka_dd_buffer (category, days) VALUES (?, ?)",
+        c.var.DB.prepare(
+          `INSERT INTO hookka_dd_buffer (category, days) VALUES (?, ?)
+           ON CONFLICT (category) DO UPDATE SET days = EXCLUDED.days`,
         ).bind(cat as Category, days),
       );
     }
   }
 
   if (statements.length > 0) {
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
   }
 
-  const data = await buildResponsePayload(c.env.DB);
+  const data = await buildResponsePayload(c.var.DB);
   return c.json({ success: true, data });
 });
 
@@ -159,14 +161,14 @@ app.put("/", async (c) => {
 // Orphans (no SO, no DD, no targetEndDate) are counted in `skipped`.
 app.post("/recalc-all", async (c) => {
   try {
-    await ensureLeadTimesSeeded(c.env.DB);
-    await ensureHookkaDDBufferSeeded(c.env.DB);
+    await ensureLeadTimesSeeded(c.var.DB);
+    await ensureHookkaDDBufferSeeded(c.var.DB);
     const [leadTimes, hookkaBuffer] = await Promise.all([
-      loadLeadTimes(c.env.DB),
-      loadHookkaDDBuffer(c.env.DB),
+      loadLeadTimes(c.var.DB),
+      loadHookkaDDBuffer(c.var.DB),
     ]);
 
-    const poRes = await c.env.DB
+    const poRes = await c.var.DB
       .prepare(
         `SELECT po.id AS id, po.itemCategory AS itemCategory,
                 po.targetEndDate AS targetEndDate,
@@ -181,7 +183,7 @@ app.post("/recalc-all", async (c) => {
       return c.json({ success: true, updatedPOs: 0, updatedJCs: 0, skipped: 0 });
     }
 
-    const jcRes = await c.env.DB
+    const jcRes = await c.var.DB
       .prepare(
         `SELECT id, productionOrderId, departmentCode, sequence, wipKey FROM job_cards`,
       )
@@ -208,7 +210,7 @@ app.post("/recalc-all", async (c) => {
       updatedPOs++;
       for (const [jcId, newDue] of newDueByJc) {
         updateStatements.push(
-          c.env.DB
+          c.var.DB
             .prepare("UPDATE job_cards SET dueDate = ? WHERE id = ?")
             .bind(newDue, jcId),
         );
@@ -217,7 +219,7 @@ app.post("/recalc-all", async (c) => {
     }
     for (let i = 0; i < updateStatements.length; i += RECALC_BATCH_SIZE) {
       const chunk = updateStatements.slice(i, i + RECALC_BATCH_SIZE);
-      if (chunk.length > 0) await c.env.DB.batch(chunk);
+      if (chunk.length > 0) await c.var.DB.batch(chunk);
     }
     return c.json({ success: true, updatedPOs, updatedJCs, skipped });
   } catch (err) {

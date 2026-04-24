@@ -166,7 +166,7 @@ function buildCalc(
 // GET /api/promise-date?productId=xxx
 app.get("/", async (c) => {
   const productId = c.req.query("productId");
-  const { products, dwts, depts, queue, stock } = await loadCoreState(c.env.DB);
+  const { products, dwts, depts, queue, stock } = await loadCoreState(c.var.DB);
 
   const dwtByProduct = new Map<string, DeptWorkingTimeRow[]>();
   for (const row of dwts) {

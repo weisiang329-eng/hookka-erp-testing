@@ -62,10 +62,10 @@ function genId(): string {
 app.get("/", async (c) => {
   const departmentId = c.req.query("departmentId");
   const stmt = departmentId
-    ? c.env.DB.prepare(
+    ? c.var.DB.prepare(
         "SELECT * FROM workers WHERE departmentId = ? ORDER BY empNo",
       ).bind(departmentId)
-    : c.env.DB.prepare("SELECT * FROM workers ORDER BY empNo");
+    : c.var.DB.prepare("SELECT * FROM workers ORDER BY empNo");
   const res = await stmt.all<WorkerRow>();
   const data = (res.results ?? []).map(rowToWorker);
   return c.json({ success: true, data, total: data.length });
@@ -92,7 +92,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const department = await c.env.DB.prepare(
+    const department = await c.var.DB.prepare(
       "SELECT id, code, workingHoursPerDay FROM departments WHERE id = ?",
     )
       .bind(departmentId)
@@ -106,7 +106,7 @@ app.post("/", async (c) => {
     const resolvedHours =
       workingHoursPerDay ?? department.workingHoursPerDay;
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, position,
          phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth,
          joinDate, icNumber, passportNumber, nationality)
@@ -131,7 +131,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM workers WHERE id = ?",
     )
       .bind(id)
@@ -151,7 +151,7 @@ app.post("/", async (c) => {
 // GET /api/workers/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
+  const row = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(id)
     .first<WorkerRow>();
   if (!row) {
@@ -164,7 +164,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM workers WHERE id = ?",
     )
       .bind(id)
@@ -184,7 +184,7 @@ app.put("/:id", async (c) => {
       body.departmentId !== undefined &&
       body.departmentId !== existing.departmentId
     ) {
-      const department = await c.env.DB.prepare(
+      const department = await c.var.DB.prepare(
         "SELECT id, code, workingHoursPerDay FROM departments WHERE id = ?",
       )
         .bind(body.departmentId)
@@ -217,7 +217,7 @@ app.put("/:id", async (c) => {
       nationality: body.nationality ?? existing.nationality ?? "",
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE workers SET
          name = ?, empNo = ?, departmentId = ?, departmentCode = ?,
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
@@ -244,7 +244,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM workers WHERE id = ?",
     )
       .bind(id)
@@ -273,7 +273,7 @@ app.put("/:id", async (c) => {
 // them out first to avoid dangling references.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
+  const existing = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(id)
     .first<WorkerRow>();
   if (!existing) {
@@ -297,20 +297,20 @@ app.delete("/:id", async (c) => {
     // Nullify the soft-FK pic columns on job_cards + piece_pics so the
     // cascade delete doesn't leave orphaned worker references. Wrapped in
     // a batch with the terminal DELETE so partial failures roll back.
-    await c.env.DB.batch([
-      c.env.DB.prepare(
+    await c.var.DB.batch([
+      c.var.DB.prepare(
         "UPDATE job_cards SET pic1Id = NULL, pic1Name = NULL WHERE pic1Id = ?",
       ).bind(id),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE job_cards SET pic2Id = NULL, pic2Name = NULL WHERE pic2Id = ?",
       ).bind(id),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE piece_pics SET pic1Id = NULL, pic1Name = NULL WHERE pic1Id = ?",
       ).bind(id),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "UPDATE piece_pics SET pic2Id = NULL, pic2Name = NULL WHERE pic2Id = ?",
       ).bind(id),
-      c.env.DB.prepare("DELETE FROM workers WHERE id = ?").bind(id),
+      c.var.DB.prepare("DELETE FROM workers WHERE id = ?").bind(id),
     ]);
     // Return a synthetic "terminated" snapshot so the client sees the final
     // state without another round-trip.
@@ -325,15 +325,15 @@ app.delete("/:id", async (c) => {
   //
   // NOTE: the workers table has no updated_at column (see 0001_init.sql),
   // which is why the spec's `updated_at = ?` clause is skipped here.
-  await c.env.DB.batch([
-    c.env.DB.prepare(
+  await c.var.DB.batch([
+    c.var.DB.prepare(
       "UPDATE workers SET status = 'INACTIVE' WHERE id = ?",
     ).bind(id),
     // Kill any live worker-portal sessions so the inactive worker can't
     // keep browsing on an old token.
-    c.env.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?").bind(id),
+    c.var.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?").bind(id),
   ]);
-  const updated = await c.env.DB.prepare("SELECT * FROM workers WHERE id = ?")
+  const updated = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(id)
     .first<WorkerRow>();
   return c.json({

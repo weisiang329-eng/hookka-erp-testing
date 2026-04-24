@@ -148,10 +148,10 @@ async function fetchPOWithItems(db: D1Database, id: string) {
 // GET /api/purchase-orders — list all POs + items
 app.get("/", async (c) => {
   const [pos, items] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM purchase_orders ORDER BY created_at DESC, id DESC",
     ).all<PurchaseOrderRow>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT * FROM purchase_order_items",
     ).all<PurchaseOrderItemRow>(),
   ]);
@@ -178,7 +178,7 @@ app.post("/", async (c) => {
     }
 
     // Validate supplier exists
-    const supplier = await c.env.DB.prepare(
+    const supplier = await c.var.DB.prepare(
       "SELECT id FROM suppliers WHERE id = ?",
     )
       .bind(supplierId)
@@ -188,7 +188,7 @@ app.post("/", async (c) => {
     }
 
     const poId = genPoId();
-    const poNo = await generatePoNo(c.env.DB);
+    const poNo = await generatePoNo(c.var.DB);
     const now = new Date().toISOString();
     const today = now.split("T")[0];
 
@@ -211,7 +211,7 @@ app.post("/", async (c) => {
     const status: string = body.status ?? "DRAFT";
 
     const statements = [
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
            subtotalSen, totalSen, status, orderDate, expectedDate, receivedDate,
            notes, created_at, updated_at)
@@ -232,7 +232,7 @@ app.post("/", async (c) => {
         now,
       ),
       ...items.map((item) =>
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           `INSERT INTO purchase_order_items (id, purchaseOrderId,
              materialCategory, materialName, supplierSKU, quantity,
              unitPriceSen, totalSen, receivedQty, unit)
@@ -252,9 +252,9 @@ app.post("/", async (c) => {
       ),
     ];
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
-    const created = await fetchPOWithItems(c.env.DB, poId);
+    const created = await fetchPOWithItems(c.var.DB, poId);
     if (!created) {
       return c.json(
         { success: false, error: "Failed to create purchase order" },
@@ -269,7 +269,7 @@ app.post("/", async (c) => {
 
 // GET /api/purchase-orders/:id — single PO + items
 app.get("/:id", async (c) => {
-  const po = await fetchPOWithItems(c.env.DB, c.req.param("id"));
+  const po = await fetchPOWithItems(c.var.DB, c.req.param("id"));
   if (!po) {
     return c.json({ success: false, error: "Purchase order not found" }, 404);
   }
@@ -280,7 +280,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT * FROM purchase_orders WHERE id = ?",
     )
       .bind(id)
@@ -334,13 +334,13 @@ app.put("/:id", async (c) => {
       });
 
       statements.push(
-        c.env.DB.prepare(
+        c.var.DB.prepare(
           "DELETE FROM purchase_order_items WHERE purchaseOrderId = ?",
         ).bind(id),
       );
       for (const item of newItems) {
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO purchase_order_items (id, purchaseOrderId,
                materialCategory, materialName, supplierSKU, quantity,
                unitPriceSen, totalSen, receivedQty, unit)
@@ -380,7 +380,7 @@ app.put("/:id", async (c) => {
     };
 
     statements.push(
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `UPDATE purchase_orders SET
            supplierId = ?, supplierName = ?, subtotalSen = ?, totalSen = ?,
            status = ?, orderDate = ?, expectedDate = ?, receivedDate = ?,
@@ -411,7 +411,7 @@ app.put("/:id", async (c) => {
     const isReceivedTransition =
       body.status === "RECEIVED" && existing.status !== "RECEIVED";
     if (isReceivedTransition) {
-      const existingGrn = await c.env.DB.prepare(
+      const existingGrn = await c.var.DB.prepare(
         "SELECT id FROM grns WHERE poId = ? LIMIT 1",
       )
         .bind(id)
@@ -440,7 +440,7 @@ app.put("/:id", async (c) => {
               unit: (item.unit as string) ?? "pcs",
             }));
           }
-          const existingItems = await c.env.DB.prepare(
+          const existingItems = await c.var.DB.prepare(
             "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
           )
             .bind(id)
@@ -449,10 +449,10 @@ app.put("/:id", async (c) => {
         })();
 
         const grnId = genGrnId();
-        const grnNumber = await generateGrnNumber(c.env.DB);
+        const grnNumber = await generateGrnNumber(c.var.DB);
         const today = now.split("T")[0];
         statements.push(
-          c.env.DB.prepare(
+          c.var.DB.prepare(
             `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
                supplierName, receiveDate, receivedBy, totalAmount,
                qcStatus, status, notes)
@@ -472,7 +472,7 @@ app.put("/:id", async (c) => {
         );
         poItemRows.forEach((item, idx) => {
           statements.push(
-            c.env.DB.prepare(
+            c.var.DB.prepare(
               `INSERT INTO grn_items (grnId, poItemIndex, materialCode,
                  materialName, orderedQty, receivedQty, acceptedQty,
                  rejectedQty, rejectionReason, unitPrice)
@@ -490,7 +490,7 @@ app.put("/:id", async (c) => {
       }
     }
 
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     // Fire-and-forget supplier notification when a PO is submitted. Stubbed
     // out as a console log for now — real Resend wiring can hook into the
@@ -507,7 +507,7 @@ app.put("/:id", async (c) => {
       }
     }
 
-    const updated = await fetchPOWithItems(c.env.DB, id);
+    const updated = await fetchPOWithItems(c.var.DB, id);
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -517,11 +517,11 @@ app.put("/:id", async (c) => {
 // DELETE /api/purchase-orders/:id — cascades to items via FK
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await fetchPOWithItems(c.env.DB, id);
+  const existing = await fetchPOWithItems(c.var.DB, id);
   if (!existing) {
     return c.json({ success: false, error: "Purchase order not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM purchase_orders WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM purchase_orders WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true, data: existing });

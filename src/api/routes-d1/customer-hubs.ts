@@ -57,10 +57,10 @@ function rowToHub(row: CustomerHubRow) {
 app.get("/", async (c) => {
   const parentId = c.req.query("parentId");
   const stmt = parentId
-    ? c.env.DB.prepare(
+    ? c.var.DB.prepare(
         "SELECT * FROM customer_hubs WHERE parentId = ? ORDER BY creditorCode",
       ).bind(parentId)
-    : c.env.DB.prepare("SELECT * FROM customer_hubs ORDER BY creditorCode");
+    : c.var.DB.prepare("SELECT * FROM customer_hubs ORDER BY creditorCode");
   const res = await stmt.all<CustomerHubRow>();
   const data = (res.results ?? []).map(rowToHub);
   return c.json({ success: true, data });

@@ -60,8 +60,8 @@ app.get("/", async (c) => {
     ? "SELECT * FROM monthly_stock_values WHERE period = ? ORDER BY accountCode"
     : "SELECT * FROM monthly_stock_values ORDER BY period DESC, accountCode";
   const stmt = period
-    ? c.env.DB.prepare(sql).bind(period)
-    : c.env.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(period)
+    : c.var.DB.prepare(sql);
   const res = await stmt.all<MonthlyStockValueRow>();
   const data = (res.results ?? []).map(rowToValue);
   return c.json({ success: true, data });
@@ -79,7 +79,7 @@ app.post("/", async (c) => {
       );
     }
 
-    const existing = await c.env.DB.prepare(
+    const existing = await c.var.DB.prepare(
       "SELECT id FROM monthly_stock_values WHERE period = ? LIMIT 1",
     )
       .bind(period)
@@ -97,10 +97,10 @@ app.post("/", async (c) => {
     const prevPeriod = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
 
     const [accountsRes, prevEntriesRes] = await Promise.all([
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT code, description FROM stock_accounts ORDER BY code",
       ).all<StockAccountRow>(),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT * FROM monthly_stock_values WHERE period = ?",
       )
         .bind(prevPeriod)
@@ -133,7 +133,7 @@ app.post("/", async (c) => {
     }
 
     const statements = newEntries.map((e) =>
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         `INSERT INTO monthly_stock_values (id, period, accountCode,
            accountDescription, openingValue, purchasesValue, consumptionValue,
            closingValue, physicalCountValue, variancePercent, status,
@@ -155,7 +155,7 @@ app.post("/", async (c) => {
         e.postedBy,
       ),
     );
-    await c.env.DB.batch(statements);
+    await c.var.DB.batch(statements);
 
     return c.json({ success: true, data: newEntries.map(rowToValue) }, 201);
   } catch {
@@ -166,7 +166,7 @@ app.post("/", async (c) => {
 // GET /api/stock-value/:id — single entry by id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM monthly_stock_values WHERE id = ?",
   )
     .bind(id)
@@ -181,7 +181,7 @@ app.get("/:id", async (c) => {
 // purchases/consumption change, and variancePercent when physicalCount set.
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM monthly_stock_values WHERE id = ?",
   )
     .bind(id)
@@ -242,7 +242,7 @@ app.put("/:id", async (c) => {
         ) / 100;
     }
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE monthly_stock_values SET
          purchasesValue = ?, consumptionValue = ?, closingValue = ?,
          physicalCountValue = ?, variancePercent = ?, status = ?,
@@ -262,7 +262,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM monthly_stock_values WHERE id = ?",
     )
       .bind(id)

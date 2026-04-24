@@ -105,7 +105,7 @@ app.get("/", async (c) => {
     where.length > 0
       ? `SELECT * FROM goods_in_transit WHERE ${where.join(" AND ")} ORDER BY orderDate DESC, id DESC`
       : "SELECT * FROM goods_in_transit ORDER BY orderDate DESC, id DESC";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<GoodsInTransitRow>();
   const data = (res.results ?? []).map(rowToGIT);
@@ -180,7 +180,7 @@ app.post("/", async (c) => {
       notes: body.notes ?? "",
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO goods_in_transit (id, poId, poNumber, supplierId, supplierName,
          shippingMethod, containerNumber, trackingNumber, carrierName, status,
          orderDate, shippedDate, expectedArrival, actualArrival,
@@ -216,7 +216,7 @@ app.post("/", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM goods_in_transit WHERE id = ?",
     )
       .bind(id)
@@ -236,7 +236,7 @@ app.post("/", async (c) => {
 // GET /api/goods-in-transit/:id — single transit entry
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM goods_in_transit WHERE id = ?",
   )
     .bind(id)
@@ -251,7 +251,7 @@ app.get("/:id", async (c) => {
 // matching in-memory behavior)
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM goods_in_transit WHERE id = ?",
   )
     .bind(id)
@@ -308,7 +308,7 @@ app.put("/:id", async (c) => {
       notes: body.notes ?? existing.notes ?? "",
     };
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `UPDATE goods_in_transit SET
          status = ?, shippedDate = ?, expectedArrival = ?, actualArrival = ?,
          customsClearanceDate = ?, customsStatus = ?, containerNumber = ?,
@@ -338,7 +338,7 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    const updated = await c.env.DB.prepare(
+    const updated = await c.var.DB.prepare(
       "SELECT * FROM goods_in_transit WHERE id = ?",
     )
       .bind(id)
@@ -358,7 +358,7 @@ app.put("/:id", async (c) => {
 // DELETE /api/goods-in-transit/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM goods_in_transit WHERE id = ?",
   )
     .bind(id)
@@ -366,7 +366,7 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Transit entry not found" }, 404);
   }
-  await c.env.DB.prepare("DELETE FROM goods_in_transit WHERE id = ?")
+  await c.var.DB.prepare("DELETE FROM goods_in_transit WHERE id = ?")
     .bind(id)
     .run();
   return c.json({ success: true, data: rowToGIT(existing) });

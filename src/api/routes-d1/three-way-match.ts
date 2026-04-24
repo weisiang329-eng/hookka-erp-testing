@@ -113,7 +113,7 @@ function genId(): string {
 
 // GET /api/three-way-match — returns RAW array (no wrapper!)
 app.get("/", async (c) => {
-  const res = await c.env.DB.prepare(
+  const res = await c.var.DB.prepare(
     "SELECT * FROM three_way_matches",
   ).all<ThreeWayMatchRow>();
   const data = (res.results ?? []).map(rowToMatch);
@@ -129,7 +129,7 @@ app.post("/", async (c) => {
 
     if (!grnId) return c.json({ error: "grnId is required" }, 400);
 
-    const grn = await c.env.DB.prepare(
+    const grn = await c.var.DB.prepare(
       "SELECT id, grnNumber, poId, supplierId, supplierName, totalAmount FROM grns WHERE id = ?",
     )
       .bind(grnId)
@@ -146,7 +146,7 @@ app.post("/", async (c) => {
     if (!grn.poId) {
       return c.json({ error: "Related PO not found" }, 404);
     }
-    const po = await c.env.DB.prepare(
+    const po = await c.var.DB.prepare(
       "SELECT id, poNo, totalSen FROM purchase_orders WHERE id = ?",
     )
       .bind(grn.poId)
@@ -154,12 +154,12 @@ app.post("/", async (c) => {
     if (!po) return c.json({ error: "Related PO not found" }, 404);
 
     const [grnItemsRes, poItemsRes] = await Promise.all([
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT * FROM grn_items WHERE grnId = ? ORDER BY id",
       )
         .bind(grn.id)
         .all<GrnItemRow>(),
-      c.env.DB.prepare(
+      c.var.DB.prepare(
         "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ? ORDER BY id",
       )
         .bind(po.id)
@@ -245,7 +245,7 @@ app.post("/", async (c) => {
     const id = genId();
     const variancePercentRounded = Math.round(variancePercent * 100) / 100;
 
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO three_way_matches (id, poId, poNumber, grnId, grnNumber,
          invoiceId, invoiceNumber, supplierId, supplierName, matchStatus,
          poTotal, grnTotal, invoiceTotal, variance, variancePercent,

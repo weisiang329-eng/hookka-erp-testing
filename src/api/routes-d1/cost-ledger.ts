@@ -147,7 +147,7 @@ app.get("/", async (c) => {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const sql = `SELECT * FROM cost_ledger ${where} ORDER BY date ASC, id ASC`;
 
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<CostLedgerRow>();
   const rows = (res.results ?? []).map(rowToLedgerEntry);
@@ -161,8 +161,8 @@ app.get("/rm-batches", async (c) => {
     ? "SELECT * FROM rm_batches WHERE rmId = ? ORDER BY receivedDate ASC, id ASC"
     : "SELECT * FROM rm_batches ORDER BY receivedDate ASC, id ASC";
   const res = rmId
-    ? await c.env.DB.prepare(sql).bind(rmId).all<RMBatchRow>()
-    : await c.env.DB.prepare(sql).all<RMBatchRow>();
+    ? await c.var.DB.prepare(sql).bind(rmId).all<RMBatchRow>()
+    : await c.var.DB.prepare(sql).all<RMBatchRow>();
   const rawRows = res.results ?? [];
   const rows = rawRows.map(rowToRMBatch);
   const totalValueSen = rawRows.reduce(
@@ -194,7 +194,7 @@ app.get("/fg-batches", async (c) => {
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
   const sql = `SELECT * FROM fg_batches ${where} ORDER BY completedDate ASC, id ASC`;
 
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<FGBatchRow>();
   const rawRows = res.results ?? [];
@@ -214,13 +214,13 @@ app.get("/fg-batches", async (c) => {
 // GET /api/cost-ledger/summary — dashboard rollup
 app.get("/summary", async (c) => {
   const [rmRes, fgRes, ledgerRes] = await Promise.all([
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT remainingQty, unitCostSen FROM rm_batches",
     ).all<{ remainingQty: number; unitCostSen: number }>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT remainingQty, unitCostSen FROM fg_batches",
     ).all<{ remainingQty: number; unitCostSen: number }>(),
-    c.env.DB.prepare(
+    c.var.DB.prepare(
       "SELECT date, type, totalCostSen FROM cost_ledger",
     ).all<{ date: string; type: string; totalCostSen: number }>(),
   ]);

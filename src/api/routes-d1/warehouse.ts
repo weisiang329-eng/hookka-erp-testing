@@ -200,8 +200,8 @@ async function replaceRackItems(
 // GET /api/warehouse — list all rack locations + summary + grouped-by-rack
 app.get("/", async (c) => {
   const [locs, items] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM rack_locations ORDER BY rack").all<RackLocationRow>(),
-    c.env.DB.prepare("SELECT * FROM rack_items").all<RackItemRow>(),
+    c.var.DB.prepare("SELECT * FROM rack_locations ORDER BY rack").all<RackLocationRow>(),
+    c.var.DB.prepare("SELECT * FROM rack_items").all<RackItemRow>(),
   ]);
   const data = (locs.results ?? []).map((l) => rowToRack(l, items.results ?? []));
   const grouped: Record<string, typeof data> = {};
@@ -233,7 +233,7 @@ app.post("/", async (c) => {
       qty?: number;
     };
     const { rackLocationId } = body;
-    const row = await c.env.DB.prepare(
+    const row = await c.var.DB.prepare(
       "SELECT * FROM rack_locations WHERE id = ?",
     )
       .bind(rackLocationId)
@@ -241,7 +241,7 @@ app.post("/", async (c) => {
     if (!row) {
       return c.json({ success: false, error: "Rack location not found" }, 404);
     }
-    const existingItems = await c.env.DB.prepare(
+    const existingItems = await c.var.DB.prepare(
       "SELECT * FROM rack_items WHERE rackLocationId = ?",
     )
       .bind(rackLocationId)
@@ -271,13 +271,13 @@ app.post("/", async (c) => {
       stockedInDate: new Date().toISOString().split("T")[0],
       notes: body.notes ?? "",
     });
-    await replaceRackItems(c.env.DB, rackLocationId, current, row.reserved);
+    await replaceRackItems(c.var.DB, rackLocationId, current, row.reserved);
 
     const [updatedRow, updatedItems] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
         .bind(rackLocationId)
         .first<RackLocationRow>(),
-      c.env.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+      c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
         .bind(rackLocationId)
         .all<RackItemRow>(),
     ]);
@@ -317,7 +317,7 @@ app.get("/movements", async (c) => {
     where.length > 0
       ? `SELECT * FROM stock_movements WHERE ${where.join(" AND ")} ORDER BY created_at DESC`
       : "SELECT * FROM stock_movements ORDER BY created_at DESC";
-  const res = await c.env.DB.prepare(sql)
+  const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<StockMovementRow>();
   const data = (res.results ?? []).map(rowToMovement);
@@ -344,7 +344,7 @@ app.post("/movements", async (c) => {
     }
     const movementId = genMovementId();
     const createdAt = new Date().toISOString();
-    await c.env.DB.prepare(
+    await c.var.DB.prepare(
       `INSERT INTO stock_movements (id, type, rackLocationId, rackLabel,
          productionOrderId, productCode, productName, quantity, reason,
          performedBy, created_at)
@@ -365,7 +365,7 @@ app.post("/movements", async (c) => {
       )
       .run();
 
-    const created = await c.env.DB.prepare(
+    const created = await c.var.DB.prepare(
       "SELECT * FROM stock_movements WHERE id = ?",
     )
       .bind(movementId)
@@ -386,10 +386,10 @@ app.post("/movements", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const [row, items] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
       .bind(id)
       .first<RackLocationRow>(),
-    c.env.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+    c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
       .bind(id)
       .all<RackItemRow>(),
   ]);
@@ -402,7 +402,7 @@ app.get("/:id", async (c) => {
 // PUT /api/warehouse/:id — replace items list and/or reserved flag
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM rack_locations WHERE id = ?",
   )
     .bind(id)
@@ -418,7 +418,7 @@ app.put("/:id", async (c) => {
     let nextReserved = existing.reserved;
     if (body.reserved !== undefined) {
       nextReserved = body.reserved ? 1 : 0;
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE rack_locations SET reserved = ? WHERE id = ?",
       )
         .bind(nextReserved, id)
@@ -428,17 +428,17 @@ app.put("/:id", async (c) => {
     let nextItems: RackItemApi[] | undefined;
     if (Array.isArray(body.items)) {
       nextItems = body.items;
-      await replaceRackItems(c.env.DB, id, nextItems, nextReserved);
+      await replaceRackItems(c.var.DB, id, nextItems, nextReserved);
     } else {
       // Still recompute status from current items + new reserved
-      const itemsRes = await c.env.DB.prepare(
+      const itemsRes = await c.var.DB.prepare(
         "SELECT * FROM rack_items WHERE rackLocationId = ?",
       )
         .bind(id)
         .all<RackItemRow>();
       const current = (itemsRes.results ?? []).map(itemRowToApi);
       const status = computeRackStatus(current, nextReserved === 1);
-      await c.env.DB.prepare(
+      await c.var.DB.prepare(
         "UPDATE rack_locations SET status = ? WHERE id = ?",
       )
         .bind(status, id)
@@ -446,10 +446,10 @@ app.put("/:id", async (c) => {
     }
 
     const [updatedRow, updatedItems] = await Promise.all([
-      c.env.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
+      c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
         .bind(id)
         .first<RackLocationRow>(),
-      c.env.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+      c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
         .bind(id)
         .all<RackItemRow>(),
     ]);
@@ -469,7 +469,7 @@ app.put("/:id", async (c) => {
 // Returns both the updated location and the previous state for undo/UI diff.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const existing = await c.env.DB.prepare(
+  const existing = await c.var.DB.prepare(
     "SELECT * FROM rack_locations WHERE id = ?",
   )
     .bind(id)
@@ -478,7 +478,7 @@ app.delete("/:id", async (c) => {
     return c.json({ success: false, error: "Rack location not found" }, 404);
   }
   const productCode = c.req.query("productCode");
-  const itemsRes = await c.env.DB.prepare(
+  const itemsRes = await c.var.DB.prepare(
     "SELECT * FROM rack_items WHERE rackLocationId = ?",
   )
     .bind(id)
@@ -507,13 +507,13 @@ app.delete("/:id", async (c) => {
   } else {
     remaining = [];
   }
-  await replaceRackItems(c.env.DB, id, remaining, existing.reserved);
+  await replaceRackItems(c.var.DB, id, remaining, existing.reserved);
 
   const [updatedRow, updatedItems] = await Promise.all([
-    c.env.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
+    c.var.DB.prepare("SELECT * FROM rack_locations WHERE id = ?")
       .bind(id)
       .first<RackLocationRow>(),
-    c.env.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
+    c.var.DB.prepare("SELECT * FROM rack_items WHERE rackLocationId = ?")
       .bind(id)
       .all<RackItemRow>(),
   ]);

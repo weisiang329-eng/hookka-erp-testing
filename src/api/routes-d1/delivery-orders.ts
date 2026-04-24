@@ -208,20 +208,63 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
 }
 
 // GET /api/delivery-orders — list all, nested items
+//
+// Opt-in pagination via ?page=N&limit=M. When either is supplied, SQL
+// LIMIT/OFFSET is applied and delivery_order_items is scoped to the
+// page's DO IDs. Default limit=50, cap=500. Omitting both params returns
+// the full list (backward compatible).
 app.get("/", async (c) => {
-  const [orders, items] = await Promise.all([
-    c.env.DB.prepare(
-      "SELECT * FROM delivery_orders ORDER BY created_at DESC",
-    ).all<DeliveryOrderRow>(),
-    c.env.DB.prepare(
-      "SELECT * FROM delivery_order_items",
-    ).all<DeliveryOrderItemRow>(),
-  ]);
+  const db = c.env.DB;
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
+  const paginate = pageParam !== undefined || limitParam !== undefined;
 
-  const data = (orders.results ?? []).map((o) =>
-    rowToOrder(o, items.results ?? []),
-  );
-  return c.json({ success: true, data, total: data.length });
+  if (!paginate) {
+    const [orders, items] = await Promise.all([
+      db
+        .prepare("SELECT * FROM delivery_orders ORDER BY created_at DESC")
+        .all<DeliveryOrderRow>(),
+      db
+        .prepare("SELECT * FROM delivery_order_items")
+        .all<DeliveryOrderItemRow>(),
+    ]);
+    const data = (orders.results ?? []).map((o) =>
+      rowToOrder(o, items.results ?? []),
+    );
+    return c.json({ success: true, data, total: data.length });
+  }
+
+  const page = Math.max(1, parseInt(pageParam ?? "1", 10) || 1);
+  const rawLimit = parseInt(limitParam ?? "50", 10) || 50;
+  const limit = Math.min(500, Math.max(1, rawLimit));
+  const offset = (page - 1) * limit;
+
+  const [countRes, pageRes] = await Promise.all([
+    db.prepare("SELECT COUNT(*) AS n FROM delivery_orders").first<{ n: number }>(),
+    db
+      .prepare(
+        "SELECT * FROM delivery_orders ORDER BY created_at DESC LIMIT ? OFFSET ?",
+      )
+      .bind(limit, offset)
+      .all<DeliveryOrderRow>(),
+  ]);
+  const total = countRes?.n ?? 0;
+  const orderRows = pageRes.results ?? [];
+
+  let items: DeliveryOrderItemRow[] = [];
+  if (orderRows.length > 0) {
+    const ids = orderRows.map((o) => o.id);
+    const placeholders = ids.map(() => "?").join(",");
+    const itemsRes = await db
+      .prepare(
+        `SELECT * FROM delivery_order_items WHERE deliveryOrderId IN (${placeholders})`,
+      )
+      .bind(...ids)
+      .all<DeliveryOrderItemRow>();
+    items = itemsRes.results ?? [];
+  }
+  const data = orderRows.map((o) => rowToOrder(o, items));
+  return c.json({ success: true, data, page, limit, total });
 });
 
 // POST /api/delivery-orders — create

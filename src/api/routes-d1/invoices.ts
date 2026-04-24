@@ -287,6 +287,11 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 // Pagination: opt-in via ?page=N&limit=M. When either is supplied, SQL
 // LIMIT/OFFSET applies to the filtered set, and items + payments are
 // scoped to only the page's invoice IDs. Default limit=50, cap=500.
+//
+// ?includeArchive=true — phase-5 flag accepted for API symmetry with the
+// other list endpoints, but invoices are NOT archived (compliance/tax
+// retention rules). So this is a no-op on the invoices endpoint; the
+// query param is consumed-and-ignored rather than forwarded to SQL.
 app.get("/", async (c) => {
   const db = c.env.DB;
   const customerId = c.req.query("customerId");

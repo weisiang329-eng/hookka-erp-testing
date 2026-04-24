@@ -1466,10 +1466,21 @@ export default function ProductionPage() {
         const bfQty = first.category === "BEDFRAME"
           ? (group.find((g) => (g.wipType || "").toUpperCase() === "HB")?.qty ?? first.qty)
           : first.qty;
+        // SO ID display rule:
+        //   SOFA merged row → parent SO without -NN suffix (e.g. SO-2604-293)
+        //     because a sofa set spans variants across POs and no single
+        //     suffix belongs to the whole set.
+        //   BF / ACCESSORY → keep first.soId (= poNo with suffix) because
+        //     qty>1 already fans out into per-piece POs (-01, -02, ...) so
+        //     the suffix is genuinely one piece.
+        const mergedSoId = first.category === "SOFA"
+          ? (first.soId || "").replace(/-\d+$/, "")
+          : first.soId;
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,
           rowNo: rowN++,
+          soId: mergedSoId,
           // Model column keeps just the baseModel (e.g. '5530') — the
           // combined variants (e.g. '5530-1A(LHF)+1NA+1A(RHF)') land in
           // the WIP label so operators see one at a glance, details on

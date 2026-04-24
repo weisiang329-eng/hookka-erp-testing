@@ -213,6 +213,12 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
 // LIMIT/OFFSET is applied and delivery_order_items is scoped to the
 // page's DO IDs. Default limit=50, cap=500. Omitting both params returns
 // the full list (backward compatible).
+//
+// ?includeArchive=true — phase-5 historical toggle. delivery_orders has
+// no archive table (phase 5 only archives production + sales), so this
+// flag is currently a no-op here — accepted for API symmetry with the
+// other three list endpoints but never changes the result set. Left as
+// a param so callers can pass the same query string uniformly.
 app.get("/", async (c) => {
   const db = c.env.DB;
   const pageParam = c.req.query("page");

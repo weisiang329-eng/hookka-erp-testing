@@ -262,8 +262,28 @@ export default function DeliveryPage() {
   const [editingDDId, setEditingDDId] = useState<string | null>(null);
   const [editingDDValue, setEditingDDValue] = useState("");
 
+  // ---------- Pagination (DO list only) ----------
+  // Server-side pagination for the DO fetch; PO-based tabs (planning,
+  // pending_delivery) and the other sibling fetches (POs, SOs, customers)
+  // remain full-set and unaffected.
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(1);
+
   // ---------- Fetch ----------
-  const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{ success?: boolean; data?: DeliveryOrder[] }>("/api/delivery-orders");
+  const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
+    success?: boolean;
+    data?: DeliveryOrder[];
+    page?: number;
+    limit?: number;
+    total?: number;
+  }>(`/api/delivery-orders?page=${page}&limit=${PAGE_SIZE}`);
+  const totalDOsServer = doRaw?.total ?? (doRaw?.data?.length ?? 0);
+  const totalPages = Math.max(1, Math.ceil(totalDOsServer / PAGE_SIZE));
+
+  // Reset to page 1 when the active tab changes.
+  useEffect(() => {
+    setPage(1);
+  }, [activeTab]);
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");

@@ -1237,19 +1237,44 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 //     Uses SQL LIMIT/OFFSET on sales_orders, then scopes
 //     sales_order_items to only the page's SO IDs — so a 50-row page no
 //     longer pulls every SO item row.
+//
+//   ?includeArchive=true
+//     Phase-5 historical-report hook. When set, UNION ALL hot + archive
+//     (sales_orders + sales_orders_archive) before applying ORDER BY /
+//     LIMIT. Default off. The archive has an extra `archivedAt` column
+//     the hot table doesn't; we project an empty string for hot rows so
+//     the UNION column lists line up, then drop the extra column in the
+//     row mapper.
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
   const db = c.env.DB;
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
+  const includeArchive = c.req.query("includeArchive") === "true";
+
+  // Union fragment used whenever includeArchive is on. `SELECT * FROM
+  // sales_orders` is padded with a literal '' for archivedAt so the
+  // column list matches the archive table. Kept as a CTE-ish inline
+  // subquery rather than a real view so we stay in one-file-per-route.
+  const soSourceSql = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM sales_orders
+        UNION ALL
+        SELECT * FROM sales_orders_archive)`
+    : "sales_orders";
+
+  const itemsSourceSql = includeArchive
+    ? `(SELECT *, '' AS archivedAt FROM sales_order_items
+        UNION ALL
+        SELECT * FROM sales_order_items_archive)`
+    : "sales_order_items";
 
   if (!paginate) {
     const [sos, items] = await Promise.all([
       db
-        .prepare("SELECT * FROM sales_orders ORDER BY created_at DESC, id DESC")
+        .prepare(`SELECT * FROM ${soSourceSql} ORDER BY created_at DESC, id DESC`)
         .all<SalesOrderRow>(),
-      db.prepare("SELECT * FROM sales_order_items").all<SalesOrderItemRow>(),
+      db.prepare(`SELECT * FROM ${itemsSourceSql}`).all<SalesOrderItemRow>(),
     ]);
     const data = (sos.results ?? []).map((s) =>
       rowToSO(s, items.results ?? []),
@@ -1263,10 +1288,10 @@ app.get("/", async (c) => {
   const offset = (page - 1) * limit;
 
   const [countRes, pageRes] = await Promise.all([
-    db.prepare("SELECT COUNT(*) AS n FROM sales_orders").first<{ n: number }>(),
+    db.prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql}`).first<{ n: number }>(),
     db
       .prepare(
-        "SELECT * FROM sales_orders ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+        `SELECT * FROM ${soSourceSql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       )
       .bind(limit, offset)
       .all<SalesOrderRow>(),
@@ -1279,7 +1304,7 @@ app.get("/", async (c) => {
     const ids = soRows.map((s) => s.id);
     const placeholders = ids.map(() => "?").join(",");
     const itemsRes = await db
-      .prepare(`SELECT * FROM sales_order_items WHERE salesOrderId IN (${placeholders})`)
+      .prepare(`SELECT * FROM ${itemsSourceSql} WHERE salesOrderId IN (${placeholders})`)
       .bind(...ids)
       .all<SalesOrderItemRow>();
     items = itemsRes.results ?? [];

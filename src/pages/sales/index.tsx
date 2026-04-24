@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,10 +45,22 @@ const ALL_STATUSES = [
   { value: "CANCELLED", label: "Cancelled" },
 ];
 
+const PAGE_SIZE = 50;
+
 export default function SalesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: SalesOrder[] }>("/api/sales-orders");
+
+  // Pagination — server-side. Filter/tab changes reset to page 1.
+  const [page, setPage] = useState(1);
+
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
+    success?: boolean;
+    data?: SalesOrder[];
+    page?: number;
+    limit?: number;
+    total?: number;
+  }>(`/api/sales-orders?page=${page}&limit=${PAGE_SIZE}`);
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
   const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
@@ -56,6 +68,8 @@ export default function SalesPage() {
     () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
     [ordersResp]
   );
+  const totalOrdersServer = ordersResp?.total ?? orders.length;
+  const totalPages = Math.max(1, Math.ceil(totalOrdersServer / PAGE_SIZE));
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -95,6 +109,11 @@ export default function SalesPage() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+
+  // Reset to page 1 when any filter or tab changes.
+  useEffect(() => {
+    setPage(1);
+  }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, tab]);
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");
@@ -562,6 +581,35 @@ export default function SalesPage() {
                 : ""
             }
           />
+
+          {/* Pagination footer */}
+          <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+            <span>
+              {totalOrdersServer.toLocaleString()} sales order
+              {totalOrdersServer === 1 ? "" : "s"}
+            </span>
+            <div className="flex items-center gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1 || loading}
+              >
+                ← Prev
+              </Button>
+              <span className="tabular-nums text-[#1F1D1B]">
+                Page {page} / {totalPages}
+              </span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                disabled={page >= totalPages || loading}
+              >
+                Next →
+              </Button>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

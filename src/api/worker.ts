@@ -109,6 +109,8 @@ import users from "./routes-d1/users";
 import presence from "./routes-d1/presence";
 import bomMasterTemplates from "./routes-d1/bom-master-templates";
 import kvConfig from "./routes-d1/kv-config";
+// Phase 5 — admin maintenance endpoints (archive/run, etc.)
+import admin from "./routes-d1/admin";
 import { authMiddleware } from "./lib/auth-middleware";
 import { timingMiddleware } from "./lib/observability";
 
@@ -183,6 +185,8 @@ app.route("/api/users", users);
 app.route("/api/presence", presence);
 app.route("/api/bom-master-templates", bomMasterTemplates);
 app.route("/api/kv-config", kvConfig);
+// Phase 5 — admin maintenance (archive/run). Behind the normal auth gate.
+app.route("/api/admin", admin);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

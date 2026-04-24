@@ -1342,6 +1342,45 @@ export default function ProductionPage() {
         // Aggregate production minutes — the cutter lays the fabric down
         // once, so the total cut time is the sum of every component.
         const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
+        // Quantity intentionally inherits from `first` (no sum). For a
+        // sofa set that means "one set" whether the merge is 3 or 8
+        // components; bedframe rows don't merge across modules and
+        // already carry their true per-line qty (e.g. 2 if the customer
+        // ordered 2 × 1013).
+        // Aggregate Fab Cut dept pill state so it matches the merged
+        // status. Previously sched_FAB_CUT inherited from `first`, so the
+        // pill would show DONE while the row-level status still said
+        // IN_PROGRESS because other components in the group were still
+        // pending — visually contradicting the operator. Now: done only
+        // when every child has a completedDate; otherwise earliest due
+        // drives overdue/pending.
+        const todayIso = new Date().toISOString().slice(0, 10);
+        const dueDates = group.map((g) => g.sched_FAB_CUT?.due).filter((d): d is string => !!d);
+        const earliestDue = dueDates.sort()[0] || "";
+        const latestCompleted = group
+          .map((g) => g.sched_FAB_CUT?.completed)
+          .filter((d): d is string => !!d)
+          .sort()
+          .slice(-1)[0] || "";
+        const aggSchedState: "done" | "pending" | "overdue" | "none" =
+          allDone
+            ? "done"
+            : earliestDue
+              ? earliestDue < todayIso
+                ? "overdue"
+                : "pending"
+              : "none";
+        const aggSched: DeptSched = {
+          due: earliestDue,
+          completed: allDone ? (latestCompleted || first.sched_FAB_CUT?.completed || "") : "",
+          state: aggSchedState,
+          sortKey: aggSchedState === "overdue" ? 3 : aggSchedState === "pending" ? 2 : 1,
+          poId: first.poId,
+          jobCardId: first.sched_FAB_CUT?.jobCardId ?? "",
+          deptCode: "FAB_CUT",
+          wipKey: first.sched_FAB_CUT?.wipKey ?? "",
+          locked: false,
+        };
         const groupKey = `${first.salesOrderNo || first.poId}:${first.colour || ""}`;
         // Compact WIP label: "{model} · {colour} · {size} · (FC)" —
         // middle-dot separator so the parts don't run into one another
@@ -1361,12 +1400,16 @@ export default function ProductionPage() {
           wipType: types || first.wipType,
           wip: wips,
           prodTime: totalMinutes,
-          completedDate: allDone ? first.completedDate : "",
+          dueDate: earliestDue || first.dueDate,
+          completedDate: allDone ? (latestCompleted || first.completedDate) : "",
           status: allDone
             ? "COMPLETED"
             : anyDone
               ? "IN_PROGRESS"
               : first.status,
+          // Fab Cut pill uses the aggregated state so DONE only shows
+          // when every component in the merge is actually complete.
+          sched_FAB_CUT: aggSched,
           _mergedJobCardIds: group.map((g) => g.jobCardId),
         });
       }

@@ -821,6 +821,54 @@ export default function ProductionPage() {
     }
   }
 
+  // Batched variant — one setOrders pass for a whole list of JC edits, plus
+  // parallel PATCH fetches. Used by merged-row completion fan-out where
+  // calling patchJobCard N times in a loop would otherwise trigger N full
+  // re-renders of a 430-row grid. Single-JC callers should still use the
+  // plain patchJobCard below; this is explicitly for fan-outs.
+  type JcPatch = Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">>;
+  const patchJobCardsBatch = useCallback(
+    (edits: Array<{ poId: string; jobCardId: string; patch: JcPatch }>) => {
+      if (edits.length === 0) return;
+      // Index by poId → jcId → patch for O(1) lookup inside the map below.
+      const byPo = new Map<string, Map<string, JcPatch>>();
+      for (const { poId, jobCardId, patch } of edits) {
+        if (!byPo.has(poId)) byPo.set(poId, new Map());
+        byPo.get(poId)!.set(jobCardId, patch);
+      }
+      setOrders((prev) =>
+        prev.map((o) => {
+          const jcPatches = byPo.get(o.id);
+          if (!jcPatches) return o;
+          return {
+            ...o,
+            jobCards: o.jobCards.map((j) => {
+              const p = jcPatches.get(j.id);
+              return p ? { ...j, ...p } : j;
+            }),
+          };
+        }),
+      );
+      // Parallel PATCH — fires all in flight, no awaits. Cache invalidation
+      // is batched too: one invalidate at the end, not N.
+      Promise.all(
+        edits.map(({ poId, jobCardId, patch }) =>
+          fetch(`/api/production-orders/${poId}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ jobCardId, ...patch }),
+          }),
+        ),
+      )
+        .then(() => {
+          invalidateCachePrefix("/api/production-orders");
+          invalidateCachePrefix("/api/sales-orders");
+        })
+        .catch((err) => console.error("[patchJobCardsBatch] network error", err));
+    },
+    [],
+  );
+
   // Optimistic PATCH helper for inline job-card edits (due date, completion,
   // PIC1, PIC2). Updates local state immediately so the grid reflows, then
   // fires the server request in the background and refetches on success.
@@ -1618,12 +1666,11 @@ export default function ProductionPage() {
             // Fan-out for FAB_CUT merged rows so a status change applies
             // to every component that was cut in the same pass. Use the
             // per-JC poId refs because a sofa merge can span multiple POs.
+            // Batched to collapse N re-renders into one.
             const refs = row._mergedJobCardRefs && row._mergedJobCardRefs.length > 0
               ? row._mergedJobCardRefs
               : [{ poId: row.poId, jobCardId: row.jobCardId }];
-            for (const { poId, jobCardId } of refs) {
-              patchJobCard(poId, jobCardId, patch);
-            }
+            patchJobCardsBatch(refs.map((r) => ({ ...r, patch })));
           }}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -1662,12 +1709,11 @@ export default function ProductionPage() {
           openDatePicker(
             row.completedDate,
             (v) => {
-              for (const { poId, jobCardId } of refs) {
-                patchJobCard(poId, jobCardId, {
-                  completedDate: v,
-                  status: v ? "COMPLETED" : "WAITING",
-                });
-              }
+              const patch: JcPatch = {
+                completedDate: v,
+                status: v ? "COMPLETED" : "WAITING",
+              };
+              patchJobCardsBatch(refs.map((r) => ({ ...r, patch })));
             },
             e.currentTarget,
           );
@@ -1726,7 +1772,12 @@ export default function ProductionPage() {
     );
   };
 
-  const deptColumns: Column<DeptRow>[] = [
+  // Memoised so the array identity stays stable across renders. Unstable
+  // columns were forcing DataGrid's internal memos to invalidate every tick,
+  // which cascaded through sortedData → render → onFilteredDataChange →
+  // parent setState → back here. Dept code is the only thing that changes
+  // the column set meaningfully (activeTab).
+  const deptColumns: Column<DeptRow>[] = useMemo(() => [
     { key: "rowNo",         label: "#",              type: "number", width: "50px",  align: "right", sortable: true },
     {
       key: "soId",
@@ -1877,7 +1928,7 @@ export default function ProductionPage() {
       sortable: true,
       render: (_v, row) => renderStatusCell(row),
     },
-  ];
+  ], [activeTab]);
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
 

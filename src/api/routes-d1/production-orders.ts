@@ -695,14 +695,19 @@ async function applyWipInventoryChange(
   const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
   const isFabSew = deptUpper === "FAB_SEW";
   const isFabCut = deptUpper === "FAB_CUT";
+  // WOOD_CUT is parallel to FAB_CUT — both are raw-material entry points
+  // (wood cut starts the wooden-frame chain, fabric cut starts the fabric
+  // chain). Neither has an upstream wip_items to consume.
+  const isWoodCut = deptUpper === "WOOD_CUT";
   const becomingActive =
     newStatus === "IN_PROGRESS" ||
     newStatus === "COMPLETED" ||
     newStatus === "TRANSFERRED";
 
-  // FAB_CUT is a producer-only stage — nothing upstream to consume.
-  // UPH has its own consume-all-upstream logic in the COMPLETED branch.
-  if (!isFabCut && !isUpholstery && becomingActive) {
+  // FAB_CUT and WOOD_CUT are producer-only stages — nothing upstream to
+  // consume. UPH has its own consume-all-upstream logic in the COMPLETED
+  // branch below.
+  if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
     if (isSofa && poRow.salesOrderId && poRow.fabricCode) {
       // Sofa Fab Sew — the whole (SO, fabric) bolt leaves Fab Cut's shelf
       // the moment ANY piece enters sewing. Zero every upstream FAB_CUT

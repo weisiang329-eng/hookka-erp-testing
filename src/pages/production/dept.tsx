@@ -16,7 +16,7 @@
 //     is inherited from ProductionPage unchanged; it fires whenever
 //     activeTab === "FAB_CUT", which is exactly what we pass here.
 // ---------------------------------------------------------------------------
-import { useParams, Navigate } from "react-router-dom";
+import { useLocation, Navigate } from "react-router-dom";
 import ProductionPage from "./index";
 
 // Accepts kebab-case or UPPER_SNAKE directly. Any unknown dept bounces
@@ -40,7 +40,11 @@ function normalizeDept(raw: string | undefined): string | null {
 }
 
 export default function ProductionDept() {
-  const { deptCode: rawDeptCode } = useParams<{ deptCode: string }>();
+  // Routes are registered as LITERAL paths (/production/fab-cut, etc.)
+  // not as /:deptCode, so useParams() returns {}. Read the last path
+  // segment directly — that's the kebab-case dept code.
+  const { pathname } = useLocation();
+  const rawDeptCode = pathname.split("/").filter(Boolean).pop();
   const code = normalizeDept(rawDeptCode);
   if (!code) {
     return <Navigate to="/production" replace />;

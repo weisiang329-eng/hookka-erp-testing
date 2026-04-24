@@ -1277,21 +1277,10 @@ export default function ProductionPage() {
         // Arm, Divan → HB, etc.) — alpha order on wipType happens to match.
         group.sort((a, b) => (a.wipType || "").localeCompare(b.wipType || ""));
         const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
-        // WIP column on merged rows used to dump every child's full label
-        // (model + component + fabric + "(FC)") with " | " separators —
-        // most of it redundant with Model / Type / Colour. Collapse to a
-        // compact per-type count like "BASE×3 + CUSHION×2 + ARMREST×2" so
-        // the cutter sees exactly how many pieces of each kind to produce
-        // without reading a wrapped paragraph.
-        const typeCounts: Record<string, number> = {};
-        for (const g of group) {
-          const t = g.wipType || "MISC";
-          typeCounts[t] = (typeCounts[t] || 0) + 1;
-        }
-        const wips = Object.entries(typeCounts)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([t, c]) => (c > 1 ? `${t}×${c}` : t))
-          .join(" + ");
+        // WIP column on merged Fab Cut rows: show a single compact label
+        // '{model} {fabric} {size} (FC)' so the cutter sees exactly what
+        // to cut on one line. The individual component counts live in
+        // the Type column already.
         // Model column on a combined row shows the module variants joined
         // with '+', matching the Google-sheet convention
         // (e.g. 5537-1A(LHF)+1NA+1A(RHF)). Strip the shared baseModel
@@ -1314,13 +1303,21 @@ export default function ProductionPage() {
         // once, so the total cut time is the sum of every component.
         const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
         const groupKey = `${first.salesOrderNo || first.poId}:${first.colour || ""}`;
+        // Compact WIP label: "{model} {colour} {size} (FC)" — size is seat
+        // size for sofa (e.g. "30"), bed size for bedframe (e.g. "6FT"),
+        // already normalised in row.size.
+        const wips = [
+          modelLabel || first.model,
+          first.colour,
+          first.size,
+        ].filter(Boolean).join(" ") + " (FC)";
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,
           rowNo: rowN++,
           model: modelLabel || first.model,
           wipType: types || first.wipType,
-          wip: wips || first.wip,
+          wip: wips,
           prodTime: totalMinutes,
           completedDate: allDone ? first.completedDate : "",
           status: allDone

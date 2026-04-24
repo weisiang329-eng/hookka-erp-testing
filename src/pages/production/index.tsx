@@ -671,9 +671,18 @@ export default function ProductionPage() {
     wipCode?: string;
     sizeLabel: string;
     qty: number;
-    // When a job card covers N pieces we print N stickers — one per
-    // physical piece. Each sticker carries its own QR (p=N&t=M) so the
-    // worker portal can tell piece 1 from piece 2 and reject duplicates.
+    // Extra fields mirrored from the Production Sheet row so the on-screen
+    // sticker carries the same context the user is looking at — Customer PO,
+    // state, model, component type, fabric colour and bedframe heights (when
+    // applicable). Keeps the sticker visually 1:1 with the row above it.
+    customerPOId?: string;
+    customerState?: string;
+    model?: string;
+    wipType?: string;
+    colour?: string;
+    gap?: string;
+    divan?: string;
+    leg?: string;
     pieceNo: number;
     totalPieces: number;
     // Raw data the QR should encode (a URL to /production/scan). Preview
@@ -1709,7 +1718,6 @@ export default function ProductionPage() {
   // path in `handlePrintJobCardStickers` regenerates every QR locally via
   // `getQRCodeDataURL` so the print preview does NOT depend on hundreds of
   // external HTTP calls completing in time.
-  const FG_STICKER_DEPTS = useMemo(() => new Set(["UPHOLSTERY", "PACKING"]), []);
   // When a dept sub-tab is active, the Production Sheet DataGrid does its
   // own in-component filtering (search + per-column value/text filters).
   // Mirror that set of visible row ids so the on-screen QR tile row and the
@@ -1724,59 +1732,79 @@ export default function ProductionPage() {
 
   const onScreenStickers = useMemo<JobCardSticker[]>(() => {
     const stickers: JobCardSticker[] = [];
-    for (const o of filteredOrders) {
-      for (const jc of o.jobCards) {
-        if (activeTab === "ALL") {
-          if (FG_STICKER_DEPTS.has(jc.departmentCode)) continue;
-        } else {
-          if (jc.departmentCode !== activeTab) continue;
-          // Respect the DataGrid's internal filter when a dept is active.
-          // `gridFilterIdSet` is null only on first render before the grid
-          // has reported back — in that case fall through to show all.
-          if (gridFilterIdSet && !gridFilterIdSet.has(`${o.id}:${jc.id}`)) continue;
-        }
-        // One sticker per physical piece produced by THIS job card. The
-        // piece count lives on `jc.wipQty` — computed at PO build time as
-        // (BOM node.quantity × parent wipQty × SO item.quantity). A bedframe
-        // SO qty=1 with BOM Divan quantity=2 → jc.wipQty=2 → two stickers,
-        // even though the parent PO quantity is 1. Falling back to o.quantity
-        // keeps legacy seed data (pre-BOM wipQty) working.
-        //
-        // Each piece carries its OWN QR payload (p=N&t=M) so the worker
-        // portal can tell piece 1 from piece 2 — otherwise a double-scan of
-        // the same sticker would silently credit two completions for one
-        // physical piece.
-        const jcWipQty = (jc as { wipQty?: number }).wipQty;
-        const total = Math.max(
-          1,
-          Math.floor(jcWipQty || o.quantity || 0) || 1,
-        );
-        for (let p = 1; p <= total; p++) {
+
+    // Overview: one sticker per job card across every dept (no piece fan-out).
+    // Matches the 8684 total shown in the Overview tab header — production
+    // sheet rows = QR stickers, strictly 1:1.
+    if (activeTab === "ALL") {
+      for (const o of filteredOrders) {
+        for (const jc of o.jobCards) {
+          const jcWipQty = (jc as { wipQty?: number }).wipQty;
+          const rowQty = Math.max(1, Math.floor(jcWipQty || o.quantity || 0) || 1);
           stickers.push({
-            key: `${o.id}:${jc.id}:${p}`,
+            key: `${o.id}:${jc.id}`,
             poNo: o.poNo,
             deptCode: jc.departmentCode,
             jobCardId: jc.id,
             wipName: wipNameFor(jc, o),
             wipCode: jc.wipCode,
             sizeLabel: o.sizeLabel || o.sizeCode || "",
-            qty: o.quantity || 0,
-            pieceNo: p,
-            totalPieces: total,
-            qrPayload: generateStickerData(
-              o.poNo,
-              jc.departmentCode,
-              jc.id,
-              "/production/scan",
-              p,
-              total,
-            ),
+            qty: rowQty,
+            customerPOId: o.customerPOId || "",
+            customerState: o.customerState || "",
+            model: o.productCode || "",
+            wipType: (jc as { wipType?: string }).wipType || "",
+            colour: o.fabricCode || "",
+            pieceNo: 1,
+            totalPieces: 1,
+            qrPayload: generateStickerData(o.poNo, jc.departmentCode, jc.id),
           });
         }
       }
+      return stickers;
+    }
+
+    // Dept tab: derive stickers straight from `deptRows`, so the count is
+    // always 1:1 with what the user sees in the Production Sheet above —
+    // including the FAB_CUT per-PO fabric merge (one merged row → one
+    // merged sticker that fans out via the FG-FAB_CUT sentinel when
+    // scanned). `gridFilteredDeptRows` reflects the grid's current
+    // search/filter; falls back to the full deptRows until the grid
+    // reports back on first paint.
+    const orderById = new Map(filteredOrders.map((o) => [o.id, o] as const));
+    const rowsSource = gridFilteredDeptRows ?? deptRows;
+    for (const row of rowsSource) {
+      const order = orderById.get(row.poId);
+      if (!order) continue;
+      const isMergedFabCut =
+        activeTab === "FAB_CUT" &&
+        !!row._mergedJobCardIds &&
+        row._mergedJobCardIds.length > 1;
+      const opId = isMergedFabCut ? "FG-FAB_CUT" : row.jobCardId;
+      stickers.push({
+        key: row.id,
+        poNo: order.poNo,
+        deptCode: activeTab,
+        jobCardId: opId,
+        wipName: row.wip,
+        wipCode: "",
+        sizeLabel: row.size || "",
+        qty: row.qty || 1,
+        customerPOId: row.customerPOId || "",
+        customerState: row.customerState || "",
+        model: row.model || "",
+        wipType: row.wipType || "",
+        colour: row.colour || "",
+        gap: row.gap || "",
+        divan: row.divan || "",
+        leg: row.leg || "",
+        pieceNo: 1,
+        totalPieces: 1,
+        qrPayload: generateStickerData(order.poNo, activeTab, opId),
+      });
     }
     return stickers;
-  }, [filteredOrders, activeTab, wipNameFor, FG_STICKER_DEPTS, gridFilterIdSet]);
+  }, [filteredOrders, activeTab, wipNameFor, deptRows, gridFilteredDeptRows]);
 
   // Build + trigger batch print for job-card stickers. Fires once state is
   // rendered into the hidden container via the useEffect below.
@@ -2509,13 +2537,12 @@ export default function ProductionPage() {
       )}
 
       {/* On-screen QR tile row — mirrors the print stickers but always
-          visible. Shown only on FAB_CUT/FAB_SEW/FOAM/WOOD_CUT/FRAMING/WEBBING
-          dept tabs (job-card sticker depts). HIDDEN on:
-            - Overview (ALL) — dashboard, not a print area
-            - UPHOLSTERY / PACKING — those depts use FG stickers instead,
-              rendered in the FG preview block below.
+          visible. Shown on every dept tab so the QR count always matches
+          the Production Sheet count above, 1:1 (FAB_CUT respects the per-
+          PO fabric merge, UPHOLSTERY/PACKING each get one sticker per job
+          card). Hidden only on Overview (dashboard, not a print area).
           Horizontally scrollable so the row stays one line regardless of count. */}
-      {activeTab !== "ALL" && activeTab !== "UPHOLSTERY" && activeTab !== "PACKING" && (
+      {activeTab !== "ALL" && (
       <div className="rounded-lg border border-[#E6E0D9] bg-white">
         <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2523,7 +2550,7 @@ export default function ProductionPage() {
             <h2 className="text-sm font-semibold text-[#1F1D1B]">
               QR Stickers
               <span className="ml-2 text-xs font-normal text-[#8A7F73]">
-                ({onScreenStickers.length} piece{onScreenStickers.length === 1 ? "" : "s"} in {activeDept?.name || activeTab})
+                ({onScreenStickers.length} sticker{onScreenStickers.length === 1 ? "" : "s"} in {activeDept?.name || activeTab})
               </span>
             </h2>
           </div>
@@ -2545,59 +2572,79 @@ export default function ProductionPage() {
         ) : (
           <div className="overflow-x-auto">
             <div className="flex gap-3 p-3 min-w-min">
-              {onScreenStickers.map((s) => (
-                <div
-                  key={s.key}
-                  className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col items-center p-2"
-                  style={{ width: "130px" }}
-                  title={`${s.wipName} — ${s.poNo} · ${s.deptCode} · ${s.sizeLabel} · Qty ${s.qty}`}
-                >
-                  <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
+              {onScreenStickers.map((s) => {
+                // Mirror the fields the user sees in the Production Sheet row
+                // above: Customer PO · State · Model · Type (WIP category) ·
+                // WIP label · Size · Colour · (bedframe heights) · Qty.
+                const heightLine = [s.gap, s.divan, s.leg].filter(Boolean).join(" · ");
+                return (
                   <div
-                    className="mt-1.5 font-bold text-center leading-tight w-full truncate"
-                    style={{ fontSize: "10px" }}
+                    key={s.key}
+                    className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col items-center p-2"
+                    style={{ width: "180px" }}
+                    title={`${s.customerPOId || s.poNo} · ${s.model} · ${s.wipType} · ${s.wipName} · ${s.sizeLabel} · ${s.colour} · Qty ${s.qty}`}
                   >
-                    {s.wipName}
-                  </div>
-                  {s.wipCode && (
+                    <QRImg data={s.qrPayload} size={100} alt="Job card QR" className="block" />
                     <div
-                      className="text-center leading-tight w-full font-mono text-[#6B5C32] truncate"
+                      className="mt-1.5 font-bold text-center leading-tight w-full truncate"
+                      style={{ fontSize: "11px" }}
+                    >
+                      {s.model || s.wipName}
+                    </div>
+                    {s.wipType && (
+                      <div
+                        className="text-center leading-tight w-full text-[#6B5C32] truncate"
+                        style={{ fontSize: "9px" }}
+                      >
+                        {s.wipType}
+                      </div>
+                    )}
+                    <div
+                      className="mt-0.5 text-center leading-tight w-full text-[#1F1D1B] truncate"
                       style={{ fontSize: "9px" }}
                     >
-                      {s.wipCode}
+                      {s.wipName}
                     </div>
-                  )}
-                  <div
-                    className="text-center leading-tight w-full text-[#6B7280]"
-                    style={{ fontSize: "9px" }}
-                  >
-                    <div className="font-semibold text-[#1F1D1B] tabular-nums">
-                      {s.poNo}
-                    </div>
-                    <div className="truncate">
-                      {s.deptCode} · {s.sizeLabel}
-                    </div>
-                    <div>
-                      {s.totalPieces > 1
-                        ? `Piece ${s.pieceNo}/${s.totalPieces}`
-                        : `Qty ${s.qty}`}
+                    <div
+                      className="mt-1 text-center leading-tight w-full text-[#6B7280] space-y-[1px]"
+                      style={{ fontSize: "9px" }}
+                    >
+                      {s.customerPOId && (
+                        <div className="font-semibold text-[#1F1D1B] tabular-nums truncate">
+                          {s.customerPOId}
+                          {s.customerState ? ` · ${s.customerState}` : ""}
+                        </div>
+                      )}
+                      <div className="tabular-nums truncate">
+                        {s.poNo}
+                      </div>
+                      <div className="truncate">
+                        {s.deptCode}
+                        {s.sizeLabel ? ` · ${s.sizeLabel}` : ""}
+                        {s.colour ? ` · ${s.colour}` : ""}
+                      </div>
+                      {heightLine && (
+                        <div className="truncate">{heightLine}</div>
+                      )}
+                      <div className="font-semibold text-[#1F1D1B]">
+                        Qty {s.qty}
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}
       </div>
       )}
 
-      {/* FG Sticker preview — shown only on UPHOLSTERY / PACKING tabs. Each
-          tile mirrors the 100×150 mm print layout (SKU, size, fabric color,
-          PO no, customer, MFD, 100×100 QR, piece N/M, short code) but sized
-          for screen. Auto-populated on tab entry via the useEffect that
-          calls loadFgStickers. Horizontally scrollable — same card width
-          pattern as the QR tiles. */}
-      {(activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
+      {/* FG Sticker preview — previously shown on UPHOLSTERY / PACKING but
+          the count (FG units) didn't match the Production Sheet (job cards),
+          which confused users. The QR Sticker row above is now the single
+          source of truth for sticker count; the FG preview block stays in
+          the file in case per-box FG labeling gets reintroduced later. */}
+      {false && (activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
         <div className="rounded-lg border border-[#E6E0D9] bg-white">
           <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
             <div className="flex items-center gap-2">

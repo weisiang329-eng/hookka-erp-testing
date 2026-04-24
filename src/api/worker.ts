@@ -126,6 +126,8 @@ import notifications from "./routes-d1/notifications";
 import payroll from "./routes-d1/payroll";
 import payslips from "./routes-d1/payslips";
 import productionLeadtimes from "./routes-d1/production-leadtimes";
+import leadtimeRecalc from "./routes-d1/leadtime-recalc";
+import jobcardSync from "./routes-d1/jobcard-sync";
 import promiseDate from "./routes-d1/promise-date";
 import qcInspections from "./routes-d1/qc-inspections";
 import rdProjects from "./routes-d1/rd-projects";
@@ -195,6 +197,14 @@ app.route("/api/notifications", notifications);
 app.route("/api/payroll", payroll);
 app.route("/api/payslips", payslips);
 app.route("/api/production-leadtimes", productionLeadtimes);
+// Bulk rescheduler — rewrites every PO's job_card dueDates using the
+// current lead-time config. Mounted at /api/production/leadtimes/recalc-all.
+app.route("/api/production/leadtimes", leadtimeRecalc);
+// Reconcile each PO's job_cards set with its CURRENT BOM (inserts missing
+// (wipKey, deptCode) pairs without touching existing JC dueDate/status).
+// Fixes the "BOM edited after POs existed" class of bug — see
+// migrations/0027, 0029 (sofa UPH/PKG backfill).
+app.route("/api/production/sync-jobcards-from-bom", jobcardSync);
 app.route("/api/promise-date", promiseDate);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);

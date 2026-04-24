@@ -962,34 +962,14 @@ function LineItemCard({
           ? catProducts.filter(p => p.baseModel === item.baseModel)
           : catProducts;
 
+        // Product-first flow: users pick a product directly (across every
+        // category) and itemCategory / baseModel / sizeLabel bind themselves
+        // from the product record via selectProduct(). Sofa still has its
+        // bulk "Modules" multi-select flow, but it's opt-in — click the
+        // Model dropdown below to clear the picked product and re-enter
+        // the checkbox picker. No category picker up front.
         return (
-          <div className={`grid gap-3 ${isSofa ? "grid-cols-[110px_130px_1fr_140px_1fr]" : "grid-cols-[110px_1fr_140px_1fr]"}`}>
-            <div>
-              <label className="block text-xs text-[#9CA3AF] mb-1">Category *</label>
-              <select
-                value={item.itemCategory}
-                onChange={(e) => {
-                  onUpdate(idx, {
-                    itemCategory: e.target.value,
-                    productId: "", productCode: "", productName: "",
-                    baseModel: "", sizeCode: "", sizeLabel: "",
-                    fabricId: "", fabricCode: "",
-                    basePriceSen: 0, seatHeight: "",
-                    selectedModules: [],
-                    gapInches: null, divanHeightInches: null, divanPriceSen: 0,
-                    legHeightInches: null, legPriceSen: 0,
-                    totalHeightPriceSen: 0,
-                    specialOrders: [], specialOrder: "", specialOrderPriceSen: 0,
-                  });
-                }}
-                className={selectClass}
-              >
-                <option value="">Select...</option>
-                <option value="BEDFRAME">Bedframe</option>
-                <option value="SOFA">Sofa</option>
-              </select>
-            </div>
-
+          <div className={`grid gap-3 ${isSofa ? "grid-cols-[130px_1fr_140px_1fr]" : "grid-cols-[1fr_140px_1fr]"}`}>
             {/* Sofa: Model selector */}
             {isSofa && (
               <div>
@@ -1067,9 +1047,18 @@ function LineItemCard({
                 <SearchableSelect
                   value={item.productId}
                   onChange={(val) => onSelectProduct(idx, val)}
-                  options={filteredProducts.map(p => ({ value: p.id, label: `${p.code} - ${p.name}` }))}
-                  placeholder={!item.itemCategory ? "Select category first" : "Select product..."}
-                  disabled={!item.itemCategory}
+                  // Before any product is picked, search the full catalog across
+                  // every category — selectProduct() reads the chosen product's
+                  // own fields and auto-sets itemCategory / baseModel / sizeLabel.
+                  // Once bound, subsequent edits stay within the same category
+                  // (filteredProducts) so the line doesn't accidentally re-bind.
+                  options={(item.itemCategory ? filteredProducts : products).map(p => ({
+                    value: p.id,
+                    label: item.itemCategory
+                      ? `${p.code} - ${p.name}`
+                      : `${p.code} - ${p.name} · ${p.category}`,
+                  }))}
+                  placeholder={item.itemCategory ? "Select product..." : "Search any product..."}
                   className={selectClass}
                 />
               )}
@@ -1099,7 +1088,22 @@ function LineItemCard({
       })()}
 
       {/* Qty / Configuration (category-dependent) */}
-      {item.itemCategory === "SOFA" ? (
+      {item.itemCategory === "ACCESSORY" ? (
+        // Accessories (pillows etc.) need nothing beyond SKU + fabric + qty —
+        // no seat size, no heights, no special-order modules. Fabric is
+        // already picked in the SKU / fabric pair above; this strip just
+        // carries the quantity and the derived base price.
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
+            <Input type="number" min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+          </div>
+          <div>
+            <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
+            <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+          </div>
+        </div>
+      ) : item.itemCategory === "SOFA" ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
@@ -1197,7 +1201,8 @@ function LineItemCard({
         </div>
       )}
 
-      {/* Special Orders multi-select */}
+      {/* Special Orders multi-select — pillows have no surcharge modules */}
+      {item.itemCategory !== "ACCESSORY" && (
       <div>
         <button
           type="button"
@@ -1259,6 +1264,7 @@ function LineItemCard({
           </div>
         )}
       </div>
+      )}
 
       {/* Line Notes */}
       <div>

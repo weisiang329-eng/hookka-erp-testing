@@ -2011,6 +2011,44 @@ export default function ProductionPage() {
   // the user can Cmd/Ctrl+P → Save PDF or send straight to printer. The
   // layout mirrors what's on screen: Overview → matrix across 8 depts,
   // dept sub-tab → Production Sheet rows with prev-dept pills.
+  // Sync each PO's job_cards set with its CURRENT BOM template. Idempotent:
+  // only INSERTs missing (wipKey, deptCode) pairs — never touches existing
+  // JC dueDate / status. Fixes the class of bug where a BOM gets edited
+  // after POs were already created (sofa UPH/PKG, FAB_CUT missing on
+  // 5536-CSL / 5537-STOOL, etc.) without needing another ad-hoc migration.
+  const handleSyncJobCardsFromBom = useCallback(async () => {
+    const ok = window.confirm(
+      "Sync Job Cards from BOM?\n\n" +
+        "This scans every production order and inserts any job cards that the current BOM expects but the PO is missing. " +
+        "Existing job cards (dueDate, status, PIC) are NOT modified.\n\n" +
+        "Proceed?",
+    );
+    if (!ok) return;
+    try {
+      const res = await fetch("/api/production/sync-jobcards-from-bom", {
+        method: "POST",
+        credentials: "include",
+      });
+      const json = (await res.json()) as {
+        success?: boolean;
+        scannedPOs?: number;
+        createdJCs?: number;
+        error?: string;
+      };
+      if (!res.ok || !json.success) {
+        alert(`Sync failed: ${json.error || res.statusText}`);
+        return;
+      }
+      const scanned = json.scannedPOs ?? 0;
+      const created = json.createdJCs ?? 0;
+      alert(`Created ${created} job cards across ${scanned} orders`);
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/job-cards");
+    } catch (err) {
+      alert(`Sync failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, []);
+
   const handlePrintSchedule = useCallback(() => {
     const today = new Date().toLocaleDateString("en-MY", {
       year: "numeric", month: "short", day: "numeric",
@@ -2267,6 +2305,7 @@ export default function ProductionPage() {
             <Plus className="w-4 h-4" />
             Create Stock PO
           </Button>
+          <Button variant="outline" onClick={handleSyncJobCardsFromBom}>Sync Job Cards from BOM</Button>
           <Button variant="outline" onClick={() => navigate("/planning?tab=tracker")}>Master Tracker</Button>
           <Button variant="outline" onClick={handlePrintSchedule}>Print Schedule</Button>
           {/* UPHOLSTERY & PACKING scan the finished good, not job cards. Keep

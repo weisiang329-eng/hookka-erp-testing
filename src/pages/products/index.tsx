@@ -1351,12 +1351,18 @@ export default function ProductsPage() {
       {/* Table — different column layout for Bedframe vs Sofa */}
       {viewMode === "skuMaster" && (() => {
         const isSofa = categoryFilter === "SOFA";
-        const colSpanN = isSofa ? 13 : 10;
+        const isAccessory = categoryFilter === "ACCESSORY";
+        const colSpanN = isSofa ? 13 : isAccessory ? 8 : 10;
         const gridCols = isSofa
           // 24/28/30/32/35 price columns need room for "RM 1,000.00" with
           // thousands separators — 0.65fr clipped the text; widened to 0.95fr.
           // Description + Model compressed slightly to claim the headroom.
           ? "1.3fr 1.5fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.6fr 0.7fr"
+          : isAccessory
+          // ACCESSORY: Code | Description | Base Price | Unit M3 | Fabric
+          // (no Category/Size/Price2 — pillows don't carry those), and
+          // no Total Min / Variants / seat-height columns either.
+          ? "1.3fr 2.5fr 1fr 0.7fr 1fr"
           : "1.3fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.7fr 0.8fr";
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         return (
@@ -1386,6 +1392,16 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-right`}>30</div>
                         <div className={`${thCls} text-right`}>32</div>
                         <div className={`${thCls} text-right`}>35</div>
+                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Fabric</div>
+                        <div className={`${thCls} text-right`}>Total Min</div>
+                        <div className={`${thCls} text-center`}>Variants</div>
+                      </>
+                    ) : isAccessory ? (
+                      <>
+                        <div className={`${thCls} text-right`}>Base Price</div>
+                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Fabric</div>
                       </>
                     ) : (
                       <>
@@ -1393,12 +1409,12 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-left`}>Size</div>
                         <div className={`${thCls} text-right`}>Price 2</div>
                         <div className={`${thCls} text-right`}>Price 1</div>
+                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Fabric</div>
+                        <div className={`${thCls} text-right`}>Total Min</div>
+                        <div className={`${thCls} text-center`}>Variants</div>
                       </>
                     )}
-                    <div className={`${thCls} text-right`}>Unit M3</div>
-                    <div className={`${thCls} text-right`}>Fabric</div>
-                    <div className={`${thCls} text-right`}>Total Min</div>
-                    <div className={`${thCls} text-center`}>Variants</div>
                   </div>
                 </th>
               </tr>
@@ -1511,7 +1527,7 @@ export default function ProductsPage() {
                               );
                             })}
                           </>
-                        ) : (
+                        ) : isAccessory ? null : (
                           /* ===== BEDFRAME / ALL columns: Category | Size | Price 2 | Price 1 ===== */
                           <>
                             <div className="px-3 py-1.5">
@@ -1606,66 +1622,85 @@ export default function ProductsPage() {
                             </div>
                           </>
                         )}
-                        {/* Unit M3 - editable */}
-                        <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
-                          {editingM3 === p.id ? (
-                            <input
-                              autoFocus
-                              type="number"
-                              value={m3Input}
-                              onChange={(e) => setM3Input(e.target.value)}
-                              onBlur={() => {
-                                const val = parseFloat(m3Input || "0") || 0;
-                                setEditingM3(null);
-                                setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, unitM3: val } : pr));
-                                fetch(`/api/products/${p.id}`, {
-                                  method: "PUT",
-                                  headers: { "Content-Type": "application/json" },
-                                  body: JSON.stringify({ unitM3: val }),
-                                }).then((r) => r.json()).then((data) => {
-                                  if (data.success) {
-                                    invalidateCachePrefix("/api/products");
-                                    invalidateCachePrefix("/api/bom");
-                                    invalidateCachePrefix("/api/bom-master-templates");
-                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
-                                  }
-                                });
-                              }}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                                if (e.key === "Escape") setEditingM3(null);
-                              }}
-                              className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
-                              step="0.001"
-                            />
-                          ) : (
-                            <button
-                              onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
-                              className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
-                            >
+                        {isAccessory ? (
+                          /* ===== ACCESSORY columns: Base Price | Unit M3 | Fabric (no edit) ===== */
+                          <>
+                            <div className="px-3 py-1.5 text-right">
+                              <span className="text-sm font-medium text-[#111827]">
+                                {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">-</span>}
+                              </span>
+                            </div>
+                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                               {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
-                            </button>
-                          )}
-                        </div>
-                        <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                          {(cfg?.fabricUsage ?? p.fabricUsage)} m
-                        </div>
-                        <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827]">
-                          {totalMin} min
-                        </div>
-                        {/* Variants badge */}
-                        <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
-                          <button
-                            onClick={() => setEditingVariant(p)}
-                            className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
-                              modelVariants.length > 0
-                                ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
-                                : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
-                            }`}
-                          >
-                            {modelVariants.length > 0 ? `${modelVariants.length} types` : "Configure"}
-                          </button>
-                        </div>
+                            </div>
+                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
+                              {(cfg?.fabricUsage ?? p.fabricUsage)} m
+                            </div>
+                          </>
+                        ) : (
+                          <>
+                            {/* Unit M3 - editable */}
+                            <div className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
+                              {editingM3 === p.id ? (
+                                <input
+                                  autoFocus
+                                  type="number"
+                                  value={m3Input}
+                                  onChange={(e) => setM3Input(e.target.value)}
+                                  onBlur={() => {
+                                    const val = parseFloat(m3Input || "0") || 0;
+                                    setEditingM3(null);
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, unitM3: val } : pr));
+                                    fetch(`/api/products/${p.id}`, {
+                                      method: "PUT",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ unitM3: val }),
+                                    }).then((r) => r.json()).then((data) => {
+                                      if (data.success) {
+                                        invalidateCachePrefix("/api/products");
+                                        invalidateCachePrefix("/api/bom");
+                                        invalidateCachePrefix("/api/bom-master-templates");
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                      }
+                                    });
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                    if (e.key === "Escape") setEditingM3(null);
+                                  }}
+                                  className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                  step="0.001"
+                                />
+                              ) : (
+                                <button
+                                  onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
+                                  className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                >
+                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
+                                </button>
+                              )}
+                            </div>
+                            <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
+                              {(cfg?.fabricUsage ?? p.fabricUsage)} m
+                            </div>
+                            <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827]">
+                              {totalMin} min
+                            </div>
+                            {/* Variants badge */}
+                            <div className="px-3 py-1.5 flex justify-center" onClick={(e) => e.stopPropagation()}>
+                              <button
+                                onClick={() => setEditingVariant(p)}
+                                className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
+                                  modelVariants.length > 0
+                                    ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
+                                    : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
+                                }`}
+                              >
+                                {modelVariants.length > 0 ? `${modelVariants.length} types` : "Configure"}
+                              </button>
+                            </div>
+                          </>
+                        )}
                       </div>
                       {/* Expanded section */}
                       {isExpanded && (

@@ -279,6 +279,8 @@ export default function PlanningPage() {
   });
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
+  const [recalcRunning, setRecalcRunning] = useState(false);
+  const [recalcResult, setRecalcResult] = useState<string | null>(null);
 
   const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
@@ -333,6 +335,49 @@ export default function PlanningPage() {
       setLtSavedAt(new Date().toLocaleTimeString());
     } finally {
       setLtSaving(false);
+    }
+  };
+
+  // Rewrites dueDate on every existing production order's job_cards using the
+  // current lead-time config. Destructive for old orders, so we confirm first
+  // and then invalidate the production cache so the tracker picks up new
+  // dates immediately.
+  const recalcAllDueDates = async () => {
+    const ok = window.confirm(
+      "Recalculate due dates on ALL existing production orders?\n\n" +
+        "This will rewrite every job card's dueDate using the current lead " +
+        "times. Orders mid-production will see their department targets shift.",
+    );
+    if (!ok) return;
+    setRecalcRunning(true);
+    setRecalcResult(null);
+    try {
+      const res = await fetch("/api/production/leadtimes/recalc-all", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const json = (await res.json().catch(() => null)) as {
+        success?: boolean;
+        updatedPOs?: number;
+        updatedJCs?: number;
+        skipped?: number;
+        error?: string;
+      } | null;
+      if (json?.success) {
+        setRecalcResult(
+          `Updated ${json.updatedPOs ?? 0} POs / ${json.updatedJCs ?? 0} job cards` +
+            (json.skipped ? ` (${json.skipped} skipped)` : ""),
+        );
+        invalidateCachePrefix("/api/production-orders");
+        refreshOrders();
+      } else {
+        setRecalcResult(`Failed: ${json?.error || "unknown error"}`);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setRecalcResult(`Failed: ${msg}`);
+    } finally {
+      setRecalcRunning(false);
     }
   };
 
@@ -1054,6 +1099,36 @@ export default function PlanningPage() {
                   {ltSavedAt && (
                     <span className="text-xs text-[#6B5C32]">Saved {ltSavedAt}</span>
                   )}
+                  {recalcResult && (
+                    <span
+                      className={`text-xs ${
+                        recalcResult.startsWith("Failed")
+                          ? "text-[#9A3A2D]"
+                          : "text-[#4F7C3A]"
+                      }`}
+                    >
+                      {recalcResult}
+                    </span>
+                  )}
+                  <Button
+                    onClick={recalcAllDueDates}
+                    disabled={recalcRunning || ltSaving}
+                    variant="outline"
+                    className="border-[#9A3A2D] text-[#9A3A2D] hover:bg-[#F9E1DA]"
+                    title="Rewrite dueDates on every existing production order using the current lead times. Destructive — confirms before running."
+                  >
+                    {recalcRunning ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Recalculating...
+                      </>
+                    ) : (
+                      <>
+                        <AlertTriangle className="mr-2 h-4 w-4" />
+                        Recalculate Old Orders
+                      </>
+                    )}
+                  </Button>
                   <Button
                     onClick={saveLeadTimes}
                     disabled={ltSaving}

@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   ArrowLeft,
   Trash2,
@@ -79,9 +79,8 @@ export default function InvoiceDetailPage() {
     });
     const data = await res.json();
     if (data.success) {
-      invalidateCachePrefix("/api/invoices");
-      invalidateCachePrefix("/api/delivery-orders");
-      invalidateCachePrefix("/api/sales-orders");
+      // Only this invoice changed. Refresh the list too (status badge).
+      if (id) invalidateCache(`/api/invoices/${id}`);
       refreshInvoice();
       refreshAllInvoices();
       setToast("Invoice sent successfully");
@@ -108,8 +107,9 @@ export default function InvoiceDetailPage() {
     });
     const data = await res.json();
     if (data.success) {
-      invalidateCachePrefix("/api/invoices");
-      invalidateCachePrefix("/api/delivery-orders");
+      // Recording payment can cascade to SO → CLOSED when all linked invoices
+      // are paid. Conservative: keep SO prefix. DO does not change on payment.
+      if (id) invalidateCache(`/api/invoices/${id}`);
       invalidateCachePrefix("/api/sales-orders");
       refreshInvoice();
       refreshAllInvoices();
@@ -131,9 +131,12 @@ export default function InvoiceDetailPage() {
         setToast(body?.error || `Failed to delete invoice (HTTP ${res.status})`);
         return;
       }
+      // Deletion cascades server-side: DO flips back from INVOICED, SO may
+      // reopen. Invoice list needs the prefix so the row vanishes.
       invalidateCachePrefix("/api/invoices");
       invalidateCachePrefix("/api/delivery-orders");
       invalidateCachePrefix("/api/sales-orders");
+      if (id) invalidateCache(`/api/invoices/${id}`);
       navigate("/invoices");
     } catch (e) {
       setToast(e instanceof Error ? e.message : "Network error — invoice not deleted");

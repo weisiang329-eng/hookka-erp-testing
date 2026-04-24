@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { SalesOrder, SOStatus, Customer } from "@/lib/mock-data";
 
 type LinkedPO = {
@@ -175,9 +175,10 @@ export default function SalesOrderDetailPage() {
   }>({ open: false, incompleteProducts: [] });
 
   const fetchOrder = useCallback(() => {
-    invalidateCachePrefix("/api/sales-orders");
+    // Only this SO changed — per-id invalidation, not list prefix.
+    if (id) invalidateCache(`/api/sales-orders/${id}`);
     refreshOrder();
-  }, [refreshOrder]);
+  }, [id, refreshOrder]);
 
   useEffect(() => {
     const d = orderResp;
@@ -223,7 +224,9 @@ export default function SalesOrderDetailPage() {
       return;
     }
     if (data.success) {
-      invalidateCachePrefix("/api/sales-orders");
+      // Only this SO changed — per-id invalidate. Status cascade below may
+      // touch many POs so the PO list prefix invalidation is retained.
+      if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
       setOrder(data.data);
       if (data.linkedPOs) setLinkedPOs(data.linkedPOs);
@@ -288,7 +291,9 @@ export default function SalesOrderDetailPage() {
       return;
     }
     if (data.success) {
-      invalidateCachePrefix("/api/sales-orders");
+      // Confirming an SO can create many new POs — keep the PO prefix
+      // invalidation. Only this one SO changed, so per-id for the SO.
+      if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
       setOrder(data.data);
       setConfirmSuccess(data.message);
@@ -308,8 +313,12 @@ export default function SalesOrderDetailPage() {
   const deleteOrder = async () => {
     if (!confirm("Delete this order?")) return;
     await fetch(`/api/sales-orders/${id}`, { method: "DELETE" });
+    // Deleting an SO also cascades to its linked POs on the server. Invalidate
+    // the SO list (one row gone) and the PO list (linked POs gone), plus the
+    // per-id SO entry so any stale detail fetch doesn't resurrect a 404.
     invalidateCachePrefix("/api/sales-orders");
     invalidateCachePrefix("/api/production-orders");
+    if (id) invalidateCache(`/api/sales-orders/${id}`);
     navigate("/sales");
   };
 

@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime } from "@/lib/utils";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   ArrowLeft,
   User,
@@ -126,7 +126,7 @@ export default function DeliveryDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("delivery_order", id, Boolean(id));
-  const { data: doResp, loading: doLoading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: DeliveryOrder }>(id ? `/api/delivery-orders/${id}` : null);
+  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder }>(id ? `/api/delivery-orders/${id}` : null);
   const { data: lorryResp, loading: lorryLoading } = useCachedJson<{ success?: boolean; data?: LorryInfo[] }>("/api/lorries");
   const [orderOverride, setOrderOverride] = useState<DeliveryOrder | null>(null);
   const order: DeliveryOrder | null = useMemo(() => {
@@ -170,10 +170,11 @@ export default function DeliveryDetailPage() {
       }
       if (data.success) {
         setOrder(data.data);
-        invalidateCachePrefix("/api/delivery-orders");
+        // Only this DO changed. SO/PO prefix kept because a status
+        // advance can cascade (e.g. DELIVERED → linked SO → COMPLETED).
+        if (id) invalidateCache(`/api/delivery-orders/${id}`);
         invalidateCachePrefix("/api/sales-orders");
         invalidateCachePrefix("/api/production-orders");
-        refreshOrder();
       }
       else toast.error(data.error || "Failed to advance status");
     } catch (e) {
@@ -203,10 +204,10 @@ export default function DeliveryDetailPage() {
       }
       if (data.success) {
         setOrder(data.data);
-        invalidateCachePrefix("/api/delivery-orders");
+        // POD save may also transition to DELIVERED which cascades to SO.
+        if (id) invalidateCache(`/api/delivery-orders/${id}`);
         invalidateCachePrefix("/api/sales-orders");
         invalidateCachePrefix("/api/production-orders");
-        refreshOrder();
         setPodOpen(false);
       } else {
         toast.error(data.error || "Failed to save proof of delivery");
@@ -230,10 +231,8 @@ export default function DeliveryDetailPage() {
       const data = await res.json();
       if (data.success) {
         setOrder(data.data);
-        invalidateCachePrefix("/api/delivery-orders");
-        invalidateCachePrefix("/api/sales-orders");
-        invalidateCachePrefix("/api/production-orders");
-        refreshOrder();
+        // Lorry assignment only affects this DO; no cascade. Per-id only.
+        if (id) invalidateCache(`/api/delivery-orders/${id}`);
       }
     } finally {
       setUpdating(false);

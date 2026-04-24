@@ -15,7 +15,7 @@ import {
   specialOrderOptions,
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 
@@ -398,7 +398,9 @@ export default function EditSalesOrderPage() {
         toast.error(data.error || `Failed to update order (HTTP ${res.status})`);
         return;
       }
-      invalidateCachePrefix("/api/sales-orders");
+      // Only this SO changed. The PO prefix stays because editing items can
+      // cascade to regenerating linked POs on the server.
+      if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
       navigate(`/sales/${id}`);
     } catch (e) {

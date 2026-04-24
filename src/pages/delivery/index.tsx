@@ -1499,6 +1499,35 @@ export default function DeliveryPage() {
               contextMenuItems={getContextMenuItems}
               groupBy="hubBranch"
             />
+
+            {/* Pagination footer */}
+            <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+              <span>
+                {totalDOsServer.toLocaleString()} delivery order
+                {totalDOsServer === 1 ? "" : "s"}
+              </span>
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={page <= 1 || doLoading}
+                >
+                  ← Prev
+                </Button>
+                <span className="tabular-nums text-[#1F1D1B]">
+                  Page {page} / {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={page >= totalPages || doLoading}
+                >
+                  Next →
+                </Button>
+              </div>
+            </div>
           </CardContent>
         </Card>
       )}

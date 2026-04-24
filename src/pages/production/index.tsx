@@ -729,6 +729,20 @@ export default function ProductionPage() {
   const [fgStickers, setFgStickers] = useState<FgSticker[]>([]);
   // Loading flag shown on the header button while a batch of QRs pre-renders.
   const [printingJobCards, setPrintingJobCards] = useState(false);
+  // QR preview sections (Job Card strip + FG Sticker preview) are collapsed
+  // by default because mounting 100-1000 <QRImg> tiles on every tab change
+  // was making the Production page feel laggy — even with lazy-generation
+  // via IntersectionObserver, the React commit for that many components
+  // is a noticeable hitch. Users who want to print or scan open the
+  // section explicitly.
+  const [showQRStrip, setShowQRStrip] = useState(false);
+  const [showFgPreview, setShowFgPreview] = useState(false);
+  // Collapse both on tab change so the new tab starts fast; user re-opens
+  // per tab if they actually need the QR grid.
+  useEffect(() => {
+    setShowQRStrip(false);
+    setShowFgPreview(false);
+  }, [activeTab]);
   // When true, the fgStickers useEffect will fire window.print() on next
   // populate. Auto-population on UPH/PACK tab entry leaves this false so
   // the preview tiles render without triggering a print dialog.
@@ -1186,12 +1200,18 @@ export default function ProductionPage() {
           })(),
           size: o.sizeLabel || "",
           colour: o.fabricCode || "",
-          gap: o.gapInches != null ? `${o.gapInches}"` : "",
-          divan: o.divanHeightInches != null ? `${o.divanHeightInches}"` : "",
+          // Gap / Divan / Total H are bedframe-only concepts — sofas don't
+          // have them. Force empty on sofa / accessory even if DB has a
+          // stray value (legacy data may have misfiled seat size into the
+          // divan column). Leg is kept because sofa does have optional leg
+          // heights via maintenance config.
+          gap: o.itemCategory === "BEDFRAME" && o.gapInches != null ? `${o.gapInches}"` : "",
+          divan: o.itemCategory === "BEDFRAME" && o.divanHeightInches != null ? `${o.divanHeightInches}"` : "",
           leg: o.legHeightInches != null ? `${o.legHeightInches}"` : "",
-          // Total height = gap + divan + leg, matching the sales/create
-          // formula used elsewhere in the system.
+          // Total height = gap + divan + leg, only meaningful for bedframes.
+          // Sofa TotalH would just mirror Leg so it's intentionally blank.
           totalHeight: (() => {
+            if (o.itemCategory !== "BEDFRAME") return "";
             const g = o.gapInches ?? 0;
             const d = o.divanHeightInches ?? 0;
             const l = o.legHeightInches ?? 0;
@@ -2640,20 +2660,35 @@ export default function ProductionPage() {
               </span>
             </h2>
           </div>
-          {onScreenStickers.length > 0 && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handlePrintJobCardStickers}
-              disabled={printingJobCards}
-            >
-              {printingJobCards ? "Generating…" : "Print All"}
-            </Button>
-          )}
+          <div className="flex gap-2">
+            {onScreenStickers.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowQRStrip((v) => !v)}
+              >
+                {showQRStrip ? "Hide QR" : "Show QR"}
+              </Button>
+            )}
+            {onScreenStickers.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handlePrintJobCardStickers}
+                disabled={printingJobCards}
+              >
+                {printingJobCards ? "Generating…" : "Print All"}
+              </Button>
+            )}
+          </div>
         </div>
         {onScreenStickers.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-[#9A918A]">
             No job cards match the current filter.
+          </div>
+        ) : !showQRStrip ? (
+          <div className="px-4 py-6 text-center text-xs text-[#9A918A]">
+            {onScreenStickers.length} sticker{onScreenStickers.length === 1 ? "" : "s"} ready · click <span className="font-semibold text-[#6B5C32]">Show QR</span> to render the tiles.
           </div>
         ) : (
           <div className="overflow-x-auto">

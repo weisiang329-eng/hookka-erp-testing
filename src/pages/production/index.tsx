@@ -679,6 +679,7 @@ export default function ProductionPage() {
     customerState?: string;
     model?: string;
     wipType?: string;
+    category?: string;
     colour?: string;
     gap?: string;
     divan?: string;
@@ -850,16 +851,30 @@ export default function ProductionPage() {
     [],
   );
 
-  // Dept fractions for tab bar: done/total cells across all orders per dept
+  // Dept fractions for tab bar: done/total rows across all orders per dept.
+  // Counts must match what the Production Sheet shows when that tab is open —
+  // for FAB_CUT that means one merged row per PO (all components of the same
+  // fabric cut collapse to one), so the tab shows 525, not 1194 raw JCs.
   const deptFractions = useMemo(() => {
     return DEPARTMENTS.map((d) => {
       let done = 0;
       let total = 0;
-      for (const o of orders) {
-        const c = cellFor(o, d.code);
-        if (c.state === "empty") continue;
-        total += c.totalCards;
-        done += c.doneCards;
+      if (d.code === "FAB_CUT") {
+        for (const o of orders) {
+          const fc = o.jobCards.filter((j) => j.departmentCode === "FAB_CUT");
+          if (fc.length === 0) continue;
+          total += 1;
+          if (fc.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")) {
+            done += 1;
+          }
+        }
+      } else {
+        for (const o of orders) {
+          const c = cellFor(o, d.code);
+          if (c.state === "empty") continue;
+          total += c.totalCards;
+          done += c.doneCards;
+        }
       }
       return { ...d, done, total };
     });
@@ -1569,7 +1584,7 @@ export default function ProductionPage() {
     { key: "customerRef",   label: "Customer Ref",   type: "text",   width: "120px", sortable: true },
     { key: "customerName",  label: "Customer Name",  type: "text",   width: "130px", sortable: true },
     { key: "customerState", label: "State",          type: "text",   width: "70px",  sortable: true },
-    { key: "category",      label: "Category",       type: "text",   width: "90px",  sortable: true, hidden: true },
+    { key: "category",      label: "Category",       type: "text",   width: "90px",  sortable: true },
     { key: "model",         label: "Model",          type: "text",   width: "110px", sortable: true },
     { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true },
     { key: "wip",           label: "WIP",            type: "text",   width: "220px", sortable: true },
@@ -1754,6 +1769,7 @@ export default function ProductionPage() {
             customerState: o.customerState || "",
             model: o.productCode || "",
             wipType: (jc as { wipType?: string }).wipType || "",
+            category: o.itemCategory || "",
             colour: o.fabricCode || "",
             pieceNo: 1,
             totalPieces: 1,
@@ -1772,7 +1788,10 @@ export default function ProductionPage() {
     // search/filter; falls back to the full deptRows until the grid
     // reports back on first paint.
     const orderById = new Map(filteredOrders.map((o) => [o.id, o] as const));
-    const rowsSource = gridFilteredDeptRows ?? deptRows;
+    // Cast via unknown because gridFilteredDeptRows is declared with a
+    // narrower inline type (id/poId/jobCardId) above where DeptRow is
+    // defined — it actually receives full DeptRow objects from the grid.
+    const rowsSource = (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
     for (const row of rowsSource) {
       const order = orderById.get(row.poId);
       if (!order) continue;
@@ -1794,6 +1813,7 @@ export default function ProductionPage() {
         customerState: row.customerState || "",
         model: row.model || "",
         wipType: row.wipType || "",
+        category: row.category || "",
         colour: row.colour || "",
         gap: row.gap || "",
         divan: row.divan || "",
@@ -2539,10 +2559,12 @@ export default function ProductionPage() {
       {/* On-screen QR tile row — mirrors the print stickers but always
           visible. Shown on every dept tab so the QR count always matches
           the Production Sheet count above, 1:1 (FAB_CUT respects the per-
-          PO fabric merge, UPHOLSTERY/PACKING each get one sticker per job
-          card). Hidden only on Overview (dashboard, not a print area).
-          Horizontally scrollable so the row stays one line regardless of count. */}
-      {activeTab !== "ALL" && (
+          PO fabric merge, UPHOLSTERY gets one sticker per job card).
+          Hidden on Overview (dashboard) and on Packing (which uses the
+          richer FG Sticker Preview below — each physical box carries its
+          own piece-N-of-M numbering that differs between bedframes and
+          sofas). Horizontally scrollable so the row stays one line. */}
+      {activeTab !== "ALL" && activeTab !== "PACKING" && (
       <div className="rounded-lg border border-[#E6E0D9] bg-white">
         <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -2591,12 +2613,12 @@ export default function ProductionPage() {
                     >
                       {s.model || s.wipName}
                     </div>
-                    {s.wipType && (
+                    {(s.category || s.wipType) && (
                       <div
                         className="text-center leading-tight w-full text-[#6B5C32] truncate"
                         style={{ fontSize: "9px" }}
                       >
-                        {s.wipType}
+                        {[s.category, s.wipType].filter(Boolean).join(" · ")}
                       </div>
                     )}
                     <div
@@ -2639,12 +2661,14 @@ export default function ProductionPage() {
       </div>
       )}
 
-      {/* FG Sticker preview — previously shown on UPHOLSTERY / PACKING but
-          the count (FG units) didn't match the Production Sheet (job cards),
-          which confused users. The QR Sticker row above is now the single
-          source of truth for sticker count; the FG preview block stays in
-          the file in case per-box FG labeling gets reintroduced later. */}
-      {false && (activeTab === "UPHOLSTERY" || activeTab === "PACKING") && (
+      {/* FG Sticker preview — shown on PACKING only. One tile per physical
+          box with SKU, size, fabric colour, PO no, customer, MFD, 100×100
+          QR, piece-N-of-M, and short code. The BF vs SF piece numbering
+          lives here (computed by /api/fg-units/generate/:poId — BF counts
+          per-PO, SF counts SO-wide per commit 3185b48). Upholstery uses
+          the JC-based QR row above because its 1184 component JCs don't
+          map 1:1 to 663 FG units. */}
+      {activeTab === "PACKING" && (
         <div className="rounded-lg border border-[#E6E0D9] bg-white">
           <div className="px-4 py-2.5 border-b border-[#E6E0D9] bg-[#FAF8F4] flex items-center justify-between">
             <div className="flex items-center gap-2">

@@ -392,6 +392,7 @@ async function fetchFilteredPOs(
   includeJobCards: boolean,
   includeArchive = false,
   minimal = false,
+  deptFilter: string | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
@@ -417,6 +418,12 @@ async function fetchFilteredPOs(
     ? db.prepare(poSql).bind(...(statuses as string[]))
     : db.prepare(poSql);
 
+  // Dept-narrowing: when caller passes ?dept=FAB_CUT, each PO's jobCards
+  // array is filtered down to only that dept's JCs. Drops ~87% of JC rows
+  // for the single-dept pages (each PO averages 15 JCs across 8 depts),
+  // pulling a ~1.5MB minimal payload down under 200KB.
+  const jcWhereDept = deptFilter ? " WHERE departmentCode = ?" : "";
+
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
     if (minimal) {
@@ -430,18 +437,24 @@ async function fetchFilteredPOs(
   // Production page — the dropped fields + table save several MB on the
   // ~530 PO / ~9k JC response.
   if (minimal) {
+    const jcStmt = deptFilter
+      ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter)
+      : db.prepare(`SELECT * FROM ${jcSource}`);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
-      db.prepare(`SELECT * FROM ${jcSource}`).all<JobCardRow>(),
+      jcStmt.all<JobCardRow>(),
     ]);
     return (pos.results ?? []).map((p) =>
       rowToMinimalPO(p, jcs.results ?? []),
     );
   }
 
+  const jcStmt = deptFilter
+    ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter)
+    : db.prepare(`SELECT * FROM ${jcSource}`);
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
-    db.prepare(`SELECT * FROM ${jcSource}`).all<JobCardRow>(),
+    jcStmt.all<JobCardRow>(),
     db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
@@ -461,6 +474,7 @@ async function fetchPaginatedPOs(
   limit: number,
   includeArchive = false,
   minimal = false,
+  deptFilter: string | null = null,
 ): Promise<{ data: ProductionOrderOut[] | MinimalPOOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
@@ -510,9 +524,14 @@ async function fetchPaginatedPOs(
   // Scope JC + piece_pics queries to only this page's PO IDs.
   const poIds = posRows.map((p) => p.id);
   const jcPlaceholders = poIds.map(() => "?").join(",");
+  // Optional dept narrowing — same as the non-paginated path. Keeps each
+  // PO's jobCards[] limited to only the active dept so per-dept pages
+  // never ship the other 7 depts' schedules.
+  const jcDeptClause = deptFilter ? " AND departmentCode = ?" : "";
+  const jcBinds = deptFilter ? [...poIds, deptFilter] : poIds;
   const jcsRes = await db
-    .prepare(`SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`)
-    .bind(...poIds)
+    .prepare(`SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})${jcDeptClause}`)
+    .bind(...jcBinds)
     .all<JobCardRow>();
   const jcs = jcsRes.results ?? [];
 
@@ -668,19 +687,22 @@ async function applyWipInventoryChange(
     return t || "WIP";
   })();
 
-  // FAB_SEW consume gate — runs whether the JC becomes IN_PROGRESS or goes
-  // straight to COMPLETED (date-cell clicks skip IN_PROGRESS, which used to
-  // orphan Fab Cut stock). Idempotent: re-calling on an already-zeroed
-  // wip_item is a no-op update.
+  // Generic upstream-consume gate — fires on IN_PROGRESS OR COMPLETED for
+  // every non-UPH, non-FAB_CUT dept. Date-cell clicks skip IN_PROGRESS
+  // (WAITING → COMPLETED directly), which used to orphan upstream stock.
+  // Idempotent: sofa zeros in place, BF uses MAX(0, stockQty - qty) clamp.
   const deptUpper = (jcRow.departmentCode || "").toUpperCase();
   const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
   const isFabSew = deptUpper === "FAB_SEW";
+  const isFabCut = deptUpper === "FAB_CUT";
   const becomingActive =
     newStatus === "IN_PROGRESS" ||
     newStatus === "COMPLETED" ||
     newStatus === "TRANSFERRED";
 
-  if (isFabSew && becomingActive) {
+  // FAB_CUT is a producer-only stage — nothing upstream to consume.
+  // UPH has its own consume-all-upstream logic in the COMPLETED branch.
+  if (!isFabCut && !isUpholstery && becomingActive) {
     if (isSofa && poRow.salesOrderId && poRow.fabricCode) {
       // Sofa Fab Sew — the whole (SO, fabric) bolt leaves Fab Cut's shelf
       // the moment ANY piece enters sewing. Zero every upstream FAB_CUT
@@ -709,9 +731,11 @@ async function applyWipInventoryChange(
           .bind(label)
           .run();
       }
-    } else if (!isSofa && wipKey) {
-      // BF / accessory Fab Sew — consume the immediate upstream wip_items
-      // row within the same wipKey by this JC's own qty.
+    } else if (wipKey) {
+      // All other cases (BF/ACC Fab Sew, every dept's Foam / Wood Cut /
+      // Framing / Webbing / Packing, sofa non-Fab-Sew transitions):
+      // consume the immediate upstream wip_items row within the same
+      // wipKey by this JC's own qty.
       const children = allJcRows
         .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
         .sort((a, b) => b.sequence - a.sequence);
@@ -726,9 +750,8 @@ async function applyWipInventoryChange(
           .run();
       }
     }
-    // For IN_PROGRESS-only we stop here — the existing code below used to
-    // return early after the consume. COMPLETED needs to fall through to
-    // also upsert its own FAB_SEW wip_items row.
+    // For IN_PROGRESS-only we stop here — COMPLETED falls through to
+    // upsert its own wip_items row via the COMPLETED branch below.
     if (newStatus === "IN_PROGRESS") return;
   }
 
@@ -1311,6 +1334,15 @@ app.get("/", async (c) => {
   // and the whole piece_pics tree. Default stays full-response for backward
   // compat (the PO detail page + other consumers need the full shape).
   const minimal = c.req.query("fields") === "minimal";
+  // Opt-in dept-narrowing: when present, each PO's jobCards array is
+  // filtered at SQL level to only the given dept code. Used by the
+  // per-department pages (/production/fab-cut etc.) so they never ship
+  // the other 7 depts' JC rows.
+  const deptParamRaw = c.req.query("dept");
+  const deptFilter =
+    deptParamRaw && deptParamRaw.trim().length > 0
+      ? deptParamRaw.trim().toUpperCase()
+      : null;
 
   if (!paginate) {
     const data = await fetchFilteredPOs(
@@ -1319,6 +1351,7 @@ app.get("/", async (c) => {
       includeJobCards,
       includeArchive,
       minimal,
+      deptFilter,
     );
     return c.json({ success: true, data, total: data.length });
   }
@@ -1334,6 +1367,7 @@ app.get("/", async (c) => {
     limit,
     includeArchive,
     minimal,
+    deptFilter,
   );
   return c.json({ success: true, data, page, limit, total });
 });

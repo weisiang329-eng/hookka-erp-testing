@@ -369,7 +369,12 @@ app.get("/", async (c) => {
   };
   const grouped = new Map<string, GroupedItem>();
   for (const r of raw) {
-    const key = `${r.wipCode}__${r.completedBy}`;
+    // Grouping key MUST include wipType — for FAB_CUT the condensed wipCode
+    // (e.g. "5530-L(LHF) | (30) | CH141-12 | (FC)") is the SAME for every
+    // component (Base / Cushion / Armrest) of the same PO, so without
+    // wipType in the key the components all collapse into one group and
+    // the per-component breakdown is lost.
+    const key = `${r.wipCode}__${r.completedBy}__${r.wipType}`;
     let g = grouped.get(key);
     if (!g) {
       g = {

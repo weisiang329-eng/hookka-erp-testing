@@ -956,9 +956,10 @@ export default function InventoryPage() {
   const [fgCategoryFilter, setFgCategoryFilter] = useState<string>("ALL");
 
   const [wipSearch, setWipSearch] = useState("");
-  // WIP view mode: "PER_COMPONENT" preserves the existing one-row-per-WIP
-  // layout; "MERGED" collapses sofa components into (SO, fabric) set rows.
-  const [wipViewMode, setWipViewMode] = useState<"PER_COMPONENT" | "MERGED">("PER_COMPONENT");
+  // WIP view mode: "MERGED" (default) collapses sofa components into
+  // (SO, fabric) set rows to match the Production page's Fab Cut layout;
+  // "PER_COMPONENT" shows one row per WIP component (legacy breakdown).
+  const [wipViewMode, setWipViewMode] = useState<"PER_COMPONENT" | "MERGED">("MERGED");
   // Which sofa-set rows are expanded to show their underlying component WIPs.
   const [expandedSetIds, setExpandedSetIds] = useState<Set<string>>(new Set());
   const toggleExpandedSet = (id: string) => {

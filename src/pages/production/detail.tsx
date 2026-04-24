@@ -80,7 +80,7 @@ export default function ProductionOrderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const orderUrl = id ? `/api/production-orders/${id}` : null;
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: ProductionOrder } | ProductionOrder>(orderUrl);
+  const { data: orderResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder } | ProductionOrder>(orderUrl);
   const [order, setOrder] = useState<ProductionOrder | null>(null);
   const [lastSeenOrderResp, setLastSeenOrderResp] = useState<typeof orderResp>(null);
   if (orderResp !== lastSeenOrderResp) {
@@ -154,9 +154,10 @@ export default function ProductionOrderDetailPage() {
       const data = await res.json();
       if (data.success) {
         setOrder(data.data);
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCachePrefix("/api/sales-orders");
-        refreshOrder();
+        // Only this PO changed — don't nuke the whole list prefix. setOrder
+        // above already reflects the new status; invalidateCache on the
+        // per-id key ensures a cross-tab read sees fresh data.
+        invalidateCache(`/api/production-orders/${id}`);
       }
     } catch {
       // handle error silently
@@ -212,9 +213,12 @@ export default function ProductionOrderDetailPage() {
         toast.error(d?.error || `Failed to generate FG units (HTTP ${r.status})`);
       } else if (d?.success) {
         setFgUnitList(d.data);
+        // FG units were generated for this PO. Invalidate the fg-units
+        // prefix (other query-param variants may be cached) and the single
+        // PO entry in case the PO record tracks unit-count, but don't nuke
+        // the whole production-orders list.
         invalidateCachePrefix("/api/fg-units");
-        invalidateCachePrefix("/api/production-orders");
-        invalidateCache(`/api/fg-units?poId=${encodeURIComponent(order.id)}`);
+        invalidateCache(`/api/production-orders/${order.id}`);
       } else {
         toast.error(d?.error || "Failed to generate FG units");
       }

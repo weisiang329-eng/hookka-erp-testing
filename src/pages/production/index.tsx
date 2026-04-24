@@ -1244,20 +1244,26 @@ export default function ProductionPage() {
       }
     }
 
-    // Fab Cut merge: one finished good = one row. The cutter lays a bolt
-    // down once per PO and cuts every component (Base + Cushion + Arm for
-    // sofa, or Divan + HB for bedframe) in a single pass, so collapsing
-    // all FAB_CUT job cards that belong to the same PO into one super-row
-    // matches the physical workflow. Grouping key is poId because a single
-    // PO = a single FG and inherits one productCode / fabric / size from
-    // the SO line. Other depts (Fab Sew, Foam, Wood Cut, Framing, Webbing,
-    // Upholstery, Packing) keep per-WIP rows since each component is
-    // handled individually from that point on.
+    // Fab Cut merge: a cutter lays one bolt of fabric down and cuts every
+    // component of every module that shares that fabric in a single pass.
+    // So the merge key is (SO, fabric) — a whole 3-piece sofa set (1A(LHF)
+    // + 1NA + 1A(RHF) on the same SO using the same cloth) collapses into
+    // ONE Fab Cut row, matching the Google-sheet layout the shop floor has
+    // always used. Falling back to poId when the SO is missing (stock PO)
+    // keeps the row from merging across unrelated orders.
+    // Other depts keep per-WIP rows since each component is handled
+    // individually from FAB_SEW onward.
     if (activeTab === "FAB_CUT") {
       const groups = new Map<string, DeptRow[]>();
       for (const r of rows) {
-        if (!groups.has(r.poId)) groups.set(r.poId, []);
-        groups.get(r.poId)!.push(r);
+        // SOFA merges across POs that share the same SO + fabric (a full
+        // sofa set cut together). BEDFRAME / ACCESSORY already worked
+        // correctly under the per-PO rule, so keep that for them.
+        const key = r.category === "SOFA"
+          ? `SOFA::${r.salesOrderNo || r.poId}::${r.colour || ""}`
+          : r.poId;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
       }
       const merged: DeptRow[] = [];
       let rowN = 1;
@@ -1267,22 +1273,38 @@ export default function ProductionPage() {
           continue;
         }
         const first = group[0];
-        // Sort children for stable display order (Base → Cushion → Arm,
-        // Divan → HB, etc.) — wipType's alpha order happens to match.
+        // Stable display order: group by component type (Base → Cushion →
+        // Arm, Divan → HB, etc.) — alpha order on wipType happens to match.
         group.sort((a, b) => (a.wipType || "").localeCompare(b.wipType || ""));
         const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
         const wips = group.map((g) => g.wip).filter(Boolean).join("  |  ");
+        // Model column on a combined row shows the module variants joined
+        // with '+', matching the Google-sheet convention
+        // (e.g. 5537-1A(LHF)+1NA+1A(RHF)). Strip the shared baseModel
+        // prefix when all rows agree on it so the string stays short.
+        const uniqueModels = [...new Set(group.map((g) => g.model).filter(Boolean))];
+        let modelLabel = uniqueModels.join("+");
+        if (uniqueModels.length > 1) {
+          const firstDash = uniqueModels[0].indexOf("-");
+          if (firstDash > 0) {
+            const prefix = uniqueModels[0].slice(0, firstDash + 1);
+            if (uniqueModels.every((m) => m.startsWith(prefix))) {
+              modelLabel = prefix + uniqueModels.map((m) => m.slice(prefix.length)).join("+");
+            }
+          }
+        }
         // Only treat the group as completed when every child has a date.
         const allDone = group.every((g) => !!g.completedDate);
         const anyDone = group.some((g) => !!g.completedDate);
-        // Aggregate production minutes across the merged components — the
-        // cutter lays the fabric down once for the whole PO, so the time
-        // to cut is the sum of every component's time, not any single one.
+        // Aggregate production minutes — the cutter lays the fabric down
+        // once, so the total cut time is the sum of every component.
         const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
+        const groupKey = `${first.salesOrderNo || first.poId}:${first.colour || ""}`;
         merged.push({
           ...first,
-          id: `${first.poId}:fabcut-merged`,
+          id: `${groupKey}:fabcut-merged`,
           rowNo: rowN++,
+          model: modelLabel || first.model,
           wipType: types || first.wipType,
           wip: wips || first.wip,
           prodTime: totalMinutes,

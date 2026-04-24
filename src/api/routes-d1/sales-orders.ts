@@ -28,7 +28,7 @@ import { resolveCustomerPrice, resolveCustomerPriceAsOf } from "./customer-produ
 
 const app = new Hono<Env>();
 
-type SalesOrderRow = {
+export type SalesOrderRow = {
   id: string;
   customerPO: string | null;
   customerPOId: string | null;
@@ -56,7 +56,7 @@ type SalesOrderRow = {
   updated_at: string | null;
 };
 
-type SalesOrderItemRow = {
+export type SalesOrderItemRow = {
   id: string;
   salesOrderId: string;
   lineNo: number;
@@ -337,7 +337,7 @@ type CreatedProductionOrder = {
   status: string;
 };
 
-async function createProductionOrdersForSO(
+export async function createProductionOrdersForSO(
   db: D1Database,
   so: SalesOrderRow,
   items: SalesOrderItemRow[],
@@ -1323,6 +1323,27 @@ app.get("/status-changes", async (c) => {
   ).all<SOStatusChangeRow>();
   const data = (res.results ?? []).map(rowToStatusChange);
   return c.json({ success: true, data, total: data.length });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/sales-orders/stats — whole-dataset status bucket counts.
+//
+// Returns { byStatus: Record<string, number>, total }. Used by the list page
+// tab badges / KPI cards so "Confirmed (N)" reflects the full table rather
+// than only the current paginated page. Single aggregate SELECT — cheap.
+// Registered BEFORE /:id (Hono route ordering: static before wildcards).
+// ---------------------------------------------------------------------------
+app.get("/stats", async (c) => {
+  const res = await c.env.DB
+    .prepare("SELECT status, COUNT(*) AS n FROM sales_orders GROUP BY status")
+    .all<{ status: string; n: number }>();
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  for (const row of res.results ?? []) {
+    byStatus[row.status] = row.n;
+    total += row.n;
+  }
+  return c.json({ success: true, byStatus, total });
 });
 
 // ---------------------------------------------------------------------------

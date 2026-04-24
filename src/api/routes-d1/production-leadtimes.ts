@@ -52,45 +52,33 @@ type JCRow = {
   wipKey: string | null;
 };
 
-function packingAnchorFor(po: PORow, buffer: HookkaDDBuffer): string | null {
-  const category = po.itemCategory || "BEDFRAME";
+// Schedule anchor — the delivery-facing date every dept staggers BACK from.
+// Explicit hookkaExpectedDD overrides (user-set internal target); otherwise
+// use the customer's requested delivery date directly. Hookka DD buffer is
+// no longer applied here because per-dept lead times are already measured
+// relative to delivery, not relative to an internal packing target.
+function scheduleAnchorFor(po: PORow, _buffer: HookkaDDBuffer): string | null {
   if (po.hookkaExpectedDD) return po.hookkaExpectedDD;
-  if (po.customerDeliveryDate) {
-    return addDays(po.customerDeliveryDate, -hookkaDDBufferFor(buffer, category));
-  }
+  if (po.customerDeliveryDate) return po.customerDeliveryDate;
   if (po.targetEndDate) return po.targetEndDate;
   return null;
 }
 
+// Parallel-dept schedule: each JC's dueDate = anchor − leadDays[that JC's
+// deptCode]. Matches the semantics in sales-orders.ts (confirm + re-confirm
+// paths): depts run concurrently on the shop floor, each just needs to
+// finish its own lead-time window before the delivery anchor.
 function computeNewDueDates(
   jcs: JCRow[],
   category: string,
-  packingAnchor: string,
+  anchor: string,
   leadTimes: LeadTimeMap,
 ): Map<string, string> {
   const out = new Map<string, string>();
-  const byWip = new Map<string, JCRow[]>();
   for (const jc of jcs) {
-    const key = jc.wipKey || "__default__";
-    const bucket = byWip.get(key);
-    if (bucket) bucket.push(jc);
-    else byWip.set(key, [jc]);
-  }
-  for (const chain of byWip.values()) {
-    chain.sort((a, b) => a.sequence - b.sequence);
-    const lastIdx = chain.length - 1;
-    if (lastIdx < 0) continue;
-    const dueByIdx = new Map<number, string>();
-    dueByIdx.set(lastIdx, packingAnchor);
-    for (let i = lastIdx - 1; i >= 0; i--) {
-      const nextDept = chain[i + 1].departmentCode || "PACKING";
-      const prevDue = dueByIdx.get(i + 1)!;
-      const nextLeadDays = leadDaysFor(leadTimes, category, nextDept);
-      dueByIdx.set(i, addDays(prevDue, -nextLeadDays));
-    }
-    for (let i = 0; i < chain.length; i++) {
-      out.set(chain[i].id, dueByIdx.get(i) || packingAnchor);
-    }
+    const dept = jc.departmentCode || "PACKING";
+    const leadDays = leadDaysFor(leadTimes, category, dept);
+    out.set(jc.id, addDays(anchor, -leadDays));
   }
   return out;
 }
@@ -210,7 +198,7 @@ app.post("/recalc-all", async (c) => {
     let updatedJCs = 0;
     let skipped = 0;
     for (const po of pos) {
-      const anchor = packingAnchorFor(po, hookkaBuffer);
+      const anchor = scheduleAnchorFor(po, hookkaBuffer);
       if (!anchor) { skipped++; continue; }
       const jcs = jcsByPo.get(po.id) ?? [];
       if (jcs.length === 0) continue;

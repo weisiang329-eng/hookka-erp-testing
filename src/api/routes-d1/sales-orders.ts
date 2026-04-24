@@ -415,26 +415,18 @@ async function createProductionOrdersForSO(
       const chain = wip.processes;
 
       if (packingAnchor) {
-        // Reverse pass. Start with the LAST dept in chain = packingAnchor
-        // (the internal target; customerDD − buffer, or explicit hookkaDD).
-        // Each earlier dept = nextDept.dueDate - nextDept.leadDays.
-        const dueByDept = new Map<string, string>();
-        const lastIdx = chain.length - 1;
-        if (lastIdx >= 0) {
-          // Anchor: LAST dept in chain due on packingAnchor.
-          dueByDept.set(chain[lastIdx].deptCode, packingAnchor);
-          for (let i = lastIdx - 1; i >= 0; i--) {
-            const nextDept = chain[i + 1];
-            const prevDue = dueByDept.get(nextDept.deptCode)!;
-            const nextLeadDays = leadDaysFor(leadTimes, category, nextDept.deptCode);
-            // Current dept due = nextDept's dueDate minus nextDept's leadDays.
-            dueByDept.set(chain[i].deptCode, addDays(prevDue, -nextLeadDays));
-          }
-        }
+        // New semantics: every dept's dueDate = customerDeliveryDate minus
+        // that dept's own lead time. Depts run in parallel, each staggered
+        // by its own offset from the delivery anchor — NOT cumulative.
+        // (Old behaviour walked the chain backwards and summed lead times,
+        // which produced a 22-day BF span and 39-day SF span; the shop floor
+        // runs depts concurrently so that was wrong.)
+        const anchor = explicitHookkaDD || customerDD || packingAnchor;
         for (let i = 0; i < chain.length; i++) {
           const p = chain[i];
           const deptMeta = deptByCode.get(p.deptCode);
           if (!deptMeta) continue;
+          const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
           planned.push({
             wipType: wip.wipType,
             wipCode: p.wipCode || wip.wipCode,
@@ -445,7 +437,7 @@ async function createProductionOrdersForSO(
             deptCode: p.deptCode,
             deptId: deptMeta.id,
             deptName: deptMeta.name,
-            dueDate: dueByDept.get(p.deptCode) || packingAnchor,
+            dueDate: addDays(anchor, -leadDays),
             category: p.category,
             minutes: p.minutes,
           });
@@ -775,27 +767,20 @@ async function backfillJobCardsForPo(
     }> = [];
 
     if (packingAnchor) {
-      const dueByDept = new Map<string, string>();
-      const lastIdx = chain.length - 1;
-      if (lastIdx >= 0) {
-        dueByDept.set(chain[lastIdx].deptCode, packingAnchor);
-        for (let i = lastIdx - 1; i >= 0; i--) {
-          const nextDept = chain[i + 1];
-          const prevDue = dueByDept.get(nextDept.deptCode)!;
-          const nextLeadDays = leadDaysFor(leadTimes, category, nextDept.deptCode);
-          dueByDept.set(chain[i].deptCode, addDays(prevDue, -nextLeadDays));
-        }
-      }
+      // Same parallel-dept semantics as the confirm path above:
+      // dueDate = anchor - leadDays[dept] for every dept independently.
+      const anchor = explicitHookkaDD || customerDD || packingAnchor;
       for (let i = 0; i < chain.length; i++) {
         const p = chain[i];
         const deptMeta = deptByCode.get(p.deptCode);
         if (!deptMeta) continue;
+        const leadDays = leadDaysFor(leadTimes, category, p.deptCode);
         planned.push({
           deptCode: p.deptCode,
           deptId: deptMeta.id,
           deptName: deptMeta.name,
           sequence: i,
-          dueDate: dueByDept.get(p.deptCode) || packingAnchor,
+          dueDate: addDays(anchor, -leadDays),
           category: p.category,
           minutes: p.minutes,
         });

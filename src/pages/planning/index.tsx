@@ -1099,36 +1099,6 @@ export default function PlanningPage() {
                   {ltSavedAt && (
                     <span className="text-xs text-[#6B5C32]">Saved {ltSavedAt}</span>
                   )}
-                  {recalcResult && (
-                    <span
-                      className={`text-xs ${
-                        recalcResult.startsWith("Failed")
-                          ? "text-[#9A3A2D]"
-                          : "text-[#4F7C3A]"
-                      }`}
-                    >
-                      {recalcResult}
-                    </span>
-                  )}
-                  <Button
-                    onClick={recalcAllDueDates}
-                    disabled={recalcRunning || ltSaving}
-                    variant="outline"
-                    className="border-[#9A3A2D] text-[#9A3A2D] hover:bg-[#F9E1DA]"
-                    title="Rewrite dueDates on every existing production order using the current lead times. Destructive — confirms before running."
-                  >
-                    {recalcRunning ? (
-                      <>
-                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Recalculating...
-                      </>
-                    ) : (
-                      <>
-                        <AlertTriangle className="mr-2 h-4 w-4" />
-                        Recalculate Old Orders
-                      </>
-                    )}
-                  </Button>
                   <Button
                     onClick={saveLeadTimes}
                     disabled={ltSaving}

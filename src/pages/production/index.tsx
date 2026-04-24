@@ -2305,7 +2305,6 @@ export default function ProductionPage() {
             <Plus className="w-4 h-4" />
             Create Stock PO
           </Button>
-          <Button variant="outline" onClick={handleSyncJobCardsFromBom}>Sync Job Cards from BOM</Button>
           <Button variant="outline" onClick={() => navigate("/planning?tab=tracker")}>Master Tracker</Button>
           <Button variant="outline" onClick={handlePrintSchedule}>Print Schedule</Button>
           {/* UPHOLSTERY & PACKING scan the finished good, not job cards. Keep

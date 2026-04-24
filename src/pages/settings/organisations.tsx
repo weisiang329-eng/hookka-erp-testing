@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useMemo, useState, useCallback } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
   Building2,
@@ -27,28 +28,24 @@ type InterCompanyConfig = {
 };
 
 export default function OrganisationsPage() {
-  const [orgs, setOrgs] = useState<Organisation[]>([]);
-  const [config, setConfig] = useState<InterCompanyConfig>({
-    hookkaToOhanaRate: 0.65,
-    autoCreateMirrorDocs: true,
-  });
-  const [activeOrgId, setActiveOrgId] = useState("");
   const [editingOrg, setEditingOrg] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<Partial<Organisation>>({});
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    const res = await fetch("/api/organisations");
-    const data = await res.json();
-    setOrgs(data.organisations);
-    setActiveOrgId(data.activeOrgId);
-    setConfig(data.interCompanyConfig);
-  }, []);
+  const { data: orgResp, refresh: refreshOrgHook } = useCachedJson<{ organisations: Organisation[]; activeOrgId: string; interCompanyConfig: InterCompanyConfig }>("/api/organisations");
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const orgs: Organisation[] = useMemo(() => orgResp?.organisations ?? [], [orgResp]);
+  const activeOrgId: string = useMemo(() => orgResp?.activeOrgId ?? "", [orgResp]);
+  const config: InterCompanyConfig = useMemo(
+    () => orgResp?.interCompanyConfig ?? { hookkaToOhanaRate: 0.65, autoCreateMirrorDocs: true },
+    [orgResp]
+  );
+
+  const fetchData = useCallback(() => {
+    invalidateCachePrefix("/api/organisations");
+    refreshOrgHook();
+  }, [refreshOrgHook]);
 
   const startEdit = (org: Organisation) => {
     setEditingOrg(org.id);

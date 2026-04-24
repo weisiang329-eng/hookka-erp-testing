@@ -1,6 +1,7 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { formatCurrency } from "@/lib/utils";
 import type { FabricTracking } from "@/lib/mock-data";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Search,
   Package,
@@ -57,19 +58,14 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string }> = {
 type Tab = "inventory";
 
 export default function FabricsPage() {
-  const [fabrics, setFabrics] = useState<FabricTracking[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: fabricsResp, loading, refresh: refreshFabrics } = useCachedJson<{ success?: boolean; data?: FabricTracking[] }>("/api/fabric-tracking");
+  const fabrics: FabricTracking[] = useMemo(
+    () => (fabricsResp?.data ?? (Array.isArray(fabricsResp) ? (fabricsResp as FabricTracking[]) : [])),
+    [fabricsResp]
+  );
   const [activeTab, setActiveTab] = useState<Tab>("inventory");
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState("ALL");
-
-  useEffect(() => {
-    fetch("/api/fabric-tracking")
-      .then((r) => r.json())
-      .then((d) => setFabrics(d.data ?? []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, []);
 
   const filtered = useMemo(() => {
     let list = fabrics;
@@ -160,9 +156,9 @@ export default function FabricsPage() {
                 body: JSON.stringify({ priceTier: tier }),
               });
               if (res.ok) {
-                setFabrics((prev) =>
-                  prev.map((f) => (f.id === id ? { ...f, priceTier: tier } : f))
-                );
+                invalidateCachePrefix("/api/fabric-tracking");
+                invalidateCachePrefix("/api/raw-materials");
+                refreshFabrics();
               }
             } catch {
               // ignore

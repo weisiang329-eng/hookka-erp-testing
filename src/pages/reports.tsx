@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { cachedFetchJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -291,16 +292,14 @@ function SalesReportTab() {
   const generate = useCallback(async () => {
     setLoading(true);
     try {
-      const [soRes, invRes] = await Promise.all([
-        fetch("/api/sales-orders"),
-        fetch("/api/invoices"),
+      const [soJson, invJson] = await Promise.all([
+        cachedFetchJson<{ data?: SalesOrder[] }>("/api/sales-orders"),
+        cachedFetchJson<{ data?: Invoice[] }>("/api/invoices"),
       ]);
-      const soJson = await soRes.json();
-      const invJson = await invRes.json();
-      const orders: SalesOrder[] = (soJson.data || []).filter(
+      const orders: SalesOrder[] = (soJson?.data || []).filter(
         (o: SalesOrder) => o.companySODate >= from && o.companySODate <= to
       );
-      const invoices: Invoice[] = (invJson.data || []).filter(
+      const invoices: Invoice[] = (invJson?.data || []).filter(
         (i: Invoice) => i.invoiceDate >= from && i.invoiceDate <= to
       );
       setData({ orders, invoices });
@@ -510,9 +509,8 @@ function ProductionReportTab() {
   const generate = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/production-orders");
-      const json = await res.json();
-      const all: ProductionOrder[] = (json.data || []).filter(
+      const json = await cachedFetchJson<{ data?: ProductionOrder[] }>("/api/production-orders");
+      const all: ProductionOrder[] = (json?.data || []).filter(
         (p: ProductionOrder) => p.startDate >= from && p.startDate <= to
       );
       setData(all);
@@ -696,9 +694,8 @@ function InventoryReportTab() {
   const generate = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/products");
-      const json = await res.json();
-      setProducts(json.data || []);
+      const json = await cachedFetchJson<{ data?: Product[] }>("/api/products");
+      setProducts(json?.data || []);
     } catch {
       setProducts([]);
     }
@@ -831,15 +828,13 @@ function FinancialReportTab() {
   const generate = useCallback(async () => {
     setLoading(true);
     try {
-      const [invRes, poRes] = await Promise.all([
-        fetch("/api/invoices"),
-        fetch("/api/purchase-orders"),
+      const [invJson, poJson] = await Promise.all([
+        cachedFetchJson<{ data?: Invoice[] }>("/api/invoices"),
+        cachedFetchJson<{ data?: PurchaseOrder[] }>("/api/purchase-orders"),
       ]);
-      const invJson = await invRes.json();
-      const poJson = await poRes.json();
       setData({
-        invoices: invJson.data || [],
-        purchaseOrders: poJson.data || [],
+        invoices: invJson?.data || [],
+        purchaseOrders: poJson?.data || [],
       });
     } catch {
       setData({ invoices: [], purchaseOrders: [] });
@@ -1084,9 +1079,8 @@ function EmployeeReportTab() {
   const generate = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch("/api/workers");
-      const json = await res.json();
-      setWorkers(json.data || []);
+      const json = await cachedFetchJson<{ data?: Worker[] }>("/api/workers");
+      setWorkers(json?.data || []);
     } catch {
       setWorkers([]);
     }

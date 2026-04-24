@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 import { asArray } from "@/lib/safe-json";
+import { useCachedJson } from "@/lib/cached-fetch";
 import {
   TrendingUp,
   TrendingDown,
@@ -202,73 +203,37 @@ function StageBadge({ status }: { status: string }) {
 export default function DashboardPage() {
   const navigate = useNavigate();
 
-  const [loading, setLoading] = useState(true);
-  const [salesOrders, setSalesOrders] = useState<SalesOrder[]>([]);
-  const [productionOrders, setProductionOrders] = useState<ProductionOrder[]>([]);
-  const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrder[]>([]);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [qcInspections, setQcInspections] = useState<QCInspection[]>([]);
-  const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
-  const [rdProjects, setRdProjects] = useState<RDProject[]>([]);
-  const [workerCount, setWorkerCount] = useState(0);
-  const [customerCount, setCustomerCount] = useState(0);
+  const { data: soData, loading: soLoading } = useCachedJson<unknown>("/api/sales-orders");
+  const { data: prodData, loading: prodLoading } = useCachedJson<unknown>("/api/production-orders");
+  const { data: doData, loading: doLoading } = useCachedJson<unknown>("/api/delivery-orders");
+  const { data: invData, loading: invLoading } = useCachedJson<unknown>("/api/invoices");
+  const { data: wData, loading: wLoading } = useCachedJson<unknown>("/api/workers");
+  const { data: cData, loading: cLoading } = useCachedJson<unknown>("/api/customers");
+  const { data: poData, loading: poLoading } = useCachedJson<unknown>("/api/purchase-orders");
+  const { data: qcData, loading: qcLoading } = useCachedJson<unknown>("/api/qc-inspections");
+  const { data: invtData, loading: invtLoading } = useCachedJson<unknown>("/api/inventory");
+  const { data: rdData, loading: rdLoading } = useCachedJson<unknown>("/api/rd-projects");
 
-  useEffect(() => {
-    async function fetchAll() {
-      try {
-        const [soRes, prodRes, doRes, invRes, wRes, cRes, poRes, qcRes, invtRes, rdRes] =
-          await Promise.all([
-            fetch("/api/sales-orders"),
-            fetch("/api/production-orders"),
-            fetch("/api/delivery-orders"),
-            fetch("/api/invoices"),
-            fetch("/api/workers"),
-            fetch("/api/customers"),
-            fetch("/api/purchase-orders"),
-            fetch("/api/qc-inspections"),
-            fetch("/api/inventory"),
-            fetch("/api/rd-projects"),
-          ]);
+  const loading =
+    soLoading || prodLoading || doLoading || invLoading || wLoading ||
+    cLoading || poLoading || qcLoading || invtLoading || rdLoading;
 
-        const [soData, prodData, doData, invData, wData, cData, poData, qcData, invtData, rdData] =
-          await Promise.all([
-            soRes.json(),
-            prodRes.json(),
-            doRes.json(),
-            invRes.json(),
-            wRes.json(),
-            cRes.json(),
-            poRes.json(),
-            qcRes.json(),
-            invtRes.json(),
-            rdRes.json(),
-          ]);
-
-        setSalesOrders(asArray(soData));
-        setProductionOrders(asArray(prodData));
-        setDeliveryOrders(asArray(doData));
-        setInvoices(asArray(invData));
-        setWorkerCount(asArray(wData).length);
-        setCustomerCount(asArray(cData).length);
-        setPurchaseOrders(asArray(poData));
-        setQcInspections(asArray(qcData));
-        const rmNested =
-          invtData && typeof invtData === "object" && !Array.isArray(invtData)
-            ? ((invtData as { data?: { rawMaterials?: unknown } }).data
-                ?.rawMaterials ?? [])
-            : [];
-        setRawMaterials(Array.isArray(rmNested) ? rmNested : []);
-        setRdProjects(asArray(rdData));
-      } catch (err) {
-        console.error("Dashboard fetch error:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchAll();
-  }, []);
+  const salesOrders: SalesOrder[] = useMemo(() => asArray(soData) as SalesOrder[], [soData]);
+  const productionOrders: ProductionOrder[] = useMemo(() => asArray(prodData) as ProductionOrder[], [prodData]);
+  const deliveryOrders: DeliveryOrder[] = useMemo(() => asArray(doData) as DeliveryOrder[], [doData]);
+  const invoices: Invoice[] = useMemo(() => asArray(invData) as Invoice[], [invData]);
+  const purchaseOrders: PurchaseOrder[] = useMemo(() => asArray(poData) as PurchaseOrder[], [poData]);
+  const qcInspections: QCInspection[] = useMemo(() => asArray(qcData) as QCInspection[], [qcData]);
+  const rawMaterials: RawMaterial[] = useMemo(() => {
+    const rmNested =
+      invtData && typeof invtData === "object" && !Array.isArray(invtData)
+        ? ((invtData as { data?: { rawMaterials?: unknown } }).data?.rawMaterials ?? [])
+        : [];
+    return Array.isArray(rmNested) ? (rmNested as RawMaterial[]) : [];
+  }, [invtData]);
+  const rdProjects: RDProject[] = useMemo(() => asArray(rdData) as RDProject[], [rdData]);
+  const workerCount = useMemo(() => asArray(wData).length, [wData]);
+  const customerCount = useMemo(() => asArray(cData).length, [cData]);
 
   // --- Computed KPIs ---
 

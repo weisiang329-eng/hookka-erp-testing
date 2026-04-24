@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { cn, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Truck,
   Package,
@@ -262,15 +263,31 @@ export default function DeliveryPage() {
   const [editingDDValue, setEditingDDValue] = useState("");
 
   // ---------- Fetch ----------
+  const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{ success?: boolean; data?: DeliveryOrder[] }>("/api/delivery-orders");
+  const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
+  const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
+  const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+
   const fetchData = useCallback(() => {
-    setLoading(true);
-    Promise.all([
-      fetch("/api/delivery-orders").then((r) => r.json()).catch(() => ({ success: false })),
-      fetch("/api/production-orders").then((r) => r.json()).catch(() => ({ success: false })),
-      fetch("/api/sales-orders").then((r) => r.json()).catch(() => ({ success: false })),
-      fetch("/api/customers").then((r) => r.json()).catch(() => ({ success: false })),
-    ])
-      .then(([dRes, poRes, soRes, custRes]) => {
+    invalidateCachePrefix("/api/delivery-orders");
+    invalidateCachePrefix("/api/production-orders");
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/customers");
+    refreshDOs();
+    refreshPOs();
+    refreshSOs();
+    refreshCustomers();
+  }, [refreshDOs, refreshPOs, refreshSOs, refreshCustomers]);
+
+  useEffect(() => {
+    const anyLoading = doLoading || poLoading || soLoading || custLoading;
+    setLoading(anyLoading);
+    const dRes = doRaw || { success: false };
+    const poRes = poRaw || { success: false };
+    const soRes = soRaw || { success: false };
+    const custRes = custRaw || { success: false };
+    {
+      {
         // Store customers for hub address lookup
         if (custRes.success && Array.isArray(custRes.data)) {
           setCustomersData(custRes.data as Customer[]);
@@ -360,34 +377,24 @@ export default function DeliveryPage() {
             .map(mapPO);
           setReadyPOs(ready);
         }
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+      }
+    }
+  }, [doRaw, poRaw, soRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
 
   // ----- 3PL Provider helpers -----
-  const fetchProviders = useCallback(() => {
-    setProvidersLoading(true);
-    fetch("/api/drivers")
-      .then((r) => r.json())
-      .then((res) => {
-        if (res.success && Array.isArray(res.data)) setProviders(res.data);
-      })
-      .catch(() => {})
-      .finally(() => setProvidersLoading(false));
-  }, []);
+  const { data: providersRaw, loading: providersFetching, refresh: refreshProvidersHook } = useCachedJson<{ success?: boolean; data?: ThreePLProvider[] }>("/api/drivers");
 
-  // Load providers once on mount. Depending on `providers.length` here
-  // would loop forever if the API returns an empty array (a fresh [] ref
-  // triggers re-render → effect re-runs → fetch fires again).
+  const fetchProviders = useCallback(() => {
+    invalidateCachePrefix("/api/drivers");
+    refreshProvidersHook();
+  }, [refreshProvidersHook]);
+
   useEffect(() => {
-    fetchProviders();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    setProvidersLoading(providersFetching);
+    if (providersRaw && providersRaw.success && Array.isArray(providersRaw.data)) {
+      setProviders(providersRaw.data);
+    }
+  }, [providersRaw, providersFetching]);
 
   const filteredProviders = useMemo(() => {
     if (!providerSearch) return providers;

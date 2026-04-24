@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
 import { Plus, X } from "lucide-react";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type {
   SupplierMaterialBinding,
   PriceHistory,
@@ -19,36 +20,35 @@ type SupplierInfo = {
 
 export default function PricingPage() {
   const [activeTab, setActiveTab] = useState<"price-list" | "price-history" | "comparison">("price-list");
-  const [bindings, setBindings] = useState<SupplierMaterialBinding[]>([]);
-  const [history, setHistory] = useState<PriceHistory[]>([]);
-  const [scorecards, setScorecards] = useState<SupplierScorecard[]>([]);
-  const [suppliers, setSuppliers] = useState<SupplierInfo[]>([]);
   const [search, setSearch] = useState("");
   const [selectedMaterial, setSelectedMaterial] = useState("");
   const [showAddDialog, setShowAddDialog] = useState(false);
   const toast = useToast();
 
-  const reloadBindings = () => {
-    fetch("/api/supplier-materials")
-      .then((r) => r.json())
-      .then((d) => setBindings(d.data ?? d))
-      .catch(() => {});
-  };
+  const { data: bindingsResp, refresh: reloadBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
+  const { data: historyResp } = useCachedJson<{ success?: boolean; data?: PriceHistory[] } | PriceHistory[]>("/api/price-history");
+  const { data: scorecardsResp } = useCachedJson<{ success?: boolean; data?: SupplierScorecard[] } | SupplierScorecard[]>("/api/supplier-scorecards");
+  const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] } | { id: string; name: string }[]>("/api/suppliers");
 
-  useEffect(() => {
-    reloadBindings();
-    fetch("/api/price-history").then((r) => r.json()).then((d) => setHistory(d.data ?? d)).catch(() => {});
-    fetch("/api/supplier-scorecards").then((r) => r.json()).then((d) => setScorecards(d.data ?? d)).catch(() => {});
-    fetch("/api/suppliers").then((r) => r.json()).then((d) => {
-      const list = d.data ?? d;
-      setSuppliers(
-        (Array.isArray(list) ? list : []).map((s: { id: string; name: string }) => ({
-          id: s.id,
-          name: s.name,
-        }))
-      );
-    }).catch(() => {});
-  }, []);
+  const bindings: SupplierMaterialBinding[] = useMemo(
+    () => ((bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? (Array.isArray(bindingsResp) ? bindingsResp : [])),
+    [bindingsResp]
+  );
+  const history: PriceHistory[] = useMemo(
+    () => ((historyResp as { data?: PriceHistory[] } | undefined)?.data ?? (Array.isArray(historyResp) ? historyResp : [])),
+    [historyResp]
+  );
+  const scorecards: SupplierScorecard[] = useMemo(
+    () => ((scorecardsResp as { data?: SupplierScorecard[] } | undefined)?.data ?? (Array.isArray(scorecardsResp) ? scorecardsResp : [])),
+    [scorecardsResp]
+  );
+  const suppliers: SupplierInfo[] = useMemo(() => {
+    const list = (suppliersResp as { data?: { id: string; name: string }[] } | undefined)?.data ?? (Array.isArray(suppliersResp) ? suppliersResp : []);
+    return (Array.isArray(list) ? list : []).map((s: { id: string; name: string }) => ({
+      id: s.id,
+      name: s.name,
+    }));
+  }, [suppliersResp]);
 
   const supplierMap = useMemo(() => {
     const map: Record<string, string> = {};
@@ -117,6 +117,8 @@ export default function PricingPage() {
           suppliers={suppliers}
           onClose={() => setShowAddDialog(false)}
           onCreated={() => {
+            invalidateCachePrefix("/api/supplier-materials");
+            invalidateCachePrefix("/api/suppliers");
             setShowAddDialog(false);
             reloadBindings();
             toast.success("Supplier-material binding created");

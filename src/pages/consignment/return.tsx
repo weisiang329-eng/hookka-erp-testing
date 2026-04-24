@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson } from "@/lib/cached-fetch";
 import {
   Package,
   Search,
@@ -166,7 +167,6 @@ const TAB_FILTERS: { key: string; label: string; statuses: CRStatus[] | null }[]
 export default function ConsignmentReturnPage() {
   const { toast } = useToast();
   const [crRows, setCrRows] = useState<ConsignmentReturnRow[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("all");
   const [detailCR, setDetailCR] = useState<ConsignmentReturnRow | null>(null);
 
@@ -177,23 +177,14 @@ export default function ConsignmentReturnPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
 
   // ---------- Fetch ----------
-  const fetchData = useCallback(() => {
-    setLoading(true);
-    _crCounter = 0;
-    fetch("/api/consignments")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success && d.data) {
-          setCrRows(buildMockCRs(d.data as ConsignmentNote[]));
-        }
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const { data: consignmentsResp, loading, refresh: fetchData } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignments");
 
   useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+    if (consignmentsResp?.success && consignmentsResp.data) {
+      _crCounter = 0;
+      setCrRows(buildMockCRs(consignmentsResp.data as ConsignmentNote[]));
+    }
+  }, [consignmentsResp]);
 
   // ---------- Filtered data ----------
   const filteredRows = useMemo(() => {

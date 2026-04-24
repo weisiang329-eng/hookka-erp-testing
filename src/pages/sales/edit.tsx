@@ -15,6 +15,7 @@ import {
   specialOrderOptions,
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 
@@ -119,9 +120,12 @@ export default function EditSalesOrderPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("sales_order", id, Boolean(id));
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [fabrics, setFabrics] = useState<FabricItem[]>([]);
+  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
+  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
+  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
+  const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
+  const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
+  const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState<SalesOrder | null>(null);
@@ -140,13 +144,6 @@ export default function EditSalesOrderPage() {
 
   useEffect(() => {
     fetchVariantsConfig().then(setMaintenanceConfig).catch(() => { /* ignore */ });
-  }, []);
-
-  // Load reference data
-  useEffect(() => {
-    fetch("/api/customers").then(r => r.json()).then(d => setCustomers(d.data || []));
-    fetch("/api/products").then(r => r.json()).then(d => setProducts(d.data || []));
-    fetch("/api/fabrics").then(r => r.json()).then(d => setFabrics(d.data || []));
   }, []);
 
   // Surcharge lookup from maintenance config
@@ -225,12 +222,16 @@ export default function EditSalesOrderPage() {
   };
 
   // Load existing order
+  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder }>(id ? `/api/sales-orders/${id}` : null);
   useEffect(() => {
-    fetch(`/api/sales-orders/${id}`)
-      .then(r => r.json())
-      .then(d => {
+    const d = orderResp;
+    if (!d) {
+      // no cached data yet — wait for the hook to fetch
+      return;
+    }
+    (() => {
         if (d.success) {
-          const so: SalesOrder = d.data;
+          const so: SalesOrder = d.data as SalesOrder;
           setOrder(so);
           setCustomerId(so.customerId);
           setCustomerPOId(so.customerPOId || "");
@@ -293,8 +294,8 @@ export default function EditSalesOrderPage() {
           }));
         }
         setLoading(false);
-      });
-  }, [id]);
+      })();
+  }, [orderResp, id]);
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
 
@@ -397,6 +398,8 @@ export default function EditSalesOrderPage() {
         toast.error(data.error || `Failed to update order (HTTP ${res.status})`);
         return;
       }
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
       navigate(`/sales/${id}`);
     } catch (e) {
       setSaving(false);

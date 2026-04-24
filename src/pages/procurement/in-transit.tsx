@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson } from "@/lib/cached-fetch";
 import type { GoodsInTransit, TransitStatus } from "@/lib/mock-data";
 import {
   Ship,
@@ -114,30 +115,17 @@ function MethodIcon({ method }: { method: string }) {
 // MAIN PAGE COMPONENT
 // ============================
 export default function GoodsInTransitPage() {
-  const [data, setData] = useState<GoodsInTransit[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"dashboard" | "detail" | "landed">("dashboard");
   const [statusFilter, setStatusFilter] = useState<TransitStatus | "ALL">("ALL");
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [selectedLandedId, setSelectedLandedId] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch("/api/goods-in-transit");
-      if (!res.ok) return;
-      const json = await res.json();
-      setData(json.data ?? []);
-    } catch {
-      // silently ignore
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const { data: resp, loading } = useCachedJson<{ success?: boolean; data?: GoodsInTransit[] } | GoodsInTransit[]>("/api/goods-in-transit");
+  const data: GoodsInTransit[] = useMemo(
+    () => ((resp as { data?: GoodsInTransit[] } | undefined)?.data ?? (Array.isArray(resp) ? resp : [])),
+    [resp]
+  );
 
   // --- Filtered data ---
   const filtered = useMemo(() => {

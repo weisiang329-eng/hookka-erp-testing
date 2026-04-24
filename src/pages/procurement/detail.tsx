@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { generatePurchaseOrderPdf } from "@/lib/generate-purchase-order-pdf";
 import { generateGRNPdf } from "@/lib/generate-grn-pdf";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { PurchaseOrder } from "@/lib/mock-data";
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
@@ -32,28 +33,12 @@ function getStepIndex(status: string): number {
 
 export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
-  const [po, setPO] = useState<PurchaseOrder | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  const fetchPO = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch(`/api/purchase-orders/${id}`);
-      const data = await res.json();
-      if (data.success) {
-        setPO(data.data);
-      } else {
-        setError(data.error || "Purchase order not found");
-      }
-    } catch {
-      setError("Failed to load purchase order");
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
-
-  useEffect(() => { fetchPO(); }, [fetchPO]);
+  const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
+  const po: PurchaseOrder | null = useMemo(
+    () => (resp?.success ? resp.data ?? null : null),
+    [resp]
+  );
+  const error: string | null = fetchError ?? (resp && resp.success === false ? resp.error || "Purchase order not found" : null);
 
   const handleAdvanceStatus = async (newStatus: string) => {
     if (!po) return;
@@ -67,6 +52,8 @@ export default function PurchaseOrderDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grns");
       fetchPO();
     } catch {
       console.error("Failed to update status");

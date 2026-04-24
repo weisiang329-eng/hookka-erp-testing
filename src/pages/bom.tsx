@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
+import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
   fetchVariantsConfig,
@@ -270,6 +271,8 @@ async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {
       headers: authHeaders(),
       body: JSON.stringify({ templates, replaceAll: false }),
     });
+    invalidateCachePrefix("/api/bom-master-templates");
+    invalidateCachePrefix("/api/products");
     // Only clear the legacy keys after a successful upload so a failed
     // migration doesn't lose data.
     localStorage.setItem(MASTERS_MIGRATED_FLAG, "1");
@@ -329,6 +332,9 @@ function saveMasterTemplate(tpl: MasterTemplate) {
     method: "PUT",
     headers: authHeaders(),
     body: JSON.stringify(tpl),
+  }).then(() => {
+    invalidateCachePrefix("/api/bom-master-templates");
+    invalidateCachePrefix("/api/products");
   }).catch(() => {
     /* offline — next hydrate will refresh */
   });
@@ -339,6 +345,9 @@ function deleteMasterTemplateById(id: string) {
   void fetch(`/api/bom-master-templates/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: authHeaders(),
+  }).then(() => {
+    invalidateCachePrefix("/api/bom-master-templates");
+    invalidateCachePrefix("/api/products");
   }).catch(() => {
     /* offline — next hydrate will resolve */
   });
@@ -4757,34 +4766,31 @@ export default function BOMManagementPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [pRes, tRes, invRes] = await Promise.all([
-          fetch("/api/products"),
-          fetch("/api/bom/templates"),
-          fetch("/api/inventory"),
+        const [pData, tData, invData] = await Promise.all([
+          cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/products"),
+          cachedFetchJson<{ success?: boolean; data?: unknown }>("/api/bom/templates"),
+          cachedFetchJson<{ success?: boolean; data?: { rawMaterials?: unknown[] } }>("/api/inventory"),
         ]);
-        const pData = await pRes.json();
-        const tData = await tRes.json();
-        const invData = await invRes.json();
 
-        if (pData.success) setProducts(pData.data);
-        if (tData.success) {
+        if (pData && pData.success) setProducts(pData.data as Product[]);
+        if (tData && tData.success) {
           // D1 is authoritative now. The old localStorage overlay (from
           // pre-D1 days) would otherwise keep resurrecting stale BOMs and
           // pushing them back to the server on every mount, undoing every
           // bulk reapply run.
-          setTemplates(tData.data);
+          setTemplates(tData.data as BOMTemplate[]);
           if (typeof window !== "undefined") {
             try { localStorage.removeItem(BOM_TEMPLATES_KEY); } catch { /* ignore */ }
           }
         }
-        if (invData.success && invData.data?.rawMaterials) {
-          setRawMaterials(invData.data.rawMaterials.map((rm: RawMaterialOption & Record<string, unknown>) => ({
+        if (invData && invData.success && invData.data?.rawMaterials) {
+          setRawMaterials((invData.data.rawMaterials as (RawMaterialOption & Record<string, unknown>)[]).map((rm) => ({
             id: rm.id, itemCode: rm.itemCode, description: rm.description, baseUOM: rm.baseUOM, itemGroup: rm.itemGroup,
           })));
           // Extract fabric codes for variant builder
-          const fabrics = invData.data.rawMaterials
-            .filter((rm: RawMaterialOption) => rm.itemGroup === "B.M-FABR" || rm.itemGroup === "S.M-FABR")
-            .map((rm: RawMaterialOption) => rm.itemCode);
+          const fabrics = (invData.data.rawMaterials as RawMaterialOption[])
+            .filter((rm) => rm.itemGroup === "B.M-FABR" || rm.itemGroup === "S.M-FABR")
+            .map((rm) => rm.itemCode);
           setFabricOptions(fabrics);
         }
       } catch {
@@ -4819,15 +4825,17 @@ export default function BOMManagementPage() {
       if (!res.ok || !json?.success) {
         throw new Error(json?.error || `HTTP ${res.status}`);
       }
+      invalidateCachePrefix("/api/bom");
+      invalidateCachePrefix("/api/products");
     } catch (err) {
       // Roll back by reloading the current server state for this product.
       toast.error(
         `Failed to save BOM: ${err instanceof Error ? err.message : "unknown error"}`,
       );
       try {
-        const refetch = await fetch("/api/bom/templates");
-        const rj = await refetch.json();
-        if (rj?.success) setTemplates(rj.data);
+        invalidateCachePrefix("/api/bom");
+        const rj = await cachedFetchJson<{ success?: boolean; data?: BOMTemplate[] }>("/api/bom/templates");
+        if (rj?.success) setTemplates(rj.data as BOMTemplate[]);
       } catch { /* ignore */ }
     }
   }

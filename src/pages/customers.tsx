@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatRM } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/lib/mock-data";
 import {
   Plus,
@@ -45,8 +46,12 @@ function StateBadge({ state }: { state: string }) {
 // Main Page
 // =====================================================================
 export default function CustomersPage() {
+  const { data: customersResp, loading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  const initialCustomers: Customer[] = useMemo(
+    () => (customersResp?.success ? customersResp.data ?? [] : Array.isArray(customersResp) ? customersResp : []),
+    [customersResp]
+  );
   const [data, setData] = useState<Customer[]>([]);
-  const [loading, setLoading] = useState(true);
   const [expandedCustomer, setExpandedCustomer] = useState<string | null>(null);
 
   // add-form state
@@ -64,20 +69,14 @@ export default function CustomersPage() {
   const [hubForm, setHubForm] = useState({ shortName: "", code: "", state: "KL", contactName: "", phone: "", email: "", address: "" });
 
   // ---------- Fetch ----------
-  const fetchCustomers = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/customers");
-      const json = await res.json();
-      if (json.success) setData(json.data);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const fetchCustomers = () => {
+    invalidateCachePrefix("/api/customers");
+    refreshCustomers();
+  };
 
   useEffect(() => {
-    fetchCustomers();
-  }, [fetchCustomers]);
+    setData(initialCustomers);
+  }, [initialCustomers]);
 
   // ---------- Add ----------
   const handleAdd = async () => {
@@ -91,6 +90,7 @@ export default function CustomersPage() {
       const json = await res.json();
       if (json.success) {
         setData((prev) => [...prev, json.data]);
+        invalidateCachePrefix("/api/customers");
         setAddForm({ code: "", name: "", contactName: "", phone: "", email: "", creditTerms: "NET30", creditLimitSen: 0 });
         setShowAdd(false);
       }
@@ -115,6 +115,7 @@ export default function CustomersPage() {
       }
       if (json.success) {
         setData((prev) => prev.filter((c) => c.id !== customer.id));
+        invalidateCachePrefix("/api/customers");
       } else {
         alert(json.error || "Failed to delete customer");
       }
@@ -131,6 +132,7 @@ export default function CustomersPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(updated),
     });
+    invalidateCachePrefix("/api/customers");
   };
 
   // ---------- Edit Customer ----------

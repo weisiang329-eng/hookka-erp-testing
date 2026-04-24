@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { cachedFetchJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -740,10 +741,6 @@ export default function InventoryPage() {
   useEffect(() => {
     let cancelled = false;
 
-    const safeJson = async (res: Response) => {
-      try { return await res.json(); } catch { return null; }
-    };
-
     const fetchInventory = async (): Promise<{
       products: Product[];
       rawMaterials: RawMaterial[];
@@ -753,13 +750,9 @@ export default function InventoryPage() {
       //    convenience aggregator that returns the same data but with a
       //    less-rich RM shape (no min/max/status/notes).
       try {
-        const [rmRes, pRes] = await Promise.all([
-          fetch("/api/raw-materials"),
-          fetch("/api/products"),
-        ]);
         const [rmJson, pJson] = await Promise.all([
-          safeJson(rmRes),
-          safeJson(pRes),
+          cachedFetchJson<{ success?: boolean; data?: RawMaterial[]; _stub?: boolean }>("/api/raw-materials"),
+          cachedFetchJson<{ success?: boolean; data?: Product[]; _stub?: boolean }>("/api/products"),
         ]);
         const okRM =
           rmJson && rmJson.success && Array.isArray(rmJson.data) && !rmJson._stub;
@@ -767,16 +760,15 @@ export default function InventoryPage() {
           pJson && pJson.success && Array.isArray(pJson.data) && !pJson._stub;
         if (okRM || okP) {
           return {
-            products: okP ? (pJson.data as Product[]) : [],
-            rawMaterials: okRM ? (rmJson.data as RawMaterial[]) : [],
+            products: okP ? (pJson!.data as Product[]) : [],
+            rawMaterials: okRM ? (rmJson!.data as RawMaterial[]) : [],
           };
         }
       } catch { /* fall through */ }
 
       // 2) Fallback: aggregated /api/inventory (products + RM in one payload).
       try {
-        const res = await fetch("/api/inventory");
-        const json = await safeJson(res);
+        const json = await cachedFetchJson<{ success?: boolean; data?: { finishedProducts?: Product[]; rawMaterials?: RawMaterial[] }; _stub?: boolean }>("/api/inventory");
         if (json && json.success && json.data && !json._stub) {
           return {
             products: Array.isArray(json.data.finishedProducts)
@@ -794,8 +786,7 @@ export default function InventoryPage() {
 
     const fetchPOs = async (): Promise<ProductionOrderLike[]> => {
       try {
-        const res = await fetch("/api/production-orders");
-        const json = await safeJson(res);
+        const json = await cachedFetchJson<{ success?: boolean; data?: ProductionOrderLike[]; _stub?: boolean }>("/api/production-orders");
         if (json && json.success && Array.isArray(json.data) && !json._stub) {
           return json.data as ProductionOrderLike[];
         }

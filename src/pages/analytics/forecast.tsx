@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useCachedJson } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,32 +16,22 @@ type PromiseDateEnriched = PromiseDateCalc & {
 
 export default function ForecastPage() {
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
-  const [forecasts, setForecasts] = useState<ForecastEntry[]>([]);
-  const [historicalSales, setHistoricalSales] = useState<HistoricalSales[]>([]);
-  const [promiseDates, setPromiseDates] = useState<PromiseDateEnriched[]>([]);
   const [selectedProductId, setSelectedProductId] = useState<string>("");
   const [selectedMethod, setSelectedMethod] = useState<"SMA_3" | "SMA_6" | "WMA">("SMA_3");
   const [promiseProductId, setPromiseProductId] = useState<string>("");
 
-  useEffect(() => {
-    const asArray = (j: unknown): unknown[] => {
-      if (Array.isArray(j)) return j;
-      const d = (j as { data?: unknown })?.data;
-      return Array.isArray(d) ? d : [];
-    };
-    fetch("/api/forecasts")
-      .then((r) => r.json())
-      .then((j) => setForecasts(asArray(j) as typeof forecasts))
-      .catch(() => {});
-    fetch("/api/historical-sales")
-      .then((r) => r.json())
-      .then((j) => setHistoricalSales(asArray(j) as typeof historicalSales))
-      .catch(() => {});
-    fetch("/api/promise-date")
-      .then((r) => r.json())
-      .then((j) => setPromiseDates(asArray(j) as typeof promiseDates))
-      .catch(() => {});
-  }, []);
+  const { data: forecastsResp } = useCachedJson<unknown>("/api/forecasts");
+  const { data: historicalResp } = useCachedJson<unknown>("/api/historical-sales");
+  const { data: promiseResp } = useCachedJson<unknown>("/api/promise-date");
+
+  const asArray = (j: unknown): unknown[] => {
+    if (Array.isArray(j)) return j;
+    const d = (j as { data?: unknown })?.data;
+    return Array.isArray(d) ? d : [];
+  };
+  const forecasts: ForecastEntry[] = useMemo(() => asArray(forecastsResp) as ForecastEntry[], [forecastsResp]);
+  const historicalSales: HistoricalSales[] = useMemo(() => asArray(historicalResp) as HistoricalSales[], [historicalResp]);
+  const promiseDates: PromiseDateEnriched[] = useMemo(() => asArray(promiseResp) as PromiseDateEnriched[], [promiseResp]);
 
   // Unique products from historical data
   const productList = useMemo(() => {

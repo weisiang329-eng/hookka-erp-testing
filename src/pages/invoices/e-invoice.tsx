@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   FileCheck,
   Send,
@@ -31,9 +32,17 @@ type Invoice = {
 type TabId = "dashboard" | "generate" | "xml";
 
 export default function EInvoicePage() {
-  const [eInvoices, setEInvoices] = useState<EInvoice[]>([]);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: eResp, loading: eLoading, refresh: refreshEInvoices } = useCachedJson<{ success?: boolean; data?: EInvoice[] }>("/api/e-invoices");
+  const { data: iResp, loading: iLoading, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>("/api/invoices");
+  const eInvoices: EInvoice[] = useMemo(
+    () => (eResp?.success ? eResp.data ?? [] : Array.isArray(eResp) ? eResp : []),
+    [eResp]
+  );
+  const invoices: Invoice[] = useMemo(
+    () => (iResp?.success ? iResp.data ?? [] : Array.isArray(iResp) ? iResp : []),
+    [iResp]
+  );
+  const loading = eLoading || iLoading;
   const [activeTab, setActiveTab] = useState<TabId>("dashboard");
   const [selectedInvoiceIds, setSelectedInvoiceIds] = useState<Set<string>>(new Set());
   const [generating, setGenerating] = useState(false);
@@ -42,20 +51,12 @@ export default function EInvoicePage() {
   const [cancelConfirmId, setCancelConfirmId] = useState<string | null>(null);
   const [selectedXmlId, setSelectedXmlId] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    const [eRes, iRes] = await Promise.all([
-      fetch("/api/e-invoices").then((r) => r.json()),
-      fetch("/api/invoices").then((r) => r.json()),
-    ]);
-    if (eRes.success) setEInvoices(eRes.data);
-    if (iRes.success) setInvoices(iRes.data);
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const fetchData = async () => {
+    invalidateCachePrefix("/api/e-invoices");
+    invalidateCachePrefix("/api/invoices");
+    refreshEInvoices();
+    refreshInvoices();
+  };
 
   // KPI calculations
   const now = new Date();

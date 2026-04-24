@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -59,33 +60,22 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
 
 export default function AccountingPage() {
   const [tab, setTab] = useState<TabKey>("overview");
-  const [accounts, setAccounts] = useState<ChartOfAccount[]>([]);
-  const [journals, setJournals] = useState<JournalEntry[]>([]);
-  const [arData, setArData] = useState<ARAgingEntry[]>([]);
-  const [apData, setApData] = useState<APAgingEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: coaResp, loading: coaLoading, refresh: refreshCoa } = useCachedJson<{ success?: boolean; data?: ChartOfAccount[] }>("/api/accounting/coa");
+  const { data: jeResp, loading: jeLoading, refresh: refreshJe } = useCachedJson<{ success?: boolean; data?: JournalEntry[] }>("/api/accounting/journals");
+  const { data: agingResp, loading: agingLoading, refresh: refreshAging } = useCachedJson<{ success?: boolean; data?: { ar: ARAgingEntry[]; ap: APAgingEntry[] } }>("/api/accounting/aging");
+
+  const accounts: ChartOfAccount[] = useMemo(() => (coaResp?.success ? coaResp.data ?? [] : []), [coaResp]);
+  const journals: JournalEntry[] = useMemo(() => (jeResp?.success ? jeResp.data ?? [] : []), [jeResp]);
+  const arData: ARAgingEntry[] = useMemo(() => (agingResp?.success ? agingResp.data?.ar ?? [] : []), [agingResp]);
+  const apData: APAgingEntry[] = useMemo(() => (agingResp?.success ? agingResp.data?.ap ?? [] : []), [agingResp]);
+  const loading = coaLoading || jeLoading || agingLoading;
 
   const fetchAll = useCallback(() => {
-    setLoading(true);
-    Promise.all([
-      fetch("/api/accounting/coa").then((r) => r.json()),
-      fetch("/api/accounting/journals").then((r) => r.json()),
-      fetch("/api/accounting/aging").then((r) => r.json()),
-    ])
-      .then(([coaRes, jeRes, agingRes]) => {
-        if (coaRes.success) setAccounts(coaRes.data);
-        if (jeRes.success) setJournals(jeRes.data);
-        if (agingRes.success) {
-          setArData(agingRes.data.ar);
-          setApData(agingRes.data.ap);
-        }
-      })
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+    invalidateCachePrefix("/api/accounting");
+    refreshCoa();
+    refreshJe();
+    refreshAging();
+  }, [refreshCoa, refreshJe, refreshAging]);
 
   return (
     <div className="space-y-6">
@@ -1299,8 +1289,6 @@ function PLReportTab() {
   const [productCategory, setProductCategory] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [stateFilter, setStateFilter] = useState("");
-  const [plData, setPlData] = useState<PLData | null>(null);
-  const [plLoading, setPlLoading] = useState(true);
 
   const periods = [
     { value: "2026-01", label: "January 2026" },
@@ -1336,25 +1324,17 @@ function PLReportTab() {
     { value: "JB", label: "Johor" },
   ];
 
-  const fetchPL = useCallback(() => {
-    setPlLoading(true);
+  const plUrl = useMemo(() => {
     const params = new URLSearchParams();
     if (period) params.set("period", period);
     if (productCategory) params.set("productCategory", productCategory);
     if (customerId) params.set("customerId", customerId);
     if (stateFilter) params.set("state", stateFilter);
-
-    fetch(`/api/accounting/pl?${params.toString()}`)
-      .then((r) => r.json())
-      .then((res) => {
-        if (res.success) setPlData(res.data);
-      })
-      .finally(() => setPlLoading(false));
+    return `/api/accounting/pl?${params.toString()}`;
   }, [period, productCategory, customerId, stateFilter]);
 
-  useEffect(() => {
-    fetchPL();
-  }, [fetchPL]);
+  const { data: plResp, loading: plLoading } = useCachedJson<{ success?: boolean; data?: PLData }>(plUrl);
+  const plData: PLData | null = useMemo(() => (plResp?.success ? plResp.data ?? null : null), [plResp]);
 
   const handleExportCSV = () => {
     if (!plData) return;
@@ -1681,19 +1661,11 @@ function PLReportTab() {
 // =============== TAB 7: BALANCE SHEET ===============
 
 function BalanceSheetTab() {
-  const [bsData, setBsData] = useState<BalanceSheetEntry[]>([]);
-  const [bsLoading, setBsLoading] = useState(true);
-
-  useEffect(() => {
-    fetch("/api/accounting/pl")
-      .then((r) => r.json())
-      .then((res) => {
-        if (res.success && res.data.balanceSheet) {
-          setBsData(res.data.balanceSheet);
-        }
-      })
-      .finally(() => setBsLoading(false));
-  }, []);
+  const { data: bsResp, loading: bsLoading } = useCachedJson<{ success?: boolean; data?: { balanceSheet?: BalanceSheetEntry[] } }>("/api/accounting/pl");
+  const bsData: BalanceSheetEntry[] = useMemo(
+    () => (bsResp?.success && bsResp.data?.balanceSheet ? bsResp.data.balanceSheet : []),
+    [bsResp]
+  );
 
   if (bsLoading) {
     return (

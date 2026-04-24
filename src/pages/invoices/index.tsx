@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Plus,
   FileText,
@@ -28,12 +29,17 @@ type AgingRow = {
 
 export default function InvoicesPage() {
   const navigate = useNavigate();
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: invResp, loading, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>("/api/invoices");
+  const invoices: Invoice[] = useMemo(
+    () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
+    [invResp]
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [deliveryOrders, setDeliveryOrders] = useState<
-    { id: string; doNo: string; customerName: string; status: string }[]
-  >([]);
+  const { data: doResp, refresh: refreshDOs } = useCachedJson<{ success?: boolean; data?: { id: string; doNo: string; customerName: string; status: string }[] }>(showCreateModal ? "/api/delivery-orders" : null);
+  const deliveryOrders = useMemo(() => {
+    const all = doResp?.success ? doResp.data ?? [] : Array.isArray(doResp) ? doResp : [];
+    return all.filter((o) => o.status === "DELIVERED" || o.status === "LOADED");
+  }, [doResp]);
   const [selectedDOId, setSelectedDOId] = useState("");
   const [creating, setCreating] = useState(false);
 
@@ -56,33 +62,9 @@ export default function InvoicesPage() {
   const [paymentMethod, setPaymentMethod] = useState("BANK_TRANSFER");
   const [paymentSubmitting, setPaymentSubmitting] = useState(false);
 
-  const fetchInvoices = useCallback(() => {
-    fetch("/api/invoices")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setInvoices(d.data);
-        setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    fetchInvoices();
-  }, [fetchInvoices]);
-
   const openCreate = () => {
-    fetch("/api/delivery-orders")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) {
-          setDeliveryOrders(
-            d.data.filter(
-              (o: { status: string }) =>
-                o.status === "DELIVERED" || o.status === "LOADED"
-            )
-          );
-        }
-        setShowCreateModal(true);
-      });
+    refreshDOs();
+    setShowCreateModal(true);
   };
 
   const createInvoice = async () => {
@@ -98,7 +80,10 @@ export default function InvoicesPage() {
     if (data.success) {
       setShowCreateModal(false);
       setSelectedDOId("");
-      fetchInvoices();
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/delivery-orders");
+      invalidateCachePrefix("/api/sales-orders");
+      refreshInvoices();
       navigate(`/invoices/${data.data.id}`);
     }
   };
@@ -110,7 +95,12 @@ export default function InvoicesPage() {
       body: JSON.stringify({ status: newStatus }),
     });
     const data = await res.json();
-    if (data.success) fetchInvoices();
+    if (data.success) {
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/delivery-orders");
+      invalidateCachePrefix("/api/sales-orders");
+      refreshInvoices();
+    }
   };
 
   const recordPayment = async (inv: Invoice) => {
@@ -134,7 +124,10 @@ export default function InvoicesPage() {
       setPayingInvoiceId(null);
       setPaymentAmount("");
       setPaymentReference("");
-      fetchInvoices();
+      invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/delivery-orders");
+      invalidateCachePrefix("/api/sales-orders");
+      refreshInvoices();
     }
     setPaymentSubmitting(false);
   };
@@ -264,8 +257,8 @@ export default function InvoicesPage() {
       disabled: row.status !== "DRAFT",
     },
     { label: "", separator: true, action: () => {} },
-    { label: "Refresh", action: () => fetchInvoices() },
-  ], [navigate, fetchInvoices]);
+    { label: "Refresh", action: () => refreshInvoices() },
+  ], [navigate, refreshInvoices]);
 
   if (loading) {
     return (

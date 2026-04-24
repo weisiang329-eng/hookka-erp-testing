@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useMemo } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -243,12 +244,15 @@ function utilizationColor(pct: number): { bar: string; text: string; bg: string 
 export default function PlanningPage() {
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>("capacity");
-  const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [workers, setWorkers] = useState<Worker[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [, setScheduleData] = useState<ScheduleEntry[]>([]);
-  const [capacityDepts, setCapacityDepts] = useState<CapacityDept[]>([]);
-  const [, setCapacityDays] = useState<string[]>([]);
+  const { data: ordersResp, loading: ordersLoading, refresh: refreshOrders } = useCachedJson<{ data?: ProductionOrder[] }>("/api/production-orders");
+  const { data: workersResp, loading: workersLoading, refresh: refreshWorkers } = useCachedJson<{ data?: Worker[] }>("/api/workers");
+  const { data: schedResp, refresh: refreshSched } = useCachedJson<{ data?: ScheduleEntry[] }>("/api/scheduling");
+  const { data: capResp, loading: capLoading, refresh: refreshCap } = useCachedJson<{ data?: CapacityDept[]; days?: string[] }>("/api/scheduling/capacity");
+  const orders: ProductionOrder[] = useMemo(() => ordersResp?.data ?? [], [ordersResp]);
+  const workers: Worker[] = useMemo(() => workersResp?.data ?? [], [workersResp]);
+  const capacityDepts: CapacityDept[] = useMemo(() => capResp?.data ?? [], [capResp]);
+  const loading = ordersLoading || workersLoading || capLoading;
+  void schedResp;
 
   // ── Master Tracker state ──
   const [trackerCategoryTab, setTrackerCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -276,40 +280,32 @@ export default function PlanningPage() {
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
 
-  const fetchLeadTimes = useCallback(async () => {
-    try {
-      const res = await fetch("/api/production/leadtimes");
-      const json = await res.json();
-      const d = json?.data;
-      // Only hydrate when we got the expected shape — stubbed catch-all
-      // returns `data: []` which would otherwise poison BEDFRAME/SOFA access.
-      if (
-        json?.success &&
-        d &&
-        typeof d === "object" &&
-        !Array.isArray(d) &&
-        (d.BEDFRAME || d.SOFA)
-      ) {
-        setLeadTimes({
-          BEDFRAME: d.BEDFRAME ?? {},
-          SOFA: d.SOFA ?? {},
-        });
-        if (d.hookkaDDBuffer && typeof d.hookkaDDBuffer === "object") {
-          const b = d.hookkaDDBuffer as { BEDFRAME?: number; SOFA?: number };
-          setHookkaDDBuffer({
-            BEDFRAME: typeof b.BEDFRAME === "number" && b.BEDFRAME >= 0 ? b.BEDFRAME : 2,
-            SOFA: typeof b.SOFA === "number" && b.SOFA >= 0 ? b.SOFA : 1,
-          });
-        }
-      }
-    } catch {
-      // silent
-    }
-  }, []);
+  const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
   useEffect(() => {
-    fetchLeadTimes();
-  }, [fetchLeadTimes]);
+    const json = leadTimesJson;
+    const d = json?.data as Record<string, unknown> | undefined;
+    if (
+      json?.success &&
+      d &&
+      typeof d === "object" &&
+      !Array.isArray(d) &&
+      ((d as { BEDFRAME?: unknown }).BEDFRAME || (d as { SOFA?: unknown }).SOFA)
+    ) {
+      const dd = d as { BEDFRAME?: Record<string, number>; SOFA?: Record<string, number>; hookkaDDBuffer?: unknown };
+      setLeadTimes({
+        BEDFRAME: dd.BEDFRAME ?? {},
+        SOFA: dd.SOFA ?? {},
+      });
+      if (dd.hookkaDDBuffer && typeof dd.hookkaDDBuffer === "object") {
+        const b = dd.hookkaDDBuffer as { BEDFRAME?: number; SOFA?: number };
+        setHookkaDDBuffer({
+          BEDFRAME: typeof b.BEDFRAME === "number" && b.BEDFRAME >= 0 ? b.BEDFRAME : 2,
+          SOFA: typeof b.SOFA === "number" && b.SOFA >= 0 ? b.SOFA : 1,
+        });
+      }
+    }
+  }, [leadTimesJson]);
 
   const updateLeadTime = (cat: LeadTimeCat, deptCode: string, value: string) => {
     const n = Number(value);
@@ -332,6 +328,8 @@ export default function PlanningPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ...leadTimes, hookkaDDBuffer }),
       });
+      invalidateCachePrefix("/api/production/leadtimes");
+      refreshLeadTimes();
       setLtSavedAt(new Date().toLocaleTimeString());
     } finally {
       setLtSaving(false);
@@ -352,35 +350,15 @@ export default function PlanningPage() {
   ];
 
   // ── Fetch data ──
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [ordersRes, workersRes, schedRes, capRes] = await Promise.all([
-        fetch("/api/production-orders"),
-        fetch("/api/workers"),
-        fetch("/api/scheduling"),
-        fetch("/api/scheduling/capacity"),
-      ]);
-      const ordersJson = await ordersRes.json();
-      const workersJson = await workersRes.json();
-      const schedJson = await schedRes.json();
-      const capJson = await capRes.json();
-
-      setOrders(ordersJson.data || []);
-      setWorkers(workersJson.data || []);
-      setScheduleData(schedJson.data || []);
-      setCapacityDepts(capJson.data || []);
-      setCapacityDays(capJson.days || []);
-    } catch {
-      // silent
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const fetchData = useCallback(() => {
+    invalidateCachePrefix("/api/production-orders");
+    invalidateCachePrefix("/api/workers");
+    invalidateCachePrefix("/api/scheduling");
+    refreshOrders();
+    refreshWorkers();
+    refreshSched();
+    refreshCap();
+  }, [refreshOrders, refreshWorkers, refreshSched, refreshCap]);
 
   // ── Capacity data ──
   const capacityData = useMemo(() => {

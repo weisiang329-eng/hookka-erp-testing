@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,6 +9,7 @@ import { formatDate } from "@/lib/utils";
 import { ArrowLeft, Download, Save, Printer, Check, X, Clock, User, Play } from "lucide-react";
 import { generateJobCardPdf } from "@/lib/generate-po-pdf";
 import { generateStickerPdf, generateBatchStickersPdf } from "@/lib/generate-sticker-pdf";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 type JobCard = {
   id: string; departmentCode: string; departmentName: string; sequence: number;
@@ -303,9 +304,23 @@ export default function DepartmentProductionPage() {
   const deptCode = (code ?? "").toUpperCase();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
+  const fetchedOrders: ProductionOrder[] = useMemo(
+    () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
+    [ordersResp]
+  );
+  const workers: Worker[] = useMemo(
+    () => (workersResp?.success ? workersResp.data ?? [] : Array.isArray(workersResp) ? workersResp : []),
+    [workersResp]
+  );
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [workers, setWorkers] = useState<Worker[]>([]);
-  const [loading, setLoading] = useState(true);
+  // Sync cached orders into local state so optimistic mutations keep working.
+  const [lastSeenOrders, setLastSeenOrders] = useState<ProductionOrder[] | null>(null);
+  if (fetchedOrders !== lastSeenOrders) {
+    setLastSeenOrders(fetchedOrders);
+    setOrders(fetchedOrders);
+  }
   const [saving, setSaving] = useState<string | null>(null);
   const [jobCardDialog, setJobCardDialog] = useState<{ order: ProductionOrder; jc: JobCard } | null>(null);
   // Quick "Mark Done" modal — captures PIC1 (required) + optional PIC2 and
@@ -335,42 +350,23 @@ export default function DepartmentProductionPage() {
   // List of rack location labels ("A-01", "B-17", …) pulled from warehouse.
   // Only used when showRack is true — lets the Packing user drop a packed
   // item into any rack slot without leaving the dept dashboard.
-  const [rackOptions, setRackOptions] = useState<
-    { label: string; occupied: boolean; occupant?: string }[]
-  >([]);
-
-  useEffect(() => {
-    Promise.all([
-      fetch("/api/production-orders").then(r => r.json()),
-      fetch("/api/workers").then(r => r.json()),
-    ]).then(([poData, wData]) => {
-      setOrders(poData.success ? poData.data : []);
-      setWorkers(wData.success ? wData.data : wData.data || []);
-      setLoading(false);
-    }).catch(() => setLoading(false));
-  }, []);
-
   // Load warehouse rack slots for the Packing dept dropdown.
-  useEffect(() => {
-    if (!showRack) return;
-    fetch("/api/warehouse")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!d?.success) return;
-        const locs = (d.data || []) as Array<{
-          rack: string; position: string; status: string;
-          productCode?: string; customerName?: string;
-        }>;
-        setRackOptions(
-          locs.map((l) => ({
-            label: `${l.rack}-${l.position}`,
-            occupied: l.status === "OCCUPIED",
-            occupant: l.productCode || l.customerName || "",
-          })),
-        );
-      })
-      .catch(() => {});
-  }, [showRack]);
+  const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; position: string; status: string; productCode?: string; customerName?: string }> }>(
+    showRack ? "/api/warehouse" : null
+  );
+  const rackOptions: { label: string; occupied: boolean; occupant?: string }[] = useMemo(() => {
+    if (!showRack) return [];
+    if (!warehouseResp?.success) return [];
+    const locs = (warehouseResp.data || []) as Array<{
+      rack: string; position: string; status: string;
+      productCode?: string; customerName?: string;
+    }>;
+    return locs.map((l) => ({
+      label: `${l.rack}-${l.position}`,
+      occupied: l.status === "OCCUPIED",
+      occupant: l.productCode || l.customerName || "",
+    }));
+  }, [showRack, warehouseResp]);
 
   // Save rack assignment straight to the PO (no dialog). Updates the local
   // order copy optimistically so the select snaps to the new value.
@@ -385,6 +381,9 @@ export default function DepartmentProductionPage() {
       const data = await res.json();
       if (data.success) {
         setOrders((prev) => prev.map((o) => (o.id === order.id ? data.data : o)));
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshOrders();
       }
     } finally {
       setSaving(null);
@@ -448,6 +447,9 @@ export default function DepartmentProductionPage() {
       const data = await res.json();
       if (data.success) {
         setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshOrders();
       }
     } finally {
       setSaving(null);
@@ -482,6 +484,9 @@ export default function DepartmentProductionPage() {
       const data = await res.json();
       if (data.success) {
         setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshOrders();
         setDoneDialog(null);
       }
     } finally {
@@ -511,6 +516,9 @@ export default function DepartmentProductionPage() {
     const data = await res.json();
     if (data.success) {
       setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/sales-orders");
+      refreshOrders();
       // Clear edit for this job card
       setEdits(prev => {
         const next = { ...prev };

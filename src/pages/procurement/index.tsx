@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/lib/mock-data";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
@@ -384,13 +385,6 @@ const ALL_PO_STATUSES = [
 export default function ProcurementPage() {
   useToast();
   const navigate = useNavigate();
-  const [allSuppliers, setAllSuppliers] = useState<Supplier[]>([]);
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
-  const [supplierMaterialBindings, setSupplierMaterialBindings] = useState<
-    SupplierMaterialBinding[]
-  >([]);
-  const [loading, setLoading] = useState(true);
 
   // Dialog
   const [showPOForm, setShowPOForm] = useState(false);
@@ -402,36 +396,36 @@ export default function ProcurementPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [supRes, poRes, invRes, bindingsRes] = await Promise.all([
-        fetch("/api/suppliers"),
-        fetch("/api/purchase-orders"),
-        fetch("/api/inventory"),
-        fetch("/api/supplier-materials"),
-      ]);
-      const supData = await supRes.json();
-      const poData = await poRes.json();
-      const invData = await invRes.json();
-      const bindingsData = await bindingsRes.json();
-      if (supData.success) setAllSuppliers(supData.data || []);
-      if (poData.success) setPurchaseOrders(poData.data || []);
-      if (invData.success) {
-        // /api/inventory returns { data: { finishedProducts, wipItems, rawMaterials } }
-        setRawMaterials(invData.data?.rawMaterials || []);
-      }
-      // /api/supplier-materials may return either {data: [...]}  or the raw array
-      const bindings = bindingsData?.data ?? bindingsData;
-      setSupplierMaterialBindings(Array.isArray(bindings) ? bindings : []);
-    } catch (err) {
-      console.error("Failed to fetch data:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: supResp, loading: supLoading, refresh: refreshSuppliers } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
+  const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] }>("/api/purchase-orders");
+  const { data: invResp, loading: invLoading, refresh: refreshInventory } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  const { data: bindingsResp, loading: bindingsLoading, refresh: refreshBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const allSuppliers: Supplier[] = useMemo(
+    () => (supResp?.success ? supResp.data ?? [] : Array.isArray(supResp) ? supResp : []),
+    [supResp]
+  );
+  const purchaseOrders: PurchaseOrder[] = useMemo(
+    () => (poResp?.success ? poResp.data ?? [] : Array.isArray(poResp) ? poResp : []),
+    [poResp]
+  );
+  const rawMaterials: RawMaterial[] = useMemo(
+    () => (invResp?.success ? invResp.data?.rawMaterials ?? [] : []),
+    [invResp]
+  );
+  const supplierMaterialBindings: SupplierMaterialBinding[] = useMemo(() => {
+    const bindings = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
+    return Array.isArray(bindings) ? bindings : [];
+  }, [bindingsResp]);
+
+  const loading = supLoading || poLoading || invLoading || bindingsLoading;
+
+  const fetchData = useCallback(() => {
+    refreshSuppliers();
+    refreshPOs();
+    refreshInventory();
+    refreshBindings();
+  }, [refreshSuppliers, refreshPOs, refreshInventory, refreshBindings]);
 
   // ---- PO CRUD ----
   const handleCreatePO = async (data: Record<string, unknown>) => {
@@ -441,8 +435,10 @@ export default function ProcurementPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grns");
+      refreshPOs();
       setShowPOForm(false);
-      fetchData();
     } catch (err) {
       console.error("Failed to create PO:", err);
     }

@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Link } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -626,27 +627,15 @@ function CreateProjectDialog({
 }
 
 export default function RDPage() {
-  const [projects, setProjects] = useState<RDProject[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<TabId>("projects");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
 
-  const fetchProjects = useCallback(async () => {
-    try {
-      const res = await fetch("/api/rd-projects");
-      if (!res.ok) return;
-      const data = await res.json();
-      setProjects(data.data ?? []);
-    } catch {
-      // silently ignore
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchProjects();
-  }, [fetchProjects]);
+  const { data: rdResp, loading, refresh: refreshRdHook } = useCachedJson<{ data?: RDProject[] }>("/api/rd-projects");
+  const projects: RDProject[] = useMemo(() => rdResp?.data ?? [], [rdResp]);
+  const fetchProjects = useCallback(() => {
+    invalidateCachePrefix("/api/rd-projects");
+    refreshRdHook();
+  }, [refreshRdHook]);
 
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "projects", label: "Projects", icon: <Lightbulb className="h-4 w-4" /> },

@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -464,63 +465,48 @@ export default function QualityPage() {
   const [viewNCR, setViewNCR] = useState<SupplierNCR | null>(null);
 
   // ── Data fetching ──────────────────────────────────────────────────────────
-  const fetchInspections = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/qc-inspections");
-      const json = await res.json();
-      setInspections(asArray(json));
-    } catch { /* ignore */ }
-    finally { setLoading(false); }
-  }, []);
+  const { data: inspResp, loading: inspLoading, refresh: refreshInspectionsHook } = useCachedJson<unknown>("/api/qc-inspections");
+  const { data: poResp, refresh: refreshPOsHook } = useCachedJson<unknown>("/api/production-orders");
+  const { data: returnsResp } = useCachedJson<unknown>("/api/qc-returns");
+  const { data: defectsResp } = useCachedJson<unknown>("/api/qc-defects");
+  const { data: bomResp } = useCachedJson<unknown>("/api/bom/templates");
+  const { data: ncrResp } = useCachedJson<unknown>("/api/supplier-ncrs");
 
-  const fetchProductionOrders = useCallback(async () => {
-    try {
-      const res = await fetch("/api/production-orders");
-      const json = await res.json();
-      setProductionOrders(
-        asArray<ProductionOrder>(json).filter(
-          (po) => po.status === "IN_PROGRESS" || po.status === "COMPLETED",
-        ),
-      );
-    } catch { /* ignore */ }
-  }, []);
+  const fetchInspections = useCallback(() => {
+    invalidateCachePrefix("/api/qc-inspections");
+    invalidateCachePrefix("/api/production-orders");
+    refreshInspectionsHook();
+  }, [refreshInspectionsHook]);
+
+  const fetchProductionOrders = useCallback(() => {
+    invalidateCachePrefix("/api/production-orders");
+    refreshPOsHook();
+  }, [refreshPOsHook]);
 
   useEffect(() => {
-    fetchInspections();
-    fetchProductionOrders();
-  }, [fetchInspections, fetchProductionOrders]);
+    setInspections(asArray(inspResp));
+    setLoading(inspLoading);
+  }, [inspResp, inspLoading]);
 
-  // Load returns / defects / supplier NCRs from D1 if available. These
-  // endpoints are optional — if they 404 we keep the empty list so the page
-  // still renders. Response shape: `{ data: [...] }` wrapped or raw array.
+  useEffect(() => {
+    setProductionOrders(
+      asArray<ProductionOrder>(poResp).filter(
+        (po) => po.status === "IN_PROGRESS" || po.status === "COMPLETED",
+      ),
+    );
+  }, [poResp]);
+
   useEffect(() => {
     const unwrap = (d: unknown): unknown[] => {
       if (Array.isArray(d)) return d;
       const inner = (d as { data?: unknown })?.data;
       return Array.isArray(inner) ? inner : [];
     };
-    fetch("/api/qc-returns")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d) setReturns(unwrap(d) as ReturnCase[]); })
-      .catch(() => {});
-    fetch("/api/qc-defects")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d) setDefects(unwrap(d) as DefectEntry[]); })
-      .catch(() => {});
-    fetch("/api/bom/templates")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!d) return;
-        const list = unwrap(d) as BomTemplateLite[];
-        setBomTemplates(list);
-      })
-      .catch(() => {});
-    fetch("/api/supplier-ncrs")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => { if (d) setNcrs(unwrap(d) as SupplierNCR[]); })
-      .catch(() => {});
-  }, []);
+    if (returnsResp) setReturns(unwrap(returnsResp) as ReturnCase[]);
+    if (defectsResp) setDefects(unwrap(defectsResp) as DefectEntry[]);
+    if (bomResp) setBomTemplates(unwrap(bomResp) as BomTemplateLite[]);
+    if (ncrResp) setNcrs(unwrap(ncrResp) as SupplierNCR[]);
+  }, [returnsResp, defectsResp, bomResp, ncrResp]);
 
   // Component type options — derived from BOM templates for the selected
   // product category. Pulls unique wipType values off the top-level

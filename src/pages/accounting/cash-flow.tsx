@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -67,36 +68,29 @@ const TABS = ["Cash Flow Forecast", "Bank Reconciliation", "Bank Accounts"] as c
 type Tab = (typeof TABS)[number];
 
 export default function CashFlowPage() {
-  const [data, setData] = useState<CashFlowData | null>(null);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<Tab>("Cash Flow Forecast");
 
-  const fetchData = useCallback(async () => {
-    try {
-      const res = await fetch("/api/cash-flow");
-      if (!res.ok) throw new Error("Failed to fetch");
-      const json = await res.json();
-      // Only hydrate when the shape looks like CashFlowData (object with the
-      // expected top-level fields). The Phase 5 stub returns `{data: []}`
-      // which would otherwise crash `.bankAccounts.map()` downstream.
-      if (
-        json &&
-        typeof json === "object" &&
-        !Array.isArray(json) &&
-        ("bankAccounts" in json || "forecast" in json || "journalEntries" in json)
-      ) {
-        setData(json);
-      }
-    } catch {
-      // silently handle
-    } finally {
-      setLoading(false);
+  const { data: json, loading, refresh } = useCachedJson<unknown>("/api/cash-flow");
+  const data: CashFlowData | null = useMemo(() => {
+    // Only hydrate when the shape looks like CashFlowData (object with the
+    // expected top-level fields). The Phase 5 stub returns `{data: []}`
+    // which would otherwise crash `.bankAccounts.map()` downstream.
+    if (
+      json &&
+      typeof json === "object" &&
+      !Array.isArray(json) &&
+      ("bankAccounts" in (json as object) || "forecast" in (json as object) || "journalEntries" in (json as object))
+    ) {
+      return json as CashFlowData;
     }
-  }, []);
+    return null;
+  }, [json]);
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const fetchData = useCallback(() => {
+    invalidateCachePrefix("/api/cash-flow");
+    invalidateCachePrefix("/api/accounting");
+    refresh();
+  }, [refresh]);
 
   if (loading) {
     return (

@@ -10,6 +10,7 @@
 // the dashboard.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useState } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Card,
   CardContent,
@@ -105,8 +106,6 @@ export default function UsersPage() {
   const currentUser = getCurrentUser();
   const [users, setUsers] = useState<UserRow[]>([]);
   const [invites, setInvites] = useState<InviteRow[]>([]);
-  const [loadingUsers, setLoadingUsers] = useState(true);
-  const [loadingInvites, setLoadingInvites] = useState(true);
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -140,32 +139,25 @@ export default function UsersPage() {
 
   // ---------- Fetchers -----------------------------------------------------
 
-  const fetchUsers = useCallback(async () => {
-    setLoadingUsers(true);
-    try {
-      const res = await fetch("/api/users");
-      const json = (await res.json()) as ApiEnvelope<UserRow[]>;
-      if (json.success) setUsers(json.data ?? []);
-    } finally {
-      setLoadingUsers(false);
-    }
-  }, []);
+  const { data: usersResp, loading: loadingUsers, refresh: refreshUsersHook } = useCachedJson<ApiEnvelope<UserRow[]>>("/api/users");
+  const { data: invitesResp, loading: loadingInvites, refresh: refreshInvitesHook } = useCachedJson<ApiEnvelope<InviteRow[]>>("/api/users/invites");
 
-  const fetchInvites = useCallback(async () => {
-    setLoadingInvites(true);
-    try {
-      const res = await fetch("/api/users/invites");
-      const json = (await res.json()) as ApiEnvelope<InviteRow[]>;
-      if (json.success) setInvites(json.data ?? []);
-    } finally {
-      setLoadingInvites(false);
-    }
-  }, []);
+  const fetchUsers = useCallback(() => {
+    invalidateCachePrefix("/api/users");
+    refreshUsersHook();
+  }, [refreshUsersHook]);
+
+  const fetchInvites = useCallback(() => {
+    invalidateCachePrefix("/api/users/invites");
+    refreshInvitesHook();
+  }, [refreshInvitesHook]);
 
   useEffect(() => {
-    fetchUsers();
-    fetchInvites();
-  }, [fetchUsers, fetchInvites]);
+    if (usersResp?.success) setUsers(usersResp.data ?? []);
+  }, [usersResp]);
+  useEffect(() => {
+    if (invitesResp?.success) setInvites(invitesResp.data ?? []);
+  }, [invitesResp]);
 
   // ---------- User actions -------------------------------------------------
 

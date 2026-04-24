@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Plus,
   FileX,
@@ -13,10 +14,17 @@ import {
 import type { CreditNote, Invoice } from "@/lib/mock-data";
 
 export default function CreditNotesPage() {
-  const [creditNotes, setCreditNotes] = useState<CreditNote[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: cnResp, loading, refresh: refreshCreditNotes } = useCachedJson<{ success?: boolean; data?: CreditNote[] }>("/api/credit-notes");
+  const creditNotes: CreditNote[] = useMemo(
+    () => (cnResp?.success ? cnResp.data ?? [] : Array.isArray(cnResp) ? cnResp : []),
+    [cnResp]
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const { data: invResp, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>(showCreateModal ? "/api/invoices" : null);
+  const invoices: Invoice[] = useMemo(
+    () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
+    [invResp]
+  );
   const [selectedInvoiceId, setSelectedInvoiceId] = useState("");
   const [reason, setReason] = useState<CreditNote["reason"]>("RETURN");
   const [reasonDetail, setReasonDetail] = useState("");
@@ -25,26 +33,9 @@ export default function CreditNotesPage() {
   ]);
   const [creating, setCreating] = useState(false);
 
-  const fetchCreditNotes = useCallback(() => {
-    fetch("/api/credit-notes")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setCreditNotes(d.data);
-        setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    fetchCreditNotes();
-  }, [fetchCreditNotes]);
-
   const openCreate = () => {
-    fetch("/api/invoices")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setInvoices(d.data);
-        setShowCreateModal(true);
-      });
+    refreshInvoices();
+    setShowCreateModal(true);
   };
 
   const addItem = () => {
@@ -83,7 +74,9 @@ export default function CreditNotesPage() {
       setReason("RETURN");
       setReasonDetail("");
       setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
-      fetchCreditNotes();
+      invalidateCachePrefix("/api/credit-notes");
+      invalidateCachePrefix("/api/invoices");
+      refreshCreditNotes();
     }
     setCreating(false);
   };
@@ -155,7 +148,7 @@ export default function CreditNotesPage() {
     },
     {
       label: "Refresh",
-      action: (_row) => fetchCreditNotes(),
+      action: (_row) => refreshCreditNotes(),
     },
   ];
 

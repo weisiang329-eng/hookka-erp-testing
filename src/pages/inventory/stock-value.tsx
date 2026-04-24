@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -69,53 +70,41 @@ function periodLabel(period: string) {
 
 export default function StockValuePage() {
   const [tab, setTab] = useState<TabKey>("entry");
-  const [accounts, setAccounts] = useState<StockAccount[]>([]);
-  const [stockValues, setStockValues] = useState<MonthlyStockValue[]>([]);
-  const [allStockValues, setAllStockValues] = useState<MonthlyStockValue[]>([]);
   const [selectedPeriod, setSelectedPeriod] = useState(() => {
     const now = new Date();
     return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
   });
-  const [loading, setLoading] = useState(true);
 
-  const fetchAccounts = useCallback(async () => {
-    const res = await fetch("/api/stock-accounts");
-    const data = await res.json();
-    if (data.success) setAccounts(data.data);
-  }, []);
+  const { data: accountsResp, loading: accountsLoading, refresh: refreshAccounts } =
+    useCachedJson<{ success?: boolean; data?: StockAccount[] }>("/api/stock-accounts");
+  const { data: stockValuesResp, loading: stockValuesLoading, refresh: refreshStockValues } =
+    useCachedJson<{ success?: boolean; data?: MonthlyStockValue[] }>(`/api/stock-value?period=${selectedPeriod}`);
+  const { data: allStockValuesResp, loading: allStockValuesLoading, refresh: refreshAllStockValues } =
+    useCachedJson<{ success?: boolean; data?: MonthlyStockValue[] }>("/api/stock-value");
 
-  const fetchStockValues = useCallback(async (period?: string) => {
-    const url = period ? `/api/stock-value?period=${period}` : "/api/stock-value";
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.success) {
-      if (period) {
-        setStockValues(data.data);
-      } else {
-        setAllStockValues(data.data);
-      }
-    }
-  }, []);
+  const accounts: StockAccount[] = useMemo(
+    () => (accountsResp?.success ? accountsResp.data ?? [] : Array.isArray(accountsResp) ? accountsResp : []),
+    [accountsResp]
+  );
+  const stockValues: MonthlyStockValue[] = useMemo(
+    () => (stockValuesResp?.success ? stockValuesResp.data ?? [] : Array.isArray(stockValuesResp) ? stockValuesResp : []),
+    [stockValuesResp]
+  );
+  const allStockValues: MonthlyStockValue[] = useMemo(
+    () => (allStockValuesResp?.success ? allStockValuesResp.data ?? [] : Array.isArray(allStockValuesResp) ? allStockValuesResp : []),
+    [allStockValuesResp]
+  );
 
-  const fetchAll = useCallback(async () => {
-    setLoading(true);
-    await Promise.all([
-      fetchAccounts(),
-      fetchStockValues(selectedPeriod),
-      fetchStockValues(),
-    ]);
-    setLoading(false);
-  }, [fetchAccounts, fetchStockValues, selectedPeriod]);
+  const loading = accountsLoading || stockValuesLoading || allStockValuesLoading;
 
-  useEffect(() => {
-    fetchAll();
-  }, [fetchAll]);
+  const fetchAll = useCallback(() => {
+    refreshAccounts();
+    refreshStockValues();
+    refreshAllStockValues();
+  }, [refreshAccounts, refreshStockValues, refreshAllStockValues]);
 
-  const handlePeriodChange = async (period: string) => {
+  const handlePeriodChange = (period: string) => {
     setSelectedPeriod(period);
-    setLoading(true);
-    await fetchStockValues(period);
-    setLoading(false);
   };
 
   return (
@@ -230,6 +219,7 @@ function EntryTab({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ physicalCountValue: senValue }),
     });
+    invalidateCachePrefix("/api/stock-value");
 
     setEditingPhysical((prev) => {
       const next = { ...prev };
@@ -257,6 +247,7 @@ function EntryTab({
         })
       )
     );
+    invalidateCachePrefix("/api/stock-value");
     setPosting(false);
     onRefresh();
   };
@@ -268,6 +259,7 @@ function EntryTab({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ period: selectedPeriod }),
     });
+    invalidateCachePrefix("/api/stock-value");
     setInitializingMonth(false);
     onRefresh();
   };

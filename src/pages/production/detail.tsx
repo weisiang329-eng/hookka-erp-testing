@@ -12,6 +12,7 @@ import {
 import { generateJobCardPdf, generateFullPOPdf } from "@/lib/generate-po-pdf";
 import { getQRCodeUrl, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
+import { useCachedJson, invalidateCachePrefix, invalidateCache } from "@/lib/cached-fetch";
 
 type JobCard = {
   id: string; departmentId: string; departmentCode: string; departmentName: string; sequence: number;
@@ -78,8 +79,20 @@ export default function ProductionOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const orderUrl = id ? `/api/production-orders/${id}` : null;
+  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: ProductionOrder } | ProductionOrder>(orderUrl);
   const [order, setOrder] = useState<ProductionOrder | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [lastSeenOrderResp, setLastSeenOrderResp] = useState<typeof orderResp>(null);
+  if (orderResp !== lastSeenOrderResp) {
+    setLastSeenOrderResp(orderResp);
+    if (!orderResp) {
+      setOrder(null);
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const d: any = orderResp;
+      setOrder(d.success ? d.data : d);
+    }
+  }
   const [updating, setUpdating] = useState<string | null>(null);
   const [qrJobCard, setQrJobCard] = useState<JobCard | null>(null);
   const [fgSticker, setFgSticker] = useState(false);
@@ -130,16 +143,6 @@ export default function ProductionOrderDetailPage() {
     return base;
   };
 
-  useEffect(() => {
-    fetch(`/api/production-orders/${id}`)
-      .then((r) => r.json())
-      .then((d) => {
-        setOrder(d.success ? d.data : d);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [id]);
-
   const updateJobCard = async (jobCardId: string, newStatus: string) => {
     setUpdating(jobCardId);
     try {
@@ -149,7 +152,12 @@ export default function ProductionOrderDetailPage() {
         body: JSON.stringify({ jobCardId, status: newStatus }),
       });
       const data = await res.json();
-      if (data.success) setOrder(data.data);
+      if (data.success) {
+        setOrder(data.data);
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshOrder();
+      }
     } catch {
       // handle error silently
     }
@@ -204,6 +212,9 @@ export default function ProductionOrderDetailPage() {
         toast.error(d?.error || `Failed to generate FG units (HTTP ${r.status})`);
       } else if (d?.success) {
         setFgUnitList(d.data);
+        invalidateCachePrefix("/api/fg-units");
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCache(`/api/fg-units?poId=${encodeURIComponent(order.id)}`);
       } else {
         toast.error(d?.error || "Failed to generate FG units");
       }

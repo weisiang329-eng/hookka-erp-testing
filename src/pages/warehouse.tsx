@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/components/ui/toast";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Warehouse, Grid3X3, Package, MapPin, LayoutGrid,
   ArrowDownToLine, ArrowUpFromLine, History, X, ArrowRightLeft,
@@ -81,11 +82,6 @@ type TabKey = typeof TABS[number]["key"];
 // ---------- Component ----------
 export default function WarehousePage() {
   const [activeTab, setActiveTab] = useState<TabKey>("grid");
-  const [rackLocations, setRackLocations] = useState<RackLocation[]>([]);
-  const [movements, setMovements] = useState<StockMovement[]>([]);
-  const [productionOrders, setProductionOrders] = useState<ProductionOrder[]>([]);
-  const [summary, setSummary] = useState<Summary>({ total: 0, occupied: 0, empty: 0, reserved: 0, occupancyRate: 0 });
-  const [loading, setLoading] = useState(true);
 
   // Popup / modals
   const [selectedSlot, setSelectedSlot] = useState<RackLocation | null>(null);
@@ -129,53 +125,35 @@ export default function WarehousePage() {
   }
 
   // ---------- Data Fetching ----------
-  const fetchRackLocations = useCallback(async () => {
-    try {
-      const res = await fetch("/api/warehouse");
-      const json = await res.json();
-      if (json.success) {
-        setRackLocations(json.data);
-        setSummary(json.summary);
-      }
-    } catch (e) {
-      console.error("Failed to fetch rack locations", e);
-    }
-  }, []);
-
-  const fetchMovements = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (historyType) params.set("type", historyType);
-      if (historyFrom) params.set("from", historyFrom);
-      if (historyTo) params.set("to", historyTo);
-      const res = await fetch(`/api/warehouse/movements?${params.toString()}`);
-      const json = await res.json();
-      if (json.success) setMovements(json.data);
-    } catch (e) {
-      console.error("Failed to fetch movements", e);
-    }
+  const movementsUrl = useMemo(() => {
+    const params = new URLSearchParams();
+    if (historyType) params.set("type", historyType);
+    if (historyFrom) params.set("from", historyFrom);
+    if (historyTo) params.set("to", historyTo);
+    return `/api/warehouse/movements?${params.toString()}`;
   }, [historyType, historyFrom, historyTo]);
 
-  const fetchProductionOrders = useCallback(async () => {
-    try {
-      const res = await fetch("/api/production-orders");
-      const json = await res.json();
-      if (json.success) {
-        setProductionOrders(json.data);
-      }
-    } catch (e) {
-      console.error("Failed to fetch production orders", e);
-    }
-  }, []);
+  const { data: rackResp, loading: rackLoading, refresh: fetchRackLocations } = useCachedJson<{ success?: boolean; data?: RackLocation[]; summary?: Summary }>("/api/warehouse");
+  const { data: movementsResp, loading: movementsLoading, refresh: fetchMovements } = useCachedJson<{ success?: boolean; data?: StockMovement[] }>(movementsUrl);
+  const { data: poResp, loading: poLoading, refresh: fetchProductionOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
 
-  useEffect(() => {
-    Promise.all([fetchRackLocations(), fetchMovements(), fetchProductionOrders()]).then(() => setLoading(false));
-  }, [fetchRackLocations, fetchMovements, fetchProductionOrders]);
-
-  // Re-fetch movements when history filters change
-  useEffect(() => {
-    if (!loading) fetchMovements();
-  }, [historyType, historyFrom, historyTo]);
+  const rackLocations: RackLocation[] = useMemo(
+    () => (rackResp?.success ? rackResp.data ?? [] : Array.isArray(rackResp) ? rackResp : []),
+    [rackResp]
+  );
+  const summary: Summary = useMemo(
+    () => rackResp?.summary ?? { total: 0, occupied: 0, empty: 0, reserved: 0, occupancyRate: 0 },
+    [rackResp]
+  );
+  const movements: StockMovement[] = useMemo(
+    () => (movementsResp?.success ? movementsResp.data ?? [] : Array.isArray(movementsResp) ? movementsResp : []),
+    [movementsResp]
+  );
+  const productionOrders: ProductionOrder[] = useMemo(
+    () => (poResp?.success ? poResp.data ?? [] : Array.isArray(poResp) ? poResp : []),
+    [poResp]
+  );
+  const loading = rackLoading || movementsLoading || poLoading;
 
   // ---------- Actions ----------
   const handleStockIn = async () => {
@@ -228,7 +206,13 @@ export default function WarehousePage() {
       });
 
       // Refresh data
-      await Promise.all([fetchRackLocations(), fetchMovements(), fetchProductionOrders()]);
+      invalidateCachePrefix("/api/warehouse");
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/stock-movements");
+      fetchRackLocations();
+      fetchMovements();
+      fetchProductionOrders();
       setShowStockInForm(false);
       setStockInTarget("");
       setSelectedPO("");
@@ -271,7 +255,12 @@ export default function WarehousePage() {
       );
 
       // Refresh data
-      await Promise.all([fetchRackLocations(), fetchMovements()]);
+      invalidateCachePrefix("/api/warehouse");
+      invalidateCachePrefix("/api/production-orders");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/stock-movements");
+      fetchRackLocations();
+      fetchMovements();
       setStockOutTarget(null);
       setStockOutItemIndex(0);
       setStockOutReason("");

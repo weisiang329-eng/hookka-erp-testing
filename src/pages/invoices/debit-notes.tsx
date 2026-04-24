@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Plus,
   FileText,
@@ -13,10 +14,17 @@ import {
 import type { DebitNote, Invoice } from "@/lib/mock-data";
 
 export default function DebitNotesPage() {
-  const [debitNotes, setDebitNotes] = useState<DebitNote[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: dnResp, loading, refresh: refreshDebitNotes } = useCachedJson<{ success?: boolean; data?: DebitNote[] }>("/api/debit-notes");
+  const debitNotes: DebitNote[] = useMemo(
+    () => (dnResp?.success ? dnResp.data ?? [] : Array.isArray(dnResp) ? dnResp : []),
+    [dnResp]
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const { data: invResp, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>(showCreateModal ? "/api/invoices" : null);
+  const invoices: Invoice[] = useMemo(
+    () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
+    [invResp]
+  );
   const [selectedInvoiceId, setSelectedInvoiceId] = useState("");
   const [reason, setReason] = useState<DebitNote["reason"]>("UNDERCHARGE");
   const [reasonDetail, setReasonDetail] = useState("");
@@ -25,26 +33,9 @@ export default function DebitNotesPage() {
   ]);
   const [creating, setCreating] = useState(false);
 
-  const fetchDebitNotes = useCallback(() => {
-    fetch("/api/debit-notes")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setDebitNotes(d.data);
-        setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    fetchDebitNotes();
-  }, [fetchDebitNotes]);
-
   const openCreate = () => {
-    fetch("/api/invoices")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setInvoices(d.data);
-        setShowCreateModal(true);
-      });
+    refreshInvoices();
+    setShowCreateModal(true);
   };
 
   const addItem = () => {
@@ -83,7 +74,9 @@ export default function DebitNotesPage() {
       setReason("UNDERCHARGE");
       setReasonDetail("");
       setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
-      fetchDebitNotes();
+      invalidateCachePrefix("/api/debit-notes");
+      invalidateCachePrefix("/api/invoices");
+      refreshDebitNotes();
     }
     setCreating(false);
   };
@@ -155,7 +148,7 @@ export default function DebitNotesPage() {
     },
     {
       label: "Refresh",
-      action: (_row) => fetchDebitNotes(),
+      action: (_row) => refreshDebitNotes(),
     },
   ];
 

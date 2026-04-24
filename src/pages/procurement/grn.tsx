@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { GoodsReceiptNote, PurchaseOrder } from "@/lib/mock-data";
 import {
   Plus,
@@ -209,9 +210,6 @@ const ALL_GRN_STATUSES = [
 export default function GRNPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [grns, setGrns] = useState<GoodsReceiptNote[]>([]);
-  const [purchaseOrders, setPurchaseOrders] = useState<PurchaseOrder[]>([]);
-  const [loading, setLoading] = useState(true);
 
   // Dialog
   const [showForm, setShowForm] = useState(false);
@@ -223,25 +221,24 @@ export default function GRNPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const [grnRes, poRes] = await Promise.all([
-        fetch("/api/grn"),
-        fetch("/api/purchase-orders"),
-      ]);
-      const grnData = await grnRes.json();
-      const poData = await poRes.json();
-      setGrns(grnData?.data ?? (Array.isArray(grnData) ? grnData : []));
-      setPurchaseOrders(poData?.data ?? poData ?? []);
-    } catch (err) {
-      console.error("Failed to fetch GRN data:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: grnResp, loading: grnLoading, refresh: refreshGrns } = useCachedJson<{ success?: boolean; data?: GoodsReceiptNote[] } | GoodsReceiptNote[]>("/api/grn");
+  const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const grns: GoodsReceiptNote[] = useMemo(
+    () => ((grnResp as { data?: GoodsReceiptNote[] } | undefined)?.data ?? (Array.isArray(grnResp) ? grnResp : [])),
+    [grnResp]
+  );
+  const purchaseOrders: PurchaseOrder[] = useMemo(
+    () => ((poResp as { data?: PurchaseOrder[] } | undefined)?.data ?? (Array.isArray(poResp) ? poResp : [])),
+    [poResp]
+  );
+
+  const loading = grnLoading || poLoading;
+
+  const fetchData = useCallback(() => {
+    refreshGrns();
+    refreshPOs();
+  }, [refreshGrns, refreshPOs]);
 
   const handleCreateGRN = async (data: Record<string, unknown>) => {
     try {
@@ -251,8 +248,13 @@ export default function GRNPage() {
         body: JSON.stringify(data),
       });
       if (res.ok) {
+        invalidateCachePrefix("/api/grns");
+        invalidateCachePrefix("/api/purchase-orders");
+        invalidateCachePrefix("/api/inventory");
+        invalidateCachePrefix("/api/raw-materials");
+        refreshGrns();
+        refreshPOs();
         setShowForm(false);
-        fetchData();
       } else {
         const err = await res.json();
         toast.error(err.error || "Failed to create GRN");
@@ -381,6 +383,10 @@ export default function GRNPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ status: "CONFIRMED" }),
             });
+            invalidateCachePrefix("/api/grns");
+            invalidateCachePrefix("/api/purchase-orders");
+            invalidateCachePrefix("/api/inventory");
+            invalidateCachePrefix("/api/raw-materials");
             fetchData();
           } catch {
             toast.error("Failed to approve GRN");

@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { ArrowLeft, Plus, Trash2, Save } from "lucide-react";
 import type { Customer, Product } from "@/lib/mock-data";
 
@@ -27,8 +28,6 @@ const EMPTY_LINE: LineItem = {
 export default function CreateConsignmentPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
   const [saving, setSaving] = useState(false);
 
   const [customerId, setCustomerId] = useState("");
@@ -37,10 +36,10 @@ export default function CreateConsignmentPage() {
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
 
-  useEffect(() => {
-    fetch("/api/customers").then((r) => r.json()).then((d) => setCustomers(d.data || []));
-    fetch("/api/products").then((r) => r.json()).then((d) => setProducts(d.data || []));
-  }, []);
+  const { data: customersResp } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  const { data: productsResp } = useCachedJson<{ success?: boolean; data?: Product[] }>("/api/products");
+  const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
+  const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
 
@@ -98,6 +97,8 @@ export default function CreateConsignmentPage() {
     setSaving(false);
 
     if (data.success) {
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
       navigate(`/consignment/${data.data.id}`);
     } else {
       toast.error(data.error || "Failed to create consignment note");

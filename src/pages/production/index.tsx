@@ -6,6 +6,7 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
 import { getQRCodeUrl, getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 // ----- types -----
 type JobCard = {
@@ -582,8 +583,10 @@ type Worker = { id: string; name: string; departmentCode?: string };
 
 export default function ProductionPage() {
   const navigate = useNavigate();
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
+  const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"ALL" | string>("ALL");
   const [workers, setWorkers] = useState<Worker[]>([]);
   // Warehouse rack slots — fetched once, used by the Packing dept Rack
@@ -741,54 +744,52 @@ export default function ProductionPage() {
   const [stockDialogOpen, setStockDialogOpen] = useState(false);
 
   const fetchOrders = useCallback(() => {
-    setLoading(true);
-    fetch("/api/production-orders")
-      .then((r) => r.json())
-      .then((d) => {
-        setOrders(d.success ? d.data : Array.isArray(d) ? d : []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+    invalidateCachePrefix("/api/production-orders");
+    refreshOrders();
+  }, [refreshOrders]);
 
-  useEffect(() => { fetchOrders(); }, [fetchOrders]);
+  // Sync cached orders response into local state so optimistic PATCHes keep working.
+  const [lastSeenOrdersResp, setLastSeenOrdersResp] = useState<typeof ordersResp>(null);
+  if (ordersResp !== lastSeenOrdersResp) {
+    setLastSeenOrdersResp(ordersResp);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d: any = ordersResp;
+    if (d) setOrders(d.success ? d.data : Array.isArray(d) ? d : []);
+  }
 
   // Fetch the 20 warehouse racks once so the Packing Rack dropdown is populated.
-  useEffect(() => {
-    fetch("/api/warehouse")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!d?.success) return;
-        const locs = (d.data || []) as Array<{
-          rack: string; status: string;
-          productCode?: string; customerName?: string;
-        }>;
-        setRackOptions(
-          locs.map((l) => ({
-            label: l.rack,
-            occupied: l.status === "OCCUPIED",
-            occupant: l.productCode || l.customerName || "",
-          })),
-        );
-      })
-      .catch(() => {});
-  }, []);
+  const [lastSeenWarehouseResp, setLastSeenWarehouseResp] = useState<typeof warehouseResp>(null);
+  if (warehouseResp !== lastSeenWarehouseResp) {
+    setLastSeenWarehouseResp(warehouseResp);
+    if (warehouseResp?.success) {
+      const locs = (warehouseResp.data || []) as Array<{
+        rack: string; status: string;
+        productCode?: string; customerName?: string;
+      }>;
+      setRackOptions(
+        locs.map((l) => ({
+          label: l.rack,
+          occupied: l.status === "OCCUPIED",
+          occupant: l.productCode || l.customerName || "",
+        })),
+      );
+    }
+  }
 
   // Workers list — powers PIC 1 / PIC 2 dropdowns. The API exposes a
   // `departmentCode` on every worker record; we fetch all workers once
   // here and filter client-side per active tab below.
-  useEffect(() => {
-    (async () => {
-      try {
-        const r = await fetch("/api/workers");
-        if (!r.ok) return;
-        const d = await r.json();
-        const list: Worker[] =
-          (d.success ? d.data : Array.isArray(d) ? d : []) as Worker[];
-        if (Array.isArray(list)) setWorkers(list);
-      } catch { /* network error — workers list stays empty */ }
-    })();
-  }, []);
+  const [lastSeenWorkersResp, setLastSeenWorkersResp] = useState<typeof workersResp>(null);
+  if (workersResp !== lastSeenWorkersResp) {
+    setLastSeenWorkersResp(workersResp);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const d: any = workersResp;
+    if (d) {
+      const list: Worker[] =
+        (d.success ? d.data : Array.isArray(d) ? d : []) as Worker[];
+      if (Array.isArray(list)) setWorkers(list);
+    }
+  }
 
   // Optimistic PATCH helper for inline job-card edits (due date, completion,
   // PIC1, PIC2). Updates local state immediately so the grid reflows, then
@@ -819,6 +820,9 @@ export default function ProductionPage() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobCardId, ...patch }),
+      }).then(() => {
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
       }).catch((err) => {
         console.error("[patchJobCard] network error", err);
       });
@@ -848,6 +852,9 @@ export default function ProductionPage() {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ jobCardId, rackingNumber: rack }),
+      }).then(() => {
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/sales-orders");
       }).catch((err) => console.error("[patchRack] network error", err));
     },
     [],
@@ -2506,6 +2513,9 @@ export default function ProductionPage() {
                         method: "PATCH",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ targetEndDate: v }),
+                      }).then(() => {
+                        invalidateCachePrefix("/api/production-orders");
+                        invalidateCachePrefix("/api/sales-orders");
                       }).catch(() => {});
                     },
                     e.currentTarget,

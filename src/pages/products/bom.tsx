@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
+import { cachedFetchJson } from "@/lib/cached-fetch";
 
 // ---------- Types ----------
 // Mirrors the master BOMTemplate shape exposed by /api/bom/templates.
@@ -461,24 +462,22 @@ export default function BOMPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [pRes, tRes] = await Promise.all([
-          fetch("/api/products"),
-          fetch("/api/bom/templates"),
+        const [pData, tData] = await Promise.all([
+          cachedFetchJson<{ success?: boolean; data?: Product[] }>("/api/products"),
+          cachedFetchJson<{ success?: boolean; data?: BOMTemplate[] }>("/api/bom/templates"),
         ]);
-        const pData = await pRes.json();
-        const tData = await tRes.json();
 
         let foundProduct: Product | null = null;
-        if (pData.success) {
+        if (pData?.success) {
           foundProduct =
-            pData.data.find((p: Product) => p.id === id) ||
-            pData.data.find((p: Product) => p.code === id) ||
+            (pData.data as Product[]).find((p: Product) => p.id === id) ||
+            (pData.data as Product[]).find((p: Product) => p.code === id) ||
             null;
           setProduct(foundProduct);
         }
 
-        if (tData.success && foundProduct) {
-          const list: BOMTemplate[] = tData.data || [];
+        if (tData?.success && foundProduct) {
+          const list: BOMTemplate[] = (tData.data as BOMTemplate[]) || [];
           // Gather all versions for this product (by productCode, then
           // fall back to baseModel).
           let productVersions = list.filter(

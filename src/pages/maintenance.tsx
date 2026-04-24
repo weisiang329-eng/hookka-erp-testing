@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -72,9 +73,18 @@ function daysUntil(nextDate: string) {
 
 export default function MaintenancePage() {
   const [activeTab, setActiveTab] = useState<TabId>("equipment");
-  const [loading, setLoading] = useState(true);
+  const { data: eqResp, loading: eqLoading } = useCachedJson<unknown>("/api/equipment");
+  const { data: logResp, loading: logLoading } = useCachedJson<unknown>("/api/maintenance-logs");
   const [equipment, setEquipment] = useState<Equipment[]>([]);
   const [logs, setLogs] = useState<MaintenanceLog[]>([]);
+  const loading = eqLoading || logLoading;
+
+  useEffect(() => {
+    setEquipment(asArray<Equipment>(eqResp));
+  }, [eqResp]);
+  useEffect(() => {
+    setLogs(asArray<MaintenanceLog>(logResp));
+  }, [logResp]);
 
   // Equipment-type options seeded from the system defaults plus every
   // distinct `type` already recorded in the equipment master, so adding a
@@ -96,25 +106,6 @@ export default function MaintenancePage() {
   const [historyTypeFilter, setHistoryTypeFilter] = useState("ALL");
   const [historySearch, setHistorySearch] = useState("");
 
-  // Fetch data
-  useEffect(() => {
-    async function fetchData() {
-      setLoading(true);
-      try {
-        const [eqRes, logRes] = await Promise.all([
-          fetch("/api/equipment").then((r) => r.json()),
-          fetch("/api/maintenance-logs").then((r) => r.json()),
-        ]);
-        setEquipment(asArray<Equipment>(eqRes));
-        setLogs(asArray<MaintenanceLog>(logRes));
-      } catch (err) {
-        console.error("Failed to fetch:", err);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchData();
-  }, []);
 
   // KPI calculations
   const operationalCount = equipment.filter((e) => e.status === "OPERATIONAL").length;
@@ -183,6 +174,8 @@ export default function MaintenancePage() {
     const result = await res.json();
     if (result.success) {
       setEquipment((prev) => [...prev, result.data]);
+      invalidateCachePrefix("/api/equipment");
+      invalidateCachePrefix("/api/maintenance");
       setShowAddForm(false);
     }
   }
@@ -216,6 +209,8 @@ export default function MaintenancePage() {
       if (result.log) {
         setLogs((prev) => [result.log, ...prev]);
       }
+      invalidateCachePrefix("/api/equipment");
+      invalidateCachePrefix("/api/maintenance");
       setShowLogForm(null);
     }
   }
@@ -244,6 +239,8 @@ export default function MaintenancePage() {
       setEquipment((prev) =>
         prev.map((eq) => (eq.id === showEditForm ? result.data : eq))
       );
+      invalidateCachePrefix("/api/equipment");
+      invalidateCachePrefix("/api/maintenance");
       setShowEditForm(null);
     }
   }

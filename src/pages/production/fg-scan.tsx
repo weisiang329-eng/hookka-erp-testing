@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { ArrowLeft, CheckCircle2, AlertTriangle, ScanLine } from "lucide-react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 type ScanAction = "PACK" | "LOAD" | "DELIVER" | "RETURN";
 
@@ -89,7 +90,11 @@ export default function FGScanPage() {
     ACTIONS.some((a) => a.value === initialAction) ? initialAction : "PACK",
   );
   const [serial, setSerial] = useState(initialSerial);
-  const [workers, setWorkers] = useState<Worker[]>([]);
+  const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
+  const workers: Worker[] = useMemo(
+    () => (workersResp?.success ? workersResp.data ?? [] : Array.isArray(workersResp) ? workersResp : []),
+    [workersResp]
+  );
   const [workerId, setWorkerId] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<
@@ -99,14 +104,6 @@ export default function FGScanPage() {
   >(null);
   const [recent, setRecent] = useState<RecentEntry[]>(loadRecent);
   const inputRef = useRef<HTMLInputElement | null>(null);
-
-  // Fetch workers once.
-  useEffect(() => {
-    fetch("/api/workers")
-      .then((r) => r.json())
-      .then((d) => { if (d.success) setWorkers(d.data); })
-      .catch(() => {});
-  }, []);
 
   // Autofocus serial field on mount and whenever mode changes / after submit.
   useEffect(() => {
@@ -139,6 +136,7 @@ export default function FGScanPage() {
 
       if (data.success && data.data) {
         const unit = data.data as FGUnit;
+        invalidateCachePrefix("/api/production-orders");
         const packerBit = action === "PACK" && unit.packerName ? ` Packer: ${unit.packerName}.` : "";
         const msg = `${s} marked as ${ACTION_PAST[action]}.${packerBit}`;
         setResult({ kind: "success", unit, message: msg });

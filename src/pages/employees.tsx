@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, Fragment } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -1599,28 +1600,18 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
-  const [payslipData, setPayslipData] = useState<PayslipData[]>([]);
-  const [loadingPayroll, setLoadingPayroll] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [approving, setApproving] = useState(false);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
   const period = `${selectedYear}-${String(selectedMonth).padStart(2, "0")}`;
 
+  const { data: payslipResp, loading: loadingPayroll, refresh: refreshPayslipsHook } = useCachedJson<unknown>(`/api/payslips?period=${period}`);
+  const payslipData: PayslipData[] = useMemo(() => asArray(payslipResp) as PayslipData[], [payslipResp]);
   const fetchPayslips = useCallback(() => {
-    setLoadingPayroll(true);
-    fetch(`/api/payslips?period=${period}`)
-      .then((r) => r.json())
-      .then((res) => {
-        setPayslipData(asArray(res));
-        setLoadingPayroll(false);
-      })
-      .catch(() => setLoadingPayroll(false));
-  }, [period]);
-
-  useEffect(() => {
-    fetchPayslips();
-  }, [fetchPayslips]);
+    invalidateCachePrefix("/api/payslips");
+    refreshPayslipsHook();
+  }, [refreshPayslipsHook]);
 
   const generatePayslips = async () => {
     setGenerating(true);
@@ -2091,8 +2082,6 @@ const LEAVE_ENTITLEMENTS = { ANNUAL: 8, MEDICAL: 14 };
 
 function LeaveManagementTab({ workers }: { workers: Worker[] }) {
   const { toast } = useToast();
-  const [leaveData, setLeaveData] = useState<LeaveRecord[]>([]);
-  const [loadingLeaves, setLoadingLeaves] = useState(false);
   const [filterStatus, setFilterStatus] = useState<string>("ALL");
   const [filterWorker, setFilterWorker] = useState<string>("ALL");
   const [showAddForm, setShowAddForm] = useState(false);
@@ -2106,20 +2095,13 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
     reason: "",
   });
 
+  const { data: leavesResp, loading: loadingLeaves, refresh: refreshLeavesHook } = useCachedJson<unknown>("/api/leaves");
+  const leaveData: LeaveRecord[] = useMemo(() => asArray(leavesResp) as LeaveRecord[], [leavesResp]);
   const fetchLeaves = useCallback(() => {
-    setLoadingLeaves(true);
-    fetch("/api/leaves")
-      .then((r) => r.json())
-      .then((res) => {
-        setLeaveData(asArray(res));
-        setLoadingLeaves(false);
-      })
-      .catch(() => setLoadingLeaves(false));
-  }, []);
-
-  useEffect(() => {
-    fetchLeaves();
-  }, [fetchLeaves]);
+    invalidateCachePrefix("/api/leaves");
+    invalidateCachePrefix("/api/workers");
+    refreshLeavesHook();
+  }, [refreshLeavesHook]);
 
   const filteredLeaves = useMemo(() => {
     let result = leaveData;
@@ -2503,24 +2485,37 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
 
 export default function EmployeesPage() {
   const [activeTab, setActiveTab] = useState<TabKey>("working-hours");
-  const [workers, setWorkers] = useState<Worker[]>([]);
-  const [allAttendance, setAllAttendance] = useState<AttendanceRecord[]>([]);
   const [, setDateAttendance] = useState<AttendanceRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+
+  const { data: workersResp, loading: workersLoading, refresh: refreshWorkersHook } = useCachedJson<{ data?: Worker[] }>("/api/workers");
+  const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>("/api/attendance");
+
+  const workers: Worker[] = useMemo(
+    () => ((workersResp as { data?: Worker[] } | Worker[] | null)
+      ? ((workersResp as { data?: Worker[] }).data ?? (Array.isArray(workersResp) ? (workersResp as Worker[]) : []))
+      : []),
+    [workersResp]
+  );
+  const allAttendance: AttendanceRecord[] = useMemo(
+    () => ((attendanceResp as { data?: AttendanceRecord[] } | AttendanceRecord[] | null)
+      ? ((attendanceResp as { data?: AttendanceRecord[] }).data ?? (Array.isArray(attendanceResp) ? (attendanceResp as AttendanceRecord[]) : []))
+      : []),
+    [attendanceResp]
+  );
+  const loading = workersLoading || attendanceLoading;
 
   const fetchWorkers = useCallback(() => {
-    fetch("/api/workers")
-      .then((r) => r.json())
-      .then((res) => setWorkers(res.data ?? res ?? []))
-      .catch(() => {});
-  }, []);
+    invalidateCachePrefix("/api/workers");
+    invalidateCachePrefix("/api/payslips");
+    invalidateCachePrefix("/api/attendance");
+    refreshWorkersHook();
+  }, [refreshWorkersHook]);
 
   const fetchAllAttendance = useCallback(() => {
-    fetch("/api/attendance")
-      .then((r) => r.json())
-      .then((res) => setAllAttendance(res.data ?? res ?? []))
-      .catch(() => {});
-  }, []);
+    invalidateCachePrefix("/api/attendance");
+    invalidateCachePrefix("/api/workers");
+    refreshAttendanceHook();
+  }, [refreshAttendanceHook]);
 
   const fetchDateAttendance = useCallback((date: string) => {
     fetch(`/api/attendance?date=${date}`)
@@ -2530,22 +2525,10 @@ export default function EmployeesPage() {
   }, []);
 
   useEffect(() => {
-    Promise.all([
-      fetch("/api/workers").then((r) => r.json()),
-      fetch("/api/attendance").then((r) => r.json()),
-    ])
-      .then(([wData, aData]) => {
-        const w = wData.data ?? wData ?? [];
-        const a = aData.data ?? aData ?? [];
-        setWorkers(w);
-        setAllAttendance(a);
-        // Also set today's attendance for the working hours tab
-        const today = todayStr();
-        setDateAttendance(a.filter((r: AttendanceRecord) => r.date === today));
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+    // Also set today's attendance for the working hours tab
+    const today = todayStr();
+    setDateAttendance(allAttendance.filter((r: AttendanceRecord) => r.date === today));
+  }, [allAttendance]);
 
   const refreshAttendance = useCallback(
     (date: string) => {

@@ -1,10 +1,11 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDate } from "@/lib/utils";
 import { ArrowLeft, Search, ChevronUp, ChevronDown, Factory, BarChart3 } from "lucide-react";
+import { useCachedJson } from "@/lib/cached-fetch";
 
 type JobCard = {
   id: string; departmentId: string; departmentCode: string; departmentName: string; sequence: number;
@@ -104,8 +105,11 @@ function getDeptEfficiency(orders: ProductionOrder[]) {
 
 export default function MasterTrackerPage() {
   const navigate = useNavigate();
-  const [orders, setOrders] = useState<ProductionOrder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: ordersResp, loading } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>("/api/production-orders");
+  const orders: ProductionOrder[] = useMemo(
+    () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
+    [ordersResp]
+  );
 
   // Filters
   const [categoryTab, setCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA">("ALL");
@@ -117,16 +121,6 @@ export default function MasterTrackerPage() {
   // Sorting
   const [sortField, setSortField] = useState<SortField>("poNo");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-
-  useEffect(() => {
-    fetch("/api/production-orders")
-      .then((r) => r.json())
-      .then((d) => {
-        setOrders(d.success ? d.data : Array.isArray(d) ? d : []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
 
   const filteredOrders = useMemo(() => {
     let result = [...orders];

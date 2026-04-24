@@ -2,6 +2,7 @@
 // Intentionally standalone (no dashboard/portal chrome), mobile-first, no auth.
 
 import { useEffect, useState } from "react";
+import { useCachedJson } from "@/lib/cached-fetch";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, Circle, Package, AlertTriangle } from "lucide-react";
 
@@ -97,29 +98,28 @@ export default function TrackPage() {
   const [params] = useSearchParams();
   const serial = params.get("s") || "";
   const [unit, setUnit] = useState<FGUnit | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const trackUrl = serial.trim() ? `/api/fg-units?serial=${encodeURIComponent(serial.trim())}` : null;
+  const { data: d, loading: fetchLoading, error: fetchError } = useCachedJson<{ success?: boolean; data?: FGUnit[] }>(trackUrl);
+  const loading = trackUrl ? fetchLoading : false;
 
   useEffect(() => {
     if (!serial.trim()) {
-      setLoading(false);
       setError("No serial number provided.");
       return;
     }
-    setLoading(true);
     setError(null);
-    fetch(`/api/fg-units?serial=${encodeURIComponent(serial.trim())}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success && Array.isArray(d.data) && d.data.length > 0) {
-          setUnit(d.data[0] as FGUnit);
-        } else {
-          setError("Unit not found. Check the QR code or serial number.");
-        }
-      })
-      .catch(() => setError("Network error. Please try again."))
-      .finally(() => setLoading(false));
-  }, [serial]);
+    if (d) {
+      if (d.success && Array.isArray(d.data) && d.data.length > 0) {
+        setUnit(d.data[0] as FGUnit);
+      } else {
+        setError("Unit not found. Check the QR code or serial number.");
+      }
+    } else if (fetchError) {
+      setError("Network error. Please try again.");
+    }
+  }, [serial, d, fetchError]);
 
   const status = unit?.status;
   const statusInfo = status ? STATUS_COLORS[status] : null;

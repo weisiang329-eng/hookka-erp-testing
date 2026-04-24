@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
@@ -616,9 +617,8 @@ function MaintenanceView() {
   useEffect(() => {
     if (tab !== "fabrics") return;
     setFabricsLoading(true);
-    fetch("/api/fabric-tracking")
-      .then((r) => r.json())
-      .then((d) => setFabricsList(d.data ?? []))
+    cachedFetchJson<{ data?: FabricTrackingItem[] }>("/api/fabric-tracking")
+      .then((d) => setFabricsList(d?.data ?? []))
       .catch(() => {})
       .finally(() => setFabricsLoading(false));
   }, [tab]);
@@ -857,6 +857,8 @@ function MaintenanceView() {
                                     body: JSON.stringify({ priceTier: tier }),
                                   });
                                   if (res.ok) {
+                                    invalidateCachePrefix("/api/fabric-tracking");
+                                    invalidateCachePrefix("/api/raw-materials");
                                     setFabricsList((prev) =>
                                       prev.map((fb) => (fb.id === f.id ? { ...fb, priceTier: tier } : fb))
                                     );
@@ -1198,6 +1200,9 @@ export default function ProductsPage() {
         }
       }
 
+      invalidateCachePrefix("/api/products");
+      invalidateCachePrefix("/api/bom");
+      invalidateCachePrefix("/api/bom-master-templates");
       setProducts(updatedProducts);
       toast.success(`Updated ${updated} products, skipped ${skipped} unknown codes.`);
     } catch (err) {
@@ -1210,14 +1215,12 @@ export default function ProductsPage() {
   useEffect(() => {
     async function load() {
       try {
-        const [pRes, cRes] = await Promise.all([
-          fetch("/api/products"),
-          fetch("/api/product-configs"),
+        const [pData, cData] = await Promise.all([
+          cachedFetchJson<{ success?: boolean; data?: Product[] }>("/api/products"),
+          cachedFetchJson<{ success?: boolean; data?: ProductDeptConfig[] }>("/api/product-configs"),
         ]);
-        const pData = await pRes.json();
-        const cData = await cRes.json();
-        if (pData.success) setProducts(pData.data);
-        if (cData.success) setConfigs(cData.data);
+        if (pData?.success) setProducts(pData.data as Product[]);
+        if (cData?.success) setConfigs(cData.data as ProductDeptConfig[]);
       } catch {
         // silent
       } finally {
@@ -1466,7 +1469,12 @@ export default function ProductsPage() {
                                           headers: { "Content-Type": "application/json" },
                                           body: JSON.stringify({ seatHeightPrices: updated }),
                                         }).then((r) => r.json()).then((data) => {
-                                          if (data.success) setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                          if (data.success) {
+                                            invalidateCachePrefix("/api/products");
+                                            invalidateCachePrefix("/api/bom");
+                                            invalidateCachePrefix("/api/bom-master-templates");
+                                            setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                          }
                                         });
                                       }}
                                       onKeyDown={(e) => {
@@ -1518,7 +1526,12 @@ export default function ProductsPage() {
                                       headers: { "Content-Type": "application/json" },
                                       body: JSON.stringify({ basePriceSen: val }),
                                     }).then((r) => r.json()).then((data) => {
-                                      if (data.success) setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                      if (data.success) {
+                                        invalidateCachePrefix("/api/products");
+                                        invalidateCachePrefix("/api/bom");
+                                        invalidateCachePrefix("/api/bom-master-templates");
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                      }
                                     });
                                   }}
                                   onKeyDown={(e) => {
@@ -1554,7 +1567,12 @@ export default function ProductsPage() {
                                       headers: { "Content-Type": "application/json" },
                                       body: JSON.stringify({ price1Sen: val }),
                                     }).then((r) => r.json()).then((data) => {
-                                      if (data.success) setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                      if (data.success) {
+                                        invalidateCachePrefix("/api/products");
+                                        invalidateCachePrefix("/api/bom");
+                                        invalidateCachePrefix("/api/bom-master-templates");
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                      }
                                     });
                                   }}
                                   onKeyDown={(e) => {
@@ -1592,7 +1610,12 @@ export default function ProductsPage() {
                                   headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify({ unitM3: val }),
                                 }).then((r) => r.json()).then((data) => {
-                                  if (data.success) setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                  if (data.success) {
+                                    invalidateCachePrefix("/api/products");
+                                    invalidateCachePrefix("/api/bom");
+                                    invalidateCachePrefix("/api/bom-master-templates");
+                                    setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                  }
                                 });
                               }}
                               onKeyDown={(e) => {

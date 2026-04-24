@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -111,31 +112,26 @@ const filterTabs: { label: string; value: FilterValue }[] = [
 export default function NotificationsPage() {
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<Notification[]>([]);
-  const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<FilterValue>("ALL");
 
-  const fetchNotifications = useCallback(async () => {
-    try {
-      const res = await fetch("/api/notifications");
-      if (res.ok) {
-        const raw: unknown = await res.json();
-        const list = Array.isArray(raw)
-          ? (raw as Notification[])
-          : Array.isArray((raw as { data?: unknown })?.data)
-            ? ((raw as { data: Notification[] }).data)
-            : [];
-        setNotifications(list);
-      }
-    } catch {
-      // silently fail for mock
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: notifResp, loading, refresh: refreshNotifHook } = useCachedJson<unknown>("/api/notifications");
+
+  const fetchNotifications = useCallback(() => {
+    invalidateCachePrefix("/api/notifications");
+    refreshNotifHook();
+  }, [refreshNotifHook]);
 
   useEffect(() => {
-    fetchNotifications();
-  }, [fetchNotifications]);
+    const raw = notifResp;
+    if (raw !== null && raw !== undefined) {
+      const list = Array.isArray(raw)
+        ? (raw as Notification[])
+        : Array.isArray((raw as { data?: unknown })?.data)
+          ? ((raw as { data: Notification[] }).data)
+          : [];
+      setNotifications(list);
+    }
+  }, [notifResp]);
 
   // --- Mark as read ---
 

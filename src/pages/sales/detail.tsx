@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { SalesOrder, SOStatus, Customer } from "@/lib/mock-data";
 
 type LinkedPO = {
@@ -147,12 +148,12 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
   const [order, setOrder] = useState<SalesOrder | null>(null);
   const [customer, setCustomer] = useState<Customer | null>(null);
   const [linkedPOs, setLinkedPOs] = useState<LinkedPO[]>([]);
   const [statusHistory, setStatusHistory] = useState<StatusChange[]>([]);
   const [overrideHistory, setOverrideHistory] = useState<PriceOverrideRecord[]>([]);
-  const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -168,33 +169,26 @@ export default function SalesOrderDetailPage() {
   }>({ open: false, title: "", message: "", confirmLabel: "", action: () => {} });
 
   const fetchOrder = useCallback(() => {
-    fetch(`/api/sales-orders/${id}`)
-      .then(r => r.json())
-      .then(d => {
-        if (d.success) {
-          setOrder(d.data);
-          setLinkedPOs(d.linkedPOs || []);
-          setStatusHistory(d.statusHistory || []);
-          setOverrideHistory(d.priceOverrides || []);
-        }
-        setLoading(false);
-      });
-  }, [id]);
+    invalidateCachePrefix("/api/sales-orders");
+    refreshOrder();
+  }, [refreshOrder]);
 
-  useEffect(() => { fetchOrder(); }, [fetchOrder]);
+  useEffect(() => {
+    const d = orderResp;
+    if (!d) return;
+    if (d.success) {
+      setOrder(d.data as SalesOrder);
+      setLinkedPOs(d.linkedPOs || []);
+      setStatusHistory(d.statusHistory || []);
+      setOverrideHistory(d.priceOverrides || []);
+    }
+  }, [orderResp]);
 
   // Fetch customer so we can resolve the hub shortName for the Delivery Hub field
+  const { data: customerResp } = useCachedJson<{ success?: boolean; data?: Customer }>(order?.customerId ? `/api/customers/${order.customerId}` : null);
   useEffect(() => {
-    if (!order?.customerId) return;
-    let cancelled = false;
-    fetch(`/api/customers/${order.customerId}`)
-      .then(r => r.json())
-      .then(d => {
-        if (!cancelled && d.success) setCustomer(d.data);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [order?.customerId]);
+    if (customerResp?.success) setCustomer(customerResp.data as Customer);
+  }, [customerResp]);
 
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
@@ -223,6 +217,8 @@ export default function SalesOrderDetailPage() {
       return;
     }
     if (data.success) {
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
       setOrder(data.data);
       if (data.linkedPOs) setLinkedPOs(data.linkedPOs);
       // Surface the ON_HOLD / CANCELLED / RESUME cascade summary as a toast so
@@ -280,6 +276,8 @@ export default function SalesOrderDetailPage() {
       return;
     }
     if (data.success) {
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
       setOrder(data.data);
       setConfirmSuccess(data.message);
       fetchOrder();
@@ -298,6 +296,8 @@ export default function SalesOrderDetailPage() {
   const deleteOrder = async () => {
     if (!confirm("Delete this order?")) return;
     await fetch(`/api/sales-orders/${id}`, { method: "DELETE" });
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/production-orders");
     navigate("/sales");
   };
 

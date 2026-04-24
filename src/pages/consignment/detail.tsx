@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   ArrowLeft, Printer, RotateCcw, XCircle, X, Package,
 } from "lucide-react";
@@ -59,8 +60,7 @@ export default function ConsignmentDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const [note, setNote] = useState<ConsignmentNote | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [noteOverride, setNoteOverride] = useState<ConsignmentNote | null>(null);
   const [updating, setUpdating] = useState(false);
 
   // Confirmation modal state
@@ -73,20 +73,12 @@ export default function ConsignmentDetailPage() {
     action: () => void;
   }>({ open: false, title: "", message: "", confirmLabel: "", action: () => {} });
 
-  const fetchNote = useCallback(() => {
-    fetch(`/api/consignments/${id}`)
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) {
-          setNote(d.data);
-        }
-        setLoading(false);
-      });
-  }, [id]);
-
-  useEffect(() => {
-    fetchNote();
-  }, [fetchNote]);
+  const { data: resp, loading } = useCachedJson<{ success?: boolean; data?: ConsignmentNote }>(id ? `/api/consignments/${id}` : null);
+  const fetchedNote: ConsignmentNote | null = useMemo(
+    () => (resp?.success ? resp.data ?? null : null),
+    [resp]
+  );
+  const note: ConsignmentNote | null = noteOverride ?? fetchedNote;
 
   const updateStatus = useCallback(async (newStatus: string) => {
     if (!note) return;
@@ -98,7 +90,9 @@ export default function ConsignmentDetailPage() {
     });
     const data = await res.json();
     if (data.success) {
-      setNote(data.data);
+      setNoteOverride(data.data);
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
     }
     setUpdating(false);
     setModal((prev) => ({ ...prev, open: false }));

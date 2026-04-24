@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -8,6 +8,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson } from "@/lib/cached-fetch";
 import type { PurchaseOrder } from "@/lib/mock-data";
 import {
   FileText,
@@ -85,8 +86,6 @@ const ALL_PI_STATUSES = [
 export default function PurchaseInvoicesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [invoices, setInvoices] = useState<PurchaseInvoice[]>([]);
-  const [loading, setLoading] = useState(true);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -95,21 +94,29 @@ export default function PurchaseInvoicesPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const fetchData = useCallback(async () => {
-    setLoading(true);
-    try {
-      const poRes = await fetch("/api/purchase-orders");
-      const poData = await poRes.json();
-      const pos: PurchaseOrder[] = poData?.data ?? poData ?? [];
-      setInvoices(generateMockPIs(pos));
-    } catch (err) {
-      console.error("Failed to fetch PO data:", err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: poResp, loading, refresh: fetchData } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
+  const generatedInvoices: PurchaseInvoice[] = useMemo(() => {
+    const pos: PurchaseOrder[] = (poResp as { data?: PurchaseOrder[] } | undefined)?.data ?? (Array.isArray(poResp) ? poResp : []);
+    return generateMockPIs(pos);
+  }, [poResp]);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const [invoiceOverrides, setInvoiceOverrides] = useState<Record<string, PIStatus>>({});
+  const invoices: PurchaseInvoice[] = useMemo(
+    () => generatedInvoices.map((pi) => invoiceOverrides[pi.id] ? { ...pi, status: invoiceOverrides[pi.id] } : pi),
+    [generatedInvoices, invoiceOverrides]
+  );
+  const setInvoices = useCallback(
+    (updater: (prev: PurchaseInvoice[]) => PurchaseInvoice[]) => {
+      const next = updater(invoices);
+      const overrides: Record<string, PIStatus> = { ...invoiceOverrides };
+      next.forEach((pi) => {
+        const original = generatedInvoices.find((g) => g.id === pi.id);
+        if (original && original.status !== pi.status) overrides[pi.id] = pi.status;
+      });
+      setInvoiceOverrides(overrides);
+    },
+    [invoices, generatedInvoices, invoiceOverrides]
+  );
 
   // ---- Filters ----
   const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo;

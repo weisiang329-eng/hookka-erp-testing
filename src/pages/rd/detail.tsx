@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -104,7 +105,6 @@ export default function RDProjectDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const [project, setProject] = useState<RDProject | null>(null);
-  const [loading, setLoading] = useState(true);
   const [advancing, setAdvancing] = useState(false);
 
   // Edit project modal
@@ -186,33 +186,28 @@ export default function RDProjectDetailPage() {
   const photoInputRef = useRef<HTMLInputElement>(null);
   const [photoUploadStage, setPhotoUploadStage] = useState<string | null>(null);
 
-  const fetchProject = useCallback(async () => {
-    try {
-      const res = await fetch(`/api/rd-projects/${id}`);
-      if (!res.ok) return;
-      const data = await res.json();
-      setProject(data.data ?? null);
-    } catch {
-      // silently ignore
-    } finally {
-      setLoading(false);
-    }
-  }, [id]);
+  const rdUrl = id ? `/api/rd-projects/${id}` : null;
+  const { data: projectResp, loading, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
+  const { data: inventoryResp, refresh: refreshInventoryHook } = useCachedJson<{ data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
 
-  const fetchRawMaterials = useCallback(async () => {
-    try {
-      const res = await fetch("/api/inventory");
-      if (!res.ok) return;
-      const data = await res.json();
-      setRawMaterials(data.data?.rawMaterials ?? []);
-    } catch {
-      // silently ignore
-    }
-  }, []);
+  const fetchProject = useCallback(() => {
+    if (rdUrl) invalidateCachePrefix(rdUrl);
+    invalidateCachePrefix("/api/rd-projects");
+    refreshProjectHook();
+  }, [rdUrl, refreshProjectHook]);
+
+  const fetchRawMaterials = useCallback(() => {
+    invalidateCachePrefix("/api/inventory");
+    refreshInventoryHook();
+  }, [refreshInventoryHook]);
 
   useEffect(() => {
-    fetchProject();
-  }, [fetchProject]);
+    if (projectResp) setProject(projectResp.data ?? null);
+  }, [projectResp]);
+
+  useEffect(() => {
+    setRawMaterials(inventoryResp?.data?.rawMaterials ?? []);
+  }, [inventoryResp]);
 
   // ─── Advance Stage ──────────────────────────────────────────────────────
 

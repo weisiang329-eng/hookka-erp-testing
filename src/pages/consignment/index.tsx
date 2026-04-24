@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Plus, Package, ArrowRight, Download, Filter, X, Eye, Pencil, Printer, RotateCcw, RefreshCw, FileText, ClipboardList } from "lucide-react";
 import type { ConsignmentNote } from "@/lib/mock-data";
 import type { Customer } from "@/lib/mock-data";
@@ -23,9 +24,6 @@ const ALL_STATUSES = [
 export default function ConsignmentPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [orders, setOrders] = useState<ConsignmentNote[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [loading, setLoading] = useState(true);
 
   // Transfer dialog states
   const [transferCNRow, setTransferCNRow] = useState<ConsignmentNote | null>(null);
@@ -44,23 +42,22 @@ export default function ConsignmentPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const fetchOrders = () => {
-    setLoading(true);
-    fetch("/api/consignments")
-      .then((r) => r.json())
-      .then((d) => {
-        setOrders(d.data || []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-    fetch("/api/customers")
-      .then((r) => r.json())
-      .then((d) => { if (d.data) setCustomers(d.data); });
-  };
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignments");
+  const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
 
-  useEffect(() => {
-    fetchOrders();
-  }, []);
+  const orders: ConsignmentNote[] = useMemo(
+    () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
+    [ordersResp]
+  );
+  const customers: Customer[] = useMemo(
+    () => (customersResp?.data ?? []),
+    [customersResp]
+  );
+
+  const fetchOrders = () => {
+    refreshOrders();
+    refreshCustomers();
+  };
 
   const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo;
 
@@ -220,6 +217,8 @@ export default function ConsignmentPage() {
         }),
       });
       if (!res.ok) throw new Error("Failed to create Consignment Note");
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
       setTransferCNRow(null);
       navigate("/consignment/note");
     } catch {
@@ -254,6 +253,8 @@ export default function ConsignmentPage() {
         }),
       });
       if (!res.ok) throw new Error("Failed to create Consignment Return");
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
       setTransferCRRow(null);
       navigate("/consignment/return");
     } catch {
@@ -278,6 +279,8 @@ export default function ConsignmentPage() {
         }),
       });
       if (!res.ok) throw new Error("Failed");
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
       setTransferSIRow(null);
       fetchOrders();
     } catch {

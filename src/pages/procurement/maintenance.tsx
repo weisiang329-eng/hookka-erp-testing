@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatDate } from "@/lib/utils";
+import { useCachedJson } from "@/lib/cached-fetch";
 import {
   Plus,
   Building2,
@@ -569,34 +570,33 @@ export default function SupplierMaintenancePage() {
   const [showSupplierForm, setShowSupplierForm] = useState(false);
   const [editingSupplier, setEditingSupplier] = useState<Supplier | null>(null);
 
+  const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
+
   useEffect(() => {
-    fetch("/api/suppliers")
-      .then((r) => r.json())
-      .then((d) => {
-        const list = Array.isArray(d?.data) ? d.data : Array.isArray(d) ? d : [];
-        if (!list.length) return;
-        const mapped: Supplier[] = list.map((s: Record<string, unknown>) => ({
-          id: String(s.id ?? s.code ?? ""),
-          code: String(s.code ?? s.id ?? ""),
-          name: String(s.name ?? ""),
-          contactPerson: String(s.contactPerson ?? s.attention ?? ""),
-          phone: String(s.phone ?? ""),
-          email: String(s.email ?? ""),
-          paymentTerms: (s.paymentTerms ?? s.creditTerm ?? "NET30") as PaymentTerms,
-          rating: Number(s.rating ?? 0),
-          status: ((s.status ?? (s.isActive === false ? "INACTIVE" : "ACTIVE")) as SupplierStatus),
-          address: String(
-            s.address ??
-              [s.addressLine1, s.addressLine2, s.addressLine3, s.addressLine4]
-                .filter(Boolean)
-                .join(", ") ??
-              "",
-          ),
-        }));
-        setSuppliers(mapped);
-      })
-      .catch(() => { /* keep fallback state */ });
-  }, []);
+    const d = suppliersResp;
+    if (!d) return;
+    const list = Array.isArray((d as { data?: unknown[] })?.data) ? (d as { data: Record<string, unknown>[] }).data : Array.isArray(d) ? (d as Record<string, unknown>[]) : [];
+    if (!list.length) return;
+    const mapped: Supplier[] = list.map((s: Record<string, unknown>) => ({
+      id: String(s.id ?? s.code ?? ""),
+      code: String(s.code ?? s.id ?? ""),
+      name: String(s.name ?? ""),
+      contactPerson: String(s.contactPerson ?? s.attention ?? ""),
+      phone: String(s.phone ?? ""),
+      email: String(s.email ?? ""),
+      paymentTerms: (s.paymentTerms ?? s.creditTerm ?? "NET30") as PaymentTerms,
+      rating: Number(s.rating ?? 0),
+      status: ((s.status ?? (s.isActive === false ? "INACTIVE" : "ACTIVE")) as SupplierStatus),
+      address: String(
+        s.address ??
+          [s.addressLine1, s.addressLine2, s.addressLine3, s.addressLine4]
+            .filter(Boolean)
+            .join(", ") ??
+          "",
+      ),
+    }));
+    setSuppliers(mapped);
+  }, [suppliersResp]);
 
   // SKU state — D1 is source of truth; MOCK_SKU kept only as a silent
   // fallback if the API is unreachable, so the page always renders.
@@ -605,67 +605,62 @@ export default function SupplierMaintenancePage() {
   const [showSKUForm, setShowSKUForm] = useState(false);
   const [editingSKU, setEditingSKU] = useState<SupplierSKU | null>(null);
 
+  // D1 exposes this under /api/supplier-materials (the legacy mock was
+  // /api/supplier-skus which never became a real endpoint). Map the
+  // D1 binding shape into the page's SupplierSKU type.
+  const { data: smResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/supplier-materials");
+
   useEffect(() => {
-    // D1 exposes this under /api/supplier-materials (the legacy mock was
-    // /api/supplier-skus which never became a real endpoint). Map the
-    // D1 binding shape into the page's SupplierSKU type.
-    fetch("/api/supplier-materials")
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => {
-        if (!d) return;
-        const raw = Array.isArray(d?.data)
-          ? d.data
-          : Array.isArray(d)
-            ? d
-            : [];
-        const mapped: SupplierSKU[] = raw.map((b: Record<string, unknown>) => ({
-          id: String(b.id ?? ""),
-          internalRMCode: String(b.materialCode ?? ""),
-          materialName: String(b.materialName ?? ""),
-          supplierId: String(b.supplierId ?? ""),
-          supplierName: b.supplierName ? String(b.supplierName) : undefined,
-          supplierSku: String(b.supplierSku ?? ""),
-          unitPriceSen:
-            typeof b.unitPriceSen === "number"
-              ? b.unitPriceSen
-              : typeof b.unitPrice === "number"
-                ? Math.round(b.unitPrice * 100)
-                : 0,
-          currency: String(b.currency ?? "MYR"),
-          leadTimeDays: Number(b.leadTimeDays ?? 7),
-          moq: Number(b.moq ?? 0),
-          isMainSupplier: Boolean(b.isMainSupplier),
-          validFrom: String(b.priceValidFrom ?? b.validFrom ?? ""),
-          validTo: String(b.priceValidTo ?? b.validTo ?? ""),
-        }));
-        setSkuList(mapped);
-      })
-      .catch(() => { /* keep fallback state */ });
-  }, []);
+    const d = smResp;
+    if (!d) return;
+    const raw = Array.isArray((d as { data?: unknown[] })?.data)
+      ? (d as { data: Record<string, unknown>[] }).data
+      : Array.isArray(d)
+        ? (d as Record<string, unknown>[])
+        : [];
+    const mapped: SupplierSKU[] = raw.map((b: Record<string, unknown>) => ({
+      id: String(b.id ?? ""),
+      internalRMCode: String(b.materialCode ?? ""),
+      materialName: String(b.materialName ?? ""),
+      supplierId: String(b.supplierId ?? ""),
+      supplierName: b.supplierName ? String(b.supplierName) : undefined,
+      supplierSku: String(b.supplierSku ?? ""),
+      unitPriceSen:
+        typeof b.unitPriceSen === "number"
+          ? b.unitPriceSen
+          : typeof b.unitPrice === "number"
+            ? Math.round(b.unitPrice * 100)
+            : 0,
+      currency: String(b.currency ?? "MYR"),
+      leadTimeDays: Number(b.leadTimeDays ?? 7),
+      moq: Number(b.moq ?? 0),
+      isMainSupplier: Boolean(b.isMainSupplier),
+      validFrom: String(b.priceValidFrom ?? b.validFrom ?? ""),
+      validTo: String(b.priceValidTo ?? b.validTo ?? ""),
+    }));
+    setSkuList(mapped);
+  }, [smResp]);
 
   // Inventory items for RM code selector
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
+  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: InventoryItem[]; finishedGoods?: InventoryItem[]; wipItems?: InventoryItem[] } }>("/api/inventory");
   useEffect(() => {
-    fetch("/api/inventory")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success && d.data) {
-          const all: InventoryItem[] = [
-            ...(d.data.rawMaterials || []),
-            ...(d.data.finishedGoods || []),
-            ...(d.data.wipItems || []),
-          ].map((item: InventoryItem) => ({
-            id: item.id,
-            itemCode: item.itemCode,
-            description: item.description,
-            baseUOM: item.baseUOM,
-            itemGroup: item.itemGroup,
-          }));
-          setInventoryItems(all);
-        }
-      })
-      .catch(() => {});
-  }, []);
+    const d = invResp;
+    if (d?.success && d.data) {
+      const all: InventoryItem[] = [
+        ...(d.data.rawMaterials || []),
+        ...(d.data.finishedGoods || []),
+        ...(d.data.wipItems || []),
+      ].map((item: InventoryItem) => ({
+        id: item.id,
+        itemCode: item.itemCode,
+        description: item.description,
+        baseUOM: item.baseUOM,
+        itemGroup: item.itemGroup,
+      }));
+      setInventoryItems(all);
+    }
+  }, [invResp]);
 
   // Supplier name lookup
   const supplierMap = useMemo(() => {

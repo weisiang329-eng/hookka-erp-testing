@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Package,
   Truck,
@@ -113,8 +114,6 @@ const TAB_FILTERS: { key: string; label: string; statuses: CNStatus[] | null }[]
 export default function ConsignmentNotePage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [cnRows, setCnRows] = useState<ConsignmentNoteRow[]>([]);
-  const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("all");
   const [detailCN, setDetailCN] = useState<ConsignmentNoteRow | null>(null);
 
@@ -138,26 +137,24 @@ export default function ConsignmentNotePage() {
   // Pull real ConsignmentNote rows from /api/consignment-notes and join them
   // client-side with their parent ConsignmentOrder so the grid can show
   // customer / branch / CO ref alongside the dispatch info.
-  const fetchData = useCallback(() => {
-    setLoading(true);
-    Promise.all([
-      fetch("/api/consignment-notes").then((r) => r.json()),
-      fetch("/api/consignments").then((r) => r.json()),
-    ])
-      .then(([cnResp, coResp]) => {
-        if (cnResp?.success && coResp?.success) {
-          const cns = (cnResp.data || []) as ConsignmentNote[];
-          const orders = (coResp.data || []) as ConsignmentNote[];
-          setCnRows(joinCNsWithOrders(cns, orders));
-        }
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const { data: cnResp, loading: cnLoading, refresh: refreshCNs } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignment-notes");
+  const { data: coResp, loading: coLoading, refresh: refreshCOs } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignments");
 
-  useEffect(() => {
-    fetchData();
-  }, [fetchData]);
+  const cnRows: ConsignmentNoteRow[] = useMemo(() => {
+    if (cnResp?.success && coResp?.success) {
+      const cns = (cnResp.data || []) as ConsignmentNote[];
+      const orders = (coResp.data || []) as ConsignmentNote[];
+      return joinCNsWithOrders(cns, orders);
+    }
+    return [];
+  }, [cnResp, coResp]);
+
+  const loading = cnLoading || coLoading;
+
+  const fetchData = useCallback(() => {
+    refreshCNs();
+    refreshCOs();
+  }, [refreshCNs, refreshCOs]);
 
   // ---------- Filtered data ----------
   const filteredRows = useMemo(() => {
@@ -401,6 +398,9 @@ export default function ConsignmentNotePage() {
         }),
       });
       if (!res.ok) throw new Error("Failed to create Consignment Return");
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/consignment-notes");
+      invalidateCachePrefix("/api/invoices");
       setTransferCRRow(null);
       navigate("/consignment/return");
     } catch {
@@ -430,6 +430,9 @@ export default function ConsignmentNotePage() {
         }),
       });
       if (!res.ok) throw new Error("Failed");
+      invalidateCachePrefix("/api/consignment-notes");
+      invalidateCachePrefix("/api/consignments");
+      invalidateCachePrefix("/api/invoices");
       setTransferSIRow(null);
       navigate("/sales"); // Navigate to invoices
     } catch {

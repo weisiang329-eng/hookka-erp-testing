@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -77,37 +78,30 @@ export default function MRPPage() {
   const [activeTab, setActiveTab] = useState<Tab>("DASHBOARD");
   const [mrpData, setMrpData] = useState<MRPRun | null>(null);
   const [fabricData, setFabricData] = useState<FabricDetail[]>([]);
-  const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [sortDesc, setSortDesc] = useState(true);
   const [horizon, setHorizon] = useState<Horizon>("all");
 
-  const fetchMRP = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/mrp");
-      const json = await res.json();
-      const d = json?.data;
-      if (
-        json?.success &&
-        d &&
-        typeof d === "object" &&
-        !Array.isArray(d) &&
-        ("requirements" in d || "runDate" in d)
-      ) {
-        setMrpData(d);
-      }
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const { data: mrpResp, loading, refresh: refreshMrp } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/mrp");
+  const fetchMRP = useCallback(() => {
+    invalidateCachePrefix("/api/mrp");
+    refreshMrp();
+  }, [refreshMrp]);
 
   useEffect(() => {
-    fetchMRP();
-  }, [fetchMRP]);
+    const json = mrpResp;
+    const d = json?.data;
+    if (
+      json?.success &&
+      d &&
+      typeof d === "object" &&
+      !Array.isArray(d) &&
+      ("requirements" in (d as object) || "runDate" in (d as object))
+    ) {
+      setMrpData(d as MRPRun);
+    }
+  }, [mrpResp]);
 
   const runMRP = async (h?: Horizon) => {
     const selectedHorizon = h ?? horizon;
@@ -120,6 +114,7 @@ export default function MRPPage() {
         if (json.fabricDetail) {
           setFabricData(json.fabricDetail);
         }
+        invalidateCachePrefix("/api/mrp");
       }
     } catch {
       // ignore

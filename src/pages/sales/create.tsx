@@ -18,6 +18,7 @@ import {
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 type SofaModule = {
   productId: string;
@@ -160,10 +161,14 @@ function CreateSalesOrderPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [products, setProducts] = useState<Product[]>([]);
-  const [fabrics, setFabrics] = useState<FabricItem[]>([]);
-  const [fabricTrackings, setFabricTrackings] = useState<{id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[]>([]);
+  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
+  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
+  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
+  const { data: fabricTrackingsResp } = useCachedJson<{ data?: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[] }>("/api/fabric-tracking");
+  const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
+  const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
+  const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
+  const fabricTrackings: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
   const [saving, setSaving] = useState(false);
   const [isClone, setIsClone] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED">("DRAFT");
@@ -182,10 +187,6 @@ function CreateSalesOrderPage() {
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
 
   useEffect(() => {
-    fetch("/api/customers").then(r => r.json()).then(d => setCustomers(d.data || []));
-    fetch("/api/products").then(r => r.json()).then(d => setProducts(d.data || []));
-    fetch("/api/fabrics").then(r => r.json()).then(d => setFabrics(d.data || []));
-    fetch("/api/fabric-tracking").then(r => r.json()).then(d => setFabricTrackings(d.data || []));
     // Variants now live in D1 under kv_config('variants-config'). Hydrate from
     // the shared cache first (instant if any other page already fetched it)
     // and fall back to factory defaults until the D1 round-trip resolves.
@@ -596,6 +597,8 @@ function CreateSalesOrderPage() {
         toast.error(data.error || `Failed to create order (HTTP ${res.status})`);
         return;
       }
+      invalidateCachePrefix("/api/sales-orders");
+      invalidateCachePrefix("/api/production-orders");
       if (data.data?.id) navigate(`/sales/${data.data.id}`);
     } catch (e) {
       setSaving(false);

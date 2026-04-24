@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,6 +10,7 @@ import { formatCurrency, cn } from "@/lib/utils";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import { ScanPOModal } from "@/components/scan-po-modal";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { SalesOrder } from "@/lib/mock-data";
 import type { Customer, DeliveryOrder } from "@/lib/mock-data";
 
@@ -47,11 +48,31 @@ const ALL_STATUSES = [
 export default function SalesPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [orders, setOrders] = useState<SalesOrder[]>([]);
-  const [customers, setCustomers] = useState<Customer[]>([]);
-  const [linkedPOMap, setLinkedPOMap] = useState<Record<string, LinkedPOSummary[]>>({});
-  const [, setStatusChanges] = useState<SOStatusChangeEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: SalesOrder[] }>("/api/sales-orders");
+  const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
+  const { data: statusChangesResp, refresh: refreshStatusChanges } = useCachedJson<{ success?: boolean; data?: SOStatusChangeEntry[] }>("/api/sales-orders/status-changes");
+  const orders: SalesOrder[] = useMemo(
+    () => (ordersResp?.success ? ordersResp.data ?? [] : Array.isArray(ordersResp) ? ordersResp : []),
+    [ordersResp]
+  );
+  const customers: Customer[] = useMemo(
+    () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
+    [customersResp]
+  );
+  const linkedPOMap = useMemo<Record<string, LinkedPOSummary[]>>(() => {
+    const map: Record<string, LinkedPOSummary[]> = {};
+    if (productionOrdersResp?.success && productionOrdersResp.data) {
+      for (const po of productionOrdersResp.data) {
+        if (!map[po.salesOrderId]) map[po.salesOrderId] = [];
+        map[po.salesOrderId].push({ soId: po.salesOrderId, poNo: po.poNo, status: po.status });
+      }
+    }
+    return map;
+  }, [productionOrdersResp]);
+  // Keep referencing the status-changes envelope so the hook stays subscribed,
+  // even though we don't render from it directly (matches the previous behaviour).
+  useMemo(() => statusChangesResp?.success ? statusChangesResp.data || [] : [], [statusChangesResp]);
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
   const [bulkPrinting, setBulkPrinting] = useState(false);
@@ -76,38 +97,14 @@ export default function SalesPage() {
   const [showFilters, setShowFilters] = useState(false);
 
   const fetchAll = () => {
-    setLoading(true);
-    fetch("/api/sales-orders", { cache: "no-store" })
-      .then(r => r.json())
-      .then(d => {
-        if (d.success) setOrders(d.data);
-        setLoading(false);
-      });
-    fetch("/api/customers")
-      .then(r => r.json())
-      .then(d => { if (d.data) setCustomers(d.data); });
-    fetch("/api/production-orders")
-      .then(r => r.json())
-      .then(d => {
-        if (d.success && d.data) {
-          const map: Record<string, LinkedPOSummary[]> = {};
-          for (const po of d.data) {
-            if (!map[po.salesOrderId]) map[po.salesOrderId] = [];
-            map[po.salesOrderId].push({ soId: po.salesOrderId, poNo: po.poNo, status: po.status });
-          }
-          setLinkedPOMap(map);
-        }
-      })
-      .catch(() => {});
-    fetch("/api/sales-orders/status-changes")
-      .then(r => r.json())
-      .then(d => { if (d.success) setStatusChanges(d.data || []); })
-      .catch(() => {});
+    invalidateCachePrefix("/api/sales-orders");
+    invalidateCachePrefix("/api/customers");
+    invalidateCachePrefix("/api/production-orders");
+    refreshOrders();
+    refreshCustomers();
+    refreshProductionOrders();
+    refreshStatusChanges();
   };
-
-  useEffect(() => {
-    fetchAll();
-  }, []);
 
   const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo;
 
@@ -511,6 +508,8 @@ export default function SalesPage() {
                   // Jump to Confirmed tab if anything actually converted so
                   // the user can immediately see the new confirmed orders.
                   if (ok > 0) setTab("CONFIRMED");
+                  invalidateCachePrefix("/api/sales-orders");
+                  invalidateCachePrefix("/api/production-orders");
                   fetchAll();
                 }}
               >
@@ -725,6 +724,8 @@ export default function SalesPage() {
                         });
                         const d = await res.json();
                         if (d.success) {
+                          invalidateCachePrefix("/api/delivery-orders");
+                          invalidateCachePrefix("/api/sales-orders");
                           setTransferSuccess({ type: "do", docNo: d.data?.doNo || "Created" });
                           fetchAll();
                         } else {
@@ -832,6 +833,8 @@ export default function SalesPage() {
                         });
                         const d = await res.json();
                         if (d.success) {
+                          invalidateCachePrefix("/api/invoices");
+                          invalidateCachePrefix("/api/delivery-orders");
                           setTransferSuccess({ type: "inv", docNo: d.data?.invoiceNo || "Created" });
                           fetchAll();
                         } else {

@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDateDMY, formatRM } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Plus,
   CreditCard,
@@ -17,11 +18,22 @@ type CustomerOption = {
 };
 
 export default function PaymentsPage() {
-  const [payments, setPayments] = useState<PaymentRecord[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: payResp, loading, refresh: refreshPayments } = useCachedJson<{ success?: boolean; data?: PaymentRecord[] }>("/api/payments");
+  const payments: PaymentRecord[] = useMemo(
+    () => (payResp?.success ? payResp.data ?? [] : Array.isArray(payResp) ? payResp : []),
+    [payResp]
+  );
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [customers, setCustomers] = useState<CustomerOption[]>([]);
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const { data: custResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: { id: string; name: string }[] }>(showCreateModal ? "/api/customers" : null);
+  const { data: invResp, refresh: refreshInvoices } = useCachedJson<{ success?: boolean; data?: Invoice[] }>(showCreateModal ? "/api/invoices" : null);
+  const customers: CustomerOption[] = useMemo(() => {
+    const raw = custResp?.success ? custResp.data ?? [] : Array.isArray(custResp) ? (custResp as { id: string; name: string }[]) : [];
+    return raw.map((c) => ({ id: c.id, name: c.name }));
+  }, [custResp]);
+  const invoices: Invoice[] = useMemo(
+    () => (invResp?.success ? invResp.data ?? [] : Array.isArray(invResp) ? invResp : []),
+    [invResp]
+  );
 
   // Create form state
   const [selectedCustomerId, setSelectedCustomerId] = useState("");
@@ -31,32 +43,9 @@ export default function PaymentsPage() {
   const [allocations, setAllocations] = useState<{ invoiceId: string; amount: number }[]>([]);
   const [creating, setCreating] = useState(false);
 
-  const fetchPayments = useCallback(() => {
-    fetch("/api/payments")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.success) setPayments(d.data);
-        setLoading(false);
-      });
-  }, []);
-
-  useEffect(() => {
-    fetchPayments();
-  }, [fetchPayments]);
-
-  const openCreate = async () => {
-    const [custRes, invRes] = await Promise.all([
-      fetch("/api/customers").then((r) => r.json()),
-      fetch("/api/invoices").then((r) => r.json()),
-    ]);
-    if (custRes.data) {
-      setCustomers(
-        custRes.data.map((c: { id: string; name: string }) => ({ id: c.id, name: c.name }))
-      );
-    }
-    if (invRes.success) {
-      setInvoices(invRes.data);
-    }
+  const openCreate = () => {
+    refreshCustomers();
+    refreshInvoices();
     setShowCreateModal(true);
   };
 
@@ -116,7 +105,9 @@ export default function PaymentsPage() {
       setMethod("BANK_TRANSFER");
       setReference("");
       setAllocations([]);
-      fetchPayments();
+      invalidateCachePrefix("/api/payments");
+      invalidateCachePrefix("/api/invoices");
+      refreshPayments();
     }
     setCreating(false);
   };
@@ -208,7 +199,7 @@ export default function PaymentsPage() {
     },
     {
       label: "Refresh",
-      action: (_row) => fetchPayments(),
+      action: (_row) => refreshPayments(),
     },
   ];
 

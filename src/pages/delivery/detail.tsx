@@ -1,10 +1,11 @@
-import { useState, useEffect } from "react";
+import { useState, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime } from "@/lib/utils";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   ArrowLeft,
   User,
@@ -125,24 +126,23 @@ export default function DeliveryDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("delivery_order", id, Boolean(id));
-  const [order, setOrder] = useState<DeliveryOrder | null>(null);
-  const [lorries, setLorries] = useState<LorryInfo[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: doResp, loading: doLoading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: DeliveryOrder }>(id ? `/api/delivery-orders/${id}` : null);
+  const { data: lorryResp, loading: lorryLoading } = useCachedJson<{ success?: boolean; data?: LorryInfo[] }>("/api/lorries");
+  const [orderOverride, setOrderOverride] = useState<DeliveryOrder | null>(null);
+  const order: DeliveryOrder | null = useMemo(() => {
+    if (orderOverride) return orderOverride;
+    if (!doResp) return null;
+    if (doResp.success && doResp.data) return doResp.data;
+    return (doResp as unknown as DeliveryOrder) ?? null;
+  }, [doResp, orderOverride]);
+  const lorries: LorryInfo[] = useMemo(
+    () => (lorryResp?.success ? lorryResp.data ?? [] : Array.isArray(lorryResp) ? lorryResp : []),
+    [lorryResp]
+  );
+  const loading = doLoading || lorryLoading;
   const [updating, setUpdating] = useState(false);
   const [podOpen, setPodOpen] = useState(false);
-
-  useEffect(() => {
-    Promise.all([
-      fetch(`/api/delivery-orders/${id}`).then((r) => r.json()),
-      fetch("/api/lorries").then((r) => r.json()),
-    ])
-      .then(([doData, lorryData]) => {
-        setOrder(doData.data ?? doData ?? null);
-        setLorries(lorryData.data ?? lorryData ?? []);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, [id]);
+  const setOrder = setOrderOverride;
 
   const advanceStatus = async (nextStatus?: string) => {
     if (!order) return;
@@ -168,7 +168,13 @@ export default function DeliveryDetailPage() {
         toast.error(data?.error || `Failed to advance status (HTTP ${res.status})`);
         return;
       }
-      if (data.success) setOrder(data.data);
+      if (data.success) {
+        setOrder(data.data);
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        invalidateCachePrefix("/api/production-orders");
+        refreshOrder();
+      }
       else toast.error(data.error || "Failed to advance status");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Network error — status unchanged");
@@ -197,6 +203,10 @@ export default function DeliveryDetailPage() {
       }
       if (data.success) {
         setOrder(data.data);
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        invalidateCachePrefix("/api/production-orders");
+        refreshOrder();
         setPodOpen(false);
       } else {
         toast.error(data.error || "Failed to save proof of delivery");
@@ -218,7 +228,13 @@ export default function DeliveryDetailPage() {
         body: JSON.stringify({ lorryId }),
       });
       const data = await res.json();
-      if (data.success) setOrder(data.data);
+      if (data.success) {
+        setOrder(data.data);
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        invalidateCachePrefix("/api/production-orders");
+        refreshOrder();
+      }
     } finally {
       setUpdating(false);
     }

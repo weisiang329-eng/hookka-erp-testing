@@ -1022,6 +1022,7 @@ export default function ProductionPage() {
     rowNo: number;
     soId: string;          // line-suffixed SO ID, unique per production line (= poNo)
     salesOrderNo: string;  // parent sales order id, NOT unique per line
+    salesOrderId: string;  // SO primary key — used to route double-click to /sales/:id
     customerPOId: string;
     customerRef: string;
     customerName: string;
@@ -1153,6 +1154,7 @@ export default function ProductionPage() {
           rowNo: n++,
           soId: o.poNo || "",                  // line-suffixed, unique
           salesOrderNo: o.companySOId || "",   // parent SO (not unique per line)
+          salesOrderId: o.salesOrderId || "",  // SO PK for double-click navigation
           customerPOId: o.customerPOId || "",
           customerRef: o.customerReference || "",
           customerName: o.customerName || "",
@@ -2623,7 +2625,7 @@ export default function ProductionPage() {
             stickyHeader
             maxHeight="calc(100vh - 300px)"
             emptyMessage={`No job cards in ${activeDept.name}.`}
-            onDoubleClick={(row) => navigate(`/production/${row.poId}`)}
+            onDoubleClick={(row) => navigate(row.salesOrderId ? `/sales/${row.salesOrderId}` : `/production/${row.poId}`)}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
             // ON_HOLD → amber background; CANCELLED → grey + strikethrough.
@@ -2698,7 +2700,7 @@ export default function ProductionPage() {
               key={order.id}
               className={`grid items-stretch border-b border-[#F0EBE3] last:border-b-0 cursor-pointer ${rowCls}`}
               style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
-              onDoubleClick={() => navigate(`/production/${order.id}`)}
+              onDoubleClick={() => navigate(order.salesOrderId ? `/sales/${order.salesOrderId}` : `/production/${order.id}`)}
             >
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
                 <span className="truncate">{order.poNo}</span>

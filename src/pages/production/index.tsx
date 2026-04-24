@@ -1274,6 +1274,28 @@ export default function ProductionPage() {
         const i = code.indexOf("-");
         return i > 0 ? code.slice(0, i) : code;
       };
+      // WIP label formatter for Fab Cut rows — layout differs by category:
+      //   SOFA: '{model} ({seatSize}) | {fabric} | (FC)' — seat size is
+      //     glued to the model string with a space so the combined module
+      //     list stays visually attached to the size it was cut for.
+      //   BEDFRAME: '{model} | ({bedSize}) | ({totalHeights}) | {fabric} | (FC)'
+      //     — heights are their own token after size because BF chooses
+      //     them per line and the cutter needs them visible.
+      //   ACCESSORY: '{model} | ({size}) | {fabric} | (FC)' when the SKU
+      //     carries a sizeLabel; otherwise the size token drops out.
+      const fabCutWIP = (r: DeptRow, modelText: string): string => {
+        if (r.category === "SOFA") {
+          const head = r.size ? `${modelText} (${r.size})` : modelText;
+          return [head, r.colour, "(FC)"].filter(Boolean).join(" | ");
+        }
+        return [
+          modelText,
+          r.size ? `(${r.size})` : "",
+          r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
+          r.colour,
+          "(FC)",
+        ].filter(Boolean).join(" | ");
+      };
       for (const group of groups.values()) {
         if (group.length === 1) {
           const r = group[0];
@@ -1281,13 +1303,7 @@ export default function ProductionPage() {
           // uses the same "{full code} | {fabric} | ({size}) | (FC)" label
           // pattern as merged rows, with the Model column showing only
           // the baseModel — full variant info lives in WIP.
-          const wip = [
-            r.model,
-            r.colour,
-            r.size ? `(${r.size})` : "",
-            r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
-            "(FC)",
-          ].filter(Boolean).join(" | ");
+          const wip = fabCutWIP(r, r.model);
           merged.push({ ...r, rowNo: rowN++, model: stripToBase(r.model), wip });
           continue;
         }
@@ -1342,13 +1358,7 @@ export default function ProductionPage() {
         // when fabric codes / sizes share characters with the model.
         // Size is seat size for sofa (e.g. "30"), bed size for bedframe
         // (e.g. "6FT"), already normalised in row.size.
-        const wips = [
-          modelLabel || first.model,
-          first.colour,
-          first.size ? `(${first.size})` : "",
-          first.category === "BEDFRAME" && first.totalHeight ? `(${first.totalHeight})` : "",
-          "(FC)",
-        ].filter(Boolean).join(" | ");
+        const wips = fabCutWIP(first, modelLabel || first.model);
         merged.push({
           ...first,
           id: `${groupKey}:fabcut-merged`,

@@ -187,6 +187,12 @@ type ProductionOrderLike = {
   sizeLabel?: string;
   // Fabric code — needed for the sofa-set merge key (SO + fabric).
   fabricCode?: string;
+  // Bedframe height components — summed into the total-height segment
+  // of the condensed Fab Cut WIP label (matches the Production page's
+  // `fabCutWIP` helper).
+  gapInches?: number;
+  divanHeightInches?: number;
+  legHeightInches?: number;
   quantity: number;
   startDate: string;
   jobCards: Array<{
@@ -439,7 +445,29 @@ function deriveWIPFromPO(
           card.wipType ||
           (wipKey.includes("::") ? wipKey.split("::")[2] || "" : wipKey) ||
           "";
-        const wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || wipKey;
+        // For Fab Cut we compute the condensed WIP label on the fly from
+        // PO fields so the Inventory column matches the Production page's
+        // `fabCutWIP` helper (src/pages/production/index.tsx ~L1288) —
+        // shape: `{product} | ({size}) | ({totalH}) | {fabric} | (FC)`
+        // with the total-height segment omitted when no BF heights exist.
+        // Sofa consumption math relies on this code equalling the Fab Cut
+        // wipLabel so stock codes line up downstream.
+        let wipCodeStr: string;
+        if (card.departmentCode === "FAB_CUT") {
+          const totalH =
+            (po.gapInches || 0) +
+            (po.divanHeightInches || 0) +
+            (po.legHeightInches || 0);
+          wipCodeStr = [
+            po.productCode,
+            po.sizeLabel ? `(${po.sizeLabel})` : "",
+            po.itemCategory === "BEDFRAME" && totalH > 0 ? `(${totalH}")` : "",
+            po.fabricCode || "",
+            "(FC)",
+          ].filter(Boolean).join(" | ");
+        } else {
+          wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || wipKey;
+        }
         const qty = card.wipQty || po.quantity;
 
         // Labor-so-far per unit — sum productionTimeMinutes for every done

@@ -214,7 +214,10 @@ type ProductionOrderLike = {
 // Same WIP code = one row, qty summed. Double-click to see all SO IDs.
 type WIPSource = {
   poCode: string;
-  quantity: number;
+  quantity: number;  // component pieces (= JC wipQty; may include BOM multiplier)
+  poQty: number;     // PO.quantity — canonical "set count" driver for sofa merge;
+                     // see mergeSofaWIPSets for how it maps to the set-level Qty
+                     // column that mirrors Production Fab Cut's "1 set" display.
   completedDate: string;
   ageDays: number;
   // Carried on each source so the sofa-set merge can compute
@@ -384,6 +387,7 @@ function deriveWIPFromPO(
   type RawEntry = {
     wipCode: string; wipType: string; relatedProduct: string;
     completedBy: string; poCode: string; quantity: number;
+    poQty: number;   // raw PO.quantity (NOT multiplied by BOM) — drives set-level Qty
     completedDate: string; ageDays: number;
     // Cost per this source emission (already × qty)
     estValueSen: number;  // doneMinsInGroup × (BOM/totalPOMins + rate) × qty
@@ -493,6 +497,7 @@ function deriveWIPFromPO(
           completedBy: card.departmentCode,
           poCode: po.poNo,
           quantity: qty,
+          poQty: po.quantity || 1,
           completedDate,
           ageDays,
           estValueSen: unitCostSen * qty,
@@ -529,6 +534,7 @@ function deriveWIPFromPO(
     g.sources.push({
       poCode: r.poCode,
       quantity: r.quantity,
+      poQty: r.poQty,
       completedDate: r.completedDate,
       ageDays: r.ageDays,
       fabricCode: r.fabricCode,
@@ -572,13 +578,23 @@ function stripPoSuffix(poCode: string): string {
 // Group sofa WIP rows into one synthetic "set" row per (SO, fabric).
 // Non-sofa WIPs are left untouched by this helper — the UI renders them
 // separately when merged-view is on.
+//
+// Qty semantics (matches Production Fab Cut's "1 set" convention):
+//   setQty = max(poQty) across POs in the bucket
+//     - one sofa set on a SO → max = 1
+//     - N identical sets on a SO → max = N
+//   We take max (not sum) because variants are separate POs but describe
+//   pieces of the same set — summing would multiply the set count by
+//   however many variants the customer configured. `pieceTotalQty` stays
+//   around for debugging / detail view if we want it later.
 function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
   // Map key `${so}::${fabric}` → accumulator
   const buckets = new Map<string, {
     salesOrderNo: string;
     fabric: string;
-    qtyByComponent: Map<string, number>; // wipType → qty
+    qtyByComponent: Map<string, number>; // wipType → qty (piece-level)
     modelSet: Set<string>;               // product codes participating
+    setQty: number;                      // max(poQty) seen in this bucket
     oldestAgeDays: number;
     estTotalValueSen: number;
     memberIds: Set<string>;              // WIPItem.id set for members
@@ -602,6 +618,7 @@ function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
           fabric: s.fabricCode,
           qtyByComponent: new Map(),
           modelSet: new Set(),
+          setQty: 0,
           oldestAgeDays: 0,
           estTotalValueSen: 0,
           memberIds: new Set(),
@@ -613,6 +630,7 @@ function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
         (b.qtyByComponent.get(w.wipType) || 0) + s.quantity,
       );
       b.modelSet.add(w.relatedProduct);
+      if (s.poQty > b.setQty) b.setQty = s.poQty;
       if (s.ageDays > b.oldestAgeDays) b.oldestAgeDays = s.ageDays;
       // Prorate the WIPItem's estTotalValueSen by this source's share.
       if (w.totalQty > 0) {
@@ -643,7 +661,10 @@ function mergeSofaWIPSets(wipItems: WIPItem[]): SofaSetRow[] {
     const components = Array.from(b.qtyByComponent.entries())
       .map(([wipType, qty]) => ({ wipType, qty }))
       .sort((a, b) => a.wipType.localeCompare(b.wipType));
-    const totalQty = components.reduce((s, c) => s + c.qty, 0);
+    // Display Qty = # of sofa sets in WIP, NOT sum of pieces. Mirrors
+    // Production Fab Cut where a merged sofa row reads "Qty 1" regardless
+    // of how many components the set has.
+    const totalQty = b.setQty || 1;
     const members = Array.from(b.memberIds)
       .map((id) => wipById.get(id))
       .filter((x): x is WIPItem => !!x);

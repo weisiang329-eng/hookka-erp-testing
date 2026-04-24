@@ -18,6 +18,9 @@ import {
   loadLeadTimes,
   ensureHookkaDDBufferSeeded,
   loadHookkaDDBuffer,
+  leadDaysFor,
+  hookkaDDBufferFor,
+  addDays,
   type LeadTimeMap,
   type HookkaDDBuffer,
 } from "../lib/lead-times";
@@ -30,6 +33,67 @@ type Category = (typeof CATEGORIES)[number];
 type LeadTimesResponse = LeadTimeMap & {
   hookkaDDBuffer: HookkaDDBuffer;
 };
+
+const RECALC_BATCH_SIZE = 50;
+
+type PORow = {
+  id: string;
+  itemCategory: string | null;
+  targetEndDate: string | null;
+  customerDeliveryDate: string | null;
+  hookkaExpectedDD: string | null;
+};
+
+type JCRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  sequence: number;
+  wipKey: string | null;
+};
+
+function packingAnchorFor(po: PORow, buffer: HookkaDDBuffer): string | null {
+  const category = po.itemCategory || "BEDFRAME";
+  if (po.hookkaExpectedDD) return po.hookkaExpectedDD;
+  if (po.customerDeliveryDate) {
+    return addDays(po.customerDeliveryDate, -hookkaDDBufferFor(buffer, category));
+  }
+  if (po.targetEndDate) return po.targetEndDate;
+  return null;
+}
+
+function computeNewDueDates(
+  jcs: JCRow[],
+  category: string,
+  packingAnchor: string,
+  leadTimes: LeadTimeMap,
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const byWip = new Map<string, JCRow[]>();
+  for (const jc of jcs) {
+    const key = jc.wipKey || "__default__";
+    const bucket = byWip.get(key);
+    if (bucket) bucket.push(jc);
+    else byWip.set(key, [jc]);
+  }
+  for (const chain of byWip.values()) {
+    chain.sort((a, b) => a.sequence - b.sequence);
+    const lastIdx = chain.length - 1;
+    if (lastIdx < 0) continue;
+    const dueByIdx = new Map<number, string>();
+    dueByIdx.set(lastIdx, packingAnchor);
+    for (let i = lastIdx - 1; i >= 0; i--) {
+      const nextDept = chain[i + 1].departmentCode || "PACKING";
+      const prevDue = dueByIdx.get(i + 1)!;
+      const nextLeadDays = leadDaysFor(leadTimes, category, nextDept);
+      dueByIdx.set(i, addDays(prevDue, -nextLeadDays));
+    }
+    for (let i = 0; i < chain.length; i++) {
+      out.set(chain[i].id, dueByIdx.get(i) || packingAnchor);
+    }
+  }
+  return out;
+}
 
 async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> {
   const [lead, buffer] = await Promise.all([
@@ -100,6 +164,78 @@ app.put("/", async (c) => {
 
   const data = await buildResponsePayload(c.env.DB);
   return c.json({ success: true, data });
+});
+
+// POST /recalc-all — bulk reschedule every PO's job_card dueDates using the
+// current lead-time config. Mirrors the reverse-schedule in sales-orders.ts.
+// Orphans (no SO, no DD, no targetEndDate) are counted in `skipped`.
+app.post("/recalc-all", async (c) => {
+  try {
+    await ensureLeadTimesSeeded(c.env.DB);
+    await ensureHookkaDDBufferSeeded(c.env.DB);
+    const [leadTimes, hookkaBuffer] = await Promise.all([
+      loadLeadTimes(c.env.DB),
+      loadHookkaDDBuffer(c.env.DB),
+    ]);
+
+    const poRes = await c.env.DB
+      .prepare(
+        `SELECT po.id AS id, po.itemCategory AS itemCategory,
+                po.targetEndDate AS targetEndDate,
+                so.customerDeliveryDate AS customerDeliveryDate,
+                so.hookkaExpectedDD AS hookkaExpectedDD
+           FROM production_orders po
+           LEFT JOIN sales_orders so ON so.id = po.salesOrderId`,
+      )
+      .all<PORow>();
+    const pos = poRes.results ?? [];
+    if (pos.length === 0) {
+      return c.json({ success: true, updatedPOs: 0, updatedJCs: 0, skipped: 0 });
+    }
+
+    const jcRes = await c.env.DB
+      .prepare(
+        `SELECT id, productionOrderId, departmentCode, sequence, wipKey FROM job_cards`,
+      )
+      .all<JCRow>();
+    const jcsByPo = new Map<string, JCRow[]>();
+    for (const jc of jcRes.results ?? []) {
+      const bucket = jcsByPo.get(jc.productionOrderId);
+      if (bucket) bucket.push(jc);
+      else jcsByPo.set(jc.productionOrderId, [jc]);
+    }
+
+    const updateStatements: D1PreparedStatement[] = [];
+    let updatedPOs = 0;
+    let updatedJCs = 0;
+    let skipped = 0;
+    for (const po of pos) {
+      const anchor = packingAnchorFor(po, hookkaBuffer);
+      if (!anchor) { skipped++; continue; }
+      const jcs = jcsByPo.get(po.id) ?? [];
+      if (jcs.length === 0) continue;
+      const category = po.itemCategory || "BEDFRAME";
+      const newDueByJc = computeNewDueDates(jcs, category, anchor, leadTimes);
+      if (newDueByJc.size === 0) continue;
+      updatedPOs++;
+      for (const [jcId, newDue] of newDueByJc) {
+        updateStatements.push(
+          c.env.DB
+            .prepare("UPDATE job_cards SET dueDate = ? WHERE id = ?")
+            .bind(newDue, jcId),
+        );
+        updatedJCs++;
+      }
+    }
+    for (let i = 0; i < updateStatements.length; i += RECALC_BATCH_SIZE) {
+      const chunk = updateStatements.slice(i, i + RECALC_BATCH_SIZE);
+      if (chunk.length > 0) await c.env.DB.batch(chunk);
+    }
+    return c.json({ success: true, updatedPOs, updatedJCs, skipped });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error: msg }, 500);
+  }
 });
 
 export default app;

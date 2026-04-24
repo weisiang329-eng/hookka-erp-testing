@@ -126,7 +126,6 @@ import notifications from "./routes-d1/notifications";
 import payroll from "./routes-d1/payroll";
 import payslips from "./routes-d1/payslips";
 import productionLeadtimes from "./routes-d1/production-leadtimes";
-import leadtimeRecalc from "./routes-d1/leadtime-recalc";
 import jobcardSync from "./routes-d1/jobcard-sync";
 import promiseDate from "./routes-d1/promise-date";
 import qcInspections from "./routes-d1/qc-inspections";
@@ -196,10 +195,12 @@ app.route("/api/mrp", mrp);
 app.route("/api/notifications", notifications);
 app.route("/api/payroll", payroll);
 app.route("/api/payslips", payslips);
+// productionLeadtimes handles GET / PUT / POST /recalc-all. Mounted at
+// both the legacy hyphen path (external consumers may have cached it) and
+// the canonical slash path that the Planning page uses, so frontend and
+// backend URLs finally agree.
 app.route("/api/production-leadtimes", productionLeadtimes);
-// Bulk rescheduler — rewrites every PO's job_card dueDates using the
-// current lead-time config. Mounted at /api/production/leadtimes/recalc-all.
-app.route("/api/production/leadtimes", leadtimeRecalc);
+app.route("/api/production/leadtimes", productionLeadtimes);
 // Reconcile each PO's job_cards set with its CURRENT BOM (inserts missing
 // (wipKey, deptCode) pairs without touching existing JC dueDate/status).
 // Fixes the "BOM edited after POs existed" class of bug — see

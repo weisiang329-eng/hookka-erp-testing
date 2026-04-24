@@ -1059,6 +1059,7 @@ export default function ProductsPage() {
   const [configs, setConfigs] = useState<ProductDeptConfig[]>([]);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string>("BEDFRAME");
+  const [searchQuery, setSearchQuery] = useState<string>("");
   const [loading, setLoading] = useState(true);
   const [variantMap, setVariantMap] = useState<Record<string, ProductVariantConfig[]>>({});
   const [editingVariant, setEditingVariant] = useState<Product | null>(null);
@@ -1250,9 +1251,20 @@ export default function ProductsPage() {
     return Array.from(cats).sort();
   }, [products]);
 
+  // When searchQuery is empty, filter by the active category tab. When the
+  // user types anything, cross-category search takes over so typing "pillow"
+  // finds the accessory rows even while the BEDFRAME tab is active — no
+  // more "why can't I find sofas while on bedframe" surprises.
   const filtered = useMemo(() => {
-    return products.filter((p) => p.category === categoryFilter);
-  }, [products, categoryFilter]);
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return products.filter((p) => p.category === categoryFilter);
+    return products.filter((p) => {
+      const hay = [p.code, p.name, p.description, p.baseModel, p.category]
+        .map((v) => (v || "").toLowerCase())
+        .join(" ");
+      return hay.includes(q);
+    });
+  }, [products, categoryFilter, searchQuery]);
 
   function totalConfigMinutes(cfg: ProductDeptConfig): number {
     return cfg.fabCutMinutes + cfg.fabSewMinutes + cfg.foamMinutes + cfg.framingMinutes + cfg.upholsteryMinutes + cfg.packingMinutes;
@@ -1303,7 +1315,7 @@ export default function ProductsPage() {
               key={cat}
               onClick={() => setCategoryFilter(cat)}
               className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                categoryFilter === cat
+                categoryFilter === cat && !searchQuery
                   ? "bg-[#111827] text-white"
                   : "bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6]"
               }`}
@@ -1311,6 +1323,22 @@ export default function ProductsPage() {
               {cat.charAt(0) + cat.slice(1).toLowerCase()}
             </button>
           ))}
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search all products..."
+            className="px-3 py-1.5 rounded-md text-xs border border-[#E5E7EB] bg-white focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 w-56"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery("")}
+              className="text-[11px] text-[#6B7280] hover:text-[#111827] px-1"
+              title="Clear search"
+            >
+              ✕
+            </button>
+          )}
           <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
           <button
             onClick={handleExportCsv}

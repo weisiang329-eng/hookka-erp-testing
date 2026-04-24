@@ -111,6 +111,8 @@ import bomMasterTemplates from "./routes-d1/bom-master-templates";
 import kvConfig from "./routes-d1/kv-config";
 // Phase 5 — admin maintenance endpoints (archive/run, etc.)
 import admin from "./routes-d1/admin";
+// Phase 6 — job_card_events audit log read endpoint.
+import jobCards from "./routes-d1/job-cards";
 import { authMiddleware } from "./lib/auth-middleware";
 import { timingMiddleware } from "./lib/observability";
 
@@ -187,6 +189,9 @@ app.route("/api/bom-master-templates", bomMasterTemplates);
 app.route("/api/kv-config", kvConfig);
 // Phase 5 — admin maintenance (archive/run). Behind the normal auth gate.
 app.route("/api/admin", admin);
+// Phase 6 — job_card_events read surface. Only /:id/events for now;
+// future PATCH/DELETE audit screens can mount here.
+app.route("/api/job-cards", jobCards);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

@@ -29,6 +29,14 @@ import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { DEPT_ORDER } from "../lib/lead-times";
 import { resolveWorkerToken } from "./worker-auth";
+// Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
+// writes go after the UPDATE lands so the source-of-truth row is committed
+// before we narrate what changed; a write failure here does NOT roll the
+// UPDATE back (events are audit-only, not the transactional source).
+import {
+  buildJobCardEventStatement,
+  diffJobCardEvents,
+} from "../lib/job-card-events";
 
 const app = new Hono<Env>();
 
@@ -918,6 +926,35 @@ async function applyPoUpdate(
         updated.id,
       )
       .run();
+
+    // Phase 6 — parallel event log. Diff the JC snapshot before/after and
+    // append one row per field that actually changed. `actorUserId` is
+    // stashed on the Hono ctx by authMiddleware; for worker-portal calls
+    // it's absent (the PIN flow mounts under /api/worker/* which bypasses
+    // the dashboard auth gate), so actorUserId may legitimately be null.
+    // Source is 'ui' here — the shop-floor scan path lives in its own
+    // handler (scan-complete) and will wire its own 'scan' source later.
+    const actorUserId = (c.get as unknown as (k: string) => string | undefined)(
+      "userId",
+    ) ?? null;
+    const events = diffJobCardEvents(jcRow, updated, {
+      actorUserId,
+      actorName: null,
+      source: "ui",
+    });
+    if (events.length > 0) {
+      // Batch the event INSERTs so we pay one round-trip regardless of
+      // how many fields changed. Event-write failures do NOT roll back the
+      // JC UPDATE (already run()), so a batch reject here just means we
+      // lose audit rows for this one mutation — acceptable for a v1
+      // parallel write path. Any failure will surface in wrangler tail.
+      const stmts = events.map((e) => buildJobCardEventStatement(db, e));
+      try {
+        await db.batch(stmts);
+      } catch (err) {
+        console.error("[jc-events] append failed", err);
+      }
+    }
 
     // Update WIP inventory if status changed.
     if (body.status) {

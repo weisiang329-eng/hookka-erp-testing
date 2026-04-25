@@ -290,6 +290,8 @@ import admin from "./routes-d1/admin";
 import jobCards from "./routes-d1/job-cards";
 // Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
 import dashboardRevenue from "./routes-d1/dashboard-revenue";
+// Phase C #4 quick-win — MDM duplicate-detection review queue.
+import mdm from "./routes-d1/mdm";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
@@ -377,6 +379,11 @@ app.route("/api/job-cards", jobCards);
 // MUST be mounted BEFORE the catch-all /api/* stub at the bottom and
 // AFTER authMiddleware so the orgId scope is in place.
 app.route("/api/dashboard/revenue", dashboardRevenue);
+// Phase C #4 quick-win — MDM duplicate-detection review queue. Routes
+// scoped by orgId via getOrgId(c); detection-pass endpoint is admin-only
+// in spirit (gated by the existing auth middleware until role-aware
+// authz lands; see roadmap §1).
+app.route("/api/mdm", mdm);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

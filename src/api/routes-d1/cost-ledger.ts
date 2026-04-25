@@ -18,6 +18,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { laborRateForDate } from "../../lib/costing";
 
 const app = new Hono<Env>();
@@ -116,6 +117,9 @@ function rowToFGBatch(r: FGBatchRow) {
 
 // GET /api/cost-ledger — list entries with optional filters
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — cost-ledger:read.
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
   const itemType = c.req.query("itemType");
   const itemId = c.req.query("itemId");
   const refType = c.req.query("refType");
@@ -156,6 +160,8 @@ app.get("/", async (c) => {
 
 // GET /api/cost-ledger/rm-batches — RM batch layers with on-hand value
 app.get("/rm-batches", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
   const rmId = c.req.query("rmId");
   const sql = rmId
     ? "SELECT * FROM rm_batches WHERE rmId = ? ORDER BY receivedDate ASC, id ASC"
@@ -179,6 +185,8 @@ app.get("/rm-batches", async (c) => {
 
 // GET /api/cost-ledger/fg-batches — FG batch layers with on-hand value
 app.get("/fg-batches", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
   const productId = c.req.query("productId");
   const productionOrderId = c.req.query("productionOrderId");
   const clauses: string[] = [];
@@ -213,6 +221,8 @@ app.get("/fg-batches", async (c) => {
 
 // GET /api/cost-ledger/summary — dashboard rollup
 app.get("/summary", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
   const [rmRes, fgRes, ledgerRes] = await Promise.all([
     c.var.DB.prepare(
       "SELECT remainingQty, unitCostSen FROM rm_batches",

@@ -233,9 +233,10 @@ app.get("/templates", async (c) => {
     binds.push(versionStatus.toUpperCase());
   }
   if (search) {
-    // Match old in-memory behavior: substring match on productCode OR baseModel,
-    // case-insensitive. SQLite LIKE is case-insensitive for ASCII by default.
-    where.push("(productCode LIKE ? OR IFNULL(baseModel, '') LIKE ?)");
+    // Postgres LIKE is case-sensitive; SQLite LIKE was case-insensitive for
+    // ASCII by default.  ILIKE preserves the old behavior.  d1-compat's
+    // swapDialect translates IFNULL → COALESCE, but we use COALESCE directly.
+    where.push("(productCode ILIKE ? OR COALESCE(baseModel, '') ILIKE ?)");
     const needle = `%${search}%`;
     binds.push(needle, needle);
   }

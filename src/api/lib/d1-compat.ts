@@ -148,6 +148,10 @@ function swapDialect(sql: string): string {
     /strftime\s*\(\s*'%Y-%m-%dT%H:%M:%SZ'\s*,\s*'now'\s*\)/gi,
     `to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`,
   )
+  // IFNULL(x, y) → COALESCE(x, y).  Postgres has COALESCE only — IFNULL
+  // would fail with "function ifnull does not exist".  Whole-word boundary
+  // match avoids touching column names that happen to contain "ifnull".
+  out = out.replace(/\bIFNULL\s*\(/gi, 'COALESCE(')
   // INSERT OR REPLACE is intentionally NOT rewritten — the Postgres equivalent
   // requires knowing the conflict target, which differs per table.  Routes
   // using it must be rewritten by hand to explicit ON CONFLICT … DO UPDATE.

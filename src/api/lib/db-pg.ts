@@ -20,6 +20,26 @@
 // ---------------------------------------------------------------------------
 import postgres, { type Sql } from 'postgres'
 
+// Postgres returns BIGINT (int8, OID 20) as a string by default — JS Number
+// can't safely hold the full int64 range so the driver bails to string.  But
+// every BIGINT in our schema is bounded:
+//   - COUNT(*) results (we cap data growth far below 2^53)
+//   - SUM of *_sen INTEGER columns (RM 90 trillion ceiling)
+//   - BIGSERIAL ids on auxiliary tables (well under 2^53)
+// String results break arithmetic silently — the textbook bug:
+//   `total = 0;  total += row.n;  // 0 + "290" === "0290"`
+// (real example: /api/sales-orders/stats was producing total = "029014" for
+// 290+4, the user-visible "Sales Order 数字突然爆炸" bug.)
+//
+// Coerce all bigint values to Number at the driver level.  Safe up to 2^53;
+// re-evaluate if any single table's row count or money sum approaches that.
+const bigintAsNumber = {
+  to: 20,
+  from: [20],
+  parse: (x: string) => Number(x),
+  serialize: (x: number | string) => String(x),
+}
+
 /**
  * Returns a fresh postgres.js client for the given connection URL.
  *
@@ -49,6 +69,7 @@ export function getSql(databaseUrl: string): Sql {
         max: 1,
         fetch_types: false,
         idle_timeout: 0,
+        types: { bigint: bigintAsNumber },
         transform: { column: { from: postgres.toCamel } },
       })
     : postgres(databaseUrl, {
@@ -61,6 +82,7 @@ export function getSql(databaseUrl: string): Sql {
         idle_timeout: 20,
         connect_timeout: 10,
         fetch_types: false,
+        types: { bigint: bigintAsNumber },
         transform: { column: { from: postgres.toCamel } },
       })
 }

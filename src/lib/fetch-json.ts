@@ -47,6 +47,8 @@ type FetchJsonInit = Omit<RequestInit, "body" | "headers"> & {
   headers?: Record<string, string>;
   /** Skip attaching the bearer token even if one exists. */
   noAuth?: boolean;
+  /** Request timeout in ms (defaults to 15000). */
+  timeoutMs?: number;
 };
 
 /**
@@ -58,25 +60,48 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
   schema: TSchema,
   init: FetchJsonInit = {},
 ): Promise<z.infer<TSchema>> {
+  const { timeoutMs = 15_000, signal: upstreamSignal, ...restInit } = init;
+
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    ...(init.headers ?? {}),
+    ...(restInit.headers ?? {}),
   };
-  if (!init.noAuth) {
+  if (!restInit.noAuth) {
     const token = getAuthToken();
     if (token) headers.authorization = `Bearer ${token}`;
   }
 
-  const res = await fetch(url, {
-    ...init,
-    headers,
-    body:
-      init.body === undefined
-        ? undefined
-        : typeof init.body === "string"
-          ? init.body
-          : JSON.stringify(init.body),
-  });
+  const ctrl = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => ctrl.abort(), timeoutMs);
+  const onUpstreamAbort = () => ctrl.abort();
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) ctrl.abort();
+    else upstreamSignal.addEventListener("abort", onUpstreamAbort, { once: true });
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      ...restInit,
+      signal: ctrl.signal,
+      headers,
+      body:
+        restInit.body === undefined
+          ? undefined
+          : typeof restInit.body === "string"
+            ? restInit.body
+            : JSON.stringify(restInit.body),
+    });
+  } catch {
+    const timedOut = ctrl.signal.aborted && !(upstreamSignal?.aborted);
+    const msg = timedOut
+      ? `Request timeout after ${timeoutMs}ms: ${url}`
+      : `Network error while requesting ${url}`;
+    throw new FetchJsonError(msg, 0, url, undefined);
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+    if (upstreamSignal) upstreamSignal.removeEventListener("abort", onUpstreamAbort);
+  }
 
   let raw: unknown;
   try {

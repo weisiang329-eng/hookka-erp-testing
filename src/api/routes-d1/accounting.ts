@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -176,6 +177,9 @@ async function nextJeNo(db: D1Database): Promise<string> {
 // AGING
 // ---------------------------------------------------------------------------
 app.get("/aging", async (c) => {
+  // RBAC gate (P3.3-followup) — accounting:read.
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
   const [ar, ap] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM ar_aging ORDER BY customerName").all<ArAgingRow>(),
     c.var.DB.prepare("SELECT * FROM ap_aging ORDER BY supplierName").all<ApAgingRow>(),
@@ -190,6 +194,9 @@ app.get("/aging", async (c) => {
 });
 
 app.post("/aging", async (c) => {
+  // RBAC gate (P3.3-followup) — accounting:create (drain aging buckets).
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { type, id, amountSen } = body;
@@ -275,6 +282,8 @@ app.post("/aging", async (c) => {
 // CHART OF ACCOUNTS
 // ---------------------------------------------------------------------------
 app.get("/coa", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM chart_of_accounts WHERE isActive = 1 ORDER BY code",
   ).all<CoaRow>();
@@ -283,6 +292,8 @@ app.get("/coa", async (c) => {
 });
 
 app.post("/coa", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code, name, type, parentCode } = body;
@@ -324,6 +335,8 @@ app.post("/coa", async (c) => {
 });
 
 app.put("/coa", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code } = body;
@@ -369,6 +382,8 @@ app.put("/coa", async (c) => {
 // JOURNALS
 // ---------------------------------------------------------------------------
 app.get("/journals", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
   const [entries, lines] = await Promise.all([
     c.var.DB.prepare(
       "SELECT * FROM journal_entries ORDER BY date DESC, entryNo DESC",
@@ -382,6 +397,8 @@ app.get("/journals", async (c) => {
 });
 
 app.post("/journals", async (c) => {
+  const denied = await requirePermission(c, "accounting", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { date, description, lines } = body;
@@ -464,6 +481,8 @@ app.post("/journals", async (c) => {
 });
 
 app.get("/journals/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const entry = await c.var.DB.prepare(
     "SELECT * FROM journal_entries WHERE id = ?",
@@ -485,6 +504,8 @@ app.get("/journals/:id", async (c) => {
 });
 
 app.put("/journals/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "update");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const entry = await c.var.DB.prepare(
@@ -629,6 +650,8 @@ app.put("/journals/:id", async (c) => {
 });
 
 app.delete("/journals/:id", async (c) => {
+  const denied = await requirePermission(c, "accounting", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const entry = await c.var.DB.prepare(
     "SELECT * FROM journal_entries WHERE id = ?",
@@ -651,6 +674,8 @@ app.delete("/journals/:id", async (c) => {
 // P&L
 // ---------------------------------------------------------------------------
 app.get("/pl", async (c) => {
+  const denied = await requirePermission(c, "accounting", "read");
+  if (denied) return denied;
   const period = c.req.query("period");
   const productCategory = c.req.query("productCategory");
   const customerId = c.req.query("customerId");

@@ -72,7 +72,10 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     );
   }, [options, query]);
 
-  // Reset search + highlight each time we open.
+  // Reset search + highlight each time we open. open-transition reset of a
+  // user-editable form (query / highlight). Pure derive isn't possible because
+  // the user mutates `query` while `open` stays true.
+  /* eslint-disable react-hooks/set-state-in-effect */
   React.useEffect(() => {
     if (open) {
       setQuery("");
@@ -87,10 +90,13 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
     }
   }, [open, options, value]);
 
-  // Clamp highlight when the filtered list shrinks.
+  // Clamp highlight when the filtered list shrinks. Highlight is user-driven
+  // (arrow keys); we just need to clamp it to a valid index when the list
+  // length drops below the current highlight.
   React.useEffect(() => {
     if (highlight >= filtered.length) setHighlight(Math.max(0, filtered.length - 1));
   }, [filtered.length, highlight]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Close on outside click.
   React.useEffect(() => {

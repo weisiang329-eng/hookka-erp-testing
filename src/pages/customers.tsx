@@ -713,13 +713,17 @@ function AssignSkuModal({
   const [modalTab, setModalTab] = useState<ModalCategory>("ALL");
   const [modalQuery, setModalQuery] = useState("");
 
-  // Reset local state on every open so stale tab/search never bleed across customers.
+  // Reset local state on every open so stale tab/search never bleed across
+  // customers. Each field is user-editable while open, so pure derive isn't
+  // possible — we just need a one-shot clear on the open->true transition.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       setModalTab("ALL");
       setModalQuery("");
     }
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ESC closes the modal.
   useEffect(() => {
@@ -912,9 +916,11 @@ export default function CustomersPage() {
     refreshCustomers();
   };
 
-  useEffect(() => {
-    setData(initialCustomers);
-  }, [initialCustomers]);
+  // `data` is locally mutated by add/edit/delete handlers (see ~5 setData
+  // call sites below) for optimistic updates. We seed from the cached server
+  // snapshot via this effect; pure derive would lose the optimistic state.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setData(initialCustomers); }, [initialCustomers]);
 
   // ---------- Add ----------
   const handleAdd = async () => {

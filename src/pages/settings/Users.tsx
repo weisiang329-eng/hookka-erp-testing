@@ -9,7 +9,7 @@
 // caching library, plain fetch + useState so the page matches the rest of
 // the dashboard.
 // ---------------------------------------------------------------------------
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Card,
@@ -104,8 +104,6 @@ function fmtRelativeExpiry(iso: string): string {
 
 export default function UsersPage() {
   const currentUser = getCurrentUser();
-  const [users, setUsers] = useState<UserRow[]>([]);
-  const [invites, setInvites] = useState<InviteRow[]>([]);
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState("");
@@ -157,12 +155,14 @@ export default function UsersPage() {
     refreshInvitesHook();
   }, [refreshInvitesHook]);
 
-  useEffect(() => {
-    if (usersResp?.success) setUsers(usersResp.data ?? []);
-  }, [usersResp]);
-  useEffect(() => {
-    if (invitesResp?.success) setInvites(invitesResp.data ?? []);
-  }, [invitesResp]);
+  const users: UserRow[] = useMemo(
+    () => (usersResp?.success ? usersResp.data ?? [] : []),
+    [usersResp],
+  );
+  const invites: InviteRow[] = useMemo(
+    () => (invitesResp?.success ? invitesResp.data ?? [] : []),
+    [invitesResp],
+  );
 
   // ---------- User actions -------------------------------------------------
 

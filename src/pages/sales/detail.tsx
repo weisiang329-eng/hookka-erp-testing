@@ -149,11 +149,6 @@ export default function SalesOrderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
-  // Optimistic post-mutation overrides — set by mutation handlers when the
-  // server returns the freshly-updated SO so the UI reflects the change
-  // immediately while the cache refresh completes in the background.
-  const [orderOverride, setOrderOverride] = useState<SalesOrder | null>(null);
-  const [linkedPOsOverride, setLinkedPOsOverride] = useState<LinkedPO[] | null>(null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -180,18 +175,17 @@ export default function SalesOrderDetailPage() {
     refreshOrder();
   }, [id, refreshOrder]);
 
-  // Pure derive — orderResp comes from useCachedJson; the optimistic override
-  // wins until the next refresh produces a newer snapshot (which clears it).
-  const orderFromServer: SalesOrder | null = useMemo(
+  // Pure derive — orderResp comes from useCachedJson. Mutation handlers call
+  // fetchOrder() which refreshes the cache; the next render then projects
+  // the new data through these memos. No useEffect+setState shadow copy.
+  const order: SalesOrder | null = useMemo(
     () => (orderResp?.success ? (orderResp.data as SalesOrder) : null),
     [orderResp],
   );
-  const order: SalesOrder | null = orderOverride ?? orderFromServer;
-  const linkedPOsFromServer: LinkedPO[] = useMemo(
+  const linkedPOs: LinkedPO[] = useMemo(
     () => (orderResp?.success ? orderResp.linkedPOs ?? [] : []),
     [orderResp],
   );
-  const linkedPOs: LinkedPO[] = linkedPOsOverride ?? linkedPOsFromServer;
   const statusHistory: StatusChange[] = useMemo(
     () => (orderResp?.success ? orderResp.statusHistory ?? [] : []),
     [orderResp],
@@ -237,10 +231,11 @@ export default function SalesOrderDetailPage() {
     if (data.success) {
       // Only this SO changed — per-id invalidate. Status cascade below may
       // touch many POs so the PO list prefix invalidation is retained.
+      // fetchOrder() at the end of this branch refreshes the cache, which
+      // re-derives `order` and `linkedPOs` via useMemo — no optimistic
+      // setOrder needed.
       if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
-      setOrderOverride(data.data);
-      if (data.linkedPOs) setLinkedPOsOverride(data.linkedPOs);
       // Surface the ON_HOLD / CANCELLED / RESUME cascade summary as a toast so
       // the user sees how many POs + job cards were touched by the transition.
       // `cascade` is only populated when the server-side helper fired.
@@ -304,9 +299,9 @@ export default function SalesOrderDetailPage() {
     if (data.success) {
       // Confirming an SO can create many new POs — keep the PO prefix
       // invalidation. Only this one SO changed, so per-id for the SO.
+      // fetchOrder() refreshes; useMemo projects the new server response.
       if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
-      setOrderOverride(data.data);
       setConfirmSuccess(data.message);
       fetchOrder();
       // Fire-and-forget banner clear scheduled from confirm action callback.

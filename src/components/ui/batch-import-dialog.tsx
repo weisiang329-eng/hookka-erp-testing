@@ -102,7 +102,10 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   const [result, setResult] = React.useState<{ created: number; updated: number } | null>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
 
-  // Reset state whenever the dialog is reopened.
+  // Reset state whenever the dialog is reopened. Each field is user-mutated
+  // during the import flow (parsed rows, errors, intro/confirm step), so a
+  // pure derive isn't possible — we just need to clear on open->true.
+  /* eslint-disable react-hooks/set-state-in-effect */
   React.useEffect(() => {
     if (open) {
       setStep("intro");
@@ -111,6 +114,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
       setResult(null);
     }
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (!open) return null;
 

@@ -3,7 +3,6 @@ import { createBrowserRouter, Navigate } from 'react-router-dom'
 import DashboardLayout from './layouts/DashboardLayout'
 import WorkerLayout from './layouts/WorkerLayout'
 import { ErrorBoundary, ErrorFallback } from './components/ui/error-boundary'
-import { DASHBOARD_ROUTES } from './dashboard-routes'
 import RequireAuth from './components/RequireAuth'
 
 // ── Standalone / non-dashboard lazy pages ─────────────────────────────────
@@ -59,8 +58,15 @@ export const router = createBrowserRouter([
   { path: '/track', element: <S><Track /></S> },
 
   // Dashboard layout — gated behind RequireAuth. All dashboard routes share
-  // the one `TabbedOutlet` inside DashboardLayout; the children list here
-  // exists so createBrowserRouter routes each URL to the dashboard shell.
+  // the one `TabbedOutlet` inside DashboardLayout, which renders its own
+  // <Routes> with the full DASHBOARD_ROUTES list. We use a single splat
+  // child route here so:
+  //   1. Every URL not handled by the standalone routes above mounts
+  //      DashboardLayout (preserves bookmarks, refresh, browser back/forward).
+  //   2. The parent route ends in `*`, which silences React Router v7's
+  //      "<Routes> rendered under a parent route with no trailing *" warning
+  //      that fires because TabbedOutlet renders nested <Routes> internally.
+  // The element is intentionally null — TabbedOutlet does the per-URL match.
   {
     element: (
       <RequireAuth>
@@ -68,7 +74,7 @@ export const router = createBrowserRouter([
       </RequireAuth>
     ),
     errorElement: <ErrorFallback error={null} />,
-    children: DASHBOARD_ROUTES,
+    children: [{ path: '*', element: null }],
   },
 
   // Worker portal (mobile PIN auth — intentionally NOT behind RequireAuth;

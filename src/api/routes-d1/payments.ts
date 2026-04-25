@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { previewCascadeSOClosed } from "./invoices";
 
 const app = new Hono<Env>();
@@ -119,6 +120,10 @@ app.get("/", async (c) => {
 // POST /api/payments — create. If allocations reference invoices, also inserts
 // matching invoice_payments rows and bumps the invoice paidAmount/status.
 app.post("/", async (c) => {
+  // RBAC gate (P3.3) — only roles with payments:create may record payments.
+  const denied = await requirePermission(c, "payments", "create");
+  if (denied) return denied;
+
   try {
     const body = await c.req.json();
     const { customerId, amount, method, reference, allocations } = body;

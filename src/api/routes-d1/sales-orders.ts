@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
   ensureLeadTimesSeeded,
@@ -1397,6 +1398,10 @@ app.post("/backfill-job-cards", async (c) => {
 // POST /api/sales-orders — create a new SO + items atomically
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  // RBAC gate (P3.3) — only roles with sales-orders:create may create SOs.
+  const denied = await requirePermission(c, "sales-orders", "create");
+  if (denied) return denied;
+
   try {
     const body = await c.req.json();
 
@@ -1676,6 +1681,12 @@ app.post("/", async (c) => {
 // confirm returns the existing production orders without duplicating.
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
+  // RBAC gate — confirming an SO is the lock-in moment that fans out POs / JCs.
+  // Reuses the dedicated confirm action so a "create-only" role can be
+  // configured separately from "create + confirm".
+  const denied = await requirePermission(c, "sales-orders", "confirm");
+  if (denied) return denied;
+
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM sales_orders WHERE id = ?",

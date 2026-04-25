@@ -35,6 +35,13 @@ type ProductionOrder = {
   jobCards: JobCard[];
   startDate: string; targetEndDate: string; completedDate: string|null;
   rackingNumber: string; stockedIn: boolean;
+  // Optional axes for the page-level Date Filter — present on the API
+  // response (rowToPO emits createdAt) but not always populated. The new
+  // customerDeliveryDate axis is a TODO: the production_orders payload
+  // doesn't expose it directly today; user needs to clarify which date
+  // they meant before this can fully wire up to a column.
+  createdAt?: string;
+  customerDeliveryDate?: string;
 };
 
 // ----- constants -----
@@ -608,10 +615,19 @@ export default function ProductionPage({
   // with 15 JCs spread across 8 depts, this drops the response to ~1/8 the
   // size (minimal ~1.5MB → ~200KB for FAB_CUT, less for depts with fewer
   // JCs like FOAM / WEBBING).
-  const ordersUrl =
+  //
+  // LAZY LOAD: the bare URL is `null` until the user touches a filter (or
+  // explicitly hits "Load all"). useCachedJson skips the fetch when URL is
+  // null, so the initial /production render is instant and the 533-PO
+  // payload is only pulled when the operator actually wants to look at
+  // something. Per-dept routes (mode="dept") still auto-fetch since landing
+  // there means the user already wants the dept's queue.
+  const baseUrl =
     mode === "dept" && deptCode
       ? `/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal&dept=${encodeURIComponent(deptCode)}`
       : "/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal";
+  const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
+  const ordersUrl: string | null = shouldFetch ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
@@ -700,6 +716,43 @@ export default function ProductionPage({
   const [fltLifecycle, setFltLifecycle] = useState<
     "active" | "all" | "onhold" | "cancelled" | "completed"
   >("active");
+  // New filters (2026-04-25):
+  //   • Category — itemCategory (BEDFRAME / SOFA / ACCESSORY).
+  //   • Date axis — switches the from/to range between targetEndDate
+  //     (production due), customerDeliveryDate (promised to customer),
+  //     and createdAt (when the PO was raised). Defaults to dueDate.
+  //     TODO: confirm with user which "Date" axis they actually wanted —
+  //     customerDeliveryDate isn't on the production_orders payload today
+  //     (lives on the SO). Until that's wired, the dropdown still shows
+  //     the option but matches against the field if/when present.
+  //   • Item type — substring match on each PO's job-card wipType
+  //     (HB→HEADBOARD, DIVAN, BASE→SOFA_BASE, CUSHION→SOFA_CUSHION, etc.).
+  //   • Model — exact productCode match, drawn from already-loaded orders.
+  const [fltCategory, setFltCategory] = useState<string>("");
+  const [fltDateAxis, setFltDateAxis] =
+    useState<"dueDate" | "customerDeliveryDate" | "created_at">("dueDate");
+  const [fltItemType, setFltItemType] = useState<string>("");
+  const [fltModel, setFltModel] = useState<string>("");
+
+  // Lazy-load trigger: any filter being non-default flips shouldFetch=true,
+  // which arms ordersUrl in the useCachedJson call above. Once fetched the
+  // data is cached in localStorage, so subsequent filter changes filter
+  // client-side without re-fetching. The "Refresh" button forces a refetch.
+  // Lifecycle defaults to "active", DateAxis defaults to "dueDate" — both
+  // are excluded from the trigger because they're the user's baseline view.
+  const anyFilterActive =
+    !!fltSearch ||
+    !!fltState ||
+    !!fltCustomer ||
+    !!fltDueFrom ||
+    !!fltDueTo ||
+    !!fltCategory ||
+    !!fltItemType ||
+    !!fltModel ||
+    fltLifecycle !== "active";
+  useEffect(() => {
+    if (anyFilterActive && !shouldFetch) setShouldFetch(true);
+  }, [anyFilterActive, shouldFetch]);
 
   // Mirror of the Production Sheet DataGrid's internal filter + sort result.
   // When a dept tab is active, Print Schedule and the on-screen QR Stickers
@@ -1037,6 +1090,19 @@ export default function ProductionPage({
   // a non-empty cell in that dept).
   const filteredOrders = useMemo(() => {
     const q = fltSearch.trim().toLowerCase();
+    // Item-type substring map: the wipType field stores canonical names
+    // (HEADBOARD / DIVAN / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST /
+    // SOFA_HEADREST). The user-facing dropdown uses short labels — we
+    // map each label to a predicate so the match still works even when
+    // the underlying value is e.g. "SOFA_BASE".
+    const itemTypeMatch: Record<string, (s: string) => boolean> = {
+      HB: (s) => s === "HEADBOARD" || s === "HB",
+      DIVAN: (s) => s === "DIVAN",
+      BASE: (s) => s.endsWith("BASE"),
+      CUSHION: (s) => s.endsWith("CUSHION"),
+      ARMREST: (s) => s.endsWith("ARMREST"),
+      HEADREST: (s) => s.endsWith("HEADREST"),
+    };
     return orders.filter((o) => {
       if (q) {
         const hay = [
@@ -1048,8 +1114,36 @@ export default function ProductionPage({
       }
       if (fltState && o.customerState !== fltState) return false;
       if (fltCustomer && o.customerName !== fltCustomer) return false;
-      if (fltDueFrom && (o.targetEndDate || "") < fltDueFrom) return false;
-      if (fltDueTo && (o.targetEndDate || "") > fltDueTo) return false;
+      // Category — itemCategory column on the PO.
+      if (fltCategory && o.itemCategory !== fltCategory) return false;
+      // Model — exact productCode match.
+      if (fltModel && o.productCode !== fltModel) return false;
+      // Item Type — at least one JC on the PO must match. POs with no JCs
+      // (legacy / partially-built) bypass this filter rather than getting
+      // hidden, since we can't tell what they are.
+      if (fltItemType) {
+        const m = itemTypeMatch[fltItemType];
+        const jcs = o.jobCards ?? [];
+        if (m && jcs.length > 0) {
+          const ok = jcs.some((j) => m(String(j.wipType || "").toUpperCase()));
+          if (!ok) return false;
+        }
+      }
+      // Date range against the user-chosen axis. Falls back to targetEndDate
+      // when customerDeliveryDate isn't on the payload (TODO near the state
+      // declaration). Empty axis values DO NOT filter the row out — that
+      // prevents POs with missing dates from disappearing the moment a
+      // from-date is set. Previous bug: `"" < fltDueFrom` was always true
+      // so undated POs got dropped silently as soon as any from-date was
+      // entered.
+      const axisVal: string =
+        (fltDateAxis === "dueDate"
+          ? o.targetEndDate
+          : fltDateAxis === "customerDeliveryDate"
+            ? (o.customerDeliveryDate || "")
+            : (o.createdAt || "")) || "";
+      if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
+      if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
       // Lifecycle filter — "active" is the default since day-to-day operators
       // don't want ON_HOLD / CANCELLED POs cluttering their queue. Supervisors
       // can flip to "all" or drill into a specific bucket.
@@ -1070,7 +1164,13 @@ export default function ProductionPage({
       }
       return true;
     });
-  }, [orders, fltSearch, fltState, fltCustomer, fltDueFrom, fltDueTo, fltLifecycle]);
+  }, [
+    orders,
+    fltSearch, fltState, fltCustomer,
+    fltDueFrom, fltDueTo, fltDateAxis,
+    fltLifecycle,
+    fltCategory, fltItemType, fltModel,
+  ]);
 
   const visibleOrders = useMemo(() => {
     if (activeTab === "ALL") return filteredOrders;
@@ -1079,8 +1179,8 @@ export default function ProductionPage({
     );
   }, [filteredOrders, activeTab]);
 
-  // Unique customer + state options for the filter dropdowns, derived live
-  // from the order set so they auto-update when mock data changes.
+  // Unique customer + state + model options for the filter dropdowns,
+  // derived live from the order set so they auto-update when data changes.
   const customerOptions = useMemo(
     () =>
       Array.from(new Set(orders.map((o) => o.customerName).filter(Boolean))).sort(),
@@ -1089,6 +1189,11 @@ export default function ProductionPage({
   const stateOptions = useMemo(
     () =>
       Array.from(new Set(orders.map((o) => o.customerState).filter(Boolean))).sort(),
+    [orders],
+  );
+  const modelOptions = useMemo(
+    () =>
+      Array.from(new Set(orders.map((o) => o.productCode).filter(Boolean))).sort(),
     [orders],
   );
 
@@ -2682,7 +2787,11 @@ export default function ProductionPage({
         </div>
       </div>
 
-      {/* Filter bar — applies to Overview matrix AND all dept sub-tabs */}
+      {/* Filter bar — applies to Overview matrix AND all dept sub-tabs.
+          Setting any filter (or clicking Load all) arms the lazy-load fetch
+          via shouldFetch. While the response is in-flight the page shows a
+          spinner below. The "Refresh" button forces a re-fetch even when
+          shouldFetch is already on. */}
       <div className="rounded-lg border border-[#E6E0D9] bg-white p-3 flex flex-wrap gap-2 items-center">
         <input
           type="text"
@@ -2707,6 +2816,47 @@ export default function ProductionPage({
           <option value="">All states</option>
           {stateOptions.map((s) => (<option key={s} value={s}>{s}</option>))}
         </select>
+        {/* Category — itemCategory column. Note the canonical value is
+            ACCESSORY (singular) on the API; we surface "Accessories" as
+            the human label for the option. */}
+        <select
+          value={fltCategory}
+          onChange={(e) => setFltCategory(e.target.value)}
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+          title="Product category"
+        >
+          <option value="">All categories</option>
+          <option value="BEDFRAME">Bedframe</option>
+          <option value="SOFA">Sofa</option>
+          <option value="ACCESSORY">Accessories</option>
+        </select>
+        {/* Item type (wipType, substring-matched against each PO's job
+            cards). Helpful when a supervisor wants to see only e.g. every
+            PO with a Headboard component currently in production. */}
+        <select
+          value={fltItemType}
+          onChange={(e) => setFltItemType(e.target.value)}
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+          title="WIP item type (matches against job-card wipType)"
+        >
+          <option value="">All item types</option>
+          <option value="HB">HB</option>
+          <option value="DIVAN">Divan</option>
+          <option value="BASE">Base</option>
+          <option value="CUSHION">Cushion</option>
+          <option value="ARMREST">Armrest</option>
+          <option value="HEADREST">Headrest</option>
+        </select>
+        {/* Model dropdown — distinct productCodes from already-loaded orders. */}
+        <select
+          value={fltModel}
+          onChange={(e) => setFltModel(e.target.value)}
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+          title="Product code (model)"
+        >
+          <option value="">All models</option>
+          {modelOptions.map((m) => (<option key={m} value={m}>{m}</option>))}
+        </select>
         {/* Lifecycle status filter — default "Active" hides ON_HOLD + CANCELLED */}
         <select
           value={fltLifecycle}
@@ -2725,7 +2875,27 @@ export default function ProductionPage({
           <option value="cancelled">Cancelled</option>
           <option value="completed">Completed</option>
         </select>
-        <label className="text-[10px] text-[#6B7280]">Due from</label>
+        {/* Date axis toggle — picks WHICH date column the from/to range
+            applies to. dueDate (default) is the production target end date.
+            customerDeliveryDate is what the customer was promised (TODO:
+            currently the production_orders payload doesn't expose it; the
+            filter no-ops on rows where the field is missing). created_at =
+            when the PO was raised. */}
+        <select
+          value={fltDateAxis}
+          onChange={(e) =>
+            setFltDateAxis(
+              e.target.value as "dueDate" | "customerDeliveryDate" | "created_at",
+            )
+          }
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+          title="Which date axis the from/to range filters on"
+        >
+          <option value="dueDate">Due date</option>
+          <option value="customerDeliveryDate">Customer delivery</option>
+          <option value="created_at">Created at</option>
+        </select>
+        <label className="text-[10px] text-[#6B7280]">From</label>
         <input
           type="date"
           value={fltDueFrom}
@@ -2739,11 +2909,33 @@ export default function ProductionPage({
           onChange={(e) => setFltDueTo(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
         />
-        {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo || fltLifecycle !== "active") && (
+        {!shouldFetch && (
+          <button
+            onClick={() => setShouldFetch(true)}
+            className="text-[10px] px-2 py-1 rounded border border-[#6B5C32] text-[#6B5C32] hover:bg-[#FAF8F4]"
+            title="Skip filtering and load every active production order"
+          >
+            Load all
+          </button>
+        )}
+        {shouldFetch && (
+          <button
+            onClick={fetchOrders}
+            className="text-[10px] px-2 py-1 rounded border border-[#E6E0D9] text-[#6B5C32] hover:bg-[#FAF8F4]"
+            title="Re-fetch the orders payload (bypasses local cache)"
+          >
+            Refresh
+          </button>
+        )}
+        {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo ||
+          fltLifecycle !== "active" || fltCategory || fltItemType || fltModel ||
+          fltDateAxis !== "dueDate") && (
           <button
             onClick={() => {
               setFltSearch(""); setFltState(""); setFltCustomer("");
               setFltDueFrom(""); setFltDueTo(""); setFltLifecycle("active");
+              setFltCategory(""); setFltItemType(""); setFltModel("");
+              setFltDateAxis("dueDate");
             }}
             className="text-[10px] text-[#6B5C32] hover:underline"
           >
@@ -2751,9 +2943,28 @@ export default function ProductionPage({
           </button>
         )}
         <span className="ml-auto text-[10px] text-[#8A7F73]">
-          {filteredOrders.length} of {orders.length} orders
+          {shouldFetch
+            ? `${filteredOrders.length} of ${orders.length} orders`
+            : "Pick a filter (or Load all) to fetch orders"}
         </span>
       </div>
+
+      {/* Lazy-load placeholder: before any filter is set we don't fetch
+          the payload at all — the user sees the filter bar above plus this
+          callout. Clicking any filter (handled by the useEffect that flips
+          shouldFetch) or "Load all" arms the request. */}
+      {!shouldFetch && (
+        <div className="rounded-lg border border-dashed border-[#E6E0D9] bg-[#FAF8F4] px-4 py-12 text-center">
+          <p className="text-sm text-[#6B5C32] font-medium">
+            No orders loaded yet.
+          </p>
+          <p className="mt-1 text-xs text-[#8A7F73]">
+            Pick any filter above (or click <em>Load all</em>) to fetch the
+            production payload. Skipping the fetch keeps the page snappy when
+            you only need to navigate to a specific order.
+          </p>
+        </div>
+      )}
 
       {/* Tab bar: Overview + 8 depts, all equal width (grid-cols-9).
           Only rendered in legacy "full" mode. The per-route pages

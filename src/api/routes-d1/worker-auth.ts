@@ -18,6 +18,51 @@ import { hashPin, isPinHashed } from "../lib/auth-utils";
 
 const app = new Hono<Env>();
 
+// ============================================================
+// Default-protect middleware (audit S2 — closes the "new endpoint
+// added under /api/worker-auth without auth" exposure class).
+//
+// The global authMiddleware exempts the entire /api/worker-auth/
+// prefix so login can run without a Bearer token. That worked when
+// the only public endpoints here were login/reset-pin, but new
+// endpoints (logout, future "rotate-token", etc.) inherit that
+// exemption automatically.
+//
+// Fix: list the routes that MUST stay public in WORKER_AUTH_PUBLIC
+// and require a valid X-Worker-Token for everything else.
+// ============================================================
+// Both the mounted path (production) and the bare sub-app path are listed
+// so the middleware behaves identically whether the app is mounted at
+// /api/worker-auth (production) or at "/" (unit tests / future remounts).
+const WORKER_AUTH_PUBLIC: ReadonlySet<string> = new Set<string>([
+  "/api/worker-auth/login",
+  "/api/worker-auth/reset-pin",
+  "/login",
+  "/reset-pin",
+]);
+
+app.use("*", async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  if (WORKER_AUTH_PUBLIC.has(path)) return next();
+
+  // Inline mini-resolveWorkerToken instead of the exported helper
+  // below — at this point in the file the helper isn't defined yet
+  // and a forward import would be a cycle. The query is cheap.
+  const token = c.req.header("x-worker-token");
+  if (!token) {
+    return c.json({ success: false, error: "Not authenticated" }, 401);
+  }
+  const row = await c.var.DB.prepare(
+    "SELECT workerId FROM worker_tokens WHERE token = ?",
+  )
+    .bind(token)
+    .first<{ workerId: string }>();
+  if (!row) {
+    return c.json({ success: false, error: "Not authenticated" }, 401);
+  }
+  return next();
+});
+
 type WorkerRow = {
   id: string;
   empNo: string;

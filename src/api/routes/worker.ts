@@ -36,25 +36,67 @@ export const PIECE_RATE_SEN: Record<string, number> = {
   PACKING: 150,
 };
 
-// Resolve the worker from the auth header, or short-circuit with
-// a 401 response. Returns either the resolved worker object or the
-// Response to bail out with. Async since P3.5 — resolveWorkerToken
-// hits D1 (worker_sessions table) instead of an in-process Map.
+// ============================================================
+// Default-protect middleware (audit S2 — closes the "new sub-route
+// added without requireWorker" exposure class).
+//
+// Every request hitting this Hono sub-app must carry a valid
+// X-Worker-Token unless its path is in PUBLIC_WORKER_ROUTES below.
+// On success the resolved worker is stashed on the context so
+// handlers can read it via c.get('worker') / c.get('workerId')
+// without re-doing the DB round-trip. On failure the middleware
+// short-circuits with 401/404 — the handler never runs.
+//
+// Login lives under /api/worker-auth (separate sub-app); there is
+// nothing public under /api/worker today, but new "ping"-style
+// endpoints can be allowlisted here if they ever exist.
+// ============================================================
+const PUBLIC_WORKER_ROUTES: ReadonlySet<string> = new Set<string>([
+  // none today
+]);
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function requireWorker(c: any): Promise<
-  | { ok: true; workerId: string; worker: (typeof workers)[number] }
-  | { ok: false; res: Response }
-> {
+async function resolveAndAttach(c: any): Promise<Response | null> {
   const token = c.req.header('x-worker-token');
   const workerId = await resolveWorkerToken(c.var.DB, token);
   if (!workerId) {
-    return { ok: false, res: c.json({ success: false, error: 'Not authenticated' }, 401) };
+    return c.json({ success: false, error: 'Not authenticated' }, 401);
   }
   const w = workers.find((x) => x.id === workerId);
   if (!w) {
-    return { ok: false, res: c.json({ success: false, error: 'Worker not found' }, 404) };
+    return c.json({ success: false, error: 'Worker not found' }, 404);
   }
-  return { ok: true, workerId, worker: w };
+  c.set('workerId', workerId);
+  c.set('worker', w);
+  return null;
+}
+
+app.use('*', async (c, next) => {
+  const path = new URL(c.req.url).pathname;
+  for (const pub of PUBLIC_WORKER_ROUTES) {
+    if (path === pub || path.startsWith(pub + '/')) return next();
+  }
+  const bail = await resolveAndAttach(c);
+  if (bail) return bail;
+  return next();
+});
+
+// Pull the resolved worker (set by the default-protect middleware
+// above) out of the context. Returns the same shape the prior
+// requireWorker used to return so handler bodies don't need to be
+// rewritten — they just drop the `if (!auth.ok)` bail-out since
+// the middleware already 401'd before the handler ran.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function requireWorker(c: any): {
+  ok: true;
+  workerId: string;
+  worker: (typeof workers)[number];
+} {
+  return {
+    ok: true,
+    workerId: c.get('workerId') as string,
+    worker: c.get('worker') as (typeof workers)[number],
+  };
 }
 
 // ----- GET /api/worker/today -----
@@ -62,8 +104,7 @@ async function requireWorker(c: any): Promise<
 // estimate, and counts of pending/in-progress job cards assigned
 // to me.
 app.get('/today', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { workerId, worker } = auth;
 
   const today = new Date().toISOString().slice(0, 10);
@@ -157,8 +198,7 @@ app.get('/today', async (c) => {
 // Punch in/out for the current worker. Mirrors the admin /attendance
 // endpoint but scoped to the caller's identity — no spoofing.
 app.post('/clock', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { worker } = auth;
 
   const body = await c.req.json().catch(() => ({}));
@@ -239,8 +279,7 @@ app.post('/clock', async (c) => {
 //
 // If no range is passed, defaults to the last 30 days.
 app.get('/history', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { workerId } = auth;
 
   // Parse + default the range. Always yields valid YYYY-MM-DD strings
@@ -461,8 +500,7 @@ app.get('/history', async (c) => {
 // ----- GET /api/worker/payslips -----
 // Self-service payslip history + current month estimate.
 app.get('/payslips', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { workerId, worker } = auth;
 
   // Historical payslips owned by this worker
@@ -524,8 +562,7 @@ app.get('/payslips', async (c) => {
 // ----- GET /api/worker/leaves -----
 // Worker's leave balance + history + pending requests.
 app.get('/leaves', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { workerId } = auth;
 
   const mine = leaveRecords
@@ -573,8 +610,7 @@ app.get('/leaves', async (c) => {
 // ----- POST /api/worker/leaves -----
 // File a leave request. Goes in as PENDING for HR to approve.
 app.post('/leaves', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { worker } = auth;
 
   const body = await c.req.json().catch(() => ({}));
@@ -626,8 +662,7 @@ const issueStore: Array<{
 }> = [];
 
 app.post('/issues', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { worker } = auth;
   const body = await c.req.json().catch(() => ({}));
   const { category, description, photoDataUrl } = body as {
@@ -654,8 +689,7 @@ app.post('/issues', async (c) => {
 });
 
 app.get('/issues', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { workerId } = auth;
   const mine = issueStore
     .filter((i) => i.workerId === workerId)
@@ -669,8 +703,7 @@ app.get('/issues', async (c) => {
 // since Worker type has no emergency field yet — keep the schema change
 // out of scope for MVP).
 app.patch('/profile', async (c) => {
-  const auth = await requireWorker(c);
-  if (!auth.ok) return auth.res;
+  const auth = requireWorker(c);
   const { worker } = auth;
   const body = await c.req.json().catch(() => ({}));
   const { phone } = body as { phone?: string };

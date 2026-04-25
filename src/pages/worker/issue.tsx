@@ -13,6 +13,7 @@ import { Link } from "react-router-dom";
 import { ArrowLeft, Camera, CheckCircle2 } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch } from "@/layouts/WorkerLayout";
+import { WorkerActionResultSchema } from "@/lib/schemas/worker-job";
 
 const CATEGORIES: Array<{ key: string; id: string }> = [
   { key: "issue.cat.material", id: "MATERIAL" },
@@ -60,7 +61,8 @@ export default function WorkerIssuePage() {
           photoDataUrl: photo,
         }),
       });
-      const data = await res.json();
+      const raw = await res.json();
+      const data = WorkerActionResultSchema.parse(raw);
       if (!data.success) {
         setError(data.error || t("common.error"));
         return;

@@ -42,6 +42,43 @@ import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { parseStickerData } from "@/lib/qr-utils";
 import { deriveWipName } from "@/lib/wip-name";
+import { fetchJson } from "@/lib/fetch-json";
+import { z } from "zod";
+
+// Loose passthrough envelopes — runtime validation at boundaries while
+// keeping the page's local Order/JobCard types as the typed view of `data`.
+const POListEnvelope = z
+  .object({
+    success: z.boolean().optional(),
+    data: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+const ScanCompleteEnvelope = z
+  .object({
+    success: z.boolean().optional(),
+    requiresConfirmation: z.boolean().optional(),
+    warning: z.object({ code: z.string(), message: z.string() }).optional(),
+    error: z.string().optional(),
+    data: z
+      .object({
+        assignedSlot: z.number().optional(),
+        jobCard: z.unknown().optional(),
+        fifoRedirected: z.boolean().optional(),
+        scannedPoNo: z.string().optional(),
+        assignedPoNo: z.string().optional(),
+        assignedPoId: z.string().optional(),
+        fifoDueDate: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+const HistoryEnvelope = z
+  .object({
+    success: z.boolean().optional(),
+    data: z.unknown().optional(),
+  })
+  .passthrough();
 
 type PiecePic = {
   pieceNo: number;
@@ -247,8 +284,9 @@ export default function WorkerScanPage() {
       const res = await workerFetch(
         `/api/worker/history?from=${d}&to=${d}`,
       );
-      const j = await res.json();
-      if (j.success) setToday(j.data);
+      const raw = await res.json();
+      const j = HistoryEnvelope.parse(raw);
+      if (j.success) setToday(j.data as TodaySnapshot);
     } catch {
       /* leave today null — snapshot section just won't render */
     }
@@ -272,10 +310,9 @@ export default function WorkerScanPage() {
       term: string,
       deptHint?: string,
     ): Promise<WipOption[]> => {
-      const res = await fetch("/api/production-orders");
-      const data = await res.json();
-      if (!data.success) return [];
-      const orders: Order[] = data.data;
+      const data = await fetchJson("/api/production-orders", POListEnvelope);
+      if (!data.success || !data.data) return [];
+      const orders = data.data as unknown as Order[];
       // Job-card id — unique → return the single hit and stop.
       for (const o of orders) {
         const jc = o.jobCards.find((j) => j.id === term);
@@ -654,7 +691,8 @@ export default function WorkerScanPage() {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const raw = await res.json();
+      const data = ScanCompleteEnvelope.parse(raw);
       // Soft-warning path — server returned HTTP 202 with
       // `requiresConfirmation`. Surface the confirm dialog instead of
       // treating it as an error.
@@ -671,11 +709,11 @@ export default function WorkerScanPage() {
         });
         return;
       }
-      if (data.success) {
+      if (data.success && data.data) {
         setResult({
           kind: "success",
-          slot: data.data.assignedSlot,
-          jobCard: data.data.jobCard,
+          slot: data.data.assignedSlot as 1 | 2,
+          jobCard: data.data.jobCard as JobCard,
           order: ctx.order,
           piece: ctx.piece,
           // FIFO diagnostic — server tells us if the scan was routed to a

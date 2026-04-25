@@ -20,6 +20,14 @@ import { ScanLine, AlertTriangle, Clock, CheckCircle2 } from "lucide-react";
 import { useT } from "@/lib/worker-i18n";
 import { workerFetch, WORKER_ME_KEY } from "@/layouts/WorkerLayout";
 import { deriveWipName } from "@/lib/wip-name";
+import { z } from "zod";
+
+// workerFetch handles auth + 401 redirect, but we still want runtime-typed
+// JSON parsing on top — cast through a passthrough envelope schema.
+const TodayEnvelope = z
+  .object({ success: z.boolean().optional(), data: z.unknown().optional(), error: z.string().optional() })
+  .passthrough();
+const HistoryEnvelope = TodayEnvelope;
 
 // ---------- types ----------
 type TodayData = {
@@ -138,8 +146,9 @@ export default function WorkerHomePage() {
   const refreshToday = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/today");
-      const j = await res.json();
-      if (j.success) setData(j.data);
+      const raw = await res.json();
+      const j = TodayEnvelope.parse(raw);
+      if (j.success) setData(j.data as TodayData);
     } finally {
       setLoading(false);
     }
@@ -153,8 +162,9 @@ export default function WorkerHomePage() {
       const res = await workerFetch(
         `/api/worker/history?from=${encodeURIComponent(f)}&to=${encodeURIComponent(tto)}`,
       );
-      const j = await res.json();
-      if (j.success) setHist(j.data);
+      const raw = await res.json();
+      const j = HistoryEnvelope.parse(raw);
+      if (j.success) setHist(j.data as HistoryData);
     } catch {
       /* leave hist as-is */
     }

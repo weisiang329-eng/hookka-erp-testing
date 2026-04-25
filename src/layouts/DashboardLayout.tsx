@@ -6,9 +6,9 @@ import { TabbedOutlet } from "@/components/layout/tabbed-outlet";
 import { TabsProvider } from "@/contexts/tabs-context";
 import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
 import { ToastProvider, useToast } from "@/components/ui/toast";
-import { hydrateMasterTemplates } from "@/pages/bom";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
+import { useLocation } from "react-router-dom";
 
 const mockUser = {
   name: "Lim",
@@ -26,10 +26,10 @@ function NewVersionWatcher() {
   const { toast } = useToast();
   useVersionCheck({
     onNewVersion: () => {
-      toast.info("新版本已发布 — 请刷新页面以更新 (Ctrl+Shift+R)");
+      toast.info("A new version is available — refresh to update (Ctrl+Shift+R).");
       // After the toast, prompt for reload. Delay so the toast is visible.
       window.setTimeout(() => {
-        if (window.confirm("系统有新版本。现在刷新吗?(未保存的表单会丢失)")) {
+        if (window.confirm("A new version is available. Reload now? Unsaved changes may be lost.")) {
           window.location.reload();
         }
       }, 1500);
@@ -39,15 +39,50 @@ function NewVersionWatcher() {
 }
 
 export default function DashboardLayout() {
-  // Hydrate Master BOM Templates from D1 once the dashboard shell mounts.
-  // On first run this also migrates any legacy localStorage templates to D1
-  // and then wipes the legacy keys.
+  const { pathname } = useLocation();
+
+  // Defer heavy startup work so first paint / page navigation stays responsive.
+  // NOTE: We intentionally avoid static-importing `@/pages/bom` here because
+  // that forces the giant BOM page into the main shell bundle and makes every
+  // dashboard route feel slow even when BOM is never opened.
   useEffect(() => {
-    void hydrateMasterTemplates();
-    // Prime the variants-config cache from D1 so downstream sync readers
-    // (getProductionMinutes, getCategoryOptions in bom.tsx) have real data.
-    void fetchVariantsConfig();
-  }, []);
+    let cancelled = false;
+
+    const start = () => {
+      if (cancelled) return;
+
+      // Prime the variants-config cache from D1 so downstream sync readers
+      // (getProductionMinutes, getCategoryOptions in bom.tsx) have real data.
+      void fetchVariantsConfig();
+
+      // Only hydrate master templates when user is in BOM/Product routes.
+      // Avoid loading the heavy BOM module for unrelated pages.
+      const needsMasterHydration =
+        pathname.startsWith("/bom") || pathname.startsWith("/products");
+      if (!needsMasterHydration) return;
+
+      // Lazy-load BOM hydration only when idle to reduce startup jank.
+      void import("@/pages/bom").then((mod) => {
+        if (!cancelled) {
+          void mod.hydrateMasterTemplates();
+        }
+      });
+    };
+
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      const idleId = window.requestIdleCallback(start, { timeout: 1500 });
+      return () => {
+        cancelled = true;
+        window.cancelIdleCallback(idleId);
+      };
+    }
+
+    const t = globalThis.setTimeout(start, 150);
+    return () => {
+      cancelled = true;
+      globalThis.clearTimeout(t);
+    };
+  }, [pathname]);
 
   return (
     <ToastProvider>

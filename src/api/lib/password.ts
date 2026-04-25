@@ -49,7 +49,9 @@ async function pbkdf2(
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      salt,
+      // Re-wrap to ensure an ArrayBuffer-backed view type accepted by
+      // both DOM and Workers typings in TS 6 strict mode.
+      salt: Uint8Array.from(salt),
       iterations,
     },
     key,

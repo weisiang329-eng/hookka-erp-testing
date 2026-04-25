@@ -30,6 +30,8 @@ jobs:
 
       - run: npm ci
 
+      - run: npm test
+
       - run: npm run build
 
       # Deploy to Cloudflare Pages — only on push events. PRs just exercise

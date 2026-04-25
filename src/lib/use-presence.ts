@@ -104,24 +104,52 @@ export function usePresence(
       if (activeRef.current) setOthers(list);
     }
 
-    // kick off immediately
-    tickHeartbeat();
-    tickPoll();
-    hbTimer = window.setInterval(tickHeartbeat, HEARTBEAT_MS);
-    pollTimer = window.setInterval(tickPoll, POLL_MS);
+    function stopTimers() {
+      if (hbTimer) window.clearInterval(hbTimer);
+      if (pollTimer) window.clearInterval(pollTimer);
+      hbTimer = undefined;
+      pollTimer = undefined;
+    }
+
+    function startTimers() {
+      if (hbTimer || pollTimer) return;
+      hbTimer = window.setInterval(tickHeartbeat, HEARTBEAT_MS);
+      pollTimer = window.setInterval(tickPoll, POLL_MS);
+    }
+
+    // Kick off immediately only when visible.
+    if (!document.hidden) {
+      void tickHeartbeat();
+      void tickPoll();
+      startTimers();
+    }
 
     // release when the browser tab closes — keepalive on the DELETE ensures
     // the request is still sent in unload scenarios.
     function onUnload() {
       release(recordType, recordId!);
     }
+    function onVisibilityChange() {
+      if (document.hidden) {
+        stopTimers();
+        // Best-effort release while tab is backgrounded, so stale locks clear
+        // quickly for other editors.
+        void release(recordType, recordId!);
+        return;
+      }
+      // Re-acquire + refresh when user returns.
+      void tickHeartbeat();
+      void tickPoll();
+      startTimers();
+    }
     window.addEventListener("pagehide", onUnload);
+    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
       activeRef.current = false;
-      if (hbTimer) window.clearInterval(hbTimer);
-      if (pollTimer) window.clearInterval(pollTimer);
+      stopTimers();
       window.removeEventListener("pagehide", onUnload);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       release(recordType, recordId);
     };
   }, [recordType, recordId, enabled]);

@@ -21,15 +21,24 @@ import { z } from "zod";
 import { getAuthToken } from "./auth";
 
 export class FetchJsonError extends Error {
+  public readonly status: number;
+  public readonly url: string;
+  public readonly body?: unknown;
+  public readonly zodIssues?: z.ZodIssue[];
+
   constructor(
     message: string,
-    public readonly status: number,
-    public readonly url: string,
-    public readonly body?: unknown,
-    public readonly zodIssues?: z.ZodIssue[],
+    status: number,
+    url: string,
+    body?: unknown,
+    zodIssues?: z.ZodIssue[],
   ) {
     super(message);
     this.name = "FetchJsonError";
+    this.status = status;
+    this.url = url;
+    this.body = body;
+    this.zodIssues = zodIssues;
   }
 }
 

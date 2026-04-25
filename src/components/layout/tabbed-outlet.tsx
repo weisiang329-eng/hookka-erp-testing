@@ -33,6 +33,11 @@ import { Routes, useLocation } from 'react-router-dom'
 import { useTabs } from '@/contexts/tabs-context'
 import { DASHBOARD_ROUTE_ELEMENTS } from '@/dashboard-routes'
 
+// Keep-alive cap: rendering every historical tab at once can make the whole
+// app sluggish on lower-end devices because hidden pages remain mounted and
+// keep running effects/timers. We keep only the most recently visited panes.
+const MAX_CACHED_PANES = 4
+
 function normalisePath(path: string): string {
   if (!path.startsWith('/')) path = '/' + path
   if (path.length > 1 && path.endsWith('/')) path = path.slice(0, -1)
@@ -47,6 +52,9 @@ export function TabbedOutlet() {
 
   // pathname → last-seen {search, hash} while that pathname was the active URL.
   const savedLocsRef = useRef<Map<string, SavedLoc>>(new Map())
+  // pathname → monotonic visit counter (LRU-ish recency without time math).
+  const visitOrderRef = useRef<Map<string, number>>(new Map())
+  const tickRef = useRef(0)
 
   useEffect(() => {
     const key = normalisePath(location.pathname)
@@ -64,8 +72,14 @@ export function TabbedOutlet() {
     ? normalisePath(activeTab.path)
     : normalisePath(location.pathname)
 
+  useEffect(() => {
+    tickRef.current += 1
+    visitOrderRef.current.set(visiblePath, tickRef.current)
+  }, [visiblePath])
+
   // Build the union of paths we need to render. Keyed by normalised path so
-  // duplicates collapse.
+  // duplicates collapse. To avoid global UI jank, limit hidden keep-alive
+  // panes using recency order.
   const panes = useMemo(() => {
     const map = new Map<string, { key: string; path: string }>()
     for (const tab of tabs) {
@@ -79,7 +93,24 @@ export function TabbedOutlet() {
     if (!map.has(currentNorm)) {
       map.set(currentNorm, { key: `url:${currentNorm}`, path: currentNorm })
     }
-    return Array.from(map.values())
+    const all = Array.from(map.values())
+    if (all.length <= MAX_CACHED_PANES) return all
+
+    const mustKeep = new Set<string>([visiblePath, currentNorm])
+    const optional = all
+      .filter((pane) => !mustKeep.has(pane.path))
+      .sort(
+        (a, b) =>
+          (visitOrderRef.current.get(b.path) ?? 0) -
+          (visitOrderRef.current.get(a.path) ?? 0),
+      )
+
+    const keepOptional = Math.max(MAX_CACHED_PANES - mustKeep.size, 0)
+    const keepPaths = new Set<string>([
+      ...mustKeep,
+      ...optional.slice(0, keepOptional).map((p) => p.path),
+    ])
+    return all.filter((pane) => keepPaths.has(pane.path))
   }, [tabs, location.pathname])
 
   return (

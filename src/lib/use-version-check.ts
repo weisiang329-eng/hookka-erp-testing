@@ -51,6 +51,7 @@ export function useVersionCheck({
     let stopped = false;
     const check = async () => {
       if (stopped || firedRef.current) return;
+      if (document.hidden) return;
       try {
         // Cache-buster query so we always hit origin through CDN revalidation.
         const res = await fetch(`/?v=${Date.now()}`, {
@@ -72,7 +73,11 @@ export function useVersionCheck({
     const id = window.setInterval(check, intervalMs);
     // Also check when the tab regains focus (user came back after a while).
     const onFocus = () => { void check(); };
+    const onVisible = () => {
+      if (!document.hidden) void check();
+    };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
     // First quick check 30s after mount — don't wait the full interval on
     // the very first load.
     const firstId = window.setTimeout(check, 30_000);
@@ -82,6 +87,7 @@ export function useVersionCheck({
       window.clearInterval(id);
       window.clearTimeout(firstId);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [intervalMs, onNewVersion]);
 }

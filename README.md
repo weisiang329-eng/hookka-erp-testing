@@ -112,6 +112,7 @@ src/
   types/index.ts    Backend-style enums + interfaces
 
 docs/
+  DOCS-INDEX.md     Documentation entry point (recommended first stop)
   ARCHITECTURE.md   System architecture, data flow, extension points
   MODULES.md        Per-module reference (screens + API + data model)
   SETUP.md          Dev environment setup, troubleshooting

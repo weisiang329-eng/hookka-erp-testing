@@ -731,6 +731,10 @@ export default function WorkerScanPage() {
         // beat so the worker sees the ✓ flash.
         if (queue.length > 0) {
           const rest = queue;
+          // Brief pause so the worker sees the success flash before we move
+          // to the next queued photo. Scheduled inside the scan-submit
+          // event-style callback, not a React lifecycle effect.
+          // eslint-disable-next-line no-restricted-syntax -- one-shot UX pause inside scan-submit event handler
           setTimeout(() => {
             processNextInQueue(rest);
           }, 700);

@@ -208,6 +208,13 @@ function useApiSearch(query: string) {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    // Debounce + AbortController combo: the timer needs to capture the
+    // freshly-created `controller` at scheduling time, and the cleanup
+    // path (when `query` changes again before 250ms elapses) must
+    // clearTimeout AND abort. useTimeout's ref-based latest-fn capture
+    // wouldn't pin the controller, so it would fetch with a stale signal.
+    // Keep raw + disable.
+    // eslint-disable-next-line no-restricted-syntax -- debounce paired with AbortController; useTimeout's latest-fn capture would lose the per-effect controller
     const timer = setTimeout(async () => {
       setLoading(true);
       const collected: SearchResult[] = [];

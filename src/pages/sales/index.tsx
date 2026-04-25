@@ -637,6 +637,10 @@ export default function SalesPage() {
                     try {
                       for (const so of selectedRows) {
                         generateSOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
+                        // Tiny pacing delay between PDFs so the browser doesn't
+                        // queue all download dialogs in the same tick. Inside
+                        // an async event handler, not a React effect.
+                        // eslint-disable-next-line no-restricted-syntax -- pacing delay inside async event handler loop
                         await new Promise(r => setTimeout(r, 120));
                       }
                     } finally {

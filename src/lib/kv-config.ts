@@ -175,6 +175,9 @@ export function setKvConfig(key: string, value: JsonValue): void {
     }
   }
   if (entry.saveTimer) clearTimeout(entry.saveTimer);
+  // Module-scope debounce timer keyed off the cache map — not bound to any
+  // React component lifecycle, so the useTimeout hook doesn't apply here.
+  // eslint-disable-next-line no-restricted-syntax -- module-level debounce, lives outside React lifecycle
   entry.saveTimer = setTimeout(() => {
     entry.saveTimer = null;
     void flushSave(key);

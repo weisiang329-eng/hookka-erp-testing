@@ -132,6 +132,11 @@ export default function UsersPage() {
   const showFlash = useCallback(
     (kind: "ok" | "err", msg: string) => {
       setFlash({ kind, msg });
+      // Fire-and-forget timer scheduled inside an event-style callback (the
+      // user did something that produced a flash banner). Not bound to
+      // component lifecycle in a way useTimeout can express cleanly without
+      // adding an extra effect+state pair just to time-out a banner.
+      // eslint-disable-next-line no-restricted-syntax -- one-shot timer scheduled from event handler / callback
       setTimeout(() => setFlash(null), 4000);
     },
     [],

@@ -164,6 +164,7 @@ export default function FGScanPage() {
         saveRecent(next);
         setSerial("");
         // Keep action + worker, refocus for next scan.
+        // eslint-disable-next-line no-restricted-syntax -- 30ms next-tick refocus inside scan-submit event handler
         setTimeout(() => inputRef.current?.focus(), 30);
       } else {
         const message = data?.error || "Scan failed.";

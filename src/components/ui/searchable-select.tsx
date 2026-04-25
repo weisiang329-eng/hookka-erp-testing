@@ -80,6 +80,9 @@ export const SearchableSelect: React.FC<SearchableSelectProps> = ({
       const idx = options.findIndex((o) => o.value === value);
       setHighlight(idx >= 0 ? idx : 0);
       // Defer focus so the click that opens doesn't race the blur.
+      // Microtask-style 0ms defer; useTimeout is overkill here (and would
+      // add an extra render-cycle dependency on `open`).
+      // eslint-disable-next-line no-restricted-syntax -- 0ms next-tick defer for focus race-condition
       setTimeout(() => inputRef.current?.focus(), 0);
     }
   }, [open, options, value]);

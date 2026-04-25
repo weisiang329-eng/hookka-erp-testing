@@ -38,9 +38,10 @@ jobs:
 
       - run: npm test
 
-      # Strict build: runs `typecheck:app && vite build`. Flipping `build` ->
-      # `build:strict` here is the Phase B.2 typecheck gate — TS errors now
-      # block deploy. Tracked as P1.6 in docs/UPGRADE-CONTROL-BOARD.md.
+      # Strict build: runs `typecheck:app && vite build`. The typecheck gate
+      # is BLOCKING — any TS error fails the deploy. Paired with `strict: true`
+      # in tsconfig.app.json (TS.E), this is the graduated form of P1.6 in
+      # docs/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
       - run: npm run build:strict
 
       # Deploy to Cloudflare Pages — only on push events. PRs just exercise

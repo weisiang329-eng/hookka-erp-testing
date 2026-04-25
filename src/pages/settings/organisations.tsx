@@ -99,6 +99,8 @@ export default function OrganisationsPage() {
 
   const flash = (msg: string) => {
     setSaveMsg(msg);
+    // Fire-and-forget banner clear scheduled from event handler (Save click).
+    // eslint-disable-next-line no-restricted-syntax -- one-shot banner timer from event handler
     setTimeout(() => setSaveMsg(null), 3000);
   };
 

@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -139,6 +140,9 @@ function nextCNNo(): string {
 
 // GET /api/credit-notes — list all
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — credit-notes:read.
+  const denied = await requirePermission(c, "credit-notes", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM credit_notes ORDER BY date DESC",
   ).all<CreditNoteRow>();
@@ -148,6 +152,9 @@ app.get("/", async (c) => {
 
 // POST /api/credit-notes — create
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — credit-notes:create.
+  const denied = await requirePermission(c, "credit-notes", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { invoiceId, reason, reasonDetail, items } = body;
@@ -270,6 +277,8 @@ app.post("/", async (c) => {
 
 // GET /api/credit-notes/:id — single
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "credit-notes", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const row = await c.var.DB.prepare(
     "SELECT * FROM credit_notes WHERE id = ?",
@@ -291,6 +300,9 @@ app.get("/:id", async (c) => {
 // cascade again. Idempotent: repeated PUTs with the same status are a
 // no-op beyond the status/approvedBy column update.
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — credit-notes:update.
+  const denied = await requirePermission(c, "credit-notes", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

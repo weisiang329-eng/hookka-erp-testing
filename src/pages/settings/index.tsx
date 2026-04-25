@@ -253,6 +253,8 @@ export default function SettingsPage() {
 
   const flash = useCallback(() => {
     setShowToast(true);
+    // Fire-and-forget toast hide; called from save-button click handler.
+    // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
     setTimeout(() => setShowToast(false), 2000);
   }, []);
 

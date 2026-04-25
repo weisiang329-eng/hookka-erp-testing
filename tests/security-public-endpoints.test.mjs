@@ -25,10 +25,6 @@ const EXPECTED_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/accept-invite",
-  // Phase C.6 — TOTP step-2 of password login. Caller already proved
-  // password possession; this verifies the second factor before issuing
-  // the bearer. No bearer yet, hence public.
-  "/api/auth/totp/login-verify",
   "/api/health",
 ];
 
@@ -36,10 +32,6 @@ const EXPECTED_PREFIXES = [
   "/api/worker-auth/",
   "/api/worker/",
   "/api/auth/invite/",
-  // Phase B.3 — Google Workspace OAuth handshake. /start mints CSRF state
-  // and 302's to Google; /callback consumes Google's redirect and issues
-  // a session. Both are pre-auth by definition.
-  "/api/auth/oauth/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

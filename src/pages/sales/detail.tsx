@@ -298,6 +298,8 @@ export default function SalesOrderDetailPage() {
       setOrder(data.data);
       setConfirmSuccess(data.message);
       fetchOrder();
+      // Fire-and-forget banner clear scheduled from confirm action callback.
+      // eslint-disable-next-line no-restricted-syntax -- one-shot banner timer from event handler
       setTimeout(() => setConfirmSuccess(null), 5000);
     } else {
       toast.error(data.error || "Failed to confirm order");

@@ -366,7 +366,8 @@ export default function ConsignmentNotePage() {
   const handleTransferToDO = async () => {
     if (!transferDORow) return;
     setTransferDOLoading(true);
-    // Simulate a short delay for UX
+    // Simulate a short delay for UX inside an async event handler.
+    // eslint-disable-next-line no-restricted-syntax -- UX pacing delay inside async event handler
     await new Promise((r) => setTimeout(r, 600));
     setTransferDOLoading(false);
     setTransferDORow(null);

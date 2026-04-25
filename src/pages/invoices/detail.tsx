@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
+import { useTimeout } from "@/lib/scheduler";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -66,13 +67,8 @@ export default function InvoiceDetailPage() {
   // Toast state
   const [toast, setToast] = useState<string | null>(null);
 
-  // Auto-dismiss toast
-  useEffect(() => {
-    if (toast) {
-      const timer = setTimeout(() => setToast(null), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [toast]);
+  // Auto-dismiss toast — `null` disables the timer when no toast is showing.
+  useTimeout(() => setToast(null), toast ? 3000 : null);
 
   const sendInvoice = async () => {
     if (!invoice) return;

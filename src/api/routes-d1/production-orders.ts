@@ -723,10 +723,20 @@ async function applyWipInventoryChange(
   // consume. UPH has its own consume-all-upstream logic in the COMPLETED
   // branch below.
   if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
-    if (isSofa && poRow.salesOrderId && poRow.fabricCode) {
+    if (isSofa && isFabSew && poRow.salesOrderId && poRow.fabricCode) {
       // Sofa Fab Sew — the whole (SO, fabric) bolt leaves Fab Cut's shelf
       // the moment ANY piece enters sewing. Zero every upstream FAB_CUT
       // wip_items row in that group.
+      //
+      // GATING: this fires ONLY for FAB_SEW.  The previous condition was
+      // `if (isSofa && ...)` without the dept check, which meant every
+      // sofa dept transition (FOAM, FRAMING, WEBBING, PACKING) wrongly
+      // zeroed every FAB_CUT wip_item in the (SO, fabric) bucket.  Per
+      // BOM:
+      //   sofa FAB_SEW upstream = FAB_CUT  (this branch)
+      //   sofa FOAM    upstream = WEBBING  (wipKey-prev branch below)
+      //   sofa FRAMING upstream = WOOD_CUT (wipKey-prev branch below)
+      //   sofa WEBBING upstream = FRAMING  (wipKey-prev branch below)
       const siblingLabels = await db
         .prepare(
           `SELECT DISTINCT jc.wipLabel AS "wipLabel"

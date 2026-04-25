@@ -590,6 +590,8 @@ app.post("/", async (c) => {
 
 // GET /api/invoices/:id — single
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
   const inv = await fetchInvoiceWithChildren(c.var.DB, c.req.param("id"));
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
@@ -599,6 +601,12 @@ app.get("/:id", async (c) => {
 
 // PUT /api/invoices/:id — update (status transitions, payments, fields)
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — base permission is invoices:update.
+  // Sensitive transitions get additional row-level checks below:
+  //   • DRAFT → SENT  (the "post" action)        ⇒ invoices:post
+  //   • *     → CANCELLED  (the "void" action)   ⇒ invoices:void
+  const baseDenied = await requirePermission(c, "invoices", "update");
+  if (baseDenied) return baseDenied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -627,6 +635,16 @@ app.put("/:id", async (c) => {
         );
       }
       nextStatus = body.status;
+
+      // Row-level RBAC for the high-impact post/void transitions.
+      if (existing.status === "DRAFT" && nextStatus === "SENT") {
+        const denied = await requirePermission(c, "invoices", "post");
+        if (denied) return denied;
+      }
+      if (nextStatus === "CANCELLED" && existing.status !== "CANCELLED") {
+        const denied = await requirePermission(c, "invoices", "void");
+        if (denied) return denied;
+      }
     }
 
     // --- handle payment delta (old impl pushed one InvoicePayment per delta) ---
@@ -868,6 +886,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/invoices/:id — only DRAFT. Cascades via FK to items + payments.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "invoices", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT id, status FROM invoices WHERE id = ?",

@@ -22,7 +22,11 @@
     "db:migrate:local": "wrangler d1 migrations apply hookka-erp-db --local",
     "db:migrate:remote": "wrangler d1 migrations apply hookka-erp-db --remote",
     "db:seed:local": "wrangler d1 execute hookka-erp-db --local --file=./scripts/seed.sql",
-    "db:studio": "wrangler d1 execute hookka-erp-db --local --command=\"SELECT name FROM sqlite_master WHERE type='table'\""
+    "db:studio": "wrangler d1 execute hookka-erp-db --local --command=\"SELECT name FROM sqlite_master WHERE type='table'\"",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{ts,tsx}": "eslint"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.14",
@@ -66,6 +70,8 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.4.0",
     "tsconfig-paths": "^4.2.0",
     "tsx": "^4.21.0",
     "typescript": "~6.0.2",

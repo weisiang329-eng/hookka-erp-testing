@@ -14,6 +14,7 @@ import React, {
   useCallback,
   useMemo,
 } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
 
@@ -76,6 +77,13 @@ export type DataGridProps<T> = {
   // parent mirror the grid's internal filter state — e.g. to scope a
   // "Print" action or a QR-sticker row to exactly what the user sees.
   onFilteredDataChange?: (rows: T[]) => void;
+  // Opt-in row virtualization (windowed rendering via @tanstack/react-virtual).
+  // Off by default to keep the table-layout-driven column widths working for
+  // small grids; turn on for large data sets (~500+ rows) where the DOM
+  // node count is the dominant cost. When `groupBy` + `groupEnabled` are
+  // active, virtualization is automatically skipped because group headers
+  // and per-group collapse make a single linear-list virtualizer awkward.
+  virtualize?: boolean;
 };
 
 type SavedView = {
@@ -710,6 +718,7 @@ export function DataGrid<T extends Record<string, any>>({
   groupBy,
   viewStorageKey,
   onFilteredDataChange,
+  virtualize = false,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(() => {
@@ -1028,6 +1037,21 @@ export function DataGrid<T extends Record<string, any>>({
     return result;
   }, [filteredData, sortKey, sortDir, groupBy, groupEnabled, groupFilter]);
 
+  // ── Virtualization ──
+  // Only enable when explicitly opted-in AND no group headers are interleaved
+  // (collapsing groups would require a separate flat-index → row-or-header
+  // model that's not worth the complexity for v1). When disabled, the
+  // virtualizer still mounts but its result is ignored — keeping hook order
+  // stable across renders is non-negotiable.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizationActive = virtualize && !(groupBy && groupEnabled);
+  const rowVirtualizer = useVirtualizer({
+    count: virtualizationActive ? sortedData.length : 0,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 26, // matches the inline row height set on each <td>
+    overscan: 8,
+  });
+
   // ── Handlers ──
   const handleSort = useCallback((col: Column<T>) => {
     if (col.sortable === false) return;
@@ -1334,6 +1358,7 @@ export function DataGrid<T extends Record<string, any>>({
 
       {/* Table */}
       <div
+        ref={scrollRef}
         className="overflow-auto border border-[#E2DDD8] rounded-b"
         style={{ maxHeight: maxHeight || "calc(100vh - 240px)" }}
       >
@@ -1440,49 +1465,14 @@ export function DataGrid<T extends Record<string, any>>({
               </tr>
             ) : (
               (() => {
-                const rows: React.ReactNode[] = [];
-                let lastGroup: string | null = null;
-                // Pre-compute group counts if groupBy is set and enabled
-                const groupCounts = new Map<string, number>();
-                if (groupBy && groupEnabled) {
-                  for (const row of sortedData) {
-                    const gv = String(getNestedValue(row, groupBy) ?? "—");
-                    groupCounts.set(gv, (groupCounts.get(gv) ?? 0) + 1);
-                  }
-                }
-
-                sortedData.forEach((row, index) => {
-                  // Group header
-                  if (groupBy && groupEnabled) {
-                    const gv = String(getNestedValue(row, groupBy) ?? "—");
-                    if (gv !== lastGroup) {
-                      lastGroup = gv;
-                      const isCollapsed = collapsedGroups.has(gv);
-                      rows.push(
-                        <tr
-                          key={`__group__${gv}`}
-                          className="bg-[#E8E4DF] border-b border-[#D0CCC7] cursor-pointer hover:bg-[#DDD8D2] select-none"
-                          onClick={() => toggleGroupCollapse(gv)}
-                        >
-                          <td
-                            colSpan={visibleColumns.length + (selectable ? 1 : 0)}
-                            className="px-3 py-1.5 text-[11px] font-bold text-[#4A4540]"
-                          >
-                            <span className="inline-block w-3 text-[9px] mr-1">{isCollapsed ? "▶" : "▼"}</span>
-                            {gv} <span className="font-normal text-[#888] ml-1">({groupCounts.get(gv) ?? 0})</span>
-                          </td>
-                        </tr>
-                      );
-                    }
-                    // Skip rows in collapsed groups
-                    if (collapsedGroups.has(gv)) return;
-                  }
-
+                // Renders one data row. Extracted so both the legacy
+                // render-all-rows path and the virtualized windowed path
+                // share identical markup / handlers.
+                const renderDataRow = (row: T, index: number) => {
                   const key = String(getNestedValue(row, keyField));
                   const isSelected = selectedKeys.has(key);
                   const isEven = index % 2 === 1;
-
-                  rows.push(
+                  return (
                     <tr
                       key={key}
                       className={cn(
@@ -1534,6 +1524,86 @@ export function DataGrid<T extends Record<string, any>>({
                       })}
                     </tr>
                   );
+                };
+
+                // ── Virtualized path ──
+                // Two spacer <tr>s (top/bottom) hold the height of the
+                // off-screen rows so the scroll-container's scrollHeight
+                // and per-pixel offsets match what they'd be if all rows
+                // were rendered. Only `visible.length + 2` <tr> nodes
+                // exist in the DOM at any time. Note that grouping is
+                // disabled in this path (virtualizationActive guards it).
+                if (virtualizationActive) {
+                  const virtualItems = rowVirtualizer.getVirtualItems();
+                  const totalSize = rowVirtualizer.getTotalSize();
+                  const colSpan = visibleColumns.length + (selectable ? 1 : 0);
+                  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+                  const paddingBottom =
+                    virtualItems.length > 0
+                      ? totalSize - virtualItems[virtualItems.length - 1].end
+                      : 0;
+                  const out: React.ReactNode[] = [];
+                  if (paddingTop > 0) {
+                    out.push(
+                      <tr key="__virt_top__" aria-hidden="true">
+                        <td colSpan={colSpan} style={{ height: `${paddingTop}px`, padding: 0, border: 0 }} />
+                      </tr>
+                    );
+                  }
+                  for (const v of virtualItems) {
+                    const row = sortedData[v.index];
+                    if (row) out.push(renderDataRow(row, v.index));
+                  }
+                  if (paddingBottom > 0) {
+                    out.push(
+                      <tr key="__virt_bot__" aria-hidden="true">
+                        <td colSpan={colSpan} style={{ height: `${paddingBottom}px`, padding: 0, border: 0 }} />
+                      </tr>
+                    );
+                  }
+                  return out;
+                }
+
+                // ── Legacy / grouped path (renders every row) ──
+                const rows: React.ReactNode[] = [];
+                let lastGroup: string | null = null;
+                // Pre-compute group counts if groupBy is set and enabled
+                const groupCounts = new Map<string, number>();
+                if (groupBy && groupEnabled) {
+                  for (const row of sortedData) {
+                    const gv = String(getNestedValue(row, groupBy) ?? "—");
+                    groupCounts.set(gv, (groupCounts.get(gv) ?? 0) + 1);
+                  }
+                }
+
+                sortedData.forEach((row, index) => {
+                  // Group header
+                  if (groupBy && groupEnabled) {
+                    const gv = String(getNestedValue(row, groupBy) ?? "—");
+                    if (gv !== lastGroup) {
+                      lastGroup = gv;
+                      const isCollapsed = collapsedGroups.has(gv);
+                      rows.push(
+                        <tr
+                          key={`__group__${gv}`}
+                          className="bg-[#E8E4DF] border-b border-[#D0CCC7] cursor-pointer hover:bg-[#DDD8D2] select-none"
+                          onClick={() => toggleGroupCollapse(gv)}
+                        >
+                          <td
+                            colSpan={visibleColumns.length + (selectable ? 1 : 0)}
+                            className="px-3 py-1.5 text-[11px] font-bold text-[#4A4540]"
+                          >
+                            <span className="inline-block w-3 text-[9px] mr-1">{isCollapsed ? "▶" : "▼"}</span>
+                            {gv} <span className="font-normal text-[#888] ml-1">({groupCounts.get(gv) ?? 0})</span>
+                          </td>
+                        </tr>
+                      );
+                    }
+                    // Skip rows in collapsed groups
+                    if (collapsedGroups.has(gv)) return;
+                  }
+
+                  rows.push(renderDataRow(row, index));
                 });
                 return rows;
               })()

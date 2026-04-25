@@ -2818,6 +2818,11 @@ export default function ProductionPage({
             onDoubleClick={(row) => navigate(row.salesOrderId ? `/sales/${row.salesOrderId}` : `/production/${row.poId}`)}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
+            // Fab Sew dept routinely renders 1,200+ rows; without
+            // windowing this contributed to ~383k DOM elements + ~525MB
+            // heap on the live perf test (2026-04-25). Virtualization
+            // keeps only ~30 visible rows + overscan in the live DOM.
+            virtualize
             // ON_HOLD → amber background; CANCELLED → grey + strikethrough.
             // rowClassName appends onto the grid's default row class so alt-row
             // striping still works when no lifecycle class applies.

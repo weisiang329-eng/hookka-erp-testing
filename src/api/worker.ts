@@ -51,9 +51,12 @@ export type Env = {
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
-  // code keeps its D1 type surface without any `any` casts.
+  // code keeps its D1 type surface without any `any` casts.  dbTimer is the
+  // per-request DB-time aggregator created by timingMiddleware and consumed
+  // by instrumentD1 (see lib/observability.ts).
   Variables: {
     DB: D1Database;
+    dbTimer: import("./lib/observability").DbTimer;
   };
 };
 
@@ -94,7 +97,8 @@ app.use("/api/*", async (c, next) => {
   const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
   const adapter = new D1Compat(getSql(url)) as unknown as D1Database;
-  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname));
+  const timer = c.get("dbTimer"); // set by timingMiddleware
+  c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname, timer));
   await next();
 });
 

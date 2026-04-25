@@ -16,6 +16,13 @@ import type { Context, Next } from "hono";
 export const SLOW_REQUEST_MS = 200;
 export const SLOW_QUERY_MS = 100;
 
+// Per-request DB time aggregator. timingMiddleware creates one and stashes it
+// on the context; instrumentD1 receives a reference and accumulates query
+// durations into it so the Server-Timing header can emit a `db` entry alongside
+// `app`. count is the number of DB ops (prepare-then-{all,first,run,raw} or
+// batch) — handy as the `desc` in DevTools so you can spot N+1s at a glance.
+export type DbTimer = { total: number; count: number };
+
 // Hono middleware — times every request. Emits a [req] line for every call,
 // upgrades to [slow-req] over SLOW_REQUEST_MS so you can grep, and writes a
 // `Server-Timing` response header so Chrome/Firefox DevTools render the
@@ -23,13 +30,18 @@ export const SLOW_QUERY_MS = 100;
 // needed for "where is the page loading slow" inspection).
 //
 // Server-Timing format (RFC 8673):
-//   Server-Timing: app;dur=312, db;dur=248
-// We emit a single `app` entry covering total handler time, plus a `cf-pop`
-// hint when the colo header is present so the user can confirm the request
-// hit a SEA edge.  D1/SQL timing is logged via instrumentD1 above; once a
-// per-request aggregator is wired here we can add a `db` entry too.
+//   Server-Timing: app;dur=312, db;dur=248;desc="14 queries"
+// We emit an `app` entry covering total handler time, a `db` entry covering
+// time spent inside instrumented D1 calls (the count of queries doubles as
+// the desc — useful for spotting N+1s in DevTools without opening
+// `wrangler tail`), and a `cf-country` hint when the colo header is present.
 export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   const start = Date.now();
+  // Per-request DB-time aggregator. The DB-injection middleware (worker.ts)
+  // grabs this with c.get("dbTimer") and threads it into instrumentD1 so
+  // every .all/.first/.run/.raw/.batch credits its duration here.
+  const dbTimer: DbTimer = { total: 0, count: 0 };
+  c.set("dbTimer", dbTimer);
   await next();
   const dur = Date.now() - start;
   const path = new URL(c.req.url).pathname;
@@ -45,6 +57,9 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   try {
     const colo = c.req.header("cf-ipcountry") ?? "";
     const parts = [`app;dur=${dur}`];
+    if (dbTimer.count > 0) {
+      parts.push(`db;dur=${dbTimer.total};desc="${dbTimer.count} queries"`);
+    }
     if (colo) parts.push(`cf-country;desc="${colo}"`);
     c.res.headers.set("Server-Timing", parts.join(", "));
   } catch { /* ignore */ }
@@ -52,16 +67,18 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
 
 // Wrap a D1Database (or Postgres-compat D1Compat) so every
 // .prepare().all()/first()/run() logs when slow.  Drop-in replacement —
-//   const db = instrumentD1(c.var.DB, c.req.url)
-// Generic preserves the concrete DB type for the caller.
-export function instrumentD1<T extends object>(db: T, routeLabel: string): T {
+//   const db = instrumentD1(c.var.DB, c.req.url, c.get("dbTimer"))
+// Generic preserves the concrete DB type for the caller.  When `timer` is
+// supplied, every wrapped call accumulates its duration into it so
+// timingMiddleware can emit a Server-Timing `db` entry.
+export function instrumentD1<T extends object>(db: T, routeLabel: string, timer?: DbTimer): T {
   return new Proxy(db, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);
       if (prop === "prepare" && typeof orig === "function") {
         return (sql: string) => {
           const stmt = orig.call(target, sql);
-          return wrapStatement(stmt, sql, routeLabel);
+          return wrapStatement(stmt, sql, routeLabel, timer);
         };
       }
       if (prop === "batch" && typeof orig === "function") {
@@ -69,6 +86,10 @@ export function instrumentD1<T extends object>(db: T, routeLabel: string): T {
           const start = Date.now();
           const res = await orig.call(target, statements);
           const dur = Date.now() - start;
+          if (timer) {
+            timer.total += dur;
+            timer.count += 1;
+          }
           if (dur >= SLOW_QUERY_MS) {
             console.warn(
               `[slow-query] route=${routeLabel} op=batch count=${statements.length} dur_ms=${dur}`,
@@ -82,19 +103,24 @@ export function instrumentD1<T extends object>(db: T, routeLabel: string): T {
   }) as T;
 }
 
-function wrapStatement(stmt: object, sql: string, routeLabel: string): object {
+function wrapStatement(stmt: object, sql: string, routeLabel: string, timer?: DbTimer): object {
   return new Proxy(stmt, {
     get(target, prop, receiver) {
       const orig = Reflect.get(target, prop, receiver);
-      // .bind(...) returns a new statement; keep wrapping.
+      // .bind(...) returns a new statement; keep wrapping (and keep threading
+      // the timer through so chained .bind(...).all() still accumulates).
       if (prop === "bind" && typeof orig === "function") {
-        return (...args: unknown[]) => wrapStatement(orig.apply(target, args), sql, routeLabel);
+        return (...args: unknown[]) => wrapStatement(orig.apply(target, args), sql, routeLabel, timer);
       }
       if ((prop === "all" || prop === "first" || prop === "run" || prop === "raw") && typeof orig === "function") {
         return async (...args: unknown[]) => {
           const start = Date.now();
           const res = await orig.apply(target, args);
           const dur = Date.now() - start;
+          if (timer) {
+            timer.total += dur;
+            timer.count += 1;
+          }
           if (dur >= SLOW_QUERY_MS) {
             // Meta.rows_read is available on D1Result; log if present.
             const meta = (res as { meta?: { rows_read?: number; rows_written?: number } } | undefined)?.meta;

@@ -787,11 +787,15 @@ async function applyWipInventoryChange(
 
   if (newStatus === "COMPLETED" || newStatus === "TRANSFERRED") {
     if (isUpholstery) {
-      // UPH completion: consume every earlier-dept WIP row in the same
-      // wipKey chain. We zero stockQty and mark status=IN_PRODUCTION so
-      // the board stops counting it as available WIP. FG presence is
-      // derived downstream from PO.jobCards[UPH].allCompleted — nothing
-      // to insert here.
+      // UPH completion semantics (per user's accounting model):
+      //   1. SUBTRACT wipQty from each upstream wipKey sibling's stockQty
+      //      (was "zero out the lot" — wrong when the wip_items row covers
+      //      a higher cumulative qty than this UPH wave: e.g., Fab Sew has
+      //      13 in stock, this UPH consumed 7, the remaining 6 should
+      //      stay visible, not zero).
+      //   2. Upsert UPH's OWN wip_items row so the inventory board shows
+      //      "completed-by-Upholstery" stock until Packing picks it up.
+      const consumeQty = jcRow.wipQty || poRow.quantity || 1;
       if (wipKey) {
         const upstreamLabels = new Set<string>();
         for (const j of allJcRows) {
@@ -806,9 +810,47 @@ async function applyWipInventoryChange(
         for (const label of upstreamLabels) {
           await db
             .prepare(
-              "UPDATE wip_items SET stockQty = 0, status = 'IN_PRODUCTION' WHERE code = ?",
+              "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
             )
-            .bind(label)
+            .bind(consumeQty, label)
+            .run();
+        }
+      }
+      // Add UPH's own wip_items row (treat UPH like every other producer
+      // dept).  Prior code skipped this and left FG derivation to the
+      // frontend — but the user wants visible per-dept WIP rows, and the
+      // upsert is idempotent so multiple UPH JCs in the same wipKey
+      // accumulate correctly.
+      if (wipLabel) {
+        const existingUph = await db
+          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
+          .bind(wipLabel)
+          .first<{ id: string; stockQty: number }>();
+        if (existingUph) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = ?, deptStatus = ?, status = 'COMPLETED' WHERE id = ?",
+            )
+            .bind(
+              (existingUph.stockQty || 0) + consumeQty,
+              "UPHOLSTERY",
+              existingUph.id,
+            )
+            .run();
+        } else {
+          await db
+            .prepare(
+              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED')`,
+            )
+            .bind(
+              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+              wipLabel,
+              shortType,
+              poRow.productCode ?? "",
+              "UPHOLSTERY",
+              consumeQty,
+            )
             .run();
         }
       }

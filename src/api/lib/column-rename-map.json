@@ -401,6 +401,7 @@
   "openingValue": "opening_value",
   "orderDate": "order_date",
   "orderedQty": "ordered_qty",
+  "orgId": "org_id",
   "originalPrice": "original_price",
   "originalQty": "original_qty",
   "otAmountSen": "ot_amount_sen",

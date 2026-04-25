@@ -194,6 +194,13 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
 // MUST be registered BEFORE any route that touches business data.
 app.use("/api/*", authMiddleware);
 
+// Phase C #1 quick-win — resolves the authenticated user's orgId and stashes
+// it on the Hono context. Routes consume via getOrgId(c) / withOrgScope(c, ...)
+// from src/api/lib/tenant.ts. Runs AFTER authMiddleware so c.get('userId')
+// is populated; bypasses public paths automatically (no userId → defaults
+// to 'hookka').
+app.use("/api/*", tenantMiddleware);
+
 // ---------------------------------------------------------------------------
 // Auth-gated routes (registered AFTER authMiddleware)
 // ---------------------------------------------------------------------------
@@ -282,6 +289,7 @@ import admin from "./routes-d1/admin";
 // Phase 6 — job_card_events audit log read endpoint.
 import jobCards from "./routes-d1/job-cards";
 import { authMiddleware } from "./lib/auth-middleware";
+import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
 
 // Phase 5 — mock-backed routes mounted until each is migrated to D1.

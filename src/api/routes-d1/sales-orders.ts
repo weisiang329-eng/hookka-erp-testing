@@ -27,6 +27,7 @@ import {
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
 import { resolveCustomerPrice, resolveCustomerPriceAsOf } from "./customer-products";
+import { withOrgScope } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -1254,6 +1255,19 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
 //     the UNION column lists line up, then drop the extra column in the
 //     row mapper.
 // ---------------------------------------------------------------------------
+// GET /api/sales-orders — list (and optional archive view) of SOs.
+//
+// Phase C #1 quick-win: scoped to the active orgId via withOrgScope().
+// THIS IS THE PATTERN the rest of the routes will follow as the multi-tenant
+// rollout continues — see src/api/lib/tenant.ts:
+//
+//   const { whereSql, params } = withOrgScope(c, "<table>", "<extra-where>");
+//   db.prepare(`SELECT * FROM <table> ${whereSql} ORDER BY ...`)
+//     .bind(...params, ...other-binds);
+//
+// The orgId column was added in migration 0049 with a default of 'hookka',
+// so this filter is a no-op in single-tenant mode but enforces isolation
+// the moment a second tenant is seeded.
 app.get("/", async (c) => {
   const db = c.var.DB;
   const pageParam = c.req.query("page");
@@ -1277,10 +1291,21 @@ app.get("/", async (c) => {
         SELECT * FROM sales_order_items_archive)`
     : "sales_order_items";
 
+  // Tenant scope — first bind param on every query against soSourceSql.
+  // Items are scoped transitively via salesOrderId IN (...) so they don't
+  // need their own orgId filter (the archive table doesn't have orgId yet).
+  const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+    c,
+    "sales_orders",
+  );
+
   if (!paginate) {
     const [sos, items] = await Promise.all([
       db
-        .prepare(`SELECT * FROM ${soSourceSql} ORDER BY created_at DESC, id DESC`)
+        .prepare(
+          `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC`,
+        )
+        .bind(...orgParams)
         .all<SalesOrderRow>(),
       db.prepare(`SELECT * FROM ${itemsSourceSql}`).all<SalesOrderItemRow>(),
     ]);
@@ -1296,12 +1321,15 @@ app.get("/", async (c) => {
   const offset = (page - 1) * limit;
 
   const [countRes, pageRes] = await Promise.all([
-    db.prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql}`).first<{ n: number }>(),
+    db
+      .prepare(`SELECT COUNT(*) AS n FROM ${soSourceSql} ${orgWhere}`)
+      .bind(...orgParams)
+      .first<{ n: number }>(),
     db
       .prepare(
-        `SELECT * FROM ${soSourceSql} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+        `SELECT * FROM ${soSourceSql} ${orgWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
       )
-      .bind(limit, offset)
+      .bind(...orgParams, limit, offset)
       .all<SalesOrderRow>(),
   ]);
   const total = countRes?.n ?? 0;

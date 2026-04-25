@@ -288,6 +288,8 @@ import kvConfig from "./routes-d1/kv-config";
 import admin from "./routes-d1/admin";
 // Phase 6 — job_card_events audit log read endpoint.
 import jobCards from "./routes-d1/job-cards";
+// Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
+import dashboardRevenue from "./routes-d1/dashboard-revenue";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
@@ -371,6 +373,10 @@ app.route("/api/admin", admin);
 // Phase 6 — job_card_events read surface. Only /:id/events for now;
 // future PATCH/DELETE audit screens can mount here.
 app.route("/api/job-cards", jobCards);
+// Phase C #5 quick-win — revenue chart from mv_revenue_by_month_by_org.
+// MUST be mounted BEFORE the catch-all /api/* stub at the bottom and
+// AFTER authMiddleware so the orgId scope is in place.
+app.route("/api/dashboard/revenue", dashboardRevenue);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

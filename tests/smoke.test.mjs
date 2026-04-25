@@ -33,3 +33,26 @@ test('npm scripts include test/build/typecheck/lint', () => {
   assert.equal(typeof pkg.scripts.typecheck, 'string');
   assert.equal(typeof pkg.scripts.lint, 'string');
 });
+
+test('router lazy pages are wrapped in Suspense loading fallback', () => {
+  const router = read('src/router.tsx');
+  assert.match(router, /function PageLoading\(\)/);
+  assert.match(router, /Loading\.\.\./);
+  assert.match(router, /<Suspense fallback={<PageLoading \/>}>{children}<\/Suspense>/);
+});
+
+test('worker login has explicit loading phase UX on submit buttons', () => {
+  const workerLogin = read('src/pages/worker/login.tsx');
+  assert.match(workerLogin, /const \[loading, setLoading\] = useState\(false\)/);
+  assert.match(workerLogin, /<button type="submit" disabled={loading} className={btnPrimary}>/);
+  assert.match(workerLogin, /loading \? t\("common\.loading"\)/);
+});
+
+test('deploy workflow runs tests before build', () => {
+  const deployWorkflow = read('.github/workflows/deploy.yml');
+  const testStep = deployWorkflow.indexOf('- run: npm test');
+  const buildStep = deployWorkflow.indexOf('- run: npm run build');
+  assert.ok(testStep > -1, 'npm test step should exist');
+  assert.ok(buildStep > -1, 'npm run build step should exist');
+  assert.ok(testStep < buildStep, 'npm test should run before npm run build');
+});

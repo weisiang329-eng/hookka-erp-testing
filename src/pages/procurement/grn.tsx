@@ -25,6 +25,12 @@ import {
   DollarSign,
 } from "lucide-react";
 
+function readErrorMessage(v: unknown): string | null {
+  if (!v || typeof v !== "object") return null;
+  const err = (v as { error?: unknown }).error;
+  return typeof err === "string" ? err : null;
+}
+
 // ============================================================
 // GRN FORM DIALOG (Transfer from PO)
 // ============================================================
@@ -257,7 +263,7 @@ export default function GRNPage() {
         setShowForm(false);
       } else {
         const err = await res.json();
-        toast.error(err.error || "Failed to create GRN");
+        toast.error(readErrorMessage(err) || "Failed to create GRN");
       }
     } catch {
       toast.error("Failed to create GRN");

@@ -29,8 +29,6 @@
 //   environment that hasn't yet provisioned the queue.
 // ---------------------------------------------------------------------------
 
-import type { Env } from "../worker";
-
 export interface PoEmissionMessage {
   /** PO row id in production_orders. */
   poId: string;
@@ -75,7 +73,7 @@ type QueueProducer = {
  * path ran without changing their control flow.
  */
 export async function enqueuePoEmission(
-  env: Env["Bindings"] & { PO_EMISSION_QUEUE?: QueueProducer },
+  env: { PO_EMISSION_QUEUE?: QueueProducer },
   args: Omit<PoEmissionMessage, "enqueuedAt"> & { enqueuedAt?: string },
 ): Promise<{ via: "queue" | "inline"; reason?: string }> {
   const message: PoEmissionMessage = {

@@ -11,6 +11,11 @@ import {
   X,
 } from "lucide-react";
 import type { PaymentRecord, Invoice } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { PaymentSchema } from "@/lib/schemas/invoice";
+
+const PaymentMutationSchema = mutationWithData(PaymentSchema);
 
 type CustomerOption = {
   id: string;
@@ -86,28 +91,30 @@ export default function PaymentsPage() {
   const handleCreate = async () => {
     if (!selectedCustomerId || amount <= 0) return;
     setCreating(true);
-    const res = await fetch("/api/payments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        customerId: selectedCustomerId,
-        amount,
-        method,
-        reference,
-        allocations,
-      }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      setShowCreateModal(false);
-      setSelectedCustomerId("");
-      setAmount(0);
-      setMethod("BANK_TRANSFER");
-      setReference("");
-      setAllocations([]);
-      invalidateCachePrefix("/api/payments");
-      invalidateCachePrefix("/api/invoices");
-      refreshPayments();
+    try {
+      const data = await fetchJson("/api/payments", PaymentMutationSchema, {
+        method: "POST",
+        body: {
+          customerId: selectedCustomerId,
+          amount,
+          method,
+          reference,
+          allocations,
+        },
+      });
+      if (data.success) {
+        setShowCreateModal(false);
+        setSelectedCustomerId("");
+        setAmount(0);
+        setMethod("BANK_TRANSFER");
+        setReference("");
+        setAllocations([]);
+        invalidateCachePrefix("/api/payments");
+        invalidateCachePrefix("/api/invoices");
+        refreshPayments();
+      }
+    } catch {
+      // ignore
     }
     setCreating(false);
   };

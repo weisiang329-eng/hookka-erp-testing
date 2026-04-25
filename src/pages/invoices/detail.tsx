@@ -22,6 +22,11 @@ import {
 } from "lucide-react";
 import { generateInvoicePdf } from "@/lib/generate-invoice-pdf";
 import type { Invoice } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { InvoiceSchema } from "@/lib/schemas/invoice";
+
+const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
 const PAYMENT_METHODS = [
   { value: "BANK_TRANSFER", label: "Bank Transfer" },
@@ -72,18 +77,20 @@ export default function InvoiceDetailPage() {
   const sendInvoice = async () => {
     if (!invoice) return;
     setUpdating(true);
-    const res = await fetch(`/api/invoices/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: "SENT" }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      // Only this invoice changed. Refresh the list too (status badge).
-      if (id) invalidateCache(`/api/invoices/${id}`);
-      refreshInvoice();
-      refreshAllInvoices();
-      setToast("Invoice sent successfully");
+    try {
+      const data = await fetchJson(`/api/invoices/${id}`, InvoiceMutationSchema, {
+        method: "PUT",
+        body: { status: "SENT" },
+      });
+      if (data.success) {
+        // Only this invoice changed. Refresh the list too (status badge).
+        if (id) invalidateCache(`/api/invoices/${id}`);
+        refreshInvoice();
+        refreshAllInvoices();
+        setToast("Invoice sent successfully");
+      }
+    } catch {
+      // ignore — UI stays in current state
     }
     setUpdating(false);
   };
@@ -95,28 +102,30 @@ export default function InvoiceDetailPage() {
 
     setUpdating(true);
     const totalPaid = invoice.paidAmount + amountSen;
-    const res = await fetch(`/api/invoices/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        paidAmount: totalPaid,
-        paymentMethod,
-        paymentDate,
-        paymentReference,
-      }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      // Recording payment can cascade to SO → CLOSED when all linked invoices
-      // are paid. Conservative: keep SO prefix. DO does not change on payment.
-      if (id) invalidateCache(`/api/invoices/${id}`);
-      invalidateCachePrefix("/api/sales-orders");
-      refreshInvoice();
-      refreshAllInvoices();
-      setShowPayment(false);
-      setPaymentAmount("");
-      setPaymentReference("");
-      setToast("Payment recorded successfully");
+    try {
+      const data = await fetchJson(`/api/invoices/${id}`, InvoiceMutationSchema, {
+        method: "PUT",
+        body: {
+          paidAmount: totalPaid,
+          paymentMethod,
+          paymentDate,
+          paymentReference,
+        },
+      });
+      if (data.success) {
+        // Recording payment can cascade to SO → CLOSED when all linked invoices
+        // are paid. Conservative: keep SO prefix. DO does not change on payment.
+        if (id) invalidateCache(`/api/invoices/${id}`);
+        invalidateCachePrefix("/api/sales-orders");
+        refreshInvoice();
+        refreshAllInvoices();
+        setShowPayment(false);
+        setPaymentAmount("");
+        setPaymentReference("");
+        setToast("Payment recorded successfully");
+      }
+    } catch {
+      // ignore
     }
     setUpdating(false);
   };

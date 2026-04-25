@@ -365,6 +365,43 @@ function genItemId(): string {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// D1 caps prepared-statement bind parameters at 100 per call. The Production
+// page's status-filter result regularly exceeds that (~530 POs in active
+// status), so any `WHERE productionOrderId IN (?,?,...)` query against
+// job_cards / piece_pics has to chunk its bind list. This helper runs the
+// chunks in parallel and concatenates results, preserving order within each
+// chunk (overall order is undefined — callers must sort if they need it).
+async function fetchInChunks<R>(
+  db: D1Database,
+  buildSql: (placeholders: string) => string,
+  ids: string[],
+  extraBindsBefore: unknown[] = [],
+  extraBindsAfter: unknown[] = [],
+  chunkSize = 100,
+): Promise<R[]> {
+  if (ids.length === 0) return [];
+  const chunks: string[][] = [];
+  for (let i = 0; i < ids.length; i += chunkSize) {
+    chunks.push(ids.slice(i, i + chunkSize));
+  }
+  const results = await Promise.all(
+    chunks.map((chunk) => {
+      const placeholders = chunk.map(() => "?").join(",");
+      const sql = buildSql(placeholders);
+      return db
+        .prepare(sql)
+        .bind(...extraBindsBefore, ...chunk, ...extraBindsAfter)
+        .all<R>();
+    }),
+  );
+  const out: R[] = [];
+  for (const r of results) {
+    if (r.results) out.push(...r.results);
+  }
+  return out;
+}
+
 async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
   const [pos, jcs, pics] = await Promise.all([
     db
@@ -462,21 +499,21 @@ async function fetchFilteredPOs(
     if (hasFilter) {
       // Status-filter path: run POs first, then narrow JCs to only the
       // matching POs' productionOrderId set. Avoids a full ~9k-row scan
-      // when the filter shrinks the PO set to a few hundred.
+      // when the filter shrinks the PO set to a few hundred. Bind list
+      // is chunked at 100 (D1 cap) — see fetchInChunks.
       const pos = await poStmt.all<ProductionOrderRow>();
       const poRows = pos.results ?? [];
       if (poRows.length === 0) {
         return [];
       }
       const poIds = poRows.map((p) => p.id);
-      const jcPlaceholders = poIds.map(() => "?").join(",");
-      const jcStmt = db
-        .prepare(
-          `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`,
-        )
-        .bind(...poIds);
-      const jcs = await jcStmt.all<JobCardRow>();
-      return poRows.map((p) => rowToMinimalPO(p, jcs.results ?? []));
+      const jcs = await fetchInChunks<JobCardRow>(
+        db,
+        (placeholders) =>
+          `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${placeholders})`,
+        poIds,
+      );
+      return poRows.map((p) => rowToMinimalPO(p, jcs));
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
     const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
@@ -505,25 +542,23 @@ async function fetchFilteredPOs(
   if (hasFilter) {
     // Status-filter path (full payload): same narrow-by-PO-id trick as the
     // minimal branch. piece_pics stays a full fetch for now (separate task).
+    // Bind list chunked at 100 — see fetchInChunks.
     const pos = await poStmt.all<ProductionOrderRow>();
     const poRows = pos.results ?? [];
     if (poRows.length === 0) {
       return [];
     }
     const poIds = poRows.map((p) => p.id);
-    const jcPlaceholders = poIds.map(() => "?").join(",");
-    const jcStmt = db
-      .prepare(
-        `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`,
-      )
-      .bind(...poIds);
-    const [jcs, pics] = await Promise.all([
-      jcStmt.all<JobCardRow>(),
+    const [jcs, picsRes] = await Promise.all([
+      fetchInChunks<JobCardRow>(
+        db,
+        (placeholders) =>
+          `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${placeholders})`,
+        poIds,
+      ),
       db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
     ]);
-    return poRows.map((p) =>
-      rowToPO(p, jcs.results ?? [], pics.results ?? []),
-    );
+    return poRows.map((p) => rowToPO(p, jcs, picsRes.results ?? []));
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
   const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);

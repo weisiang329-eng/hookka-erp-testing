@@ -12,6 +12,11 @@ import {
   Trash2,
 } from "lucide-react";
 import type { CreditNote, Invoice } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { CreditNoteSchema } from "@/lib/schemas/invoice";
+
+const CNMutationSchema = mutationWithData(CreditNoteSchema);
 
 export default function CreditNotesPage() {
   const { data: cnResp, loading, refresh: refreshCreditNotes } = useCachedJson<{ success?: boolean; data?: CreditNote[] }>("/api/credit-notes");
@@ -57,26 +62,28 @@ export default function CreditNotesPage() {
   const handleCreate = async () => {
     if (!selectedInvoiceId || items.length === 0) return;
     setCreating(true);
-    const res = await fetch("/api/credit-notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        invoiceId: selectedInvoiceId,
-        reason,
-        reasonDetail,
-        items: items.filter((i) => i.description && i.unitPrice > 0),
-      }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      setShowCreateModal(false);
-      setSelectedInvoiceId("");
-      setReason("RETURN");
-      setReasonDetail("");
-      setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
-      invalidateCachePrefix("/api/credit-notes");
-      invalidateCachePrefix("/api/invoices");
-      refreshCreditNotes();
+    try {
+      const data = await fetchJson("/api/credit-notes", CNMutationSchema, {
+        method: "POST",
+        body: {
+          invoiceId: selectedInvoiceId,
+          reason,
+          reasonDetail,
+          items: items.filter((i) => i.description && i.unitPrice > 0),
+        },
+      });
+      if (data.success) {
+        setShowCreateModal(false);
+        setSelectedInvoiceId("");
+        setReason("RETURN");
+        setReasonDetail("");
+        setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
+        invalidateCachePrefix("/api/credit-notes");
+        invalidateCachePrefix("/api/invoices");
+        refreshCreditNotes();
+      }
+    } catch {
+      // ignore
     }
     setCreating(false);
   };

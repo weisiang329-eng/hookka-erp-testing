@@ -17,6 +17,11 @@ import {
   List,
 } from "lucide-react";
 import type { Invoice } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { InvoiceSchema } from "@/lib/schemas/invoice";
+
+const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
 type AgingRow = {
   customerName: string;
@@ -98,38 +103,43 @@ export default function InvoicesPage() {
   const createInvoice = async () => {
     if (!selectedDOId) return;
     setCreating(true);
-    const res = await fetch("/api/invoices", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deliveryOrderId: selectedDOId }),
-    });
-    const data = await res.json();
-    setCreating(false);
-    if (data.success) {
-      setShowCreateModal(false);
-      setSelectedDOId("");
-      invalidateCachePrefix("/api/invoices");
-      invalidateCachePrefix("/api/delivery-orders");
-      invalidateCachePrefix("/api/sales-orders");
-      refreshInvoices();
-      refreshInvStats();
-      navigate(`/invoices/${data.data.id}`);
+    try {
+      const data = await fetchJson("/api/invoices", InvoiceMutationSchema, {
+        method: "POST",
+        body: { deliveryOrderId: selectedDOId },
+      });
+      if (data.success && data.data?.id) {
+        setShowCreateModal(false);
+        setSelectedDOId("");
+        invalidateCachePrefix("/api/invoices");
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshInvoices();
+        refreshInvStats();
+        navigate(`/invoices/${data.data.id}`);
+      }
+    } catch {
+      // surface in form via creating state — caller renders generic error
+    } finally {
+      setCreating(false);
     }
   };
 
   const advanceStatus = async (inv: Invoice, newStatus: string) => {
-    const res = await fetch(`/api/invoices/${inv.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: newStatus }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      invalidateCachePrefix("/api/invoices");
-      invalidateCachePrefix("/api/delivery-orders");
-      invalidateCachePrefix("/api/sales-orders");
-      refreshInvoices();
-      refreshInvStats();
+    try {
+      const data = await fetchJson(`/api/invoices/${inv.id}`, InvoiceMutationSchema, {
+        method: "PUT",
+        body: { status: newStatus },
+      });
+      if (data.success) {
+        invalidateCachePrefix("/api/invoices");
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshInvoices();
+        refreshInvStats();
+      }
+    } catch {
+      // ignore
     }
   };
 
@@ -139,26 +149,28 @@ export default function InvoicesPage() {
 
     setPaymentSubmitting(true);
     const totalPaid = inv.paidAmount + amountSen;
-    const res = await fetch(`/api/invoices/${inv.id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        paidAmount: totalPaid,
-        paymentMethod,
-        paymentDate,
-        paymentReference,
-      }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      setPayingInvoiceId(null);
-      setPaymentAmount("");
-      setPaymentReference("");
-      invalidateCachePrefix("/api/invoices");
-      invalidateCachePrefix("/api/delivery-orders");
-      invalidateCachePrefix("/api/sales-orders");
-      refreshInvoices();
-      refreshInvStats();
+    try {
+      const data = await fetchJson(`/api/invoices/${inv.id}`, InvoiceMutationSchema, {
+        method: "PUT",
+        body: {
+          paidAmount: totalPaid,
+          paymentMethod,
+          paymentDate,
+          paymentReference,
+        },
+      });
+      if (data.success) {
+        setPayingInvoiceId(null);
+        setPaymentAmount("");
+        setPaymentReference("");
+        invalidateCachePrefix("/api/invoices");
+        invalidateCachePrefix("/api/delivery-orders");
+        invalidateCachePrefix("/api/sales-orders");
+        refreshInvoices();
+        refreshInvStats();
+      }
+    } catch {
+      // ignore
     }
     setPaymentSubmitting(false);
   };

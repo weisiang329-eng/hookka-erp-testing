@@ -12,6 +12,11 @@ import {
   Trash2,
 } from "lucide-react";
 import type { DebitNote, Invoice } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { DebitNoteSchema } from "@/lib/schemas/invoice";
+
+const DNMutationSchema = mutationWithData(DebitNoteSchema);
 
 export default function DebitNotesPage() {
   const { data: dnResp, loading, refresh: refreshDebitNotes } = useCachedJson<{ success?: boolean; data?: DebitNote[] }>("/api/debit-notes");
@@ -57,26 +62,28 @@ export default function DebitNotesPage() {
   const handleCreate = async () => {
     if (!selectedInvoiceId || items.length === 0) return;
     setCreating(true);
-    const res = await fetch("/api/debit-notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        invoiceId: selectedInvoiceId,
-        reason,
-        reasonDetail,
-        items: items.filter((i) => i.description && i.unitPrice > 0),
-      }),
-    });
-    const data = await res.json();
-    if (data.success) {
-      setShowCreateModal(false);
-      setSelectedInvoiceId("");
-      setReason("UNDERCHARGE");
-      setReasonDetail("");
-      setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
-      invalidateCachePrefix("/api/debit-notes");
-      invalidateCachePrefix("/api/invoices");
-      refreshDebitNotes();
+    try {
+      const data = await fetchJson("/api/debit-notes", DNMutationSchema, {
+        method: "POST",
+        body: {
+          invoiceId: selectedInvoiceId,
+          reason,
+          reasonDetail,
+          items: items.filter((i) => i.description && i.unitPrice > 0),
+        },
+      });
+      if (data.success) {
+        setShowCreateModal(false);
+        setSelectedInvoiceId("");
+        setReason("UNDERCHARGE");
+        setReasonDetail("");
+        setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
+        invalidateCachePrefix("/api/debit-notes");
+        invalidateCachePrefix("/api/invoices");
+        refreshDebitNotes();
+      }
+    } catch {
+      // ignore
     }
     setCreating(false);
   };

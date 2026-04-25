@@ -13,6 +13,20 @@ import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { SalesOrder } from "@/lib/mock-data";
 import type { Customer, DeliveryOrder } from "@/lib/mock-data";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
+import { InvoiceSchema } from "@/lib/schemas/invoice";
+import { z } from "zod";
+
+const DOListSchema = z
+  .object({
+    success: z.boolean().optional(),
+    data: z.array(DeliveryOrderSchema).optional(),
+  })
+  .passthrough();
+const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
+const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
 type LinkedPOSummary = {
   soId: string;
@@ -328,12 +342,11 @@ export default function SalesPage() {
       action: async () => {
         setTransferLoading(true);
         try {
-          const res = await fetch("/api/delivery-orders");
-          const d = await res.json();
+          const d = await fetchJson("/api/delivery-orders", DOListSchema);
           if (d.success && d.data) {
-            const found = d.data.find((dord: DeliveryOrder) => dord.salesOrderId === row.id);
+            const found = d.data.find((dord) => dord.salesOrderId === row.id);
             if (found) {
-              setMatchedDO(found);
+              setMatchedDO(found as unknown as DeliveryOrder);
               setTransferSuccess(null);
               setTransferInvRow(row);
             } else {
@@ -784,22 +797,20 @@ export default function SalesPage() {
                           rackingNumber: "",
                           packingStatus: "PENDING",
                         }));
-                        const res = await fetch("/api/delivery-orders", {
+                        const d = await fetchJson("/api/delivery-orders", DOMutationSchema, {
                           method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({
+                          body: {
                             salesOrderId: transferDORow.id,
                             items: mappedItems,
                             ...(doDeliveryDate && { deliveryDate: doDeliveryDate }),
                             ...(doDriverName && { driverName: doDriverName }),
                             ...(doVehicleNo && { vehicleNo: doVehicleNo }),
-                          }),
+                          },
                         });
-                        const d = await res.json();
                         if (d.success) {
                           invalidateCachePrefix("/api/delivery-orders");
                           invalidateCachePrefix("/api/sales-orders");
-                          setTransferSuccess({ type: "do", docNo: d.data?.doNo || "Created" });
+                          setTransferSuccess({ type: "do", docNo: (d.data?.doNo as string) || "Created" });
                           fetchAll();
                         } else {
                           toast.error(d.error || "Failed to create Delivery Order.");
@@ -899,16 +910,14 @@ export default function SalesPage() {
                     onClick={async () => {
                       setTransferLoading(true);
                       try {
-                        const res = await fetch("/api/invoices", {
+                        const d = await fetchJson("/api/invoices", InvoiceMutationSchema, {
                           method: "POST",
-                          headers: { "Content-Type": "application/json" },
-                          body: JSON.stringify({ deliveryOrderId: matchedDO.id }),
+                          body: { deliveryOrderId: matchedDO.id },
                         });
-                        const d = await res.json();
                         if (d.success) {
                           invalidateCachePrefix("/api/invoices");
                           invalidateCachePrefix("/api/delivery-orders");
-                          setTransferSuccess({ type: "inv", docNo: d.data?.invoiceNo || "Created" });
+                          setTransferSuccess({ type: "inv", docNo: (d.data?.invoiceNo as string) || "Created" });
                           fetchAll();
                         } else {
                           toast.error(d.error || "Failed to create Invoice.");

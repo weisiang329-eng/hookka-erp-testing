@@ -28,6 +28,11 @@ import PODDialog from "@/components/delivery/POD-dialog";
 import type { ProofOfDelivery } from "@/lib/mock-data";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
+import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
+
+const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -157,19 +162,12 @@ export default function DeliveryDetailPage() {
 
     setUpdating(true);
     try {
-      const res = await fetch(`/api/delivery-orders/${id}`, {
+      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: target }),
+        body: { status: target },
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error(data?.error || `Failed to advance status (HTTP ${res.status})`);
-        return;
-      }
-      if (data.success) {
-        setOrder(data.data);
+      if (data.success && data.data) {
+        setOrder(data.data as DeliveryOrder);
         // Only this DO changed. SO/PO prefix kept because a status
         // advance can cascade (e.g. DELIVERED → linked SO → COMPLETED).
         if (id) invalidateCache(`/api/delivery-orders/${id}`);
@@ -178,7 +176,12 @@ export default function DeliveryDetailPage() {
       }
       else toast.error(data.error || "Failed to advance status");
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Network error — status unchanged");
+      if (e instanceof FetchJsonError) {
+        const body = e.body as { error?: string } | undefined;
+        toast.error(body?.error || e.message);
+      } else {
+        toast.error(e instanceof Error ? e.message : "Network error — status unchanged");
+      }
     } finally {
       setUpdating(false);
     }
@@ -191,19 +194,12 @@ export default function DeliveryDetailPage() {
       // If order is already DELIVERED, just attach proof; otherwise transition.
       const body: Record<string, unknown> = { proofOfDelivery: pod };
       if (order.status !== "DELIVERED") body.status = "DELIVERED";
-      const res = await fetch(`/api/delivery-orders/${id}`, {
+      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body,
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const data: any = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        toast.error(data?.error || `Failed to save proof of delivery (HTTP ${res.status})`);
-        return;
-      }
-      if (data.success) {
-        setOrder(data.data);
+      if (data.success && data.data) {
+        setOrder(data.data as DeliveryOrder);
         // POD save may also transition to DELIVERED which cascades to SO.
         if (id) invalidateCache(`/api/delivery-orders/${id}`);
         invalidateCachePrefix("/api/sales-orders");
@@ -213,7 +209,12 @@ export default function DeliveryDetailPage() {
         toast.error(data.error || "Failed to save proof of delivery");
       }
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Network error — POD not saved");
+      if (e instanceof FetchJsonError) {
+        const errBody = e.body as { error?: string } | undefined;
+        toast.error(errBody?.error || e.message);
+      } else {
+        toast.error(e instanceof Error ? e.message : "Network error — POD not saved");
+      }
     } finally {
       setUpdating(false);
     }
@@ -223,17 +224,17 @@ export default function DeliveryDetailPage() {
     if (!order) return;
     setUpdating(true);
     try {
-      const res = await fetch(`/api/delivery-orders/${id}`, {
+      const data = await fetchJson(`/api/delivery-orders/${id}`, DOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lorryId }),
+        body: { lorryId },
       });
-      const data = await res.json();
-      if (data.success) {
-        setOrder(data.data);
+      if (data.success && data.data) {
+        setOrder(data.data as DeliveryOrder);
         // Lorry assignment only affects this DO; no cascade. Per-id only.
         if (id) invalidateCache(`/api/delivery-orders/${id}`);
       }
+    } catch {
+      // Lorry assignment is non-critical UI affordance — swallow + log via fetchJson
     } finally {
       setUpdating(false);
     }

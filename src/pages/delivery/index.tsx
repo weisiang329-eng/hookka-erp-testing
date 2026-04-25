@@ -29,6 +29,15 @@ import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "
 import PODDialog from "@/components/delivery/POD-dialog";
 import PrintDO from "@/components/delivery/print-do";
 import type { PrintDOData, PrintMode } from "@/components/delivery/print-do";
+import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
+import { mutationWithData, MutationResultSchema } from "@/lib/schemas/common";
+import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
+import { SalesOrderSchema } from "@/lib/schemas/sales-order";
+import { InvoiceSchema } from "@/lib/schemas/invoice";
+
+const DOMutationSchema = mutationWithData(DeliveryOrderSchema);
+const SOMutationSchema = mutationWithData(SalesOrderSchema);
+const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -480,20 +489,22 @@ export default function DeliveryPage() {
       const isEdit = providerDialog !== "new" && providerDialog !== null;
       const url = isEdit ? `/api/drivers/${(providerDialog as ThreePLProvider).id}` : "/api/drivers";
       const method = isEdit ? "PUT" : "POST";
-      const res = await fetch(url, {
+      const data = await fetchJson(url, MutationResultSchema, {
         method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: payload,
       });
-      const data = await res.json();
       if (data.success) {
         setProviderDialog(null);
         fetchProviders();
       } else {
         toast.error(data.error || "Failed to save");
       }
-    } catch {
-      toast.error("Failed to save provider");
+    } catch (e) {
+      if (e instanceof FetchJsonError) {
+        toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+      } else {
+        toast.error("Failed to save provider");
+      }
     }
     setProviderSaving(false);
   };
@@ -628,23 +639,25 @@ export default function DeliveryPage() {
 
     setCreatingDOFromPO(true);
     try {
-      const res = await fetch("/api/delivery-orders", {
+      const data = await fetchJson("/api/delivery-orders", DOMutationSchema, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           productionOrderIds: poIds,
           driverId: createDOForm.driverId || null,
           deliveryAddress,
           dropPoints: createDODrops.length,
           remarks: createDOForm.remarks,
-        }),
+        },
       });
-      const data = await res.json();
       if (!data.success) {
         toast.error(data.error || "Failed to create delivery order");
       }
-    } catch {
-      toast.error("Failed to create delivery order");
+    } catch (e) {
+      if (e instanceof FetchJsonError) {
+        toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+      } else {
+        toast.error("Failed to create delivery order");
+      }
     }
     setCreatingDOFromPO(false);
     setCreateDODialog(null);
@@ -711,20 +724,22 @@ export default function DeliveryPage() {
   const handleSubmitPOD = async (pod: ProofOfDelivery) => {
     if (!podDialog) return;
     try {
-      const res = await fetch(`/api/delivery-orders/${podDialog.id}`, {
+      const data = await fetchJson(`/api/delivery-orders/${podDialog.id}`, DOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: "DELIVERED", proofOfDelivery: pod }),
+        body: { status: "DELIVERED", proofOfDelivery: pod },
       });
-      const data = await res.json();
       if (data.success) {
         setPodDialog(null);
         fetchData();
       } else {
         toast.error(data.error || "Failed to mark delivered");
       }
-    } catch {
-      toast.error("Failed to mark delivered");
+    } catch (e) {
+      if (e instanceof FetchJsonError) {
+        toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+      } else {
+        toast.error("Failed to mark delivered");
+      }
     }
   };
 
@@ -732,27 +747,24 @@ export default function DeliveryPage() {
     if (!invoiceDialog) return;
     setInvoiceLoading(true);
     try {
-      const res = await fetch("/api/invoices", {
+      await fetchJson("/api/invoices", InvoiceMutationSchema, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           salesOrderId: invoiceDialog.salesOrderId,
           doNo: invoiceDialog.doNo,
           customerId: invoiceDialog.customerId,
           customerName: invoiceDialog.customerName,
-        }),
+        },
       });
-      if (res.ok) {
-        setDeliveryOrders((prev) =>
-          prev.map((d) =>
-            d.id === invoiceDialog.id && d.status === "DELIVERED"
-              ? { ...d, status: "INVOICED" as DOStatus }
-              : d
-          )
-        );
-        if (detailDO?.id === invoiceDialog.id) {
-          setDetailDO({ ...invoiceDialog, status: "INVOICED" });
-        }
+      setDeliveryOrders((prev) =>
+        prev.map((d) =>
+          d.id === invoiceDialog.id && d.status === "DELIVERED"
+            ? { ...d, status: "INVOICED" as DOStatus }
+            : d
+        )
+      );
+      if (detailDO?.id === invoiceDialog.id) {
+        setDetailDO({ ...invoiceDialog, status: "INVOICED" });
       }
     } catch { /* ignore */ }
     setInvoiceLoading(false);
@@ -830,10 +842,9 @@ export default function DeliveryPage() {
     setEditSaving(true);
     try {
       const provider = providers.find((p) => p.id === editForm.driverId);
-      const res = await fetch(`/api/delivery-orders/${detailDO.id}`, {
+      const data = await fetchJson(`/api/delivery-orders/${detailDO.id}`, DOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           driverId: editForm.driverId || null,
           driverName: provider?.name || "",
           vehicleNo: provider?.vehicleNo || "",
@@ -856,21 +867,24 @@ export default function DeliveryPage() {
             rackingNumber: i.rackingNumber,
             packingStatus: "PACKED",
           })),
-        }),
+        },
       });
-      const data = await res.json();
-      if (data.success) {
+      if (data.success && data.data) {
         setEditMode(false);
         setShowAddItemPanel(false);
         // Update detailDO with new data
-        const updated = mapDOToRow(data.data);
+        const updated = mapDOToRow(data.data as DeliveryOrder);
         setDetailDO(updated);
         fetchData();
       } else {
         toast.error(data.error || "Failed to save changes");
       }
-    } catch {
-      toast.error("Failed to save changes");
+    } catch (e) {
+      if (e instanceof FetchJsonError) {
+        toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+      } else {
+        toast.error("Failed to save changes");
+      }
     }
     setEditSaving(false);
   };
@@ -916,12 +930,10 @@ export default function DeliveryPage() {
   const updateExpectedDD = useCallback(async (salesOrderId: string, newDate: string, rowId: string) => {
     if (!salesOrderId) return;
     try {
-      const res = await fetch(`/api/sales-orders/${salesOrderId}`, {
+      const json = await fetchJson(`/api/sales-orders/${salesOrderId}`, SOMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ hookkaExpectedDD: newDate }),
+        body: { hookkaExpectedDD: newDate },
       });
-      const json = await res.json();
       if (json.success) {
         setPlanningPOs((prev) =>
           prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r))
@@ -1207,17 +1219,19 @@ export default function DeliveryPage() {
         icon: <Send className="h-3.5 w-3.5" />,
         action: async () => {
           try {
-            const res = await fetch(`/api/delivery-orders/${row.id}`, {
+            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
               method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ status: "LOADED" }),
+              body: { status: "LOADED" },
             });
-            const data = await res.json();
             if (!data.success) {
               toast.error(data.error || "Failed to mark dispatched");
             }
-          } catch {
-            toast.error("Failed to mark dispatched");
+          } catch (e) {
+            if (e instanceof FetchJsonError) {
+              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+            } else {
+              toast.error("Failed to mark dispatched");
+            }
           }
           fetchData();
         },
@@ -1229,17 +1243,19 @@ export default function DeliveryPage() {
         action: async () => {
           if (!confirm("Reverse this DO back to Pending Dispatch?")) return;
           try {
-            const res = await fetch(`/api/delivery-orders/${row.id}`, {
+            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
               method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ status: "DRAFT" }),
+              body: { status: "DRAFT" },
             });
-            const data = await res.json();
             if (!data.success) {
               toast.error(data.error || "Failed to reverse");
             }
-          } catch {
-            toast.error("Failed to reverse");
+          } catch (e) {
+            if (e instanceof FetchJsonError) {
+              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+            } else {
+              toast.error("Failed to reverse");
+            }
           }
           fetchData();
         },
@@ -2209,20 +2225,22 @@ export default function DeliveryPage() {
                         variant="primary"
                         onClick={async () => {
                           try {
-                            const res = await fetch(`/api/delivery-orders/${detailDO.id}`, {
+                            const data = await fetchJson(`/api/delivery-orders/${detailDO.id}`, DOMutationSchema, {
                               method: "PUT",
-                              headers: { "Content-Type": "application/json" },
-                              body: JSON.stringify({ status: "LOADED" }),
+                              body: { status: "LOADED" },
                             });
-                            const data = await res.json();
                             if (data.success) {
                               setDetailDO({ ...detailDO, status: "DISPATCHED", dispatchDate: new Date().toISOString() });
                               fetchData();
                             } else {
                               toast.error(data.error || "Failed to mark dispatched");
                             }
-                          } catch {
-                            toast.error("Failed to mark dispatched");
+                          } catch (e) {
+                            if (e instanceof FetchJsonError) {
+                              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+                            } else {
+                              toast.error("Failed to mark dispatched");
+                            }
                           }
                         }}
                       >

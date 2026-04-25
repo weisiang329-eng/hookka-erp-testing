@@ -1,0 +1,134 @@
+# Upgrade Control Board — Single Source of Truth
+
+> **Last updated**: 2026-04-25
+> **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
+> **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
+
+## Status legend
+
+- **Backlog** — accepted, not yet started
+- **In Progress** — actively being worked on this week
+- **Blocked** — has a named reason and a named unblocker
+- **Done** — gate command was run and passed
+
+## Field contract
+
+Every row carries these fields. If any is missing, the row is malformed and must not ship.
+
+| Field | Meaning |
+|---|---|
+| `ID` | `P{phase}.{n}` matching [PROGRAM-90D-EXECUTION](PROGRAM-90D-EXECUTION.md) |
+| `Domain` | `ci` / `auth` / `audit` / `scheduler` / `sdk` / `obs` / `governance` |
+| `Owner` | `Claude` (engineering) or `User` (decision/approval) or `Both` |
+| `Status` | One of the four lanes |
+| `ETA` | Calendar date the gate is expected to pass |
+| `Acceptance Commands` | The exact command(s) that prove the row is done |
+| `PR / Commit` | GitHub link once landed |
+| `Risk / Blocker` | What could derail it; if Blocked, why |
+
+---
+
+## In Progress (W1, 2026-04-28 → 2026-05-04)
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | PR / Commit | Risk |
+|---|---|---|---|---|---|---|---|
+| P1.1 | ci | Snapshot baselines `.ci-baseline/typecheck.txt` + `.ci-baseline/lint.txt` from current main | Claude | 2026-04-26 | `cat .ci-baseline/typecheck.txt \| tail -1` shows error count | _pending_ | low |
+| P1.2 | ci | Add `typecheck:app` step to `.github/workflows/deploy.yml` (initially `continue-on-error: true` until TS-cleanup agent finishes) | Claude | 2026-04-27 | Workflow run shows the step executing | _pending_ | medium — coordinate with parallel TS agent |
+| P1.3 | ci | Add `lint:app` step to `.github/workflows/deploy.yml` (same pattern) | Claude | 2026-04-27 | Workflow run shows step executing | _pending_ | low |
+| P1.6 | ci | Flip `continue-on-error: false` once TS-cleanup branch merges (gate becomes blocking) | Claude | 2026-05-02 | PR with new TS error fails CI | _pending_ | high — depends on TS agent timeline |
+| TS.A | ci | Drain `src/pages/production/**` to 0 TS errors | _other agent_ | 2026-05-04 | `npm run typecheck:app -- --include "src/pages/production/**"` returns 0 | _external_ | medium |
+| TS.B | ci | Drain `src/pages/worker/**` to 0 TS errors | _other agent_ | 2026-05-04 | Same pattern | _external_ | medium |
+| TS.C | ci | Drain `src/pages/delivery/**` to 0 TS errors | _other agent_ | 2026-05-04 | Same pattern | _external_ | medium |
+
+---
+
+## Backlog (this 90-day window)
+
+### Phase 1 — CI Gate Foundation
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P1.4 | ci | Husky + lint-staged pre-commit on staged `.ts`/`.tsx` | Claude | 2026-05-04 | `git commit` on a bad file fails locally | low |
+| P1.5 | governance | Reconcile `build` script + [SETUP.md](SETUP.md) — decide whether `build` runs typecheck (per [REPO-REVIEW](REPO-REVIEW-2026-04-24.md)) | Claude | 2026-05-04 | Doc + script say the same thing | low |
+
+### Phase 2 — Type Baseline Restoration (TS-cleanup agent owns; tracked here for visibility)
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| TS.D | ci | Drain remaining `src/pages/**` (sales, procurement, accounting, settings, invoices, planning, products, rd, consignment, dashboard, track, analytics, inventory) | _other agent_ | 2026-05-18 | `npm run typecheck:app` returns 0 | medium |
+| TS.E | ci | Flip `tsconfig.app.json` `strict: true` + `noUnusedLocals: true` + `noUnusedParameters: true` | Claude | 2026-05-18 | `npm run typecheck:app` returns 0 with strict on | medium |
+| TS.F | ci | Delete `.ci-baseline/typecheck.txt`; CI hard-fails on any TS error | Claude | 2026-05-18 | CI passes with bare `tsc --noEmit` | low |
+
+### Phase 3 — Authz / RBAC / Audit Foundation
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P3.1 | auth | Migration `0045_rbac.sql` — `roles`, `permissions`, `role_permissions` + seed 8 roles | Claude | 2026-05-22 | `wrangler d1 execute hookka-erp-db --command "select count(*) from role_permissions"` > 0 | low |
+| P3.2 | audit | Migration `0046_audit_events.sql` + indexes | Claude | 2026-05-22 | `select count(*) from audit_events` works | low |
+| P3.3 | auth | `src/api/lib/authz.ts` — `requirePermission(resource, action)` middleware, KV-cached | Claude | 2026-05-29 | All 48 routes use it; ad-hoc `if (role !==…)` count == 0 | high — cross-cutting refactor |
+| P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 mutations | Claude | 2026-05-29 | `audit_events` row appears for each mutation in smoke test | medium |
+| P3.5 | auth | Migration `0047_worker_sessions.sql` + persist worker login | Claude | 2026-06-01 | Worker login survives `wrangler dev` restart | medium |
+| P3.6 | auth | `<RequireRole>` + `<RequirePermission>` + `usePermission()` frontend | Claude | 2026-06-05 | Non-Finance redirected from `/accounting` | medium |
+| P3.7 | auth | Sidebar reads from current user (replace hardcoded "Lim / Director") | Claude | 2026-06-05 | Display name == logged-in user | low |
+| P3.8 | auth | Reduce KV session-cache TTL to 60s OR explicit invalidation on role change | Claude | 2026-06-08 | Role change reflected in ≤60s | low |
+
+### Phase 4 — Scheduler Policy
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P4.1 | scheduler | `src/lib/scheduler.ts` with `useInterval(fn, ms, opts)` | Claude | 2026-06-11 | Tests cover hidden-pause + unmount-clear | low |
+| P4.2 | scheduler | ESLint `no-restricted-syntax` blocking raw `setInterval`/`setTimeout` in `src/` | Claude | 2026-06-12 | New `setInterval` in a page fails lint | low |
+| P4.3 | scheduler | Migrate 30+ existing call sites | Claude | 2026-06-15 | Raw timer count in `src/` (excl. allowlist) == 0 | medium |
+| P4.4 | scheduler | Lift `useVersionCheck` to root layout via context | Claude | 2026-06-15 | DevTools shows 1 instance | low |
+
+### Phase 5 — API SDK + Unified Query
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P5.1 | sdk | `src/sdk/sales` + migrate sales pages | Claude | 2026-06-22 | Sales pages no longer import `safe-json.ts` | medium |
+| P5.2 | sdk | `src/sdk/{delivery,production}` + migrate | Claude | 2026-06-29 | Same | medium |
+| P5.3 | sdk | `src/sdk/{procurement,accounting,worker,inventory}` + migrate | Claude | 2026-07-06 | Same | medium |
+| P5.4 | sdk | `src/lib/use-query.ts` replaces `useApi` + `useCachedJson` | Claude | 2026-07-06 | One hook in use; old removed | medium |
+| P5.5 | sdk | Delete `src/lib/safe-json.ts` `asArray`/`asObject` | Claude | 2026-07-06 | File removed; CI green | low |
+| P5.6 | sdk | ESLint blocking raw `fetch(` in `src/pages/**` | Claude | 2026-07-06 | New raw `fetch(` in a page fails lint | low |
+
+### Phase 6 — Observability
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P6.1 | obs | `traceparent` propagation browser → API → D1 | Claude | 2026-07-09 | Single trace visible end-to-end | medium |
+| P6.2 | obs | Cloudflare Analytics Engine writes per-route p50/p75/p95 | Claude | 2026-07-11 | Dashboard query returns rows | medium |
+| P6.3 | obs | Worker reports `audit_events` + login + 4xx/5xx counts | Claude | 2026-07-12 | Dashboard shows trend | low |
+| P6.4 | obs | `/admin/health` page (SUPER_ADMIN only) renders 5 KPIs | Claude | 2026-07-13 | Page loads with live data | low |
+
+### Phase 7 — Hardening + Buffer
+
+| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
+|---|---|---|---|---|---|---|
+| P7.1 | auth | `org_id`/`site_id` scoping helper applied to all read queries | Claude | 2026-07-18 | Cross-org leak test fails to leak | high |
+| P7.2 | ci | Bundle size budget: reject PR with top-5 chunk growth > 5% | Claude | 2026-07-20 | PR with bloat fails CI | low |
+| P7.3 | governance | DR drill — restore D1 to staging, verify counts; runbook | Both | 2026-07-23 | `docs/DR-RUNBOOK.md` exists | medium |
+| P7.4 | ci | Drain remaining ESLint debt to 0 errors / 0 warnings | Claude | 2026-07-25 | `npm run lint:app` returns 0 | medium |
+| P7.5 | governance | Final readout — KPI snapshot, before/after table, lessons | Both | 2026-07-27 | Doc landed | low |
+
+---
+
+## Blocked
+
+_(empty — surface here when something stalls. Each blocker must name the unblocker and an ETA to escalate.)_
+
+---
+
+## Done
+
+_(empty — items move here only after their acceptance command has been run and passed. The gate command + its output go into the row.)_
+
+---
+
+## How to update this board
+
+1. **State change**: edit the row in place, move it across lanes if status changed.
+2. **Acceptance**: when you run the acceptance command and it passes, copy the output (or a one-line summary) into the row, link the commit, move to Done.
+3. **New work**: add to Backlog with a `P{phase}.{n}` ID that fits the [90-day plan](PROGRAM-90D-EXECUTION.md). If it doesn't fit any phase, pause and ask whether the plan needs revising.
+4. **Blocked**: move to Blocked with a name and date. Do not leave a blocker unowned.
+5. **Stamp `Last updated`** at the top of this file.

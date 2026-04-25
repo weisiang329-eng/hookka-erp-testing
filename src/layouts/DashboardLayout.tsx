@@ -10,14 +10,6 @@ import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
 import { useLocation } from "react-router-dom";
 
-const mockUser = {
-  name: "Lim",
-  email: "lim@hookka.com.my",
-  role: "Director",
-  organisationName: "HOOKKA INDUSTRIES SDN BHD",
-  organisationCode: "HOOKKA",
-};
-
 // Lives inside ToastProvider so it can pop a toast when a new deploy lands.
 // Polls for a new bundle hash every 5 min + on focus; on change, surfaces a
 // manual confirm() prompt — we deliberately don't auto-reload because the
@@ -92,7 +84,7 @@ export default function DashboardLayout() {
         <div className="h-full">
           <Sidebar />
           <div className="pl-60 transition-all duration-300">
-            <Topbar user={mockUser} />
+            <Topbar />
             <TabBar />
             <main className="p-6">
               <TabbedOutlet />

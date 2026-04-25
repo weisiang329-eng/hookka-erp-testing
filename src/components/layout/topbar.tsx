@@ -38,14 +38,19 @@ export function Topbar({ user }: TopbarProps) {
   const currentOrg = user?.organisationCode || "HOOKKA";
 
   // Prefer the real signed-in user for the avatar label + dropdown.
+  // If nobody is signed in yet (localStorage empty during boot), fall back
+  // to "—" rather than inventing a name — never show a stale demo user
+  // (P3.7: replaced hardcoded "Lim / Director" placeholder).
   const authUser = getCurrentUser();
   const displayName =
-    authUser?.displayName || authUser?.email || user?.name || "User";
-  const rawRole = authUser?.role || user?.role || "Admin";
+    authUser?.displayName || authUser?.email || user?.name || "—";
+  const rawRole = authUser?.role || user?.role || "";
   const displayRole = rawRole
-    .replace(/_/g, " ")
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+    ? rawRole
+        .replace(/_/g, " ")
+        .toLowerCase()
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+    : "—";
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-[#E2DDD8] bg-white px-6">

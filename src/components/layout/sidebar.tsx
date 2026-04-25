@@ -17,7 +17,6 @@ import {
   Bell,
   FileText,
   BookOpen,
-  FolderOpen,
   Calendar,
   Building2,
   ChevronDown,
@@ -26,9 +25,7 @@ import {
   FileCheck,
   QrCode,
   Wallet,
-  ClipboardCheck,
   Calculator,
-  Globe,
   Package,
   Ship,
   TrendingUp,
@@ -40,7 +37,6 @@ import {
   Shirt,
   Route,
   DollarSign,
-  SlidersHorizontal,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -219,6 +215,7 @@ export function Sidebar() {
   useEffect(() => {
     try {
       const saved = localStorage.getItem("sidebar-collapsed-groups");
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot localStorage rehydrate on mount; pre-existing pattern, separate cleanup task
       if (saved) setCollapsedGroups(new Set(JSON.parse(saved)));
     } catch { /* ignore */ }
   }, []);
@@ -285,6 +282,7 @@ export function Sidebar() {
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount; pre-existing pattern, separate cleanup task
     fetchOrgs();
     fetchUnreadCount();
     const interval = setInterval(() => {
@@ -297,18 +295,25 @@ export function Sidebar() {
   // SUPER_ADMIN-only User Management link into the SYSTEM group.
   const authUser = getCurrentUser();
   const isSuperAdmin = authUser?.role === "SUPER_ADMIN";
-  const displayName = authUser?.displayName || authUser?.email || "User";
-  const roleLabel = (authUser?.role || "Member")
-    .replace(/_/g, " ")
-    .toLowerCase()
-    .replace(/\b\w/g, (c) => c.toUpperCase());
+  // If localStorage is empty mid-boot, fall back to "—" / blank rather than
+  // inventing a placeholder name — never show a stale demo user like the old
+  // "Lim / Director" hardcode (P3.7).
+  const displayName = authUser?.displayName || authUser?.email || "—";
+  const roleLabel = authUser?.role
+    ? authUser.role
+        .replace(/_/g, " ")
+        .toLowerCase()
+        .replace(/\b\w/g, (c) => c.toUpperCase())
+    : "—";
   const initials =
-    displayName
-      .split(/\s+/)
-      .filter(Boolean)
-      .slice(0, 2)
-      .map((s) => s[0]?.toUpperCase() ?? "")
-      .join("") || "U";
+    (authUser
+      ? displayName
+          .split(/\s+/)
+          .filter(Boolean)
+          .slice(0, 2)
+          .map((s) => s[0]?.toUpperCase() ?? "")
+          .join("")
+      : "") || "—";
   const groupsWithBadge = navigationGroups.map((group) => {
     let items = group.items.map((item) => {
       if (item.name === "Notifications") return { ...item, badge: unreadCount };

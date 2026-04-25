@@ -175,14 +175,43 @@ function collectProcesses(
   return acc;
 }
 
-// Sort a set of process entries by DEPT_ORDER (the canonical dept chain).
-function orderProcesses(entries: WipProcessEntry[]): WipProcessEntry[] {
-  return entries
-    .slice()
-    .sort(
-      (a, b) => DEPT_ORDER.indexOf(a.deptCode as (typeof DEPT_ORDER)[number]) -
-        DEPT_ORDER.indexOf(b.deptCode as (typeof DEPT_ORDER)[number]),
-    );
+// Per-wipType production order, BOM-derived.  The flat DEPT_ORDER lied for
+// SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST: per BOM tree, sofa FOAM is
+// downstream of WEBBING (FOAM ← WEBBING ← FRAMING ← WOOD_CUT chain), but
+// DEPT_ORDER put FOAM at index 3, before FRAMING/WEBBING.  Each wipType
+// gets its own canonical chain matching the BOM's parent→child links.
+//
+// HEADBOARD (BF) keeps FOAM near the front because BF Headboard's BOM has
+// FOAM in the fabric branch (FOAM ← FAB_SEW ← FAB_CUT) which IS upstream
+// of UPH but parallel to the webbing branch (WEBBING ← FRAMING ← WOOD_CUT).
+const PRODUCTION_ORDER_BY_WIP_TYPE: Record<string, readonly string[]> = {
+  // BF Divan BOM: FAB_CUT->FAB_SEW (fabric branch) || WOOD_CUT->FRAMING->WEBBING (frame branch) -> UPH -> PACK.
+  // No FOAM in Divan (the "Foam"-named WIP node's actual dept is WEBBING).
+  DIVAN:         ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
+  // BF Headboard BOM: FAB_CUT->FAB_SEW->FOAM (foam branch) || WOOD_CUT->FRAMING->WEBBING (webbing branch) -> UPH -> PACK.
+  HEADBOARD:     ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING"],
+  // Sofa BOM: FAB_CUT->FAB_SEW (fabric branch) || WOOD_CUT->FRAMING->WEBBING->FOAM (foam branch) -> UPH -> PACK.
+  // FOAM is downstream of WEBBING in sofa, opposite of BF Headboard.
+  SOFA_BASE:     ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_CUSHION:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_ARMREST:  ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
+  SOFA_HEADREST: ["FAB_CUT", "FAB_SEW", "WOOD_CUT", "FRAMING", "WEBBING", "FOAM", "UPHOLSTERY", "PACKING"],
+};
+
+// Sort a set of process entries by per-wipType chain when known, falling
+// back to global DEPT_ORDER for unknown / FG_MAIN wipTypes.
+function orderProcesses(
+  entries: WipProcessEntry[],
+  wipType: string,
+): WipProcessEntry[] {
+  const chain =
+    PRODUCTION_ORDER_BY_WIP_TYPE[wipType.toUpperCase()] ?? DEPT_ORDER;
+  const idx = (code: string): number => {
+    const i = chain.indexOf(code);
+    // Unknown depts go to the end so they don't break the ordering.
+    return i === -1 ? chain.length : i;
+  };
+  return entries.slice().sort((a, b) => idx(a.deptCode) - idx(b.deptCode));
 }
 
 // Build the virtual FG fallback WIP when a BOM has zero WIPs.
@@ -268,7 +297,7 @@ export function breakBomIntoWips(
     if (acc.size === 0) {
       processes = fallbackChainForType(wipType, wipCode, wipLabel, nodeQty);
     } else {
-      processes = orderProcesses(Array.from(acc.values()));
+      processes = orderProcesses(Array.from(acc.values()), wipType);
     }
 
     wips.push({

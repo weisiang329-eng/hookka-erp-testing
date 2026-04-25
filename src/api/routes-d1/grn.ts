@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { makeLedgerEntry } from "../../lib/costing";
 import { emitAudit } from "../lib/audit";
 
@@ -448,6 +449,9 @@ async function cascadePOStatusAfterGRNPost(
 
 // GET /api/grn — list all GRNs (optional ?poId=&supplierId= filters)
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — grn:read.
+  const denied = await requirePermission(c, "grn", "read");
+  if (denied) return denied;
   const poId = c.req.query("poId");
   const supplierId = c.req.query("supplierId");
   const clauses: string[] = [];
@@ -477,6 +481,9 @@ app.get("/", async (c) => {
 
 // POST /api/grn — create a new DRAFT GRN from a PO + line info
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — grn:create.
+  const denied = await requirePermission(c, "grn", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { poId, items, receivedBy, notes, qcStatus } = body;
@@ -621,6 +628,8 @@ app.post("/", async (c) => {
 
 // GET /api/grn/:id — single GRN + items
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "grn", "read");
+  if (denied) return denied;
   const grn = await fetchGRN(c.var.DB, c.req.param("id"));
   if (!grn) {
     return c.json({ success: false, error: "GRN not found" }, 404);
@@ -630,6 +639,11 @@ app.get("/:id", async (c) => {
 
 // PUT /api/grn/:id — update status/qc/items; post to stock on DRAFT → committed
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — grn:update covers status / item edits.
+  // The 0045 seed only has read/create/update/delete for grn (no separate
+  // post/commit action), so reuse update for the DRAFT → POSTED flip.
+  const denied = await requirePermission(c, "grn", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

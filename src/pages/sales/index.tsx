@@ -146,12 +146,19 @@ export default function SalesPage() {
   const [filterCustomer, setFilterCustomer] = useState("");
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
+  // New: category + customerDeliveryDate range filters. Category matches if
+  // ANY line on the SO is the chosen category. DD axis = customerDeliveryDate
+  // (sales staff filter on the date the customer expects delivery, not the
+  // SO entry date or our internal expected DD).
+  const [filterCategory, setFilterCategory] = useState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("");
+  const [filterDDFrom, setFilterDDFrom] = useState("");
+  const [filterDDTo, setFilterDDTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
   // Reset to page 1 when any filter or tab changes.
   useEffect(() => {
     setPage(1);
-  }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, tab]);
+  }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");
@@ -164,13 +171,16 @@ export default function SalesPage() {
     refreshStatusChanges();
   };
 
-  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo;
+  const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo;
 
   const clearFilters = () => {
     setFilterStatus("");
     setFilterCustomer("");
     setFilterDateFrom("");
     setFilterDateTo("");
+    setFilterCategory("");
+    setFilterDDFrom("");
+    setFilterDDTo("");
   };
 
   const filteredOrders = useMemo(() => {
@@ -187,9 +197,18 @@ export default function SalesPage() {
         const orderDate = o.companySODate.split("T")[0];
         if (orderDate > filterDateTo) return false;
       }
+      // Category: SO matches if ANY line is the chosen category.
+      if (filterCategory && !o.items.some(it => it.itemCategory === filterCategory)) return false;
+      // Customer delivery date range — what sales staff actually filter on.
+      if (filterDDFrom || filterDDTo) {
+        const dd = o.customerDeliveryDate ? o.customerDeliveryDate.split("T")[0] : "";
+        if (!dd) return false;
+        if (filterDDFrom && dd < filterDDFrom) return false;
+        if (filterDDTo && dd > filterDDTo) return false;
+      }
       return true;
     });
-  }, [orders, tab, filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
+  }, [orders, tab, filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo]);
 
   const exportCSV = () => {
     const headers = [
@@ -481,6 +500,35 @@ export default function SalesPage() {
                   type="date"
                   value={filterDateTo}
                   onChange={(e) => setFilterDateTo(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">Category</label>
+                <select
+                  value={filterCategory}
+                  onChange={(e) => setFilterCategory(e.target.value as "" | "BEDFRAME" | "SOFA" | "ACCESSORY")}
+                  className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                >
+                  <option value="">All Categories</option>
+                  <option value="BEDFRAME">Bedframe</option>
+                  <option value="SOFA">Sofa (Mattress)</option>
+                  <option value="ACCESSORY">Accessories</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">DD from</label>
+                <Input
+                  type="date"
+                  value={filterDDFrom}
+                  onChange={(e) => setFilterDDFrom(e.target.value)}
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-[#9CA3AF] mb-1">DD to</label>
+                <Input
+                  type="date"
+                  value={filterDDTo}
+                  onChange={(e) => setFilterDDTo(e.target.value)}
                 />
               </div>
             </div>

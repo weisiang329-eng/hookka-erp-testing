@@ -16,9 +16,18 @@ import type { Context, Next } from "hono";
 export const SLOW_REQUEST_MS = 200;
 export const SLOW_QUERY_MS = 100;
 
-// Hono middleware — times every request. Emits a [req] line for every call
-// and a separate [slow-req] line when over SLOW_REQUEST_MS so you can grep
-// for just the bad ones.
+// Hono middleware — times every request. Emits a [req] line for every call,
+// upgrades to [slow-req] over SLOW_REQUEST_MS so you can grep, and writes a
+// `Server-Timing` response header so Chrome/Firefox DevTools render the
+// backend duration in the Network tab's Timing pane (no CLI/wrangler tail
+// needed for "where is the page loading slow" inspection).
+//
+// Server-Timing format (RFC 8673):
+//   Server-Timing: app;dur=312, db;dur=248
+// We emit a single `app` entry covering total handler time, plus a `cf-pop`
+// hint when the colo header is present so the user can confirm the request
+// hit a SEA edge.  D1/SQL timing is logged via instrumentD1 above; once a
+// per-request aggregator is wired here we can add a `db` entry too.
 export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   const start = Date.now();
   await next();
@@ -30,6 +39,15 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   } else {
     console.log(line);
   }
+  // Best-effort Server-Timing header.  Some CF runtimes lock res after
+  // streaming starts — wrap in try/catch so a header-set failure never
+  // breaks the response.
+  try {
+    const colo = c.req.header("cf-ipcountry") ?? "";
+    const parts = [`app;dur=${dur}`];
+    if (colo) parts.push(`cf-country;desc="${colo}"`);
+    c.res.headers.set("Server-Timing", parts.join(", "));
+  } catch { /* ignore */ }
 }
 
 // Wrap a D1Database (or Postgres-compat D1Compat) so every

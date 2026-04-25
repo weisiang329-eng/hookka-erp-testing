@@ -751,6 +751,44 @@ export function DataGrid<T extends Record<string, any>>({
     }
   }, [gridId]);
 
+  // When the parent passes a new `columns` array (e.g., the production page
+  // changes activeTab and rebuilds dept-pill columns, or BOM-driven upstream
+  // adds a sibling column), sync local state:
+  //   - Append new column keys to columnOrder (so they don't sort to 999/end)
+  //   - For NEW visible-by-default keys not yet known, add to visibleKeys so
+  //     the column renders.  Don't override user-toggled visibility.
+  // The "first time we see this key" check is via columnOrder (a key exists
+  // there as soon as the grid has acknowledged its existence).
+  useEffect(() => {
+    const known = new Set(columnOrder);
+    const fresh: string[] = [];
+    const newlyVisible: string[] = [];
+    for (const c of columns) {
+      if (!known.has(c.key)) {
+        fresh.push(c.key);
+        if (!c.hidden) newlyVisible.push(c.key);
+      }
+    }
+    if (fresh.length === 0) return;
+    setColumnOrder((prev) => {
+      const next = [...prev, ...fresh];
+      if (gridId) {
+        try { localStorage.setItem(`datagrid-colorder-${gridId}-${userKey()}`, JSON.stringify(next)); } catch { /* ignore */ }
+      }
+      return next;
+    });
+    if (newlyVisible.length > 0) {
+      setVisibleKeys((prev) => {
+        const next = new Set(prev);
+        for (const k of newlyVisible) next.add(k);
+        if (gridId) {
+          try { localStorage.setItem(`datagrid-cols-${gridId}-${userKey()}`, JSON.stringify([...next])); } catch { /* ignore */ }
+        }
+        return next;
+      });
+    }
+  }, [columns, columnOrder, gridId]);
+
   const visibleColumns = useMemo(() => {
     const orderMap = new Map(columnOrder.map((k, i) => [k, i]));
     return columns

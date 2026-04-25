@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -113,6 +114,9 @@ function genId(): string {
 
 // GET /api/three-way-match — returns RAW array (no wrapper!)
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — three-way-match:read.
+  const denied = await requirePermission(c, "three-way-match", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM three_way_matches",
   ).all<ThreeWayMatchRow>();
@@ -121,7 +125,15 @@ app.get("/", async (c) => {
 });
 
 // POST /api/three-way-match — compute + persist a new match
+//
+// Spec asked for `three-way-match:approve` here, but the 0045 seed only
+// defines read/create/update/delete for this resource. Treat the
+// compute+persist POST as the `create` action — that's what's actually
+// in the matrix.
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — three-way-match:create.
+  const denied = await requirePermission(c, "three-way-match", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { grnId, invoiceId, invoiceNumber, invoiceTotal, invoiceItems } =

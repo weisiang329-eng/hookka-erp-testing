@@ -46,6 +46,114 @@ type LeavesData = {
   history: LeaveRecord[];
 };
 
+type WorkerMeResponse = { success: true; worker: WorkerMe } | { success: false; error?: string };
+type WorkerLeavesResponse = { success: true; data: LeavesData } | { success: false; error?: string };
+type WorkerActionResponse = { success: true } | { success: false; error?: string };
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object";
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function asNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function asWorkerMe(v: unknown): WorkerMe | null {
+  if (!isRecord(v)) return null;
+  const id = asString(v.id);
+  const empNo = asString(v.empNo);
+  const name = asString(v.name);
+  const departmentCode = asString(v.departmentCode);
+  if (!id || !empNo || !name || !departmentCode) return null;
+  return {
+    id,
+    empNo,
+    name,
+    departmentCode,
+    position: asString(v.position) ?? undefined,
+    phone: asString(v.phone) ?? undefined,
+    nationality: asString(v.nationality) ?? undefined,
+  };
+}
+
+function asLeaveRecord(v: unknown): LeaveRecord | null {
+  if (!isRecord(v)) return null;
+  const id = asString(v.id);
+  const workerId = asString(v.workerId);
+  const type = asString(v.type);
+  const startDate = asString(v.startDate);
+  const endDate = asString(v.endDate);
+  const days = asNumber(v.days);
+  const status = asString(v.status);
+  if (!id || !workerId || !type || !startDate || !endDate || days === null) return null;
+  if (status !== "PENDING" && status !== "APPROVED" && status !== "REJECTED") return null;
+  return {
+    id,
+    workerId,
+    type,
+    startDate,
+    endDate,
+    days,
+    status,
+    reason: asString(v.reason) ?? undefined,
+  };
+}
+
+function asLeavesData(v: unknown): LeavesData | null {
+  if (!isRecord(v) || !isRecord(v.balance) || !Array.isArray(v.history)) return null;
+  const annualRemaining = asNumber(v.balance.annualRemaining);
+  const medicalRemaining = asNumber(v.balance.medicalRemaining);
+  const annualEntitlement = asNumber(v.balance.annualEntitlement);
+  const medicalEntitlement = asNumber(v.balance.medicalEntitlement);
+  if (
+    annualRemaining === null ||
+    medicalRemaining === null ||
+    annualEntitlement === null ||
+    medicalEntitlement === null
+  ) return null;
+  const history = v.history.map(asLeaveRecord).filter((x): x is LeaveRecord => !!x);
+  return {
+    balance: {
+      annualRemaining,
+      medicalRemaining,
+      annualEntitlement,
+      medicalEntitlement,
+    },
+    history,
+  };
+}
+
+function asWorkerMeResponse(v: unknown): WorkerMeResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) {
+    const worker = asWorkerMe(v.worker);
+    return worker ? { success: true, worker } : null;
+  }
+  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
+  return null;
+}
+
+function asWorkerLeavesResponse(v: unknown): WorkerLeavesResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) {
+    const data = asLeavesData(v.data);
+    return data ? { success: true, data } : null;
+  }
+  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
+  return null;
+}
+
+function asWorkerActionResponse(v: unknown): WorkerActionResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) return { success: true };
+  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
+  return null;
+}
+
 export default function WorkerMePage() {
   const t = useT();
   const navigate = useNavigate();
@@ -77,8 +185,8 @@ export default function WorkerMePage() {
   const loadLeaves = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/leaves");
-      const j = await res.json();
-      if (j.success) setLeaves(j.data);
+      const j = asWorkerLeavesResponse(await res.json());
+      if (j?.success) setLeaves(j.data);
     } finally {
       setLeavesLoading(false);
     }
@@ -89,11 +197,12 @@ export default function WorkerMePage() {
     workerFetch("/api/worker-auth/me")
       .then((r) => r.json())
       .then((j) => {
-        if (j.success) {
-          setMe(j.worker);
-          setPhone(j.worker.phone || "");
+        const parsed = asWorkerMeResponse(j);
+        if (parsed?.success) {
+          setMe(parsed.worker);
+          setPhone(parsed.worker.phone || "");
           try {
-            localStorage.setItem(WORKER_ME_KEY, JSON.stringify(j.worker));
+            localStorage.setItem(WORKER_ME_KEY, JSON.stringify(parsed.worker));
           } catch {
             /* ignore */
           }
@@ -112,8 +221,8 @@ export default function WorkerMePage() {
         method: "PATCH",
         body: JSON.stringify({ phone: phone.trim() }),
       });
-      const j = await res.json();
-      if (j.success) {
+      const j = asWorkerActionResponse(await res.json());
+      if (j?.success) {
         setPhoneDirty(false);
         if (me) {
           const next = { ...me, phone: phone.trim() };
@@ -148,9 +257,9 @@ export default function WorkerMePage() {
           reason: leaveReason,
         }),
       });
-      const j = await res.json();
-      if (!j.success) {
-        setLeaveError(j.error || t("common.error"));
+      const j = asWorkerActionResponse(await res.json());
+      if (!j?.success) {
+        setLeaveError(j?.error || t("common.error"));
         return;
       }
       // Reset form + refresh

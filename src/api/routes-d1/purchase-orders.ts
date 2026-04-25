@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { notifySupplierPoSubmitted } from "../lib/email";
 import { emitAudit } from "../lib/audit";
 
@@ -148,6 +149,9 @@ async function fetchPOWithItems(db: D1Database, id: string) {
 
 // GET /api/purchase-orders — list all POs + items
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — purchase-orders:read.
+  const denied = await requirePermission(c, "purchase-orders", "read");
+  if (denied) return denied;
   const [pos, items] = await Promise.all([
     c.var.DB.prepare(
       "SELECT * FROM purchase_orders ORDER BY created_at DESC, id DESC",
@@ -164,6 +168,9 @@ app.get("/", async (c) => {
 
 // POST /api/purchase-orders — create PO + items atomically
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — purchase-orders:create.
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { supplierId, supplierName } = body;
@@ -277,6 +284,8 @@ app.post("/", async (c) => {
 
 // GET /api/purchase-orders/:id — single PO + items
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "read");
+  if (denied) return denied;
   const po = await fetchPOWithItems(c.var.DB, c.req.param("id"));
   if (!po) {
     return c.json({ success: false, error: "Purchase order not found" }, 404);
@@ -286,6 +295,13 @@ app.get("/:id", async (c) => {
 
 // PUT /api/purchase-orders/:id — update scalar fields + optionally replace items
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — base check is purchase-orders:update.
+  // Status transitions get stricter row-level checks below:
+  //   • SUBMITTED → CONFIRMED  ⇒ purchase-orders:approve
+  //   • *         → RECEIVED   ⇒ purchase-orders:receive
+  //   • *         → PARTIAL_RECEIVED ⇒ purchase-orders:receive
+  const baseDenied = await requirePermission(c, "purchase-orders", "update");
+  if (baseDenied) return baseDenied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -313,6 +329,16 @@ app.put("/:id", async (c) => {
           },
           400,
         );
+      }
+
+      // Row-level RBAC for the high-impact status flips.
+      if (existing.status === "SUBMITTED" && body.status === "CONFIRMED") {
+        const denied = await requirePermission(c, "purchase-orders", "approve");
+        if (denied) return denied;
+      }
+      if (body.status === "RECEIVED" || body.status === "PARTIAL_RECEIVED") {
+        const denied = await requirePermission(c, "purchase-orders", "receive");
+        if (denied) return denied;
       }
     }
 
@@ -524,6 +550,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/purchase-orders/:id — cascades to items via FK
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await fetchPOWithItems(c.var.DB, id);
   if (!existing) {

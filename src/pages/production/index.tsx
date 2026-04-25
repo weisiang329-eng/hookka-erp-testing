@@ -1092,21 +1092,35 @@ export default function ProductionPage({
     [orders],
   );
 
-  // Upstream dept chain derived from the real BOM tree structure.
-  // Key = current dept; value = list of upstream dept codes. ALL entries
-  // are shown as separate pills so convergent depts (Upholstery, Packing)
-  // surface the full status of every feeder process — e.g. Upholstery
-  // shows Foam + Framing + Sewing side-by-side per the user's workflow.
-  const UPSTREAM: Record<string, string[]> = {
-    FAB_CUT:    [],
-    FAB_SEW:    ["FAB_CUT"],
-    WOOD_CUT:   [],
-    FRAMING:    ["WOOD_CUT"],
-    WEBBING:    ["FRAMING"],
-    FOAM:       ["FAB_SEW"],
-    UPHOLSTERY: ["FOAM", "FRAMING", "FAB_SEW"],
-    PACKING:    ["UPHOLSTERY"],
-  };
+  // BOM-driven upstream derivation: for the active dept, walk every JC in
+  // the loaded POs that matches activeTab and collect every sibling JC
+  // (same wipKey) with a smaller `sequence`.  Their dept codes are the
+  // BOM-defined upstreams.
+  //
+  // The previous hardcoded UPSTREAM map disagreed with the BOM in two
+  // places: it claimed FOAM had FAB_SEW upstream (true for BF Headboard,
+  // false for Sofa Base where they're parallel) and PACKING was always
+  // downstream of just UPHOLSTERY (also a special-case assumption).
+  // Reading sequence per wipKey makes whatever the BOM says the source
+  // of truth, no map maintenance.  Falls back to no upstreams if the
+  // active tab has no JCs loaded yet (initial render).
+  const upstreamDepts = useMemo<Set<string>>(() => {
+    const set = new Set<string>();
+    if (!activeTab || activeTab === "ALL") return set;
+    for (const o of filteredOrders) {
+      for (const jc of o.jobCards) {
+        if (jc.departmentCode !== activeTab) continue;
+        if (jc.wipKey == null) continue;
+        for (const sib of o.jobCards) {
+          if (sib.id === jc.id) continue;
+          if (sib.wipKey !== jc.wipKey) continue;
+          if (sib.sequence >= jc.sequence) continue;
+          if (sib.departmentCode) set.add(sib.departmentCode);
+        }
+      }
+    }
+    return set;
+  }, [filteredOrders, activeTab]);
 
   // Short labels for the prev-dept pills (saves horizontal space when
   // multiple pills stack in the Upholstery / Packing rows).
@@ -1977,9 +1991,8 @@ export default function ProductionPage({
     // the sheet isn't cluttered.
     ...DEPARTMENTS.map((d): Column<DeptRow> => {
       const objKey = `sched_${d.code}` as keyof DeptRow;
-      const upstreams = UPSTREAM[activeTab] || [];
       const isActive = d.code === activeTab;
-      const isUpstream = upstreams.includes(d.code);
+      const isUpstream = upstreamDepts.has(d.code);
       return {
         key: `${objKey}.sortKey`,
         label: d.name,
@@ -2033,7 +2046,7 @@ export default function ProductionPage({
       sortable: true,
       render: (_v, row) => renderStatusCell(row),
     },
-  ], [activeTab]);
+  ], [activeTab, upstreamDepts]);
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
 

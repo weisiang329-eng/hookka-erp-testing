@@ -61,4 +61,51 @@ export default defineConfig([
       'react-refresh/only-export-components': 'off',
     },
   },
+  // P4.2 — Scheduler policy. Block raw setInterval / setTimeout in app code;
+  // every recurring timer must go through the visibility-aware wrappers in
+  // src/lib/scheduler.ts so it pauses on document.hidden and clears on
+  // unmount. Severity is "warn" today because P4.3 (call-site migration of
+  // 30+ existing raw timers) has not landed yet — flipping to "error" before
+  // that lands would block every commit touching a file with a raw timer
+  // via lint-staged. Once P4.3 drains the count to zero, flip both rules to
+  // "error" in the same commit. See docs/UPGRADE-CONTROL-BOARD.md (Phase 4).
+  //
+  // Allowlist: the wrapper itself (which IS the implementation) and the
+  // two existing visibility-aware hooks that served as the template for the
+  // wrapper (use-presence, use-version-check). Those have hand-rolled
+  // visibility logic that we do not want to migrate — they are the
+  // reference implementation.
+  {
+    files: ['src/**/*.{ts,tsx}'],
+    ignores: [
+      'src/lib/scheduler.ts',
+      'src/lib/use-presence.ts',
+      'src/lib/use-version-check.ts',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'warn',
+        {
+          selector: "CallExpression[callee.name='setInterval']",
+          message:
+            'Use useInterval from src/lib/scheduler.ts (visibility-aware, auto-cleanup). See docs/UPGRADE-CONTROL-BOARD.md P4.1.',
+        },
+        {
+          selector: "CallExpression[callee.name='setTimeout']",
+          message:
+            'Use useTimeout from src/lib/scheduler.ts. If running outside React (event handlers, module init, non-component utilities), suppress with `// eslint-disable-next-line no-restricted-syntax` and a one-line reason.',
+        },
+        {
+          selector: "CallExpression[callee.object.name='window'][callee.property.name='setInterval']",
+          message:
+            'Use useInterval from src/lib/scheduler.ts (visibility-aware, auto-cleanup).',
+        },
+        {
+          selector: "CallExpression[callee.object.name='window'][callee.property.name='setTimeout']",
+          message:
+            'Use useTimeout from src/lib/scheduler.ts (or eslint-disable with a reason for non-React call sites).',
+        },
+      ],
+    },
+  },
 ])

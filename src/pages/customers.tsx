@@ -131,7 +131,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   const [query, setQuery] = useState("");
   const [categoryTab, setCategoryTab] = useState<"ALL" | "BEDFRAME" | "SOFA" | "ACCESSORY">("ALL");
   const [showAssign, setShowAssign] = useState(false);
-  const [assignQuery, setAssignQuery] = useState("");
+  const [_assignQuery, setAssignQuery] = useState("");
   const [assignPicked, setAssignPicked] = useState<Set<string>>(new Set());
   const [assignSaving, setAssignSaving] = useState(false);
 
@@ -227,13 +227,6 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   }, [rows]);
 
   const assignedIds = useMemo(() => new Set(rows.map((r) => r.productId)), [rows]);
-  const assignOptions = useMemo(() => {
-    const q = assignQuery.trim().toLowerCase();
-    return allProducts
-      .filter((p) => !assignedIds.has(p.id))
-      .filter((p) => !q || p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
-      .slice(0, 100);
-  }, [allProducts, assignedIds, assignQuery]);
 
   const openEdit = (row: CustomerProduct) => {
     setEditId(row.id);

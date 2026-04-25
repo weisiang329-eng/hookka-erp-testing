@@ -63,7 +63,7 @@ type SupplierSKU = {
 // ============================================================
 // Mock Data
 // ============================================================
-const MOCK_SUPPLIERS: Supplier[] = [
+const _MOCK_SUPPLIERS: Supplier[] = [
   {
     id: "sup-001",
     code: "SUP-001",
@@ -126,7 +126,7 @@ const MOCK_SUPPLIERS: Supplier[] = [
   },
 ];
 
-const MOCK_SKU: SupplierSKU[] = [
+const _MOCK_SKU: SupplierSKU[] = [
   {
     id: "sku-001",
     internalRMCode: "RM-FAB-001",

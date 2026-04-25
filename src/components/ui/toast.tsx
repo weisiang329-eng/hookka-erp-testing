@@ -9,6 +9,7 @@ import React, {
   useState,
 } from "react";
 import { cn } from "@/lib/utils";
+import { useInterval, useTimeout } from "@/lib/scheduler";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -149,8 +150,8 @@ interface SingleToastProps {
 function SingleToast({ item, onDismiss }: SingleToastProps) {
   const [visible, setVisible] = useState(false);
   const [progress, setProgress] = useState(100);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [dismissing, setDismissing] = useState(false);
+  const startTimeRef = useRef(Date.now());
 
   // Trigger enter animation on mount
   useEffect(() => {
@@ -158,31 +159,35 @@ function SingleToast({ item, onDismiss }: SingleToastProps) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  // Progress bar countdown
-  useEffect(() => {
-    const startTime = Date.now();
-    intervalRef.current = setInterval(() => {
-      const elapsed = Date.now() - startTime;
+  // Progress bar countdown — visibility-aware via useInterval. Stop ticking
+  // once the user (or auto-dismiss) has triggered the exit animation.
+  useInterval(
+    () => {
+      const elapsed = Date.now() - startTimeRef.current;
       const remaining = Math.max(0, 100 - (elapsed / DURATION_MS) * 100);
       setProgress(remaining);
-    }, 50);
+    },
+    dismissing ? null : 50,
+  );
 
-    timeoutRef.current = setTimeout(() => {
+  // Auto-dismiss after DURATION_MS. `null` once dismissing has started so the
+  // timer doesn't double-fire if the user already clicked the close button.
+  useTimeout(
+    () => {
       handleDismiss();
-    }, DURATION_MS);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (timeoutRef.current) clearTimeout(timeoutRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    },
+    dismissing ? null : DURATION_MS,
+  );
 
   function handleDismiss() {
-    if (intervalRef.current) clearInterval(intervalRef.current);
-    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    if (dismissing) return;
+    setDismissing(true);
     setVisible(false);
-    // Wait for exit animation before removing from DOM
+    // Wait for exit animation before removing from DOM. This is a one-shot
+    // delay scheduled inside the click handler / auto-dismiss callback —
+    // useTimeout would tie the firing to a render with `dismissing=true`,
+    // which the unmount path of a clean exit may never reach. Keep raw.
+    // eslint-disable-next-line no-restricted-syntax -- one-shot exit-animation cleanup, fires from event handler not React lifecycle
     setTimeout(() => onDismiss(item.id), 300);
   }
 

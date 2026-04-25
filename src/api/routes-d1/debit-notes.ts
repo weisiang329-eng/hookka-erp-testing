@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -79,6 +80,9 @@ function nextDNNo(): string {
 
 // GET /api/debit-notes — list all
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — debit-notes:read.
+  const denied = await requirePermission(c, "debit-notes", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM debit_notes ORDER BY date DESC",
   ).all<DebitNoteRow>();
@@ -88,6 +92,9 @@ app.get("/", async (c) => {
 
 // POST /api/debit-notes — create
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — debit-notes:create.
+  const denied = await requirePermission(c, "debit-notes", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { invoiceId, reason, reasonDetail, items } = body;
@@ -177,6 +184,8 @@ app.post("/", async (c) => {
 
 // GET /api/debit-notes/:id — single
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "debit-notes", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const row = await c.var.DB.prepare(
     "SELECT * FROM debit_notes WHERE id = ?",

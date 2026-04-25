@@ -221,6 +221,10 @@ export function printPayslip(
     printWindow.document.write(html);
     printWindow.document.close();
     printWindow.focus();
+    // Give the new window time to lay out the document before invoking
+    // print(). Runs from a print-button click handler in a plain utility
+    // function — no React lifecycle, so useTimeout doesn't apply.
+    // eslint-disable-next-line no-restricted-syntax -- non-React utility called from event handler
     setTimeout(() => printWindow.print(), 500);
   }
 }

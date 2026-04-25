@@ -190,7 +190,7 @@ function genNCRNo(): string {
 }
 
 // ─── Sample data ─────────────────────────────────────────────────────────────
-const SAMPLE_RETURNS: ReturnCase[] = [
+const _SAMPLE_RETURNS: ReturnCase[] = [
   {
     id: "rc-1", caseNo: "RC-2603-001", customer: "Houzs PG", soRef: "SO-2509-238-01",
     product: "HILTON(A) BEDFRAME Queen", issueType: "PRODUCT_DEFECT",
@@ -238,7 +238,7 @@ const SAMPLE_RETURNS: ReturnCase[] = [
   },
 ];
 
-const SAMPLE_DEFECTS: DefectEntry[] = [
+const _SAMPLE_DEFECTS: DefectEntry[] = [
   {
     id: "dft-1", defectId: "DFT-2603-011", source: "QC", product: "HILTON(A) BEDFRAME Queen",
     defectType: "FABRIC", severity: "MAJOR", status: "REWORK_IN_PROGRESS",
@@ -277,7 +277,7 @@ const SAMPLE_DEFECTS: DefectEntry[] = [
   },
 ];
 
-const SAMPLE_NCRS: SupplierNCR[] = [
+const _SAMPLE_NCRS: SupplierNCR[] = [
   {
     id: "ncr-1", ncrNo: "NCR-2603-001", supplier: "Foam Supplies Sdn Bhd",
     materialCode: "FM-32-YLW", materialName: "32kg Yellow Foam Sheet",
@@ -478,10 +478,6 @@ export default function QualityPage() {
     refreshInspectionsHook();
   }, [refreshInspectionsHook]);
 
-  const fetchProductionOrders = useCallback(() => {
-    invalidateCachePrefix("/api/production-orders");
-    refreshPOsHook();
-  }, [refreshPOsHook]);
 
   useEffect(() => {
     setInspections(asArray(inspResp));

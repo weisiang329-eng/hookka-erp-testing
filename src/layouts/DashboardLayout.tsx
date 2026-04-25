@@ -20,6 +20,10 @@ function NewVersionWatcher() {
     onNewVersion: () => {
       toast.info("A new version is available — refresh to update (Ctrl+Shift+R).");
       // After the toast, prompt for reload. Delay so the toast is visible.
+      // Fires from useVersionCheck's onNewVersion callback (not a render),
+      // so useTimeout doesn't apply — this is a one-shot reaction to an
+      // event, not a lifecycle-bound effect.
+      // eslint-disable-next-line no-restricted-syntax -- one-shot delay inside event-style callback, not in a React effect
       window.setTimeout(() => {
         if (window.confirm("A new version is available. Reload now? Unsaved changes may be lost.")) {
           window.location.reload();

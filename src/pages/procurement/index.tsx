@@ -2,7 +2,6 @@ import { useState, useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
@@ -13,7 +12,7 @@ import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } fr
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
-  Eye, Pencil, Printer, RefreshCw, ArrowRight,
+  Eye, Pencil, Printer, RefreshCw,
 } from "lucide-react";
 import { generatePurchaseOrderPdf } from "@/lib/generate-purchase-order-pdf";
 
@@ -510,15 +509,6 @@ export default function ProcurementPage() {
   const totalOutstandingQty = purchaseOrders
     .filter((po) => !["RECEIVED", "CANCELLED"].includes(po.status))
     .reduce((sum, po) => sum + po.items.reduce((s, it) => s + Math.max(0, it.quantity - (it.receivedQty || 0)), 0), 0);
-
-  // ---- Status pipeline counts ----
-  const statusCounts = [
-    { label: "Draft", status: "DRAFT", count: purchaseOrders.filter(po => po.status === "DRAFT").length },
-    { label: "Submitted", status: "SUBMITTED", count: purchaseOrders.filter(po => po.status === "SUBMITTED").length },
-    { label: "Confirmed", status: "CONFIRMED", count: purchaseOrders.filter(po => po.status === "CONFIRMED").length },
-    { label: "Partial Received", status: "PARTIAL_RECEIVED", count: purchaseOrders.filter(po => po.status === "PARTIAL_RECEIVED").length },
-    { label: "Received", status: "RECEIVED", count: purchaseOrders.filter(po => po.status === "RECEIVED").length },
-  ];
 
   // ---- Unique suppliers for filter dropdown ----
   const uniqueSuppliers = useMemo(() => {

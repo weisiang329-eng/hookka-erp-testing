@@ -239,48 +239,9 @@ function ContextMenu({
 // Column Filter Dropdown (AutoCount-style)
 // ---------------------------------------------------------------------------
 
-// Date presets — relative to today, trailing for "last" and leading
-// for "next" (NOT including today itself on either side, so Today is
-// its own distinct chip).
-//
-// Returns [fromYmd, toYmd] or null if the preset key is unknown.
-// Kept module-level so the render path can also decide which presets
-// apply without re-allocating per render.
-function getDatePresetRange(
-  preset: string,
-): [string, string] | null {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const addDays = (d: Date, n: number) => {
-    const c = new Date(d);
-    c.setDate(c.getDate() + n);
-    return c;
-  };
-  const ymd = (d: Date) => {
-    // Local-tz aware YYYY-MM-DD (NOT toISOString(), which is UTC and
-    // can shift the date by one in MYT/SGT at the day boundary)
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${y}-${m}-${dd}`;
-  };
-  let from: Date, to: Date;
-  switch (preset) {
-    case "today":       from = today;            to = today;              break;
-    case "lastDay":     from = addDays(today, -1);  to = addDays(today, -1); break;
-    case "nextDay":     from = addDays(today, 1);   to = addDays(today, 1);  break;
-    case "lastWeek":    from = addDays(today, -7);  to = addDays(today, -1); break;
-    case "nextWeek":    from = addDays(today, 1);   to = addDays(today, 7);  break;
-    case "lastMonth":   from = addDays(today, -30); to = addDays(today, -1); break;
-    case "nextMonth":   from = addDays(today, 1);   to = addDays(today, 30); break;
-    default: return null;
-  }
-  return [ymd(from), ymd(to)];
-}
-
 function ColumnFilterDropdown<T>({
   columnKey,
-  columnType,
+  columnType: _columnType,
   allData,
   activeValues,
   textFilter,

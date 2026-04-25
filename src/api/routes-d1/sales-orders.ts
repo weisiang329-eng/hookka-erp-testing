@@ -26,7 +26,7 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
-import { resolveCustomerPrice, resolveCustomerPriceAsOf } from "./customer-products";
+import { resolveCustomerPriceAsOf } from "./customer-products";
 import { withOrgScope } from "../lib/tenant";
 
 const app = new Hono<Env>();

@@ -5890,9 +5890,6 @@ export type BalanceSheetEntry = {
 
 // --- P&L Entries: 3 months (Jan-Mar 2026) by product category & customer ---
 
-let _plId = 1;
-function plId() { return `pl-${_plId++}`; }
-
 export const plEntries: PLEntry[] = [];
 
 // --- Balance Sheet (as of 31 March 2026) ---

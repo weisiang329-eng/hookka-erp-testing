@@ -279,8 +279,8 @@ export default function PlanningPage() {
   });
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
-  const [recalcRunning, setRecalcRunning] = useState(false);
-  const [recalcResult, setRecalcResult] = useState<string | null>(null);
+  const [_recalcRunning, setRecalcRunning] = useState(false);
+  const [_recalcResult, setRecalcResult] = useState<string | null>(null);
 
   const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
@@ -342,7 +342,7 @@ export default function PlanningPage() {
   // current lead-time config. Destructive for old orders, so we confirm first
   // and then invalidate the production cache so the tracker picks up new
   // dates immediately.
-  const recalcAllDueDates = async () => {
+  const _recalcAllDueDates = async () => {
     const ok = window.confirm(
       "Recalculate due dates on ALL existing production orders?\n\n" +
         "This will rewrite every job card's dueDate using the current lead " +
@@ -395,7 +395,7 @@ export default function PlanningPage() {
   ];
 
   // ── Fetch data ──
-  const fetchData = useCallback(() => {
+  const _fetchData = useCallback(() => {
     invalidateCachePrefix("/api/production-orders");
     invalidateCachePrefix("/api/workers");
     invalidateCachePrefix("/api/scheduling");

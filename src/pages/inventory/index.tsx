@@ -17,12 +17,7 @@ import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-impo
 // fetched live from D1 via the API. After a D1 clear the UI now correctly
 // renders zero balances instead of baked-in seed values.
 import { type Product, type RawMaterial } from "@/lib/mock-data";
-import type { RMBatch, FGBatch } from "@/types";
-import {
-  weightedAvgCostSen, totalBatchValueSen, totalRemainingQty,
-  laborRateForDate,
-} from "@/lib/costing";
-import { getRawMaterialStock } from "@/lib/material-lookup";
+import type { FGBatch } from "@/types";
 import {
   SUCCESS, NEUTRAL,
   INVENTORY_TYPE_COLOR,
@@ -34,9 +29,6 @@ import {
 // arrays. No D1 endpoint exists yet for batch layers, so both helpers now
 // return empty arrays — downstream weighted-average cost calcs gracefully
 // return 0. Wire these up once GRN/PO batch tables are exposed via the API.
-function batchesForRM(_rmId: string): RMBatch[] {
-  return [];
-}
 
 /** Return all FG layers for a product (oldest-first). */
 function batchesForProduct(_productId: string): FGBatch[] {
@@ -85,13 +77,6 @@ function oldestBatchAgeDays(
   return Math.max(0, Math.floor((today - oldestTs) / 86400000));
 }
 
-function oldestRMAgeDays(rmId: string): number {
-  return oldestBatchAgeDays(
-    batchesForRM(rmId),
-    (b: RMBatch) => b.receivedDate,
-  );
-}
-
 function oldestFGAgeDays(productId: string): number {
   return oldestBatchAgeDays(
     batchesForProduct(productId),
@@ -109,42 +94,6 @@ function renderAgeCell(ageDays: number) {
   const textCls = ageDays > 7 ? sem.text : "text-[#1F1D1B]";
   const label = ageDays === 0 ? "Today" : ageDays === 1 ? "1 day" : `${ageDays} days`;
   return <span className={`${textCls} ${weight}`}>{label}</span>;
-}
-
-/**
- * Estimated per-unit BOM material cost for a product, using the current
- * weighted-average RM batch prices. Mirrors the BOM→RM resolution used in
- * `postProductionOrderCompletion` but averages (rather than FIFO-slicing)
- * since nothing is actually being consumed — this is a display-only
- * estimate for WIP cost. Returns 0 if the product has no BOM or no RMs
- * with priced batches could be matched.
- */
-function bomMaterialCostPerUnitSen(product: Product | undefined): number {
-  if (!product?.bomComponents?.length) return 0;
-  let totalSen = 0;
-  for (const bom of product.bomComponents) {
-    const perUnit = Number(bom.qtyPerUnit) || 0;
-    if (perUnit <= 0) continue;
-    const waste = Math.max(0, Number(bom.wastePct) || 0) / 100;
-    const qtyWithWaste = perUnit * (1 + waste);
-
-    // Preferred RM set: exact match on name/code, else full category group.
-    const categoryMatches = getRawMaterialStock(bom.materialCategory).items;
-    const exact = categoryMatches.find(
-      (rm) =>
-        rm.description === bom.materialName || rm.itemCode === bom.materialName,
-    );
-    const rmPool = exact ? [exact] : categoryMatches;
-    if (rmPool.length === 0) continue;
-
-    // Weighted avg across the entire pool's active batches.
-    const poolBatches = rmPool.flatMap((rm) => batchesForRM(rm.id));
-    const avgUnitCost = weightedAvgCostSen(poolBatches);
-    if (avgUnitCost <= 0) continue;
-
-    totalSen += qtyWithWaste * avgUnitCost;
-  }
-  return totalSen;
 }
 
 /** Display RM/unit with 2 decimals, or "—" if no cost info. */
@@ -358,17 +307,6 @@ function deriveFGStock(
 }
 // (fgItems was previously a module-level const seeded from mock data. It is
 // now recomputed inside the component from live fetches — see useMemo below.)
-
-// WIP type labels from wipKey codes
-const WIP_TYPE_LABELS: Record<string, string> = {
-  FG: "Finished Good",
-  DIVAN: "Divan",
-  HEADBOARD: "Headboard",
-  SOFA_BASE: "Base",
-  SOFA_CUSHION: "Cushion",
-  SOFA_ARMREST: "Armrest",
-  SOFA_HEADREST: "Headrest",
-};
 
 // Row shape for the merged-sofa-set grid. Populated from the
 // /api/inventory/wip endpoint's SET rows (wipType === "SET") — the
@@ -929,7 +867,7 @@ const wipColumns: Column<WIPItem>[] = [
 // Columns for the merged sofa-set view. The first column doubles as an
 // expand/collapse caret — click handling is wired up at the DataGrid level
 // since the underlying component rows live in a separate nested grid.
-const sofaSetColumns = (
+const _sofaSetColumns = (
   expandedIds: Set<string>,
   toggle: (id: string) => void,
 ): Column<SofaSetRow>[] => [
@@ -1047,10 +985,10 @@ export default function InventoryPage() {
   // WIP view mode: "MERGED" (default) collapses sofa components into
   // (SO, fabric) set rows to match the Production page's Fab Cut layout;
   // "PER_COMPONENT" shows one row per WIP component (legacy breakdown).
-  const [wipViewMode, setWipViewMode] = useState<"PER_COMPONENT" | "MERGED">("MERGED");
+  const [_wipViewMode, _setWipViewMode] = useState<"PER_COMPONENT" | "MERGED">("MERGED");
   // Which sofa-set rows are expanded to show their underlying component WIPs.
-  const [expandedSetIds, setExpandedSetIds] = useState<Set<string>>(new Set());
-  const toggleExpandedSet = (id: string) => {
+  const [_expandedSetIds, setExpandedSetIds] = useState<Set<string>>(new Set());
+  const _toggleExpandedSet = (id: string) => {
     setExpandedSetIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -1267,7 +1205,7 @@ export default function InventoryPage() {
     return map;
   }, [wipItems]);
 
-  const sofaSetRows = useMemo<SofaSetRow[]>(() => {
+  const _sofaSetRows = useMemo<SofaSetRow[]>(() => {
     const q = wipSearch.trim().toLowerCase();
     const matchSearch = (row: BackendWipRow): boolean => {
       if (!q) return true;
@@ -1303,7 +1241,7 @@ export default function InventoryPage() {
   // Per-component SOFA rows are filtered out here so they only appear when
   // the user switches to PER_COMPONENT view (otherwise they'd double-count
   // against the merged SET rows).
-  const filteredWIPNonSofa = useMemo(
+  const _filteredWIPNonSofa = useMemo(
     () => filteredWIP.filter(
       (w) => !(w.sources.length > 0 && w.sources.every((s) => s.itemCategory === "SOFA")),
     ),

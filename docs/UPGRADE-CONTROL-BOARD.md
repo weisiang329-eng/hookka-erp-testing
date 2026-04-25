@@ -1,6 +1,6 @@
 # Upgrade Control Board — Single Source of Truth
 
-> **Last updated**: 2026-04-25 (P3.4 finish)
+> **Last updated**: 2026-04-25 (P5.0 finish — landed mislabeled in 1c9a14c)
 > **Latest batch landed**: Batch 1 (CI gate non-blocking + thundering-herd fix + 90d plan + control board). 96 TS errors remaining.
 > **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
 > **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
@@ -83,7 +83,6 @@ Every row carries these fields. If any is missing, the row is malformed and must
 
 | ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
 |---|---|---|---|---|---|---|
-| P5.0 | sdk | Apply same `fetchInChunks` helper to `fetchPaginatedPOs` (currently has same latent IN-clause overflow but no frontend caller — preempt before pagination ships) | Claude | 2026-06-22 | `fetchPaginatedPOs` no longer builds `WHERE productionOrderId IN (?,?,...)` directly | low — latent |
 | P5.1 | sdk | `src/sdk/sales` + migrate sales pages | Claude | 2026-06-22 | Sales pages no longer import `safe-json.ts` | medium |
 | P5.2 | sdk | `src/sdk/{delivery,production}` + migrate | Claude | 2026-06-29 | Same | medium |
 | P5.3 | sdk | `src/sdk/{procurement,accounting,worker,inventory}` + migrate | Claude | 2026-07-06 | Same | medium |
@@ -128,6 +127,7 @@ _(empty — surface here when something stalls. Each blocker must name the unblo
 | P1.2 | ci | Add `typecheck:app` step to `.github/workflows/deploy.yml` (initially `continue-on-error: true` until TS-cleanup agent finishes) | Claude | 2026-04-27 | Workflow run shows the step executing | 745801a | medium — coordinate with parallel TS agent | ✓ Step `Typecheck (app)` runs in `.github/workflows/deploy.yml` (continue-on-error: true). Visible in commit 745801a CI run. |
 | P1.3 | ci | Add `lint:app` step to `.github/workflows/deploy.yml` (same pattern) | Claude | 2026-04-27 | Workflow run shows step executing | 745801a | low | ✓ Step `Lint (app)` runs in `.github/workflows/deploy.yml` (continue-on-error: true). Visible in commit 745801a CI run. |
 | P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 sensitive mutations | Claude | 2026-04-25 | `emitAudit` written for each mutation; `tests/audit.test.mjs` covers stub-INSERT shape + non-throwing failure path | 7f58af3 + this commit | medium | ✓ 12 sensitive mutations wired (SO create/confirm + payment create from 7f58af3; PO create, GRN create, invoice post + void, user role-change, worker hard-delete, payroll post, credit-note create, debit-note create, e-invoice submit, BOM-master publish from this commit). Job-card status changes intentionally skipped — already journaled by `job_card_events` domain table to avoid double-logging. `npm test` 19/19 ✓; `npm run typecheck:app` 0 errors; `npm run build` ✓. |
+| P5.0 | sdk | Apply same `fetchInChunks` helper to `fetchPaginatedPOs` | Claude | 2026-04-25 | `fetchPaginatedPOs` no longer builds `WHERE productionOrderId IN (?,?,...)` directly | 1c9a14c (mislabeled — see this commit) | low — latent | ✓ `fetchPaginatedPOs` JC + piece_pics queries now chunk at 100 binds via `fetchInChunks` (no-deptFilter case) + inline triple-IN chunked loop (deptFilter case, 3 copies of `poIds` per chunk). The chunking diff was swept into commit `1c9a14c` ("feat(ledger): journal_entries + hash chain + invoice dual-write") by another agent's `git add -A`-style staging — the ledger commit's `production-orders.ts` 76-line delta is actually this P5.0 task. Hygiene rule 6 followed: not rewriting history (1c9a14c is another agent's commit), citing both commits in this row. |
 
 ---
 

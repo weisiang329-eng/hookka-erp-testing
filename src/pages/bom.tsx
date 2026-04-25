@@ -4126,6 +4126,8 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
 
   function showToast(msg: string) {
     setToastMsg(msg);
+    // Fire-and-forget toast clear from event-style callback (Save click).
+    // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
     setTimeout(() => setToastMsg(""), 2000);
   }
 

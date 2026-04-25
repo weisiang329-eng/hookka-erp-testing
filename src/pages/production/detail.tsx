@@ -11,7 +11,7 @@ import {
   Play, Square, User, ChevronRight, Download, FileText, QrCode, X, Printer,
 } from "lucide-react";
 import { generateJobCardPdf, generateFullPOPdf } from "@/lib/generate-po-pdf";
-import { getQRCodeUrl, generateStickerData } from "@/lib/qr-utils";
+import { generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix, invalidateCache } from "@/lib/cached-fetch";
 import { fetchJson } from "@/lib/fetch-json";

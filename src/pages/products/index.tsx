@@ -766,6 +766,11 @@ function MaintenanceView() {
     const snap = JSON.stringify(config);
     if (snap === savedSnapshot) return;
     let cancelled = false;
+    // Debounce + per-effect cancellation flag: useTimeout's ref-based
+    // latest-fn capture and shared `fired` semantics don't compose cleanly
+    // with the local `cancelled` closure used to discard a stale flush
+    // when `config` changes again before 500ms elapses. Keep raw + disable.
+    // eslint-disable-next-line no-restricted-syntax -- debounced autosave with per-effect cancellation closure
     const t = setTimeout(async () => {
       saveMaintenanceConfig(config);
       const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
@@ -811,6 +816,8 @@ function MaintenanceView() {
   function showToast(msg: string) {
     setToastMsg(msg);
     setToastVisible(true);
+    // Fire-and-forget toast hide from event-style callback (e.g. add-row click).
+    // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
     setTimeout(() => setToastVisible(false), 2000);
   }
 

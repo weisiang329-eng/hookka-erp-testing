@@ -1747,6 +1747,9 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
         printWindow.document.write(html);
         printWindow.document.close();
         printWindow.focus();
+        // Wait for the new window to lay out the payslip HTML before
+        // invoking print(). Runs from a print-button click handler.
+        // eslint-disable-next-line no-restricted-syntax -- one-shot delay inside print-button event handler
         setTimeout(() => printWindow.print(), 500);
       }
     } catch {

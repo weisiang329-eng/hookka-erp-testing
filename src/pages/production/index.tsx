@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Check, Plus, Lock } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column } from "@/components/ui/data-grid";
-import { getQRCodeUrl, getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
+import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
@@ -849,7 +849,7 @@ export default function ProductionPage({
   // is a noticeable hitch. Users who want to print or scan open the
   // section explicitly.
   const [showQRStrip, setShowQRStrip] = useState(false);
-  const [showFgPreview, setShowFgPreview] = useState(false);
+  const [_showFgPreview, setShowFgPreview] = useState(false);
   // Collapse both on tab change so the new tab starts fast; user re-opens
   // per tab if they actually need the QR grid.
   useEffect(() => {
@@ -1227,18 +1227,6 @@ export default function ProductionPage({
     return set;
   }, [filteredOrders, activeTab]);
 
-  // Short labels for the prev-dept pills (saves horizontal space when
-  // multiple pills stack in the Upholstery / Packing rows).
-  const DEPT_SHORT: Record<string, string> = {
-    FAB_CUT: "FC",
-    FAB_SEW: "SEW",
-    WOOD_CUT: "WD",
-    FRAMING: "FR",
-    WEBBING: "WB",
-    FOAM: "FM",
-    UPHOLSTERY: "UPH",
-    PACKING: "PK",
-  };
 
   // Dept-view rows: one row per JobCard in the selected dept, flattened
   // across all production orders. Matches the "Production Sheet" columns
@@ -2486,7 +2474,7 @@ export default function ProductionPage({
   // JC dueDate / status. Fixes the class of bug where a BOM gets edited
   // after POs were already created (sofa UPH/PKG, FAB_CUT missing on
   // 5536-CSL / 5537-STOOL, etc.) without needing another ad-hoc migration.
-  const handleSyncJobCardsFromBom = useCallback(async () => {
+  const _handleSyncJobCardsFromBom = useCallback(async () => {
     const ok = window.confirm(
       "Sync Job Cards from BOM?\n\n" +
         "This scans every production order and inserts any job cards that the current BOM expects but the PO is missing. " +

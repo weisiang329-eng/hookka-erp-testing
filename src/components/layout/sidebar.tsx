@@ -1,5 +1,6 @@
 import { Link, useLocation } from "react-router-dom";
 import { useState, useEffect, useCallback } from "react";
+import { useInterval } from "@/lib/scheduler";
 import {
   LayoutDashboard,
   ShoppingCart,
@@ -286,11 +287,14 @@ export function Sidebar() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial fetch on mount; pre-existing pattern, separate cleanup task
     fetchOrgs();
     fetchUnreadCount();
-    const interval = setInterval(() => {
-      fetchUnreadCount();
-    }, 60_000);
-    return () => clearInterval(interval);
   }, [fetchOrgs, fetchUnreadCount]);
+
+  // Poll the unread-notifications count once a minute. useInterval pauses when
+  // the tab is hidden (saves a request/min on idle pinned tabs) and clears on
+  // unmount automatically.
+  useInterval(() => {
+    fetchUnreadCount();
+  }, 60_000);
 
   // P3.6 — load the current user's permission set so we can hide nav links
   // that would otherwise lead to a redirect or 403. SUPER_ADMIN gets ["*"]

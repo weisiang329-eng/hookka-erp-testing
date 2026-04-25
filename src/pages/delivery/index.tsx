@@ -919,7 +919,10 @@ export default function DeliveryPage() {
       remarks: row.remarks,
     };
     setPrintData({ data, mode });
-    // Wait for render, then print
+    // Wait for render, then print. Runs from the Print-button event handler,
+    // not a React effect — useTimeout would tie the firing to a render and
+    // make the synchronous setPrintData(null) cleanup awkward.
+    // eslint-disable-next-line no-restricted-syntax -- one-shot delay inside print-button event handler
     setTimeout(() => {
       window.print();
       setPrintData(null);

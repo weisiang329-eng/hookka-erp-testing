@@ -32,7 +32,6 @@ import {
   Search,
   CheckCircle2,
   AlertTriangle,
-  Upload,
   X,
   ChevronRight,
   Images,

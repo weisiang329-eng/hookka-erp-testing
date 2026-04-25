@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -61,6 +62,9 @@ function genId(): string {
 
 // GET /api/workers?departmentId=dept-1
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — workers:read.
+  const denied = await requirePermission(c, "workers", "read");
+  if (denied) return denied;
   const departmentId = c.req.query("departmentId");
   const stmt = departmentId
     ? c.var.DB.prepare(
@@ -74,6 +78,9 @@ app.get("/", async (c) => {
 
 // POST /api/workers — create
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — workers:create.
+  const denied = await requirePermission(c, "workers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const {
@@ -151,6 +158,8 @@ app.post("/", async (c) => {
 
 // GET /api/workers/:id
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "workers", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const row = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(id)
@@ -163,6 +172,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/workers/:id — update
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "workers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -266,13 +277,23 @@ app.put("/:id", async (c) => {
 // Live worker tokens are purged so any session for that worker is killed
 // immediately.
 //
-// `?hard=1` (SUPER_ADMIN only) hard-deletes the row. FKs from
-// worker_pins / worker_tokens / attendance / salary_adjustments /
+// `?hard=1` requires the workers:delete permission (P3.3-followup) — used
+// to be a hard-coded SUPER_ADMIN check, now delegated to the role matrix
+// so a custom role with workers:delete can be configured. SUPER_ADMIN
+// short-circuits via lib/rbac.ts so existing admin behavior is preserved.
+// FKs from worker_pins / worker_tokens / attendance / salary_adjustments /
 // worker_salary_periods / payroll_records cascade via ON DELETE CASCADE
 // (see migrations/0001_init.sql). The soft-FK pic1Id / pic2Id columns on
 // job_cards + piece_pics are not declared as FKs, so we explicitly NULL
 // them out first to avoid dangling references.
 app.delete("/:id", async (c) => {
+  // Soft delete is gated as workers:delete too — the row flip kills live
+  // sessions and is a security-relevant mutation. Hard delete picks up
+  // the same gate; if needed a future split can add a separate
+  // `workers:hard-delete` action to the seed.
+  const denied = await requirePermission(c, "workers", "delete");
+  if (denied) return denied;
+
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM workers WHERE id = ?")
     .bind(id)
@@ -284,16 +305,6 @@ app.delete("/:id", async (c) => {
   const hard = c.req.query("hard") === "1";
 
   if (hard) {
-    // Role gate — hard deletes wipe referential history, SUPER_ADMIN only.
-    const role = (c as unknown as {
-      get: (k: string) => string | undefined;
-    }).get("userRole");
-    if (role !== "SUPER_ADMIN") {
-      return c.json(
-        { success: false, error: "Hard delete requires SUPER_ADMIN" },
-        403,
-      );
-    }
 
     // Nullify the soft-FK pic columns on job_cards + piece_pics so the
     // cascade delete doesn't leave orphaned worker references. Wrapped in

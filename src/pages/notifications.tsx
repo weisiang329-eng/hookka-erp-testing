@@ -1,5 +1,5 @@
-import { useState, useMemo, useCallback } from "react";
-import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useState, useMemo } from "react";
+import { useCachedJson } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -118,13 +118,7 @@ export default function NotificationsPage() {
   const [locallyRead, setLocallyRead] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<FilterValue>("ALL");
 
-  const { data: notifResp, loading, refresh: refreshNotifHook } = useCachedJson<unknown>("/api/notifications");
-
-  const fetchNotifications = useCallback(() => {
-    invalidateCachePrefix("/api/notifications");
-    setLocallyRead(new Set());
-    refreshNotifHook();
-  }, [refreshNotifHook]);
+  const { data: notifResp, loading } = useCachedJson<unknown>("/api/notifications");
 
   const notifications: Notification[] = useMemo(() => {
     const raw = notifResp;

@@ -20,6 +20,40 @@ import {
 
 type Mode = "login" | "setup" | "reset";
 
+type WorkerAuthSuccess = {
+  success: true;
+  token: string;
+  worker: WorkerMe;
+  needsSetup?: false;
+};
+
+type WorkerAuthNeedsSetup = {
+  success: false;
+  needsSetup: true;
+  error?: string;
+};
+
+type WorkerAuthError = {
+  success: false;
+  error?: string;
+  needsSetup?: false;
+};
+
+type WorkerAuthResponse = WorkerAuthSuccess | WorkerAuthNeedsSetup | WorkerAuthError;
+
+function asWorkerAuthResponse(v: unknown): WorkerAuthResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.needsSetup === true) return { needsSetup: true, success: false, error: typeof o.error === "string" ? o.error : undefined };
+  if (o.success === true && typeof o.token === "string" && o.worker && typeof o.worker === "object") {
+    return { success: true, token: o.token, worker: o.worker as WorkerMe };
+  }
+  if (o.success === false) {
+    return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  }
+  return null;
+}
+
 export default function WorkerLoginPage() {
   const t = useT();
   const navigate = useNavigate();
@@ -47,7 +81,11 @@ export default function WorkerLoginPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ empNo: empNo.trim(), pin }),
       });
-      const data = await res.json();
+      const data = asWorkerAuthResponse(await res.json());
+      if (!data) {
+        setError(t("common.error"));
+        return;
+      }
 
       // Server says "no PIN on file yet" → swap to setup screen
       if (data.needsSetup) {
@@ -87,9 +125,9 @@ export default function WorkerLoginPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ empNo: empNo.trim(), firstTimePin: pin }),
       });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || t("common.error"));
+      const data = asWorkerAuthResponse(await res.json());
+      if (!data || !data.success) {
+        setError(data?.error || t("common.error"));
         return;
       }
       finalizeLogin(data);
@@ -127,9 +165,9 @@ export default function WorkerLoginPage() {
           newPin: pin,
         }),
       });
-      const data = await res.json();
-      if (!data.success) {
-        setError(data.error || t("common.error"));
+      const data = asWorkerAuthResponse(await res.json());
+      if (!data || !data.success) {
+        setError(data?.error || t("common.error"));
         return;
       }
       // After reset, fall back to login screen so the worker logs in

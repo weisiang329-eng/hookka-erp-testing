@@ -421,12 +421,17 @@ app.put("/templates", async (c) => {
   }
 });
 
-// PUT /api/bom/templates/:id — partial update for a single template row.
+// PUT /api/bom/templates/:id — UPSERT for a single template row.
 // The Module Builder save flow calls this once per user-triggered save so D1
 // is never rewritten in bulk from stale client state. Only the fields the
 // caller sends are updated; JSON fields (l1Processes, wipComponents) are
-// re-stringified from whatever array the client sends. Returns 404 if the
-// id doesn't exist — callers should POST /templates to create new rows.
+// re-stringified from whatever array the client sends.
+//
+// If the row does not exist, it is INSERTed with the body fields plus sane
+// defaults for any required columns the body omitted. This supports the
+// frontend "Create from Default Template" / "Start Blank" flow in bom.tsx,
+// where a template is constructed locally with `id: bom-${Date.now()}` and
+// then saved via PUT — there is no prior POST to /templates.
 app.put("/templates/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
@@ -434,9 +439,6 @@ app.put("/templates/:id", async (c) => {
   )
     .bind(id)
     .first<BOMTemplateRow>();
-  if (!existing) {
-    return c.json({ success: false, error: "BOM template not found" }, 404);
-  }
   try {
     const body = await c.req.json();
     const patch: Record<string, string | number | null> = {};
@@ -467,13 +469,39 @@ app.put("/templates/:id", async (c) => {
       patch.changeLog = body.changeLog;
     }
 
-    const keys = Object.keys(patch);
-    if (keys.length > 0) {
-      const setClause = keys.map((k) => `${k} = ?`).join(", ");
+    if (existing) {
+      const keys = Object.keys(patch);
+      if (keys.length > 0) {
+        const setClause = keys.map((k) => `${k} = ?`).join(", ");
+        await c.var.DB.prepare(
+          `UPDATE bom_templates SET ${setClause} WHERE id = ?`,
+        )
+          .bind(...keys.map((k) => patch[k]), id)
+          .run();
+      }
+    } else {
+      // INSERT path: row doesn't exist yet. Fill in required columns with
+      // sensible defaults if the body didn't supply them.
+      const insertRow: Record<string, string | number | null> = {
+        id,
+        productCode: typeof patch.productCode === "string" ? patch.productCode : id,
+        version: typeof patch.version === "string" ? patch.version : "v1.0",
+        versionStatus:
+          typeof patch.versionStatus === "string" ? patch.versionStatus : "ACTIVE",
+        category: typeof patch.category === "string" ? patch.category : "BEDFRAME",
+      };
+      // Carry over any other supplied optional columns.
+      for (const k of Object.keys(patch)) {
+        if (!(k in insertRow)) {
+          insertRow[k] = patch[k];
+        }
+      }
+      const cols = Object.keys(insertRow);
+      const placeholders = cols.map(() => "?").join(", ");
       await c.var.DB.prepare(
-        `UPDATE bom_templates SET ${setClause} WHERE id = ?`,
+        `INSERT INTO bom_templates (${cols.join(", ")}) VALUES (${placeholders})`,
       )
-        .bind(...keys.map((k) => patch[k]), id)
+        .bind(...cols.map((k) => insertRow[k]))
         .run();
     }
 

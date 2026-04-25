@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -93,6 +94,9 @@ async function nextPayrollId(db: D1Database): Promise<string> {
 // GET /api/payroll?period=YYYY-MM
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payroll:read.
+  const denied = await requirePermission(c, "payroll", "read");
+  if (denied) return denied;
   const period = c.req.query("period");
   const stmt = period
     ? c.var.DB.prepare(
@@ -108,6 +112,9 @@ app.get("/", async (c) => {
 // POST /api/payroll — generate a run for all ACTIVE workers
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payroll:create (run payroll).
+  const denied = await requirePermission(c, "payroll", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { period } = body;
@@ -216,6 +223,12 @@ app.post("/", async (c) => {
 // PUT /api/payroll — bulk status update for a period
 // ---------------------------------------------------------------------------
 app.put("/", async (c) => {
+  // RBAC gate (P3.3-followup) — bulk status flip is the "post" semantic.
+  // The 0045 seed has read/create/update/delete for payroll; spec asked
+  // for `payroll:post` which doesn't exist — fall back to :update which
+  // is the closest match (and what the audit row says about this PUT).
+  const denied = await requirePermission(c, "payroll", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { period, status } = body;

@@ -1011,6 +1011,12 @@ type ProductionOrderRow = {
   salesOrderId: string | null;
   productCode: string | null;
   itemCategory: string | null;
+  sizeLabel: string | null;
+  sizeCode: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
   quantity: number;
   currentDepartment: string | null;
   targetEndDate: string | null;

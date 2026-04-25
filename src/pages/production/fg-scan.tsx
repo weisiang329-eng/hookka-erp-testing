@@ -46,6 +46,22 @@ type RecentEntry = {
   at: string;
 };
 
+type FGScanResponse =
+  | { success: true; data: FGUnit }
+  | { success: false; error?: string };
+
+function asFGScanResponse(v: unknown): FGScanResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true && o.data && typeof o.data === "object") {
+    return { success: true, data: o.data as FGUnit };
+  }
+  if (o.success === false) {
+    return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  }
+  return null;
+}
+
 const RECENT_KEY = "hookka_fg_scan_recent";
 const ACTIONS: { value: ScanAction; label: string; color: string }[] = [
   { value: "PACK",    label: "Pack",     color: "bg-[#3E6570]" },
@@ -131,11 +147,11 @@ export default function FGScanPage() {
           workerId: action === "PACK" ? workerId : workerId || undefined,
         }),
       });
-      const data = await res.json();
+      const data = asFGScanResponse(await res.json());
       const now = new Date().toISOString();
 
-      if (data.success && data.data) {
-        const unit = data.data as FGUnit;
+      if (data?.success) {
+        const unit = data.data;
         invalidateCachePrefix("/api/production-orders");
         const packerBit = action === "PACK" && unit.packerName ? ` Packer: ${unit.packerName}.` : "";
         const msg = `${s} marked as ${ACTION_PAST[action]}.${packerBit}`;
@@ -150,7 +166,7 @@ export default function FGScanPage() {
         // Keep action + worker, refocus for next scan.
         setTimeout(() => inputRef.current?.focus(), 30);
       } else {
-        const message = data.error || "Scan failed.";
+        const message = data?.error || "Scan failed.";
         setResult({ kind: "error", message });
         const next = [
           { serial: s, action, ok: false, message, at: now },

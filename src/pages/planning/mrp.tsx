@@ -42,6 +42,12 @@ type FabricDetail = {
   shortage: boolean;
 };
 
+type MRPPostResponse = {
+  success?: boolean;
+  data?: MRPRun;
+  fabricDetail?: FabricDetail[];
+};
+
 const TABS: { key: Tab; label: string }[] = [
   { key: "DASHBOARD", label: "MRP Dashboard" },
   { key: "REQUIREMENTS", label: "Material Requirements" },
@@ -108,7 +114,7 @@ export default function MRPPage() {
     setRunning(true);
     try {
       const res = await fetch(`/api/mrp?horizon=${selectedHorizon}`, { method: "POST" });
-      const json = await res.json();
+      const json = (await res.json()) as MRPPostResponse;
       if (json.success && json.data) {
         setMrpData(json.data);
         if (json.fabricDetail) {

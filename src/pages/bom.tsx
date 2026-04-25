@@ -4897,7 +4897,7 @@ export default function BOMManagementPage() {
           body: JSON.stringify(t),
         },
       );
-      const json = await res.json().catch(() => null);
+      const json = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
       if (!res.ok || !json?.success) {
         throw new Error(json?.error || `HTTP ${res.status}`);
       }

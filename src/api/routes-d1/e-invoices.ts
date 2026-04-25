@@ -34,7 +34,7 @@ type EInvoiceRow = {
   totalExcludingTax: number;
   taxAmount: number;
   totalIncludingTax: number;
-  created_at: string | null;
+  createdAt: string | null;
 };
 
 function rowToEInvoice(row: EInvoiceRow) {
@@ -47,7 +47,7 @@ function rowToEInvoice(row: EInvoiceRow) {
     totalExcludingTax: row.totalExcludingTax,
     taxAmount: row.taxAmount,
     totalIncludingTax: row.totalIncludingTax,
-    createdAt: row.created_at ?? "",
+    createdAt: row.createdAt ?? "",
   };
   if (row.customerTIN !== null) obj.customerTIN = row.customerTIN;
   if (row.submissionId !== null) obj.submissionId = row.submissionId;

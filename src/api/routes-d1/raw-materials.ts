@@ -44,8 +44,8 @@ type RawMaterialRow = {
   maxStock: number;
   status: string;
   notes: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
   uomCount: number | null;
   itemType: string | null;
   stockControl: number | null;
@@ -84,8 +84,8 @@ function rowToApi(r: RawMaterialRow) {
     maxStock: r.maxStock ?? 0,
     status: r.status ?? (r.isActive === 1 ? "ACTIVE" : "INACTIVE"),
     notes: r.notes ?? "",
-    created_at: r.created_at ?? "",
-    updated_at: r.updated_at ?? "",
+    created_at: r.createdAt ?? "",
+    updated_at: r.updatedAt ?? "",
     uomCount: r.uomCount ?? 1,
     itemType: r.itemType ?? null,
     stockControl: (r.stockControl ?? 1) === 1,

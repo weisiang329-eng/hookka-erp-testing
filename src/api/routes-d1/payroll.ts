@@ -46,8 +46,8 @@ type PayrollRow = {
   totalDeductionsSen: number;
   netPaySen: number;
   status: "DRAFT" | "APPROVED" | "PAID";
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 function rowToPayroll(r: PayrollRow) {
@@ -73,8 +73,8 @@ function rowToPayroll(r: PayrollRow) {
     totalDeductionsSen: r.totalDeductionsSen,
     netPaySen: r.netPaySen,
     status: r.status,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
   };
 }
 

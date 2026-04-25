@@ -56,7 +56,7 @@ type StockMovementRow = {
   quantity: number;
   reason: string | null;
   performedBy: string | null;
-  created_at: string;
+  createdAt: string;
 };
 
 type RackItemApi = {
@@ -148,7 +148,7 @@ function rowToMovement(r: StockMovementRow) {
     quantity: r.quantity,
     reason: r.reason ?? "",
     performedBy: r.performedBy ?? "",
-    createdAt: r.created_at,
+    createdAt: r.createdAt,
   };
 }
 

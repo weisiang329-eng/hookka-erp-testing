@@ -27,8 +27,8 @@ type PurchaseOrderRow = {
   expectedDate: string | null;
   receivedDate: string | null;
   notes: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type PurchaseOrderItemRow = {
@@ -82,8 +82,8 @@ function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
     expectedDate: row.expectedDate ?? "",
     receivedDate: row.receivedDate,
     notes: row.notes ?? "",
-    createdAt: row.created_at ?? "",
-    updatedAt: row.updated_at ?? "",
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
   };
 }
 

@@ -33,8 +33,8 @@ type CustomerProductRow = {
   price1Sen: number | null;
   seatHeightPrices: string | null;
   notes: string | null;
-  created_at: string;
-  updated_at: string | null;
+  createdAt: string;
+  updatedAt: string | null;
 };
 
 // Row shape used by JOIN queries against products / customers.
@@ -85,7 +85,7 @@ type CustomerProductPriceRow = {
   seatHeightPrices: string | null;
   effectiveFrom: string;
   notes: string | null;
-  created_at: string;
+  createdAt: string;
   createdBy: string | null;
 };
 
@@ -349,7 +349,7 @@ app.get("/:customerProductId/price-history", async (c) => {
     seatHeightPrices: parseJson<SeatHeightPrice[]>(r.seatHeightPrices, []),
     effectiveFrom: r.effectiveFrom,
     notes: r.notes ?? "",
-    created_at: r.created_at,
+    createdAt: r.createdAt,
   }));
   return c.json({ success: true, data });
 });
@@ -432,7 +432,7 @@ app.post("/:customerProductId/prices", async (c) => {
           ),
           effectiveFrom: row.effectiveFrom,
           notes: row.notes ?? "",
-          created_at: row.created_at,
+          createdAt: row.createdAt,
         },
       },
       201,

@@ -65,8 +65,8 @@ type DeliveryOrderRow = {
   signedByWorkerId: string | null;
   signedByWorkerName: string | null;
   proofOfDelivery: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type DeliveryOrderItemRow = {
@@ -148,8 +148,8 @@ function rowToOrder(row: DeliveryOrderRow, items: DeliveryOrderItemRow[] = []) {
     dispatchedAt: row.dispatchedAt,
     deliveredAt: row.deliveredAt,
     remarks: row.remarks ?? "",
-    createdAt: row.created_at ?? "",
-    updatedAt: row.updated_at ?? "",
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
     doQrCode: row.doQrCode ?? undefined,
     fgUnitIds: fgUnitIds.length ? fgUnitIds : undefined,
     signedAt: row.signedAt,

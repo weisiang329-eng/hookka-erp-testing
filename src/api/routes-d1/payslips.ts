@@ -56,8 +56,8 @@ type PayslipRow = {
   bankAccount: string;
   payrollRunId: string | null;
   status: "DRAFT" | "APPROVED" | "PAID";
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 // ---------------------------------------------------------------------------
@@ -94,8 +94,8 @@ function rowToPayslip(r: PayslipRow) {
     netPay: r.netPaySen,
     bankAccount: r.bankAccount,
     status: r.status,
-    createdAt: r.created_at,
-    updatedAt: r.updated_at,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
   };
 }
 

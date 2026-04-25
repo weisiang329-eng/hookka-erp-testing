@@ -12,7 +12,7 @@
 //   GET /api/cost-ledger/fg-batches     → FGBatch layers (+ productId / productionOrderId filter)
 //   GET /api/cost-ledger/summary        → dashboard rollup (on-hand values, COGS)
 //
-// Schema-note: D1 stores `rm_batches.created_at` / `fg_batches.created_at`
+// Schema-note: D1 stores `rm_batches.createdAt` / `fg_batches.createdAt`
 // (snake_case); the in-memory type exposes `createdAt` (camelCase). The
 // row->API mappers handle the rename.
 // ---------------------------------------------------------------------------
@@ -47,7 +47,7 @@ type RMBatchRow = {
   originalQty: number;
   remainingQty: number;
   unitCostSen: number;
-  created_at: string | null;
+  createdAt: string | null;
   notes: string | null;
 };
 
@@ -62,7 +62,7 @@ type FGBatchRow = {
   materialCostSen: number;
   laborCostSen: number;
   overheadCostSen: number;
-  created_at: string | null;
+  createdAt: string | null;
 };
 
 function rowToLedgerEntry(r: CostLedgerRow) {
@@ -93,7 +93,7 @@ function rowToRMBatch(r: RMBatchRow) {
     originalQty: r.originalQty,
     remainingQty: r.remainingQty,
     unitCostSen: r.unitCostSen,
-    createdAt: r.created_at ?? "",
+    createdAt: r.createdAt ?? "",
     notes: r.notes ?? undefined,
   };
 }
@@ -110,7 +110,7 @@ function rowToFGBatch(r: FGBatchRow) {
     materialCostSen: r.materialCostSen,
     laborCostSen: r.laborCostSen,
     overheadCostSen: r.overheadCostSen,
-    createdAt: r.created_at ?? "",
+    createdAt: r.createdAt ?? "",
   };
 }
 

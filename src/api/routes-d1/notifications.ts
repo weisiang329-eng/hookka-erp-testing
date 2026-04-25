@@ -22,7 +22,7 @@ type NotificationRow = {
   severity: string;
   isRead: number;
   link: string | null;
-  created_at: string;
+  createdAt: string;
 };
 
 function rowToNotification(r: NotificationRow) {
@@ -34,7 +34,7 @@ function rowToNotification(r: NotificationRow) {
     severity: r.severity,
     isRead: r.isRead === 1,
     link: r.link ?? undefined,
-    createdAt: r.created_at,
+    createdAt: r.createdAt,
   };
 }
 

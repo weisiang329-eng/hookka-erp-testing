@@ -19,7 +19,7 @@ const app = new Hono<Env>();
 type Row = {
   key: string;
   value: string;
-  updated_at: string;
+  updatedAt: string;
 };
 
 // GET /api/kv-config/:key
@@ -47,7 +47,7 @@ app.get("/:key", async (c) => {
   return c.json({
     success: true,
     data: parsed,
-    updatedAt: row.updated_at,
+    updatedAt: row.updatedAt,
   });
 });
 
@@ -70,7 +70,7 @@ app.put("/:key", async (c) => {
      VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET
        value = excluded.value,
-       updated_at = excluded.updated_at`,
+       updated_at = excluded.updatedAt`,
   )
     .bind(key, value, now)
     .run();

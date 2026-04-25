@@ -24,7 +24,7 @@ type InspectionRow = {
   result: string | null;
   notes: string | null;
   inspectionDate: string | null;
-  created_at: string | null;
+  createdAt: string | null;
 };
 
 type DefectRow = {
@@ -51,7 +51,7 @@ function rowToInspection(row: InspectionRow, defects: DefectRow[] = []) {
     result: row.result ?? "PASS",
     notes: row.notes ?? "",
     inspectionDate: row.inspectionDate ?? "",
-    createdAt: row.created_at ?? "",
+    createdAt: row.createdAt ?? "",
     defects: defects
       .filter((d) => d.qcInspectionId === row.id)
       .map((d) => ({

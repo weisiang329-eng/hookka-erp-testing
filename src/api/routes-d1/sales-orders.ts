@@ -52,8 +52,8 @@ export type SalesOrderRow = {
   status: string;
   overdue: string | null;
   notes: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 export type SalesOrderItemRow = {
@@ -163,8 +163,8 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     status: row.status,
     overdue: row.overdue ?? "PENDING",
     notes: row.notes ?? "",
-    createdAt: row.created_at ?? "",
-    updatedAt: row.updated_at ?? "",
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
   };
 }
 

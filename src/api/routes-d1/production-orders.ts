@@ -75,8 +75,8 @@ type ProductionOrderRow = {
   completedDate: string | null;
   rackingNumber: string | null;
   stockedIn: number;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type JobCardRow = {
@@ -341,8 +341,8 @@ function rowToPO(
     completedDate: row.completedDate,
     rackingNumber: row.rackingNumber ?? "",
     stockedIn: row.stockedIn === 1,
-    createdAt: row.created_at ?? "",
-    updatedAt: row.updated_at ?? "",
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
   };
 }
 
@@ -2197,8 +2197,8 @@ app.post("/:id/scan-complete", async (c) => {
       const aTD = a.po.targetEndDate || "9999-12-31";
       const bTD = b.po.targetEndDate || "9999-12-31";
       if (aTD !== bTD) return aTD.localeCompare(bTD);
-      const aC = a.po.created_at || "";
-      const bC = b.po.created_at || "";
+      const aC = a.po.createdAt || "";
+      const bC = b.po.createdAt || "";
       if (aC !== bC) return aC.localeCompare(bC);
       return a.slot.pieceNo - b.slot.pieceNo;
     });

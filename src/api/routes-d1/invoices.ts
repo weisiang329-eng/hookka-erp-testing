@@ -43,8 +43,8 @@ type InvoiceRow = {
   paymentDate: string | null;
   paymentMethod: string | null;
   notes: string | null;
-  created_at: string | null;
-  updated_at: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
 };
 
 type InvoiceItemRow = {
@@ -132,8 +132,8 @@ function rowToInvoice(
       .filter((p) => p.invoiceId === row.id)
       .map(rowToPayment),
     notes: row.notes ?? "",
-    createdAt: row.created_at ?? "",
-    updatedAt: row.updated_at ?? "",
+    createdAt: row.createdAt ?? "",
+    updatedAt: row.updatedAt ?? "",
   };
 }
 

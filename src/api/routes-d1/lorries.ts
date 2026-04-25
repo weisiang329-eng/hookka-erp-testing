@@ -17,8 +17,8 @@ type LorryRow = {
   driverName: string;
   driverContact: string;
   status: string;
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 function rowToLorry(row: LorryRow) {
@@ -30,8 +30,8 @@ function rowToLorry(row: LorryRow) {
     driverName: row.driverName,
     driverContact: row.driverContact,
     status: row.status,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

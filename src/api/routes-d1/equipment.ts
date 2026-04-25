@@ -24,8 +24,8 @@ type EquipmentRow = {
   maintenanceCycleDays: number;
   purchaseDate: string;
   notes: string;
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 type MaintenanceLogRow = {
@@ -38,7 +38,7 @@ type MaintenanceLogRow = {
   date: string;
   costSen: number;
   downtimeHours: number;
-  created_at: string;
+  createdAt: string;
 };
 
 function rowToEquipment(row: EquipmentRow) {
@@ -54,8 +54,8 @@ function rowToEquipment(row: EquipmentRow) {
     maintenanceCycleDays: row.maintenanceCycleDays,
     purchaseDate: row.purchaseDate,
     notes: row.notes,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 
@@ -70,7 +70,7 @@ function rowToLog(row: MaintenanceLogRow) {
     date: row.date,
     costSen: row.costSen,
     downtimeHours: row.downtimeHours,
-    createdAt: row.created_at,
+    createdAt: row.createdAt,
   };
 }
 

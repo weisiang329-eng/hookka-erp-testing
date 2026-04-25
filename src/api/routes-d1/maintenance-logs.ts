@@ -21,7 +21,7 @@ type MaintenanceLogRow = {
   date: string;
   costSen: number;
   downtimeHours: number;
-  created_at: string;
+  createdAt: string;
 };
 
 function rowToLog(row: MaintenanceLogRow) {
@@ -35,7 +35,7 @@ function rowToLog(row: MaintenanceLogRow) {
     date: row.date,
     costSen: row.costSen,
     downtimeHours: row.downtimeHours,
-    createdAt: row.created_at,
+    createdAt: row.createdAt,
   };
 }
 

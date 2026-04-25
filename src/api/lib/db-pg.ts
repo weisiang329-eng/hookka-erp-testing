@@ -7,11 +7,14 @@
 //     request handlers.
 //   - prepare: false — transaction-mode pooler doesn't carry session state
 //     across statements, so prepared-statement caching is off.
-//   - transform.column.from — converts snake_case columns to camelCase on
-//     read so app code keeps using `row.shortName` instead of `row.short_name`.
-//     (Schema is snake_case; app types are camelCase.)  Write-side identifiers
-//     inside SQL strings must be written in snake_case by the caller — the
-//     rename map in migrations-postgres/_rename_map.json is the canonical list.
+//   - transform.column.from — converts snake_case columns back to the
+//     ORIGINAL camelCase identifiers used in app code via the rename map
+//     (column-rename-map.json).  postgres.toCamel is lossy — `customer_po`
+//     becomes `customerPo` not `customerPO`, so reads like `row.customerPO`
+//     silently return undefined for every acronym field.  The rename map
+//     was built during D1→Postgres migration and is the canonical source
+//     of truth for the original casing.  Unknown columns (SQL aliases,
+//     ad-hoc derived columns) fall back to postgres.toCamel.
 //
 // Usage from a route:
 //     import { getSql } from '../lib/db-pg'
@@ -19,6 +22,7 @@
 //     const rows = await sql`SELECT * FROM customers LIMIT 10`
 // ---------------------------------------------------------------------------
 import postgres, { type Sql } from 'postgres'
+import renameMap from './column-rename-map.json' with { type: 'json' }
 
 // Postgres returns BIGINT (int8, OID 20) as a string by default — JS Number
 // can't safely hold the full int64 range so the driver bails to string.  But
@@ -39,6 +43,19 @@ const bigintAsNumber = {
   parse: (x: string) => Number(x),
   serialize: (x: number | string) => String(x),
 }
+
+// Inverse of column-rename-map.json: snake_case → original camelCase.
+// Built once at module load.  postgres.toCamel can't preserve acronym
+// casing (`customer_po` → `customerPo` not `customerPO`), so we look up
+// the canonical original here first and only fall back to toCamel for
+// columns that aren't in the migration map (SQL aliases, derived cols).
+const snakeToCamel: Record<string, string> = Object.fromEntries(
+  Object.entries(renameMap as Record<string, string>).map(
+    ([camel, snake]) => [snake, camel],
+  ),
+)
+const columnFrom = (col: string): string =>
+  snakeToCamel[col] ?? postgres.toCamel(col)
 
 /**
  * Returns a fresh postgres.js client for the given connection URL.
@@ -70,7 +87,7 @@ export function getSql(databaseUrl: string): Sql {
         fetch_types: false,
         idle_timeout: 0,
         types: { bigint: bigintAsNumber },
-        transform: { column: { from: postgres.toCamel } },
+        transform: { column: { from: columnFrom } },
       })
     : postgres(databaseUrl, {
         // verify-full validates the cert chain AND the hostname against the
@@ -83,6 +100,6 @@ export function getSql(databaseUrl: string): Sql {
         connect_timeout: 10,
         fetch_types: false,
         types: { bigint: bigintAsNumber },
-        transform: { column: { from: postgres.toCamel } },
+        transform: { column: { from: columnFrom } },
       })
 }

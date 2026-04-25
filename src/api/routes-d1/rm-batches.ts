@@ -27,7 +27,7 @@ type RmBatchRow = {
   originalQty: number;
   remainingQty: number;
   unitCostSen: number;
-  created_at: string | null;
+  createdAt: string | null;
   notes: string | null;
   supplierId: string | null;
   grnId: string | null;
@@ -51,7 +51,7 @@ function rowToApi(r: RmBatchRow) {
     // Prefer explicit grnId column; fall back to sourceRefId when source=GRN.
     grnId: r.grnId ?? (r.source === "GRN" ? r.sourceRefId ?? "" : ""),
     notes: r.notes ?? "",
-    created_at: r.created_at ?? "",
+    created_at: r.createdAt ?? "",
   };
 }
 

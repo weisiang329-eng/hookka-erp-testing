@@ -21,8 +21,8 @@ type DriverRow = {
   ratePerExtraDropSen: number;
   status: string;
   remarks: string;
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 function rowToDriver(row: DriverRow) {
@@ -38,8 +38,8 @@ function rowToDriver(row: DriverRow) {
     ratePerExtraDropSen: row.ratePerExtraDropSen,
     status: row.status,
     remarks: row.remarks,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

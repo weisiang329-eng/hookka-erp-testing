@@ -22,8 +22,8 @@ type LeaveRow = {
   status: string;
   reason: string;
   approvedBy: string | null;
-  created_at: string;
-  updated_at: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 function rowToLeave(row: LeaveRow) {
@@ -38,8 +38,8 @@ function rowToLeave(row: LeaveRow) {
     status: row.status,
     reason: row.reason ?? "",
     approvedBy: row.approvedBy ?? undefined,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

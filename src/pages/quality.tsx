@@ -466,7 +466,7 @@ export default function QualityPage() {
 
   // ── Data fetching ──────────────────────────────────────────────────────────
   const { data: inspResp, loading: inspLoading, refresh: refreshInspectionsHook } = useCachedJson<unknown>("/api/qc-inspections");
-  const { data: poResp, refresh: refreshPOsHook } = useCachedJson<unknown>("/api/production-orders");
+  const { data: poResp } = useCachedJson<unknown>("/api/production-orders");
   const { data: returnsResp } = useCachedJson<unknown>("/api/qc-returns");
   const { data: defectsResp } = useCachedJson<unknown>("/api/qc-defects");
   const { data: bomResp } = useCachedJson<unknown>("/api/bom/templates");

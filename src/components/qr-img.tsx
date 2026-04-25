@@ -28,6 +28,11 @@ function QRImgBase({ data, size = 200, className, alt = "QR" }: QRImgProps) {
   const [shouldRender, setShouldRender] = useState<boolean>(false);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
 
+  // Subscribe to viewport intersection — this is a textbook "external system
+  // sync" effect (the observer is a browser-platform API), and `setShouldRender`
+  // is the React-side projection of that subscription. Pure-derive is not an
+  // option because there's no synchronous way to read the visibility state.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (shouldRender) return;
     const el = wrapperRef.current;
@@ -52,6 +57,9 @@ function QRImgBase({ data, size = 200, className, alt = "QR" }: QRImgProps) {
     return () => observer.disconnect();
   }, [shouldRender]);
 
+  // Async data-URL generation. The promise resolves with a value the React
+  // tree needs (the <img src>); the cancelled flag prevents a stale write
+  // when `data`/`size` change mid-flight.
   useEffect(() => {
     if (!shouldRender) return;
     let cancelled = false;
@@ -70,6 +78,7 @@ function QRImgBase({ data, size = 200, className, alt = "QR" }: QRImgProps) {
       cancelled = true;
     };
   }, [data, size, shouldRender]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (!src) {
     return (

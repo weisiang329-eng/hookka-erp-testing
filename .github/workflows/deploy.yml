@@ -20,6 +20,8 @@ jobs:
     permissions:
       contents: read
       deployments: write
+      # canary deploy posts a comment on the PR with the preview URL
+      pull-requests: write
     steps:
       - uses: actions/checkout@v4
 
@@ -44,18 +46,85 @@ jobs:
       # docs/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
       - run: npm run build:strict
 
-      # Deploy to Cloudflare Pages — only on push events. PRs just exercise
-      # the build to produce the required status check; they don't deploy a
-      # preview (the PR merge ref `<N>/merge` isn't a meaningful branch
-      # slug for Pages, and the teammate's source branch already gets its
-      # own preview on push anyway).
-      - name: Deploy to Cloudflare Pages
+      # Deploy to Cloudflare Pages — main branch path. Preserves the
+      # original behavior: pushes to `main` and `claude/**` deploy to
+      # the matching branch slug on Pages.
+      - name: Deploy to Cloudflare Pages (main / branch push)
         if: github.event_name == 'push'
         uses: cloudflare/wrangler-action@v3
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           command: pages deploy dist --project-name=hookka-erp-testing --branch=${{ github.ref_name }}
+
+      # ---------------------------------------------------------------------
+      # Phase B.5 — Canary deploy on PR.
+      # ---------------------------------------------------------------------
+      # Every PR targeting main also deploys to a unique Pages preview
+      # branch (`canary-<PR_NUMBER>`). Cloudflare Pages auto-creates a
+      # preview URL for each branch slug. Reviewers can click the URL in
+      # the PR comment to test the change against real Pages
+      # infrastructure (Hyperdrive, KV, R2 bindings — all live in
+      # preview env).
+      #
+      # Promote-to-main = merge the PR. The push event on main re-runs
+      # the workflow and deploys to the production branch.
+      # ---------------------------------------------------------------------
+      - name: Deploy to Cloudflare Pages (canary)
+        if: github.event_name == 'pull_request'
+        id: canary
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=hookka-erp-testing --branch=canary-${{ github.event.pull_request.number }}
+
+      - name: Comment canary URL on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // Cloudflare Pages preview URLs follow the pattern
+            //   https://<branch-slug>.<project-name>.pages.dev
+            // The branch slug is normalized: lowercase, dashes, no `/`.
+            const prNumber = context.payload.pull_request.number;
+            const branchSlug = `canary-${prNumber}`;
+            const url = `https://${branchSlug}.hookka-erp-testing.pages.dev`;
+            const marker = '<!-- canary-deploy-comment -->';
+            const body = [
+              marker,
+              `### Canary deploy ready`,
+              ``,
+              `Preview URL: ${url}`,
+              ``,
+              `This branch is wired to the same Hyperdrive / D1 / KV bindings as production. Test changes here before merging — see [docs/CANARY-DEPLOY.md](../blob/main/docs/CANARY-DEPLOY.md) for the review checklist.`,
+              ``,
+              `Promote to main = merge this PR.`,
+            ].join("\n");
+
+            // Update existing comment if present (avoid spam on every push)
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+            }
 
       # Apply D1 migrations after the deploy, only for main pushes. Feature
       # branches share the same D1 so preview pushes must never mutate the

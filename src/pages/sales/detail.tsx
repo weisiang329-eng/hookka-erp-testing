@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -149,11 +149,11 @@ export default function SalesOrderDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
-  const [order, setOrder] = useState<SalesOrder | null>(null);
-  const [customer, setCustomer] = useState<Customer | null>(null);
-  const [linkedPOs, setLinkedPOs] = useState<LinkedPO[]>([]);
-  const [statusHistory, setStatusHistory] = useState<StatusChange[]>([]);
-  const [overrideHistory, setOverrideHistory] = useState<PriceOverrideRecord[]>([]);
+  // Optimistic post-mutation overrides — set by mutation handlers when the
+  // server returns the freshly-updated SO so the UI reflects the change
+  // immediately while the cache refresh completes in the background.
+  const [orderOverride, setOrderOverride] = useState<SalesOrder | null>(null);
+  const [linkedPOsOverride, setLinkedPOsOverride] = useState<LinkedPO[] | null>(null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -180,22 +180,33 @@ export default function SalesOrderDetailPage() {
     refreshOrder();
   }, [id, refreshOrder]);
 
-  useEffect(() => {
-    const d = orderResp;
-    if (!d) return;
-    if (d.success) {
-      setOrder(d.data as SalesOrder);
-      setLinkedPOs(d.linkedPOs || []);
-      setStatusHistory(d.statusHistory || []);
-      setOverrideHistory(d.priceOverrides || []);
-    }
-  }, [orderResp]);
+  // Pure derive — orderResp comes from useCachedJson; the optimistic override
+  // wins until the next refresh produces a newer snapshot (which clears it).
+  const orderFromServer: SalesOrder | null = useMemo(
+    () => (orderResp?.success ? (orderResp.data as SalesOrder) : null),
+    [orderResp],
+  );
+  const order: SalesOrder | null = orderOverride ?? orderFromServer;
+  const linkedPOsFromServer: LinkedPO[] = useMemo(
+    () => (orderResp?.success ? orderResp.linkedPOs ?? [] : []),
+    [orderResp],
+  );
+  const linkedPOs: LinkedPO[] = linkedPOsOverride ?? linkedPOsFromServer;
+  const statusHistory: StatusChange[] = useMemo(
+    () => (orderResp?.success ? orderResp.statusHistory ?? [] : []),
+    [orderResp],
+  );
+  const overrideHistory: PriceOverrideRecord[] = useMemo(
+    () => (orderResp?.success ? orderResp.priceOverrides ?? [] : []),
+    [orderResp],
+  );
 
   // Fetch customer so we can resolve the hub shortName for the Delivery Hub field
   const { data: customerResp } = useCachedJson<{ success?: boolean; data?: Customer }>(order?.customerId ? `/api/customers/${order.customerId}` : null);
-  useEffect(() => {
-    if (customerResp?.success) setCustomer(customerResp.data as Customer);
-  }, [customerResp]);
+  const customer: Customer | null = useMemo(
+    () => (customerResp?.success ? (customerResp.data as Customer) : null),
+    [customerResp],
+  );
 
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
@@ -228,8 +239,8 @@ export default function SalesOrderDetailPage() {
       // touch many POs so the PO list prefix invalidation is retained.
       if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
-      setOrder(data.data);
-      if (data.linkedPOs) setLinkedPOs(data.linkedPOs);
+      setOrderOverride(data.data);
+      if (data.linkedPOs) setLinkedPOsOverride(data.linkedPOs);
       // Surface the ON_HOLD / CANCELLED / RESUME cascade summary as a toast so
       // the user sees how many POs + job cards were touched by the transition.
       // `cascade` is only populated when the server-side helper fired.
@@ -295,7 +306,7 @@ export default function SalesOrderDetailPage() {
       // invalidation. Only this one SO changed, so per-id for the SO.
       if (id) invalidateCache(`/api/sales-orders/${id}`);
       invalidateCachePrefix("/api/production-orders");
-      setOrder(data.data);
+      setOrderOverride(data.data);
       setConfirmSuccess(data.message);
       fetchOrder();
       // Fire-and-forget banner clear scheduled from confirm action callback.

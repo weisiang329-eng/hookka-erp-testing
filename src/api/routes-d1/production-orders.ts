@@ -631,26 +631,52 @@ async function fetchPaginatedPOs(
     return { data: posRows.map((p) => rowToPO(p, [], [])), total };
   }
 
-  // Scope JC + piece_pics queries to only this page's PO IDs.
+  // Scope JC + piece_pics queries to only this page's PO IDs. Bind lists
+  // chunked at 100 (D1 cap) — same latent overflow that 745801a fixed for
+  // fetchFilteredPOs. With page size up to 500 + 3 IN clauses for the
+  // deptFilter case, we'd otherwise blow past D1's 100-parameter cap.
   const poIds = posRows.map((p) => p.id);
-  const jcPlaceholders = poIds.map(() => "?").join(",");
-  // Dept narrowing — same wipKey-grouped logic as fetchFilteredPOs. Drops
-  // unrelated wipKeys but keeps every sibling JC inside a touched wipKey
-  // so the production page's prev-dept-CD pills (FAB_SEW shown on FOAM
-  // tab, etc.) have the data they need.  Plain departmentCode filter
-  // would orphan upstream pills.
-  const jcDeptClause = deptFilter
-    ? ` AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${jcPlaceholders}))
-            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${jcPlaceholders}))))`
-    : "";
-  const jcBinds = deptFilter
-    ? [...poIds, deptFilter, ...poIds, deptFilter, ...poIds]
-    : poIds;
-  const jcsRes = await db
-    .prepare(`SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})${jcDeptClause}`)
-    .bind(...jcBinds)
-    .all<JobCardRow>();
-  const jcs = jcsRes.results ?? [];
+  let jcs: JobCardRow[] = [];
+  if (deptFilter) {
+    // Dept narrowing — same wipKey-grouped logic as fetchFilteredPOs. Drops
+    // unrelated wipKeys but keeps every sibling JC inside a touched wipKey
+    // so the production page's prev-dept-CD pills (FAB_SEW shown on FOAM
+    // tab, etc.) have the data they need.  Plain departmentCode filter
+    // would orphan upstream pills.
+    //
+    // The query references `poIds` 3 times (outer + both subqueries), so we
+    // chunk inline rather than threading a triple-IN shape through
+    // fetchInChunks. Each chunk substitutes the same chunk slice into all 3
+    // IN clauses.
+    if (poIds.length > 0) {
+      const CHUNK = 100;
+      const chunks: string[][] = [];
+      for (let i = 0; i < poIds.length; i += CHUNK) {
+        chunks.push(poIds.slice(i, i + CHUNK));
+      }
+      const chunkResults = await Promise.all(
+        chunks.map((chunk) => {
+          const ph = chunk.map(() => "?").join(",");
+          const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${ph}))
+            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph}))))`;
+          return db
+            .prepare(sql)
+            .bind(...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
+            .all<JobCardRow>();
+        }),
+      );
+      for (const r of chunkResults) {
+        if (r.results) jcs.push(...r.results);
+      }
+    }
+  } else {
+    jcs = await fetchInChunks<JobCardRow>(
+      db,
+      (placeholders) =>
+        `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${placeholders})`,
+      poIds,
+    );
+  }
 
   // Minimal path: skip piece_pics entirely.
   if (minimal) {
@@ -660,12 +686,12 @@ async function fetchPaginatedPOs(
   let pics: PiecePicRow[] = [];
   if (jcs.length > 0) {
     const jcIds = jcs.map((j) => j.id);
-    const picPlaceholders = jcIds.map(() => "?").join(",");
-    const picsRes = await db
-      .prepare(`SELECT * FROM piece_pics WHERE jobCardId IN (${picPlaceholders})`)
-      .bind(...jcIds)
-      .all<PiecePicRow>();
-    pics = picsRes.results ?? [];
+    pics = await fetchInChunks<PiecePicRow>(
+      db,
+      (placeholders) =>
+        `SELECT * FROM piece_pics WHERE jobCardId IN (${placeholders})`,
+      jcIds,
+    );
   }
 
   return { data: posRows.map((p) => rowToPO(p, jcs, pics)), total };

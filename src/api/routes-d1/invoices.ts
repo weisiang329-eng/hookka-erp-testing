@@ -19,7 +19,9 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
+import { appendJournalEntries } from "../lib/journal-hash";
 
 const app = new Hono<Env>();
 
@@ -294,6 +296,9 @@ async function fetchInvoiceWithChildren(db: D1Database, id: string) {
 // retention rules). So this is a no-op on the invoices endpoint; the
 // query param is consumed-and-ignored rather than forwarded to SQL.
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — invoices:read.
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
   const db = c.var.DB;
   const customerId = c.req.query("customerId");
   const status = c.req.query("status");
@@ -395,6 +400,8 @@ app.get("/", async (c) => {
 // current paginated page. Registered BEFORE /:id (Hono route ordering).
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
+  const denied = await requirePermission(c, "invoices", "read");
+  if (denied) return denied;
   const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM invoices GROUP BY status")
     .all<{ status: string; n: number }>();
@@ -409,6 +416,9 @@ app.get("/stats", async (c) => {
 
 // POST /api/invoices — create from a DELIVERED delivery order.
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — invoices:create.
+  const denied = await requirePermission(c, "invoices", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const deliveryOrderId: string | undefined = body.deliveryOrderId;
@@ -764,6 +774,79 @@ app.put("/:id", async (c) => {
         before: existing,
         after: updated,
       });
+
+      // ----------------------------------------------------------------
+      // Phase C #2 quick-win — dual-write to the immutable ledger.
+      //
+      // Standard 2-leg invoice posting per the roadmap (chart in 0010):
+      //   DR 1100 Accounts Receivable     totalSen
+      //   CR 4000 Sales Revenue           subtotalSen
+      //   CR 2400 GST Output              taxSen   (only if non-zero)
+      //
+      // taxSen is derived as totalSen - subtotalSen. The current invoice
+      // schema doesn't carry an explicit tax column, so the GST leg only
+      // fires once a future migration starts populating it; today this
+      // resolves to 0 and the leg is skipped.
+      //
+      // Errors are caught and warned, not thrown (same pattern as audit).
+      // The editable invoice posting stays authoritative until M3/W9 when
+      // the immutability trigger flips.
+      try {
+        const orgId =
+          (existing as unknown as { orgId?: string | null }).orgId ??
+          "hookka";
+        const actorUserId =
+          (
+            c as unknown as { get: (k: string) => string | undefined }
+          ).get("userId") ?? null;
+        const taxSen = Math.max(0, existing.totalSen - existing.subtotalSen);
+        const legs = [
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "invoice",
+            sourceId: id,
+            legNo: 1,
+            accountCode: "1100",
+            debitSen: existing.totalSen,
+            creditSen: 0,
+            description: `AR · invoice ${existing.invoiceNo}`,
+            actorUserId,
+            orgId,
+          },
+          {
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "invoice",
+            sourceId: id,
+            legNo: 2,
+            accountCode: "4000",
+            debitSen: 0,
+            creditSen: existing.subtotalSen,
+            description: `Sales · invoice ${existing.invoiceNo}`,
+            actorUserId,
+            orgId,
+          },
+        ];
+        if (taxSen > 0) {
+          legs.push({
+            id: `lje-${crypto.randomUUID().slice(0, 12)}`,
+            sourceType: "invoice",
+            sourceId: id,
+            legNo: 3,
+            accountCode: "2400",
+            debitSen: 0,
+            creditSen: taxSen,
+            description: `GST output · invoice ${existing.invoiceNo}`,
+            actorUserId,
+            orgId,
+          });
+        }
+        await appendJournalEntries(c.var.DB, orgId, legs);
+      } catch (e) {
+        console.warn(
+          `[ledger] dual-write failed for invoice ${id} post:`,
+          e,
+        );
+      }
     } else if (
       nextStatus === "CANCELLED" &&
       existing.status !== "CANCELLED"

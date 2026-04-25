@@ -2438,27 +2438,38 @@ export default function ProductionPage({
   // Once the batch container is rendered, fire the print dialog. Small
   // timeout lets React paint the hidden container first; QR images are
   // external URLs but that's OK — the dialog waits for them to load.
+  // TODO P4.3-followup: migrate to useTimeout(fn, jobCardStickers.length === 0 ? null : 300).
+  // Skipped in P4.3 because this file carries 6 pre-existing
+  // react-hooks/set-state-in-effect errors that block lint-staged on
+  // commit; once those land their own follow-up, this migration is a
+  // one-liner. See docs/UPGRADE-CONTROL-BOARD.md.
   useEffect(() => {
     if (jobCardStickers.length === 0) return;
+    // eslint-disable-next-line no-restricted-syntax -- P4.3-followup, see TODO above
     const t = setTimeout(() => {
       window.print();
       // Clear after print dialog closes. onafterprint isn't universally
       // reliable; a follow-up timeout keeps state clean either way.
+      // eslint-disable-next-line no-restricted-syntax -- one-shot post-print state cleanup, fires from print callback
       setTimeout(() => setJobCardStickers([]), 500);
     }, 300);
     return () => clearTimeout(t);
   }, [jobCardStickers]);
 
+  // TODO P4.3-followup: migrate to useTimeout — see the JC sticker effect
+  // above for the same rationale.
   useEffect(() => {
     if (!fgPrintRequested) return;
     if (fgStickers.length === 0) {
       setFgPrintRequested(false);
       return;
     }
+    // eslint-disable-next-line no-restricted-syntax -- P4.3-followup, see TODO above
     const t = setTimeout(() => {
       window.print();
       // Don't clear fgStickers here anymore — the on-screen preview on UPH/
       // PACK tabs depends on that state. Reset just the print-requested flag.
+      // eslint-disable-next-line no-restricted-syntax -- one-shot post-print state cleanup, fires from print callback
       setTimeout(() => setFgPrintRequested(false), 500);
     }, 300);
     return () => clearTimeout(t);

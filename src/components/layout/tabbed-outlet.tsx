@@ -1,42 +1,36 @@
 // ---------------------------------------------------------------------------
-// TabbedOutlet — keep-alive replacement for <Outlet />.
+// TabbedOutlet — active-pane-only renderer for the dashboard shell.
 //
-// Instead of unmounting the previous route's component when the URL changes,
-// TabbedOutlet renders a <Routes location={tab.path}> for *every* open tab
-// and hides inactive ones with `display: none`. This means:
+// Only the *active* tab's React tree is mounted at any time. Switching tabs
+// unmounts the previous pane and mounts the new one. This means:
 //
-//   • Switching tabs is instant — no re-mount, no API re-fetch.
-//   • Scroll position, form inputs, local component state survive switches.
-//   • Memory grows with the number of open tabs — this is the cost.
+//   • Each fetch made by a page only fires when that page is visible —
+//     no N concurrent slow `[slow-fetch]` calls fan out from hidden tabs.
+//   • Scroll position / unsaved form state in inactive tabs is lost on switch
+//     (acceptable: the user explicitly asked for "Mount on activation,
+//     unmount on switch (or at least suspend rendering)" after observing
+//     7 dept tabs each firing 8s production-orders queries on Production).
+//   • The browser URL remains authoritative — the active pane uses the live
+//     `location`, so each tab's saved per-pane state isn't needed any more.
+//
+// History
+// -------
+// Earlier this file kept *every* open tab mounted (with `display: none` for
+// inactive panes). Mounted = effects run = fetches fire, so opening 4 tabs
+// triggered 4 parallel API calls on every page render. The cap on cached
+// panes only bounded memory; it didn't stop the fan-out. Per the user's
+// 2026-04-25 perf report we now mount one pane at a time.
 //
 // How it hooks into react-router
 // ------------------------------
-// The router config (src/router.tsx) still maps every dashboard URL to
-// <DashboardLayout /> so the browser URL stays authoritative for bookmarks,
-// browser back/forward, and refresh. But DashboardLayout renders this
-// TabbedOutlet *instead of* the standard <Outlet />, so the router's matched
-// child is ignored — TabbedOutlet re-does the matching itself using the
-// same DASHBOARD_ROUTES list, per tab.
-//
-// Per-tab location memory
-// -----------------------
-// Some pages (scan, settings/variants, sales/create, etc.) read query params
-// via useSearchParams. To keep those working per-tab — so each tab remembers
-// its own ?filter=… — we snapshot the browser URL's {search, hash} into a
-// map keyed by pathname every time it changes. When rendering an inactive
-// pane we pass its saved snapshot via the `location` prop on <Routes>, so
-// its internal useLocation / useSearchParams see what the user last saw
-// on that tab, not whatever the browser URL is right now.
+// The router config (src/router.tsx) maps every dashboard URL to
+// <DashboardLayout /> via a single splat child route. DashboardLayout
+// renders this TabbedOutlet, which re-does the matching itself using
+// DASHBOARD_ROUTE_ELEMENTS and the live URL.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useRef } from 'react'
 import { Routes, useLocation } from 'react-router-dom'
 import { useTabs } from '@/contexts/tabs-context'
 import { DASHBOARD_ROUTE_ELEMENTS } from '@/dashboard-routes'
-
-// Keep-alive cap: rendering every historical tab at once can make the whole
-// app sluggish on lower-end devices because hidden pages remain mounted and
-// keep running effects/timers. We keep only the most recently visited panes.
-const MAX_CACHED_PANES = 4
 
 function normalisePath(path: string): string {
   if (!path.startsWith('/')) path = '/' + path
@@ -44,109 +38,24 @@ function normalisePath(path: string): string {
   return path
 }
 
-type SavedLoc = { search: string; hash: string }
-
 export function TabbedOutlet() {
   const { tabs, activeId } = useTabs()
   const location = useLocation()
 
-  // pathname → last-seen {search, hash} while that pathname was the active URL.
-  const savedLocsRef = useRef<Map<string, SavedLoc>>(new Map())
-  // pathname → monotonic visit counter (LRU-ish recency without time math).
-  const visitOrderRef = useRef<Map<string, number>>(new Map())
-  const tickRef = useRef(0)
-
-  useEffect(() => {
-    const key = normalisePath(location.pathname)
-    savedLocsRef.current.set(key, {
-      search: location.search,
-      hash: location.hash,
-    })
-  }, [location.pathname, location.search, location.hash])
-
   // Decide which pane is the visible one. Prefer the explicit activeId;
   // fall back to the URL (covers the first-render case before TabsUrlSync
-  // has finished wiring up).
+  // has finished wiring up). The active pane is the only thing we render —
+  // inactive tabs have no React tree, so their fetches never fire.
   const activeTab = tabs.find((t) => t.id === activeId)
   const visiblePath = activeTab
     ? normalisePath(activeTab.path)
     : normalisePath(location.pathname)
 
-  useEffect(() => {
-    tickRef.current += 1
-    visitOrderRef.current.set(visiblePath, tickRef.current)
-  }, [visiblePath])
-
-  // Build the union of paths we need to render. Keyed by normalised path so
-  // duplicates collapse. To avoid global UI jank, limit hidden keep-alive
-  // panes using recency order.
-  const panes = useMemo(() => {
-    const map = new Map<string, { key: string; path: string }>()
-    for (const tab of tabs) {
-      const p = normalisePath(tab.path)
-      if (!map.has(p)) {
-        map.set(p, { key: tab.id, path: p })
-      }
-    }
-    // Ensure the current URL is rendered even if no tab has it yet.
-    const currentNorm = normalisePath(location.pathname)
-    if (!map.has(currentNorm)) {
-      map.set(currentNorm, { key: `url:${currentNorm}`, path: currentNorm })
-    }
-    const all = Array.from(map.values())
-    if (all.length <= MAX_CACHED_PANES) return all
-
-    const mustKeep = new Set<string>([visiblePath, currentNorm])
-    const optional = all
-      .filter((pane) => !mustKeep.has(pane.path))
-      .sort(
-        (a, b) =>
-          (visitOrderRef.current.get(b.path) ?? 0) -
-          (visitOrderRef.current.get(a.path) ?? 0),
-      )
-
-    const keepOptional = Math.max(MAX_CACHED_PANES - mustKeep.size, 0)
-    const keepPaths = new Set<string>([
-      ...mustKeep,
-      ...optional.slice(0, keepOptional).map((p) => p.path),
-    ])
-    return all.filter((pane) => keepPaths.has(pane.path))
-  }, [tabs, location.pathname])
-
   return (
-    <>
-      {panes.map((pane) => {
-        const isActive = pane.path === visiblePath
-
-        // Active pane: use the live browser location so query-param-driven
-        // pages stay reactive. Inactive panes: use the saved snapshot so
-        // each tab remembers its own ?filter=… state.
-        const paneLocation = isActive
-          ? location
-          : {
-              pathname: pane.path,
-              search: savedLocsRef.current.get(pane.path)?.search ?? '',
-              hash: savedLocsRef.current.get(pane.path)?.hash ?? '',
-              state: null,
-              key: `pane:${pane.path}`,
-            }
-
-        return (
-          <div
-            key={pane.key}
-            // `display: none` keeps the React tree mounted + DOM preserved
-            // (so scroll position, inputs, etc. survive tab switches). The
-            // `hidden` attribute adds the right a11y / SEO semantics.
-            hidden={!isActive}
-            style={{ display: isActive ? 'block' : 'none' }}
-            data-tab-pane={pane.path}
-          >
-            <Routes location={paneLocation}>
-              {DASHBOARD_ROUTE_ELEMENTS}
-            </Routes>
-          </div>
-        )
-      })}
-    </>
+    <div data-tab-pane={visiblePath}>
+      <Routes location={location}>
+        {DASHBOARD_ROUTE_ELEMENTS}
+      </Routes>
+    </div>
   )
 }

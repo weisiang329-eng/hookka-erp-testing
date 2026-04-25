@@ -1,7 +1,12 @@
 // ---------------------------------------------------------------------------
 // D1-backed users (admin CRUD) route.
 //
-// Gated behind authMiddleware — every handler assumes a SUPER_ADMIN caller.
+// Gated per-handler via requirePermission (P3.3-followup, audit S1). Replaces
+// the previous blanket `if (role !== "SUPER_ADMIN")` middleware so non-admin
+// roles with a `users:*` grant in role_permissions can read / invite / update
+// users without escalating to SUPER_ADMIN. SUPER_ADMIN still short-circuits
+// every check via lib/rbac.ts.
+//
 // passwordHash is NEVER returned by any endpoint (strip it in publicUser).
 //
 // DELETE is soft — flips isActive to 0 and purges the user's sessions so
@@ -11,24 +16,12 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendEmail } from "../lib/email";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
-
-// Role gate — the whole file is SUPER_ADMIN only. authMiddleware has already
-// stashed the caller's role on the ctx (`userRole`); if it's missing or not
-// SUPER_ADMIN, reject with 403 before any handler runs.
-app.use("*", async (c, next) => {
-  const role = (c as unknown as { get: (k: string) => string | undefined }).get(
-    "userRole",
-  );
-  if (role !== "SUPER_ADMIN") {
-    return c.json({ success: false, error: "Forbidden" }, 403);
-  }
-  await next();
-});
 
 // Invite TTL — 72 hours is a standard SaaS balance between "oops I missed it"
 // and "stale tokens floating around". Change here, not in the schema.
@@ -82,6 +75,9 @@ function genId(): string {
 
 // GET /api/users — list all users
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — users:read.
+  const denied = await requirePermission(c, "users", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM users ORDER BY createdAt DESC",
   ).all<UserRow>();
@@ -97,6 +93,9 @@ app.get("/", async (c) => {
 // POST /api/users — create a new user
 // Body: { email, password, displayName?, role? }
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — users:create.
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { email, password, displayName, role } = body as {
@@ -163,6 +162,13 @@ app.post("/", async (c) => {
 // PUT /api/users/:id — update non-password fields
 // Body: { email?, displayName?, role?, isActive? }
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — base permission is users:update.
+  // The 0045 seed has no `roles` resource, so role-change requests
+  // (existing.role !== merged.role) inherit the same users:update gate
+  // rather than a separate roles:update permission. The audit row that
+  // fires on a role flip already records the high-impact intent.
+  const denied = await requirePermission(c, "users", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
@@ -227,6 +233,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/users/:id — soft delete + session purge
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "users", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)
@@ -254,6 +262,9 @@ app.delete("/:id", async (c) => {
 // POST /api/users/:id/reset-password — admin resets another user's password
 // Body: { newPassword }
 app.post("/:id/reset-password", async (c) => {
+  // RBAC gate (P3.3-followup) — admin password reset is a users:update.
+  const denied = await requirePermission(c, "users", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const body = await c.req.json().catch(() => ({}));
   const { newPassword } = body as { newPassword?: string };
@@ -336,6 +347,9 @@ async function sendInviteEmail(
 // POST /api/users/invite — create + send invite
 // Body: { email, role?, displayName? }
 app.post("/invite", async (c) => {
+  // RBAC gate (P3.3-followup) — invite is a users:create flow.
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { email, role, displayName } = body as {
@@ -474,6 +488,8 @@ app.post("/invite", async (c) => {
 
 // GET /api/users/invites — list pending (unaccepted, unexpired) invites
 app.get("/invites", async (c) => {
+  const denied = await requirePermission(c, "users", "read");
+  if (denied) return denied;
   const nowIso = new Date().toISOString();
   const res = await c.var.DB.prepare(
     `SELECT i.*,
@@ -493,6 +509,8 @@ app.get("/invites", async (c) => {
 
 // POST /api/users/invites/:token/resend — re-email the same invite
 app.post("/invites/:token/resend", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const token = c.req.param("token");
   const nowIso = new Date().toISOString();
 
@@ -544,6 +562,8 @@ app.post("/invites/:token/resend", async (c) => {
 
 // DELETE /api/users/invites/:token — revoke a pending invite
 app.delete("/invites/:token", async (c) => {
+  const denied = await requirePermission(c, "users", "delete");
+  if (denied) return denied;
   const token = c.req.param("token");
   const existing = await c.var.DB.prepare(
     "SELECT token, acceptedAt FROM user_invites WHERE token = ?",
@@ -570,6 +590,8 @@ app.delete("/invites/:token", async (c) => {
 // static invite routes above take precedence (see note near the top of file).
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "users", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const user = await c.var.DB.prepare("SELECT * FROM users WHERE id = ?")
     .bind(id)

@@ -43,6 +43,12 @@ type ClaudeScanRow = {
   file: File;
 };
 
+type CreateSOResponse = {
+  success?: boolean;
+  error?: string;
+  data?: { companySOId?: string };
+};
+
 export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [step, setStep] = useState<StepState>("upload");
   const [files, setFiles] = useState<File[]>([]);
@@ -247,8 +253,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
         });
-        const data = await res.json();
-        if (data.success && data.data) {
+        const data = (await res.json()) as CreateSOResponse;
+        if (data.success && data.data?.companySOId) {
           created.push({
             soNo: data.data.companySOId,
             poNo: po.customerPO,
@@ -306,8 +312,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           body: JSON.stringify(body),
         });
 
-        const data = await res.json();
-        if (data.success && data.data) {
+        const data = (await res.json()) as CreateSOResponse;
+        if (data.success && data.data?.companySOId) {
           created.push({
             soNo: data.data.companySOId,
             poNo: po.poNo,

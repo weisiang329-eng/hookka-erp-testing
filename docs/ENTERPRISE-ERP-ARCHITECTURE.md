@@ -111,7 +111,7 @@ This blueprint is adapted to the current Hookka codebase and can be adopted incr
 
 ---
 
-## 7) KPI dashboard for "不卡"
+## 7) KPI dashboard for "smooth UX"
 
 Track weekly:
 - p75/p95 route transition duration,

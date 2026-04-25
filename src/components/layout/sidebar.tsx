@@ -186,6 +186,13 @@ type OrgInfo = {
   name: string;
 };
 
+type NotificationsResponse = { notifications?: Array<{ isRead?: boolean }> };
+type OrganisationsResponse = { organisations?: OrgInfo[]; activeOrgId?: string };
+
+function asObj(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+}
+
 export function Sidebar() {
   const { pathname } = useLocation();
   const [collapsed, setCollapsed] = useState(false);
@@ -230,15 +237,16 @@ export function Sidebar() {
     try {
       const res = await fetch("/api/organisations");
       if (!res.ok) return;
-      const data = await res.json();
+      const data = (await res.json()) as unknown;
+      const obj = asObj(data) as OrganisationsResponse | null;
       setOrgs(
-        (data.organisations ?? []).map((o: OrgInfo) => ({
+        (obj?.organisations ?? []).map((o: OrgInfo) => ({
           id: o.id,
           code: o.code,
           name: o.name,
         }))
       );
-      setActiveOrgId(data.activeOrgId ?? "");
+      setActiveOrgId(obj?.activeOrgId ?? "");
     } catch {
       // silently ignore
     }
@@ -262,8 +270,11 @@ export function Sidebar() {
     try {
       const res = await fetch("/api/notifications");
       if (!res.ok) return;
-      const data = await res.json();
-      const notifications = Array.isArray(data) ? data : data.notifications ?? [];
+      const data = (await res.json()) as unknown;
+      const obj = asObj(data) as NotificationsResponse | null;
+      const notifications = Array.isArray(data)
+        ? (data as Array<{ isRead?: boolean }>)
+        : (obj?.notifications ?? []);
       const count = notifications.filter(
         (n: { isRead?: boolean }) => n.isRead === false
       ).length;

@@ -21,10 +21,11 @@ import { z } from "zod";
 import { getAuthToken } from "./auth";
 
 export class FetchJsonError extends Error {
-  readonly status: number;
-  readonly url: string;
-  readonly body?: unknown;
-  readonly zodIssues?: z.ZodIssue[];
+  public readonly status: number;
+  public readonly url: string;
+  public readonly body?: unknown;
+  public readonly zodIssues?: z.ZodIssue[];
+
   constructor(
     message: string,
     status: number,
@@ -98,7 +99,7 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
     if (import.meta.env.DEV) {
-       
+      // eslint-disable-next-line no-console
       console.error(`[fetchJson] schema mismatch at ${url}`, {
         issues: parsed.error.issues,
         raw,

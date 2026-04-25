@@ -49,9 +49,9 @@ async function pbkdf2(
     {
       name: "PBKDF2",
       hash: "SHA-256",
-      // Cast to BufferSource — modern TS types Uint8Array as
-      // Uint8Array<ArrayBufferLike> which isn't assignable without a hint.
-      salt: salt as BufferSource,
+      // Re-wrap to ensure an ArrayBuffer-backed view type accepted by
+      // both DOM and Workers typings in TS 6 strict mode.
+      salt: Uint8Array.from(salt),
       iterations,
     },
     key,

@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useMemo, useState, useCallback, useEffect } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
@@ -32,22 +32,20 @@ export default function OrganisationsPage() {
   const [editForm, setEditForm] = useState<Partial<Organisation>>({});
   const [saving, setSaving] = useState(false);
   const [saveMsg, setSaveMsg] = useState<string | null>(null);
+  const [config, setConfig] = useState<InterCompanyConfig>({
+    hookkaToOhanaRate: 0.65,
+    autoCreateMirrorDocs: true,
+  });
 
   const { data: orgResp, refresh: refreshOrgHook } = useCachedJson<{ organisations: Organisation[]; activeOrgId: string; interCompanyConfig: InterCompanyConfig }>("/api/organisations");
 
   const orgs: Organisation[] = useMemo(() => orgResp?.organisations ?? [], [orgResp]);
   const activeOrgId: string = useMemo(() => orgResp?.activeOrgId ?? "", [orgResp]);
-  // Local draft — user edits accumulate here until Save.  Reads through to
-  // the fetched config when draft is null.  Save + refresh clears the draft
-  // so the UI snaps back to the server value.
-  const [configDraft, setConfigDraft] = useState<InterCompanyConfig | null>(null);
-  const config: InterCompanyConfig = useMemo(
-    () => configDraft
-      ?? orgResp?.interCompanyConfig
-      ?? { hookkaToOhanaRate: 0.65, autoCreateMirrorDocs: true },
-    [configDraft, orgResp]
-  );
-  const setConfig = setConfigDraft;
+  useEffect(() => {
+    if (orgResp?.interCompanyConfig) {
+      setConfig(orgResp.interCompanyConfig);
+    }
+  }, [orgResp]);
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/organisations");
@@ -95,7 +93,6 @@ export default function OrganisationsPage() {
       body: JSON.stringify({ interCompanyConfig: config }),
     });
     await fetchData();
-    setConfigDraft(null); // snap back to the fresh server value
     setSaving(false);
     flash("Inter-company config saved");
   };

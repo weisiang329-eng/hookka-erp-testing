@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test": "node --test tests/smoke.test.mjs",
     "build": "vite build",
-    "build:strict": "tsc -b && vite build",
+    "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",
     "typecheck:app": "tsc -p tsconfig.app.json --noEmit",
     "lint": "eslint .",

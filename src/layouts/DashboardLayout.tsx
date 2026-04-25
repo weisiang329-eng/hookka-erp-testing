@@ -8,6 +8,7 @@ import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
 import { ToastProvider, useToast } from "@/components/ui/toast";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
+import { useLocation } from "react-router-dom";
 
 const mockUser = {
   name: "Lim",
@@ -25,10 +26,10 @@ function NewVersionWatcher() {
   const { toast } = useToast();
   useVersionCheck({
     onNewVersion: () => {
-      toast.info("新版本已发布 — 请刷新页面以更新 (Ctrl+Shift+R)");
+      toast.info("A new version is available — refresh to update (Ctrl+Shift+R).");
       // After the toast, prompt for reload. Delay so the toast is visible.
       window.setTimeout(() => {
-        if (window.confirm("系统有新版本。现在刷新吗?(未保存的表单会丢失)")) {
+        if (window.confirm("A new version is available. Reload now? Unsaved changes may be lost.")) {
           window.location.reload();
         }
       }, 1500);
@@ -38,6 +39,8 @@ function NewVersionWatcher() {
 }
 
 export default function DashboardLayout() {
+  const { pathname } = useLocation();
+
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because
   // that forces the giant BOM page into the main shell bundle and makes every
@@ -51,6 +54,12 @@ export default function DashboardLayout() {
       // Prime the variants-config cache from D1 so downstream sync readers
       // (getProductionMinutes, getCategoryOptions in bom.tsx) have real data.
       void fetchVariantsConfig();
+
+      // Only hydrate master templates when user is in BOM/Product routes.
+      // Avoid loading the heavy BOM module for unrelated pages.
+      const needsMasterHydration =
+        pathname.startsWith("/bom") || pathname.startsWith("/products");
+      if (!needsMasterHydration) return;
 
       // Lazy-load BOM hydration only when idle to reduce startup jank.
       void import("@/pages/bom").then((mod) => {
@@ -68,12 +77,12 @@ export default function DashboardLayout() {
       };
     }
 
-    const t = window.setTimeout(start, 150);
+    const t = globalThis.setTimeout(start, 150);
     return () => {
       cancelled = true;
-      window.clearTimeout(t);
+      globalThis.clearTimeout(t);
     };
-  }, []);
+  }, [pathname]);
 
   return (
     <ToastProvider>

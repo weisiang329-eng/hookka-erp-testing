@@ -172,6 +172,27 @@ interface ApiRecord {
   customerName?: string;
 }
 
+type UnknownObj = Record<string, unknown>;
+
+function asObj(v: unknown): UnknownObj | null {
+  return v && typeof v === "object" ? (v as UnknownObj) : null;
+}
+
+function asApiRecords(v: unknown): ApiRecord[] {
+  return Array.isArray(v) ? (v as ApiRecord[]) : [];
+}
+
+function pickRecords(v: unknown, ...keys: string[]): ApiRecord[] {
+  if (Array.isArray(v)) return asApiRecords(v);
+  const obj = asObj(v);
+  if (!obj) return [];
+  for (const key of keys) {
+    const candidate = obj[key];
+    if (Array.isArray(candidate)) return asApiRecords(candidate);
+  }
+  return [];
+}
+
 function useApiSearch(query: string) {
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
@@ -196,7 +217,7 @@ function useApiSearch(query: string) {
         fetch(`/api/sales-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items: ApiRecord[] = data?.salesOrders ?? data?.orders ?? (Array.isArray(data) ? data : []);
+            const items = pickRecords(data, "salesOrders", "orders");
             items.forEach((item) => {
               const num = item.soNumber || item.orderNumber || "";
               collected.push({
@@ -215,7 +236,7 @@ function useApiSearch(query: string) {
         fetch(`/api/customers?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items: ApiRecord[] = data?.customers ?? (Array.isArray(data) ? data : []);
+            const items = pickRecords(data, "customers");
             items.forEach((item) => {
               collected.push({
                 id: `cust-${item.id}`,
@@ -233,7 +254,7 @@ function useApiSearch(query: string) {
         fetch(`/api/products?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items: ApiRecord[] = data?.products ?? (Array.isArray(data) ? data : []);
+            const items = pickRecords(data, "products");
             items.forEach((item) => {
               collected.push({
                 id: `prod-${item.id}`,
@@ -251,7 +272,7 @@ function useApiSearch(query: string) {
         fetch(`/api/delivery-orders?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items: ApiRecord[] = data?.deliveryOrders ?? data?.orders ?? (Array.isArray(data) ? data : []);
+            const items = pickRecords(data, "deliveryOrders", "orders");
             items.forEach((item) => {
               const num = item.doNumber || item.orderNumber || "";
               collected.push({
@@ -270,7 +291,7 @@ function useApiSearch(query: string) {
         fetch(`/api/invoices?search=${encodeURIComponent(query)}&limit=5`, { signal: controller.signal })
           .then((r) => r.ok ? r.json() : null)
           .then((data) => {
-            const items: ApiRecord[] = data?.invoices ?? (Array.isArray(data) ? data : []);
+            const items = pickRecords(data, "invoices");
             items.forEach((item) => {
               const num = item.invoiceNumber || "";
               collected.push({

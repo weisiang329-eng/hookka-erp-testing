@@ -117,10 +117,12 @@ export function usePresence(
       pollTimer = window.setInterval(tickPoll, POLL_MS);
     }
 
-    // kick off immediately
-    tickHeartbeat();
-    tickPoll();
-    startTimers();
+    // Kick off immediately only when visible.
+    if (!document.hidden) {
+      void tickHeartbeat();
+      void tickPoll();
+      startTimers();
+    }
 
     // release when the browser tab closes — keepalive on the DELETE ensures
     // the request is still sent in unload scenarios.

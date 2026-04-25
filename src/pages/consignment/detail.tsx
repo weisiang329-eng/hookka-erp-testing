@@ -11,6 +11,22 @@ import {
 } from "lucide-react";
 import type { ConsignmentNote } from "@/lib/mock-data";
 
+type ConsignmentUpdateResponse =
+  | { success: true; data: ConsignmentNote }
+  | { success: false; error?: string };
+
+function asConsignmentUpdateResponse(v: unknown): ConsignmentUpdateResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true && o.data && typeof o.data === "object") {
+    return { success: true, data: o.data as ConsignmentNote };
+  }
+  if (o.success === false) {
+    return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  }
+  return null;
+}
+
 // --- Confirmation Modal ---
 function ConfirmModal({
   open, title, message, confirmLabel, confirmVariant, onConfirm, onCancel,
@@ -88,8 +104,8 @@ export default function ConsignmentDetailPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: newStatus }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asConsignmentUpdateResponse(await res.json());
+    if (data?.success) {
       setNoteOverride(data.data);
       invalidateCachePrefix("/api/consignments");
       invalidateCachePrefix("/api/invoices");

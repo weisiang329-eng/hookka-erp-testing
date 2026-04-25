@@ -28,6 +28,22 @@ import {
   FileDown,
 } from "lucide-react";
 
+type CustomerMutationResponse =
+  | { success: true; data: Customer }
+  | { success: false; error?: string };
+
+function asCustomerMutationResponse(v: unknown): CustomerMutationResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true && o.data && typeof o.data === "object") {
+    return { success: true, data: o.data as Customer };
+  }
+  if (o.success === false) {
+    return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  }
+  return null;
+}
+
 // =====================================================================
 // Customer Products types (per-customer SKU assignments with price overrides)
 // =====================================================================
@@ -916,8 +932,8 @@ export default function CustomersPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(addForm),
       });
-      const json = await res.json();
-      if (json.success) {
+      const json = asCustomerMutationResponse(await res.json());
+      if (json?.success) {
         setData((prev) => [...prev, json.data]);
         invalidateCachePrefix("/api/customers");
         setAddForm({ code: "", name: "", contactName: "", phone: "", email: "", creditTerms: "NET30", creditLimitSen: 0 });

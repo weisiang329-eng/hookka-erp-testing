@@ -17,6 +17,25 @@ type LineItem = {
   unitPrice: number; // sen
 };
 
+type CreateConsignmentResponse =
+  | { success: true; data: { id: string } }
+  | { success: false; error?: string };
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object";
+}
+
+function asCreateConsignmentResponse(v: unknown): CreateConsignmentResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true && isRecord(v.data) && typeof v.data.id === "string") {
+    return { success: true, data: { id: v.data.id } };
+  }
+  if (v.success === false) {
+    return { success: false, error: typeof v.error === "string" ? v.error : undefined };
+  }
+  return null;
+}
+
 const EMPTY_LINE: LineItem = {
   productId: "",
   productCode: "",
@@ -93,15 +112,15 @@ export default function CreateConsignmentPage() {
         })),
       }),
     });
-    const data = await res.json();
+    const data = asCreateConsignmentResponse(await res.json());
     setSaving(false);
 
-    if (data.success) {
+    if (data?.success) {
       invalidateCachePrefix("/api/consignments");
       invalidateCachePrefix("/api/invoices");
       navigate(`/consignment/${data.data.id}`);
     } else {
-      toast.error(data.error || "Failed to create consignment note");
+      toast.error(data?.error || "Failed to create consignment note");
     }
   };
 

@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -140,6 +141,9 @@ async function nextPayslipId(db: D1Database): Promise<string> {
 // GET /api/payslips?period=&employeeId=
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payslips:read.
+  const denied = await requirePermission(c, "payslips", "read");
+  if (denied) return denied;
   const period = c.req.query("period");
   const employeeId = c.req.query("employeeId");
 
@@ -167,6 +171,9 @@ app.get("/", async (c) => {
 // POST /api/payslips — generate a run for ACTIVE workers
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payslips:create (generate).
+  const denied = await requirePermission(c, "payslips", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { period } = body;
@@ -279,6 +286,9 @@ app.post("/", async (c) => {
 // PUT /api/payslips — bulk status update for a period
 // ---------------------------------------------------------------------------
 app.put("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payslips:update (bulk status flip).
+  const denied = await requirePermission(c, "payslips", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { period, status } = body;
@@ -305,6 +315,8 @@ app.put("/", async (c) => {
 // GET /api/payslips/:id — detail + YTD summary for this employee's year
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "payslips", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const payslip = await c.var.DB.prepare("SELECT * FROM payslips WHERE id = ?")
     .bind(id)

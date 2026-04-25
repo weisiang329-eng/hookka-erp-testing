@@ -41,15 +41,44 @@ type WorkerAuthError = {
 
 type WorkerAuthResponse = WorkerAuthSuccess | WorkerAuthNeedsSetup | WorkerAuthError;
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object";
+}
+
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+
+function asWorkerMe(v: unknown): WorkerMe | null {
+  if (!isRecord(v)) return null;
+  const id = asString(v.id);
+  const empNo = asString(v.empNo);
+  const name = asString(v.name);
+  const departmentCode = asString(v.departmentCode);
+  if (!id || !empNo || !name || !departmentCode) return null;
+  return {
+    id,
+    empNo,
+    name,
+    departmentCode,
+    position: asString(v.position),
+    phone: asString(v.phone),
+    nationality: asString(v.nationality),
+  };
+}
+
 function asWorkerAuthResponse(v: unknown): WorkerAuthResponse | null {
-  if (!v || typeof v !== "object") return null;
-  const o = v as Record<string, unknown>;
-  if (o.needsSetup === true) return { needsSetup: true, success: false, error: typeof o.error === "string" ? o.error : undefined };
-  if (o.success === true && typeof o.token === "string" && o.worker && typeof o.worker === "object") {
-    return { success: true, token: o.token, worker: o.worker as WorkerMe };
+  if (!isRecord(v)) return null;
+  if (v.needsSetup === true) {
+    return { needsSetup: true, success: false, error: asString(v.error) };
   }
-  if (o.success === false) {
-    return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  if (v.success === true && typeof v.token === "string") {
+    const worker = asWorkerMe(v.worker);
+    if (!worker) return null;
+    return { success: true, token: v.token, worker };
+  }
+  if (v.success === false) {
+    return { success: false, error: asString(v.error) };
   }
   return null;
 }

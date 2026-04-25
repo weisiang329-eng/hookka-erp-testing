@@ -90,6 +90,9 @@ function genStatusChangeId(): string {
 
 // GET /api/payments — list all (optional ?customerId= / ?invoiceId= filters)
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — payments:read.
+  const denied = await requirePermission(c, "payments", "read");
+  if (denied) return denied;
   const customerId = c.req.query("customerId");
   const invoiceId = c.req.query("invoiceId");
 
@@ -384,6 +387,8 @@ app.post("/", async (c) => {
 
 // GET /api/payments/:id — single
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "payments", "read");
+  if (denied) return denied;
   const row = await c.var.DB.prepare(
     "SELECT * FROM payment_records WHERE id = ?",
   )
@@ -398,6 +403,9 @@ app.get("/:id", async (c) => {
 // PUT /api/payments/:id — status transitions (RECEIVED → CLEARED / BOUNCED).
 // BOUNCED rolls back invoice paidAmount/status exactly like the old impl.
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — payments:update for status transitions.
+  const denied = await requirePermission(c, "payments", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

@@ -9,6 +9,8 @@
 import { lazy, Suspense } from 'react'
 import { Navigate, Route, type RouteObject } from 'react-router-dom'
 import { ErrorBoundary } from './components/ui/error-boundary'
+import RequirePermission from './components/auth/RequirePermission'
+import RequireRole from './components/auth/RequireRole'
 
 // ── Lazy-loaded pages ─────────────────────────────────────────────────────
 
@@ -182,13 +184,56 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/delivery-test', element: <Navigate to="/delivery" replace /> },
   { path: '/delivery-test/:id', element: <Navigate to="/delivery" replace /> },
 
-  // Invoices
-  { path: '/invoices', element: <S><Invoices /></S> },
-  { path: '/invoices/:id', element: <S><InvoiceDetail /></S> },
-  { path: '/invoices/payments', element: <S><Payments /></S> },
-  { path: '/invoices/credit-notes', element: <S><CreditNotes /></S> },
-  { path: '/invoices/debit-notes', element: <S><DebitNotes /></S> },
-  { path: '/invoices/e-invoice', element: <S><EInvoice /></S> },
+  // Invoices (P3.6 — gated on invoices:read; non-Finance users redirect
+  // to /dashboard rather than landing on a 403-everywhere shell).
+  {
+    path: '/invoices',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><Invoices /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/invoices/:id',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><InvoiceDetail /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/invoices/payments',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><Payments /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/invoices/credit-notes',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><CreditNotes /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/invoices/debit-notes',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><DebitNotes /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/invoices/e-invoice',
+    element: (
+      <RequirePermission resource="invoices" action="read">
+        <S><EInvoice /></S>
+      </RequirePermission>
+    ),
+  },
 
   // Procurement
   { path: '/procurement', element: <S><Procurement /></S> },
@@ -216,9 +261,24 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/employees', element: <S><Employees /></S> },
   { path: '/warehouse', element: <S><Warehouse /></S> },
 
-  // Accounting
-  { path: '/accounting', element: <S><Accounting /></S> },
-  { path: '/accounting/cash-flow', element: <S><CashFlow /></S> },
+  // Accounting (P3.6 — gated on accounting:read; non-Finance users redirect
+  // to /dashboard rather than landing on a 403-everywhere shell).
+  {
+    path: '/accounting',
+    element: (
+      <RequirePermission resource="accounting" action="read">
+        <S><Accounting /></S>
+      </RequirePermission>
+    ),
+  },
+  {
+    path: '/accounting/cash-flow',
+    element: (
+      <RequirePermission resource="accounting" action="read">
+        <S><CashFlow /></S>
+      </RequirePermission>
+    ),
+  },
 
   // Planning
   { path: '/planning', element: <S><Planning /></S> },
@@ -239,7 +299,15 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Settings
   { path: '/settings', element: <S><Settings /></S> },
   { path: '/settings/organisations', element: <S><Organisations /></S> },
-  { path: '/settings/users', element: <S><SettingsUsers /></S> },
+  // User Management is SUPER_ADMIN only — coarsest gate, role-based.
+  {
+    path: '/settings/users',
+    element: (
+      <RequireRole role="SUPER_ADMIN">
+        <S><SettingsUsers /></S>
+      </RequireRole>
+    ),
+  },
 
   // Consignment
   { path: '/consignment', element: <S><Consignment /></S> },

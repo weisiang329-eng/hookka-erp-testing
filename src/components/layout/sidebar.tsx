@@ -41,6 +41,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
+import { usePermissions } from "@/lib/use-permission";
 
 interface NavItem {
   name: string;
@@ -291,6 +292,32 @@ export function Sidebar() {
     return () => clearInterval(interval);
   }, [fetchOrgs, fetchUnreadCount]);
 
+  // P3.6 — load the current user's permission set so we can hide nav links
+  // that would otherwise lead to a redirect or 403. SUPER_ADMIN gets ["*"]
+  // from the backend so hasPermission always returns true for them.
+  const { hasPermission: canDo } = usePermissions();
+
+  // Routes that are gated by RequirePermission in dashboard-routes.tsx — keep
+  // this list in sync with the wrappers there. If we don't list a route here
+  // it stays visible by default (matches the current behavior for any link).
+  const NAV_PERMISSION_REQUIREMENTS: Record<
+    string,
+    { resource: string; action: string }
+  > = {
+    "/accounting": { resource: "accounting", action: "read" },
+    "/accounting/cash-flow": { resource: "accounting", action: "read" },
+    "/invoices": { resource: "invoices", action: "read" },
+    "/invoices/credit-notes": { resource: "invoices", action: "read" },
+    "/invoices/debit-notes": { resource: "invoices", action: "read" },
+    "/invoices/payments": { resource: "invoices", action: "read" },
+    "/invoices/e-invoice": { resource: "invoices", action: "read" },
+  };
+  const isNavItemAllowed = (href: string): boolean => {
+    const req = NAV_PERMISSION_REQUIREMENTS[href];
+    if (!req) return true;
+    return canDo(req.resource, req.action);
+  };
+
   // Inject badge counts into the Notifications item, and the
   // SUPER_ADMIN-only User Management link into the SYSTEM group.
   const authUser = getCurrentUser();
@@ -329,6 +356,10 @@ export function Sidebar() {
         ...items.slice(insertAt),
       ];
     }
+    // P3.6 — filter out nav items the current user can't access. Anything
+    // not in NAV_PERMISSION_REQUIREMENTS stays visible (default-allow for
+    // links the gating doesn't cover yet).
+    items = items.filter((item) => isNavItemAllowed(item.href));
     return { ...group, items };
   });
 

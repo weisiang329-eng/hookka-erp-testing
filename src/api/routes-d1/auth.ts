@@ -130,6 +130,77 @@ app.get("/me", async (c) => {
   return c.json({ success: true, data: { user: publicUser(user) } });
 });
 
+// ----- GET /api/auth/me/permissions ---------------------------------------
+// Returns the resolved (resource, action) permission strings for the caller's
+// role. The frontend uses this to gate routes + nav links so users don't
+// bounce off API 403s after navigating (P3.6).
+//
+// Shape: { success: true, permissions: string[] } — each entry is
+//        "resource:action", e.g. "invoices:read".
+//
+// SUPER_ADMIN: returns ["*"] as a single sentinel — the frontend treats it
+// as "allow everything". Cheaper than enumerating the full matrix and aligns
+// with the bypass behavior in src/api/lib/authz.ts.
+//
+// READ_ONLY fallback: users without a roleId fall through to role_read_only
+// per the same convention as authz.ts.
+app.get("/me/permissions", async (c) => {
+  const userId = (c as unknown as { get: (k: string) => unknown }).get(
+    "userId",
+  ) as string | undefined;
+  if (!userId) {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+
+  // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
+  // mirroring authz.ts's resolveUserRole().
+  const roleRow = await c.var.DB.prepare(
+    `SELECT u.roleId AS roleId, r.name AS roleName
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.roleId
+      WHERE u.id = ?
+      LIMIT 1`,
+  )
+    .bind(userId)
+    .first<{ roleId: string | null; roleName: string | null }>();
+
+  if (!roleRow) {
+    // Authenticated but no users row — shouldn't happen in practice.
+    return c.json({ success: true, permissions: [] });
+  }
+
+  // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
+  // authz.ts SUPER_ADMIN short-circuit.
+  if (roleRow.roleName === "SUPER_ADMIN") {
+    return c.json({
+      success: true,
+      role: roleRow.roleName,
+      permissions: ["*"],
+    });
+  }
+
+  const roleId = roleRow.roleId ?? "role_read_only";
+  const roleName = roleRow.roleName ?? "READ_ONLY";
+
+  const permsRes = await c.var.DB.prepare(
+    `SELECT p.resource AS resource, p.action AS action
+       FROM role_permissions rp
+       JOIN permissions p ON rp.permissionId = p.id
+      WHERE rp.roleId = ?`,
+  )
+    .bind(roleId)
+    .all<{ resource: string; action: string }>();
+
+  const rows = permsRes.results ?? [];
+  const permissions = rows.map((r) => `${r.resource}:${r.action}`);
+
+  return c.json({
+    success: true,
+    role: roleName,
+    permissions,
+  });
+});
+
 // ----- POST /api/auth/change-password -------------------------------------
 // Body: { oldPassword, newPassword }
 app.post("/change-password", async (c) => {

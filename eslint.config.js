@@ -53,6 +53,10 @@ export default defineConfig([
   {
     files: [
       'src/router.tsx',
+      // dashboard-routes.tsx exports DASHBOARD_ROUTES (RouteObject[]) and
+      // DASHBOARD_ROUTE_ELEMENTS — config, not components. Same rationale
+      // as router.tsx; fast-refresh does not apply.
+      'src/dashboard-routes.tsx',
       'src/components/ui/button.tsx',
       'src/components/ui/toast.tsx',
       'src/components/ui/status-badge.tsx',

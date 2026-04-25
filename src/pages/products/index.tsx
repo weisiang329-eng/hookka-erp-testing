@@ -4,6 +4,11 @@ import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import { Plus, Trash2, Save, AlertCircle, Check } from "lucide-react";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { ProductSchema } from "@/lib/schemas/product";
+
+const ProductMutationSchema = mutationWithData(ProductSchema);
 import {
   fetchVariantsConfig,
   getVariantsConfigSync,
@@ -1363,15 +1368,13 @@ export default function ProductsPage() {
         });
 
         try {
-          const res = await fetch(`/api/products/${existing.id}`, {
+          const data = await fetchJson(`/api/products/${existing.id}`, ProductMutationSchema, {
             method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(patch),
+            body: patch,
           });
-          const data = await res.json();
           if (data.success && data.data) {
             const idx = updatedProducts.findIndex((p) => p.id === existing.id);
-            if (idx !== -1) updatedProducts[idx] = data.data;
+            if (idx !== -1) updatedProducts[idx] = data.data as Product;
             updated++;
           } else {
             skipped++;
@@ -1701,18 +1704,17 @@ export default function ProductsPage() {
                                           norm(s.height) === hN ? { ...s, height: hN, priceSen: val } : s
                                         );
                                         setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, seatHeightPrices: updated } : pr));
-                                        fetch(`/api/products/${p.id}`, {
+                                        fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
                                           method: "PUT",
-                                          headers: { "Content-Type": "application/json" },
-                                          body: JSON.stringify({ seatHeightPrices: updated }),
-                                        }).then((r) => r.json()).then((data) => {
-                                          if (data.success) {
+                                          body: { seatHeightPrices: updated },
+                                        }).then((data) => {
+                                          if (data.success && data.data) {
                                             invalidateCachePrefix("/api/products");
                                             invalidateCachePrefix("/api/bom");
                                             invalidateCachePrefix("/api/bom-master-templates");
-                                            setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                            setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
                                           }
-                                        });
+                                        }).catch(() => {});
                                       }}
                                       onKeyDown={(e) => {
                                         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1758,18 +1760,17 @@ export default function ProductsPage() {
                                     const val = Math.round(parseFloat(priceInput || "0") * 100);
                                     setEditingPrice(null);
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
-                                    fetch(`/api/products/${p.id}`, {
+                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
                                       method: "PUT",
-                                      headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({ basePriceSen: val }),
-                                    }).then((r) => r.json()).then((data) => {
-                                      if (data.success) {
+                                      body: { basePriceSen: val },
+                                    }).then((data) => {
+                                      if (data.success && data.data) {
                                         invalidateCachePrefix("/api/products");
                                         invalidateCachePrefix("/api/bom");
                                         invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
                                       }
-                                    });
+                                    }).catch(() => {});
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1799,18 +1800,17 @@ export default function ProductsPage() {
                                     const val = Math.round(parseFloat(price1Input || "0") * 100);
                                     setEditingPrice1(null);
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
-                                    fetch(`/api/products/${p.id}`, {
+                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
                                       method: "PUT",
-                                      headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({ price1Sen: val }),
-                                    }).then((r) => r.json()).then((data) => {
-                                      if (data.success) {
+                                      body: { price1Sen: val },
+                                    }).then((data) => {
+                                      if (data.success && data.data) {
                                         invalidateCachePrefix("/api/products");
                                         invalidateCachePrefix("/api/bom");
                                         invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
                                       }
-                                    });
+                                    }).catch(() => {});
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1859,18 +1859,17 @@ export default function ProductsPage() {
                                     const val = parseFloat(m3Input || "0") || 0;
                                     setEditingM3(null);
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, unitM3: val } : pr));
-                                    fetch(`/api/products/${p.id}`, {
+                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
                                       method: "PUT",
-                                      headers: { "Content-Type": "application/json" },
-                                      body: JSON.stringify({ unitM3: val }),
-                                    }).then((r) => r.json()).then((data) => {
-                                      if (data.success) {
+                                      body: { unitM3: val },
+                                    }).then((data) => {
+                                      if (data.success && data.data) {
                                         invalidateCachePrefix("/api/products");
                                         invalidateCachePrefix("/api/bom");
                                         invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...data.data } : pr));
+                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
                                       }
-                                    });
+                                    }).catch(() => {});
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();

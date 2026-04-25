@@ -30,6 +30,18 @@ jobs:
 
       - run: npm ci
 
+      # Typecheck — non-blocking until the parallel TS-cleanup branch lands.
+      # Tracked in docs/UPGRADE-CONTROL-BOARD.md as P1.2 (flip to blocking = P1.6).
+      - name: Typecheck (app)
+        run: npm run typecheck:app
+        continue-on-error: true
+
+      # Lint — same non-blocking treatment. Surfaces error count in CI logs
+      # without breaking deploy. Tracked as P1.3 in UPGRADE-CONTROL-BOARD.md.
+      - name: Lint (app)
+        run: npm run lint:app
+        continue-on-error: true
+
       - run: npm test
 
       - run: npm run build

@@ -445,9 +445,41 @@ async function fetchFilteredPOs(
   // Production page — the dropped fields + table save several MB on the
   // ~530 PO / ~9k JC response.
   if (minimal) {
-    const jcStmt = deptFilter
-      ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter, deptFilter)
-      : db.prepare(`SELECT * FROM ${jcSource}`);
+    if (deptFilter) {
+      // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
+      // payload bounded. Leave it untouched.
+      const jcStmt = db
+        .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
+        .bind(deptFilter, deptFilter);
+      const [pos, jcs] = await Promise.all([
+        poStmt.all<ProductionOrderRow>(),
+        jcStmt.all<JobCardRow>(),
+      ]);
+      return (pos.results ?? []).map((p) =>
+        rowToMinimalPO(p, jcs.results ?? []),
+      );
+    }
+    if (hasFilter) {
+      // Status-filter path: run POs first, then narrow JCs to only the
+      // matching POs' productionOrderId set. Avoids a full ~9k-row scan
+      // when the filter shrinks the PO set to a few hundred.
+      const pos = await poStmt.all<ProductionOrderRow>();
+      const poRows = pos.results ?? [];
+      if (poRows.length === 0) {
+        return [];
+      }
+      const poIds = poRows.map((p) => p.id);
+      const jcPlaceholders = poIds.map(() => "?").join(",");
+      const jcStmt = db
+        .prepare(
+          `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`,
+        )
+        .bind(...poIds);
+      const jcs = await jcStmt.all<JobCardRow>();
+      return poRows.map((p) => rowToMinimalPO(p, jcs.results ?? []));
+    }
+    // No status filter, no dept filter: legacy full-fetch backward-compat path.
+    const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -457,9 +489,44 @@ async function fetchFilteredPOs(
     );
   }
 
-  const jcStmt = deptFilter
-    ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter, deptFilter)
-    : db.prepare(`SELECT * FROM ${jcSource}`);
+  if (deptFilter) {
+    const jcStmt = db
+      .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
+      .bind(deptFilter, deptFilter);
+    const [pos, jcs, pics] = await Promise.all([
+      poStmt.all<ProductionOrderRow>(),
+      jcStmt.all<JobCardRow>(),
+      db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    ]);
+    return (pos.results ?? []).map((p) =>
+      rowToPO(p, jcs.results ?? [], pics.results ?? []),
+    );
+  }
+  if (hasFilter) {
+    // Status-filter path (full payload): same narrow-by-PO-id trick as the
+    // minimal branch. piece_pics stays a full fetch for now (separate task).
+    const pos = await poStmt.all<ProductionOrderRow>();
+    const poRows = pos.results ?? [];
+    if (poRows.length === 0) {
+      return [];
+    }
+    const poIds = poRows.map((p) => p.id);
+    const jcPlaceholders = poIds.map(() => "?").join(",");
+    const jcStmt = db
+      .prepare(
+        `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})`,
+      )
+      .bind(...poIds);
+    const [jcs, pics] = await Promise.all([
+      jcStmt.all<JobCardRow>(),
+      db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    ]);
+    return poRows.map((p) =>
+      rowToPO(p, jcs.results ?? [], pics.results ?? []),
+    );
+  }
+  // No status filter, no dept filter: legacy full-fetch backward-compat path.
+  const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
     jcStmt.all<JobCardRow>(),

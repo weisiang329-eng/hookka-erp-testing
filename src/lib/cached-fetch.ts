@@ -95,6 +95,65 @@ export function clearAllCache(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// In-flight request dedup + abort.
+//
+// Two pages calling the same URL on the same render should NOT each fire a
+// network request — they share one Promise. And when a component unmounts
+// (or its URL changes) before the response lands, the old fetch should be
+// cancelled, not just have its setState skipped. Without this, rapid
+// route switching (e.g. /production/fab-cut → /production/fab-sew →
+// /production/foam) piles slow PO queries on D1 and trips 503 throttling.
+//
+// Refcount semantics:
+//   - First subscriber to a URL creates the entry + AbortController.
+//   - Subsequent subscribers join the same Promise (refs++).
+//   - Each unsubscribe decrements refs.
+//   - When refs reaches 0 BEFORE the fetch resolves, we abort.
+//   - Once the fetch resolves (or rejects) the entry is dropped from the
+//     map regardless of refs — refcounting only governs cancellation.
+// ---------------------------------------------------------------------------
+type InflightEntry = {
+  promise: Promise<unknown>;
+  controller: AbortController;
+  refs: number;
+};
+const inflight = new Map<string, InflightEntry>();
+
+function joinInflight<T>(url: string): Promise<T> {
+  const existing = inflight.get(url);
+  if (existing) {
+    existing.refs++;
+    return existing.promise as Promise<T>;
+  }
+  const controller = new AbortController();
+  const promise: Promise<T> = fetch(url, { signal: controller.signal })
+    .then((r) => r.json())
+    .finally(() => {
+      // Drop the entry once settled — refs no longer matter after resolution.
+      // Late releaseInflight() calls become no-ops.
+      inflight.delete(url);
+    }) as Promise<T>;
+  inflight.set(url, { promise, controller, refs: 1 });
+  return promise;
+}
+
+function releaseInflight(url: string): void {
+  const entry = inflight.get(url);
+  if (!entry) return;
+  entry.refs--;
+  if (entry.refs <= 0) {
+    entry.controller.abort();
+    inflight.delete(url);
+  }
+}
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: unknown }).name;
+  return name === "AbortError";
+}
+
 type UseCachedJsonResult<T> = {
   data: T | null;
   loading: boolean;
@@ -159,27 +218,30 @@ export function useCachedJson<T = unknown>(
 
     let cancelled = false;
     const t0 = performance.now();
-    fetch(url)
-      .then((r) => r.json())
+    const joinedUrl = url;
+    joinInflight<T>(joinedUrl)
       .then((raw) => {
         if (cancelled) return;
         // Client-side timing — anything over 500ms gets a warn so slow
         // endpoints surface in devtools without adding a dashboard.
         const dur = Math.round(performance.now() - t0);
         if (dur >= 500) {
-           
-          console.warn(`[slow-fetch] url=${url} dur_ms=${dur}`);
+
+          console.warn(`[slow-fetch] url=${joinedUrl} dur_ms=${dur}`);
         }
         // Canonicalise Hono's `{ success, data }` envelope into `data` only
         // when we're confident that's what the caller wants. We DO NOT strip
         // the envelope here — callers decide how to interpret the response —
         // but we do cache the whole body so future reads match the server.
-        writeCache<T>(url, raw as T);
-        setData(raw as T);
+        writeCache<T>(joinedUrl, raw);
+        setData(raw);
         setError(null);
       })
       .catch((err) => {
         if (cancelled) return;
+        // AbortError is the expected outcome of releaseInflight() racing
+        // a slow request; not a user-visible failure.
+        if (isAbortError(err)) return;
         setError(err instanceof Error ? err.message : String(err));
       })
       .finally(() => {
@@ -188,6 +250,7 @@ export function useCachedJson<T = unknown>(
 
     return () => {
       cancelled = true;
+      releaseInflight(joinedUrl);
     };
   }, [url, ttlSec, tick]);
 
@@ -212,11 +275,13 @@ export async function cachedFetchJson<T = unknown>(
   const isFresh = cached && Date.now() - cached.fetchedAt < ttlSec * 1000;
   if (isFresh) return cached.data;
   try {
-    const res = await fetch(url);
-    const raw = (await res.json()) as T;
+    // Reuse the same in-flight dedup as the React hook — concurrent callers
+    // (event handlers + mounting components) share one network request.
+    const raw = await joinInflight<T>(url);
     writeCache<T>(url, raw);
     return raw;
-  } catch {
+  } catch (err) {
+    if (isAbortError(err)) return cached?.data ?? null;
     return cached?.data ?? null;
   }
 }

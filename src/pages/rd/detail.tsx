@@ -25,6 +25,11 @@ import {
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDPrototypeType, RDBOMItem } from "@/lib/mock-data";
 import type { RawMaterial } from "@/types";
+import { fetchJson } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { RdProjectSchema } from "@/lib/schemas/rd-project";
+
+const RDMutationSchema = mutationWithData(RdProjectSchema);
 
 const STAGES: RDProjectStage[] = ["CONCEPT", "DESIGN", "PROTOTYPE", "TESTING", "APPROVED", "PRODUCTION_READY"];
 
@@ -227,18 +232,12 @@ export default function RDProjectDetailPage() {
         return m;
       });
 
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ currentStage: nextStage, milestones: updatedMilestones }),
+        body: { currentStage: nextStage, milestones: updatedMilestones },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        toast.success(`Advanced to ${STAGE_LABELS[nextStage]}`);
-      } else {
-        toast.error("Failed to advance stage");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      toast.success(`Advanced to ${STAGE_LABELS[nextStage]}`);
     } catch {
       toast.error("Failed to advance stage");
     } finally {
@@ -275,19 +274,13 @@ export default function RDProjectDetailPage() {
         assignedTeam: editForm.assignedTeamStr.split(",").map((s) => s.trim()).filter(Boolean),
         status: editForm.status,
       };
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: payload,
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        setEditOpen(false);
-        toast.success("Project updated successfully");
-      } else {
-        toast.error("Failed to update project");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      setEditOpen(false);
+      toast.success("Project updated successfully");
     } catch {
       toast.error("Failed to update project");
     } finally {
@@ -342,19 +335,13 @@ export default function RDProjectDetailPage() {
         createdDate: protoForm.createdDate,
       };
       const updatedPrototypes = [...project.prototypes, newProto];
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prototypes: updatedPrototypes }),
+        body: { prototypes: updatedPrototypes },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        setProtoOpen(false);
-        toast.success("Prototype added successfully");
-      } else {
-        toast.error("Failed to add prototype");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      setProtoOpen(false);
+      toast.success("Prototype added successfully");
     } catch {
       toast.error("Failed to add prototype");
     } finally {
@@ -381,20 +368,14 @@ export default function RDProjectDetailPage() {
         unitCostSen: Math.round(bomForm.unitCostRM * 100),
       };
       const updatedBOM = [...(project.productionBOM || []), newItem];
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productionBOM: updatedBOM }),
+        body: { productionBOM: updatedBOM },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        setBomOpen(false);
-        setBomForm({ materialCode: "", materialName: "", qty: 1, unit: "PCS", unitCostRM: 0 });
-        toast.success("Material added to Production BOM");
-      } else {
-        toast.error("Failed to add material");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      setBomOpen(false);
+      setBomForm({ materialCode: "", materialName: "", qty: 1, unit: "PCS", unitCostRM: 0 });
+      toast.success("Material added to Production BOM");
     } catch {
       toast.error("Failed to add material");
     } finally {
@@ -406,18 +387,12 @@ export default function RDProjectDetailPage() {
     if (!project) return;
     const updatedBOM = (project.productionBOM || []).filter((b) => b.id !== itemId);
     try {
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ productionBOM: updatedBOM }),
+        body: { productionBOM: updatedBOM },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        toast.success("Material removed");
-      } else {
-        toast.error("Failed to remove material");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      toast.success("Material removed");
     } catch {
       toast.error("Failed to remove material");
     }
@@ -502,18 +477,12 @@ export default function RDProjectDetailPage() {
     if (!project) return;
     const updated = (project.materialIssuances || []).filter((i) => i.id !== issuanceId);
     try {
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ materialIssuances: updated }),
+        body: { materialIssuances: updated },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        toast.success("Issuance removed");
-      } else {
-        toast.error("Failed to remove issuance");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      toast.success("Issuance removed");
     } catch {
       toast.error("Failed to remove issuance");
     }
@@ -586,19 +555,13 @@ export default function RDProjectDetailPage() {
         }
         return m;
       });
-      const res = await fetch(`/api/rd-projects/${id}`, {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ milestones: updatedMilestones }),
+        body: { milestones: updatedMilestones },
       });
-      if (res.ok) {
-        const data = await res.json();
-        setProject(data.data);
-        setEditingMilestone(null);
-        toast.success("Milestone date updated");
-      } else {
-        toast.error("Failed to update milestone");
-      }
+      if (data.data) setProject(data.data as RDProject);
+      setEditingMilestone(null);
+      toast.success("Milestone date updated");
     } catch {
       toast.error("Failed to update milestone");
     } finally {
@@ -631,13 +594,12 @@ export default function RDProjectDetailPage() {
         }
         return m;
       });
-      fetch(`/api/rd-projects/${id}`, {
+      fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ milestones: updatedMilestones }),
-      }).then((res) => res.json()).then((data) => {
-        if (data.data) setProject(data.data);
-      });
+        body: { milestones: updatedMilestones },
+      }).then((data) => {
+        if (data.data) setProject(data.data as RDProject);
+      }).catch(() => {});
     }
     setPhotoUploadStage(null);
     e.target.value = "";

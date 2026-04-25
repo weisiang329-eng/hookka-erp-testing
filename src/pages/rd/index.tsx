@@ -19,6 +19,11 @@ import {
   X,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/lib/mock-data";
+import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
+import { mutationWithData } from "@/lib/schemas/common";
+import { RdProjectSchema } from "@/lib/schemas/rd-project";
+
+const RDMutationSchema = mutationWithData(RdProjectSchema);
 
 const STAGES: RDProjectStage[] = ["CONCEPT", "DESIGN", "PROTOTYPE", "TESTING", "APPROVED", "PRODUCTION_READY"];
 
@@ -454,17 +459,20 @@ function CreateProjectDialog({
           .filter(Boolean);
       }
 
-      const res = await fetch("/api/rd-projects", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        throw new Error(err?.error ?? "Failed to create project");
+      try {
+        await fetchJson("/api/rd-projects", RDMutationSchema, {
+          method: "POST",
+          body,
+        });
+        toast.success("Project created successfully");
+        onCreated();
+      } catch (err) {
+        if (err instanceof FetchJsonError) {
+          const errBody = err.body as { error?: string } | undefined;
+          throw new Error(errBody?.error ?? "Failed to create project");
+        }
+        throw err;
       }
-      toast.success("Project created successfully");
-      onCreated();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to create project");
     } finally {

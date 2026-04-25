@@ -46,6 +46,29 @@ import type {
 
 type TabKey = "overview" | "coa" | "journals" | "ar" | "ap" | "pl" | "bs";
 
+type MutationResponse = { success: true; error?: string } | { success: false; error?: string };
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object";
+}
+
+function asMutationResponse(v: unknown): MutationResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) {
+    return {
+      success: true,
+      error: typeof v.error === "string" ? v.error : undefined,
+    };
+  }
+  if (v.success === false) {
+    return {
+      success: false,
+      error: typeof v.error === "string" ? v.error : undefined,
+    };
+  }
+  return null;
+}
+
 const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   { key: "overview", label: "Overview", icon: <LayoutDashboard className="h-4 w-4" /> },
   { key: "pl", label: "P&L Report", icon: <BarChart3 className="h-4 w-4" /> },
@@ -386,13 +409,13 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(formData),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asMutationResponse(await res.json());
+    if (data?.success) {
       setShowForm(false);
       setFormData({ code: "", name: "", type: "ASSET", parentCode: "" });
       onRefresh();
     } else {
-      toast.error(data.error);
+      toast.error(data?.error || "Failed to create account");
     }
   };
 
@@ -402,8 +425,8 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, name: editName }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asMutationResponse(await res.json());
+    if (data?.success) {
       setEditCode(null);
       onRefresh();
     }
@@ -415,8 +438,8 @@ function COATab({ accounts, onRefresh }: { accounts: ChartOfAccount[]; onRefresh
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ code, isActive: false }),
     });
-    const data = await res.json();
-    if (data.success) onRefresh();
+    const data = asMutationResponse(await res.json());
+    if (data?.success) onRefresh();
   };
 
   return (
@@ -810,13 +833,13 @@ function JournalEntryForm({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ date, description, lines: validLines }),
     });
-    const data = await res.json();
+    const data = asMutationResponse(await res.json());
     setSaving(false);
 
-    if (data.success) {
+    if (data?.success) {
       onSave();
     } else {
-      setError(data.error);
+      setError(data?.error || "Failed to save journal entry");
     }
   };
 

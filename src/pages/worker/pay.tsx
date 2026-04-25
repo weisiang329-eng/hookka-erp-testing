@@ -87,6 +87,123 @@ type PayData = {
   }>;
 };
 
+type WorkerPayResponse = { success: true; data: PayData } | { success: false; error?: string };
+type WorkerHistoryResponse = { success: true; data: HistoryData } | { success: false; error?: string };
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === "object";
+}
+
+function asString(v: unknown): string | null {
+  return typeof v === "string" ? v : null;
+}
+
+function asNumber(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function asAttendanceRow(v: unknown): AttendanceRow | null {
+  if (!isRecord(v)) return null;
+  const date = asString(v.date);
+  const workingMinutes = asNumber(v.workingMinutes);
+  const productionTimeMinutes = asNumber(v.productionTimeMinutes);
+  const efficiencyPct = asNumber(v.efficiencyPct);
+  const overtimeMinutes = asNumber(v.overtimeMinutes);
+  const status = asString(v.status);
+  if (!date || workingMinutes === null || productionTimeMinutes === null || efficiencyPct === null || overtimeMinutes === null || !status) return null;
+  return {
+    date,
+    clockIn: asString(v.clockIn),
+    clockOut: asString(v.clockOut),
+    workingMinutes,
+    productionTimeMinutes,
+    efficiencyPct,
+    overtimeMinutes,
+    status,
+  };
+}
+
+function asHistoryData(v: unknown): HistoryData | null {
+  if (!isRecord(v) || !isRecord(v.range) || !Array.isArray(v.attendance) || !isRecord(v.totals)) return null;
+  const from = asString(v.range.from);
+  const to = asString(v.range.to);
+  const days = asNumber(v.totals.days);
+  const workedMinutes = asNumber(v.totals.workedMinutes);
+  const overtimeMinutes = asNumber(v.totals.overtimeMinutes);
+  if (!from || !to || days === null || workedMinutes === null || overtimeMinutes === null) return null;
+  return {
+    range: { from, to },
+    attendance: v.attendance.map(asAttendanceRow).filter((x): x is AttendanceRow => !!x),
+    totals: { days, workedMinutes, overtimeMinutes },
+  };
+}
+
+function asPayslipRow(v: unknown): PayData["history"][number] | null {
+  if (!isRecord(v)) return null;
+  const id = asString(v.id);
+  const period = asString(v.period);
+  if (!id || !period) return null;
+  return {
+    id,
+    period,
+    basicSen: asNumber(v.basicSen) ?? undefined,
+    grossSen: asNumber(v.grossSen) ?? undefined,
+    netSen: asNumber(v.netSen) ?? undefined,
+    allowancesSen: asNumber(v.allowancesSen) ?? undefined,
+    overtimeSen: asNumber(v.overtimeSen) ?? undefined,
+    epfEeSen: asNumber(v.epfEeSen) ?? undefined,
+    socsoEeSen: asNumber(v.socsoEeSen) ?? undefined,
+    eisEeSen: asNumber(v.eisEeSen) ?? undefined,
+    taxSen: asNumber(v.taxSen) ?? undefined,
+  };
+}
+
+function asPayData(v: unknown): PayData | null {
+  if (!isRecord(v) || !isRecord(v.current) || !Array.isArray(v.history)) return null;
+  const period = asString(v.current.period);
+  const workedDays = asNumber(v.current.workedDays);
+  const otMinutes = asNumber(v.current.otMinutes);
+  const basicEarnedSen = asNumber(v.current.basicEarnedSen);
+  const otSen = asNumber(v.current.otSen);
+  const pieceBonusSen = asNumber(v.current.pieceBonusSen);
+  const estimatedGrossSen = asNumber(v.current.estimatedGrossSen);
+  if (!period || workedDays === null || otMinutes === null || basicEarnedSen === null || otSen === null || pieceBonusSen === null || estimatedGrossSen === null) return null;
+  return {
+    current: {
+      period,
+      workedDays,
+      otMinutes,
+      basicEarnedSen,
+      otSen,
+      pieceBonusSen,
+      estimatedGrossSen,
+    },
+    history: v.history
+      .map(asPayslipRow)
+      .filter((x): x is PayData["history"][number] => !!x),
+  };
+}
+
+function asWorkerPayResponse(v: unknown): WorkerPayResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) {
+    const data = asPayData(v.data);
+    return data ? { success: true, data } : null;
+  }
+  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
+  return null;
+}
+
+function asWorkerHistoryResponse(v: unknown): WorkerHistoryResponse | null {
+  if (!isRecord(v)) return null;
+  if (v.success === true) {
+    const data = asHistoryData(v.data);
+    return data ? { success: true, data } : null;
+  }
+  if (v.success === false) return { success: false, error: asString(v.error) ?? undefined };
+  return null;
+}
+
 // ============================================================
 export default function WorkerPayPage() {
   const t = useT();
@@ -107,8 +224,8 @@ export default function WorkerPayPage() {
   const loadPay = useCallback(async () => {
     try {
       const res = await workerFetch("/api/worker/payslips");
-      const j = await res.json();
-      if (j.success) setPay(j.data);
+      const j = asWorkerPayResponse(await res.json());
+      if (j?.success) setPay(j.data);
     } catch {
       /* network error — leave pay null, UI will show error card */
     }
@@ -119,8 +236,8 @@ export default function WorkerPayPage() {
       const res = await workerFetch(
         `/api/worker/history?from=${encodeURIComponent(f)}&to=${encodeURIComponent(tto)}`,
       );
-      const j = await res.json();
-      if (j.success) setHist(j.data);
+      const j = asWorkerHistoryResponse(await res.json());
+      if (j?.success) setHist(j.data);
     } catch {
       /* leave hist null — attendance section just won't render */
     }

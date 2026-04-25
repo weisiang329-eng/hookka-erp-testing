@@ -25,6 +25,10 @@ type UserRow = {
   createdAt: string;
   lastLoginAt: string | null;
   displayName: string | null;
+  // Phase C.6 — TOTP 2FA. Non-null totpEnrolledAt means the user MUST present
+  // a TOTP code (or recovery code) before /login issues a session.
+  totpSecret?: string | null;
+  totpEnrolledAt?: string | null;
 };
 
 function publicUser(u: UserRow) {
@@ -70,6 +74,19 @@ app.post("/login", async (c) => {
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) {
     return c.json({ success: false, error: "Invalid credentials" }, 401);
+  }
+
+  // Phase C.6 — TOTP gate. If the user is enrolled, do NOT issue a session
+  // here; the frontend must POST { userId, code } to
+  // /api/auth/totp/login-verify which issues the session on success.
+  // Returning userId (NOT a token) is intentional — userId alone is useless
+  // without a valid TOTP/recovery code.
+  if (user.totpEnrolledAt) {
+    return c.json({
+      success: true,
+      totpRequired: true,
+      userId: user.id,
+    });
   }
 
   const token = crypto.randomUUID();

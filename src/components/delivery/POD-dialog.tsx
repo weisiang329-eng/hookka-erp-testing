@@ -31,7 +31,12 @@ export default function PODDialog({
   const [photos, setPhotos] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
 
-  // Reset state whenever the dialog opens
+  // Reset state whenever the dialog opens.
+  //
+  // Intentional form reset on the open->true transition. Each field is
+  // user-editable while the dialog is open, so derive-from-prop is not an
+  // option; we just need a one-shot clear on every re-open.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (open) {
       setReceiverName("");
@@ -56,6 +61,7 @@ export default function PODDialog({
       });
     }
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   if (!open) return null;
 

@@ -44,7 +44,12 @@ export default function ForecastPage() {
     return Array.from(map.values());
   }, [historicalSales]);
 
-  // Set default selections once data loads
+  // Set default selections once data loads.
+  //
+  // One-shot default-selection seed (data arrives -> auto-pick first item).
+  // The dropdown is user-editable afterwards, so a pure derive would prevent
+  // the user from picking a different product.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (productList.length > 0 && !selectedProductId) {
       setSelectedProductId(productList[0].id);
@@ -56,6 +61,7 @@ export default function ForecastPage() {
       setPromiseProductId(promiseDates[0].productId);
     }
   }, [promiseDates, promiseProductId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const tabs: { key: Tab; label: string }[] = [
     { key: "dashboard", label: "Dashboard" },

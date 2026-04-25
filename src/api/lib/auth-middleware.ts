@@ -18,6 +18,10 @@ export const PUBLIC_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/accept-invite",
+  // Phase C.6 — TOTP step-2 of password login. The caller already proved
+  // possession of the password (got back { totpRequired: true, userId }) and
+  // must now prove possession of the second factor. No bearer yet.
+  "/api/auth/totp/login-verify",
   "/api/health",
 ];
 
@@ -30,6 +34,10 @@ const PUBLIC_PREFIXES = [
   "/api/worker-auth/",
   "/api/worker/",
   "/api/auth/invite/",
+  // Phase B.3 — Google Workspace OAuth handshake. /start mints CSRF state +
+  // 302's to Google; /callback consumes Google's redirect, finds-or-links
+  // the local user, and issues a session. Both are pre-auth by definition.
+  "/api/auth/oauth/",
 ];
 
 // Customer QR tracking lookup: only the single-unit GET is public. The list

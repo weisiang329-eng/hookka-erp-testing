@@ -48,6 +48,18 @@ export type Env = {
     CRON_SECRET?: string;
     // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
     SESSION_CACHE: KVNamespace;
+    // R2 bucket for invoice PDFs / BOM drawings / SO attachments (Phase B.4).
+    // Optional during rollout — code paths gate on `if (env.FILES)`.
+    FILES?: R2Bucket;
+    // Cloudflare Queues binding for async PO emission cascade (Phase C #3).
+    // Optional — falls back to synchronous inline call when absent.
+    PO_EMISSION_QUEUE?: Queue;
+    // OAuth client credentials (Phase B.3 / C #6).  Set via `wrangler secret put`.
+    OAUTH_GOOGLE_CLIENT_ID?: string;
+    OAUTH_GOOGLE_CLIENT_SECRET?: string;
+    OAUTH_GOOGLE_REDIRECT_URI?: string;
+    OAUTH_GOOGLE_HOSTED_DOMAIN?: string;
+    JWT_SECRET?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -280,6 +292,10 @@ import supplierScorecards from "./routes-d1/supplier-scorecards";
 import priceHistory from "./routes-d1/price-history";
 // Auth — login portal + admin user CRUD
 import auth from "./routes-d1/auth";
+// Phase B.3 — Google Workspace OAuth (federated SSO).
+import authOauth from "./routes-d1/auth-oauth";
+// Phase C.6 — TOTP 2FA enrollment + verify.
+import authTotp from "./routes-d1/auth-totp";
 import users from "./routes-d1/users";
 import presence from "./routes-d1/presence";
 import bomMasterTemplates from "./routes-d1/bom-master-templates";
@@ -365,6 +381,12 @@ app.route("/api/supplier-materials", supplierMaterials);
 app.route("/api/supplier-scorecards", supplierScorecards);
 app.route("/api/price-history", priceHistory);
 // Auth
+// MUST mount /api/auth/oauth and /api/auth/totp BEFORE /api/auth so the
+// more-specific subapps win route matching (Hono picks the first registered
+// subapp whose prefix matches). Otherwise the catch-all `auth` subapp would
+// 404 the OAuth/TOTP paths.
+app.route("/api/auth/oauth", authOauth);
+app.route("/api/auth/totp", authTotp);
 app.route("/api/auth", auth);
 app.route("/api/users", users);
 app.route("/api/presence", presence);

@@ -1,7 +1,7 @@
 // Public FG unit tracking page — opened by customers scanning the QR sticker.
 // Intentionally standalone (no dashboard/portal chrome), mobile-first, no auth.
 
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import { useCachedJson } from "@/lib/cached-fetch";
 import { useSearchParams } from "react-router-dom";
 import { CheckCircle2, Circle, Package, AlertTriangle } from "lucide-react";
@@ -97,28 +97,28 @@ function TimelineRow({
 export default function TrackPage() {
   const [params] = useSearchParams();
   const serial = params.get("s") || "";
-  const [unit, setUnit] = useState<FGUnit | null>(null);
-  const [error, setError] = useState<string | null>(null);
 
   const trackUrl = serial.trim() ? `/api/fg-units?serial=${encodeURIComponent(serial.trim())}` : null;
   const { data: d, loading: fetchLoading, error: fetchError } = useCachedJson<{ success?: boolean; data?: FGUnit[] }>(trackUrl);
   const loading = trackUrl ? fetchLoading : false;
 
-  useEffect(() => {
-    if (!serial.trim()) {
-      setError("No serial number provided.");
-      return;
+  // Pure derive — no useEffect+setState. unit / error fall out of inputs.
+  const unit: FGUnit | null = useMemo(() => {
+    if (!d) return null;
+    if (d.success && Array.isArray(d.data) && d.data.length > 0) {
+      return d.data[0] as FGUnit;
     }
-    setError(null);
+    return null;
+  }, [d]);
+
+  const error: string | null = useMemo(() => {
+    if (!serial.trim()) return "No serial number provided.";
     if (d) {
-      if (d.success && Array.isArray(d.data) && d.data.length > 0) {
-        setUnit(d.data[0] as FGUnit);
-      } else {
-        setError("Unit not found. Check the QR code or serial number.");
-      }
-    } else if (fetchError) {
-      setError("Network error. Please try again.");
+      if (d.success && Array.isArray(d.data) && d.data.length > 0) return null;
+      return "Unit not found. Check the QR code or serial number.";
     }
+    if (fetchError) return "Network error. Please try again.";
+    return null;
   }, [serial, d, fetchError]);
 
   const status = unit?.status;

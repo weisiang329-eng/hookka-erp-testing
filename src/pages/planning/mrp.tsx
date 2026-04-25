@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -82,20 +82,19 @@ function statusDotColor(status: string) {
 
 export default function MRPPage() {
   const [activeTab, setActiveTab] = useState<Tab>("DASHBOARD");
-  const [mrpData, setMrpData] = useState<MRPRun | null>(null);
+  // mrpDataLocal is set ONLY by the runMRP() POST handler. The cached GET
+  // response feeds mrpDataFromServer via useMemo; we render whichever is
+  // newer so the user sees their just-completed run without a refetch.
+  const [mrpDataLocal, setMrpDataLocal] = useState<MRPRun | null>(null);
   const [fabricData, setFabricData] = useState<FabricDetail[]>([]);
   const [running, setRunning] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ALL");
   const [sortDesc, setSortDesc] = useState(true);
   const [horizon, setHorizon] = useState<Horizon>("all");
 
-  const { data: mrpResp, loading, refresh: refreshMrp } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/mrp");
-  const fetchMRP = useCallback(() => {
-    invalidateCachePrefix("/api/mrp");
-    refreshMrp();
-  }, [refreshMrp]);
+  const { data: mrpResp, loading } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/mrp");
 
-  useEffect(() => {
+  const mrpDataFromServer: MRPRun | null = useMemo(() => {
     const json = mrpResp;
     const d = json?.data;
     if (
@@ -105,9 +104,11 @@ export default function MRPPage() {
       !Array.isArray(d) &&
       ("requirements" in (d as object) || "runDate" in (d as object))
     ) {
-      setMrpData(d as MRPRun);
+      return d as MRPRun;
     }
+    return null;
   }, [mrpResp]);
+  const mrpData = mrpDataLocal ?? mrpDataFromServer;
 
   const runMRP = async (h?: Horizon) => {
     const selectedHorizon = h ?? horizon;
@@ -116,7 +117,7 @@ export default function MRPPage() {
       const res = await fetch(`/api/mrp?horizon=${selectedHorizon}`, { method: "POST" });
       const json = (await res.json()) as MRPPostResponse;
       if (json.success && json.data) {
-        setMrpData(json.data);
+        setMrpDataLocal(json.data);
         if (json.fabricDetail) {
           setFabricData(json.fabricDetail);
         }

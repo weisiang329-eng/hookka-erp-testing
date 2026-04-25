@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useMemo, useCallback } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
@@ -111,27 +111,32 @@ const filterTabs: { label: string; value: FilterValue }[] = [
 
 export default function NotificationsPage() {
   const navigate = useNavigate();
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  // Local read-state overrides (mark-as-read mutation) layered on top of the
+  // server snapshot. We track JUST the ids that have been marked read locally
+  // since the last server fetch; the rendered list is derived (no setState in
+  // an effect that copies from notifResp).
+  const [locallyRead, setLocallyRead] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<FilterValue>("ALL");
 
   const { data: notifResp, loading, refresh: refreshNotifHook } = useCachedJson<unknown>("/api/notifications");
 
   const fetchNotifications = useCallback(() => {
     invalidateCachePrefix("/api/notifications");
+    setLocallyRead(new Set());
     refreshNotifHook();
   }, [refreshNotifHook]);
 
-  useEffect(() => {
+  const notifications: Notification[] = useMemo(() => {
     const raw = notifResp;
-    if (raw !== null && raw !== undefined) {
-      const list = Array.isArray(raw)
-        ? (raw as Notification[])
-        : Array.isArray((raw as { data?: unknown })?.data)
-          ? ((raw as { data: Notification[] }).data)
-          : [];
-      setNotifications(list);
-    }
-  }, [notifResp]);
+    if (raw === null || raw === undefined) return [];
+    const list = Array.isArray(raw)
+      ? (raw as Notification[])
+      : Array.isArray((raw as { data?: unknown })?.data)
+        ? ((raw as { data: Notification[] }).data)
+        : [];
+    if (locallyRead.size === 0) return list;
+    return list.map((n) => (locallyRead.has(n.id) ? { ...n, isRead: true } : n));
+  }, [notifResp, locallyRead]);
 
   // --- Mark as read ---
 
@@ -141,9 +146,11 @@ export default function NotificationsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ids }),
     });
-    setNotifications((prev) =>
-      prev.map((n) => (ids.includes(n.id) ? { ...n, isRead: true } : n))
-    );
+    setLocallyRead((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) next.add(id);
+      return next;
+    });
   }
 
   function markAllRead() {

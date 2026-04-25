@@ -41,11 +41,16 @@ export default function OrganisationsPage() {
 
   const orgs: Organisation[] = useMemo(() => orgResp?.organisations ?? [], [orgResp]);
   const activeOrgId: string = useMemo(() => orgResp?.activeOrgId ?? "", [orgResp]);
+  // `config` is an editable form (rate + checkbox); we seed from the server
+  // snapshot once, then let the user mutate it freely until they hit Save.
+  // A pure derive would lock out edits.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (orgResp?.interCompanyConfig) {
       setConfig(orgResp.interCompanyConfig);
     }
   }, [orgResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/organisations");

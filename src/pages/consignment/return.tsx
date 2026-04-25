@@ -179,12 +179,18 @@ export default function ConsignmentReturnPage() {
   // ---------- Fetch ----------
   const { data: consignmentsResp, loading, refresh: fetchData } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignments");
 
+  // crRows is mutated locally by inspect/accept/restock actions (see ~6
+  // setCrRows call sites below). It needs to be a writable copy seeded from
+  // the cached server snapshot; a pure derive would discard those local
+  // edits.
+  /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
     if (consignmentsResp?.success && consignmentsResp.data) {
       _crCounter = 0;
       setCrRows(buildMockCRs(consignmentsResp.data as ConsignmentNote[]));
     }
   }, [consignmentsResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- Filtered data ----------
   const filteredRows = useMemo(() => {

@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -73,18 +73,14 @@ function daysUntil(nextDate: string) {
 
 export default function MaintenancePage() {
   const [activeTab, setActiveTab] = useState<TabId>("equipment");
-  const { data: eqResp, loading: eqLoading } = useCachedJson<unknown>("/api/equipment");
-  const { data: logResp, loading: logLoading } = useCachedJson<unknown>("/api/maintenance-logs");
-  const [equipment, setEquipment] = useState<Equipment[]>([]);
-  const [logs, setLogs] = useState<MaintenanceLog[]>([]);
+  const { data: eqResp, loading: eqLoading, refresh: refreshEq } = useCachedJson<unknown>("/api/equipment");
+  const { data: logResp, loading: logLoading, refresh: refreshLogs } = useCachedJson<unknown>("/api/maintenance-logs");
+  // Derive directly from the cached responses — no useEffect+setState needed.
+  // After mutations, call refreshEq()/refreshLogs() to pull the fresh server
+  // snapshot rather than mutating local copies optimistically.
+  const equipment: Equipment[] = useMemo(() => asArray<Equipment>(eqResp), [eqResp]);
+  const logs: MaintenanceLog[] = useMemo(() => asArray<MaintenanceLog>(logResp), [logResp]);
   const loading = eqLoading || logLoading;
-
-  useEffect(() => {
-    setEquipment(asArray<Equipment>(eqResp));
-  }, [eqResp]);
-  useEffect(() => {
-    setLogs(asArray<MaintenanceLog>(logResp));
-  }, [logResp]);
 
   // Equipment-type options seeded from the system defaults plus every
   // distinct `type` already recorded in the equipment master, so adding a
@@ -173,9 +169,10 @@ export default function MaintenancePage() {
     });
     const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
-      setEquipment((prev) => [...prev, result.data]);
       invalidateCachePrefix("/api/equipment");
       invalidateCachePrefix("/api/maintenance");
+      refreshEq();
+      refreshLogs();
       setShowAddForm(false);
     }
   }
@@ -203,14 +200,10 @@ export default function MaintenancePage() {
     });
     const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
-      setEquipment((prev) =>
-        prev.map((eq) => (eq.id === showLogForm ? result.data : eq))
-      );
-      if (result.log) {
-        setLogs((prev) => [result.log, ...prev]);
-      }
       invalidateCachePrefix("/api/equipment");
       invalidateCachePrefix("/api/maintenance");
+      refreshEq();
+      refreshLogs();
       setShowLogForm(null);
     }
   }
@@ -236,11 +229,9 @@ export default function MaintenancePage() {
     });
     const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
-      setEquipment((prev) =>
-        prev.map((eq) => (eq.id === showEditForm ? result.data : eq))
-      );
       invalidateCachePrefix("/api/equipment");
       invalidateCachePrefix("/api/maintenance");
+      refreshEq();
       setShowEditForm(null);
     }
   }

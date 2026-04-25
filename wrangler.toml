@@ -73,9 +73,25 @@ id = "8f4c4b7ac1f142ff8378eada4602458a"
 # Cloudflare dashboard or via wrangler secret put.
 #
 # NOTE: RESEND_API_KEY is intentionally NOT listed here — secrets belong in
-# .dev.vars locally and `wrangler secret put RESEND_API_KEY` in prod.
+# .dev.vars locally and `wrangler secret put <NAME>` in prod.
+#
+# Phase B.3 / C.6 — Google Workspace OAuth + TOTP 2FA. Required for OAuth
+# login to work; until set, /api/auth/oauth/google/start returns 503.
+# See docs/AUTH-OAUTH-SETUP.md for the full setup walkthrough.
+#   PUBLIC vars (set here or via dashboard):
+#     OAUTH_GOOGLE_CLIENT_ID
+#     OAUTH_GOOGLE_REDIRECT_URI
+#     OAUTH_GOOGLE_HOSTED_DOMAIN     — optional; lock to one Workspace tenant
+#   SECRETS (wrangler secret put …):
+#     OAUTH_GOOGLE_CLIENT_SECRET
+#     JWT_SECRET                     — HMAC secret for OAuth CSRF state token
 [vars]
 ENVIRONMENT = "production"
 API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
 APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka ERP <noreply@houzscentury.com>"
+# Uncomment + fill once the Google Cloud Console step is done. Empty values
+# keep the OAuth route returning 503 (fails closed, see auth-oauth.ts).
+# OAUTH_GOOGLE_CLIENT_ID = ""
+# OAUTH_GOOGLE_REDIRECT_URI = "https://hookka-erp-testing.pages.dev/api/auth/oauth/google/callback"
+# OAUTH_GOOGLE_HOSTED_DOMAIN = "hookka.com"

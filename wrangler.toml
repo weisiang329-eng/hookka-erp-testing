@@ -69,6 +69,57 @@ id = "8f4c4b7ac1f142ff8378eada4602458a"
 # Until one of the above ships, dashboard tiles will reflect the MV state at
 # the last manual refresh — see docs/d1-retirement-plan.md for the runbook.
 
+# ---------------------------------------------------------------------------
+# Phase C #3 quick-win — PO emission queue (scaffold).
+# ---------------------------------------------------------------------------
+# Bindings stay commented out until the admin provisions the queues:
+#   wrangler queues create po-emission
+#   wrangler queues create po-emission-dlq
+# Then uncomment both blocks and redeploy. Producer code in
+# src/api/lib/queue-po-emission.ts auto-detects the binding (gracefully
+# falls back to inline notify when missing). Consumer code lives at
+# src/api/queues/po-emission-consumer.ts — Pages Functions cannot host a
+# queue consumer directly, so the admin will also need a sibling Worker
+# to wire `default.queue` → that handler. Full runbook in
+# docs/QUEUES-SETUP.md.
+#
+# [[queues.producers]]
+# binding = "PO_EMISSION_QUEUE"
+# queue = "po-emission"
+#
+# [[queues.consumers]]
+# queue = "po-emission"
+# max_batch_size = 10
+# max_batch_timeout = 30
+# max_retries = 3
+# dead_letter_queue = "po-emission-dlq"
+
+# ---------------------------------------------------------------------------
+# Phase B.4 — R2 bucket for invoice PDFs / BOM drawings / SO attachments.
+# ---------------------------------------------------------------------------
+# Bucket-create runbook:
+#   wrangler r2 bucket create hookka-files
+# Then uncomment the block below and redeploy. Helper in
+# src/api/lib/r2-store.ts raises a clear error when the binding is
+# missing, so routes that need files (src/api/routes-d1/files.ts) return
+# 503 instead of crashing. Full runbook in docs/R2-SETUP.md.
+#
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "hookka-files"
+
+# ---------------------------------------------------------------------------
+# Phase C #7 — Daily backup cron trigger (scaffold).
+# ---------------------------------------------------------------------------
+# Uncomment after the FILES R2 binding is live. Runs the
+# src/api/cron/daily-backup.ts handler, which writes a logical dump of
+# the Supabase tables to r2://hookka-files/backups/supabase/<date>.json.gz.
+# Pages Functions does not support `[triggers] crons`; you'll need to
+# move this entry to a sibling Worker project. See docs/DR-RUNBOOK.md.
+#
+# [triggers]
+# crons = ["0 18 * * *"]   # 02:00 SGT daily (UTC+8)
+
 # Runtime env vars — override per environment (dev/preview/prod) on the
 # Cloudflare dashboard or via wrangler secret put.
 #

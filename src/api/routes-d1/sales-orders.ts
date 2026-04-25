@@ -1846,6 +1846,48 @@ app.post("/:id/confirm", async (c) => {
 
   const order = await fetchSOWithItems(c.var.DB, id);
 
+  // Phase C #3 quick-win — enqueue one PO emission message per newly
+  // created production order. Runs AFTER the synchronous DB batch so
+  // the SO is durably CONFIRMED before any side-effect fires. When the
+  // PO_EMISSION_QUEUE binding is not configured (default until
+  // docs/QUEUES-SETUP.md is executed) the helper falls back to the
+  // existing inline notify, preserving today's behavior.
+  if (!preExisting && productionOrders.length > 0) {
+    try {
+      const { enqueuePoEmission } = await import("../lib/queue-po-emission");
+      const orgId = (c.get as unknown as (k: string) => string | undefined)(
+        "orgId",
+      );
+      const customerEmail =
+        (existing as unknown as { customerEmail?: string }).customerEmail ??
+        undefined;
+      await Promise.all(
+        productionOrders.map((po) =>
+          enqueuePoEmission(
+            c.env as unknown as {
+              PO_EMISSION_QUEUE?: { send: (m: unknown) => Promise<void> };
+            },
+            {
+              poId: po.id,
+              soId: id,
+              poNo: po.poNo,
+              customerEmail,
+              orgId,
+            },
+          ),
+        ),
+      );
+    } catch (err) {
+      // Never block the confirm response on the queue. The inline
+      // fallback inside enqueuePoEmission already covers the common
+      // failure case; this catch is the belt for the suspenders.
+      console.warn(
+        "[sales-orders/confirm] PO emission enqueue failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   // Audit emit (P3.4) — confirm is the lock-in moment that fans out POs.
   // Snapshot the SO's state before/after so forensic queries can trace the
   // moment a PO chain was kicked off.

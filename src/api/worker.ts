@@ -308,6 +308,9 @@ import jobCards from "./routes-d1/job-cards";
 import dashboardRevenue from "./routes-d1/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes-d1/mdm";
+// Phase B.4 — file_assets storage (R2-backed). Returns 503 until the
+// FILES R2 binding is wired up; see docs/R2-SETUP.md.
+import files from "./routes-d1/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
@@ -406,6 +409,9 @@ app.route("/api/dashboard/revenue", dashboardRevenue);
 // in spirit (gated by the existing auth middleware until role-aware
 // authz lands; see roadmap §1).
 app.route("/api/mdm", mdm);
+// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503
+// when env.FILES (R2 binding) is missing; see docs/R2-SETUP.md.
+app.route("/api/files", files);
 
 // Phase 5 — mock-backed. Same shapes as before; data lives in
 // src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)

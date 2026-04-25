@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -253,6 +254,14 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Audit emit (P3.4) — CN create. Sensitive because issuing a CN
+    // decrements customer A/R and can flip an invoice's totals.
+    await emitAudit(c, {
+      resource: "credit-notes",
+      resourceId: id,
+      action: "create",
+      after: rowToCreditNote(created),
+    });
     return c.json({ success: true, data: rowToCreditNote(created) }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

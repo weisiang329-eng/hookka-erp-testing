@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -224,6 +225,21 @@ app.put("/", async (c) => {
         400,
       );
     }
+    // Snapshot the prior status distribution so the audit row captures the
+    // pre-state alongside the post-state.
+    const beforeRes = await c.var.DB.prepare(
+      "SELECT status, COUNT(*) AS n FROM payroll_records WHERE period = ? GROUP BY status",
+    )
+      .bind(period)
+      .all<{ status: string; n: number }>();
+    const beforeStatuses = (beforeRes.results ?? []).reduce<Record<string, number>>(
+      (acc, r) => {
+        acc[r.status] = r.n;
+        return acc;
+      },
+      {},
+    );
+
     const res = await c.var.DB.prepare(
       `UPDATE payroll_records
          SET status = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -231,7 +247,23 @@ app.put("/", async (c) => {
     )
       .bind(status, period)
       .run();
-    return c.json({ success: true, updated: res.meta?.changes ?? 0 });
+    const updated = res.meta?.changes ?? 0;
+
+    // Audit emit (P3.4) — payroll post / finalize. The PUT bulk-flips the
+    // whole period; resourceId is the period (e.g. "2026-04") so audit
+    // queries can scope by month. Only emit when at least one row changed
+    // — no-op runs don't generate noise.
+    if (updated > 0) {
+      await emitAudit(c, {
+        resource: "payroll",
+        resourceId: String(period),
+        action: "post",
+        before: { period, statuses: beforeStatuses },
+        after: { period, status, recordsUpdated: updated },
+      });
+    }
+
+    return c.json({ success: true, updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

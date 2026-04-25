@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -160,6 +161,14 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Audit emit (P3.4) — DN create. Sensitive because issuing a DN
+    // increments customer A/R and can bump an invoice's totalSen.
+    await emitAudit(c, {
+      resource: "debit-notes",
+      resourceId: id,
+      action: "create",
+      after: rowToDebitNote(created),
+    });
     return c.json({ success: true, data: rowToDebitNote(created) }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

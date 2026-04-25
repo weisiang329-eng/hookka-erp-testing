@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -748,6 +749,34 @@ app.put("/:id", async (c) => {
     await c.var.DB.batch(statements);
 
     const updated = await fetchInvoiceWithChildren(c.var.DB, id);
+
+    // Audit emit (P3.4) — only on the two sensitive status transitions:
+    //   • post  = DRAFT → SENT (the finalize / publish moment)
+    //   • void  = ANY   → CANCELLED (the kill-switch)
+    // Skip the remaining payment-driven transitions (SENT → PARTIAL_PAID /
+    // PAID / OVERDUE) — those are already journaled via payment audit
+    // events on payments.ts. Avoid double-logging.
+    if (existing.status === "DRAFT" && nextStatus === "SENT") {
+      await emitAudit(c, {
+        resource: "invoices",
+        resourceId: id,
+        action: "post",
+        before: existing,
+        after: updated,
+      });
+    } else if (
+      nextStatus === "CANCELLED" &&
+      existing.status !== "CANCELLED"
+    ) {
+      await emitAudit(c, {
+        resource: "invoices",
+        resourceId: id,
+        action: "void",
+        before: existing,
+        after: updated,
+      });
+    }
+
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

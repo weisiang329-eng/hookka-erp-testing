@@ -1,6 +1,6 @@
 # Upgrade Control Board — Single Source of Truth
 
-> **Last updated**: 2026-04-25
+> **Last updated**: 2026-04-25 (P3.4 finish)
 > **Latest batch landed**: Batch 1 (CI gate non-blocking + thundering-herd fix + 90d plan + control board). 96 TS errors remaining.
 > **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
 > **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
@@ -64,7 +64,7 @@ Every row carries these fields. If any is missing, the row is malformed and must
 | P3.1 | auth | Migration `0045_rbac.sql` — `roles`, `permissions`, `role_permissions` + seed 8 roles | Claude | 2026-05-22 | `wrangler d1 execute hookka-erp-db --command "select count(*) from role_permissions"` > 0 | low |
 | P3.2 | audit | Migration `0046_audit_events.sql` + indexes | Claude | 2026-05-22 | `select count(*) from audit_events` works | low |
 | P3.3 | auth | `src/api/lib/authz.ts` — `requirePermission(resource, action)` middleware, KV-cached | Claude | 2026-05-29 | All 48 routes use it; ad-hoc `if (role !==…)` count == 0 | high — cross-cutting refactor |
-| P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 mutations | Claude | 2026-05-29 | `audit_events` row appears for each mutation in smoke test | medium |
+| P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 mutations | Claude | 2026-05-29 | `audit_events` row appears for each mutation in smoke test | medium | _landed — see Done lane_ |
 | P3.5 | auth | Migration `0047_worker_sessions.sql` + persist worker login | Claude | 2026-06-01 | Worker login survives `wrangler dev` restart | medium |
 | P3.6 | auth | `<RequireRole>` + `<RequirePermission>` + `usePermission()` frontend | Claude | 2026-06-05 | Non-Finance redirected from `/accounting` | medium |
 | P3.7 | auth | Sidebar reads from current user (replace hardcoded "Lim / Director") | Claude | 2026-06-05 | Display name == logged-in user | low |
@@ -127,6 +127,7 @@ _(empty — surface here when something stalls. Each blocker must name the unblo
 | P1.1 | ci | Snapshot baselines `.ci-baseline/typecheck.txt` + `.ci-baseline/lint.txt` from current main | Claude | 2026-04-26 | Files present in main | _landed_ | low | Skipped — `.ci-baseline/` directory deferred; we use the live commit count instead since `npm run typecheck:app` exits with the count visible in CI logs (96 errors at landing time). |
 | P1.2 | ci | Add `typecheck:app` step to `.github/workflows/deploy.yml` (initially `continue-on-error: true` until TS-cleanup agent finishes) | Claude | 2026-04-27 | Workflow run shows the step executing | 745801a | medium — coordinate with parallel TS agent | ✓ Step `Typecheck (app)` runs in `.github/workflows/deploy.yml` (continue-on-error: true). Visible in commit 745801a CI run. |
 | P1.3 | ci | Add `lint:app` step to `.github/workflows/deploy.yml` (same pattern) | Claude | 2026-04-27 | Workflow run shows step executing | 745801a | low | ✓ Step `Lint (app)` runs in `.github/workflows/deploy.yml` (continue-on-error: true). Visible in commit 745801a CI run. |
+| P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 sensitive mutations | Claude | 2026-04-25 | `emitAudit` written for each mutation; `tests/audit.test.mjs` covers stub-INSERT shape + non-throwing failure path | 7f58af3 + this commit | medium | ✓ 12 sensitive mutations wired (SO create/confirm + payment create from 7f58af3; PO create, GRN create, invoice post + void, user role-change, worker hard-delete, payroll post, credit-note create, debit-note create, e-invoice submit, BOM-master publish from this commit). Job-card status changes intentionally skipped — already journaled by `job_card_events` domain table to avoid double-logging. `npm test` 19/19 ✓; `npm run typecheck:app` 0 errors; `npm run build` ✓. |
 
 ---
 

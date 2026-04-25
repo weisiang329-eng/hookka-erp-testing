@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendEmail } from "../lib/email";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -203,6 +204,21 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "User vanished" }, 500);
     }
+
+    // Audit emit (P3.4) — only fires when the role actually changed.
+    // High-impact mutation: a role flip can grant/revoke permission across
+    // the whole RBAC matrix. Skip plain display-name / email-only updates
+    // to keep the audit log focused on security-relevant changes.
+    if (existing.role !== merged.role) {
+      await emitAudit(c, {
+        resource: "users",
+        resourceId: id,
+        action: "role-change",
+        before: publicUser(existing),
+        after: publicUser(updated),
+      });
+    }
+
     return c.json({ success: true, data: publicUser(updated) });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

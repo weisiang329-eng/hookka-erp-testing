@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -285,6 +286,16 @@ app.put("/:id", async (c) => {
       if (!updated) {
         return c.json({ success: false, error: "e-Invoice not found" }, 404);
       }
+      // Audit emit (P3.4) — e-invoice submit. This is the LHDN
+      // transmission moment; capture before/after so the journal records
+      // submissionId / uuid / status flip for tax-audit traceability.
+      await emitAudit(c, {
+        resource: "e-invoices",
+        resourceId: id,
+        action: "submit",
+        before: rowToEInvoice(existing),
+        after: rowToEInvoice(updated),
+      });
       return c.json({ success: true, data: rowToEInvoice(updated) });
     }
 

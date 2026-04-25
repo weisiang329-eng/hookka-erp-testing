@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -312,6 +313,18 @@ app.delete("/:id", async (c) => {
       ).bind(id),
       c.var.DB.prepare("DELETE FROM workers WHERE id = ?").bind(id),
     ]);
+
+    // Audit emit (P3.4) — hard delete is irreversible; capture the row
+    // snapshot so a future forensic query can reconstruct who/what was
+    // wiped. Soft delete is journaled via job_card_events / status flips
+    // already; only the hard-delete branch needs an audit row here.
+    await emitAudit(c, {
+      resource: "workers",
+      resourceId: id,
+      action: "delete",
+      before: rowToWorker(existing),
+    });
+
     // Return a synthetic "terminated" snapshot so the client sees the final
     // state without another round-trip.
     return c.json({

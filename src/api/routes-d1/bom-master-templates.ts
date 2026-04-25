@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -111,6 +112,16 @@ app.put("/:id", async (c) => {
     );
   }
 
+  // Snapshot the prior state to detect the publish transition (isDefault
+  // flipping 0 → 1). The schema has no draft/published flag — `isDefault`
+  // is the closest thing to a "this is the active template for the
+  // category" switch, so that's what we treat as publish.
+  const prior = await c.var.DB.prepare(
+    "SELECT * FROM bom_master_templates WHERE id = ?",
+  )
+    .bind(id)
+    .first<Row>();
+
   const row = templateToRow(body, id);
 
   // If this one is flagged default, clear any other default in the same cat.
@@ -143,6 +154,20 @@ app.put("/:id", async (c) => {
       row.updatedAt,
     )
     .run();
+
+  // Audit emit (P3.4) — only on the publish transition (isDefault flipping
+  // off → on, including first-time create-as-default). Plain edits to a
+  // template body don't fire here; they're not a security-relevant action.
+  const wasDefault = prior?.isDefault === 1;
+  if (row.isDefault === 1 && !wasDefault) {
+    await emitAudit(c, {
+      resource: "bom-master-templates",
+      resourceId: id,
+      action: "publish",
+      before: prior ? rowToTemplate(prior) : null,
+      after: rowToTemplate(row),
+    });
+  }
 
   return c.json({ success: true, data: rowToTemplate(row) });
 });

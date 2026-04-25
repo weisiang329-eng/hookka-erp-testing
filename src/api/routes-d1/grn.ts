@@ -18,6 +18,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { makeLedgerEntry } from "../../lib/costing";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -605,6 +606,13 @@ app.post("/", async (c) => {
     if (!created) {
       return c.json({ success: false, error: "Failed to create GRN" }, 500);
     }
+    // Audit emit (P3.4) — GRN create. Snapshot the after-state for the journal.
+    await emitAudit(c, {
+      resource: "grn",
+      resourceId: grnId,
+      action: "create",
+      after: created,
+    });
     return c.json({ success: true, data: created }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

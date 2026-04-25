@@ -12,6 +12,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { notifySupplierPoSubmitted } from "../lib/email";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -261,6 +262,13 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Audit emit (P3.4) — PO create. Snapshot the after-state for the journal.
+    await emitAudit(c, {
+      resource: "purchase-orders",
+      resourceId: poId,
+      action: "create",
+      after: created,
+    });
     return c.json({ success: true, data: created }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

@@ -23,7 +23,7 @@ export default function PricingPage() {
   const [search, setSearch] = useState("");
   const [selectedMaterial, setSelectedMaterial] = useState("");
   const [showAddDialog, setShowAddDialog] = useState(false);
-  const toast = useToast();
+  const { toast } = useToast();
 
   const { data: bindingsResp, refresh: reloadBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
   const { data: historyResp } = useCachedJson<{ success?: boolean; data?: PriceHistory[] } | PriceHistory[]>("/api/price-history");
@@ -305,7 +305,7 @@ function AddBindingDialog({
           isMainSupplier: form.isMainSupplier,
         }),
       });
-      const json = await res.json().catch(() => ({ success: false }));
+      const json = (await res.json().catch(() => ({ success: false }))) as { success?: boolean; error?: string };
       if (res.ok && json.success) {
         onCreated();
       } else {

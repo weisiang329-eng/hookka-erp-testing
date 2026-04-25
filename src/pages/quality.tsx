@@ -675,7 +675,7 @@ export default function QualityPage() {
     setScanError("");
     try {
       const res = await fetch(`/api/fg-units?serial=${encodeURIComponent(s)}`);
-      const data = await res.json();
+      const data = (await res.json()) as { success?: boolean; data?: Array<{ customerName?: string; soNo?: string; productName?: string; unitSerial: string }> };
       if (data.success && Array.isArray(data.data) && data.data.length > 0) {
         const u = data.data[0];
         setReturnForm({
@@ -716,7 +716,7 @@ export default function QualityPage() {
         }),
       });
       if (!res.ok) throw new Error("Failed to create R&D project");
-      const json = await res.json();
+      const json = (await res.json()) as { data: { id: string; code: string } };
       const rdProject = json.data;
       setReturns((prev) =>
         prev.map((r) => r.id === rc.id ? { ...r, rdProjectId: rdProject.id } : r)

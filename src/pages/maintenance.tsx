@@ -171,7 +171,7 @@ export default function MaintenancePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = await res.json();
+    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
       setEquipment((prev) => [...prev, result.data]);
       invalidateCachePrefix("/api/equipment");
@@ -201,7 +201,7 @@ export default function MaintenancePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = await res.json();
+    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
       setEquipment((prev) =>
         prev.map((eq) => (eq.id === showLogForm ? result.data : eq))
@@ -234,7 +234,7 @@ export default function MaintenancePage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
-    const result = await res.json();
+    const result = (await res.json()) as { success?: boolean; data: Equipment; log: MaintenanceLog };
     if (result.success) {
       setEquipment((prev) =>
         prev.map((eq) => (eq.id === showEditForm ? result.data : eq))

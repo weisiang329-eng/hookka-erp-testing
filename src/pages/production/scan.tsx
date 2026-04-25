@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, Suspense } from "react";
+import { z } from "zod";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -7,6 +8,26 @@ import { Camera, Search, CheckCircle2, AlertTriangle, ArrowLeft, User } from "lu
 import { Link } from "react-router-dom";
 import { useSearchParams } from "react-router-dom";
 import { parseStickerData } from "@/lib/qr-utils";
+import { fetchJson } from "@/lib/fetch-json";
+
+const WorkerListSchema = z.object({
+  success: z.boolean(),
+  data: z.array(z.object({ id: z.string(), name: z.string() }).passthrough()),
+}).passthrough();
+const ProductionOrderListSchema = z.object({
+  success: z.boolean(),
+  data: z.array(z.unknown()),
+}).passthrough();
+const ScanCompleteSchema = z.object({
+  success: z.boolean(),
+  data: z.object({
+    assignedSlot: z.union([z.literal(1), z.literal(2)]).optional(),
+    workerName: z.string().optional(),
+    jobCard: z.unknown().optional(),
+  }).passthrough().optional(),
+  error: z.string().optional(),
+  code: z.string().optional(),
+}).passthrough();
 
 type JobCard = {
   id: string;
@@ -88,8 +109,7 @@ function ScannerPage() {
 
   // Fetch worker list once
   useEffect(() => {
-    fetch("/api/workers")
-      .then((r) => r.json())
+    fetchJson("/api/workers", WorkerListSchema)
       .then((d) => {
         if (d.success) setWorkers(d.data);
       })
@@ -140,15 +160,14 @@ function ScannerPage() {
     setSelectedWorkerId("");
 
     try {
-      const res = await fetch("/api/production-orders");
-      const data = await res.json();
+      const data = await fetchJson("/api/production-orders", ProductionOrderListSchema);
       if (!data.success) {
         setLookupError("Failed to fetch production orders.");
         setLoading(false);
         return;
       }
 
-      const orders: ProductionOrder[] = data.data;
+      const orders: ProductionOrder[] = data.data as ProductionOrder[];
       let found: { order: ProductionOrder; jobCard: JobCard } | null = null;
 
       // Merged FG-level scan (e.g. FAB_CUT plan-B sticker). The sentinel
@@ -234,22 +253,20 @@ function ScannerPage() {
             // route the scan to the right piece_pics slot.
             pieceNo: scannedPieceNo,
           };
-      const res = await fetch(endpoint, {
+      const data = await fetchJson(endpoint, ScanCompleteSchema, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: payload,
       });
-      const data = await res.json();
-      if (data.success) {
+      if (data.success && data.data) {
         setSubmitResult({
           kind: "success",
-          slot: data.data.assignedSlot,
-          workerName: data.data.workerName,
+          slot: data.data.assignedSlot ?? 1,
+          workerName: data.data.workerName ?? "",
         });
         // Reflect updated PIC state in the card
         setLookupResult({
           order: lookupResult.order,
-          jobCard: data.data.jobCard,
+          jobCard: data.data.jobCard as JobCard,
         });
       } else {
         let msg = data.error || "Failed to record scan.";
@@ -265,7 +282,7 @@ function ScannerPage() {
         setSubmitResult({ kind: "error", message: msg });
         // Refresh the card view if the server returned updated state
         if (data.data?.jobCard) {
-          setLookupResult({ order: lookupResult.order, jobCard: data.data.jobCard });
+          setLookupResult({ order: lookupResult.order, jobCard: data.data.jobCard as JobCard });
         }
       }
     } catch {

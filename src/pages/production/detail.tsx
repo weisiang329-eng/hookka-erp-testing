@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { z } from "zod";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -13,6 +14,21 @@ import { generateJobCardPdf, generateFullPOPdf } from "@/lib/generate-po-pdf";
 import { getQRCodeUrl, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix, invalidateCache } from "@/lib/cached-fetch";
+import { fetchJson } from "@/lib/fetch-json";
+
+const POMutationSchema = z.object({
+  success: z.boolean(),
+  data: z.unknown().optional(),
+  error: z.string().optional(),
+}).passthrough();
+const ListEnvelope = z.object({
+  success: z.boolean(),
+  data: z.array(z.unknown()).optional(),
+}).passthrough();
+const ItemEnvelope = z.object({
+  success: z.boolean(),
+  data: z.unknown().optional(),
+}).passthrough();
 
 type JobCard = {
   id: string; departmentId: string; departmentCode: string; departmentName: string; sequence: number;
@@ -146,14 +162,12 @@ export default function ProductionOrderDetailPage() {
   const updateJobCard = async (jobCardId: string, newStatus: string) => {
     setUpdating(jobCardId);
     try {
-      const res = await fetch(`/api/production-orders/${id}`, {
+      const data = await fetchJson(`/api/production-orders/${id}`, POMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobCardId, status: newStatus }),
+        body: { jobCardId, status: newStatus },
       });
-      const data = await res.json();
       if (data.success) {
-        setOrder(data.data);
+        setOrder(data.data as ProductionOrder);
         // Only this PO changed — don't nuke the whole list prefix. setOrder
         // above already reflects the new status; invalidateCache on the
         // per-id key ensures a cross-tab read sees fresh data.
@@ -175,11 +189,11 @@ export default function ProductionOrderDetailPage() {
       setFgLoading(true);
       try {
         const [uRes, pRes] = await Promise.all([
-          fetch(`/api/fg-units?poId=${encodeURIComponent(order.id)}`).then((r) => r.json()),
-          fetch(`/api/products/${encodeURIComponent(order.productId)}`).then((r) => r.json()).catch(() => null),
+          fetchJson(`/api/fg-units?poId=${encodeURIComponent(order.id)}`, ListEnvelope).catch(() => ({ success: false, data: [] as unknown[] })),
+          fetchJson(`/api/products/${encodeURIComponent(order.productId)}`, ItemEnvelope).catch(() => null),
         ]);
         if (cancelled) return;
-        setFgUnitList(uRes?.success ? uRes.data : []);
+        setFgUnitList(uRes?.success && uRes.data ? (uRes.data as FGUnit[]) : []);
         if (pRes?.success) {
           const p = pRes.data as ProductExt;
           setProductExt({

@@ -249,13 +249,13 @@ function CreateStockPODialog({
       ? "/api/production-orders/historical-wips"
       : "/api/production-orders/historical-fgs";
     fetch(url)
-      .then((r) => r.json())
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown[] }>)
       .then((d) => {
         if (!d?.success) {
           setWips([]); setFgs([]); setLoadingList(false); return;
         }
-        if (type === "WIP") { setWips(d.data || []); setFgs([]); }
-        else { setFgs(d.data || []); setWips([]); }
+        if (type === "WIP") { setWips((d.data || []) as HistoricalWip[]); setFgs([]); }
+        else { setFgs((d.data || []) as HistoricalFg[]); setWips([]); }
         setLoadingList(false);
       })
       .catch(() => setLoadingList(false));
@@ -371,7 +371,7 @@ function CreateStockPODialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const d = await res.json();
+      const d = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !d?.success) {
         setErr(d?.error || `Failed (${res.status}).`);
         setSubmitting(false);
@@ -909,7 +909,7 @@ export default function ProductionPage({
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ jobCardId, ...patch }),
           }).then(async (res) => {
-            const body = await res.json().catch(() => null);
+            const body = (await res.json().catch(() => null)) as { success?: boolean } | null;
             return { res, body, poId, jobCardId };
           }),
         ),
@@ -2271,11 +2271,12 @@ export default function ProductionPage({
       for (const o of filteredOrders) {
         const [gRes, pRes] = await Promise.all([
           fetch(`/api/fg-units/generate/${encodeURIComponent(o.id)}`, { method: "POST" })
-            .then((r) => r.json()),
+            .then((r) => r.json() as Promise<{ success?: boolean; data?: FGUnitMini[] }>),
           fetch(`/api/products/${encodeURIComponent(o.productId)}`)
-            .then((r) => r.json()).catch(() => null),
+            .then((r) => r.json() as Promise<{ success?: boolean; data?: ProductMini }>)
+            .catch(() => null),
         ]);
-        const units: FGUnitMini[] = gRes?.success ? gRes.data : [];
+        const units: FGUnitMini[] = gRes?.success ? (gRes.data ?? []) : [];
         const p: ProductMini | undefined = pRes?.success ? pRes.data : undefined;
         for (const u of units) {
           all.push({

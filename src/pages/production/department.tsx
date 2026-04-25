@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { z } from "zod";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -10,6 +11,13 @@ import { ArrowLeft, Download, Save, Printer, Check, X, Clock, User, Play } from 
 import { generateJobCardPdf } from "@/lib/generate-po-pdf";
 import { generateStickerPdf, generateBatchStickersPdf } from "@/lib/generate-sticker-pdf";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { fetchJson } from "@/lib/fetch-json";
+
+const POMutationSchema = z.object({
+  success: z.boolean(),
+  data: z.unknown().optional(),
+  error: z.string().optional(),
+}).passthrough();
 
 type JobCard = {
   id: string; departmentCode: string; departmentName: string; sequence: number;
@@ -373,14 +381,12 @@ export default function DepartmentProductionPage() {
   const saveRack = async (order: ProductionOrder, rack: string) => {
     setSaving(order.id);
     try {
-      const res = await fetch(`/api/production-orders/${order.id}`, {
+      const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ rackingNumber: rack }),
+        body: { rackingNumber: rack },
       });
-      const data = await res.json();
       if (data.success) {
-        setOrders((prev) => prev.map((o) => (o.id === order.id ? data.data : o)));
+        setOrders((prev) => prev.map((o) => (o.id === order.id ? (data.data as ProductionOrder) : o)));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
       }
@@ -438,14 +444,12 @@ export default function DepartmentProductionPage() {
   const startJobCard = async (order: ProductionOrder, jc: JobCard) => {
     setSaving(jc.id);
     try {
-      const res = await fetch(`/api/production-orders/${order.id}`, {
+      const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobCardId: jc.id, status: "IN_PROGRESS" }),
+        body: { jobCardId: jc.id, status: "IN_PROGRESS" },
       });
-      const data = await res.json();
       if (data.success) {
-        setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+        setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
       }
@@ -469,19 +473,17 @@ export default function DepartmentProductionPage() {
     const { order, jc, pic1Id, pic2Id } = doneDialog;
     setSaving(jc.id);
     try {
-      const res = await fetch(`/api/production-orders/${order.id}`, {
+      const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
         method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+        body: {
           jobCardId: jc.id,
           status: "COMPLETED",
           pic1Id,
           pic2Id: pic2Id || null,
-        }),
+        },
       });
-      const data = await res.json();
       if (data.success) {
-        setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+        setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
         invalidateCachePrefix("/api/production-orders");
         invalidateCachePrefix("/api/sales-orders");
         setDoneDialog(null);
@@ -505,14 +507,12 @@ export default function DepartmentProductionPage() {
       body.completedDate = edit.completedDate;
     }
 
-    const res = await fetch(`/api/production-orders/${order.id}`, {
+    const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
       method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body,
     });
-    const data = await res.json();
     if (data.success) {
-      setOrders(prev => prev.map(o => o.id === order.id ? data.data : o));
+      setOrders(prev => prev.map(o => o.id === order.id ? (data.data as ProductionOrder) : o));
       invalidateCachePrefix("/api/production-orders");
       invalidateCachePrefix("/api/sales-orders");
       // Clear edit for this job card

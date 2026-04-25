@@ -1739,9 +1739,9 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   const printPayslipForEmployee = async (payslip: PayslipData) => {
     try {
       const res = await fetch(`/api/payslips/${payslip.id}`);
-      const data = await res.json();
+      const data = (await res.json()) as { data: PayslipData; ytd: unknown };
       const { generatePayslipHTML } = await import("@/lib/generate-payslip-pdf");
-      const html = generatePayslipHTML(data.data, data.ytd);
+      const html = generatePayslipHTML(data.data, data.ytd as Parameters<typeof generatePayslipHTML>[1]);
       const printWindow = window.open("", "_blank");
       if (printWindow) {
         printWindow.document.write(html);
@@ -2519,8 +2519,8 @@ export default function EmployeesPage() {
 
   const fetchDateAttendance = useCallback((date: string) => {
     fetch(`/api/attendance?date=${date}`)
-      .then((r) => r.json())
-      .then((res) => setDateAttendance(res.data ?? res ?? []))
+      .then((r) => r.json() as Promise<{ data?: AttendanceRecord[] } | AttendanceRecord[]>)
+      .then((res) => setDateAttendance(Array.isArray(res) ? res : (res.data ?? [])))
       .catch(() => {});
   }, []);
 

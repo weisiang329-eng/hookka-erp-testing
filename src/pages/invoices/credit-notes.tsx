@@ -13,6 +13,16 @@ import {
 } from "lucide-react";
 import type { CreditNote, Invoice } from "@/lib/mock-data";
 
+type CreateCreditNoteResponse = { success: true } | { success: false; error?: string };
+
+function asCreateCreditNoteResponse(v: unknown): CreateCreditNoteResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true) return { success: true };
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
 export default function CreditNotesPage() {
   const { data: cnResp, loading, refresh: refreshCreditNotes } = useCachedJson<{ success?: boolean; data?: CreditNote[] }>("/api/credit-notes");
   const creditNotes: CreditNote[] = useMemo(
@@ -67,8 +77,8 @@ export default function CreditNotesPage() {
         items: items.filter((i) => i.description && i.unitPrice > 0),
       }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asCreateCreditNoteResponse(await res.json());
+    if (data?.success) {
       setShowCreateModal(false);
       setSelectedInvoiceId("");
       setReason("RETURN");

@@ -13,6 +13,16 @@ import {
 } from "lucide-react";
 import type { DebitNote, Invoice } from "@/lib/mock-data";
 
+type CreateDebitNoteResponse = { success: true } | { success: false; error?: string };
+
+function asCreateDebitNoteResponse(v: unknown): CreateDebitNoteResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true) return { success: true };
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
 export default function DebitNotesPage() {
   const { data: dnResp, loading, refresh: refreshDebitNotes } = useCachedJson<{ success?: boolean; data?: DebitNote[] }>("/api/debit-notes");
   const debitNotes: DebitNote[] = useMemo(
@@ -67,8 +77,8 @@ export default function DebitNotesPage() {
         items: items.filter((i) => i.description && i.unitPrice > 0),
       }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asCreateDebitNoteResponse(await res.json());
+    if (data?.success) {
       setShowCreateModal(false);
       setSelectedInvoiceId("");
       setReason("UNDERCHARGE");

@@ -31,6 +31,16 @@ const PAYMENT_METHODS = [
   { value: "E_WALLET", label: "E-Wallet" },
 ];
 
+type InvoiceMutationResponse = { success: true } | { success: false; error?: string };
+
+function asInvoiceMutationResponse(v: unknown): InvoiceMutationResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true) return { success: true };
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
 export default function InvoiceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
@@ -77,8 +87,8 @@ export default function InvoiceDetailPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: "SENT" }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asInvoiceMutationResponse(await res.json());
+    if (data?.success) {
       // Only this invoice changed. Refresh the list too (status badge).
       if (id) invalidateCache(`/api/invoices/${id}`);
       refreshInvoice();
@@ -105,8 +115,8 @@ export default function InvoiceDetailPage() {
         paymentReference,
       }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asInvoiceMutationResponse(await res.json());
+    if (data?.success) {
       // Recording payment can cascade to SO → CLOSED when all linked invoices
       // are paid. Conservative: keep SO prefix. DO does not change on payment.
       if (id) invalidateCache(`/api/invoices/${id}`);

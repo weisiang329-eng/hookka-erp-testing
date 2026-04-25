@@ -17,6 +17,16 @@ type CustomerOption = {
   name: string;
 };
 
+type CreatePaymentResponse = { success: true } | { success: false; error?: string };
+
+function asCreatePaymentResponse(v: unknown): CreatePaymentResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true) return { success: true };
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
 export default function PaymentsPage() {
   const { data: payResp, loading, refresh: refreshPayments } = useCachedJson<{ success?: boolean; data?: PaymentRecord[] }>("/api/payments");
   const payments: PaymentRecord[] = useMemo(
@@ -97,8 +107,8 @@ export default function PaymentsPage() {
         allocations,
       }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asCreatePaymentResponse(await res.json());
+    if (data?.success) {
       setShowCreateModal(false);
       setSelectedCustomerId("");
       setAmount(0);

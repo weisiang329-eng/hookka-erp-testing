@@ -27,6 +27,29 @@ type AgingRow = {
   total: number;
 };
 
+type CreateInvoiceResponse =
+  | { success: true; data: { id: string } }
+  | { success: false; error?: string };
+type InvoiceMutationResponse = { success: true } | { success: false; error?: string };
+
+function asCreateInvoiceResponse(v: unknown): CreateInvoiceResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true && o.data && typeof o.data === "object" && typeof (o.data as { id?: unknown }).id === "string") {
+    return { success: true, data: { id: (o.data as { id: string }).id } };
+  }
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
+function asInvoiceMutationResponse(v: unknown): InvoiceMutationResponse | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  if (o.success === true) return { success: true };
+  if (o.success === false) return { success: false, error: typeof o.error === "string" ? o.error : undefined };
+  return null;
+}
+
 // Page size 200 — client-side search only sees the current page, so big
 // enough to fit typical working set in one go.
 const PAGE_SIZE = 200;
@@ -103,9 +126,9 @@ export default function InvoicesPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deliveryOrderId: selectedDOId }),
     });
-    const data = await res.json();
+    const data = asCreateInvoiceResponse(await res.json());
     setCreating(false);
-    if (data.success) {
+    if (data?.success) {
       setShowCreateModal(false);
       setSelectedDOId("");
       invalidateCachePrefix("/api/invoices");
@@ -123,8 +146,8 @@ export default function InvoicesPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status: newStatus }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asInvoiceMutationResponse(await res.json());
+    if (data?.success) {
       invalidateCachePrefix("/api/invoices");
       invalidateCachePrefix("/api/delivery-orders");
       invalidateCachePrefix("/api/sales-orders");
@@ -149,8 +172,8 @@ export default function InvoicesPage() {
         paymentReference,
       }),
     });
-    const data = await res.json();
-    if (data.success) {
+    const data = asInvoiceMutationResponse(await res.json());
+    if (data?.success) {
       setPayingInvoiceId(null);
       setPaymentAmount("");
       setPaymentReference("");

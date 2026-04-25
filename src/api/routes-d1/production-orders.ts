@@ -418,11 +418,19 @@ async function fetchFilteredPOs(
     ? db.prepare(poSql).bind(...(statuses as string[]))
     : db.prepare(poSql);
 
-  // Dept-narrowing: when caller passes ?dept=FAB_CUT, each PO's jobCards
-  // array is filtered down to only that dept's JCs. Drops ~87% of JC rows
-  // for the single-dept pages (each PO averages 15 JCs across 8 depts),
-  // pulling a ~1.5MB minimal payload down under 200KB.
-  const jcWhereDept = deptFilter ? " WHERE departmentCode = ?" : "";
+  // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
+  // whose wipKey appears in any wipKey that contains a matching-dept JC,
+  // PLUS legacy JCs (wipKey NULL) whose PO has a matching-dept JC.  The
+  // production page's prev-dept-CD pills need upstream sibling JCs in
+  // the same wipKey -- the original `WHERE departmentCode = ?` filter
+  // stripped them, leaving every upstream column rendering "—".  This
+  // wipKey-grouped variant keeps the JC-row payload down (only loads
+  // wipKeys that the active dept actually touches) while letting the
+  // frontend picker find the full chain.
+  const jcWhereDept = deptFilter
+    ? ` WHERE wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL)
+          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL))`
+    : "";
 
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
@@ -438,7 +446,7 @@ async function fetchFilteredPOs(
   // ~530 PO / ~9k JC response.
   if (minimal) {
     const jcStmt = deptFilter
-      ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter)
+      ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter, deptFilter)
       : db.prepare(`SELECT * FROM ${jcSource}`);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
@@ -450,7 +458,7 @@ async function fetchFilteredPOs(
   }
 
   const jcStmt = deptFilter
-    ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter)
+    ? db.prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`).bind(deptFilter, deptFilter)
     : db.prepare(`SELECT * FROM ${jcSource}`);
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
@@ -524,11 +532,18 @@ async function fetchPaginatedPOs(
   // Scope JC + piece_pics queries to only this page's PO IDs.
   const poIds = posRows.map((p) => p.id);
   const jcPlaceholders = poIds.map(() => "?").join(",");
-  // Optional dept narrowing — same as the non-paginated path. Keeps each
-  // PO's jobCards[] limited to only the active dept so per-dept pages
-  // never ship the other 7 depts' schedules.
-  const jcDeptClause = deptFilter ? " AND departmentCode = ?" : "";
-  const jcBinds = deptFilter ? [...poIds, deptFilter] : poIds;
+  // Dept narrowing — same wipKey-grouped logic as fetchFilteredPOs. Drops
+  // unrelated wipKeys but keeps every sibling JC inside a touched wipKey
+  // so the production page's prev-dept-CD pills (FAB_SEW shown on FOAM
+  // tab, etc.) have the data they need.  Plain departmentCode filter
+  // would orphan upstream pills.
+  const jcDeptClause = deptFilter
+    ? ` AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${jcPlaceholders}))
+            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${jcPlaceholders}))))`
+    : "";
+  const jcBinds = deptFilter
+    ? [...poIds, deptFilter, ...poIds, deptFilter, ...poIds]
+    : poIds;
   const jcsRes = await db
     .prepare(`SELECT * FROM ${jcSource} WHERE productionOrderId IN (${jcPlaceholders})${jcDeptClause}`)
     .bind(...jcBinds)

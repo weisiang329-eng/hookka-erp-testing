@@ -204,6 +204,9 @@ app.get("/:id", async (c) => {
 // that invoice's totalSen. Idempotent: only fires on the actual transition
 // into POSTED (not on repeated PUTs with the same status).
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — debit-notes:update.
+  const denied = await requirePermission(c, "debit-notes", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -115,6 +116,9 @@ function generateEInvoiceXml(
 
 // GET /api/e-invoices — list all
 app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — e-invoices:read.
+  const denied = await requirePermission(c, "e-invoices", "read");
+  if (denied) return denied;
   const res = await c.var.DB.prepare(
     "SELECT * FROM e_invoices ORDER BY created_at DESC",
   ).all<EInvoiceRow>();
@@ -124,6 +128,9 @@ app.get("/", async (c) => {
 
 // POST /api/e-invoices — create (generates XML payload)
 app.post("/", async (c) => {
+  // RBAC gate (P3.3-followup) — e-invoices:create.
+  const denied = await requirePermission(c, "e-invoices", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { invoiceId } = body;
@@ -222,6 +229,8 @@ app.post("/", async (c) => {
 
 // GET /api/e-invoices/:id — single
 app.get("/:id", async (c) => {
+  const denied = await requirePermission(c, "e-invoices", "read");
+  if (denied) return denied;
   const id = c.req.param("id");
   const row = await c.var.DB.prepare(
     "SELECT * FROM e_invoices WHERE id = ?",
@@ -235,7 +244,16 @@ app.get("/:id", async (c) => {
 });
 
 // PUT /api/e-invoices/:id — submit or cancel
+//
+// Spec asked for `e-invoices:submit` / `e-invoices:cancel` actions, but the
+// 0045 seed only has read/create/update/delete for this resource. Both
+// `submit` (LHDN transmission) and `cancel` (LHDN void) are functionally
+// updates, so the base gate is e-invoices:update. If finer-grained actions
+// are seeded later, this PUT can be split per-action.
 app.put("/:id", async (c) => {
+  // RBAC gate (P3.3-followup) — e-invoices:update.
+  const denied = await requirePermission(c, "e-invoices", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(

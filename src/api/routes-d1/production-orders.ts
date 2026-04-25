@@ -1260,8 +1260,18 @@ async function applyPoUpdate(
     //
     // Status changes are intentionally NOT blocked here — the operator un-
     // completing the downstream dept is precisely the path the error message
-    // tells them to take.
-    if (body.dueDate !== undefined || body.completedDate !== undefined) {
+    // tells them to take. The merged-row Fab Cut date-cell click sends BOTH
+    // `status` and `completedDate` (the operator's intent IS to advance
+    // status; the date is a side-effect stamp). Treat any patch that
+    // includes `status` as a status change — the guard only fires on PURE
+    // date edits, which is the original intent of the rule. Without this
+    // exemption, the merged-row fan-out could hit a phantom 409 even on a
+    // clean WAITING → COMPLETED transition.
+    const isStatusChange = body.status !== undefined;
+    if (
+      !isStatusChange &&
+      (body.dueDate !== undefined || body.completedDate !== undefined)
+    ) {
       const laterDone = await db
         .prepare(
           `SELECT 1 FROM job_cards

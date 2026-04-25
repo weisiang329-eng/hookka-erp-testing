@@ -5,42 +5,85 @@
 // director/admin Firebase/SSO flow. Workers use their empNo + a
 // 4-digit PIN that they set themselves on first login.
 //
-// Storage model (in-memory for now, same mock-data pattern as
-// the rest of the app): `pinStore[workerId] = pin`.  In production
-// these would be salted+hashed in a proper DB.  A token is a bare
-// opaque string we hand back; the worker's browser keeps it in
-// localStorage and sends it as `X-Worker-Token` on every call.
+// Storage model (P3.5 — D1-backed; replaces the old in-memory
+// `pinStore` / `tokenStore` Maps that died on every Worker
+// cold-start):
+//   - worker_pins      — one row per worker, holds the SHA-256
+//                        hex of the PIN. Already existed before
+//                        this migration (see 0001_init.sql).
+//   - worker_sessions  — one row per active token. New table in
+//                        migration 0048_worker_sessions.sql.
+//                        Token is the primary key; sessions carry
+//                        createdAt / expiresAt (now + 30d) /
+//                        lastSeenAt for idle-aging.
+//
+// PINs are stored as SHA-256 hex digests (see ../lib/auth-utils.ts).
+// SHA-256 is NOT salted — PIN space is only 10^4 so rainbow tables
+// are trivial — but it keeps raw PINs out of D1. Real worker auth
+// should pair this with route-level rate limiting (TODO: separate
+// task) and migrate to PBKDF2 + per-worker salt when the shop floor
+// moves beyond convenience login.
+//
+// Legacy cleartext rows (from before the hashing migration) are
+// auto-upgraded in-place the first time the worker logs in
+// successfully with them.
 // ============================================================
 import { Hono } from 'hono';
-import { workers } from '../../lib/mock-data';
+import type { Env } from '../worker';
+import { hashPin, isPinHashed } from '../lib/auth-utils';
 
-const app = new Hono();
+const app = new Hono<Env>();
 
-// In-memory PIN map: workerId → 4-digit PIN string.
-// MVP: plaintext since the whole ERP is mock-data. Add hashing
-// when the backend moves to a real DB.
-const pinStore: Record<string, string> = {};
+// Session lifetime — 30 days. Same value used by the director/admin
+// JWT cookie so workers feel a single coherent "stay logged in" rule.
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-// In-memory token → workerId map (opaque tokens, ~32 chars).
-const tokenStore: Record<string, { workerId: string; issuedAt: number }> = {};
+type WorkerRow = {
+  id: string;
+  empNo: string;
+  name: string;
+  departmentId: string | null;
+  departmentCode: string | null;
+  position: string | null;
+  phone: string | null;
+  status: string;
+  nationality: string | null;
+};
+
+type PinRow = { workerId: string; pin: string; updatedAt: string | null };
+type SessionRow = {
+  token: string;
+  workerId: string;
+  createdAt: string;
+  expiresAt: string;
+  lastSeenAt: string;
+};
 
 function newToken(): string {
-  // 32 char random hex — enough for a mock portal; real prod uses JWT.
+  // 32 char random hex — opaque bearer token for the worker portal.
   const bytes = new Uint8Array(16);
-  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(bytes);
-  } else {
-    for (let i = 0; i < 16; i++) bytes[i] = Math.floor(Math.random() * 256);
-  }
+  crypto.getRandomValues(bytes);
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function publicWorker(w: WorkerRow) {
+  return {
+    id: w.id,
+    empNo: w.empNo,
+    name: w.name,
+    departmentCode: w.departmentCode ?? '',
+    position: w.position ?? '',
+    phone: w.phone ?? '',
+    nationality: w.nationality ?? '',
+  };
+}
+
 // ----- POST /api/worker-auth/login -----
-// Body: { empNo, pin }
-// Returns: { token, worker: { id, empNo, name, departmentCode } }
+// Body: { empNo, pin, firstTimePin? }
+// Returns: { token, worker: { id, empNo, name, departmentCode, position, phone, nationality } }
 //
 // First-time login (no PIN set yet): body must carry `firstTimePin`.
-// That registers the PIN against this empNo. Subsequent logins
+// That registers the PIN against this worker. Subsequent logins
 // require the same PIN.
 app.post('/login', async (c) => {
   const body = await c.req.json().catch(() => ({}));
@@ -51,9 +94,12 @@ app.post('/login', async (c) => {
   };
   if (!empNo) return c.json({ success: false, error: 'empNo required' }, 400);
 
-  const worker = workers.find(
-    (w) => w.empNo.toLowerCase() === empNo.trim().toLowerCase(),
-  );
+  // Match by case-insensitive empNo.
+  const worker = await c.var.DB.prepare(
+    'SELECT id, empNo, name, departmentId, departmentCode, position, phone, status, nationality FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1',
+  )
+    .bind(empNo.trim())
+    .first<WorkerRow>();
   if (!worker) {
     return c.json({ success: false, error: 'Employee not found' }, 404);
   }
@@ -61,46 +107,73 @@ app.post('/login', async (c) => {
     return c.json({ success: false, error: 'Employee account inactive' }, 403);
   }
 
-  const existingPin = pinStore[worker.id];
+  const existing = await c.var.DB.prepare(
+    'SELECT workerId, pin, updatedAt FROM worker_pins WHERE workerId = ?',
+  )
+    .bind(worker.id)
+    .first<PinRow>();
 
-  // First-time registration path
-  if (!existingPin) {
+  // First-time registration path.
+  if (!existing) {
     if (!firstTimePin || !/^\d{4}$/.test(firstTimePin)) {
-      // Tell the client "this empNo has no PIN yet" so it can show
-      // the setup screen instead of the login screen.
+      // 200 so the client treats it as info, not a failure, and shows
+      // the setup screen.
       return c.json(
         { success: false, error: 'PIN_NOT_SET', needsSetup: true },
-        200, // 200 so the client treats it as info, not a failure
+        200,
       );
     }
-    pinStore[worker.id] = firstTimePin;
+    const hashed = await hashPin(firstTimePin);
+    await c.var.DB.prepare(
+      'INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)',
+    )
+      .bind(worker.id, hashed, new Date().toISOString())
+      .run();
   } else {
-    if (!pin || pin !== existingPin) {
+    if (!pin) {
       return c.json({ success: false, error: 'Wrong PIN' }, 401);
+    }
+    // Back-compat: rows predating the hashing migration still hold cleartext
+    // PINs. On a successful match rewrite them to SHA-256 so the next login
+    // takes the fast path. After a full rollout + cleanup this branch can be
+    // removed.
+    const submittedHash = await hashPin(pin);
+    const storedIsHashed = isPinHashed(existing.pin);
+    const matches = storedIsHashed
+      ? submittedHash === existing.pin
+      : pin === existing.pin;
+    if (!matches) {
+      return c.json({ success: false, error: 'Wrong PIN' }, 401);
+    }
+    if (!storedIsHashed) {
+      await c.var.DB.prepare(
+        'UPDATE worker_pins SET pin = ?, updatedAt = ? WHERE workerId = ?',
+      )
+        .bind(submittedHash, new Date().toISOString(), worker.id)
+        .run();
     }
   }
 
   const token = newToken();
-  tokenStore[token] = { workerId: worker.id, issuedAt: Date.now() };
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
+  await c.var.DB.prepare(
+    'INSERT INTO worker_sessions (token, workerId, createdAt, expiresAt, lastSeenAt) VALUES (?, ?, ?, ?, ?)',
+  )
+    .bind(token, worker.id, now.toISOString(), expiresAt, now.toISOString())
+    .run();
+
   return c.json({
     success: true,
     token,
-    worker: {
-      id: worker.id,
-      empNo: worker.empNo,
-      name: worker.name,
-      departmentCode: worker.departmentCode,
-      position: worker.position,
-      phone: worker.phone,
-      nationality: worker.nationality,
-    },
+    worker: publicWorker(worker),
   });
 });
 
 // ----- POST /api/worker-auth/reset-pin -----
 // Body: { empNo, phoneLast4, newPin }
-// Poor-man's reset: verify empNo + last 4 digits of their stored
-// phone number, then overwrite the stored PIN.
+// Poor-man's reset: verify empNo + last 4 digits of stored phone, then
+// overwrite stored PIN and invalidate all active sessions for this worker.
 app.post('/reset-pin', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const { empNo, phoneLast4, newPin } = body as {
@@ -114,22 +187,39 @@ app.post('/reset-pin', async (c) => {
   if (!/^\d{4}$/.test(newPin)) {
     return c.json({ success: false, error: 'PIN must be 4 digits' }, 400);
   }
-  const worker = workers.find(
-    (w) => w.empNo.toLowerCase() === empNo.trim().toLowerCase(),
-  );
-  if (!worker) return c.json({ success: false, error: 'Employee not found' }, 404);
 
-  // Strip non-digits from stored phone, compare last 4
+  const worker = await c.var.DB.prepare(
+    'SELECT id, empNo, name, departmentId, departmentCode, position, phone, status, nationality FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1',
+  )
+    .bind(empNo.trim())
+    .first<WorkerRow>();
+  if (!worker) {
+    return c.json({ success: false, error: 'Employee not found' }, 404);
+  }
+
+  // Strip non-digits from stored phone, compare last 4.
   const storedLast4 = (worker.phone || '').replace(/\D/g, '').slice(-4);
   if (!storedLast4 || storedLast4 !== phoneLast4) {
-    return c.json({ success: false, error: 'Phone last-4 does not match' }, 401);
+    return c.json(
+      { success: false, error: 'Phone last-4 does not match' },
+      401,
+    );
   }
-  pinStore[worker.id] = newPin;
 
-  // Invalidate any active tokens for this worker — force re-login
-  for (const t of Object.keys(tokenStore)) {
-    if (tokenStore[t].workerId === worker.id) delete tokenStore[t];
-  }
+  const hashedNew = await hashPin(newPin);
+  await c.var.DB.prepare(
+    `INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)
+     ON CONFLICT (workerId) DO UPDATE SET pin = excluded.pin, updatedAt = excluded.updatedAt`,
+  )
+    .bind(worker.id, hashedNew, new Date().toISOString())
+    .run();
+
+  // Invalidate ALL active sessions for this worker — force re-login on
+  // every device. This is the security-critical contract of reset-pin:
+  // if you rotate the credential, every old cookie dies.
+  await c.var.DB.prepare('DELETE FROM worker_sessions WHERE workerId = ?')
+    .bind(worker.id)
+    .run();
 
   return c.json({ success: true });
 });
@@ -140,41 +230,73 @@ app.post('/logout', async (c) => {
   const body = await c.req.json().catch(() => ({}));
   const token =
     c.req.header('x-worker-token') || (body as { token?: string }).token;
-  if (token && tokenStore[token]) delete tokenStore[token];
+  if (token) {
+    await c.var.DB.prepare('DELETE FROM worker_sessions WHERE token = ?')
+      .bind(token)
+      .run();
+  }
   return c.json({ success: true });
 });
 
 // ----- GET /api/worker-auth/me -----
-// Resolve the current worker from the token header. Used by the
-// portal layout on every page load to refresh the current identity.
-app.get('/me', (c) => {
+// Resolve the current worker from the token header. Used by the portal
+// layout on every page load to refresh the current identity.
+app.get('/me', async (c) => {
   const token = c.req.header('x-worker-token');
-  if (!token || !tokenStore[token]) {
+  if (!token) {
     return c.json({ success: false, error: 'Not authenticated' }, 401);
   }
-  const { workerId } = tokenStore[token];
-  const w = workers.find((x) => x.id === workerId);
-  if (!w) return c.json({ success: false, error: 'Worker vanished' }, 404);
-  return c.json({
-    success: true,
-    worker: {
-      id: w.id,
-      empNo: w.empNo,
-      name: w.name,
-      departmentCode: w.departmentCode,
-      position: w.position,
-      phone: w.phone,
-      nationality: w.nationality,
-    },
-  });
+  const nowIso = new Date().toISOString();
+  const session = await c.var.DB.prepare(
+    'SELECT token, workerId, createdAt, expiresAt, lastSeenAt FROM worker_sessions WHERE token = ? AND expiresAt > ?',
+  )
+    .bind(token, nowIso)
+    .first<SessionRow>();
+  if (!session) {
+    return c.json({ success: false, error: 'Not authenticated' }, 401);
+  }
+
+  const worker = await c.var.DB.prepare(
+    'SELECT id, empNo, name, departmentId, departmentCode, position, phone, status, nationality FROM workers WHERE id = ?',
+  )
+    .bind(session.workerId)
+    .first<WorkerRow>();
+  if (!worker) {
+    return c.json({ success: false, error: 'Worker vanished' }, 404);
+  }
+
+  // Bump lastSeenAt — useful for idle-token telemetry. Best-effort: a
+  // failure here should not deny the request.
+  try {
+    await c.var.DB.prepare(
+      'UPDATE worker_sessions SET lastSeenAt = ? WHERE token = ?',
+    )
+      .bind(nowIso, token)
+      .run();
+  } catch {
+    // swallow — verifying the session is the priority, telemetry is gravy
+  }
+
+  return c.json({ success: true, worker: publicWorker(worker) });
 });
 
 // Helper used by other routes to authenticate worker requests.
-// Returns the workerId or null if the token is invalid/missing.
-export function resolveWorkerToken(token: string | undefined): string | null {
+// Returns the workerId or null if the token is invalid / missing / expired.
+// Async because it must hit D1; callers that previously called the
+// in-memory sync version need to `await` and pass the request's `c.var.DB`.
+export async function resolveWorkerToken(
+  db: D1Database,
+  token: string | undefined,
+): Promise<string | null> {
   if (!token) return null;
-  const entry = tokenStore[token];
-  return entry ? entry.workerId : null;
+  const nowIso = new Date().toISOString();
+  const row = await db
+    .prepare(
+      'SELECT workerId FROM worker_sessions WHERE token = ? AND expiresAt > ?',
+    )
+    .bind(token, nowIso)
+    .first<{ workerId: string }>();
+  return row ? row.workerId : null;
 }
 
 export default app;

@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 import { previewCascadeSOClosed } from "./invoices";
 
 const app = new Hono<Env>();
@@ -365,7 +366,17 @@ app.post("/", async (c) => {
         500,
       );
     }
-    return c.json({ success: true, data: rowToPayment(created) }, 201);
+    // Audit emit (P3.4) — payment is a high-sensitivity mutation that ops
+    // and finance both audit forensically.  Capture full row state (incl.
+    // allocations) so a forensic query can reconstruct what was settled.
+    const paymentRow = rowToPayment(created);
+    await emitAudit(c, {
+      resource: "payments",
+      resourceId: paymentRow.id,
+      action: "create",
+      after: paymentRow,
+    });
+    return c.json({ success: true, data: paymentRow }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

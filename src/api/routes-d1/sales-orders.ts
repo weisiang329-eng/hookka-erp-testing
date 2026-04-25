@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
   ensureLeadTimesSeeded,
@@ -1666,6 +1667,15 @@ app.post("/", async (c) => {
         500,
       );
     }
+    // Audit emit (P3.4) — captures the actor + after-state snapshot.
+    // emitAudit is fire-and-forget on its own; awaiting just keeps tests
+    // deterministic. Non-throwing on internal failure.
+    await emitAudit(c, {
+      resource: "sales-orders",
+      resourceId: soId,
+      action: "create",
+      after: created,
+    });
     return c.json({ success: true, data: created }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -1807,6 +1817,17 @@ app.post("/:id/confirm", async (c) => {
   ]);
 
   const order = await fetchSOWithItems(c.var.DB, id);
+
+  // Audit emit (P3.4) — confirm is the lock-in moment that fans out POs.
+  // Snapshot the SO's state before/after so forensic queries can trace the
+  // moment a PO chain was kicked off.
+  await emitAudit(c, {
+    resource: "sales-orders",
+    resourceId: id,
+    action: "confirm",
+    before: existing,
+    after: order,
+  });
 
   return c.json({
     success: true,

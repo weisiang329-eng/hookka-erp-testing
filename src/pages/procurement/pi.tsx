@@ -8,8 +8,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
-import { useCachedJson } from "@/lib/cached-fetch";
-import type { PurchaseOrder } from "@/lib/mock-data";
+import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   FileText,
   Clock,
@@ -44,32 +43,6 @@ type PurchaseInvoice = {
 };
 
 // ============================================================
-// Generate mock PI from received POs
-// ============================================================
-function generateMockPIs(purchaseOrders: PurchaseOrder[]): PurchaseInvoice[] {
-  const receivedPOs = purchaseOrders.filter(po => po.status === "RECEIVED");
-  return receivedPOs.map((po, idx) => {
-    const invoiceDate = po.receivedDate || po.orderDate;
-    const due = new Date(invoiceDate);
-    due.setDate(due.getDate() + 30);
-    const statuses: PIStatus[] = ["DRAFT", "PENDING_APPROVAL", "APPROVED", "PAID"];
-    const status = statuses[idx % statuses.length];
-    return {
-      id: `pi-${po.id}`,
-      piNo: `PI-2604-${String(idx + 1).padStart(3, "0")}`,
-      poRef: po.poNo,
-      supplierId: po.supplierId,
-      supplier: po.supplierName,
-      invoiceDate: invoiceDate.split("T")[0],
-      dueDate: due.toISOString().split("T")[0],
-      amountSen: po.totalSen,
-      status,
-      remarks: `Invoice for ${po.poNo}`,
-    };
-  });
-}
-
-// ============================================================
 // STATUS OPTIONS
 // ============================================================
 const ALL_PI_STATUSES = [
@@ -94,28 +67,41 @@ export default function PurchaseInvoicesPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
 
-  const { data: poResp, loading, refresh: fetchData } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] } | PurchaseOrder[]>("/api/purchase-orders");
-  const generatedInvoices: PurchaseInvoice[] = useMemo(() => {
-    const pos: PurchaseOrder[] = (poResp as { data?: PurchaseOrder[] } | undefined)?.data ?? (Array.isArray(poResp) ? poResp : []);
-    return generateMockPIs(pos);
-  }, [poResp]);
-
-  const [invoiceOverrides, setInvoiceOverrides] = useState<Record<string, PIStatus>>({});
+  // Wired to /api/purchase-invoices 2026-04-26 — replaces the previous
+  // generateMockPIs + invoiceOverrides client-side state. Status changes
+  // (Approve / Mark Paid) now PUT through the real backend so refreshes
+  // and other tabs see the same data.
+  const { data: piResp, loading, refresh: fetchData } = useCachedJson<{
+    success?: boolean;
+    data?: PurchaseInvoice[];
+  }>("/api/purchase-invoices");
   const invoices: PurchaseInvoice[] = useMemo(
-    () => generatedInvoices.map((pi) => invoiceOverrides[pi.id] ? { ...pi, status: invoiceOverrides[pi.id] } : pi),
-    [generatedInvoices, invoiceOverrides]
+    () => piResp?.data ?? [],
+    [piResp],
   );
-  const setInvoices = useCallback(
-    (updater: (prev: PurchaseInvoice[]) => PurchaseInvoice[]) => {
-      const next = updater(invoices);
-      const overrides: Record<string, PIStatus> = { ...invoiceOverrides };
-      next.forEach((pi) => {
-        const original = generatedInvoices.find((g) => g.id === pi.id);
-        if (original && original.status !== pi.status) overrides[pi.id] = pi.status;
-      });
-      setInvoiceOverrides(overrides);
+
+  const updateStatus = useCallback(
+    async (id: string, nextStatus: PIStatus) => {
+      try {
+        const res = await fetch(`/api/purchase-invoices/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: nextStatus }),
+        });
+        const j = (await res.json().catch(() => null)) as
+          | { success?: boolean; error?: string }
+          | null;
+        if (!res.ok || !j?.success) {
+          toast.error(j?.error || `Failed to update PI to ${nextStatus}`);
+          return;
+        }
+        invalidateCachePrefix("/api/purchase-invoices");
+        fetchData();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Failed to update PI");
+      }
     },
-    [invoices, generatedInvoices, invoiceOverrides]
+    [toast, fetchData],
   );
 
   // ---- Filters ----
@@ -213,24 +199,25 @@ export default function PurchaseInvoicesPage() {
       },
       { label: "", separator: true, action: () => {} },
       {
+        label: "Submit for Approval",
+        icon: <ArrowRight className="h-3.5 w-3.5" />,
+        action: () => updateStatus(row.id, "PENDING_APPROVAL"),
+        disabled: row.status !== "DRAFT",
+      },
+      {
         label: "Approve",
         icon: <CheckCircle2 className="h-3.5 w-3.5" />,
-        action: () => {
-          setInvoices(prev =>
-            prev.map(pi => pi.id === row.id ? { ...pi, status: "APPROVED" as PIStatus } : pi)
-          );
-        },
+        action: () => updateStatus(row.id, "APPROVED"),
+        // Backend transitions allow both DRAFT→APPROVED and PENDING_APPROVAL
+        // →APPROVED. Match here so the menu doesn't ghost the option for an
+        // operator who skipped the review step.
         disabled: row.status !== "PENDING_APPROVAL" && row.status !== "DRAFT",
       },
       {
         label: "Mark Paid",
         icon: <DollarSign className="h-3.5 w-3.5" />,
-        action: () => {
-          setInvoices(prev =>
-            prev.map(pi => pi.id === row.id ? { ...pi, status: "PAID" as PIStatus } : pi)
-          );
-        },
-        disabled: row.status === "PAID" || row.status === "DRAFT",
+        action: () => updateStatus(row.id, "PAID"),
+        disabled: row.status !== "APPROVED",
       },
       { label: "", separator: true, action: () => {} },
       {
@@ -239,7 +226,7 @@ export default function PurchaseInvoicesPage() {
         action: () => fetchData(),
       },
     ];
-  }, [navigate, toast, fetchData]);
+  }, [navigate, toast, fetchData, updateStatus]);
 
   if (loading) {
     return (

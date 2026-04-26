@@ -828,14 +828,32 @@ async function applyWipInventoryChange(
   newStatus: string,
   allJcRows: JobCardRow[],
 ): Promise<void> {
-  const wipLabel = jcRow.wipLabel;
+  // Producer wipLabel — falls back to a synthesized label when the JC was
+  // created without BOM (legacy seed via createJobCards()) so the inventory
+  // upsert still lands a row. Without this fallback, completing WOOD_CUT (or
+  // any producer dept) on a non-BOM PO silently skipped the wip_items
+  // upsert, leaving nothing in the warehouse WIP view — reported by user
+  // 2026-04-26.
+  const deptCodeRaw = (jcRow.departmentCode || "").toUpperCase();
   const wipType = jcRow.wipType;
   const wipKey = jcRow.wipKey;
   const wipQty = jcRow.wipQty || poRow.quantity || 1;
+  const wipLabel =
+    jcRow.wipLabel ||
+    // Synthesize: "<productCode> <wipCode> (<DEPT>)" — keeps each dept's
+    // output uniquely keyed so the upsert-by-code accumulates correctly
+    // and the JC-derived /api/inventory/wip view groups by dept stage.
+    [
+      poRow.productCode || "",
+      jcRow.wipCode || wipKey || "",
+      deptCodeRaw ? `(${deptCodeRaw})` : "",
+    ]
+      .filter((s) => s && String(s).trim().length > 0)
+      .join(" ")
+      .trim();
   if (!wipLabel) return;
 
-  const isUpholstery =
-    (jcRow.departmentCode || "").toUpperCase() === "UPHOLSTERY";
+  const isUpholstery = deptCodeRaw === "UPHOLSTERY";
 
   const shortType = (() => {
     const t = (wipType || "").toUpperCase();
@@ -850,7 +868,7 @@ async function applyWipInventoryChange(
   // every non-UPH, non-FAB_CUT dept. Date-cell clicks skip IN_PROGRESS
   // (WAITING → COMPLETED directly), which used to orphan upstream stock.
   // Idempotent: sofa zeros in place, BF uses MAX(0, stockQty - qty) clamp.
-  const deptUpper = (jcRow.departmentCode || "").toUpperCase();
+  const deptUpper = deptCodeRaw;
   const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
   const isFabSew = deptUpper === "FAB_SEW";
   const isFabCut = deptUpper === "FAB_CUT";
@@ -1415,19 +1433,50 @@ async function applyPoUpdate(
     }
 
     // Update WIP inventory if status changed.
+    //
+    // Defensive try/catch (Bug 3, 2026-04-26): a runtime exception inside the
+    // WIP cascade — a missing wip_items row, a transient D1 hiccup, a
+    // synthesized-label collision — used to bubble up to Hono's default 500
+    // handler and surface as "Update applied to 0/1 components" in the UI,
+    // even though the job_card UPDATE at line 1383 already committed. The
+    // cascade is supplementary inventory bookkeeping; failing it must NOT
+    // void the operator's primary write. Log + continue so the PATCH still
+    // returns 200 + the updated payload.
     if (body.status) {
       const refreshed = allJcRows.map((j) => (j.id === updated.id ? updated : j));
-      await applyWipInventoryChange(db, existing, updated, body.status, refreshed);
+      try {
+        await applyWipInventoryChange(db, existing, updated, body.status, refreshed);
+      } catch (err) {
+        console.error("[applyWipInventoryChange] cascade failed", {
+          poId: id,
+          jobCardId: updated.id,
+          dept: updated.departmentCode,
+          status: body.status,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // F2 — labor cost posting on job_card COMPLETED/TRANSFERRED transition.
     // Idempotent: postJobCardLabor checks cost_ledger for existing LABOR_POSTED
     // entries keyed by refType='JOB_CARD', refId=jc.id.
+    //
+    // Same defensive wrap as above — a labor-ledger insert failure must not
+    // void the JC status flip. The ledger write is recoverable separately
+    // (idempotent re-run via PATCH), so swallowing once is safe.
     if (
       body.status &&
       (body.status === "COMPLETED" || body.status === "TRANSFERRED")
     ) {
-      await postJobCardLabor(db, updated.id, existing.id);
+      try {
+        await postJobCardLabor(db, updated.id, existing.id);
+      } catch (err) {
+        console.error("[postJobCardLabor] cascade failed", {
+          poId: id,
+          jobCardId: updated.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // Recalculate progress / PO status.
@@ -1487,15 +1536,39 @@ async function applyPoUpdate(
     )
     .run();
 
-  // SO cascades.
+  // SO cascades.  Wrapped in try/catch for the same reason as the WIP +
+  // labor cascades above (Bug 3, 2026-04-26): a downstream cascade failure
+  // must not void the JC + PO scalar UPDATEs that already committed.
   if (body.jobCardId && updatedPoStatus === "COMPLETED") {
     // Auto-generate FG units + fg_batches row on PO completion. Idempotent:
     // postProductionOrderCompletion short-circuits if fg_units already exist
     // for this PO, and the fg_batches insert is guarded by productionOrderId.
-    await postProductionOrderCompletion(db, id);
-    await cascadePoCompletionToSO(db, existing.salesOrderId);
+    try {
+      await postProductionOrderCompletion(db, id);
+    } catch (err) {
+      console.error("[postProductionOrderCompletion] cascade failed", {
+        poId: id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+    try {
+      await cascadePoCompletionToSO(db, existing.salesOrderId);
+    } catch (err) {
+      console.error("[cascadePoCompletionToSO] cascade failed", {
+        poId: id,
+        soId: existing.salesOrderId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
-  await cascadeUpholsteryToSO(db, id);
+  try {
+    await cascadeUpholsteryToSO(db, id);
+  } catch (err) {
+    console.error("[cascadeUpholsteryToSO] cascade failed", {
+      poId: id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   const fresh = await fetchPO(db, id);
   return c.json({ success: true, data: fresh });

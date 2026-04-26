@@ -95,6 +95,18 @@ app.use(
 // even 401s are timed.
 app.use("/api/*", timingMiddleware);
 
+// No-cache headers on every API response. Cloudflare's edge / browser HTTP
+// cache MUST NOT cache dynamic data — when the user resets D1 (or any backend
+// data changes), the next API call has to hit Pages Functions, not a stale
+// edge response. Without this, after a wrangler `--remote` UPDATE the user
+// kept seeing pre-reset rows for minutes (Wei Siang Apr 26 2026).
+app.use("/api/*", async (c, next) => {
+  await next();
+  c.res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  c.res.headers.set("Pragma", "no-cache");
+  c.res.headers.set("Expires", "0");
+});
+
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
 // adapter and exposes it as `c.var.DB`.  Routes use this instead of raw D1.
 // Must run before authMiddleware (which itself hits the DB to verify tokens).

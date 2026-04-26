@@ -1,6 +1,6 @@
 # Upgrade Control Board — Single Source of Truth
 
-> **Last updated**: 2026-04-25 (P5.1–P5.6 audited + closed with deferral; see [SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md))
+> **Last updated**: 2026-04-25 (P7.2 — bundle size budget script + baseline; CI step non-blocking pending signal week)
 > **Latest batch landed**: Batch 1 (CI gate non-blocking + thundering-herd fix + 90d plan + control board). 96 TS errors remaining.
 > **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
 > **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
@@ -97,7 +97,7 @@ _All Phase 5 rows (P5.1–P5.6) audited 2026-04-25 and moved to Done with deferr
 | ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
 |---|---|---|---|---|---|---|
 | P7.1 | auth | `org_id`/`site_id` scoping helper applied to all read queries | Claude | 2026-07-18 | Cross-org leak test fails to leak | high |
-| P7.2 | ci | Bundle size budget: reject PR with top-5 chunk growth > 5% | Claude | 2026-07-20 | PR with bloat fails CI | low |
+| P7.2 | ci | Bundle size budget: reject PR with top-5 chunk growth > 5% | Claude | 2026-07-20 | PR with bloat fails CI | low | _landed (continue-on-error week) — see Done lane_ |
 | P7.3 | governance | DR drill — restore D1 to staging, verify counts; runbook | Both | 2026-07-23 | `docs/DR-RUNBOOK.md` exists | medium |
 | P7.4 | ci | Drain remaining ESLint debt to 0 errors / 0 warnings | Claude | 2026-07-25 | `npm run lint:app` returns 0 | medium |
 | P7.5 | governance | Final readout — KPI snapshot, before/after table, lessons | Both | 2026-07-27 | Doc landed | low |
@@ -128,6 +128,7 @@ _(empty — surface here when something stalls. Each blocker must name the unblo
 | P5.4 | sdk | `src/lib/api/cache.ts` provides SWR for SDK callers; `useCachedJson` retained for legacy callers | Claude | 2026-04-25 | Both hooks coexist; SDK's in-memory SWR is independent of `useCachedJson`'s localStorage SWR | fecca6d | low | ✓ Deferred per cost/benefit (see [docs/SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md)). Replacing `useCachedJson` would touch all 49 pages; not justified while both paths are type-safe. |
 | P5.5 | sdk | `src/lib/safe-json.ts` `asArray`/`asObject` retained until last consumer migrates | Claude | 2026-04-25 | 5 pages still import (quality, employees, maintenance, dashboard, analytics/forecast); deletion when each is touched for another reason | _deferred_ | low | ✓ Deferred per cost/benefit. Helpers stay; pages migrate opportunistically. |
 | P5.6 | sdk | ESLint blocking raw `fetch(` in `src/pages/**` — NOT applied | Claude | 2026-04-25 | Decision: not applied because the legacy `fetchJson` path is sanctioned, not deprecated | _deferred by decision_ | low | ✓ Decided against. A lint rule would force every existing page to add an `eslint-disable` comment for sanctioned legacy code, which is noise. New code is steered toward SDK by the README + the go-forward rule, not by lint. |
+| P7.2 | ci | Bundle size budget script + baseline + non-blocking CI step | Claude | 2026-04-25 | `node scripts/check-bundle-size.mjs` exits 0 against baseline; growth >5% on any chunk-stem exits 1 | this commit | low | ✓ `scripts/check-bundle-size.mjs` reads `dist/assets/*.js`, groups by chunk-stem (filename minus 8-char content hash), sums per-stem bytes, compares against `.bundle-baseline.json`. Threshold: 5% growth per stem fails the gate. Baseline snapshotted at 94 chunk-stems / 4,197 KB total (top: pdf 1011 KB, xlsx 412 KB, mock-data 318 KB, react-vendor 270 KB). Wired into `.github/workflows/deploy.yml` as `Bundle size budget` with `continue-on-error: true` — graduate to blocking after one signal week, mirroring P1.2 typecheck pattern. |
 
 ---
 

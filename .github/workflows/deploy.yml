@@ -46,6 +46,17 @@ jobs:
       # docs/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
       - run: npm run build:strict
 
+      # Bundle size budget (P7.2) — non-blocking initially.
+      # Compares dist chunk sizes against `.bundle-baseline.json`; fails if
+      # any chunk-stem grew > 5%. continue-on-error: true mirrors how
+      # typecheck started (P1.2) — observe one clean signal week, then flip
+      # to blocking. To intentionally bump the baseline:
+      #   node scripts/check-bundle-size.mjs --write-baseline
+      # and commit `.bundle-baseline.json` alongside the change.
+      - name: Bundle size budget
+        run: node scripts/check-bundle-size.mjs
+        continue-on-error: true
+
       # Deploy to Cloudflare Pages — main branch path. Preserves the
       # original behavior: pushes to `main` and `claude/**` deploy to
       # the matching branch slug on Pages.

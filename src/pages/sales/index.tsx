@@ -156,9 +156,11 @@ export default function SalesPage() {
   const [showFilters, setShowFilters] = useState(false);
 
   // Reset to page 1 when any filter or tab changes.
+  /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter/tab change */
   useEffect(() => {
     setPage(1);
   }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");

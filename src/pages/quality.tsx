@@ -488,6 +488,10 @@ export default function QualityPage() {
   }, [refreshInspectionsHook]);
 
 
+  // Mirror SWR data into mutable local state — submit handlers add/remove
+  // rows optimistically before the next refresh lands. Re-rendering once on
+  // hydration is intentional.
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror server data into mutable local state for optimistic UI */
   useEffect(() => {
     setInspections(asArray(inspResp));
     setLoading(inspLoading);
@@ -512,6 +516,7 @@ export default function QualityPage() {
     if (bomResp) setBomTemplates(unwrap(bomResp) as BomTemplateLite[]);
     if (ncrResp) setNcrs(unwrap(ncrResp) as SupplierNCR[]);
   }, [returnsResp, defectsResp, bomResp, ncrResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Component type options — derived from BOM templates for the selected
   // product category. Pulls unique wipType values off the top-level

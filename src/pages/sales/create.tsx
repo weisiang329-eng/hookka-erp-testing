@@ -266,7 +266,8 @@ function CreateSalesOrderPage() {
     );
   }, []);
 
-  // Load clone data from localStorage if navigated from Clone button
+  // Load clone data from localStorage if navigated from Clone button.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate from localStorage clone payload on mount */
   useEffect(() => {
     if (searchParams.get("clone") === "1") {
       try {
@@ -299,6 +300,7 @@ function CreateSalesOrderPage() {
       }
     }
   }, [searchParams]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
 

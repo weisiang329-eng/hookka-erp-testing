@@ -58,6 +58,7 @@ function GRNFormDialog({
 
   const po = purchaseOrders.find((p) => p.id === selectedPO);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- seed item entries from the selected PO when the user picks one */
   useEffect(() => {
     if (po) {
       setItemEntries(
@@ -73,6 +74,7 @@ function GRNFormDialog({
       setItemEntries([]);
     }
   }, [selectedPO, po]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const updateItem = (idx: number, field: string, value: number | string) => {
     const updated = [...itemEntries];

@@ -174,9 +174,11 @@ export default function WorkerHomePage() {
     refreshToday();
   }, [refreshToday]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- refresh history when date range changes; setState lives inside the async callback */
   useEffect(() => {
     refreshHistory(from, to);
   }, [refreshHistory, from, to]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   async function handleClock(action: "CLOCK_IN" | "CLOCK_OUT") {
     setClocking(true);

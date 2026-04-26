@@ -291,9 +291,11 @@ export default function WorkerScanPage() {
     }
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- run loadToday once on mount; setState lives inside the async callback */
   useEffect(() => {
     loadToday();
   }, [loadToday]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Pure lookup — no state mutation.
   //
@@ -361,6 +363,7 @@ export default function WorkerScanPage() {
 
   // If the page is opened from a QR deep-link like /worker/scan?op=xxx,
   // look it up immediately.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot QR deep-link hydrate on mount */
   useEffect(() => {
     const op = params.get("op");
     if (op) {
@@ -369,6 +372,7 @@ export default function WorkerScanPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Turn a decoded QR payload into a lookup — factored out so both the
   // live-scan loop and the file-based decoder share one path.

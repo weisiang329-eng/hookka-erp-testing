@@ -206,6 +206,7 @@ export default function RDProjectDetailPage() {
     refreshInventoryHook();
   }, [refreshInventoryHook]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR project + inventory data into mutable local state */
   useEffect(() => {
     if (projectResp) setProject(projectResp.data ?? null);
   }, [projectResp]);
@@ -213,6 +214,7 @@ export default function RDProjectDetailPage() {
   useEffect(() => {
     setRawMaterials(inventoryResp?.data?.rawMaterials ?? []);
   }, [inventoryResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ─── Advance Stage ──────────────────────────────────────────────────────
 

@@ -2527,11 +2527,13 @@ export default function EmployeesPage() {
       .catch(() => {});
   }, []);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- derived: pluck today's rows out of the all-attendance list */
   useEffect(() => {
     // Also set today's attendance for the working hours tab
     const today = todayStr();
     setDateAttendance(allAttendance.filter((r: AttendanceRecord) => r.date === today));
   }, [allAttendance]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const refreshAttendance = useCallback(
     (date: string) => {

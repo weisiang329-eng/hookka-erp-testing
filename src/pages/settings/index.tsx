@@ -240,6 +240,7 @@ export default function SettingsPage() {
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(defaultSystem);
 
   // Load from localStorage on mount
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount-time hydrate from localStorage */
   useEffect(() => {
     setHookka(loadJSON(LS_HOOKKA, defaultHookka));
     setOhana(loadJSON(LS_OHANA, defaultOhana));
@@ -250,6 +251,7 @@ export default function SettingsPage() {
     setSurcharges(loadJSON(LS_SURCHARGES, defaultSurcharges));
     setSystemSettings(loadJSON(LS_SYSTEM, defaultSystem));
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const flash = useCallback(() => {
     setShowToast(true);

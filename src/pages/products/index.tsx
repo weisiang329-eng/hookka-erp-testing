@@ -400,9 +400,11 @@ function VariantEditorDialog({
 }) {
   const [configs, setConfigs] = useState<ProductVariantConfig[]>([]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot deep clone of variants into editor state when dialog opens */
   useEffect(() => {
     if (open) setConfigs(variants.map((v) => ({ ...v, options: v.options.map((o) => ({ ...o })) })));
   }, [open, variants]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function addVariantCategory() {
     setConfigs((prev) => [...prev, {
@@ -713,6 +715,7 @@ function MaintenanceView() {
   const [fabricsLoading, setFabricsLoading] = useState(false);
   const [fabricSearch, setFabricSearch] = useState("");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of kv-config + subscription to cross-tab updates */
   useEffect(() => {
     // Render immediately from whatever the shared kv-config cache already has
     // (prevents a flash of defaults when bouncing between pages). Then fetch
@@ -750,6 +753,7 @@ function MaintenanceView() {
       offErr();
     };
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Auto-save: push every config change to D1 and wait for server
   // confirmation before marking the snapshot as saved. The previous
@@ -804,6 +808,7 @@ function MaintenanceView() {
   }, [config, savedSnapshot]);
 
   // Fetch fabrics when tab switches to fabrics
+  /* eslint-disable react-hooks/set-state-in-effect -- lazy load + loading flag toggle on tab switch */
   useEffect(() => {
     if (tab !== "fabrics") return;
     setFabricsLoading(true);
@@ -812,6 +817,7 @@ function MaintenanceView() {
       .catch(() => {})
       .finally(() => setFabricsLoading(false));
   }, [tab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function showToast(msg: string) {
     setToastMsg(msg);
@@ -1428,6 +1434,7 @@ export default function ProductsPage() {
   }, [configs]);
 
   // Initialize variant configs from defaults
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount-time seed of static defaults */
   useEffect(() => {
     const map: Record<string, ProductVariantConfig[]> = {};
     Object.entries(DEFAULT_VARIANT_CONFIGS).forEach(([model, configs]) => {
@@ -1435,6 +1442,7 @@ export default function ProductsPage() {
     });
     setVariantMap(map);
   }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const categories = useMemo(() => {
     const cats = new Set(products.map((p) => p.category));

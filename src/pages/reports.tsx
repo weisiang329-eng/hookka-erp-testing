@@ -1273,11 +1273,13 @@ export default function ReportsPage() {
   );
   // Whenever the URL ?tab= changes (back / forward / external nav),
   // sync activeTab to it so the visible pane matches the address bar.
+  /* eslint-disable react-hooks/set-state-in-effect -- URL-to-state sync for browser back/forward navigation */
   useEffect(() => {
     if (isValidTab(tabFromUrl) && tabFromUrl !== activeTab) {
       setActiveTabState(tabFromUrl);
     }
   }, [tabFromUrl, activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const setActiveTab = useCallback(
     (next: TabId) => {
       setActiveTabState(next);

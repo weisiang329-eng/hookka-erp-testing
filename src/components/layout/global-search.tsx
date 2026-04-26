@@ -198,6 +198,7 @@ function useApiSearch(query: string) {
   const [loading, setLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- debounced query effect resets results when query is cleared */
   useEffect(() => {
     if (query.length < 2) {
       setResults([]);
@@ -327,6 +328,7 @@ function useApiSearch(query: string) {
       controller.abort();
     };
   }, [query]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return { results, loading };
 }
@@ -400,6 +402,7 @@ export function GlobalSearch() {
   }, [groupedResults]);
 
   // Load recent on open
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot reset on dialog open */
   useEffect(() => {
     if (open) {
       setRecentSearches(getRecentSearches());
@@ -409,6 +412,7 @@ export function GlobalSearch() {
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Keyboard shortcut: Ctrl+K / Cmd+K
   useEffect(() => {
@@ -422,10 +426,12 @@ export function GlobalSearch() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, []);
 
-  // Reset selected index when results change
+  // Reset selected index when results change.
+  /* eslint-disable react-hooks/set-state-in-effect -- derived: keyboard cursor reset on query/result change */
   useEffect(() => {
     setSelectedIndex(0);
   }, [query, flatResults.length]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Scroll selected item into view
   useEffect(() => {

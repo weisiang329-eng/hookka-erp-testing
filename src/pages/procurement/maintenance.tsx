@@ -572,6 +572,7 @@ export default function SupplierMaintenancePage() {
 
   const { data: suppliersResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/suppliers");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR suppliers data into mutable local state for optimistic UI */
   useEffect(() => {
     const d = suppliersResp;
     if (!d) return;
@@ -597,6 +598,7 @@ export default function SupplierMaintenancePage() {
     }));
     setSuppliers(mapped);
   }, [suppliersResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // SKU state — D1 is source of truth; MOCK_SKU kept only as a silent
   // fallback if the API is unreachable, so the page always renders.
@@ -610,6 +612,7 @@ export default function SupplierMaintenancePage() {
   // D1 binding shape into the page's SupplierSKU type.
   const { data: smResp } = useCachedJson<{ success?: boolean; data?: Record<string, unknown>[] } | Record<string, unknown>[]>("/api/supplier-materials");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR supplier-material bindings into mutable local state */
   useEffect(() => {
     const d = smResp;
     if (!d) return;
@@ -640,10 +643,12 @@ export default function SupplierMaintenancePage() {
     }));
     setSkuList(mapped);
   }, [smResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Inventory items for RM code selector
   const [inventoryItems, setInventoryItems] = useState<InventoryItem[]>([]);
   const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: InventoryItem[]; finishedGoods?: InventoryItem[]; wipItems?: InventoryItem[] } }>("/api/inventory");
+  /* eslint-disable react-hooks/set-state-in-effect -- flatten inventory categories into the SKU selector's pool */
   useEffect(() => {
     const d = invResp;
     if (d?.success && d.data) {
@@ -661,6 +666,7 @@ export default function SupplierMaintenancePage() {
       setInventoryItems(all);
     }
   }, [invResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Supplier name lookup
   const supplierMap = useMemo(() => {

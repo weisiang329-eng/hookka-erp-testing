@@ -78,9 +78,11 @@ export default function InvoicesPage() {
   const [filterDateTo, setFilterDateTo] = useState("");
 
   // Reset to page 1 when any filter changes (stale page could be empty).
+  /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter change */
   useEffect(() => {
     setPage(1);
   }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Tabs
   const [activeTab, setActiveTab] = useState<"list" | "aging">("list");

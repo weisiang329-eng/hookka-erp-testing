@@ -83,6 +83,7 @@ export function usePresence(
   const [others, setOthers] = useState<PresenceHolder[]>([]);
   const activeRef = useRef(false);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- presence subscription manages local list as the websocket / heartbeat lifecycle dictates */
   useEffect(() => {
     if (!enabled || !recordId || !recordType) {
       setOthers([]);
@@ -153,6 +154,7 @@ export function usePresence(
       release(recordType, recordId);
     };
   }, [recordType, recordId, enabled]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   return others;
 }

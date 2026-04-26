@@ -3,6 +3,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { TabBar } from "@/components/layout/tab-bar";
 import { TabbedOutlet } from "@/components/layout/tabbed-outlet";
+import { TabsCapModal } from "@/components/layout/tabs-cap-modal";
 import { TabsProvider } from "@/contexts/tabs-context";
 import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
 import { ToastProvider, useToast } from "@/components/ui/toast";
@@ -95,6 +96,7 @@ export default function DashboardLayout() {
             </main>
           </div>
         </div>
+        <TabsCapModal />
       </TabsProvider>
     </ToastProvider>
   );

@@ -19,6 +19,7 @@ import {
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useActiveTabDirty } from "@/contexts/tabs-context";
 
 type SeatHeightTier = { height: string; priceSen: number };
 
@@ -205,6 +206,18 @@ function CreateSalesOrderPage() {
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
+
+  // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
+  // the user has touched the form. Heuristic: any of the header fields
+  // populated, or any line item with a product picked. Saving (which then
+  // navigates away to the detail page) unmounts this component and the
+  // useActiveTabDirty hook's cleanup automatically clears the flag.
+  const isDirty = !saving && (
+    !!customerId || !!customerPOId || !!customerSOId || !!reference ||
+    !!customerDeliveryDate || !!hookkaExpectedDD || !!notes ||
+    items.some((it) => !!it.productId)
+  );
+  useActiveTabDirty(isDirty);
 
   useEffect(() => {
     // Variants now live in D1 under kv_config('variants-config'). Hydrate from

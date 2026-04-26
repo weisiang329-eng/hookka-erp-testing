@@ -2,8 +2,16 @@
 // Multi-tab context — VS Code-style in-app tab bar.
 //
 // Data model
-//   tabs: ordered list of { id, path, title, pinned? }
+//   tabs: ordered list of { id, path, title, pinned?, lastVisitedAt }
 //   activeId: currently-focused tab id (mirrors location.pathname)
+//   dirty: record of tab ids whose pages have unsaved changes
+//   pendingOpenPath: deferred-open intent when cap modal is visible
+//
+// Cap behaviour (MAX_TABS, see ./tabs-reducer)
+//   • At 10 open tabs, opening an 11th evicts the oldest non-pinned,
+//     non-dirty tab (LRU). If every tab is dirty, the UI surfaces a modal
+//     so the user picks one to save/discard. Pattern matches SAP Fiori
+//     shell + Salesforce Lightning console; not Odoo's hard-reject toast.
 //
 // Design notes
 //   • The browser URL is the single source of truth for which page is
@@ -27,24 +35,29 @@ import {
   useState,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import {
+  initialState,
+  openTabAction,
+  closeTabAction,
+  markDirtyAction,
+  setActiveAction,
+  clearPendingAction,
+  type TabsState,
+  type TabDescriptor as ReducerTabDescriptor,
+} from "./tabs-reducer";
+
+// Re-export the cap so UI components don't need to reach into the reducer.
+export { MAX_TABS } from "./tabs-reducer";
 
 // ---- Tab shape ------------------------------------------------------------
 
-export type TabDescriptor = {
-  id: string;
-  path: string;   // always includes leading slash, no trailing slash
-  title: string;
-  pinned?: boolean;
-};
-
-type TabsState = {
-  tabs: TabDescriptor[];
-  activeId: string | null;
-};
+export type TabDescriptor = ReducerTabDescriptor;
 
 type TabsContextValue = {
   tabs: TabDescriptor[];
   activeId: string | null;
+  dirtyIds: ReadonlySet<string>;
+  pendingOpenPath: string | null;
   openTab: (path: string, title?: string) => void;
   closeTab: (id: string) => void;
   closeOthers: (id: string) => void;
@@ -52,6 +65,10 @@ type TabsContextValue = {
   switchTab: (id: string) => void;
   reorderTabs: (fromIdx: number, toIdx: number) => void;
   togglePinned: (id: string) => void;
+  markDirty: (tabId: string, dirty: boolean) => void;
+  cancelPendingOpen: () => void;
+  /** Save/discard happened on a dirty tab; close it and try the deferred open. */
+  resolveCapModal: (closeTabId: string) => void;
 };
 
 const TabsContext = createContext<TabsContextValue | null>(null);
@@ -60,8 +77,6 @@ const STORAGE_KEY = "hookka-open-tabs";
 
 // ---- Path → title helpers -------------------------------------------------
 
-// Map route prefix → nice section label. Order matters — longer prefixes first
-// so "/invoices/credit-notes" wins over "/invoices".
 const PATH_TITLES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/^\/dashboard\/?$/, () => "Dashboard"],
   [/^\/notifications\/?$/, () => "Notifications"],
@@ -127,7 +142,6 @@ export function titleForPath(path: string, fallback?: string): string {
     const m = re.exec(path);
     if (m) return mk(m);
   }
-  // Last resort: strip leading slash, title-case the first segment.
   const seg = path.replace(/^\/+/, "").split("/")[0] || "Home";
   return seg.charAt(0).toUpperCase() + seg.slice(1).replace(/-/g, " ");
 }
@@ -137,15 +151,38 @@ export function titleForPath(path: string, fallback?: string): string {
 function loadInitial(): TabsState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { tabs: [], activeId: null };
-    const parsed = JSON.parse(raw) as TabsState;
-    if (!parsed || !Array.isArray(parsed.tabs)) return { tabs: [], activeId: null };
+    if (!raw) return initialState;
+    const parsed = JSON.parse(raw) as {
+      tabs?: Array<Partial<TabDescriptor>>;
+      activeId?: string | null;
+    } | null;
+    if (!parsed || !Array.isArray(parsed.tabs)) return initialState;
+    const now = Date.now();
+    const persistedTabs = parsed.tabs;
+    const tabs: TabDescriptor[] = [];
+    for (let i = 0; i < persistedTabs.length; i++) {
+      const t = persistedTabs[i];
+      if (!t || typeof t.path !== "string" || typeof t.id !== "string" || typeof t.title !== "string") continue;
+      tabs.push({
+        id: t.id,
+        path: t.path,
+        title: t.title,
+        pinned: t.pinned,
+        // Backfill lastVisitedAt for tabs persisted before this field existed
+        // — preserve relative order so the strip ordering is the LRU baseline.
+        lastVisitedAt: typeof t.lastVisitedAt === "number" ? t.lastVisitedAt : now - (persistedTabs.length - i),
+      });
+    }
     return {
-      tabs: parsed.tabs.filter((t) => typeof t?.path === "string"),
+      tabs,
       activeId: parsed.activeId ?? null,
+      // Dirty state is per-session (form changes are in component state, which
+      // is gone after reload). Always start clean on hydrate.
+      dirty: {},
+      pendingOpenPath: null,
     };
   } catch {
-    return { tabs: [], activeId: null };
+    return initialState;
   }
 }
 
@@ -164,66 +201,52 @@ function makeTabId(path: string): string {
 export function TabsProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<TabsState>(loadInitial);
 
-  // Persist on every change.
+  // Persist on every change. Dirty state and pendingOpenPath are session-only.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      const persisted = {
+        tabs: state.tabs,
+        activeId: state.activeId,
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted));
     } catch {
       /* quota / private mode — ignore */
     }
-  }, [state]);
+  }, [state.tabs, state.activeId]);
 
   const openTab = useCallback((pathIn: string, title?: string) => {
     const path = normalisePath(pathIn);
     const id = makeTabId(path);
     setState((prev) => {
-      const existing = prev.tabs.find((t) => t.id === id);
-      if (existing) {
-        // Idempotent — don't return a new object if nothing actually changes.
-        // Returning `{...prev, activeId: id}` when activeId is already `id`
-        // triggers pointless re-renders that cascade into the URL-sync loop.
-        if (prev.activeId === id) return prev;
-        return { ...prev, activeId: id };
-      }
-      const tab: TabDescriptor = {
+      const result = openTabAction(prev, {
         id,
         path,
         title: title ?? titleForPath(path),
-      };
-      return { tabs: [...prev.tabs, tab], activeId: id };
+        now: Date.now(),
+      });
+      return result.state;
     });
   }, []);
 
   const switchTab = useCallback((id: string) => {
-    setState((prev) => {
-      if (prev.activeId === id) return prev;
-      if (!prev.tabs.some((t) => t.id === id)) return prev;
-      return { ...prev, activeId: id };
-    });
+    setState((prev) => setActiveAction(prev, id, Date.now()));
   }, []);
 
   const closeTab = useCallback((id: string) => {
-    setState((prev) => {
-      const idx = prev.tabs.findIndex((t) => t.id === id);
-      if (idx === -1) return prev;
-      if (prev.tabs[idx].pinned) return prev; // pinned tabs cannot be closed
-      const next = prev.tabs.filter((t) => t.id !== id);
-      let activeId = prev.activeId;
-      if (activeId === id) {
-        // Pick the neighbor — prefer the one to the right, fall back to left.
-        const neighbor = next[idx] ?? next[idx - 1] ?? null;
-        activeId = neighbor ? neighbor.id : null;
-      }
-      return { tabs: next, activeId };
-    });
+    setState((prev) => closeTabAction(prev, id).state);
   }, []);
 
   const closeOthers = useCallback((id: string) => {
     setState((prev) => {
       const keep = prev.tabs.filter((t) => t.id === id || t.pinned);
+      const dropped = prev.tabs.filter((t) => t.id !== id && !t.pinned);
+      const dirty = { ...prev.dirty };
+      for (const d of dropped) delete dirty[d.id];
       return {
+        ...prev,
         tabs: keep,
         activeId: keep.some((t) => t.id === id) ? id : keep[0]?.id ?? null,
+        dirty,
       };
     });
   }, []);
@@ -231,9 +254,13 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   const closeAll = useCallback(() => {
     setState((prev) => {
       const pinned = prev.tabs.filter((t) => t.pinned);
+      const dirty: Record<string, true> = {};
+      for (const p of pinned) if (prev.dirty[p.id]) dirty[p.id] = true;
       return {
+        ...prev,
         tabs: pinned,
         activeId: pinned[0]?.id ?? null,
+        dirty,
       };
     });
   }, []);
@@ -263,10 +290,51 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
     }));
   }, []);
 
+  const markDirty = useCallback((tabId: string, dirty: boolean) => {
+    setState((prev) => markDirtyAction(prev, tabId, dirty));
+  }, []);
+
+  const cancelPendingOpen = useCallback(() => {
+    setState((prev) => clearPendingAction(prev));
+  }, []);
+
+  const resolveCapModal = useCallback((closeTabId: string) => {
+    setState((prev) => {
+      const pending = prev.pendingOpenPath;
+      if (!pending) return prev;
+      // Close the user-selected dirty tab first…
+      const { state: afterClose } = closeTabAction(
+        // Mark it clean so closeTabAction proceeds (it's not pinned by
+        // construction since pinned tabs can't be selected by the modal,
+        // and dirty doesn't block close — only the cap-modal flow forces
+        // explicit user resolution).
+        markDirtyAction(prev, closeTabId, false),
+        closeTabId,
+      );
+      // …then retry the deferred open.
+      const path = normalisePath(pending);
+      const id = makeTabId(path);
+      const result = openTabAction(afterClose, {
+        id,
+        path,
+        title: titleForPath(path),
+        now: Date.now(),
+      });
+      return { ...result.state, pendingOpenPath: null };
+    });
+  }, []);
+
+  const dirtyIds = useMemo<ReadonlySet<string>>(
+    () => new Set(Object.keys(state.dirty)),
+    [state.dirty],
+  );
+
   const value = useMemo<TabsContextValue>(
     () => ({
       tabs: state.tabs,
       activeId: state.activeId,
+      dirtyIds,
+      pendingOpenPath: state.pendingOpenPath,
       openTab,
       closeTab,
       closeOthers,
@@ -274,9 +342,15 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
       switchTab,
       reorderTabs,
       togglePinned,
+      markDirty,
+      cancelPendingOpen,
+      resolveCapModal,
     }),
     [
-      state,
+      state.tabs,
+      state.activeId,
+      state.pendingOpenPath,
+      dirtyIds,
       openTab,
       closeTab,
       closeOthers,
@@ -284,6 +358,9 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
       switchTab,
       reorderTabs,
       togglePinned,
+      markDirty,
+      cancelPendingOpen,
+      resolveCapModal,
     ],
   );
 
@@ -307,19 +384,6 @@ export function useTabs(): TabsContextValue {
 
 // ---- Sync helpers (rendered inside provider) ------------------------------
 
-/**
- * Watches the URL: whenever the pathname changes, make sure there's a tab
- * for it and that it is active. Handles initial load + manual URL typing +
- * browser back/forward and sidebar link clicks without special-casing.
- *
- * Only reacts to *pathname* changes. Depending on `tabs`/`activeId` creates
- * feedback loops because TabsNavigationSync mutates those in response.
- */
-// List / landing pages the user reaches via the sidebar. Navigating to one
-// of these does NOT open a persistent tab — the user is browsing, not
-// working on a specific record. Detail / create / edit pages (anything not
-// in this list) always open a tab because the user is actively editing
-// something they need to come back to.
 const NON_PERSISTENT_PATHS = new Set<string>([
   "/notifications",
   "/analytics/forecast",
@@ -365,8 +429,6 @@ const NON_PERSISTENT_PATHS = new Set<string>([
 ]);
 
 function shouldPersistTab(path: string): boolean {
-  // Dashboard is the home tab — always persistent so there's something to
-  // come back to when all transient pages close.
   if (path === "/dashboard") return true;
   return !NON_PERSISTENT_PATHS.has(path);
 }
@@ -375,7 +437,6 @@ function TabsUrlSync() {
   const { pathname } = useLocation();
   const { openTab, switchTab, tabs: tabsRef } = useTabs();
 
-  // Keep a live ref to tabs so the effect doesn't depend on it.
   const tabsCurrent = useRef(tabsRef);
   // eslint-disable-next-line react-hooks/refs -- live-ref pattern: writing on each render keeps the effect's dep list minimal and avoids ping-pong navigation
   tabsCurrent.current = tabsRef;
@@ -387,9 +448,6 @@ function TabsUrlSync() {
     if (lastPath.current === path) return;
     lastPath.current = path;
 
-    // List / landing pages don't get a tab. The user navigates via the
-    // sidebar to browse, then any detail / edit click opens a persistent
-    // tab for the specific record they're working on.
     if (!shouldPersistTab(path)) return;
 
     const id = makeTabId(path);
@@ -404,30 +462,13 @@ function TabsUrlSync() {
   return null;
 }
 
-/**
- * When the context's activeId changes (e.g. user clicks another tab),
- * navigate the browser to that tab's path.
- *
- * IMPORTANT: only reacts to actual *activeId* transitions. Re-firing on
- * `pathname` or `tabs` changes would cause ping-pong navigation — when the
- * URL changes, TabsUrlSync updates activeId, which would otherwise cause
- * this effect to also navigate (redundantly) and sometimes back to a stale
- * path if the render hadn't caught up yet.
- */
 function TabsNavigationSync() {
   const navigate = useNavigate();
   const { pathname } = useLocation();
   const { tabs, activeId } = useTabs();
 
-  // Seeded with the initial activeId so the very first effect run is a
-  // no-op — on a fresh mount we trust the URL, not whatever activeId was
-  // hydrated from localStorage. If they disagree, TabsUrlSync (which runs
-  // first via mount order) will update activeId to match the URL before
-  // this effect gets a chance to navigate elsewhere.
   const lastActiveId = useRef<string | null>(activeId);
 
-  // Keep live refs to pathname/tabs so the effect depends only on activeId
-  // (otherwise URL-driven re-renders cause ping-pong navigation).
   const pathnameRef = useRef(pathname);
   // eslint-disable-next-line react-hooks/refs -- live-ref pattern: see TabsUrlSync rationale above
   pathnameRef.current = pathname;
@@ -450,3 +491,38 @@ function TabsNavigationSync() {
 
   return null;
 }
+
+// ---- Active-tab dirty hook ------------------------------------------------
+
+/**
+ * Convenience hook for pages: tracks "is the form dirty?" and reports it
+ * upward so the cap-eviction logic knows whether this tab is safe to close.
+ *
+ * Pages call `useActiveTabDirty(myDirtyFlag)` once with a boolean; the
+ * hook syncs that flag to the *currently-active* tab (which is always
+ * the tab hosting this page, given TabbedOutlet only mounts the active
+ * pane). On unmount it clears the flag so a closed page never pins its
+ * tab as dirty forever.
+ */
+// eslint-disable-next-line react-refresh/only-export-components -- co-located hook for the tab provider; HMR penalty is acceptable
+export function useActiveTabDirty(isDirty: boolean): void {
+  const { activeId, markDirty } = useTabs();
+  const lastTabId = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!activeId) return;
+    lastTabId.current = activeId;
+    markDirty(activeId, isDirty);
+  }, [activeId, isDirty, markDirty]);
+
+  useEffect(() => {
+    return () => {
+      const tid = lastTabId.current;
+      if (tid) markDirty(tid, false);
+    };
+    // markDirty is stable (useCallback). The cleanup needs to run only on
+    // unmount, not on every dep change, so we deliberately exclude it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+}
+

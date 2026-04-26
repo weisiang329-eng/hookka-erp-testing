@@ -9,6 +9,7 @@ import { Link } from "react-router-dom";
 import { useSearchParams } from "react-router-dom";
 import { parseStickerData } from "@/lib/qr-utils";
 import { fetchJson } from "@/lib/fetch-json";
+import { useActiveTabDirty } from "@/contexts/tabs-context";
 
 const WorkerListSchema = z.object({
   success: z.boolean(),
@@ -106,6 +107,16 @@ function ScannerPage() {
   // behaviour) when the QR didn't encode &p=<n> — the server treats missing
   // pieceNo as 1 too, so this matches backend semantics.
   const [scannedPieceNo, setScannedPieceNo] = useState<number>(1);
+
+  // Mark dirty whenever a scan has been pulled up but not yet submitted —
+  // closing the tab now would lose the worker assignment selection. After
+  // a successful submit the form clears (submitResult.kind === "success"
+  // sets lookupResult back to null elsewhere) and dirty flips off again.
+  const isScanPending =
+    !submitting &&
+    lookupResult !== null &&
+    submitResult?.kind !== "success";
+  useActiveTabDirty(isScanPending);
 
   // Fetch worker list once
   useEffect(() => {

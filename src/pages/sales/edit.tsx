@@ -18,6 +18,7 @@ import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
+import { useActiveTabDirty } from "@/contexts/tabs-context";
 
 type LineItem = {
   id?: string;
@@ -141,6 +142,41 @@ export default function EditSalesOrderPage() {
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, unknown> | null>(getVariantsConfigSync());
   const [showSpecialOrdersIdx, setShowSpecialOrdersIdx] = useState<number | null>(null);
+
+  // Compare the current form state against what was loaded; dirty = the
+  // user has typed something that hasn't been saved. We compute a coarse
+  // fingerprint rather than deep-equal each line item — perf doesn't matter
+  // here, but a stable string makes the memo dep simple. The order's own
+  // fingerprint is captured once when it loads so save→navigate cleanly
+  // resets the flag (the page unmounts and useActiveTabDirty cleans up).
+  const formSig = useMemo(
+    () => JSON.stringify({
+      customerId, customerPOId, customerSOId, reference,
+      companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
+      items: items.map((it) => ({
+        productId: it.productId, fabricId: it.fabricId, quantity: it.quantity,
+        seatHeight: it.seatHeight, gapInches: it.gapInches,
+        divanHeightInches: it.divanHeightInches,
+        legHeightInches: it.legHeightInches,
+        specialOrders: it.specialOrders, notes: it.notes,
+      })),
+    }),
+    [
+      customerId, customerPOId, customerSOId, reference,
+      companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+    ],
+  );
+  const [initialSig, setInitialSig] = useState<string | null>(null);
+  /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- one-shot baseline snapshot when the loaded order arrives; deliberately excludes formSig so later edits don't reset the baseline */
+  useEffect(() => {
+    if (!loading && order && initialSig === null) {
+      setInitialSig(formSig);
+    }
+  }, [loading, order, initialSig]);
+  /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
+  const isDirty =
+    !saving && !loading && initialSig !== null && initialSig !== formSig;
+  useActiveTabDirty(isDirty);
 
   useEffect(() => {
     fetchVariantsConfig().then(setMaintenanceConfig).catch(() => { /* ignore */ });

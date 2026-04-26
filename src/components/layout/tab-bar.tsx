@@ -14,6 +14,7 @@ import { useEffect, useRef, useState } from "react";
 import { Pin, PinOff, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTabs, type TabDescriptor } from "@/contexts/tabs-context";
+import { MAX_TABS } from "@/contexts/tabs-reducer";
 
 type ContextMenuState = {
   tabId: string;
@@ -25,6 +26,7 @@ export function TabBar() {
   const {
     tabs,
     activeId,
+    dirtyIds,
     closeTab,
     closeOthers,
     closeAll,
@@ -114,6 +116,7 @@ export function TabBar() {
             key={tab.id}
             tab={tab}
             active={tab.id === activeId}
+            dirty={dirtyIds.has(tab.id)}
             beingDragged={dragIdx === idx}
             dropBefore={hoverIdx === idx && dragIdx !== null && dragIdx !== idx}
             onSelect={() => switchTab(tab.id)}
@@ -130,6 +133,16 @@ export function TabBar() {
         ))}
         {/* Filler so the last tab's right-border extends to the end */}
         <div className="flex-1 min-w-4 border-b border-[#E2DDD8]" />
+        {/* Cap indicator — appears when at MAX_TABS so users notice the
+            ceiling before LRU eviction starts silently dropping tabs. */}
+        {tabs.length >= MAX_TABS && (
+          <div
+            className="shrink-0 self-center mr-2 px-2 py-0.5 text-[11px] tabular-nums rounded-full bg-[#EAE5E0] text-[#6B5C32] border border-[#D1CBC5]"
+            title={`Tab limit reached (${MAX_TABS}). Opening another will close the oldest unmodified tab.`}
+          >
+            {tabs.length}/{MAX_TABS}
+          </div>
+        )}
       </div>
 
       {menu && (
@@ -152,6 +165,7 @@ export function TabBar() {
 interface TabItemProps {
   tab: TabDescriptor;
   active: boolean;
+  dirty: boolean;
   beingDragged: boolean;
   dropBefore: boolean;
   onSelect: () => void;
@@ -166,6 +180,7 @@ interface TabItemProps {
 function TabItem({
   tab,
   active,
+  dirty,
   beingDragged,
   dropBefore,
   onSelect,
@@ -230,8 +245,24 @@ function TabItem({
       {/* Label */}
       <span className="truncate flex-1">{tab.title}</span>
 
-      {/* Close button — hidden for pinned tabs */}
-      {!tab.pinned && (
+      {/* Dirty dot — shown in place of the close button when there are
+          unsaved changes. Click still closes (the page's onBeforeUnload /
+          cap modal handles confirmation). */}
+      {dirty && !tab.pinned && (
+        <button
+          type="button"
+          aria-label="Close tab (unsaved changes)"
+          title="Unsaved changes"
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose();
+          }}
+          className="shrink-0 rounded-full h-2 w-2 bg-[#6B5C32] hover:ring-2 hover:ring-[#6B5C32]/30"
+        />
+      )}
+
+      {/* Close button — hidden for pinned tabs and replaced by dirty dot */}
+      {!tab.pinned && !dirty && (
         <button
           type="button"
           aria-label="Close tab"

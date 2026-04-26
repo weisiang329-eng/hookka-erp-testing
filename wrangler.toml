@@ -45,6 +45,27 @@ binding = "SESSION_CACHE"
 id = "8f4c4b7ac1f142ff8378eada4602458a"
 
 # ---------------------------------------------------------------------------
+# ERP_METRICS — Cloudflare Analytics Engine dataset (Phase 6 / P6.2-P6.3).
+# ---------------------------------------------------------------------------
+# Sink for per-request timing + per-resource event counters. Writes are
+# best-effort — every call site checks `if (env.ERP_METRICS)` before
+# dispatching, so when the binding is missing (local dev without an account
+# token, or during a rollback) the code simply doesn't emit. Queries run
+# from /api/admin/health/kpis (P6.4) via env.ERP_METRICS.query(...).
+#
+# Schema (see docs/OBSERVABILITY.md for the full spec):
+#   indexes:  ["{route}|{status}"]
+#   blobs:    [route, status, traceparent, kind?]
+#   doubles:  [dur_ms, db_dur_ms, db_count]
+#
+# Bindings on Pages projects require the Analytics Engine product be
+# enabled on the account (free tier covers ~10M events/day). If unavailable,
+# leave this commented out — the code path no-ops.
+[[analytics_engine_datasets]]
+binding = "ERP_METRICS"
+dataset = "hookka_erp_metrics"
+
+# ---------------------------------------------------------------------------
 # TODO: Cron Trigger for dashboard materialized views.
 # ---------------------------------------------------------------------------
 # `migrations-postgres/9901_dashboard_mat_views.sql` creates 4 MVs that need

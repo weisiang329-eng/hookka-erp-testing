@@ -42,6 +42,84 @@ function isValidTraceparent(v: string): boolean {
   return /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(v);
 }
 
+// ---------------------------------------------------------------------------
+// P6.2 / P6.3 — Cloudflare Analytics Engine writes.
+//
+// Schema overview (full spec lives in docs/OBSERVABILITY.md):
+//
+//   `req` events (P6.2 — written from timingMiddleware after every request):
+//     indexes:  ["req|{route}|{status}"]
+//     blobs:    ["req", route, String(status), traceparent]
+//     doubles:  [dur_ms, db_dur_ms, db_count]
+//
+//   counter events (P6.3 — emitted via emitCounter()):
+//     indexes:  ["{kind}"]                 // e.g. "audit_events.created"
+//     blobs:    [kind, resource?, action?, traceparent?]
+//     doubles:  [count]                    // always 1 unless caller batches
+//
+// Querying (admin-health route, P6.4):
+//   SELECT
+//     quantileWeighted(0.5)(double1, _sample_interval) AS p50,
+//     ...
+//   FROM hookka_erp_metrics
+//   WHERE blob1 = 'req' AND timestamp >= now() - INTERVAL '24' HOUR
+//
+// All writes are best-effort — wrapped in try/catch and gated on the binding
+// being present. With the binding absent (local dev / rollback) every helper
+// silently no-ops, the dashboard endpoint serves mock data, and the rest of
+// the app is unaffected.
+// ---------------------------------------------------------------------------
+
+// Loose ambient interface so this module compiles even when the workers-types
+// version in scope predates AnalyticsEngineDataset. The CF runtime only cares
+// that .writeDataPoint exists.
+type AnalyticsEngineLike = {
+  writeDataPoint?: (data: {
+    indexes?: string[];
+    blobs?: (string | null)[];
+    doubles?: number[];
+  }) => void;
+};
+
+function getMetrics(env: unknown): AnalyticsEngineLike | null {
+  if (!env || typeof env !== "object") return null;
+  const ae = (env as { ERP_METRICS?: AnalyticsEngineLike }).ERP_METRICS;
+  if (!ae || typeof ae.writeDataPoint !== "function") return null;
+  return ae;
+}
+
+/**
+ * Emit a per-resource counter to Analytics Engine. P6.3 hook for
+ * `audit_events.created`, `auth.login_success`, `auth.login_fail`,
+ * `req.4xx`, `req.5xx`, etc. Pass `c` so we can pull traceparent off ctx.
+ *
+ * No-ops when ERP_METRICS isn't bound. Failures are swallowed.
+ */
+export function emitCounter(
+  c: Context,
+  kind: string,
+  details?: { resource?: string; action?: string; count?: number },
+): void {
+  const ae = getMetrics(c.env);
+  if (!ae) return;
+  try {
+    const traceparent =
+      ((c as unknown as { get: (k: string) => unknown }).get("traceparent") as string | undefined) ?? "";
+    ae.writeDataPoint?.({
+      indexes: [kind],
+      blobs: [
+        kind,
+        details?.resource ?? "",
+        details?.action ?? "",
+        traceparent,
+      ],
+      doubles: [details?.count ?? 1],
+    });
+  } catch {
+    /* never let metrics break a real request */
+  }
+}
+
 // Per-request DB time aggregator. timingMiddleware creates one and stashes it
 // on the context; instrumentD1 receives a reference and accumulates query
 // durations into it so the Server-Timing header can emit a `db` entry alongside
@@ -104,6 +182,25 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
     if (colo) parts.push(`cf-country;desc="${colo}"`);
     c.res.headers.set("Server-Timing", parts.join(", "));
   } catch { /* ignore */ }
+
+  // P6.2 — Analytics Engine timing event (req).  No-op when binding absent.
+  const ae = getMetrics(c.env);
+  if (ae) {
+    const status = c.res.status;
+    try {
+      ae.writeDataPoint?.({
+        indexes: [`req|${path}|${status}`],
+        blobs: ["req", path, String(status), traceparent],
+        doubles: [dur, dbTimer.total, dbTimer.count],
+      });
+    } catch { /* swallow */ }
+    // P6.3 — auto-counters for 4xx / 5xx so the dashboard can chart error
+    // rate without inspecting every req row. Status < 400 is the happy
+    // path; 4xx and 5xx each get their own counter event so the query
+    // can `WHERE blob1 = 'req.5xx'` cheaply.
+    if (status >= 500) emitCounter(c, "req.5xx", { resource: path });
+    else if (status >= 400) emitCounter(c, "req.4xx", { resource: path });
+  }
 }
 
 // Wrap a D1Database (or Postgres-compat D1Compat) so every

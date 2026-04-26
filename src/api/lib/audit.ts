@@ -28,6 +28,7 @@
 // ---------------------------------------------------------------------------
 import type { Context } from "hono";
 import type { Env } from "../worker";
+import { emitCounter } from "./observability";
 
 export type AuditAction =
   | "create"
@@ -121,6 +122,13 @@ export async function emitAudit(
         ua,
       )
       .run();
+    // P6.3 — count successful inserts as a metric so the dashboard can
+    // chart audit-write throughput. Cast c through the looser observability
+    // signature; emitCounter never throws on shape mismatch.
+    emitCounter(c as unknown as Context, "audit_events.created", {
+      resource: event.resource,
+      action: String(event.action),
+    });
   } catch (e) {
     // NEVER throw — audit failure must not block the underlying mutation.
     console.warn(

@@ -10,6 +10,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
+import { emitCounter } from "../lib/observability";
 
 const app = new Hono<Env>();
 
@@ -65,14 +66,19 @@ app.post("/login", async (c) => {
     .bind(email.trim())
     .first<UserRow>();
   if (!user) {
+    // P6.3 — count failed logins. We deliberately do NOT include the email
+    // in the metric blob (PII / brute-force enumeration) — just the count.
+    emitCounter(c, "auth.login_fail", { resource: "unknown_email" });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
   if (user.isActive !== 1) {
+    emitCounter(c, "auth.login_fail", { resource: "account_disabled" });
     return c.json({ success: false, error: "Account disabled" }, 403);
   }
 
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) {
+    emitCounter(c, "auth.login_fail", { resource: "bad_password" });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
 
@@ -103,6 +109,9 @@ app.post("/login", async (c) => {
       user.id,
     ),
   ]);
+
+  // P6.3 — count successful logins for the dashboard.
+  emitCounter(c, "auth.login_success", { resource: user.role });
 
   return c.json({
     success: true,

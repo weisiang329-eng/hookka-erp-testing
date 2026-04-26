@@ -531,7 +531,7 @@ export default function ProcurementPage() {
       render: (_v: unknown, row: PurchaseOrder) => <span>{row.items.length}</span>,
     },
     {
-      key: "orderedQty" as any,
+      key: "orderedQty",
       label: "Ordered",
       type: "number",
       width: "80px",
@@ -543,7 +543,7 @@ export default function ProcurementPage() {
       },
     },
     {
-      key: "outstandingQty" as any,
+      key: "outstandingQty",
       label: "Outstanding",
       type: "number",
       width: "95px",

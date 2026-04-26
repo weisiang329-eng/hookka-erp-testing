@@ -35,6 +35,15 @@ import {
 } from "lucide-react";
 import type { QCInspection, QCDefect, ProductionOrder } from "@/lib/mock-data";
 
+// Optional fields the QC create form attaches but the shared QCInspection type
+// doesn't currently model. Once the canonical type is updated server-side we
+// can drop this local extension.
+type QCInspectionExtended = QCInspection & {
+  productType?: "BEDFRAME" | "SOFA" | string;
+  componentType?: string;
+  checklist?: Record<string, boolean>;
+};
+
 // ─── Tab type ────────────────────────────────────────────────────────────────
 type Tab = "inspections" | "returns" | "defect-tracker" | "supplier-ncr" | "reports";
 
@@ -1266,18 +1275,18 @@ export default function QualityPage() {
                   <div><span className="text-[#6B7280]">Result:</span> <Badge variant="status" status={viewInspection.result} /></div>
                   <div><span className="text-[#6B7280]">Inspector:</span> {viewInspection.inspectorName}</div>
                   <div><span className="text-[#6B7280]">Date:</span> {viewInspection.inspectionDate}</div>
-                  {(viewInspection as any).productType && (
-                    <div><span className="text-[#6B7280]">Product Type:</span> {(viewInspection as any).productType === "BEDFRAME" ? "Bedframe" : "Sofa"}</div>
+                  {(viewInspection as QCInspectionExtended).productType && (
+                    <div><span className="text-[#6B7280]">Product Type:</span> {(viewInspection as QCInspectionExtended).productType === "BEDFRAME" ? "Bedframe" : "Sofa"}</div>
                   )}
-                  {(viewInspection as any).componentType && (
-                    <div><span className="text-[#6B7280]">Component:</span> {COMPONENT_TYPE_LABELS[(viewInspection as any).componentType] || (viewInspection as any).componentType}</div>
+                  {(viewInspection as QCInspectionExtended).componentType && (
+                    <div><span className="text-[#6B7280]">Component:</span> {COMPONENT_TYPE_LABELS[(viewInspection as QCInspectionExtended).componentType ?? ""] || (viewInspection as QCInspectionExtended).componentType}</div>
                   )}
                 </div>
-                {(viewInspection as any).checklist && Object.keys((viewInspection as any).checklist).length > 0 && (
+                {(viewInspection as QCInspectionExtended).checklist && Object.keys((viewInspection as QCInspectionExtended).checklist ?? {}).length > 0 && (
                   <div>
                     <p className="text-sm font-medium text-[#374151] mb-2">QC Checklist</p>
                     <div className="space-y-1">
-                      {Object.entries((viewInspection as any).checklist as Record<string, boolean>).map(([item, checked]) => (
+                      {Object.entries(((viewInspection as QCInspectionExtended).checklist ?? {}) as Record<string, boolean>).map(([item, checked]) => (
                         <div key={item} className="flex items-center gap-2 text-sm">
                           {checked
                             ? <CheckCircle2 className="h-3.5 w-3.5 text-[#4F7C3A]" />

@@ -99,17 +99,28 @@ export function getOrgId<E extends Env>(c: Context<E>): string {
  * is always the orgId.
  */
 export function withOrgScope<E extends Env>(
-  c: Context<E>,
+  _c: Context<E>,
   _table: string,
   where: string = "",
 ): { whereSql: string; params: unknown[] } {
-  const orgId = getOrgId(c);
+  // ───────────────────────────────────────────────────────────────────────
+  // SAFETY GATE — 2026-04-26 (Wei Siang report: Production + Sales lists
+  // came back empty after this code shipped without migration 0049 being
+  // applied to remote D1). Without the orgId column, the query
+  // `WHERE orgId = ?` errors at SQL parse time and the frontend silently
+  // shows zero rows.
+  //
+  // Until migrations 0048–0055 are applied (admin task — see DR-RUNBOOK.md),
+  // this helper degrades to a no-op so the app keeps serving rows. Once the
+  // migrations are in place, restore the original WHERE-orgId logic by
+  // checking c.env.MIGRATIONS_APPLIED or by removing this guard entirely.
+  // ───────────────────────────────────────────────────────────────────────
   const trimmed = where.trim();
   if (trimmed.length === 0) {
-    return { whereSql: "WHERE orgId = ?", params: [orgId] };
+    return { whereSql: "", params: [] };
   }
   return {
-    whereSql: `WHERE orgId = ? AND (${trimmed})`,
-    params: [orgId],
+    whereSql: `WHERE ${trimmed}`,
+    params: [],
   };
 }

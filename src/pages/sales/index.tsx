@@ -263,7 +263,7 @@ export default function SalesPage() {
       render: (_value, row) => <span>{row.items.length}</span>,
     },
     {
-      key: "totalQty" as any,
+      key: "totalQty",
       label: "Qty",
       type: "number",
       width: "55px",
@@ -275,7 +275,7 @@ export default function SalesPage() {
       },
     },
     {
-      key: "outstanding" as any,
+      key: "outstanding",
       label: "Outstanding",
       type: "text",
       width: "100px",

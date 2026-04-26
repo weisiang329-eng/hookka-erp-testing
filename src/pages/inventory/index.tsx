@@ -819,13 +819,33 @@ const wipColumns: Column<WIPItem>[] = [
     key: "totalQty",
     label: "Qty",
     align: "right",
-    render: (_v, row) => <span className="font-medium text-[#1F1D1B]">{row.totalQty}</span>,
+    render: (_v, row) => {
+      const breakdown = row.sources.length > 0
+        ? row.sources.map((s) => `${s.poCode}: ${s.quantity}`).join(" · ")
+        : "No PO breakdown available";
+      return (
+        <span className="font-medium text-[#1F1D1B]" title={`Total pieces in WIP at this stage. ${breakdown}`}>
+          {row.totalQty}
+        </span>
+      );
+    },
   },
   {
     key: "sources",
-    label: "POs",
+    label: "Source POs",
     align: "right",
-    render: (_v, row) => <span className="text-sm text-[#6B7280]">{row.sources.length}</span>,
+    render: (_v, row) => (
+      <span
+        className="text-sm text-[#6B7280]"
+        title={
+          row.sources.length > 0
+            ? `Contributed by: ${row.sources.map((s) => `${s.poCode} (qty ${s.quantity})`).join(", ")}`
+            : "No production orders linked"
+        }
+      >
+        {row.sources.length}
+      </span>
+    ),
   },
   {
     key: "oldestAgeDays",

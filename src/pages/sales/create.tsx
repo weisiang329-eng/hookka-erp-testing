@@ -22,6 +22,11 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 
 type SeatHeightTier = { height: string; priceSen: number };
 
+// Maintenance config (kv_config 'variants-config') values are either bare
+// strings (e.g. '4"') or { value, priceSen } pairs. Each consumer narrows
+// the union further.
+type MaintenanceConfigValue = string | { value: string; priceSen: number };
+
 type SofaModule = {
   productId: string;
   productCode: string;
@@ -188,8 +193,7 @@ function CreateSalesOrderPage() {
     incompleteProducts: Array<{ productCode: string; productName: string; reason: string }>;
     soId: string | null;
   }>({ open: false, incompleteProducts: [], soId: null });
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, any[]> | null>(null);
+  const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, MaintenanceConfigValue[]> | null>(null);
 
   const [customerId, setCustomerId] = useState("");
   const [deliveryHubId, setDeliveryHubId] = useState("");
@@ -250,9 +254,9 @@ function CreateSalesOrderPage() {
 
     const applyCfg = (cfg: Record<string, unknown> | null) => {
       if (cfg && Object.keys(cfg).length > 0) {
-        setMaintenanceConfig(cfg as Record<string, any[]>);
+        setMaintenanceConfig(cfg as Record<string, MaintenanceConfigValue[]>);
       } else {
-        setMaintenanceConfig(FACTORY_DEFAULTS as Record<string, any[]>);
+        setMaintenanceConfig(FACTORY_DEFAULTS as Record<string, MaintenanceConfigValue[]>);
       }
     };
 
@@ -944,8 +948,7 @@ type LineItemCardProps = {
   getUnitPrice: (item: LineItem) => number;
   getLineTotal: (item: LineItem) => number;
   getTotalHeight: (item: LineItem) => number;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  maintenanceConfig: Record<string, any[]> | null;
+  maintenanceConfig: Record<string, MaintenanceConfigValue[]> | null;
 };
 
 function LineItemCard({

@@ -253,19 +253,6 @@ app.get("/", async (c) => {
       else groups.set(key, [jc]);
     }
 
-    // PO-level "fabric pulled" flag. The shop floor cuts the whole bolt
-    // for a PO at once and the operator pulls the entire stack to Fab Sew
-    // — so the moment ANY Fab Sew job card in this PO is done, every
-    // remaining FAB_CUT in this PO has physically left the cutting room
-    // and should disappear from FC WIP. Mirrors the wip_items "sofa Fab
-    // Sew zeros all upstream FC" rule (see production-orders.ts ~L854),
-    // extended to BF + ACC per Wei Siang Apr 2026.
-    const anyFabSewDoneOnPO = myJcs.some(
-      (jc) =>
-        jc.departmentCode === "FAB_SEW" &&
-        (jc.status === "COMPLETED" || jc.status === "TRANSFERRED"),
-    );
-
     for (const [wipKey, cards] of groups) {
       const sorted = [...cards].sort((a, b) => a.sequence - b.sequence);
       const isDone = (c2: JCLite) =>
@@ -274,10 +261,6 @@ app.get("/", async (c) => {
       for (let i = 0; i < sorted.length; i++) {
         const card = sorted[i];
         if (!isDone(card)) continue;
-        // PO-level FC suppression: any FS done in this PO clears the
-        // entire FAB_CUT shelf for that PO. Per-component edge detection
-        // would otherwise leave un-sewn components stranded on FC.
-        if (card.departmentCode === "FAB_CUT" && anyFabSewDoneOnPO) continue;
         const nextCard = sorted[i + 1];
         if (nextCard && isDone(nextCard)) continue;
 

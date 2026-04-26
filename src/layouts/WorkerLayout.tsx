@@ -39,6 +39,7 @@ export type WorkerMe = {
 
 // Tiny helper — read the current token synchronously. Used by every
 // /worker page via `workerFetch()` to add the auth header.
+// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
 export function getWorkerToken(): string | null {
   try {
     return localStorage.getItem(WORKER_TOKEN_KEY);
@@ -49,6 +50,7 @@ export function getWorkerToken(): string | null {
 
 // Clear every piece of worker auth state. Called from logout and
 // from any 401 response.
+// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
 export function clearWorkerAuth() {
   try {
     localStorage.removeItem(WORKER_TOKEN_KEY);
@@ -61,6 +63,7 @@ export function clearWorkerAuth() {
 // Fetch wrapper that auto-attaches the X-Worker-Token header and
 // bounces to login on 401. Every /worker page should use this
 // instead of bare fetch so auth is never accidentally skipped.
+// eslint-disable-next-line react-refresh/only-export-components -- co-located worker auth helpers; HMR penalty is acceptable
 export async function workerFetch(
   input: string,
   init: RequestInit = {},

@@ -242,6 +242,7 @@ function CreateStockPODialog({
   // Load whichever list is active (WIP or FG) whenever the dialog opens
   // or the Type toggle changes. Keeps the picker data fresh — if the user
   // just created a new PO, its wipLabels should show up on the next open.
+  /* eslint-disable react-hooks/set-state-in-effect -- reset filters + fetch the picker list when the dialog opens or type toggles */
   useEffect(() => {
     if (!open) return;
     setSelectedKey("");
@@ -267,6 +268,7 @@ function CreateStockPODialog({
       })
       .catch(() => setLoadingList(false));
   }, [open, type]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Unique value lists used to populate the dropdown filters. Computed off
   // whichever pane (WIP / FG) is active so the options always match what's
@@ -641,6 +643,7 @@ export default function ProductionPage({
   // Keep activeTab in sync with the deptCode prop when navigating between
   // sibling dept routes (React Router reuses the component instance on
   // /production/fab-cut → /production/fab-sew transitions).
+  /* eslint-disable react-hooks/set-state-in-effect -- sync activeTab to route when React Router reuses this component instance across dept routes */
   useEffect(() => {
     if (mode === "dept" && deptCode && deptCode !== activeTab) {
       setActiveTabRaw(deptCode);
@@ -648,6 +651,7 @@ export default function ProductionPage({
       setActiveTabRaw("ALL");
     }
   }, [mode, deptCode, activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   // Wrapped setter that marks tab-switch start time; the matching end is
   // recorded at the top of the next render via useEffect below. Over 200ms
   // gets a [slow-tab] warn.
@@ -750,9 +754,11 @@ export default function ProductionPage({
     !!fltItemType ||
     !!fltModel ||
     fltLifecycle !== "active";
+  /* eslint-disable react-hooks/set-state-in-effect -- arm shouldFetch on first filter activity */
   useEffect(() => {
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
   }, [anyFilterActive, shouldFetch]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Mirror of the Production Sheet DataGrid's internal filter + sort result.
   // When a dept tab is active, Print Schedule and the on-screen QR Stickers
@@ -769,6 +775,7 @@ export default function ProductionPage({
   // Reset the mirror when the active tab changes — the new dept's grid will
   // report its own rows once it mounts. Without this, stale rows from the
   // previous dept would briefly filter the QR tile row to an empty set.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- derived: clear stale grid mirror on tab change
   useEffect(() => { setGridFilteredDeptRows(null); }, [activeTab]);
 
   // Batch sticker printing — populated when the user clicks "Print Job Card
@@ -852,10 +859,12 @@ export default function ProductionPage({
   const [_showFgPreview, setShowFgPreview] = useState(false);
   // Collapse both on tab change so the new tab starts fast; user re-opens
   // per tab if they actually need the QR grid.
+  /* eslint-disable react-hooks/set-state-in-effect -- derived: collapse heavy QR sections on tab change */
   useEffect(() => {
     setShowQRStrip(false);
     setShowFgPreview(false);
   }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   // When true, the fgStickers useEffect will fire window.print() on next
   // populate. Auto-population on UPH/PACK tab entry leaves this false so
   // the preview tiles render without triggering a print dialog.
@@ -2427,6 +2436,7 @@ export default function ProductionPage({
   // load so the tiles stay in sync with what the operator is looking at.
   // Other tabs clear the list so the hidden print container doesn't carry
   // stale data into a job-card print job.
+  /* eslint-disable react-hooks/set-state-in-effect -- conditional FG preview load + clear keyed off the active tab */
   useEffect(() => {
     if (activeTab === "UPHOLSTERY" || activeTab === "PACKING") {
       loadFgStickers();
@@ -2434,6 +2444,7 @@ export default function ProductionPage({
       setFgStickers([]);
     }
   }, [activeTab, loadFgStickers]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Once the batch container is rendered, fire the print dialog. Small
   // timeout lets React paint the hidden container first; QR images are
@@ -2458,6 +2469,7 @@ export default function ProductionPage({
 
   // TODO P4.3-followup: migrate to useTimeout — see the JC sticker effect
   // above for the same rationale.
+  /* eslint-disable react-hooks/set-state-in-effect -- print-fired-from-effect: same P4.3-followup migration as above */
   useEffect(() => {
     if (!fgPrintRequested) return;
     if (fgStickers.length === 0) {
@@ -2474,6 +2486,7 @@ export default function ProductionPage({
     }, 300);
     return () => clearTimeout(t);
   }, [fgStickers, fgPrintRequested]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Print the current filtered schedule as an A4 landscape listing. Opens
   // a new window populated with inline HTML + @page size:A4 landscape so

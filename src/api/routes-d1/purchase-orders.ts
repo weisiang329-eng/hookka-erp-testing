@@ -46,13 +46,19 @@ type PurchaseOrderItemRow = {
   unit: string | null;
 };
 
-// Same transitions as the in-memory route
+// PO lifecycle. RECEIVED → CLOSED added 2026-04-26 to match the
+// frontend's "Close PO" action button on procurement/detail.tsx — the
+// previous backend transition map ended at RECEIVED with no further
+// allowed states, so clicking Close PO returned 400 (the audit caught
+// this as a FE/BE drift). CLOSED is terminal: nothing more flows from
+// it. CANCELLED is also terminal.
 const VALID_TRANSITIONS: Record<string, string[]> = {
   DRAFT: ["SUBMITTED", "CANCELLED"],
   SUBMITTED: ["CONFIRMED", "CANCELLED"],
   CONFIRMED: ["PARTIAL_RECEIVED", "RECEIVED", "CANCELLED"],
   PARTIAL_RECEIVED: ["RECEIVED", "CANCELLED"],
-  RECEIVED: [],
+  RECEIVED: ["CLOSED"],
+  CLOSED: [],
   CANCELLED: [],
 };
 

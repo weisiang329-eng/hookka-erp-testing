@@ -57,22 +57,10 @@ const DEPARTMENTS = [
   { name: "Packing",    code: "PACKING" },
 ] as const;
 
-// Workflow order used by the upstream-lock rule: once a later dept's JC is
-// COMPLETED/TRANSFERRED we lock dueDate/completedDate edits on every earlier
-// dept's JC within the same wipKey. Mirrors src/api/lib/lead-times.ts DEPT_ORDER
-// (WOOD_CUT comes before FOAM there, but on the UI we keep the presentation
-// order the operator already knows — what matters is relative position between
-// a given pair for the lock decision).
-const DEPT_ORDER: readonly string[] = [
-  "FAB_CUT",
-  "FAB_SEW",
-  "FOAM",
-  "WOOD_CUT",
-  "FRAMING",
-  "WEBBING",
-  "UPHOLSTERY",
-  "PACKING",
-] as const;
+// DEPT_ORDER constant (previously used by buildSched's upstream-lock
+// predicate) was removed alongside the lock disable — see buildSched
+// for the rationale. The BOM-driven lock chain rewrite will reintroduce
+// a per-branch order helper rather than this flat list.
 
 // Simplified 3-state palette per user spec:
 //   completed = cyan, pending = amber, overdue = rose.
@@ -1278,20 +1266,22 @@ export default function ProductionPage({
     else if (due && due < today) state = "overdue";
     else state = "pending";
     const sortKey = state === "overdue" ? 3 : state === "pending" ? 2 : 1;
-    const myPos = DEPT_ORDER.indexOf(card.departmentCode);
-    // Scope the lock check to the CARD's own wipKey — siblings from other
-    // wipKey chains (parallel component branches) must NOT influence this
-    // card's lock state. Falls back to whole-PO comparison only when the
-    // card has no wipKey (legacy rows pre-dating BOM-driven chains).
-    const cardSiblings = card.wipKey
-      ? poJobCards.filter((j) => j.wipKey === card.wipKey)
-      : poJobCards;
-    const locked = myPos >= 0 && cardSiblings.some((j) => {
-      if (j.id === card.id) return false;
-      const jPos = DEPT_ORDER.indexOf(j.departmentCode);
-      if (jPos <= myPos) return false;
-      return j.status === "COMPLETED" || j.status === "TRANSFERRED";
-    });
+    // Lock UI disabled (2026-04-26) — aligns with backend.
+    //
+    // Backend already disabled the upstream-lock predicate at
+    // src/api/routes-d1/production-orders.ts:1255 + :2121 (PATCH guard +
+    // scan-complete guard are no-ops). Frontend used to compute `locked`
+    // from the same flat DEPT_ORDER + wipKey heuristic which:
+    //   (a) fired false positives across BOM parallel branches — Wood Cut
+    //       DONE wrongly locked Fab Cut/Sew on the same wipKey row, even
+    //       though backend would happily accept the patch
+    //   (b) rendered misleading 🔒 icons that no longer reflected any
+    //       backend gate — UX worse than full-off
+    // Until BOM-driven (per-branch) lock chain lands, set `locked = false`
+    // unconditionally so frontend matches backend reality. `poJobCards`
+    // stays in the signature for the eventual rewrite.
+    void poJobCards;
+    const locked = false;
     return {
       due, completed, state, sortKey, poId,
       jobCardId: card.id,

@@ -329,10 +329,10 @@ import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
 
-// Phase 5 — mock-backed routes mounted until each is migrated to D1.
-// Pure Hono handlers + in-memory data from src/lib/mock-data.ts, fully
-// Workers-runtime compatible. Returning real shapes (not stubs) keeps
-// the UI pages from crashing on .filter/.map over envelope objects.
+// Phase-5 imports — historically these were in-memory stubs, but every
+// route below has since been migrated to real D1 / Supabase persistence
+// (verified 2026-04-26). The import block name is kept for git-history
+// continuity; the routes themselves are fully durable.
 import accounting from "./routes-d1/accounting";
 import attendance from "./routes-d1/attendance";
 import cashFlow from "./routes-d1/cash-flow";
@@ -432,9 +432,10 @@ app.route("/api/mdm", mdm);
 // when env.FILES (R2 binding) is missing; see docs/R2-SETUP.md.
 app.route("/api/files", files);
 
-// Phase 5 — mock-backed. Same shapes as before; data lives in
-// src/lib/mock-data.ts. Writes here are in-memory only (reset on deploy)
-// so writes need real D1 persistence once the module is actively used.
+// Below routes were previously in-memory mock-backed (data in
+// src/lib/mock-data.ts); now all D1-persistent. Comment refreshed
+// 2026-04-26 — the original "writes are in-memory, reset on deploy"
+// claim was stale and actively misleading the next dev.
 app.route("/api/accounting", accounting);
 app.route("/api/attendance", attendance);
 app.route("/api/cash-flow", cashFlow);

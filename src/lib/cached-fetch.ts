@@ -163,6 +163,24 @@ function joinInflight<T>(url: string): Promise<T> {
     headers: { traceparent: buildTraceparent() },
   })
     .then((r) => r.json())
+    .then((j) => {
+      // Catch-all stub guard (2026-04-26): the backend's /api/* fallback in
+      // worker.ts returns `{success:true, data:[], _stub:true, path}` for
+      // any unrouted endpoint. Without surfacing this, a typo'd or
+      // unmounted route silently renders "no data" forever — exactly
+      // the failure mode that masked the linkedPOs bug for months.
+      // Warn loudly in dev so the next typo is caught immediately.
+      if (
+        j &&
+        typeof j === "object" &&
+        (j as { _stub?: unknown })._stub === true
+      ) {
+        console.warn(
+          `[cached-fetch] STUB RESPONSE for ${url} — backend route is not mounted (returned the catch-all _stub envelope from worker.ts). Frontend will see empty data. Check the route is registered in src/api/worker.ts.`,
+        );
+      }
+      return j as T;
+    })
     .finally(() => {
       // Drop the entry once settled — refs no longer matter after resolution.
       // Late releaseInflight() calls become no-ops.

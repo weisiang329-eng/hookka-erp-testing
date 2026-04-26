@@ -16,6 +16,8 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
+import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -220,6 +222,10 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
 // other three list endpoints but never changes the result set. Left as
 // a param so callers can pass the same query string uniformly.
 app.get("/", async (c) => {
+  // RBAC gate — listing DOs requires delivery-orders:read.
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+
   const db = c.var.DB;
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
@@ -282,6 +288,10 @@ app.get("/", async (c) => {
 // (Hono route ordering: static routes before wildcards).
 // ---------------------------------------------------------------------------
 app.get("/stats", async (c) => {
+  // RBAC gate — stats are aggregate reads of the same data, gated identically.
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+
   const res = await c.var.DB
     .prepare("SELECT status, COUNT(*) AS n FROM delivery_orders GROUP BY status")
     .all<{ status: string; n: number }>();
@@ -296,6 +306,10 @@ app.get("/stats", async (c) => {
 
 // POST /api/delivery-orders — create
 app.post("/", async (c) => {
+  // RBAC gate — only roles with delivery-orders:create may insert a new DO.
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+
   try {
     const body = await c.req.json();
 
@@ -602,6 +616,15 @@ app.post("/", async (c) => {
         500,
       );
     }
+
+    // Audit emit (P3.4) — DO create. Mirrors the sales-orders pattern.
+    await emitAudit(c, {
+      resource: "delivery-orders",
+      resourceId: id,
+      action: "create",
+      after: { status: "DRAFT", doNo, salesOrderId: salesOrderRow?.id ?? null },
+    });
+
     return c.json({ success: true, data: created }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -610,6 +633,10 @@ app.post("/", async (c) => {
 
 // GET /api/delivery-orders/:id — single
 app.get("/:id", async (c) => {
+  // RBAC gate — single-record reads also require delivery-orders:read.
+  const denied = await requirePermission(c, "delivery-orders", "read");
+  if (denied) return denied;
+
   const order = await fetchOrderWithItems(c.var.DB, c.req.param("id"));
   if (!order) {
     return c.json({ success: false, error: "Delivery order not found" }, 404);
@@ -620,6 +647,12 @@ app.get("/:id", async (c) => {
 // PUT /api/delivery-orders/:id — update (supports status transitions, PoD,
 // driver/lorry changes, and full item replacement).
 app.put("/:id", async (c) => {
+  // RBAC gate — every mutation path on the DO row goes through PUT, including
+  // status transitions (load / dispatch / deliver / invoice), driver swaps,
+  // and POD writes. Single delivery-orders:update gate covers all of them.
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -1122,6 +1155,22 @@ app.put("/:id", async (c) => {
     await c.var.DB.batch(statements);
 
     const updated = await fetchOrderWithItems(c.var.DB, id);
+
+    // Audit emit (P3.4) — status transitions on a DO are forensic events
+    // (e.g. "who marked DO-XXX delivered"). The SO cascade already writes
+    // so_status_changes for the upstream SO; this gives the DO itself a
+    // first-class trail. Snapshot before/after status only — full row
+    // snapshots can balloon the audit table once POD blobs land.
+    if (existing.status !== nextStatus) {
+      await emitAudit(c, {
+        resource: "delivery-orders",
+        resourceId: id,
+        action: "update",
+        before: { status: existing.status },
+        after: { status: nextStatus },
+      });
+    }
+
     return c.json({ success: true, data: updated });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -1130,6 +1179,10 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/delivery-orders/:id — only DRAFT rows are deletable.
 app.delete("/:id", async (c) => {
+  // RBAC gate — DO deletion is destructive, gated by delivery-orders:delete.
+  const denied = await requirePermission(c, "delivery-orders", "delete");
+  if (denied) return denied;
+
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT id, status FROM delivery_orders WHERE id = ?",
@@ -1154,6 +1207,16 @@ app.delete("/:id", async (c) => {
     ).bind(id),
     c.var.DB.prepare("DELETE FROM delivery_orders WHERE id = ?").bind(id),
   ]);
+
+  // Audit emit (P3.4) — DO deletion. before-snapshot captures the status so
+  // we know what was destroyed.
+  await emitAudit(c, {
+    resource: "delivery-orders",
+    resourceId: id,
+    action: "delete",
+    before: { status: existing.status },
+  });
+
   return c.json({ success: true });
 });
 

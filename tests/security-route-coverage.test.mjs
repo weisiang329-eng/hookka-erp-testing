@@ -40,6 +40,15 @@ const routes = [
     file: "src/api/routes-d1/payments.ts",
     required: [["payments", "create"]],
   },
+  {
+    file: "src/api/routes-d1/delivery-orders.ts",
+    required: [
+      ["delivery-orders", "read"],
+      ["delivery-orders", "create"],
+      ["delivery-orders", "update"],
+      ["delivery-orders", "delete"],
+    ],
+  },
 ];
 
 for (const r of routes) {
@@ -108,10 +117,12 @@ test("total requirePermission call count across gated routes does not regress", 
     total += matches.length;
   }
   // Current floor as of 2026-04-25:
-  //   sales-orders.ts: 2 (create + confirm)
-  //   payments.ts:     1 (create)
-  // Total = 3. If you add a gate, raise this number with the same PR.
-  const FLOOR = 3;
+  //   sales-orders.ts:    2 (create + confirm)
+  //   payments.ts:        1 (create)
+  //   delivery-orders.ts: 6 (list-read + stats-read + single-read + create
+  //                          + update + delete)
+  // Total = 9. If you add a gate, raise this number with the same PR.
+  const FLOOR = 9;
   assert.ok(
     total >= FLOOR,
     `requirePermission gate count ${total} < floor ${FLOOR} — a gate was removed`,

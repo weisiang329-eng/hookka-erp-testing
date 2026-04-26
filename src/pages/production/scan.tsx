@@ -129,7 +129,7 @@ function ScannerPage() {
       });
   }, []);
 
-  const doLookup = useCallback(async (query?: string, fgSentinel?: string) => {
+  const doLookup = useCallback(async (query?: string) => {
     const searchTerm = (query || manualInput).trim();
     if (!searchTerm) return;
 
@@ -149,26 +149,6 @@ function ScannerPage() {
 
       const orders: ProductionOrder[] = data.data as ProductionOrder[];
       let found: { order: ProductionOrder; jobCard: JobCard } | null = null;
-
-      // Merged FG-level scan (e.g. FAB_CUT plan-B sticker). The sentinel
-      // id isn't a real job card; find the PO by poNo and synthesize a
-      // display job card that carries the sentinel id so the submit
-      // handler routes to scan-complete-dept.
-      if (fgSentinel) {
-        const deptCode = fgSentinel.replace(/^FG-/, "");
-        for (const order of orders) {
-          if (order.poNo.toLowerCase() === searchTerm.toLowerCase()) {
-            const anyDeptJc = order.jobCards.find((j) => j.departmentCode === deptCode);
-            if (anyDeptJc) {
-              found = {
-                order,
-                jobCard: { ...anyDeptJc, id: fgSentinel },
-              };
-            }
-            break;
-          }
-        }
-      }
 
       // Search by job card ID first
       if (!found) {
@@ -224,18 +204,9 @@ function ScannerPage() {
       setScannedPieceNo(parsed.pieceNo);
     }
     const opId = parsed?.opId || searchParams.get("op");
-    const poNoFromQr = parsed?.poNo || searchParams.get("po");
     if (opId) {
       setManualInput(opId);
-      // Merged FG-level sticker (e.g. "FG-FAB_CUT") — lookup can't find a
-      // job card with that synthetic id, so search by PO number instead
-      // and keep the sentinel id on the jobCard so handleCompleteScan
-      // knows to hit the fan-out endpoint.
-      if (/^FG-[A-Z_]+$/.test(opId) && poNoFromQr) {
-        doLookup(poNoFromQr, opId);
-      } else {
-        doLookup(opId);
-      }
+      doLookup(opId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -245,27 +216,17 @@ function ScannerPage() {
     if (!lookupResult || !selectedWorkerId) return;
     setSubmitting(true);
     try {
-      // FG-level merged sticker path (today: FAB_CUT). The opId that came
-      // off the QR is the sentinel "FG-<DEPT>" — route to the fan-out
-      // endpoint which flips every matching dept job card on the PO in
-      // one request, instead of the per-jc scan-complete which only
-      // touches one card and leaves the others pending.
-      const fgMatch = /^FG-([A-Z_]+)$/.exec(lookupResult.jobCard.id);
-      const endpoint = fgMatch
-        ? `/api/production-orders/${lookupResult.order.id}/scan-complete-dept`
-        : `/api/production-orders/${lookupResult.order.id}/scan-complete`;
-      const payload = fgMatch
-        ? { deptCode: fgMatch[1], workerId: selectedWorkerId }
-        : {
-            jobCardId: lookupResult.jobCard.id,
-            workerId: selectedWorkerId,
-            // Forward the per-piece number the QR sticker carried. Without
-            // this, a multi-piece job card (qty=N) would always increment
-            // piece 1 no matter which sticker the operator scanned — the
-            // backend's sticker-binding + FIFO logic rely on pieceNo to
-            // route the scan to the right piece_pics slot.
-            pieceNo: scannedPieceNo,
-          };
+      const endpoint = `/api/production-orders/${lookupResult.order.id}/scan-complete`;
+      const payload = {
+        jobCardId: lookupResult.jobCard.id,
+        workerId: selectedWorkerId,
+        // Forward the per-piece number the QR sticker carried. Without
+        // this, a multi-piece job card (qty=N) would always increment
+        // piece 1 no matter which sticker the operator scanned — the
+        // backend's sticker-binding + FIFO logic rely on pieceNo to
+        // route the scan to the right piece_pics slot.
+        pieceNo: scannedPieceNo,
+      };
       const data = await fetchJson(endpoint, ScanCompleteSchema, {
         method: "POST",
         body: payload,

@@ -27,7 +27,6 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
-import { DEPT_ORDER } from "../lib/lead-times";
 import { resolveWorkerToken } from "./worker-auth";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
@@ -1253,48 +1252,18 @@ async function applyPoUpdate(
       );
     }
 
-    // Upstream-lock rule: when an operator tries to edit dueDate or
-    // completedDate on this JC, refuse if any DOWNSTREAM JC in the same
-    // wipKey branch has already been COMPLETED / TRANSFERRED. The UI greys
-    // out the cell too, but this guard enforces the rule even when the PATCH
-    // comes from a stale client or a direct API call.
+    // Upstream-lock disabled (2026-04-26, user request).
     //
-    // Status changes are intentionally NOT blocked here — the operator un-
-    // completing the downstream dept is precisely the path the error message
-    // tells them to take. The merged-row Fab Cut date-cell click sends BOTH
-    // `status` and `completedDate` (the operator's intent IS to advance
-    // status; the date is a side-effect stamp). Treat any patch that
-    // includes `status` as a status change — the guard only fires on PURE
-    // date edits, which is the original intent of the rule. Without this
-    // exemption, the merged-row fan-out could hit a phantom 409 even on a
-    // clean WAITING → COMPLETED transition.
-    const isStatusChange = body.status !== undefined;
-    if (
-      !isStatusChange &&
-      (body.dueDate !== undefined || body.completedDate !== undefined)
-    ) {
-      const laterDone = await db
-        .prepare(
-          `SELECT 1 FROM job_cards
-           WHERE productionOrderId = ?
-             AND wipKey = ?
-             AND sequence > ?
-             AND status IN ('COMPLETED','TRANSFERRED')
-           LIMIT 1`,
-        )
-        .bind(jcRow.productionOrderId, jcRow.wipKey, jcRow.sequence)
-        .first();
-      if (laterDone) {
-        return c.json(
-          {
-            success: false,
-            error:
-              "Cannot modify — a later department is already completed. Undo that first.",
-          },
-          409,
-        );
-      }
-    }
+    // The wipKey + sequence predicate doesn't model the BOM tree's parallel
+    // branches: within one wipKey ("DIVAN" / "HEADBOARD" / "SOFA_*") the
+    // FAB chain (FAB_CUT→FAB_SEW…) and WOOD chain (WOOD_CUT→FRAMING→
+    // WEBBING…) run independently and only converge at UPHOLSTERY. The
+    // previous predicate treated WOOD_CUT (sequence 3) as downstream of
+    // FAB_CUT/FAB_SEW (sequences 1/2), so completing Wood Cut wrongly 409'd
+    // pure-date edits on the fabric branch. Frontend lock UI is also a
+    // no-op (see src/pages/production/index.tsx buildSched). Will be
+    // restored once the lock chain is derived from the actual BOM template
+    // at runtime.
 
     // Mutate a shallow copy — final UPDATE statement below writes it.
     const updated: JobCardRow = { ...jcRow };
@@ -2044,102 +2013,6 @@ app.post("/stock", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/production-orders/:id/scan-complete-dept
-// DEPRECATED 2026-04-26 (Wei Siang FAB_CUT normalization): no sticker
-// path emits the FG-<DEPT> sentinel anymore. Each JC now gets its own
-// per-JC sticker scanned through /scan-complete. The route is kept
-// alive for transition safety (in case a paper sticker generated
-// before the change is still in circulation), but new code MUST NOT
-// call it. Logs a warn so we can spot stale call sites.
-// ---------------------------------------------------------------------------
-app.post("/:id/scan-complete-dept", async (c) => {
-  console.warn(
-    "[deprecated] scan-complete-dept invoked — caller should switch to per-JC /scan-complete",
-  );
-  const db = c.var.DB;
-  const poId = c.req.param("id");
-  const po = await db
-    .prepare("SELECT * FROM production_orders WHERE id = ?")
-    .bind(poId)
-    .first<ProductionOrderRow>();
-  if (!po) return c.json({ success: false, error: "Production order not found" }, 404);
-  if (po.status === "ON_HOLD") {
-    return c.json({ success: false, code: "PO_ON_HOLD", error: "此 Production Order 处于 ON_HOLD。主管恢复后才能扫描。" }, 409);
-  }
-  if (po.status === "CANCELLED") {
-    return c.json({ success: false, code: "PO_CANCELLED", error: "此 Production Order 已被取消,无法扫描。" }, 409);
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const body: any = await c.req.json().catch(() => ({}));
-  const { deptCode, workerId } = body || {};
-  if (!deptCode || !workerId) {
-    return c.json({ success: false, error: "deptCode and workerId are required" }, 400);
-  }
-
-  // Same worker-auth pattern as scan-complete — dashboard sessions pass
-  // the userId gate, worker portals bind via x-worker-token.
-  const ctxUserId = (c as unknown as { get: (k: string) => unknown }).get("userId");
-  const workerToken = c.req.header("x-worker-token");
-  if (!ctxUserId) {
-    const resolvedWorkerId = await resolveWorkerToken(db, workerToken);
-    if (!resolvedWorkerId || resolvedWorkerId !== workerId) {
-      return c.json({ success: false, error: "Worker auth mismatch", code: "AUTH_MISMATCH" }, 403);
-    }
-  }
-
-  const worker = await db
-    .prepare("SELECT id, name FROM workers WHERE id = ?")
-    .bind(workerId)
-    .first<{ id: string; name: string }>();
-  if (!worker) return c.json({ success: false, error: "Worker not found" }, 400);
-
-  const jcRows = await db
-    .prepare(
-      `SELECT id, status FROM job_cards
-         WHERE productionOrderId = ? AND departmentCode = ?`,
-    )
-    .bind(poId, deptCode)
-    .all<{ id: string; status: string }>();
-  const pending = (jcRows.results ?? []).filter(
-    (r) => r.status !== "COMPLETED" && r.status !== "TRANSFERRED",
-  );
-  if (pending.length === 0) {
-    return c.json({
-      success: true,
-      completed: 0,
-      alreadyDone: (jcRows.results ?? []).length,
-      message: `All ${deptCode} job cards on this PO are already done`,
-    });
-  }
-
-  const nowIso = new Date().toISOString();
-  const today = nowIso.slice(0, 10);
-  const statements = pending.map((r) =>
-    db
-      .prepare(
-        `UPDATE job_cards
-             SET status = 'COMPLETED',
-                 completedDate = ?,
-                 pic1Id = COALESCE(pic1Id, ?),
-                 pic1Name = COALESCE(NULLIF(pic1Name, ''), ?)
-           WHERE id = ?`,
-      )
-      .bind(today, worker.id, worker.name, r.id),
-  );
-  await db.batch(statements);
-
-  return c.json({
-    success: true,
-    completed: pending.length,
-    alreadyDone: (jcRows.results ?? []).length - pending.length,
-    deptCode,
-    poId,
-    completedIds: pending.map((r) => r.id),
-  });
-});
-
-// ---------------------------------------------------------------------------
 // POST /api/production-orders/:id/scan-complete
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
@@ -2245,76 +2118,13 @@ app.post("/:id/scan-complete", async (c) => {
     return c.json({ success: false, error: "Worker not found" }, 400);
   }
 
-  // ---- Upstream-lock enforcement -------------------------------------------
-  // Mirrors the PATCH guard in applyPoUpdate (production-orders.ts:585-607).
-  // If any LATER dept in DEPT_ORDER for the same wipKey on this PO is already
-  // COMPLETED / TRANSFERRED, the operator is trying to retroactively scan a
-  // piece whose downstream work already landed — must undo downstream first.
-  //
-  // DEPT_ORDER is the forward production order; we compare against job_cards
-  // for the same (productionOrderId, wipKey) whose departmentCode appears
-  // LATER in DEPT_ORDER than this one.
-  const myDeptIdx = DEPT_ORDER.indexOf(
-    (scannedJc.departmentCode ?? "") as (typeof DEPT_ORDER)[number],
-  );
-  if (myDeptIdx >= 0 && scannedJc.wipKey) {
-    const siblingsRes = await db
-      .prepare(
-        `SELECT departmentCode, status FROM job_cards
-         WHERE productionOrderId = ? AND wipKey = ?`,
-      )
-      .bind(scannedJc.productionOrderId, scannedJc.wipKey)
-      .all<{ departmentCode: string | null; status: string }>();
-    const laterDone = (siblingsRes.results ?? []).some((s) => {
-      const idx = DEPT_ORDER.indexOf(
-        (s.departmentCode ?? "") as (typeof DEPT_ORDER)[number],
-      );
-      return (
-        idx > myDeptIdx &&
-        (s.status === "COMPLETED" || s.status === "TRANSFERRED")
-      );
-    });
-    if (laterDone) {
-      // Soft warning path — without `force: true` we ask the worker to
-      // confirm before proceeding. The PATCH guard in applyPoUpdate still
-      // treats this as a hard reject (editing past dates via admin UI is
-      // different from completing work on the shop floor).
-      if (!forced) {
-        return c.json(
-          {
-            success: false,
-            requiresConfirmation: true,
-            warning: {
-              code: "UPSTREAM_LOCKED",
-              message: "后面 dept 已经完工,确定继续?",
-            },
-            data: {
-              jobCardId: scannedJc.id,
-              blockedBy: "DOWNSTREAM_COMPLETED",
-            },
-          },
-          202,
-        );
-      }
-      // Forced — record the override so we can trace who bypassed what.
-      await db
-        .prepare(
-          `INSERT INTO scan_override_audit
-             (id, workerId, workerName, jobCardId, productionOrderId,
-              overrideCode, reason, created_at)
-           VALUES (?, ?, ?, ?, ?, 'UPSTREAM_LOCKED', 'force scan', ?)`,
-        )
-        .bind(
-          `soa-${crypto.randomUUID().slice(0, 8)}`,
-          workerId,
-          worker.name,
-          scannedJc.id,
-          scannedJc.productionOrderId,
-          new Date().toISOString(),
-        )
-        .run();
-    }
-  }
+  // Upstream-lock disabled (2026-04-26, user request) — same reasoning as
+  // the PATCH guard above: the flat DEPT_ORDER + wipKey predicate doesn't
+  // model the BOM tree's parallel branches (FAB chain vs WOOD chain inside
+  // one wipKey only converge at UPHOLSTERY). The previous predicate flagged
+  // any FAB_CUT/FAB_SEW scan as UPSTREAM_LOCKED the moment WOOD_CUT
+  // completed, which is wrong. Re-enable once the lock chain is derived
+  // from the BOM template at runtime.
 
   // ---- prerequisiteMet check -----------------------------------------------
   // The sales-orders planner stamps prerequisiteMet=1 on the first dept of

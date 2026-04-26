@@ -1854,7 +1854,7 @@ export default function ProductsPage() {
                               </span>
                             </div>
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)} m&sup3;
+                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
                             </div>
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                               {(cfg?.fabricUsage ?? p.fabricUsage)} m
@@ -1898,7 +1898,7 @@ export default function ProductsPage() {
                                   onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
                                   className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
                                 >
-                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)} m&sup3;
+                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
                                 </button>
                               )}
                             </div>

@@ -1066,7 +1066,7 @@ export default function DeliveryPage() {
         align: "right",
         sortable: true,
         render: (_v, row) => (
-          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)} m&sup3;</span>
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)}</span>
         ),
       },
       { key: "currentDepartment", label: "Current Dept", type: "text", width: "100px", sortable: true },
@@ -1192,7 +1192,7 @@ export default function DeliveryPage() {
         align: "right",
         sortable: true,
         render: (_v, row) => (
-          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)} m&sup3;</span>
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)}</span>
         ),
       },
       { key: "rackingNumber", label: "Rack", type: "text", width: "80px", sortable: true },
@@ -1329,11 +1329,11 @@ export default function DeliveryPage() {
         key: "totalM3",
         label: "Total M\u00B3",
         type: "number",
-        width: "100px",
+        width: "90px",
         align: "right",
         sortable: true,
         render: (_v, row) => (
-          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)} m&sup3;</span>
+          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)}</span>
         ),
       },
       { key: "driverName", label: "3PL / Driver", type: "text", width: "120px", sortable: true },

@@ -1516,13 +1516,31 @@ export function DataGrid<T extends Record<string, any>>({
                 // exist in the DOM at any time. Note that grouping is
                 // disabled in this path (virtualizationActive guards it).
                 if (virtualizationActive) {
-                  const virtualItems = rowVirtualizer.getVirtualItems();
+                  // Clip virtualItems to the current sortedData length. The
+                  // tanstack-virtual instance can transiently emit indices
+                  // computed from a *previous* `count` value when the count
+                  // shrinks sharply in the same tick that React passes new
+                  // options — e.g., applying a column-value filter that
+                  // narrows 460 rows down to 3. Its internal getMeasurements
+                  // memo recomputes synchronously on the next call, but the
+                  // body render uses whatever getVirtualItems() emits in this
+                  // pass. Without an explicit clip, stale indices slipped
+                  // through the body and rendered alongside the freshly
+                  // filtered rows, producing a row count that disagreed with
+                  // the "X of Y records" badge (Wei Siang's Apr 26 2026 Fab
+                  // Cut report). Using `sortedData.length` as the upper bound
+                  // mirrors the badge — body and badge are now derived from
+                  // the same source of truth.
+                  const rawVirtualItems = rowVirtualizer.getVirtualItems();
+                  const virtualItems = rawVirtualItems.filter(
+                    (v) => v.index < sortedData.length,
+                  );
                   const totalSize = rowVirtualizer.getTotalSize();
                   const colSpan = visibleColumns.length + (selectable ? 1 : 0);
                   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
                   const paddingBottom =
                     virtualItems.length > 0
-                      ? totalSize - virtualItems[virtualItems.length - 1].end
+                      ? Math.max(0, totalSize - virtualItems[virtualItems.length - 1].end)
                       : 0;
                   const out: React.ReactNode[] = [];
                   if (paddingTop > 0) {

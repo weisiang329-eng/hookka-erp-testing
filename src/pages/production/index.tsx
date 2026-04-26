@@ -9,7 +9,6 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { useToast } from "@/components/ui/toast";
 
 // ----- types -----
 type JobCard = {
@@ -607,7 +606,6 @@ export default function ProductionPage({
   deptCode,
 }: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
-  const { toast } = useToast();
   // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
   // entire piece_pics tree on the wire. The Production page never reads
   // them and this response ships ~530 POs × ~9k JCs — the largest payload
@@ -949,74 +947,6 @@ export default function ProductionPage({
       if (Array.isArray(list)) setWorkers(list);
     }
   }
-
-  // Batched variant — one setOrders pass for a whole list of JC edits, plus
-  // parallel PATCH fetches. Used by merged-row completion fan-out where
-  // calling patchJobCard N times in a loop would otherwise trigger N full
-  // re-renders of a 430-row grid. Single-JC callers should still use the
-  // plain patchJobCard below; this is explicitly for fan-outs.
-  type JcPatch = Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">>;
-  const patchJobCardsBatch = useCallback(
-    (edits: Array<{ poId: string; jobCardId: string; patch: JcPatch }>) => {
-      if (edits.length === 0) return;
-      // Index by poId → jcId → patch for O(1) lookup inside the map below.
-      const byPo = new Map<string, Map<string, JcPatch>>();
-      for (const { poId, jobCardId, patch } of edits) {
-        if (!byPo.has(poId)) byPo.set(poId, new Map());
-        byPo.get(poId)!.set(jobCardId, patch);
-      }
-      setOrders((prev) =>
-        prev.map((o) => {
-          const jcPatches = byPo.get(o.id);
-          if (!jcPatches) return o;
-          return {
-            ...o,
-            jobCards: o.jobCards.map((j) => {
-              const p = jcPatches.get(j.id);
-              return p ? { ...j, ...p } : j;
-            }),
-          };
-        }),
-      );
-      // Parallel PATCH — fires all in flight, no awaits. No cache invalidation:
-      // optimistic setOrders above already reflects the change, and invalidating
-      // the list prefix would force a full re-download on next mount (hundreds
-      // of rows × dept columns). Single-entity detail pages do their own
-      // per-id invalidation if needed.
-      //
-      // Post-fan-out verification: allSettled (not all) so one failure doesn't
-      // abort sibling checks. Each response is verified for res.ok + JSON
-      // success; any partial failure raises a toast so shop floor sees it.
-      Promise.allSettled(
-        edits.map(({ poId, jobCardId, patch }) =>
-          fetch(`/api/production-orders/${poId}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ jobCardId, ...patch }),
-          }).then(async (res) => {
-            const body = (await res.json().catch(() => null)) as { success?: boolean } | null;
-            return { res, body, poId, jobCardId };
-          }),
-        ),
-      ).then((results) => {
-        const failed: Array<{ poId: string; jobCardId: string; reason: string }> = [];
-        for (let i = 0; i < results.length; i++) {
-          const r = results[i];
-          if (r.status === "rejected") {
-            failed.push({ poId: edits[i].poId, jobCardId: edits[i].jobCardId, reason: String(r.reason) });
-          } else if (!r.value.res.ok || (r.value.body && r.value.body.success === false)) {
-            failed.push({ poId: r.value.poId, jobCardId: r.value.jobCardId, reason: `HTTP ${r.value.res.status}` });
-          }
-        }
-        if (failed.length > 0) {
-          const okCount = edits.length - failed.length;
-          console.error("[patchJobCardsBatch] partial failure", failed);
-          toast.error(`Fab Cut complete applied to ${okCount}/${edits.length} components. ${failed.length} failed — check Overview tab for mismatches.`);
-        }
-      });
-    },
-    [toast],
-  );
 
   // Optimistic PATCH helper for inline job-card edits (due date, completion,
   // PIC1, PIC2). Updates local state immediately so the grid reflows, then
@@ -1747,7 +1677,7 @@ export default function ProductionPage({
           openDatePicker(
             row.completedDate,
             (v) => {
-              const patch: JcPatch = {
+              const patch: Parameters<typeof patchJobCard>[2] = {
                 completedDate: v,
                 status: v ? "COMPLETED" : "WAITING",
               };

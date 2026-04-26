@@ -840,6 +840,14 @@ export type JobCard = {
   wipCode?: string;      // e.g. "Divan Heights Queen"
   wipType?: string;      // WIPType discriminator
   wipLabel?: string;     // human label for table column, e.g. "Divan", "Headboard", "Sofa Base"
+  // BOM-branch identifier (added 2026-04-27). Equals the top-level
+  // wipComponent's wipCode that this JC's subtree descended from. Within
+  // one wipKey, the BOM has parallel branches (e.g. BF Divan: "Foam"
+  // branch and "Fabric" branch) that converge at UPHOLSTERY. Empty
+  // string for joint terminals (UPH, PACK) which sit at the BOM root
+  // and are shared by every branch. (wipKey, branchKey) is the correct
+  // grouping key for lock + consume + WIP-display sibling lookups.
+  branchKey?: string;
   // Effective quantity for THIS WIP on the parent PO. Computed at PO
   // generation time as `node.quantity × parentWipQty × item.quantity`.
   // Example: a bedframe SO line qty=1 with Divan BOM quantity=2 yields a

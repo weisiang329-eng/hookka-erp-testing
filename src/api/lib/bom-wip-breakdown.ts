@@ -44,6 +44,13 @@ type BomWipNode = {
 
 export type BomVariantContext = {
   productCode?: string | null;
+  // Parent/base model SKU (e.g. "5531" for variant "5531-L(RHF)"). Read
+  // from bom_templates.baseModel by the JC builder. When BOM templates use
+  // `{MODEL}` they mean the model-level identifier — e.g. an armrest WIP
+  // shared across `5531-L(RHF)`, `5531-2A(LHF)` etc. should render as
+  // `5531 -Left Arm`, not `5531-L(RHF) -Left Arm`. Falls back to
+  // productCode when null so legacy callers keep working.
+  model?: string | null;
   sizeLabel?: string | null;
   sizeCode?: string | null;
   fabricCode?: string | null;
@@ -110,13 +117,20 @@ export function resolveWipTokens(
   const totalStr = totalH > 0 ? `${totalH}"` : "";
   const size = ctx.sizeLabel || ctx.sizeCode || "";
   const productCode = ctx.productCode || "";
+  // {MODEL} ≠ {PRODUCT_CODE}. Model is the shared parent SKU (e.g. "5531");
+  // PRODUCT_CODE is the variant (e.g. "5531-L(RHF)"). When the BOM authors
+  // wrote `{MODEL} -Back Cushion {SEAT_SIZE}` they meant the cushion is
+  // shared across all variants of the same model, so it should NOT pick up
+  // the variant suffix. Fall back to productCode only when caller didn't
+  // provide a model — the legacy behaviour from before BUG-2026-04-27-004.
+  const model = ctx.model || productCode;
   const fabric = ctx.fabricCode || "";
   return template
     .replace(/\{DIVAN_HEIGHT\}/g, divanH)
     .replace(/\{SIZE\}/g, size)
     .replace(/\{FABRIC\}/g, fabric)
     .replace(/\{PRODUCT_CODE\}/g, productCode)
-    .replace(/\{MODEL\}/g, productCode)
+    .replace(/\{MODEL\}/g, model)
     .replace(/\{TOTAL_HEIGHT\}/g, totalStr)
     .replace(/\{SEAT_SIZE\}/g, ctx.sizeCode || "")
     .replace(/\s+/g, " ")

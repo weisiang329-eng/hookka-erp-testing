@@ -72,6 +72,7 @@ type JCLite = {
   wipType: string | null;
   wipLabel: string | null;
   wipQty: number | null;
+  branchKey: string | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -170,7 +171,8 @@ app.get("/", async (c) => {
       .prepare(
         `SELECT jc.id, jc.productionOrderId, jc.departmentCode, jc.sequence,
                 jc.status, jc.completedDate, jc.productionTimeMinutes,
-                jc.wipKey, jc.wipCode, jc.wipType, jc.wipLabel, jc.wipQty
+                jc.wipKey, jc.wipCode, jc.wipType, jc.wipLabel, jc.wipQty,
+                jc.branchKey
            FROM job_cards jc
            JOIN production_orders po ON po.id = jc.productionOrderId
           WHERE po.status IN (${placeholders})`,
@@ -244,16 +246,30 @@ app.get("/", async (c) => {
     const materialPerMinuteSen =
       totalPOMinsPerUnit > 0 ? bomCostPerUnitSen / totalPOMinsPerUnit : 0;
 
-    // Group job cards by wipKey.
+    // Group job cards by (wipKey, branchKey). Within one wipKey the BOM
+    // has multiple parallel branches that converge only at UPHOLSTERY —
+    // grouping by wipKey alone collapses them into a single chain and the
+    // edge-detection loop below misclassifies a Wood Cut completion as
+    // having "consumed" a Fab Sew row that's on a different branch
+    // (BUG-2026-04-27 root cause). branchKey isolates each branch so each
+    // branch's edge is computed independently. Joint terminals
+    // (UPHOLSTERY, PACKING) carry branchKey="" which gives them their own
+    // group — that's correct: their edge is shared by every branch but
+    // they don't have parallel siblings within their group.
     const groups = new Map<string, JCLite[]>();
     for (const jc of myJcs) {
-      const key = jc.wipKey || "FG";
+      const wk = jc.wipKey || "FG";
+      const bk = jc.branchKey ?? "";
+      const key = `${wk}::__BRANCH__::${bk}`;
       const arr = groups.get(key);
       if (arr) arr.push(jc);
       else groups.set(key, [jc]);
     }
 
-    for (const [wipKey, cards] of groups) {
+    for (const [groupKey, cards] of groups) {
+      // wipKey is the prefix before the "::__BRANCH__::" delimiter; we
+      // recover it for downstream label-shape decisions that still use it.
+      const wipKey = groupKey.split("::__BRANCH__::")[0];
       const sorted = [...cards].sort((a, b) => a.sequence - b.sequence);
       const isDone = (c2: JCLite) =>
         c2.status === "COMPLETED" || c2.status === "TRANSFERRED";

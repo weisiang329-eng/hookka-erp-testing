@@ -123,6 +123,7 @@ export function createJobCardsFromBOM(
     node: BOMTemplateWIP,
     topWipType: string,
     parentQty: number,
+    branchKey: string,
   ): void => {
     // `itemQuantity` (SO-line bedframe count) is already baked into the
     // initial parentQty on the outer call (see the `for (const w of
@@ -184,12 +185,31 @@ export function createJobCardsFromBOM(
         category: p.category || "CAT 1",
         productionTimeMinutes: p.minutes,
         overdue: "PENDING",
+        // BOM-branch identifier (added 2026-04-27). Equals the top-level
+        // wipComponent's wipCode that this JC's subtree descended from.
+        // Within one wipKey ("DIVAN" / "HEADBOARD" / etc.) the BOM has
+        // multiple parallel branches that converge at UPHOLSTERY — e.g.
+        // BF Divan: "Foam" branch (Foam→Frame→(WD)) || "Fabric" branch
+        // (Fabric→(FC)). The lock + consume + WIP-display logic uses
+        // (wipKey, branchKey) to group siblings so a Wood Cut completion
+        // does not consume Fab Sew stock (different branchKey).
+        branchKey,
         piecePics,
       } as JobCard);
     }
 
     for (const child of node.children || []) {
-      walkWip(child, topWipType, effectiveQty);
+      // branchKey assignment rule (matches actual BOM tree shape — see
+      // bom_templates.wipComponents JSON):
+      //   - Top-level node's processes (UPH, PACKING) inherit branchKey=""
+      //     (joint terminals shared by every branch).
+      //   - First descent into a child = the start of a parallel branch;
+      //     the child's wipCode (literal "Foam" / "Fabric" / "Webbing") is
+      //     adopted as the branch identifier.
+      //   - Deeper descents inside the same subtree inherit the parent's
+      //     branchKey unchanged.
+      const childBranch = branchKey || child.wipCode || "";
+      walkWip(child, topWipType, effectiveQty, childBranch);
     }
   };
 
@@ -197,9 +217,11 @@ export function createJobCardsFromBOM(
   // the "how many finished bedframes does this SO line want" multiplier, and
   // it only needs to be applied once. The walker then just multiplies each
   // node's relative BOM quantity against the running parent product.
+  // Top-level passes branchKey="" — UPH/PACKING processes at the root
+  // inherit the empty key; child branches stamp their own wipCode below.
   const rootParentQty = itemQuantity || 1;
   for (const w of bom.wipComponents) {
-    walkWip(w, w.wipType, rootParentQty);
+    walkWip(w, w.wipType, rootParentQty, "");
   }
 
   if (cards.length === 0) {

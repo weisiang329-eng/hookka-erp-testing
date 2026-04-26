@@ -502,6 +502,8 @@
   "purchaseOrderId": "purchase_order_id",
   "piNo": "pi_no",
   "poRef": "po_ref",
+  "branchKey": "branch_key",
+  "idx_job_cards_wipKey_branchKey": "idx_job_cards_wip_key_branch_key",
   "idx_purchase_invoices_supplierId": "idx_purchase_invoices_supplier_id",
   "idx_purchase_invoices_invoiceDate": "idx_purchase_invoices_invoice_date",
   "idx_purchase_invoices_purchaseOrderId": "idx_purchase_invoices_purchase_order_id",

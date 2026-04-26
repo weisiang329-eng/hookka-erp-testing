@@ -92,6 +92,11 @@ type JobCardRow = {
   wipType: string | null;
   wipLabel: string | null;
   wipQty: number | null;
+  // BOM-branch identifier (added 2026-04-27, migration 0058). See
+  // src/lib/mock-data.ts JobCard.branchKey for full rationale. Within
+  // one wipKey, JCs in different branchKeys are NOT each other's
+  // upstream/downstream — used by lock + consume + WIP-display logic.
+  branchKey: string | null;
   prerequisiteMet: number;
   pic1Id: string | null;
   pic1Name: string | null;
@@ -164,6 +169,7 @@ function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
     wipType: r.wipType ?? undefined,
     wipLabel: r.wipLabel ?? undefined,
     wipQty: r.wipQty ?? undefined,
+    branchKey: r.branchKey ?? undefined,
     prerequisiteMet: r.prerequisiteMet === 1,
     pic1Id: r.pic1Id,
     pic1Name: r.pic1Name ?? "",
@@ -247,6 +253,7 @@ function rowToMinimalJobCard(r: JobCardRow): MinimalJobCardOut {
     wipType: r.wipType ?? undefined,
     wipLabel: r.wipLabel ?? undefined,
     wipQty: r.wipQty ?? undefined,
+    branchKey: r.branchKey ?? undefined,
     prerequisiteMet: r.prerequisiteMet === 1,
     pic1Id: r.pic1Id,
     pic1Name: r.pic1Name ?? "",
@@ -826,6 +833,7 @@ async function applyWipInventoryChange(
   jcRow: JobCardRow,
   newStatus: string,
   allJcRows: JobCardRow[],
+  prevStatus: string | null = null,
 ): Promise<void> {
   // Producer wipLabel — falls back to a synthesized label when the JC was
   // created without BOM (legacy seed via createJobCards()) so the inventory
@@ -868,8 +876,6 @@ async function applyWipInventoryChange(
   // (WAITING → COMPLETED directly), which used to orphan upstream stock.
   // Idempotent: sofa zeros in place, BF uses MAX(0, stockQty - qty) clamp.
   const deptUpper = deptCodeRaw;
-  const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
-  const isFabSew = deptUpper === "FAB_SEW";
   const isFabCut = deptUpper === "FAB_CUT";
   // WOOD_CUT is parallel to FAB_CUT — both are raw-material entry points
   // (wood cut starts the wooden-frame chain, fabric cut starts the fabric
@@ -880,22 +886,118 @@ async function applyWipInventoryChange(
     newStatus === "COMPLETED" ||
     newStatus === "TRANSFERRED";
 
+  // ---------------------------------------------------------------------
+  // BUG-2026-04-27-002 — rollback branch.
+  // When a JC transitions OUT of a DONE state (COMPLETED/TRANSFERRED →
+  // anything else) we have to undo what the original COMPLETED transition
+  // did, otherwise stock drifts on every toggle. Symmetric inverse of the
+  // forward paths below:
+  //   Non-UPH:   subtract wipQty from this JC's own wip_items row,
+  //              refund the same qty to the upstream sibling that the
+  //              forward path consumed from.
+  //   UPH:       subtract wipQty from UPH's own row, refund each upstream
+  //              wipKey sibling that the forward path zeroed.
+  // ---------------------------------------------------------------------
+  const wasDone =
+    prevStatus === "COMPLETED" || prevStatus === "TRANSFERRED";
+  const isDone =
+    newStatus === "COMPLETED" || newStatus === "TRANSFERRED";
+  if (wasDone && !isDone) {
+    const refundQty = wipQty;
+    if (isUpholstery) {
+      // Subtract UPH's own row (clamped at 0 so a duplicate rollback is a
+      // no-op rather than going negative).
+      await db
+        .prepare(
+          "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
+        )
+        .bind(refundQty, wipLabel)
+        .run();
+      // Refund every upstream sibling the forward UPH-COMPLETED path
+      // consumed from.
+      if (wipKey) {
+        const upstreamLabels = new Set<string>();
+        for (const j of allJcRows) {
+          if (
+            j.wipKey === wipKey &&
+            j.sequence < jcRow.sequence &&
+            j.wipLabel
+          ) {
+            upstreamLabels.add(j.wipLabel);
+          }
+        }
+        for (const label of upstreamLabels) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+            )
+            .bind(refundQty, label)
+            .run();
+        }
+      }
+      return;
+    }
+
+    // Non-UPH dept rollback: subtract this JC's own row first.
+    await db
+      .prepare(
+        "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
+      )
+      .bind(refundQty, wipLabel)
+      .run();
+    // Refund the upstream sibling that the becomingActive branch consumed.
+    // FAB_CUT and WOOD_CUT have no upstream so they skip the refund —
+    // matches the forward path's `!isFabCut && !isWoodCut && !isUpholstery`
+    // gate. Sibling lookup matches by (wipKey, branchKey) — within one
+    // wipKey there can be multiple parallel BOM branches that share the
+    // wipKey but never each other's upstream/downstream (BUG-2026-04-27:
+    // Wood Cut completion was wrongly consuming Fab Sew stock because the
+    // old wipKey-only filter pulled siblings from both branches).
+    if (!isFabCut && !isWoodCut && wipKey) {
+      const myBranch = jcRow.branchKey ?? "";
+      const children = allJcRows
+        .filter(
+          (j) =>
+            j.wipKey === wipKey &&
+            (j.branchKey ?? "") === myBranch &&
+            j.sequence < jcRow.sequence,
+        )
+        .sort((a, b) => b.sequence - a.sequence);
+      const child = children[0];
+      if (child?.wipLabel) {
+        await db
+          .prepare(
+            "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+          )
+          .bind(refundQty, child.wipLabel)
+          .run();
+      }
+    }
+    return;
+  }
+
   // FAB_CUT and WOOD_CUT are producer-only stages — nothing upstream to
   // consume. UPH has its own consume-all-upstream logic in the COMPLETED
   // branch below.
   if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
-    // Per-component upstream consume — no category-specific fan-out. Sofa,
-    // BF, and accessory all run through the same wipKey-prev branch:
-    // pick the most recent done JC in the same wipKey at a lower sequence
-    // and decrement its wip_items.stockQty by this JC's own qty. The old
-    // sofa "FAB_SEW zeros every FAB_CUT wip_item in (SO, fabric)" branch
-    // was deleted as part of the FAB_CUT normalization (Wei Siang Apr
-    // 2026): every dept now behaves identically, so a sofa Fab Sew
-    // completing one component only consumes that component's upstream
-    // FC stock — not the whole bolt.
+    // Per-component upstream consume — sibling lookup is now BOM-branch
+    // aware (BUG-2026-04-27 fix, migration 0058). Within one wipKey
+    // ("DIVAN" / "HEADBOARD" / "SOFA_*") the BOM has parallel branches
+    // (e.g. BF Divan: Foam-branch wood chain || Fabric-branch fab chain)
+    // that converge only at UPHOLSTERY. The previous wipKey + sequence
+    // heuristic flattened them into one chain and a Wood Cut completion
+    // wrongly consumed Fab Sew stock (Wei Siang report 2026-04-27).
+    // Filter siblings by (wipKey, branchKey) so each branch's consume
+    // only reaches its own true upstream.
     if (wipKey) {
+      const myBranch = jcRow.branchKey ?? "";
       const children = allJcRows
-        .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
+        .filter(
+          (j) =>
+            j.wipKey === wipKey &&
+            (j.branchKey ?? "") === myBranch &&
+            j.sequence < jcRow.sequence,
+        )
         .sort((a, b) => b.sequence - a.sequence);
       const child = children[0];
       if (child?.wipLabel) {
@@ -1062,11 +1164,18 @@ async function applyWipInventoryChange(
     }
 
     // Default path (BF / accessory / non-sofa Fab Sew chains): consume
-    // the immediate upstream wip_items row within the same wipKey by
-    // this JC's own qty. Per-JC consumption — each child scan
-    // decrements exactly its own share.
+    // the immediate upstream wip_items row within the same (wipKey,
+    // branchKey) by this JC's own qty. Per-JC consumption — each child
+    // scan decrements exactly its own share. (wipKey, branchKey) match
+    // is BOM-branch aware (see migration 0058).
+    const myBranch = jcRow.branchKey ?? "";
     const children = allJcRows
-      .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
+      .filter(
+        (j) =>
+          j.wipKey === wipKey &&
+          (j.branchKey ?? "") === myBranch &&
+          j.sequence < jcRow.sequence,
+      )
       .sort((a, b) => b.sequence - a.sequence);
     const child = children[0];
     if (!child || !child.wipLabel) return;
@@ -1271,10 +1380,19 @@ async function applyPoUpdate(
     if (body.status) {
       updated.status = body.status;
       const isDone = body.status === "COMPLETED" || body.status === "TRANSFERRED";
+      const wasDone =
+        jcRow.status === "COMPLETED" || jcRow.status === "TRANSFERRED";
       if (isDone) {
         if (!updated.completedDate) updated.completedDate = today;
         updated.overdue = "COMPLETED";
-      } else if (body.completedDate === undefined) {
+      } else if (wasDone && body.completedDate === undefined) {
+        // BUG-2026-04-27-001: previously cleared completedDate on ANY
+        // non-DONE status change (including WAITING → IN_PROGRESS, which
+        // shouldn't touch the date). Now only clear when the JC is
+        // genuinely transitioning OUT of a DONE state — i.e. the user is
+        // un-completing it. Other status touches (PIC re-assign that
+        // re-sends status, due-date edit that includes status) leave the
+        // date alone.
         updated.completedDate = null;
       }
     }
@@ -1381,7 +1499,17 @@ async function applyPoUpdate(
     if (body.status) {
       const refreshed = allJcRows.map((j) => (j.id === updated.id ? updated : j));
       try {
-        await applyWipInventoryChange(db, existing, updated, body.status, refreshed);
+        // Pass prevStatus (jcRow.status, the pre-update value) so the
+        // cascade can detect a DONE → non-DONE rollback and reverse the
+        // forward consume + producer-add. See BUG-2026-04-27-002.
+        await applyWipInventoryChange(
+          db,
+          existing,
+          updated,
+          body.status,
+          refreshed,
+          jcRow.status,
+        );
       } catch (err) {
         console.error("[applyWipInventoryChange] cascade failed", {
           poId: id,
@@ -1973,8 +2101,8 @@ app.post("/stock", async (c) => {
              departmentName, sequence, status, dueDate, wipKey, wipCode, wipType,
              wipLabel, wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name,
              completedDate, estMinutes, actualMinutes, category,
-             productionTimeMinutes, overdue, rackingNumber)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             productionTimeMinutes, overdue, rackingNumber, branchKey)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           newId,
@@ -2002,6 +2130,9 @@ app.post("/stock", async (c) => {
           jc.productionTimeMinutes,
           "PENDING",
           null,
+          // Inherit the source JC's branchKey (clone path — same BOM
+          // branch as the row we're copying from).
+          jc.branchKey ?? "",
         ),
     );
   }
@@ -2462,12 +2593,16 @@ app.post("/:id/scan-complete", async (c) => {
       .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
       .bind(target.po.id)
       .all<JobCardRow>();
+    // Scan path is forward-only (jcJustCompleted is computed from a
+    // prevStatus that wasn't COMPLETED/TRANSFERRED). Pass target.jc.status
+    // for completeness so the cascade's wasDone gate evaluates correctly.
     await applyWipInventoryChange(
       db,
       target.po,
       mergedJc,
       "COMPLETED",
       siblings.results ?? [],
+      target.jc.status,
     );
 
     // F2 — labor cost posting (idempotent per jobCardId).

@@ -26,6 +26,7 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
+import { deriveBranchKey } from "../lib/bom-branch";
 import { resolveCustomerPriceAsOf } from "./customer-products";
 import { withOrgScope } from "../lib/tenant";
 
@@ -437,26 +438,33 @@ export async function createProductionOrdersForSO(
     // ------ BOM → WIP breakdown ------
     // Look up active BOM template for this productCode; if none, fall back
     // to the latest template regardless of status.
+    type BomRow = {
+      wipComponents: string | null;
+      l1Processes: string | null;
+      baseModel: string | null;
+    };
     let bomRow = await db
       .prepare(
-        `SELECT wipComponents, l1Processes FROM bom_templates
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
            WHERE productCode = ? AND versionStatus = 'ACTIVE'
            ORDER BY effectiveFrom DESC LIMIT 1`,
       )
       .bind(productCode)
-      .first<{ wipComponents: string | null; l1Processes: string | null }>();
+      .first<BomRow>();
     if (!bomRow) {
       bomRow = await db
         .prepare(
-          `SELECT wipComponents, l1Processes FROM bom_templates
+          `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
              WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
         )
         .bind(productCode)
-        .first<{ wipComponents: string | null; l1Processes: string | null }>();
+        .first<BomRow>();
     }
 
     const variants: BomVariantContext = {
       productCode: item.productCode ?? "",
+      // Parent model — see BUG-2026-04-27-004 for why {MODEL} ≠ {PRODUCT_CODE}.
+      model: bomRow?.baseModel ?? (item.productCode ?? ""),
       sizeLabel: item.sizeLabel ?? "",
       sizeCode: item.sizeCode ?? "",
       fabricCode: item.fabricCode ?? "",
@@ -646,8 +654,8 @@ export async function createProductionOrdersForSO(
             `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
                departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
                wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             jcId,
@@ -675,6 +683,10 @@ export async function createProductionOrdersForSO(
             p.minutes,
             "PENDING",
             null,
+            // BOM-branch identifier — see src/api/lib/bom-branch.ts.
+            // (wipKey, branchKey) is the correct sibling key for lock +
+            // consume + WIP-display logic.
+            deriveBranchKey(p.deptCode, p.wipType),
           ),
       );
     }
@@ -700,8 +712,8 @@ export async function createProductionOrdersForSO(
             `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
                departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
                wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             jcId,
@@ -729,6 +741,10 @@ export async function createProductionOrdersForSO(
             l1p.minutes,
             "PENDING",
             null,
+            // FG-level processes (UPHOLSTERY/PACKING) are joint terminals
+            // shared by every branch — branchKey="" so they aren't filtered
+            // out by per-branch sibling queries.
+            "",
           ),
       );
     }
@@ -807,23 +823,33 @@ async function backfillJobCardsForPo(
 
   let bomRow = await db
     .prepare(
-      `SELECT wipComponents, l1Processes FROM bom_templates
+      `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
          WHERE productCode = ? AND versionStatus = 'ACTIVE'
          ORDER BY effectiveFrom DESC LIMIT 1`,
     )
     .bind(productCode)
-    .first<{ wipComponents: string | null; l1Processes: string | null }>();
+    .first<{
+      wipComponents: string | null;
+      l1Processes: string | null;
+      baseModel: string | null;
+    }>();
   if (!bomRow) {
     bomRow = await db
       .prepare(
-        `SELECT wipComponents, l1Processes FROM bom_templates
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
            WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
       )
       .bind(productCode)
-      .first<{ wipComponents: string | null; l1Processes: string | null }>();
+      .first<{
+        wipComponents: string | null;
+        l1Processes: string | null;
+        baseModel: string | null;
+      }>();
   }
   const backfillVariants: BomVariantContext = {
     productCode: po.productCode ?? "",
+    // Parent model — see BUG-2026-04-27-004.
+    model: bomRow?.baseModel ?? (po.productCode ?? ""),
     sizeLabel: po.sizeLabel ?? "",
     sizeCode: po.sizeCode ?? "",
     fabricCode: po.fabricCode ?? "",
@@ -915,8 +941,8 @@ async function backfillJobCardsForPo(
             `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
                departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
                wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             jcId,
@@ -944,6 +970,7 @@ async function backfillJobCardsForPo(
             p.minutes,
             "PENDING",
             null,
+            deriveBranchKey(p.deptCode, wip.wipType),
           ),
       );
       jcCount++;
@@ -970,8 +997,8 @@ async function backfillJobCardsForPo(
           `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
              departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
              wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-             estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           jcId,
@@ -999,6 +1026,8 @@ async function backfillJobCardsForPo(
           l1p.minutes,
           "PENDING",
           null,
+          // FG-level UPHOLSTERY/PACKING — joint terminal, branchKey="".
+          "",
         ),
     );
     jcCount++;

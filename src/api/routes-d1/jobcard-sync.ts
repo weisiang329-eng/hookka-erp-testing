@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { deriveBranchKey } from "../lib/bom-branch";
 import {
   breakBomIntoWips,
   type BomVariantContext,
@@ -87,11 +88,19 @@ type ExpectedJc = {
 
 function computeExpectedJcs(
   po: ProductionOrderRow,
-  bomRow: { wipComponents: string | null; l1Processes: string | null } | null,
+  bomRow: {
+    wipComponents: string | null;
+    l1Processes: string | null;
+    baseModel: string | null;
+  } | null,
 ): ExpectedJc[] {
   const productCode = po.productCode ?? "";
   const variants: BomVariantContext = {
     productCode,
+    // Parent model from bom_templates.baseModel — fall back to productCode
+    // when BOM didn't store one (so {MODEL} keeps the legacy variant value
+    // for those rows instead of going blank). See BUG-2026-04-27-004.
+    model: bomRow?.baseModel ?? productCode,
     sizeLabel: po.sizeLabel ?? "",
     sizeCode: po.sizeCode ?? "",
     fabricCode: po.fabricCode ?? "",
@@ -147,24 +156,33 @@ function computeExpectedJcs(
 async function loadBomTemplate(
   db: D1Database,
   productCode: string,
-): Promise<{ wipComponents: string | null; l1Processes: string | null } | null> {
+): Promise<{
+  wipComponents: string | null;
+  l1Processes: string | null;
+  baseModel: string | null;
+} | null> {
   if (!productCode) return null;
+  type Row = {
+    wipComponents: string | null;
+    l1Processes: string | null;
+    baseModel: string | null;
+  };
   const active = await db
     .prepare(
-      `SELECT wipComponents, l1Processes FROM bom_templates
+      `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
          WHERE productCode = ? AND versionStatus = 'ACTIVE'
          ORDER BY effectiveFrom DESC LIMIT 1`,
     )
     .bind(productCode)
-    .first<{ wipComponents: string | null; l1Processes: string | null }>();
+    .first<Row>();
   if (active) return active;
   const latest = await db
     .prepare(
-      `SELECT wipComponents, l1Processes FROM bom_templates
+      `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
          WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
     )
     .bind(productCode)
-    .first<{ wipComponents: string | null; l1Processes: string | null }>();
+    .first<Row>();
   return latest ?? null;
 }
 
@@ -265,8 +283,8 @@ app.post("/", async (c) => {
             `INSERT OR IGNORE INTO job_cards (id, productionOrderId, departmentId, departmentCode,
                departmentName, sequence, status, dueDate, wipKey, wipCode, wipType, wipLabel,
                wipQty, prerequisiteMet, pic1Id, pic1Name, pic2Id, pic2Name, completedDate,
-               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               estMinutes, actualMinutes, category, productionTimeMinutes, overdue, rackingNumber, branchKey)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           .bind(
             jcId,
@@ -299,6 +317,9 @@ app.post("/", async (c) => {
             exp.estMinutes,
             "PENDING",
             null,
+            // BOM-branch identifier — matches the same logic the SO-confirm
+            // path uses (src/api/lib/bom-branch.ts).
+            deriveBranchKey(exp.deptCode, exp.wipType),
           ),
       );
       createdForThisPO.push(exp.deptCode);

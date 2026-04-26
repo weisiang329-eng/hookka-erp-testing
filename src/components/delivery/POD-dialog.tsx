@@ -3,6 +3,7 @@
 import { useRef, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { X, Eraser, Upload, Trash2 } from "lucide-react";
+import { useToast } from "@/components/ui/toast";
 import type { ProofOfDelivery } from "@/lib/mock-data";
 
 interface PODDialogProps {
@@ -15,6 +16,68 @@ interface PODDialogProps {
 
 const MAX_PHOTOS = 5;
 
+// ---------------------------------------------------------------------------
+// POD photo size guards.
+//
+// The whole POD blob (signature + up to 5 photos + receiver fields) is
+// stringified and written to delivery_orders.proofOfDelivery, a TEXT column
+// on D1 (Cloudflare D1 / SQLite). D1 enforces a 1 MB row size limit — and
+// we share that row with every other DO column. Five raw 12 MP iPhone
+// captures encoded as base64 weigh in around 50–80 MB, which would silently
+// fail the UPDATE in production.
+//
+// To stay safely under the limit we:
+//   1. Reject any individual file > MAX_INPUT_FILE_BYTES (10 MB) before it
+//      ever hits the canvas.
+//   2. Resize every accepted file to PHOTO_MAX_DIMENSION (longest side) and
+//      JPEG-encode at PHOTO_JPEG_QUALITY. Empirically this lands ~150–200 KB
+//      per photo for a typical phone capture (target = MAX_POD_PHOTO_BYTES).
+//   3. Re-check the final stringified POD size against MAX_POD_JSON_BYTES
+//      (700 KB ceiling, ~30 % headroom under the 1 MB row cap). If the user
+//      somehow exceeds that — e.g. an unusually noisy photo that doesn't
+//      compress well — we reject the submit and ask them to remove a photo.
+// ---------------------------------------------------------------------------
+const MAX_INPUT_FILE_BYTES = 10 * 1024 * 1024; // 10 MB hard cap on raw upload
+const PHOTO_MAX_DIMENSION = 1280; // longest side after resize
+const PHOTO_JPEG_QUALITY = 0.7;
+const MAX_POD_PHOTO_BYTES = 200 * 1024; // soft target per photo (post-compression)
+const MAX_POD_JSON_BYTES = 700 * 1024; // total stringified POD ceiling (D1 row safe)
+
+/**
+ * Read a File, downscale to PHOTO_MAX_DIMENSION on the longest side via
+ * <canvas>, and JPEG-encode at PHOTO_JPEG_QUALITY. Returns a base64 data
+ * URL ready to embed in the POD JSON. Rejects the promise if the browser
+ * can't decode the image (corrupt/unsupported format).
+ */
+async function compressPhoto(file: File): Promise<string> {
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsDataURL(file);
+  });
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image();
+    el.onload = () => resolve(el);
+    el.onerror = () => reject(new Error("Failed to decode image"));
+    el.src = dataUrl;
+  });
+
+  const longest = Math.max(img.width, img.height);
+  const scale = longest > PHOTO_MAX_DIMENSION ? PHOTO_MAX_DIMENSION / longest : 1;
+  const targetW = Math.max(1, Math.round(img.width * scale));
+  const targetH = Math.max(1, Math.round(img.height * scale));
+
+  const canvas = document.createElement("canvas");
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("Canvas 2D context unavailable");
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+  return canvas.toDataURL("image/jpeg", PHOTO_JPEG_QUALITY);
+}
+
 export default function PODDialog({
   open,
   doNo,
@@ -24,6 +87,7 @@ export default function PODDialog({
 }: PODDialogProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const isDrawingRef = useRef(false);
+  const { toast } = useToast();
   const [hasSignature, setHasSignature] = useState(false);
   const [receiverName, setReceiverName] = useState("");
   const [receiverIC, setReceiverIC] = useState("");
@@ -124,26 +188,47 @@ export default function PODDialog({
     setHasSignature(false);
   };
 
-  const handlePhotoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files || []);
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const files = Array.from(input.files || []);
     if (files.length === 0) return;
     const remaining = MAX_PHOTOS - photos.length;
-    const toRead = files.slice(0, remaining);
-    Promise.all(
-      toRead.map(
-        (file) =>
-          new Promise<string>((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onload = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(file);
-          })
-      )
-    ).then((urls) => {
-      setPhotos((prev) => [...prev, ...urls].slice(0, MAX_PHOTOS));
-    });
-    // Reset input so the same file can be re-selected
-    e.target.value = "";
+    const toProcess = files.slice(0, remaining);
+
+    // Reject oversize raw uploads up front. 10 MB on a phone capture is the
+    // upper end of even RAW-ish JPEGs; anything beyond that is almost certainly
+    // a video or HEIC the canvas pipeline can't usefully shrink.
+    const oversize = toProcess.find((f) => f.size > MAX_INPUT_FILE_BYTES);
+    if (oversize) {
+      toast.error(
+        `"${oversize.name}" is larger than 10 MB. Please choose a smaller photo.`,
+      );
+      input.value = "";
+      return;
+    }
+
+    try {
+      const compressed = await Promise.all(toProcess.map(compressPhoto));
+      // Surface a soft warning if any single photo is still over the per-photo
+      // budget after compression — usually means a noisy/textured image. We
+      // still accept it; the total-size check below is the hard gate.
+      const oversizeAfter = compressed.find(
+        (url) => url.length > MAX_POD_PHOTO_BYTES * 1.5,
+      );
+      if (oversizeAfter) {
+        toast.warning(
+          "One photo is unusually large after compression — POD payload may be tight.",
+        );
+      }
+      setPhotos((prev) => [...prev, ...compressed].slice(0, MAX_PHOTOS));
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Could not process photo",
+      );
+    } finally {
+      // Reset input so the same file can be re-selected
+      input.value = "";
+    }
   };
 
   const removePhoto = (idx: number) => {
@@ -169,6 +254,21 @@ export default function PODDialog({
       deliveredAt: new Date().toISOString(),
       capturedBy: "",
     };
+
+    // Final guard: stringified blob must fit comfortably under the 1 MB D1
+    // row limit (we share the row with every other DO column). 700 KB gives
+    // ~30 % headroom — see the constant comment block at the top of the file.
+    const podJsonSize = JSON.stringify(pod).length;
+    if (podJsonSize > MAX_POD_JSON_BYTES) {
+      const kb = Math.round(podJsonSize / 1024);
+      const limitKb = Math.round(MAX_POD_JSON_BYTES / 1024);
+      toast.error(
+        `POD payload is ${kb} KB, over the ${limitKb} KB limit. Remove a photo and try again.`,
+      );
+      setSubmitting(false);
+      return;
+    }
+
     try {
       await onSubmit(pod);
     } finally {

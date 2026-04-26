@@ -545,7 +545,12 @@ export default function DeliveryPage() {
     const byStatus = doStatsRaw?.byStatus ?? {};
     return {
       draft: byStatus.DRAFT ?? 0,
-      dispatched: byStatus.DISPATCHED ?? 0,
+      // The "Dispatched" UI label maps to the LOADED DB status. The DO state
+      // machine writes LOADED when a DRAFT is dispatched (see VALID_TRANSITIONS
+      // in src/api/routes-d1/delivery-orders.ts) — there is no DISPATCHED
+      // bucket on the server side. Reading byStatus.DISPATCHED would always
+      // return 0 and the card would silently misreport the dashboard.
+      dispatched: byStatus.LOADED ?? 0,
       inTransit: byStatus.IN_TRANSIT ?? 0,
       delivered: byStatus.DELIVERED ?? 0,
       invoiced: byStatus.INVOICED ?? 0,

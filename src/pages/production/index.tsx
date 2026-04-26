@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useUrlState } from "@/lib/use-url-state";
+import { useSessionState } from "@/lib/use-session-state";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Check, Plus, Lock } from "lucide-react";
@@ -707,19 +709,20 @@ export default function ProductionPage({
     [],
   );
   // Page-level filters — apply to BOTH the Overview matrix and all dept
-  // sub-tabs. The user wanted unified filtering across the whole production
-  // page plus a printable schedule output.
-  const [fltSearch, setFltSearch] = useState("");
-  const [fltState, setFltState] = useState("");
-  const [fltCustomer, setFltCustomer] = useState("");
-  const [fltDueFrom, setFltDueFrom] = useState("");
-  const [fltDueTo, setFltDueTo] = useState("");
+  // sub-tabs. URL-synced so a refresh / nav-and-back / share-link all
+  // keep the user's exact view. The dept-tab itself is already URL'd via
+  // the route (/production/<code>); these are the dropdowns alongside.
+  const [fltSearch, setFltSearch] = useUrlState<string>("q", "");
+  const [fltState, setFltState] = useUrlState<string>("state", "");
+  const [fltCustomer, setFltCustomer] = useUrlState<string>("customer", "");
+  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
+  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
   // Status lifecycle filter: Active (default) hides ON_HOLD + CANCELLED.
   // "all" shows everything; "onhold" / "cancelled" / "completed" isolate
   // a single bucket for supervisors auditing the queue.
-  const [fltLifecycle, setFltLifecycle] = useState<
+  const [fltLifecycle, setFltLifecycle] = useUrlState<
     "active" | "all" | "onhold" | "cancelled" | "completed"
-  >("active");
+  >("life", "active");
   // New filters (2026-04-25):
   //   • Category — itemCategory (BEDFRAME / SOFA / ACCESSORY).
   //   • Date axis — switches the from/to range between targetEndDate
@@ -732,11 +735,11 @@ export default function ProductionPage({
   //   • Item type — substring match on each PO's job-card wipType
   //     (HB→HEADBOARD, DIVAN, BASE→SOFA_BASE, CUSHION→SOFA_CUSHION, etc.).
   //   • Model — exact productCode match, drawn from already-loaded orders.
-  const [fltCategory, setFltCategory] = useState<string>("");
+  const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
   const [fltDateAxis, setFltDateAxis] =
-    useState<"dueDate" | "customerDeliveryDate" | "created_at">("dueDate");
-  const [fltItemType, setFltItemType] = useState<string>("");
-  const [fltModel, setFltModel] = useState<string>("");
+    useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
+  const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
+  const [fltModel, setFltModel] = useUrlState<string>("model", "");
 
   // Lazy-load trigger: any filter being non-default flips shouldFetch=true,
   // which arms ordersUrl in the useCachedJson call above. Once fetched the
@@ -759,6 +762,26 @@ export default function ProductionPage({
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
   }, [anyFilterActive, shouldFetch]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Scroll position restoration — keyed per active dept tab so each dept
+  // remembers its own scroll independently. sessionStorage so the value
+  // dies when the tab closes.
+  const [savedScroll, setSavedScroll] = useSessionState<number>(
+    `production:scrollY:${activeTab}`,
+    0,
+  );
+  useEffect(() => {
+    if (savedScroll > 0 && window.scrollY === 0) {
+      window.scrollTo(0, savedScroll);
+    }
+    const onScroll = () => {
+      setSavedScroll(window.scrollY);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+    // savedScroll is read on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
 
   // Mirror of the Production Sheet DataGrid's internal filter + sort result.
   // When a dept tab is active, Print Schedule and the on-screen QR Stickers

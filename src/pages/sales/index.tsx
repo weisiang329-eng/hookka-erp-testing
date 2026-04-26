@@ -1,6 +1,8 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
+import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
+import { useSessionState } from "@/lib/use-session-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -70,7 +72,8 @@ export default function SalesPage() {
   const navigate = useNavigate();
 
   // Pagination — server-side. Filter/tab changes reset to page 1.
-  const [page, setPage] = useState(1);
+  // URL-synced so refresh / share-link land back on the same page.
+  const [page, setPage] = useUrlStateNumber("page", 1);
 
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
     success?: boolean;
@@ -128,7 +131,9 @@ export default function SalesPage() {
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
   const [bulkPrinting, setBulkPrinting] = useState(false);
-  const [tab, setTab] = useState<"DRAFT" | "CONFIRMED">("CONFIRMED");
+  // Tab + filter state lives in the URL so refresh, back/forward, and
+  // shared links all land the user on exactly the view they had open.
+  const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
   const [scanPOOpen, setScanPOOpen] = useState(false);
 
   // Transfer to DO / Invoice states
@@ -141,19 +146,39 @@ export default function SalesPage() {
   const [transferSuccess, setTransferSuccess] = useState<{ type: "do" | "inv"; docNo: string } | null>(null);
   const [matchedDO, setMatchedDO] = useState<DeliveryOrder | null>(null);
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState("");
-  const [filterCustomer, setFilterCustomer] = useState("");
-  const [filterDateFrom, setFilterDateFrom] = useState("");
-  const [filterDateTo, setFilterDateTo] = useState("");
-  // New: category + customerDeliveryDate range filters. Category matches if
-  // ANY line on the SO is the chosen category. DD axis = customerDeliveryDate
-  // (sales staff filter on the date the customer expects delivery, not the
-  // SO entry date or our internal expected DD).
-  const [filterCategory, setFilterCategory] = useState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("");
-  const [filterDDFrom, setFilterDDFrom] = useState("");
-  const [filterDDTo, setFilterDDTo] = useState("");
-  const [showFilters, setShowFilters] = useState(false);
+  // Filters — URL-synced so refresh / shared link / back-forward keeps
+  // the user's exact view. Default values are stripped from the URL so
+  // empty filters don't litter the address bar.
+  const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
+  const [filterCustomer, setFilterCustomer] = useUrlState<string>("customer", "");
+  const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
+  const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
+  // Category matches if ANY line on the SO is the chosen category. DD axis
+  // = customerDeliveryDate (sales staff filter on the date the customer
+  // expects delivery, not SO entry date / internal expected DD).
+  const [filterCategory, setFilterCategory] = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
+  const [filterDDFrom, setFilterDDFrom] = useUrlState<string>("ddFrom", "");
+  const [filterDDTo, setFilterDDTo] = useUrlState<string>("ddTo", "");
+  // Show/hide filter panel — sessionStorage so closing the tab forgets,
+  // but a refresh keeps the panel open if user had it open.
+  const [showFilters, setShowFilters] = useSessionState<boolean>("sales:showFilters", false);
+
+  // Restore scroll position after navigating back to this page.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [savedScroll, setSavedScroll] = useSessionState<number>("sales:scrollY", 0);
+  useEffect(() => {
+    if (savedScroll > 0 && window.scrollY === 0) {
+      window.scrollTo(0, savedScroll);
+    }
+    const onScroll = () => {
+      setSavedScroll(window.scrollY);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+    // savedScroll is read on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Reset to page 1 when any filter or tab changes.
   /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter/tab change */
@@ -750,7 +775,7 @@ export default function SalesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                onClick={() => setPage(Math.max(1, page - 1))}
                 disabled={page <= 1 || loading}
               >
                 ← Prev
@@ -761,7 +786,7 @@ export default function SalesPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                onClick={() => setPage(Math.min(totalPages, page + 1))}
                 disabled={page >= totalPages || loading}
               >
                 Next →

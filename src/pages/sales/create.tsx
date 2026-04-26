@@ -20,6 +20,7 @@ import {
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useActiveTabDirty } from "@/contexts/tabs-context";
+import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
 
 type SeatHeightTier = { height: string; priceSen: number };
 
@@ -218,6 +219,72 @@ function CreateSalesOrderPage() {
     items.some((it) => !!it.productId)
   );
   useActiveTabDirty(isDirty);
+
+  // Form draft — auto-save the in-progress form to localStorage every 500ms
+  // (debounced inside the hook). If the user navigates away mid-edit and
+  // comes back, we offer to restore. The clone branch (?clone=…) seeds the
+  // form from the source SO directly, so we don't want a stale draft to
+  // overwrite that — keep the draft key bound to the clone source so each
+  // "new from X" thread has its own draft slot.
+  const draftKey = `so-create:${searchParams.get("clone") ?? "blank"}`;
+  type DraftShape = {
+    customerId: string;
+    deliveryHubId: string;
+    customerPOId: string;
+    customerSOId: string;
+    reference: string;
+    companySODate: string;
+    customerDeliveryDate: string;
+    hookkaExpectedDD: string;
+    notes: string;
+    items: LineItem[];
+  };
+  const draftCurrent: DraftShape = useMemo(() => ({
+    customerId,
+    deliveryHubId,
+    customerPOId,
+    customerSOId,
+    reference,
+    companySODate,
+    customerDeliveryDate,
+    hookkaExpectedDD,
+    notes,
+    items,
+  }), [
+    customerId, deliveryHubId, customerPOId, customerSOId, reference,
+    companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+  ]);
+  const restoredDraft = useFormDraft<DraftShape>(draftKey, draftCurrent);
+  const [draftBannerDismissed, setDraftBannerDismissed] = useState(false);
+  // The banner is offered only if (a) there is an actual draft, (b) the
+  // current form is still empty (so we don't surprise-overwrite a clone
+  // seed), and (c) the user hasn't already chosen restore-or-discard.
+  const draftBannerVisible =
+    !!restoredDraft &&
+    !draftBannerDismissed &&
+    !customerId && !customerPOId && !customerSOId && !reference &&
+    !notes && items.every((it) => !it.productId);
+  const restoreDraft = () => {
+    if (!restoredDraft) return;
+    setCustomerId(restoredDraft.customerId);
+    setDeliveryHubId(restoredDraft.deliveryHubId);
+    setCustomerPOId(restoredDraft.customerPOId);
+    setCustomerSOId(restoredDraft.customerSOId);
+    setReference(restoredDraft.reference);
+    setCompanySODate(restoredDraft.companySODate);
+    setCustomerDeliveryDate(restoredDraft.customerDeliveryDate);
+    setHookkaExpectedDD(restoredDraft.hookkaExpectedDD);
+    setNotes(restoredDraft.notes);
+    setItems(restoredDraft.items);
+    setDraftBannerDismissed(true);
+  };
+  const discardDraft = () => {
+    clearFormDraft(draftKey);
+    setDraftBannerDismissed(true);
+  };
+  // Note: draft cleanup happens INSIDE handleSubmit on success. We don't
+  // tie it to unmount because Cancel also unmounts and we want Cancel to
+  // preserve the draft so the user can come back to it.
 
   useEffect(() => {
     // Variants now live in D1 under kv_config('variants-config'). Hydrate from
@@ -701,12 +768,21 @@ function CreateSalesOrderPage() {
         }
         invalidateCachePrefix("/api/sales-orders");
         invalidateCachePrefix("/api/production-orders");
+        // Successful confirm — wipe the draft so the next visit to /sales/create
+        // starts fresh. Failure paths (DRAFT-only saves, BOM-incomplete) keep
+        // the draft alive in case the user wants to retry.
+        clearFormDraft(draftKey);
         navigate(`/sales/${newId}`);
         return;
       }
 
       setSaving(false);
-      if (newId) navigate(`/sales/${newId}`);
+      if (newId) {
+        // Saved as DRAFT — also clear the draft since the form is now
+        // persisted server-side under a real SO id.
+        clearFormDraft(draftKey);
+        navigate(`/sales/${newId}`);
+      }
     } catch (e) {
       setSaving(false);
       toast.error(e instanceof Error ? e.message : "Network error — order not saved");
@@ -767,6 +843,27 @@ function CreateSalesOrderPage() {
                 Open SO as Draft
               </Button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Form-draft restore banner — appears once per session per draftKey
+          when an unsaved draft is detected and the form is still empty. */}
+      {draftBannerVisible && (
+        <div className="rounded-md border border-[#A8CAD2] bg-[#E0EDF0] px-4 py-3 flex items-center justify-between text-sm">
+          <div>
+            <span className="font-medium text-[#3E6570]">Restore your draft?</span>
+            <span className="ml-2 text-[#6B7280]">
+              You started filling in this form earlier. Restore your in-progress entries?
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={discardDraft} className="text-[#6B7280]">
+              Discard
+            </Button>
+            <Button variant="primary" size="sm" onClick={restoreDraft}>
+              Restore
+            </Button>
           </div>
         </div>
       )}

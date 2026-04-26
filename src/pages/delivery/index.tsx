@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
+import { useSessionState } from "@/lib/use-session-state";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -221,12 +223,15 @@ type ProductionOrderApiShape = {
 
 export default function DeliveryPage() {
   const { toast } = useToast();
-  const [pageTab, setPageTab] = useState<"orders" | "3pl">("orders");
+  // Top-level "Orders" / "3PL" tab — URL-synced so refresh and back/forward
+  // both keep the user where they were.
+  const [pageTab, setPageTab] = useUrlState<"orders" | "3pl">("section", "orders");
   const [deliveryOrders, setDeliveryOrders] = useState<DeliveryOrderRow[]>([]);
   const [planningPOs, setPlanningPOs] = useState<ReadyPORow[]>([]);
   const [readyPOs, setReadyPOs] = useState<ReadyPORow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState("planning");
+  // Active inner tab — URL-synced for the same reason as pageTab above.
+  const [activeTab, setActiveTab] = useUrlState<string>("tab", "planning");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailDO, setDetailDO] = useState<DeliveryOrderRow | null>(null);
   const [createDODialog, setCreateDODialog] = useState<ReadyPORow[] | null>(null);
@@ -256,7 +261,7 @@ export default function DeliveryPage() {
   // ----- 3PL Providers state -----
   const [providers, setProviders] = useState<ThreePLProvider[]>([]);
   const [providersLoading, setProvidersLoading] = useState(false);
-  const [providerSearch, setProviderSearch] = useState("");
+  const [providerSearch, setProviderSearch] = useUrlState<string>("psearch", "");
   const [providerDialog, setProviderDialog] = useState<ThreePLProvider | null | "new">(null);
   const [providerForm, setProviderForm] = useState({
     name: "", phone: "", contactPerson: "", vehicleNo: "", vehicleType: "",
@@ -278,7 +283,7 @@ export default function DeliveryPage() {
   // 200 — same rationale as sales/invoices: big enough that daily working
   // set fits on page 1 so search works normally.
   const PAGE_SIZE = 200;
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useUrlStateNumber("page", 1);
 
   // ---------- Fetch ----------
   const { data: doRaw, loading: doLoading, refresh: refreshDOs } = useCachedJson<{
@@ -303,8 +308,28 @@ export default function DeliveryPage() {
   /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by tab change */
   useEffect(() => {
     setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Scroll position restoration — keyed per active tab so each tab
+  // remembers its own scroll position independently.
+  const [savedScroll, setSavedScroll] = useSessionState<number>(
+    `delivery:scrollY:${pageTab}:${activeTab}`,
+    0,
+  );
+  useEffect(() => {
+    if (savedScroll > 0 && window.scrollY === 0) {
+      window.scrollTo(0, savedScroll);
+    }
+    const onScroll = () => {
+      setSavedScroll(window.scrollY);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+    // savedScroll is read on mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageTab, activeTab]);
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
@@ -1553,7 +1578,7 @@ export default function DeliveryPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  onClick={() => setPage(Math.max(1, page - 1))}
                   disabled={page <= 1 || doLoading}
                 >
                   ← Prev
@@ -1564,7 +1589,7 @@ export default function DeliveryPage() {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+                  onClick={() => setPage(Math.min(totalPages, page + 1))}
                   disabled={page >= totalPages || doLoading}
                 >
                   Next →

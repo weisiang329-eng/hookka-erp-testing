@@ -1,6 +1,6 @@
 # Upgrade Control Board — Single Source of Truth
 
-> **Last updated**: 2026-04-25 (P5.0 finish — landed mislabeled in 1c9a14c)
+> **Last updated**: 2026-04-25 (P3.8 — KV session-cache invalidation on role change)
 > **Latest batch landed**: Batch 1 (CI gate non-blocking + thundering-herd fix + 90d plan + control board). 96 TS errors remaining.
 > **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
 > **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
@@ -68,7 +68,7 @@ Every row carries these fields. If any is missing, the row is malformed and must
 | P3.5 | auth | Migration `0047_worker_sessions.sql` + persist worker login | Claude | 2026-06-01 | Worker login survives `wrangler dev` restart | medium |
 | P3.6 | auth | `<RequireRole>` + `<RequirePermission>` + `usePermission()` frontend | Claude | 2026-06-05 | Non-Finance redirected from `/accounting` | medium |
 | P3.7 | auth | Sidebar reads from current user (replace hardcoded "Lim / Director") | Claude | 2026-06-05 | Display name == logged-in user | low |
-| P3.8 | auth | Reduce KV session-cache TTL to 60s OR explicit invalidation on role change | Claude | 2026-06-08 | Role change reflected in ≤60s | low |
+| P3.8 | auth | Reduce KV session-cache TTL to 60s OR explicit invalidation on role change | Claude | 2026-06-08 | Role change reflected in ≤60s | low | _landed — see Done lane_ |
 
 ### Phase 4 — Scheduler Policy
 
@@ -128,6 +128,7 @@ _(empty — surface here when something stalls. Each blocker must name the unblo
 | P1.3 | ci | Add `lint:app` step to `.github/workflows/deploy.yml` (same pattern) | Claude | 2026-04-27 | Workflow run shows step executing | 745801a | low | ✓ Step `Lint (app)` runs in `.github/workflows/deploy.yml` (continue-on-error: true). Visible in commit 745801a CI run. |
 | P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 sensitive mutations | Claude | 2026-04-25 | `emitAudit` written for each mutation; `tests/audit.test.mjs` covers stub-INSERT shape + non-throwing failure path | 7f58af3 + this commit | medium | ✓ 12 sensitive mutations wired (SO create/confirm + payment create from 7f58af3; PO create, GRN create, invoice post + void, user role-change, worker hard-delete, payroll post, credit-note create, debit-note create, e-invoice submit, BOM-master publish from this commit). Job-card status changes intentionally skipped — already journaled by `job_card_events` domain table to avoid double-logging. `npm test` 19/19 ✓; `npm run typecheck:app` 0 errors; `npm run build` ✓. |
 | P5.0 | sdk | Apply same `fetchInChunks` helper to `fetchPaginatedPOs` | Claude | 2026-04-25 | `fetchPaginatedPOs` no longer builds `WHERE productionOrderId IN (?,?,...)` directly | 1c9a14c (mislabeled — see this commit) | low — latent | ✓ `fetchPaginatedPOs` JC + piece_pics queries now chunk at 100 binds via `fetchInChunks` (no-deptFilter case) + inline triple-IN chunked loop (deptFilter case, 3 copies of `poIds` per chunk). The chunking diff was swept into commit `1c9a14c` ("feat(ledger): journal_entries + hash chain + invoice dual-write") by another agent's `git add -A`-style staging — the ledger commit's `production-orders.ts` 76-line delta is actually this P5.0 task. Hygiene rule 6 followed: not rewriting history (1c9a14c is another agent's commit), citing both commits in this row. |
+| P3.8 | auth | KV session-cache TTL stays 5 min, explicit invalidation on role change + delete + logout + reset-password | Claude | 2026-04-25 | Role change reflected on next request (no 5-min wait) | this commit | low | ✓ Path A chosen (cheap reads, instant security-critical revoke). Logout (`auth.ts`) + delete-user (`users.ts`) + admin password-reset (`users.ts`) + user-disable (`users.ts`) already called `invalidateSessionCache` / `purgeUserSessions`. Gap was role-change-only mutations (`PUT /api/users/:id` where role flips but isActive stays 1) — now triggers `purgeUserSessions` too. `npm run typecheck` 0 errors; `npm test` 48/48 ✓; `npm run build` ✓. |
 
 ---
 

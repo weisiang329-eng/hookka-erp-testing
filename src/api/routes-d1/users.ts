@@ -197,9 +197,16 @@ app.put("/:id", async (c) => {
       .bind(merged.email, merged.role, merged.displayName, merged.isActive, id)
       .run();
 
-    // If we just disabled the user, nuke their sessions (DB + KV cache) so
-    // the token the frontend is holding stops working on the next request.
-    if (merged.isActive === 0 && existing.isActive === 1) {
+    // P3.8 — security-sensitive mutations require explicit KV cache
+    // invalidation. The auth-middleware caches the joined user/session row
+    // (incl. role) for SESSION_CACHE_TTL_S (5 min), so without this purge a
+    // demoted user would keep their old (more-privileged) role until the
+    // cache entry expires. We keep the 5-min TTL for the cold-start
+    // performance win and invalidate on the few writes that change the
+    // cached fields (role flip, deactivation, password reset, delete).
+    const roleChanged = existing.role !== merged.role;
+    const justDisabled = merged.isActive === 0 && existing.isActive === 1;
+    if (roleChanged || justDisabled) {
       const { purgeUserSessions } = await import("../lib/auth-middleware");
       await purgeUserSessions(c.var.DB, c.env.SESSION_CACHE, id);
     }

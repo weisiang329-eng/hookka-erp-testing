@@ -63,9 +63,17 @@ type SessionJoinRow = {
 
 // KV session cache (Phase 2.6a).  Key = "sess:" + sha256(token) to avoid
 // storing tokens in plaintext as KV keys.  Value = SessionJoinRow JSON.
-// TTL = 5 minutes — short enough that role revocation and session
-// invalidation propagate within a tolerable window, long enough to absorb
-// the hot API-call pattern (dashboard loads fire 5-10 calls/sec per user).
+// TTL = 5 minutes — long enough to absorb the hot API-call pattern
+// (dashboard loads fire 5-10 calls/sec per user) without round-tripping
+// to D1 every time.
+//
+// P3.8 — TTL alone is NOT the security boundary for role/session changes.
+// Every write that mutates a cached field (role flip, deactivation, logout,
+// password reset, delete) explicitly purges the KV entry via
+// invalidateSessionCache / purgeUserSessions, so revocation propagates on
+// the next request rather than waiting up to TTL seconds. Path A from the
+// P3.8 ticket: keep the cheap 5-min TTL, pay the explicit-invalidate cost
+// on the rare write side instead of 5x'ing read traffic to D1.
 const SESSION_CACHE_TTL_S = 300;
 
 export async function sessionCacheKey(token: string): Promise<string> {

@@ -187,6 +187,7 @@ type ReadyPORow = {
   customerState: string;
   productCode: string;
   productName: string;
+  itemCategory: string;          // SOFA / BEDFRAME / ACCESSORY — drives the SO ID display rule
   sizeLabel: string;
   fabricCode: string;
   quantity: number;
@@ -197,6 +198,16 @@ type ReadyPORow = {
   currentDepartment: string;
   progress: number;
 };
+
+// Same rule as src/pages/sales/detail.tsx:39 and the production grid:
+//   SOFA → poNo without -NN line suffix (one set spans variant POs)
+//   BF/ACC → poNo as-is (each suffix = one physical piece)
+function displaySoId(row: { poNo: string; itemCategory: string }): string {
+  if ((row.itemCategory || "").toUpperCase() === "SOFA") {
+    return row.poNo.replace(/-\d+$/, "");
+  }
+  return row.poNo;
+}
 
 type ProductionOrderApiShape = {
   id: string;
@@ -209,6 +220,7 @@ type ProductionOrderApiShape = {
   customerState?: string;
   productCode?: string;
   productName?: string;
+  itemCategory?: string;
   sizeLabel?: string;
   fabricCode?: string;
   quantity?: number;
@@ -400,6 +412,7 @@ export default function DeliveryPage() {
               customerState: po.customerState || "",
               productCode: po.productCode || "",
               productName: po.productName || "",
+              itemCategory: po.itemCategory || "",
               sizeLabel: po.sizeLabel || "",
               fabricCode: po.fabricCode || "",
               quantity: po.quantity || 0,
@@ -992,7 +1005,14 @@ export default function DeliveryPage() {
   const planningColumns: Column<ReadyPORow>[] = useMemo(
     () => [
       { key: "salesOrderNo", label: "SO No.", type: "docno", width: "130px", sortable: true },
-      { key: "poNo", label: "SO ID", type: "docno", width: "150px", sortable: true },
+      {
+        key: "poNo",
+        label: "SO ID",
+        type: "docno",
+        width: "150px",
+        sortable: true,
+        render: (_v, row) => <span className="doc-number">{displaySoId(row)}</span>,
+      },
       { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
       { key: "productName", label: "Product", type: "text", sortable: true },
       { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },
@@ -1100,7 +1120,14 @@ export default function DeliveryPage() {
         ),
       },
       { key: "salesOrderNo", label: "SO No.", type: "docno", width: "130px", sortable: true },
-      { key: "poNo", label: "SO ID", type: "docno", width: "150px", sortable: true },
+      {
+        key: "poNo",
+        label: "SO ID",
+        type: "docno",
+        width: "150px",
+        sortable: true,
+        render: (_v, row) => <span className="doc-number">{displaySoId(row)}</span>,
+      },
       { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
       { key: "productName", label: "Product", type: "text", sortable: true },
       { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },

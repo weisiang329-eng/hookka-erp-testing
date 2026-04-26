@@ -885,49 +885,16 @@ async function applyWipInventoryChange(
   // consume. UPH has its own consume-all-upstream logic in the COMPLETED
   // branch below.
   if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
-    if (isSofa && isFabSew && poRow.salesOrderId && poRow.fabricCode) {
-      // Sofa Fab Sew — the whole (SO, fabric) bolt leaves Fab Cut's shelf
-      // the moment ANY piece enters sewing. Zero every upstream FAB_CUT
-      // wip_items row in that group.
-      //
-      // GATING: this fires ONLY for FAB_SEW.  The previous condition was
-      // `if (isSofa && ...)` without the dept check, which meant every
-      // sofa dept transition (FOAM, FRAMING, WEBBING, PACKING) wrongly
-      // zeroed every FAB_CUT wip_item in the (SO, fabric) bucket.  Per
-      // BOM:
-      //   sofa FAB_SEW upstream = FAB_CUT  (this branch)
-      //   sofa FOAM    upstream = WEBBING  (wipKey-prev branch below)
-      //   sofa FRAMING upstream = WOOD_CUT (wipKey-prev branch below)
-      //   sofa WEBBING upstream = FRAMING  (wipKey-prev branch below)
-      const siblingLabels = await db
-        .prepare(
-          `SELECT DISTINCT jc.wipLabel AS "wipLabel"
-             FROM production_orders po
-             JOIN job_cards jc ON jc.productionOrderId = po.id
-            WHERE po.salesOrderId = ?
-              AND po.fabricCode = ?
-              AND po.itemCategory = 'SOFA'
-              AND jc.departmentCode = 'FAB_CUT'
-              AND jc.wipLabel IS NOT NULL`,
-        )
-        .bind(poRow.salesOrderId, poRow.fabricCode)
-        .all<{ wipLabel: string | null }>();
-      const labels = (siblingLabels.results ?? [])
-        .map((r) => r.wipLabel)
-        .filter((l): l is string => !!l);
-      for (const label of labels) {
-        await db
-          .prepare(
-            "UPDATE wip_items SET stockQty = 0, status = 'IN_PRODUCTION' WHERE code = ?",
-          )
-          .bind(label)
-          .run();
-      }
-    } else if (wipKey) {
-      // All other cases (BF/ACC Fab Sew, every dept's Foam / Wood Cut /
-      // Framing / Webbing / Packing, sofa non-Fab-Sew transitions):
-      // consume the immediate upstream wip_items row within the same
-      // wipKey by this JC's own qty.
+    // Per-component upstream consume — no category-specific fan-out. Sofa,
+    // BF, and accessory all run through the same wipKey-prev branch:
+    // pick the most recent done JC in the same wipKey at a lower sequence
+    // and decrement its wip_items.stockQty by this JC's own qty. The old
+    // sofa "FAB_SEW zeros every FAB_CUT wip_item in (SO, fabric)" branch
+    // was deleted as part of the FAB_CUT normalization (Wei Siang Apr
+    // 2026): every dept now behaves identically, so a sofa Fab Sew
+    // completing one component only consumes that component's upstream
+    // FC stock — not the whole bolt.
+    if (wipKey) {
       const children = allJcRows
         .filter((j) => j.wipKey === wipKey && j.sequence < jcRow.sequence)
         .sort((a, b) => b.sequence - a.sequence);

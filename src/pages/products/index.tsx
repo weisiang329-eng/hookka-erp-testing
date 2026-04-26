@@ -1618,7 +1618,7 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-right`}>30</div>
                         <div className={`${thCls} text-right`}>32</div>
                         <div className={`${thCls} text-right`}>35</div>
-                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
                         <div className={`${thCls} text-right`}>Fabric</div>
                         <div className={`${thCls} text-right`}>Total Min</div>
                         <div className={`${thCls} text-center`}>Variants</div>
@@ -1626,7 +1626,7 @@ export default function ProductsPage() {
                     ) : isAccessory ? (
                       <>
                         <div className={`${thCls} text-right`}>Base Price</div>
-                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
                         <div className={`${thCls} text-right`}>Fabric</div>
                       </>
                     ) : (
@@ -1635,7 +1635,7 @@ export default function ProductsPage() {
                         <div className={`${thCls} text-left`}>Size</div>
                         <div className={`${thCls} text-right`}>Price 2</div>
                         <div className={`${thCls} text-right`}>Price 1</div>
-                        <div className={`${thCls} text-right`}>Unit M3</div>
+                        <div className={`${thCls} text-right`}>Unit (m&sup3;)</div>
                         <div className={`${thCls} text-right`}>Fabric</div>
                         <div className={`${thCls} text-right`}>Total Min</div>
                         <div className={`${thCls} text-center`}>Variants</div>
@@ -1854,7 +1854,7 @@ export default function ProductsPage() {
                               </span>
                             </div>
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
-                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
+                              {(cfg?.unitM3 ?? p.unitM3).toFixed(3)} m&sup3;
                             </div>
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                               {(cfg?.fabricUsage ?? p.fabricUsage)} m
@@ -1898,7 +1898,7 @@ export default function ProductsPage() {
                                   onClick={() => { setEditingM3(p.id); setM3Input((cfg?.unitM3 ?? p.unitM3).toFixed(3)); }}
                                   className="text-sm text-[#111827] hover:text-[#6B5C32] hover:underline"
                                 >
-                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)}
+                                  {(cfg?.unitM3 ?? p.unitM3).toFixed(3)} m&sup3;
                                 </button>
                               )}
                             </div>

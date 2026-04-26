@@ -120,6 +120,7 @@ const PATH_TITLES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/^\/consignment\/?$/, () => "Consignment"],
 ];
 
+// eslint-disable-next-line react-refresh/only-export-components -- co-located helper for the tab provider; HMR penalty is acceptable
 export function titleForPath(path: string, fallback?: string): string {
   if (fallback) return fallback;
   for (const [re, mk] of PATH_TITLES) {
@@ -295,6 +296,7 @@ export function TabsProvider({ children }: { children: React.ReactNode }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- context consumer hook lives next to its provider
 export function useTabs(): TabsContextValue {
   const ctx = useContext(TabsContext);
   if (!ctx) {
@@ -375,6 +377,7 @@ function TabsUrlSync() {
 
   // Keep a live ref to tabs so the effect doesn't depend on it.
   const tabsCurrent = useRef(tabsRef);
+  // eslint-disable-next-line react-hooks/refs -- live-ref pattern: writing on each render keeps the effect's dep list minimal and avoids ping-pong navigation
   tabsCurrent.current = tabsRef;
 
   const lastPath = useRef<string | null>(null);
@@ -426,8 +429,10 @@ function TabsNavigationSync() {
   // Keep live refs to pathname/tabs so the effect depends only on activeId
   // (otherwise URL-driven re-renders cause ping-pong navigation).
   const pathnameRef = useRef(pathname);
+  // eslint-disable-next-line react-hooks/refs -- live-ref pattern: see TabsUrlSync rationale above
   pathnameRef.current = pathname;
   const tabsRefCurrent = useRef(tabs);
+  // eslint-disable-next-line react-hooks/refs -- live-ref pattern: see TabsUrlSync rationale above
   tabsRefCurrent.current = tabs;
 
   useEffect(() => {

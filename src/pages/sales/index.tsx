@@ -615,7 +615,7 @@ export default function SalesPage() {
                 >
                   <option value="">All Categories</option>
                   <option value="BEDFRAME">Bedframe</option>
-                  <option value="SOFA">Sofa (Mattress)</option>
+                  <option value="SOFA">Sofa</option>
                   <option value="ACCESSORY">Accessories</option>
                 </select>
               </div>

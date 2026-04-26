@@ -402,7 +402,9 @@ export default function MasterTrackerPage() {
                       <tr
                         key={order.id}
                         className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
-                        onClick={() => navigate(`/production/${order.id}`)}
+                        onClick={() => {
+                          if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
+                        }}
                       >
                         <td className="px-2 py-1.5 font-medium doc-number sticky left-0 bg-white z-10">
                           {order.poNo}

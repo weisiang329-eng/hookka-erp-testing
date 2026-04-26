@@ -1346,7 +1346,19 @@ export default function ProductionPage({
           poId: o.id,
           jobCardId: jc.id,
           rowNo: n++,
-          soId: o.poNo || "",                  // line-suffixed, unique
+          // SO ID display rule (sofa drops -NN suffix, BF/ACC keep it):
+          //   SOFA   → parent SO (companySOId, e.g. SO-2604-293) because a
+          //           sofa set spans multiple variant-POs and no single
+          //           -01/-02 suffix belongs to the whole set. Multiple
+          //           sofa rows from the same SO will display the same SO
+          //           ID — operators distinguish by product / variant /
+          //           fabric columns.
+          //   BF/ACC → line-suffixed poNo (e.g. SO-2604-293-01) because
+          //           qty>1 already fans out into per-piece POs and the
+          //           suffix genuinely identifies one physical piece.
+          // Applies to every dept tab — soId is computed once at row
+          // construction and consumed by all dept render paths uniformly.
+          soId: (o.itemCategory === "SOFA" ? o.companySOId : o.poNo) || "",
           salesOrderNo: o.companySOId || "",   // parent SO (not unique per line)
           salesOrderId: o.salesOrderId || "",  // SO PK for double-click navigation
           customerPOId: o.customerPOId || "",
@@ -1914,9 +1926,8 @@ export default function ProductionPage({
 
   const activeDept = DEPARTMENTS.find((d) => d.code === activeTab);
 
-  // Derive a WIP/component name for a job-card sticker. Mirrors the helper
-  // in production/detail.tsx — most departments produce the Divan / HB
-  // component; Packing produces the FG itself.
+  // Derive a WIP/component name for a job-card sticker. Most departments
+  // produce the Divan / HB component; Packing produces the FG itself.
   const wipNameFor = useCallback(
     (jc: JobCard, po: ProductionOrder): string => {
       const base = po.productName || po.productCode;
@@ -2800,7 +2811,9 @@ export default function ProductionPage({
             stickyHeader
             maxHeight="calc(100vh - 300px)"
             emptyMessage={`No job cards in ${activeDept.name}.`}
-            onDoubleClick={(row) => navigate(row.salesOrderId ? `/sales/${row.salesOrderId}` : `/production/${row.poId}`)}
+            onDoubleClick={(row) => {
+              if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
+            }}
             contextMenuItems={(row): ContextMenuItem[] => [
               {
                 label: "Open Sales Order",
@@ -2809,14 +2822,6 @@ export default function ProductionPage({
                   if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
                 },
                 disabled: !row.salesOrderId,
-              },
-              {
-                label: "Open Production Order",
-                icon: <ExternalLink className="h-3.5 w-3.5" />,
-                action: () => {
-                  if (row.poId) navigate(`/production/${row.poId}`);
-                },
-                disabled: !row.poId,
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
@@ -2898,7 +2903,9 @@ export default function ProductionPage({
               key={order.id}
               className={`grid items-stretch border-b border-[#F0EBE3] last:border-b-0 cursor-pointer ${rowCls}`}
               style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
-              onDoubleClick={() => navigate(order.salesOrderId ? `/sales/${order.salesOrderId}` : `/production/${order.id}`)}
+              onDoubleClick={() => {
+                if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
+              }}
             >
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">
                 <span className="truncate">{order.poNo}</span>

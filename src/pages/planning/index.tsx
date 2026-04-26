@@ -1001,7 +1001,9 @@ export default function PlanningPage() {
                           <tr
                             key={order.id}
                             className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
-                            onDoubleClick={() => navigate(`/production/${order.id}`)}
+                            onDoubleClick={() => {
+                              if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
+                            }}
                           >
                             <td className="px-2 py-1.5 font-medium doc-number sticky left-0 bg-white z-10">
                               {order.poNo}

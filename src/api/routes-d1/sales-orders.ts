@@ -1935,7 +1935,7 @@ app.post("/:id/confirm", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const [so, itemsRes, statusRes, overridesRes] = await Promise.all([
+  const [so, itemsRes, statusRes, overridesRes, posRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM sales_orders WHERE id = ?")
       .bind(id)
       .first<SalesOrderRow>(),
@@ -1950,6 +1950,31 @@ app.get("/:id", async (c) => {
     c.var.DB.prepare("SELECT * FROM price_overrides WHERE soId = ?")
       .bind(id)
       .all<PriceOverrideRow>(),
+    // Linked production orders for the SO detail page's "Linked Production
+    // Orders" table + doc-flow Production node + header chip. Wired
+    // 2026-04-26 — the original endpoint left this as `[]` with a "Phase
+    // 4" TODO from the D1 migration, never backfilled. Frontend uses
+    // itemCategory to decide whether to show the line-suffixed poNo
+    // (BF/ACC) or the parent companySOId without the -NN suffix (SOFA).
+    c.var.DB.prepare(
+      `SELECT id, poNo, productName, productCode, itemCategory, quantity,
+              status, progress, currentDepartment
+         FROM production_orders
+        WHERE salesOrderId = ?
+        ORDER BY poNo`,
+    )
+      .bind(id)
+      .all<{
+        id: string;
+        poNo: string;
+        productName: string | null;
+        productCode: string | null;
+        itemCategory: string | null;
+        quantity: number | null;
+        status: string | null;
+        progress: number | null;
+        currentDepartment: string | null;
+      }>(),
   ]);
   if (!so) {
     return c.json({ success: false, error: "Order not found" }, 404);
@@ -1957,7 +1982,17 @@ app.get("/:id", async (c) => {
   return c.json({
     success: true,
     data: rowToSO(so, itemsRes.results ?? []),
-    linkedPOs: [], // Production orders — Phase 4
+    linkedPOs: (posRes.results ?? []).map((p) => ({
+      id: p.id,
+      poNo: p.poNo,
+      productName: p.productName ?? "",
+      productCode: p.productCode ?? "",
+      itemCategory: p.itemCategory ?? "",
+      quantity: p.quantity ?? 0,
+      status: p.status ?? "",
+      progress: p.progress ?? 0,
+      currentDepartment: p.currentDepartment ?? "",
+    })),
     statusHistory: (statusRes.results ?? []).map(rowToStatusChange),
     priceOverrides: (overridesRes.results ?? []).map(rowToPriceOverride),
   });

@@ -6,12 +6,11 @@
 // joined from delivery_order_items. JSON columns (`fgUnitIds`,
 // `proofOfDelivery`) are parsed on read and stringified on write.
 //
-// Phase-3 scope: basic DO CRUD against the delivery_orders +
-// delivery_order_items tables. Legacy behaviours around production-order
-// lookups, FG-layer FIFO consumption, COGS ledger postings, lorry/3PL
-// auto-pricing, and SO status cascades are DEFERRED to later phases —
-// see the `// TODO(phase-4)` markers below. fg_units is empty at seed time,
-// so those flows can't be exercised yet.
+// Phase coverage: full CRUD (phase 3) + the phase-4 stocking cascade —
+// fg_units stamping on LOADED, FIFO COGS + SO status cascade + auto-
+// invoice on DELIVERED, and the LOADED → DRAFT reversal that unstamps
+// fg_units when the operator reopens the DO. The header used to flag
+// these as deferred but the work landed; only the comment was stale.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -904,6 +903,70 @@ app.put("/:id", async (c) => {
             item.rackingNumber,
             item.packingStatus,
             item.salesOrderNo,
+          ),
+        );
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Reversal on LOADED → DRAFT transition (phase-4 finish, 2026-04-26):
+    // unstamp fg_units that were marked LOADED + tied to this DO when the
+    // operator reopens the DO for editing. Without this, units stay
+    // wedged in 'LOADED' state with an obsolete doId pointer and the
+    // warehouse view double-counts them. Audit rows in stock_movements
+    // are intentionally NOT deleted — those are immutable history; we
+    // append a STOCK_IN counter-movement instead so the racking ledger
+    // shows the round-trip.
+    // -------------------------------------------------------------------
+    const revertedToDraft =
+      existing.status === "LOADED" && nextStatus === "DRAFT";
+    if (revertedToDraft) {
+      const stampedPosRes = await c.var.DB.prepare(
+        `SELECT DISTINCT poId FROM fg_units WHERE doId = ?`,
+      )
+        .bind(id)
+        .all<{ poId: string }>();
+      const stampedPoIds = (stampedPosRes.results ?? [])
+        .map((r) => r.poId)
+        .filter(Boolean);
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE fg_units
+              SET doId = NULL, status = 'AVAILABLE', loadedAt = NULL
+            WHERE doId = ?`,
+        ).bind(id),
+      );
+      for (const poId of stampedPoIds) {
+        const po = await c.var.DB.prepare(
+          `SELECT id, productCode, productName, quantity, rackingNumber
+             FROM production_orders WHERE id = ?`,
+        )
+          .bind(poId)
+          .first<{
+            id: string;
+            productCode: string | null;
+            productName: string | null;
+            quantity: number | null;
+            rackingNumber: string | null;
+          }>();
+        if (!po) continue;
+        statements.push(
+          c.var.DB.prepare(
+            `INSERT INTO stock_movements (
+               id, type, rackLocationId, rackLabel, productionOrderId,
+               productCode, productName, quantity, reason, performedBy,
+               created_at
+             ) VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+          ).bind(
+            `mov-${crypto.randomUUID().slice(0, 8)}`,
+            null,
+            po.rackingNumber ?? "",
+            po.id,
+            po.productCode ?? "",
+            po.productName ?? "",
+            Number(po.quantity) || 0,
+            `DO ${existing.doNo} reverted to DRAFT`,
+            now,
           ),
         );
       }

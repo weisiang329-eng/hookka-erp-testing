@@ -31,7 +31,6 @@ const SalesEdit = lazy(() => import('./pages/sales/edit'))
 // routes below point at the new wrappers.
 const ProductionOverview = lazy(() => import('./pages/production/overview'))
 const ProductionDeptPage = lazy(() => import('./pages/production/dept'))
-const ProductionDetail = lazy(() => import('./pages/production/detail'))
 const DepartmentDetail = lazy(() => import('./pages/production/department'))
 const ProductionScan = lazy(() => import('./pages/production/scan'))
 const FGScan = lazy(() => import('./pages/production/fg-scan'))
@@ -170,9 +169,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/production/webbing', element: <S><ProductionDeptPage /></S> },
   { path: '/production/upholstery', element: <S><ProductionDeptPage /></S> },
   { path: '/production/packing', element: <S><ProductionDeptPage /></S> },
-  // PO detail — keep LAST under /production/ so its :id wildcard only
-  // catches what the literal paths above don't (i.e. pord-xxxx ids).
-  { path: '/production/:id', element: <S><ProductionDetail /></S> },
+  // /production/:id PO-detail route deleted (2026-04-26, user request).
+  // PO double-clicks now route directly to /sales/:salesOrderId — the SO
+  // page is the canonical place to track an order. Any stale link to
+  // /production/<pord-id> falls through to the dept routes above (which
+  // only match literal /production/<dept>) and then to the global 404.
 
   // Legacy redirects
   { path: '/production-test', element: <Navigate to="/production" replace /> },

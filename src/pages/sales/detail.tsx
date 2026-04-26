@@ -20,11 +20,28 @@ type LinkedPO = {
   poNo: string;
   productName: string;
   productCode: string;
+  itemCategory: string;
   quantity: number;
   status: string;
   progress: number;
   currentDepartment: string;
 };
+
+// SO ID display rule (mirrors src/pages/production/index.tsx):
+//   SOFA   → strip the trailing -NN line suffix from poNo because a sofa
+//           set spans multiple variant-POs and no single -01/-02 suffix
+//           belongs to the whole set. All sofa rows on the same SO will
+//           display the same SO ID — operators distinguish by product /
+//           variant / fabric columns.
+//   BF/ACC → keep poNo as-is (e.g. SO-2604-293-01) because qty>1 already
+//           fans out into per-piece POs and the suffix genuinely identifies
+//           one physical piece.
+function displaySoId(po: { poNo: string; itemCategory: string }): string {
+  if ((po.itemCategory || "").toUpperCase() === "SOFA") {
+    return po.poNo.replace(/-\d+$/, "");
+  }
+  return po.poNo;
+}
 
 type StatusChange = {
   id: string;
@@ -446,7 +463,7 @@ export default function SalesOrderDetailPage() {
             <p className="font-medium">{confirmSuccess}</p>
             {linkedPOs.length > 0 && (
               <p className="text-sm mt-1">
-                Production Orders: {linkedPOs.map(po => po.poNo).join(", ")}
+                Production Orders: {linkedPOs.map(displaySoId).join(", ")}
               </p>
             )}
           </div>
@@ -651,13 +668,12 @@ export default function SalesOrderDetailPage() {
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Current Dept</th>
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Progress</th>
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Status</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]"></th>
                   </tr>
                 </thead>
                 <tbody>
                   {linkedPOs.map((po) => (
                     <tr key={po.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
-                      <td className="px-3 py-3 doc-number font-medium">{po.poNo}</td>
+                      <td className="px-3 py-3 doc-number font-medium">{displaySoId(po)}</td>
                       <td className="px-3 py-3">
                         <p className="font-medium text-[#1F1D1B]">{po.productName}</p>
                         <p className="text-xs text-[#9CA3AF]">{po.productCode}</p>
@@ -887,13 +903,15 @@ export default function SalesOrderDetailPage() {
         purchaseFlow={linkedPOs.length > 0 ? (() => {
           // Show first linked PO as representative
           const po = linkedPOs[0];
+          // Production-detail page is gone; node is informational only.
+          // docNo follows the same display rule as the linked-PO table
+          // (sofa drops -NN suffix, BF/ACC keep it).
           const nodes: DocNode[] = [
             {
               type: "PRODUCTION",
               label: "Production Order",
-              docNo: po.poNo,
+              docNo: displaySoId(po),
               status: po.status,
-              href: `/production/${po.id}`,
             },
           ];
           return nodes;

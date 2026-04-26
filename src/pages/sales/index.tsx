@@ -404,6 +404,37 @@ export default function SalesPage() {
   ];
 
   const totalRevenue = orders.reduce((sum, o) => sum + o.totalSen, 0);
+  // When any filter is active, show the sum of the currently-visible rows
+  // so users can ask "sofa this month — how much?" and read it off the
+  // same Revenue card. Falls back to the page-level totalRevenue when no
+  // filter is active.
+  const filteredRevenue = useMemo(
+    () => filteredOrders.reduce((sum, o) => sum + o.totalSen, 0),
+    [filteredOrders]
+  );
+
+  // Quick date presets for filterDateFrom / filterDateTo. Sales staff
+  // usually want "this month / last month / this year" at a glance.
+  const applyDatePreset = (preset: "this-month" | "last-month" | "this-year") => {
+    const now = new Date();
+    const fmt = (d: Date) => d.toISOString().split("T")[0];
+    if (preset === "this-month") {
+      const from = new Date(now.getFullYear(), now.getMonth(), 1);
+      const to = new Date(now.getFullYear(), now.getMonth() + 1, 0);
+      setFilterDateFrom(fmt(from));
+      setFilterDateTo(fmt(to));
+    } else if (preset === "last-month") {
+      const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const to = new Date(now.getFullYear(), now.getMonth(), 0);
+      setFilterDateFrom(fmt(from));
+      setFilterDateTo(fmt(to));
+    } else {
+      const from = new Date(now.getFullYear(), 0, 1);
+      const to = new Date(now.getFullYear(), 11, 31);
+      setFilterDateFrom(fmt(from));
+      setFilterDateTo(fmt(to));
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -424,7 +455,19 @@ export default function SalesPage() {
 
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
-        <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Revenue</p><p className="text-xl font-bold">{formatCurrency(totalRevenue)}</p></CardContent></Card>
+        <Card>
+          <CardContent className="p-2.5">
+            <p className="text-xs text-[#6B7280]">
+              {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
+            </p>
+            <p className={cn(
+              "text-xl font-bold",
+              hasActiveFilters && "text-[#6B5C32]"
+            )}>
+              {formatCurrency(hasActiveFilters ? filteredRevenue : totalRevenue)}
+            </p>
+          </CardContent>
+        </Card>
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Outstanding</p><p className="text-xl font-bold text-[#9C6F1E]">{outstandingCount}</p></CardContent></Card>
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Pending Delivery</p><p className="text-xl font-bold text-[#3E6570]">{pendingDeliveryCount}</p></CardContent></Card>
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Completed</p><p className="text-xl font-bold text-[#4F7C3A]">{completedCount}</p></CardContent></Card>
@@ -450,7 +493,10 @@ export default function SalesPage() {
               )}
               {hasActiveFilters && (
                 <span className="text-sm text-[#6B7280]">
-                  Showing {filteredOrders.length} of {orders.length} orders
+                  Showing {filteredOrders.length} of {orders.length} orders ·{" "}
+                  <span className="font-semibold text-[#6B5C32]">
+                    {formatCurrency(filteredRevenue)}
+                  </span>
                 </span>
               )}
             </div>
@@ -460,7 +506,26 @@ export default function SalesPage() {
           </div>
 
           {showFilters && (
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-3 border-t border-[#E2DDD8]">
+            <>
+              <div className="flex flex-wrap items-center gap-2 pt-3 pb-1 border-t border-[#E2DDD8]">
+                <span className="text-xs text-[#9CA3AF]">Quick:</span>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("this-month")}>
+                  This Month
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("last-month")}>
+                  Last Month
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => applyDatePreset("this-year")}>
+                  This Year
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setFilterCategory("SOFA")}>
+                  Sofa
+                </Button>
+                <Button variant="outline" size="sm" onClick={() => setFilterCategory("BEDFRAME")}>
+                  Bedframe
+                </Button>
+              </div>
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2">
               <div>
                 <label className="block text-xs text-[#9CA3AF] mb-1">Status</label>
                 <select
@@ -532,6 +597,7 @@ export default function SalesPage() {
                 />
               </div>
             </div>
+            </>
           )}
         </CardContent>
       </Card>

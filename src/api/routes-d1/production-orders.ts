@@ -549,16 +549,26 @@ async function fetchFilteredPOs(
       return [];
     }
     const poIds = poRows.map((p) => p.id);
-    const [jcs, picsRes] = await Promise.all([
+    const [jcs, pics] = await Promise.all([
       fetchInChunks<JobCardRow>(
         db,
         (placeholders) =>
           `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${placeholders})`,
         poIds,
       ),
-      db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+      // piece_pics scoped via a sub-select bound to the page's PO IDs, not a
+      // full table scan. Chunked at 100 PO ids — same D1 bind cap as the JC
+      // chunking above. Avoids the ~all-piece_pics scan that the previous
+      // `SELECT * FROM piece_pics` did when the operator only asked for a
+      // status-filtered slice.
+      fetchInChunks<PiecePicRow>(
+        db,
+        (placeholders) =>
+          `SELECT * FROM piece_pics WHERE jobCardId IN (SELECT id FROM ${jcSource} WHERE productionOrderId IN (${placeholders}))`,
+        poIds,
+      ),
     ]);
-    return poRows.map((p) => rowToPO(p, jcs, picsRes.results ?? []));
+    return poRows.map((p) => rowToPO(p, jcs, pics));
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
   const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
@@ -683,14 +693,20 @@ async function fetchPaginatedPOs(
     return { data: posRows.map((p) => rowToMinimalPO(p, jcs)), total };
   }
 
+  // piece_pics: bind chunks of 100 PO ids and use a sub-select on job_cards
+  // so each round-trip can sweep all piece_pics for ~hundreds of JCs instead
+  // of one prepared statement per 100 JC ids. The previous JC-id-bound shape
+  // expanded to ~35 chunks for a 200-PO / ~3500-JC page (the bulk of the
+  // 16s/44-query overview path); this collapses that to ceil(POs/100) chunks
+  // — typically 2 for an active-status slice — without changing the result
+  // set the JC-id-bound query produced.
   let pics: PiecePicRow[] = [];
-  if (jcs.length > 0) {
-    const jcIds = jcs.map((j) => j.id);
+  if (jcs.length > 0 && poIds.length > 0) {
     pics = await fetchInChunks<PiecePicRow>(
       db,
       (placeholders) =>
-        `SELECT * FROM piece_pics WHERE jobCardId IN (${placeholders})`,
-      jcIds,
+        `SELECT * FROM piece_pics WHERE jobCardId IN (SELECT id FROM ${jcSource} WHERE productionOrderId IN (${placeholders}))`,
+      poIds,
     );
   }
 

@@ -1323,11 +1323,25 @@ export function DataGrid<T extends Record<string, any>>({
         className="overflow-auto border border-[#E2DDD8] rounded-b"
         style={{ maxHeight: maxHeight || "calc(100vh - 240px)" }}
       >
-        <table className="w-full border-collapse text-[12px]">
+        <table
+          className="w-full border-collapse text-[12px]"
+          // table-layout:auto lets the browser redistribute width when a
+          // column is hidden via the Columns picker. The previous default
+          // (no explicit table-layout) caused the cached `<colgroup>` widths
+          // to lock in place after the first render — when a column was
+          // toggled off, the browser kept the old widths AND the data cells
+          // drifted into the wrong slot. Explicit `auto` re-runs the layout
+          // algorithm on every change to <colgroup>, keeping <thead> and
+          // <tbody> aligned. (Apr 2026 Wei Siang report.)
+          style={{ tableLayout: "auto" }}
+        >
           <colgroup>
             {selectable && <col style={{ width: "32px" }} />}
             {visibleColumns.map(col => (
-              <col key={col.key} style={col.width ? { width: col.width } : undefined} />
+              <col
+                key={col.key}
+                style={col.width ? { width: col.width, minWidth: col.width } : undefined}
+              />
             ))}
           </colgroup>
 

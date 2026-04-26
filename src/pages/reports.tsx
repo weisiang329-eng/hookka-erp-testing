@@ -1,4 +1,5 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
+import { useSearchParams } from "react-router-dom";
 import { cachedFetchJson } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1255,7 +1256,43 @@ function EmployeeReportTab() {
 // =====================================================================
 
 export default function ReportsPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("sales");
+  // Persist activeTab to the URL (?tab=inventory) so that:
+  //   1. Reload / hard-refresh restores the user's last tab.
+  //   2. TabbedOutlet unmount/remount on tab-bar switching doesn't reset
+  //      back to the default ("sales").  Without this, the user clicks
+  //      "Inventory", switches to another shell tab, comes back, and the
+  //      page mounts fresh with activeTab="sales" (Apr 2026 Wei Siang
+  //      report: "Check Inventory 不见了").
+  //   3. Direct links / bookmarks land on the right tab.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get("tab");
+  const isValidTab = (t: string | null): t is TabId =>
+    !!t && (TABS as readonly { id: string }[]).some((x) => x.id === t);
+  const [activeTab, setActiveTabState] = useState<TabId>(
+    isValidTab(tabFromUrl) ? tabFromUrl : "sales",
+  );
+  // Whenever the URL ?tab= changes (back / forward / external nav),
+  // sync activeTab to it so the visible pane matches the address bar.
+  useEffect(() => {
+    if (isValidTab(tabFromUrl) && tabFromUrl !== activeTab) {
+      setActiveTabState(tabFromUrl);
+    }
+  }, [tabFromUrl, activeTab]);
+  const setActiveTab = useCallback(
+    (next: TabId) => {
+      setActiveTabState(next);
+      setSearchParams(
+        (prev) => {
+          const params = new URLSearchParams(prev);
+          if (next === "sales") params.delete("tab");
+          else params.set("tab", next);
+          return params;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
 
   return (
     <div className="space-y-6">

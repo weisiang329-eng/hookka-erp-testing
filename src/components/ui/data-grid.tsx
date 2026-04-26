@@ -1515,7 +1515,23 @@ export function DataGrid<T extends Record<string, any>>({
                 // were rendered. Only `visible.length + 2` <tr> nodes
                 // exist in the DOM at any time. Note that grouping is
                 // disabled in this path (virtualizationActive guards it).
-                if (virtualizationActive) {
+                //
+                // ALIGNMENT GATE: even with the v.index<length clip below,
+                // tanstack-virtual's getTotalSize() lags one render behind
+                // a sharp count drop (e.g. column-filter narrows 460→3),
+                // producing a giant stale paddingBottom that breaks the
+                // body-vs-badge invariant the user reports as "filter
+                // doesn't align" (Wei Siang, 2026-04-26 — multiple
+                // sightings). Below VIRTUALIZE_MIN_ROWS we skip the
+                // virtualizer entirely and render every row through the
+                // same renderDataRow that the legacy path uses — direct
+                // 1:1 mapping with sortedData, no spacers, no race. The
+                // virtualizer hook still mounts (line ~1016) so hook
+                // order stays stable; we just don't consult its output.
+                const VIRTUALIZE_MIN_ROWS = 100;
+                const useVirtualizedBody =
+                  virtualizationActive && sortedData.length >= VIRTUALIZE_MIN_ROWS;
+                if (useVirtualizedBody) {
                   // Clip virtualItems to the current sortedData length. The
                   // tanstack-virtual instance can transiently emit indices
                   // computed from a *previous* `count` value when the count

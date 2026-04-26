@@ -300,9 +300,11 @@ export default function DeliveryPage() {
   const totalPages = Math.max(1, Math.ceil(totalDOsServer / PAGE_SIZE));
 
   // Reset to page 1 when the active tab changes.
+  /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by tab change */
   useEffect(() => {
     setPage(1);
   }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
@@ -319,6 +321,7 @@ export default function DeliveryPage() {
     refreshCustomers();
   }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshCustomers]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR data into mutable local state for optimistic UI */
   useEffect(() => {
     const anyLoading = doLoading || poLoading || soLoading || custLoading;
     setLoading(anyLoading);
@@ -420,6 +423,7 @@ export default function DeliveryPage() {
       }
     }
   }, [doRaw, poRaw, soRaw, custRaw, doLoading, poLoading, soLoading, custLoading]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // ----- 3PL Provider helpers -----
   const { data: providersRaw, loading: providersFetching, refresh: refreshProvidersHook } = useCachedJson<{ success?: boolean; data?: ThreePLProvider[] }>("/api/drivers");
@@ -429,12 +433,14 @@ export default function DeliveryPage() {
     refreshProvidersHook();
   }, [refreshProvidersHook]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR providers data into local state */
   useEffect(() => {
     setProvidersLoading(providersFetching);
     if (providersRaw && providersRaw.success && Array.isArray(providersRaw.data)) {
       setProviders(providersRaw.data);
     }
   }, [providersRaw, providersFetching]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const filteredProviders = useMemo(() => {
     if (!providerSearch) return providers;
@@ -803,6 +809,7 @@ export default function DeliveryPage() {
     // Check if already in items
     if (editItems.some((i) => i.productionOrderId === po.id)) return;
     const newItem: DOItem = {
+      // eslint-disable-next-line react-hooks/purity -- id generation; only invoked from a click handler, never during render
       id: `new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       productionOrderId: po.id,
       salesOrderNo: po.salesOrderNo || "",

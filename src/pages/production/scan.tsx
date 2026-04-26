@@ -118,37 +118,6 @@ function ScannerPage() {
       });
   }, []);
 
-  // Check URL params on mount
-  useEffect(() => {
-    // Parse the full scan URL via parseStickerData so we share the same
-    // decoding logic as the worker portal. We reconstruct the URL from
-    // window.location because the SPA has consumed it into searchParams
-    // and parseStickerData expects a URL string.
-    const fullUrl =
-      typeof window !== "undefined"
-        ? `${window.location.origin}${window.location.pathname}${window.location.search}`
-        : "";
-    const parsed = fullUrl ? parseStickerData(fullUrl) : null;
-    if (parsed?.pieceNo && parsed.pieceNo >= 1) {
-      setScannedPieceNo(parsed.pieceNo);
-    }
-    const opId = parsed?.opId || searchParams.get("op");
-    const poNoFromQr = parsed?.poNo || searchParams.get("po");
-    if (opId) {
-      setManualInput(opId);
-      // Merged FG-level sticker (e.g. "FG-FAB_CUT") — lookup can't find a
-      // job card with that synthetic id, so search by PO number instead
-      // and keep the sentinel id on the jobCard so handleCompleteScan
-      // knows to hit the fan-out endpoint.
-      if (/^FG-[A-Z_]+$/.test(opId) && poNoFromQr) {
-        doLookup(poNoFromQr, opId);
-      } else {
-        doLookup(opId);
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   const doLookup = useCallback(async (query?: string, fgSentinel?: string) => {
     const searchTerm = (query || manualInput).trim();
     if (!searchTerm) return;
@@ -227,6 +196,39 @@ function ScannerPage() {
     }
     setLoading(false);
   }, [manualInput]);
+
+  // Check URL params on mount.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate from QR sticker URL on mount */
+  useEffect(() => {
+    // Parse the full scan URL via parseStickerData so we share the same
+    // decoding logic as the worker portal. We reconstruct the URL from
+    // window.location because the SPA has consumed it into searchParams
+    // and parseStickerData expects a URL string.
+    const fullUrl =
+      typeof window !== "undefined"
+        ? `${window.location.origin}${window.location.pathname}${window.location.search}`
+        : "";
+    const parsed = fullUrl ? parseStickerData(fullUrl) : null;
+    if (parsed?.pieceNo && parsed.pieceNo >= 1) {
+      setScannedPieceNo(parsed.pieceNo);
+    }
+    const opId = parsed?.opId || searchParams.get("op");
+    const poNoFromQr = parsed?.poNo || searchParams.get("po");
+    if (opId) {
+      setManualInput(opId);
+      // Merged FG-level sticker (e.g. "FG-FAB_CUT") — lookup can't find a
+      // job card with that synthetic id, so search by PO number instead
+      // and keep the sentinel id on the jobCard so handleCompleteScan
+      // knows to hit the fan-out endpoint.
+      if (/^FG-[A-Z_]+$/.test(opId) && poNoFromQr) {
+        doLookup(poNoFromQr, opId);
+      } else {
+        doLookup(opId);
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const handleCompleteScan = async () => {
     if (!lookupResult || !selectedWorkerId) return;

@@ -190,7 +190,7 @@ export default function DocumentFlowDiagram({
 
   const handleNodeClick = (node: DocNode) => {
     if (node.href) {
-      window.location.href = node.href;
+      window.location.assign(node.href);
     }
   };
 

@@ -956,7 +956,7 @@ export default function ProductionPage({
   // re-renders of a 430-row grid. Single-JC callers should still use the
   // plain patchJobCard below; this is explicitly for fan-outs.
   type JcPatch = Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">>;
-  const patchJobCardsBatch = useCallback(
+  const _patchJobCardsBatch = useCallback(
     (edits: Array<{ poId: string; jobCardId: string; patch: JcPatch }>) => {
       if (edits.length === 0) return;
       // Index by poId → jcId → patch for O(1) lookup inside the map below.
@@ -1838,6 +1838,10 @@ export default function ProductionPage({
             : row.poStatus === "CANCELLED"
               ? "CANCELLED"
               : "";
+        const displaySoId =
+          row.category === "SOFA"
+            ? (row.salesOrderNo || row.soId)
+            : row.soId;
         return (
           <span className="flex items-center gap-1.5 tabular-nums">
             {row.salesOrderId ? (
@@ -1849,12 +1853,12 @@ export default function ProductionPage({
                   navigate(`/sales/${row.salesOrderId}`);
                 }}
                 onDoubleClick={(e) => e.stopPropagation()}
-                title={`Open Sales Order ${row.soId}`}
+                title={`Open Sales Order ${displaySoId}`}
               >
-                {row.soId}
+                {displaySoId}
               </button>
             ) : (
-              <span className="doc-number truncate">{row.soId}</span>
+              <span className="doc-number truncate">{displaySoId}</span>
             )}
             {pillLabel && (
               <span
@@ -2442,9 +2446,10 @@ export default function ProductionPage({
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
       const rowsHtml = printRows.map((r) => {
+        const printSoId = r.category === "SOFA" ? (r.salesOrderNo || r.soId) : r.soId;
         return `<tr>
           <td class="num">${r.rowNo}</td>
-          <td class="so">${r.soId}</td>
+          <td class="so">${printSoId}</td>
           <td>${r.customerPOId || ""}</td>
           <td>${r.customerRef || ""}</td>
           <td>${r.customerName}</td>

@@ -1314,17 +1314,6 @@ export default function ProductionPage({
     sched_WEBBING: DeptSched;
     sched_UPHOLSTERY: DeptSched;
     sched_PACKING: DeptSched;
-    // Set on the FAB_CUT tab when multiple same-fabric WIPs on the same PO
-    // get merged into one row (so the operator lays one bolt down and cuts
-    // all components in one pass). Completing / clearing the row fans the
-    // patch across every id in this array; other depts leave it undefined
-    // and keep per-WIP behaviour.
-    _mergedJobCardIds?: string[];
-    // Per-JC (poId, jobCardId) pairs for merged Fab Cut rows. Required when
-    // the merge spans multiple POs (sofa variants on one SO cut from the
-    // same cloth each live under their own PO) — patching every JC under
-    // `row.poId` silently drops updates for siblings on other POs.
-    _mergedJobCardRefs?: Array<{ poId: string; jobCardId: string }>;
   };
 
   // Build a DeptSched from a candidate JobCard (or null if no card exists).
@@ -1721,14 +1710,9 @@ export default function ProductionPage({
             if (leavingDone) {
               patch.completedDate = "";
             }
-            // Fan-out for FAB_CUT merged rows so a status change applies
-            // to every component that was cut in the same pass. Use the
-            // per-JC poId refs because a sofa merge can span multiple POs.
-            // Batched to collapse N re-renders into one.
-            const refs = row._mergedJobCardRefs && row._mergedJobCardRefs.length > 0
-              ? row._mergedJobCardRefs
-              : [{ poId: row.poId, jobCardId: row.jobCardId }];
-            patchJobCardsBatch(refs.map((r) => ({ ...r, patch })));
+            // Single-JC patch — FAB_CUT no longer merges rows, so every
+            // dept (including FC) updates exactly the row's own jobCardId.
+            patchJobCard(row.poId, row.jobCardId, patch);
           }}
           onClick={(e) => e.stopPropagation()}
           onDoubleClick={(e) => e.stopPropagation()}
@@ -1753,12 +1737,8 @@ export default function ProductionPage({
   // UX so the user can fill/clear from one place.
   const renderCompletionCell = (row: DeptRow) => {
     const has = !!row.completedDate;
-    // Fan-out for FAB_CUT merged rows — stamp / clear the date on every
-    // child job card so the whole cut-batch flips state together. Use the
-    // per-JC poId refs because a sofa merge can span multiple POs.
-    const refs = row._mergedJobCardRefs && row._mergedJobCardRefs.length > 0
-      ? row._mergedJobCardRefs
-      : [{ poId: row.poId, jobCardId: row.jobCardId }];
+    // Single-JC stamp/clear — FAB_CUT no longer fans out to merged
+    // siblings.
     return (
       <div
         className="relative w-full h-full min-h-[22px] cursor-pointer"
@@ -1771,13 +1751,13 @@ export default function ProductionPage({
                 completedDate: v,
                 status: v ? "COMPLETED" : "WAITING",
               };
-              patchJobCardsBatch(refs.map((r) => ({ ...r, patch })));
+              patchJobCard(row.poId, row.jobCardId, patch);
             },
             e.currentTarget,
           );
         }}
         onDoubleClick={(e) => e.stopPropagation()}
-        title={refs.length > 1 ? `Click to set completion date (${refs.length} components)` : "Click to set completion date"}
+        title="Click to set completion date"
       >
         <span
           className={`flex items-center justify-center px-1.5 py-[2px] rounded-sm text-[10px] font-semibold whitespace-nowrap leading-tight w-full ${
@@ -2112,11 +2092,10 @@ export default function ProductionPage({
     for (const row of rowsSource) {
       const order = orderById.get(row.poId);
       if (!order) continue;
-      const isMergedFabCut =
-        activeTab === "FAB_CUT" &&
-        !!row._mergedJobCardIds &&
-        row._mergedJobCardIds.length > 1;
-      const opId = isMergedFabCut ? "FG-FAB_CUT" : row.jobCardId;
+      // Each JC gets its own sticker — no FG-FAB_CUT sentinel anymore.
+      // Operators scan once per JC, going through the standard
+      // scan-complete flow (scan-complete-dept fan-out is dead).
+      const opId = row.jobCardId;
       // qty > 1 fans the row into N physical piece stickers, each with
       // its own p=N&t=M marker so the worker portal can reject double-
       // scans. qty=1 stays single-sticker.

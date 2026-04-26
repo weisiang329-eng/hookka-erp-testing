@@ -8,6 +8,14 @@ import path from 'path'
 // Workers use the Upload photos path instead (multiple select + batch
 // queue), which works fine over HTTP.
 export default defineConfig({
+  // Build-time identifier injected as a global constant. Used by
+  // src/lib/cached-fetch.ts to namespace localStorage cache entries —
+  // every new build gets a unique namespace so old cached payloads from
+  // a previous deploy automatically orphan instead of haunting users
+  // through the next deploy. No manual cache-clear ever needed.
+  define: {
+    __BUILD_ID__: JSON.stringify(Date.now().toString(36)),
+  },
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {

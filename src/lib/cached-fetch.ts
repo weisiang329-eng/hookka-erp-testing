@@ -23,7 +23,35 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildTraceparent } from "./trace";
 
-const NAMESPACE = "hookka-cache:v1:";
+// Per-build cache namespace. `__BUILD_ID__` is injected by Vite (see
+// vite.config.ts `define`) as a unique-per-build string. Every new
+// deploy ships a different namespace, so previously-cached payloads
+// orphan automatically — no manual localStorage clear, no version
+// bump, no stale data after a backend reset.
+declare const __BUILD_ID__: string;
+const NAMESPACE = `hookka-cache:${__BUILD_ID__}:`;
+
+// One-shot cleanup: when this module loads (i.e. once per browser
+// session, on the first import), sweep localStorage for any
+// `hookka-cache:*` entries that don't belong to the current build and
+// delete them. Keeps the per-build namespacing from accumulating dead
+// entries forever (browsers will eventually GC under quota pressure,
+// but explicit cleanup is friendlier).
+if (typeof window !== "undefined") {
+  try {
+    const keysToDrop: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k) continue;
+      if (k.startsWith("hookka-cache:") && !k.startsWith(NAMESPACE)) {
+        keysToDrop.push(k);
+      }
+    }
+    for (const k of keysToDrop) window.localStorage.removeItem(k);
+  } catch {
+    // localStorage disabled or quota error — best effort, ignore.
+  }
+}
 
 type CacheEntry<T> = {
   data: T;

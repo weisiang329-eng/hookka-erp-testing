@@ -108,25 +108,18 @@ export async function enqueuePoEmission(
 }
 
 /**
- * Inline fallback: imitates exactly what the consumer would do if the
- * queue were wired. Today this is `notifySupplierPoSubmitted` (a console
- * log stub); once Resend is wired into that helper the inline path picks
- * up the change for free.
+ * Inline fallback for the SO-confirm → production-PO emission flow.
+ * NOTE: this queue is for INTERNAL production orders spawned at SO
+ * confirm — not the procurement PO → supplier flow that
+ * `notifySupplierPoSubmitted` handles. The two were sharing one stub
+ * pre-2026-04-26; the supplier-facing path is now wired to Resend
+ * (see `lib/email.ts`) but the production-PO emission path still has
+ * no concrete receiver (no customer-facing portal exists yet). Log
+ * only — when a real customer notification template lands, swap the
+ * console.log for a sendEmail call.
  */
 async function runInline(message: PoEmissionMessage): Promise<void> {
-  const { notifySupplierPoSubmitted } = await import("./email");
-  try {
-    notifySupplierPoSubmitted({
-      poNo: message.poNo ?? message.poId,
-      supplierName: message.supplierName ?? "(unknown supplier)",
-      supplierId: message.supplierId ?? "",
-    });
-  } catch (err) {
-    // Match the existing routes-d1/purchase-orders.ts behavior — never
-    // let a notification failure surface to the caller.
-    console.warn(
-      "[queue-po-emission:inline] notify failed:",
-      err instanceof Error ? err.message : err,
-    );
-  }
+  console.log(
+    `[queue-po-emission:inline] PO ${message.poNo ?? message.poId} (SO ${message.soId}) emitted; no customer-facing notification wired yet.`,
+  );
 }

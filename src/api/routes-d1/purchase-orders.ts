@@ -532,18 +532,37 @@ app.put("/:id", async (c) => {
 
     await c.var.DB.batch(statements);
 
-    // Fire-and-forget supplier notification when a PO is submitted. Stubbed
-    // out as a console log for now — real Resend wiring can hook into the
-    // same call site later.
+    // Fire-and-forget supplier notification on the DRAFT/etc → SUBMITTED
+    // transition. Wired to Resend 2026-04-26: looks up the supplier's
+    // email and sends a templated PO notification. Failures (no email on
+    // file, RESEND_API_KEY missing, network error) are logged only and
+    // never roll back the PO update — a missed email is not worse than a
+    // missed PO save.
     if (body.status === "SUBMITTED" && existing.status !== "SUBMITTED") {
       try {
-        notifySupplierPoSubmitted({
-          poNo: existing.poNo,
-          supplierName: merged.supplierName,
-          supplierId: merged.supplierId,
-        });
-      } catch {
-        // Never let a stub break the PO update.
+        const supplierRow = await c.var.DB.prepare(
+          "SELECT email FROM suppliers WHERE id = ? LIMIT 1",
+        )
+          .bind(merged.supplierId)
+          .first<{ email: string | null }>();
+        await notifySupplierPoSubmitted(
+          c.env as unknown as {
+            RESEND_API_KEY?: string;
+            RESEND_FROM_EMAIL?: string;
+            APP_URL?: string;
+          },
+          supplierRow?.email ?? null,
+          {
+            poNo: existing.poNo,
+            supplierName: merged.supplierName,
+            supplierId: merged.supplierId,
+          },
+        );
+      } catch (err) {
+        console.warn(
+          "[purchase-orders] supplier notification failed",
+          err instanceof Error ? err.message : err,
+        );
       }
     }
 

@@ -101,23 +101,22 @@ async function processOne(
   message: PoEmissionMessage,
   _env: PoEmissionConsumerEnv,
 ): Promise<void> {
-  // Lazy import keeps the consumer module light and avoids a circular
-  // import (email.ts ← queue-po-emission.ts ← worker.ts → consumer).
-  const { notifySupplierPoSubmitted } = await import("../lib/email");
+  // SO-confirm → production-PO emission. NOT the procurement PO → supplier
+  // flow (that's wired to Resend in `lib/email.ts notifySupplierPoSubmitted`
+  // and runs synchronously from `routes-d1/purchase-orders.ts`). This
+  // consumer fires when an SO is confirmed and spawns N production POs;
+  // its job is to emit some customer-facing notification, but no
+  // customer template / portal exists yet — log only until that lands.
 
-  // Permanent failure: no supplier identity at all. Log + ack (handled
-  // by the caller catching the throw with isTransient === false).
   if (!message.supplierId && !message.poNo) {
     throw new PermanentError(
-      `PO ${message.poId}: missing supplierId AND poNo — cannot route email`,
+      `PO ${message.poId}: missing supplierId AND poNo — cannot route notification`,
     );
   }
 
-  notifySupplierPoSubmitted({
-    poNo: message.poNo ?? message.poId,
-    supplierName: message.supplierName ?? "(unknown supplier)",
-    supplierId: message.supplierId ?? "",
-  });
+  console.log(
+    `[queue-po-emission:consumer] PO ${message.poNo ?? message.poId} (SO ${message.soId}) emitted; no customer-facing notification wired yet.`,
+  );
 
   // TODO (Phase C #3 finish): once a workflow_run table exists, write a
   // step-completion row here so the UI can show "PO emission completed

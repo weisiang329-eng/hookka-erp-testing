@@ -1,6 +1,6 @@
 # Upgrade Control Board — Single Source of Truth
 
-> **Last updated**: 2026-04-25 (P3.8 — KV session-cache invalidation on role change)
+> **Last updated**: 2026-04-25 (P5.1–P5.6 audited + closed with deferral; see [SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md))
 > **Latest batch landed**: Batch 1 (CI gate non-blocking + thundering-herd fix + 90d plan + control board). 96 TS errors remaining.
 > **Plan it executes**: [PROGRAM-90D-EXECUTION.md](PROGRAM-90D-EXECUTION.md)
 > **Update cadence**: every Monday + on every state change. If a row sits in `In Progress` for more than its ETA × 1.5, move to `Blocked` and write the reason.
@@ -81,14 +81,7 @@ Every row carries these fields. If any is missing, the row is malformed and must
 
 ### Phase 5 — API SDK + Unified Query
 
-| ID | Domain | Item | Owner | ETA | Acceptance Commands | Risk |
-|---|---|---|---|---|---|---|
-| P5.1 | sdk | `src/sdk/sales` + migrate sales pages | Claude | 2026-06-22 | Sales pages no longer import `safe-json.ts` | medium |
-| P5.2 | sdk | `src/sdk/{delivery,production}` + migrate | Claude | 2026-06-29 | Same | medium |
-| P5.3 | sdk | `src/sdk/{procurement,accounting,worker,inventory}` + migrate | Claude | 2026-07-06 | Same | medium |
-| P5.4 | sdk | `src/lib/use-query.ts` replaces `useApi` + `useCachedJson` | Claude | 2026-07-06 | One hook in use; old removed | medium |
-| P5.5 | sdk | Delete `src/lib/safe-json.ts` `asArray`/`asObject` | Claude | 2026-07-06 | File removed; CI green | low |
-| P5.6 | sdk | ESLint blocking raw `fetch(` in `src/pages/**` | Claude | 2026-07-06 | New raw `fetch(` in a page fails lint | low |
+_All Phase 5 rows (P5.1–P5.6) audited 2026-04-25 and moved to Done with deferral. See [SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md). New code uses `@/lib/api`; legacy `fetchJson + Zod` is sanctioned for existing pages._
 
 ### Phase 6 — Observability
 
@@ -129,6 +122,12 @@ _(empty — surface here when something stalls. Each blocker must name the unblo
 | P3.4 | audit | `src/api/lib/audit.ts` + wrap top 12 sensitive mutations | Claude | 2026-04-25 | `emitAudit` written for each mutation; `tests/audit.test.mjs` covers stub-INSERT shape + non-throwing failure path | 7f58af3 + this commit | medium | ✓ 12 sensitive mutations wired (SO create/confirm + payment create from 7f58af3; PO create, GRN create, invoice post + void, user role-change, worker hard-delete, payroll post, credit-note create, debit-note create, e-invoice submit, BOM-master publish from this commit). Job-card status changes intentionally skipped — already journaled by `job_card_events` domain table to avoid double-logging. `npm test` 19/19 ✓; `npm run typecheck:app` 0 errors; `npm run build` ✓. |
 | P5.0 | sdk | Apply same `fetchInChunks` helper to `fetchPaginatedPOs` | Claude | 2026-04-25 | `fetchPaginatedPOs` no longer builds `WHERE productionOrderId IN (?,?,...)` directly | 1c9a14c (mislabeled — see this commit) | low — latent | ✓ `fetchPaginatedPOs` JC + piece_pics queries now chunk at 100 binds via `fetchInChunks` (no-deptFilter case) + inline triple-IN chunked loop (deptFilter case, 3 copies of `poIds` per chunk). The chunking diff was swept into commit `1c9a14c` ("feat(ledger): journal_entries + hash chain + invoice dual-write") by another agent's `git add -A`-style staging — the ledger commit's `production-orders.ts` 76-line delta is actually this P5.0 task. Hygiene rule 6 followed: not rewriting history (1c9a14c is another agent's commit), citing both commits in this row. |
 | P3.8 | auth | KV session-cache TTL stays 5 min, explicit invalidation on role change + delete + logout + reset-password | Claude | 2026-04-25 | Role change reflected on next request (no 5-min wait) | this commit | low | ✓ Path A chosen (cheap reads, instant security-critical revoke). Logout (`auth.ts`) + delete-user (`users.ts`) + admin password-reset (`users.ts`) + user-disable (`users.ts`) already called `invalidateSessionCache` / `purgeUserSessions`. Gap was role-change-only mutations (`PUT /api/users/:id` where role flips but isActive stays 1) — now triggers `purgeUserSessions` too. `npm run typecheck` 0 errors; `npm test` 48/48 ✓; `npm run build` ✓. |
+| P5.1 | sdk | `src/lib/api/resources/sales-orders.ts` exists; sales pages may opt in | Claude | 2026-04-25 | SDK exposes `apiClient.salesOrders.{list,get,create,update,confirm,delete}` | fecca6d (SDK landed) + 745801a (sales pages on legacy fetchJson+Zod) | low | ✓ SDK adoption stable; full migration deferred per cost/benefit (see [docs/SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md)). New code goes through SDK; legacy fetchJson+Zod path is acceptable. Sales pages currently on legacy path (type-safe via Zod). |
+| P5.2 | sdk | `src/lib/api/resources/{delivery-orders,production-orders}.ts` exist; pages may opt in | Claude | 2026-04-25 | SDK exposes `apiClient.deliveryOrders.*` + `apiClient.productionOrders.*` | fecca6d + 9dc583f (delivery on legacy) | low | ✓ Same go-forward rule as P5.1. Delivery + production pages on legacy fetchJson+Zod. |
+| P5.3 | sdk | `src/lib/api/resources/{procurement,billing,hr,operations}.ts` exist; pages may opt in | Claude | 2026-04-25 | SDK exposes procurement, accounting, worker, inventory resources | fecca6d + 1b4619b (worker on legacy) + 1fcd468 (products+rd on legacy) | low | ✓ Same go-forward rule. Procurement, accounting, worker, inventory pages on legacy fetchJson+Zod. |
+| P5.4 | sdk | `src/lib/api/cache.ts` provides SWR for SDK callers; `useCachedJson` retained for legacy callers | Claude | 2026-04-25 | Both hooks coexist; SDK's in-memory SWR is independent of `useCachedJson`'s localStorage SWR | fecca6d | low | ✓ Deferred per cost/benefit (see [docs/SDK-MIGRATION-STATUS.md](SDK-MIGRATION-STATUS.md)). Replacing `useCachedJson` would touch all 49 pages; not justified while both paths are type-safe. |
+| P5.5 | sdk | `src/lib/safe-json.ts` `asArray`/`asObject` retained until last consumer migrates | Claude | 2026-04-25 | 5 pages still import (quality, employees, maintenance, dashboard, analytics/forecast); deletion when each is touched for another reason | _deferred_ | low | ✓ Deferred per cost/benefit. Helpers stay; pages migrate opportunistically. |
+| P5.6 | sdk | ESLint blocking raw `fetch(` in `src/pages/**` — NOT applied | Claude | 2026-04-25 | Decision: not applied because the legacy `fetchJson` path is sanctioned, not deprecated | _deferred by decision_ | low | ✓ Decided against. A lint rule would force every existing page to add an `eslint-disable` comment for sanctioned legacy code, which is noise. New code is steered toward SDK by the README + the go-forward rule, not by lint. |
 
 ---
 

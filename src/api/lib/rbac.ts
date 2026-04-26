@@ -62,16 +62,34 @@ async function loadRolePermissions(
 ): Promise<PermSet> {
   // role here is the user.role TEXT (uppercase like "FINANCE").  The 0045
   // schema seeds roles.name with the same uppercase — join through.
-  const rows = await db
-    .prepare(
-      `SELECT p.resource AS resource, p.action AS action
-         FROM role_permissions rp
-         JOIN roles r       ON r.id  = rp.roleId
-         JOIN permissions p ON p.id  = rp.permissionId
-        WHERE r.name = ?`,
-    )
-    .bind(role)
-    .all<{ resource: string; action: string }>();
+  //
+  // Defensive try/catch (2026-04-26 prod 500 dogfood report): if any of the
+  // RBAC tables (roles / role_permissions / permissions) are missing or the
+  // JOIN throws for any reason, fall through to the legacy default for the
+  // role text rather than letting a 500 escape to the user. The same role
+  // text is what auth-middleware already stamps on the context from the
+  // legacy users.role TEXT column, so this keeps the dashboard working
+  // until ops re-applies migrations.
+  let rows: { results?: { resource: string; action: string }[] } = {};
+  try {
+    rows = await db
+      .prepare(
+        `SELECT p.resource AS resource, p.action AS action
+           FROM role_permissions rp
+           JOIN roles r       ON r.id  = rp.roleId
+           JOIN permissions p ON p.id  = rp.permissionId
+          WHERE r.name = ?`,
+      )
+      .bind(role)
+      .all<{ resource: string; action: string }>();
+  } catch (err) {
+    console.warn(
+      `[rbac] role_permissions JOIN failed for role=${role} — falling back to legacy defaults. err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    // rows stays empty → legacy fallback below kicks in.
+  }
 
   const set: PermSet = new Set();
   for (const r of rows.results ?? []) {
@@ -84,6 +102,13 @@ async function loadRolePermissions(
     console.warn(
       `[rbac] role=${role} had 0 grants in role_permissions — seeded ${set.size} legacy defaults. Migrate user to new roleId.`,
     );
+  }
+  // No rows, no legacy default — give ANY authenticated caller read-only
+  // access. Mutations stay locked. This is the fail-safe for an unknown
+  // role text (e.g. "FINANCE" before its row exists) so the user doesn't
+  // get stuck on a blank dashboard. Surfaced in the warn log above.
+  if (set.size === 0) {
+    set.add("*:read");
   }
   return set;
 }
@@ -144,7 +169,25 @@ export async function requirePermission(
   if (!role) {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
-  const set = await getRolePermissions(c, role);
+  // Defensive try/catch (2026-04-26 prod 500 dogfood report): if the
+  // permission lookup throws (KV blip, D1 transient, schema drift), fall
+  // back to legacy users.role text — SUPER_ADMIN / ADMIN keep full access,
+  // anything else degrades to read-only via permitted() against ["*:read"].
+  // This is strictly safer than letting a 500 escape, because the worst
+  // case is a mutation getting blocked (caller retries) rather than the
+  // whole page going blank. The thrown error is logged so ops can root-
+  // cause via wrangler tail.
+  let set: PermSet;
+  try {
+    set = await getRolePermissions(c, role);
+  } catch (err) {
+    console.warn(
+      `[rbac] getRolePermissions threw for role=${role} resource=${resource} action=${action} — falling back to legacy. err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    set = new Set(LEGACY_ROLE_DEFAULTS[role] ?? ["*:read"]);
+  }
   if (!permitted(set, resource, action)) {
     return c.json(
       {

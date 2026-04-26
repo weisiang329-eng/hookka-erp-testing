@@ -178,53 +178,88 @@ app.get("/me/permissions", async (c) => {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
-  // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
-  // mirroring authz.ts's resolveUserRole().
-  const roleRow = await c.var.DB.prepare(
-    `SELECT u.roleId AS roleId, r.name AS roleName
-       FROM users u
-       LEFT JOIN roles r ON r.id = u.roleId
-      WHERE u.id = ?
-      LIMIT 1`,
-  )
-    .bind(userId)
-    .first<{ roleId: string | null; roleName: string | null }>();
+  // Defensive wrap (2026-04-26 prod 500 dogfood report): if the roles /
+  // role_permissions tables are missing or the JOIN throws, degrade to a
+  // legacy lookup against users.role TEXT and surface a permissive
+  // ["*:read"] set so the UI keeps gating reads sensibly. SUPER_ADMIN /
+  // ADMIN still get the wildcard. Mutations stay forbidden until the
+  // operator re-applies migrations.
+  try {
+    // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
+    // mirroring authz.ts's resolveUserRole().
+    const roleRow = await c.var.DB.prepare(
+      `SELECT u.roleId AS roleId, r.name AS roleName
+         FROM users u
+         LEFT JOIN roles r ON r.id = u.roleId
+        WHERE u.id = ?
+        LIMIT 1`,
+    )
+      .bind(userId)
+      .first<{ roleId: string | null; roleName: string | null }>();
 
-  if (!roleRow) {
-    // Authenticated but no users row — shouldn't happen in practice.
-    return c.json({ success: true, permissions: [] });
-  }
+    if (!roleRow) {
+      // Authenticated but no users row — shouldn't happen in practice.
+      return c.json({ success: true, permissions: [] });
+    }
 
-  // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
-  // authz.ts SUPER_ADMIN short-circuit.
-  if (roleRow.roleName === "SUPER_ADMIN") {
+    // SUPER_ADMIN bypass — sentinel list keeps payload tiny + matches the
+    // authz.ts SUPER_ADMIN short-circuit.
+    if (roleRow.roleName === "SUPER_ADMIN") {
+      return c.json({
+        success: true,
+        role: roleRow.roleName,
+        permissions: ["*"],
+      });
+    }
+
+    const roleId = roleRow.roleId ?? "role_read_only";
+    const roleName = roleRow.roleName ?? "READ_ONLY";
+
+    const permsRes = await c.var.DB.prepare(
+      `SELECT p.resource AS resource, p.action AS action
+         FROM role_permissions rp
+         JOIN permissions p ON rp.permissionId = p.id
+        WHERE rp.roleId = ?`,
+    )
+      .bind(roleId)
+      .all<{ resource: string; action: string }>();
+
+    const rows = permsRes.results ?? [];
+    const permissions = rows.map((r) => `${r.resource}:${r.action}`);
+
     return c.json({
       success: true,
-      role: roleRow.roleName,
-      permissions: ["*"],
+      role: roleName,
+      permissions,
+    });
+  } catch (err) {
+    console.warn(
+      `[auth] /me/permissions failed for userId=${userId} — falling back to legacy users.role. err=${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    // Fallback: legacy users.role TEXT lookup. Same query the
+    // auth-middleware already runs to stamp userRole on the context.
+    let legacyRole = "READ_ONLY";
+    try {
+      const r = await c.var.DB.prepare(
+        "SELECT role FROM users WHERE id = ? LIMIT 1",
+      )
+        .bind(userId)
+        .first<{ role: string | null }>();
+      if (r?.role) legacyRole = r.role.toUpperCase();
+    } catch {
+      // Even the legacy lookup failed — return read-only against unknown role.
+    }
+    if (legacyRole === "SUPER_ADMIN" || legacyRole === "ADMIN") {
+      return c.json({ success: true, role: legacyRole, permissions: ["*"] });
+    }
+    return c.json({
+      success: true,
+      role: legacyRole,
+      permissions: ["*:read"],
     });
   }
-
-  const roleId = roleRow.roleId ?? "role_read_only";
-  const roleName = roleRow.roleName ?? "READ_ONLY";
-
-  const permsRes = await c.var.DB.prepare(
-    `SELECT p.resource AS resource, p.action AS action
-       FROM role_permissions rp
-       JOIN permissions p ON rp.permissionId = p.id
-      WHERE rp.roleId = ?`,
-  )
-    .bind(roleId)
-    .all<{ resource: string; action: string }>();
-
-  const rows = permsRes.results ?? [];
-  const permissions = rows.map((r) => `${r.resource}:${r.action}`);
-
-  return c.json({
-    success: true,
-    role: roleName,
-    permissions,
-  });
 });
 
 // ----- POST /api/auth/change-password -------------------------------------

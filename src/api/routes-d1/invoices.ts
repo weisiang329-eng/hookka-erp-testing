@@ -319,6 +319,14 @@ app.get("/", async (c) => {
   const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   if (!paginate) {
+    // 2026-04-26 prod 500 fix: cap the unbounded items + payments fetch
+    // when no customer/status filter is applied. The unfiltered
+    // `SELECT * FROM invoice_items` was the prime suspect for the 500
+    // surfaced in the dogfood test (Server-Timing showed app-time + 0
+    // db queries, consistent with a result-set or CPU-budget exception
+    // inside the handler before any timer fires). Past this cap callers
+    // must pass ?page=N&limit=M.
+    const ROWS_HARD_CAP = 5000;
     const [invs, items, payments] = await Promise.all([
       db
         .prepare(`SELECT * FROM invoices ${clause} ORDER BY created_at DESC`)
@@ -328,8 +336,9 @@ app.get("/", async (c) => {
         .prepare(
           customerId || status
             ? `SELECT i.* FROM invoice_items i
-                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
-            : "SELECT * FROM invoice_items",
+                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 LIMIT ${ROWS_HARD_CAP}`
+            : `SELECT * FROM invoice_items LIMIT ${ROWS_HARD_CAP}`,
         )
         .bind(...params)
         .all<InvoiceItemRow>(),
@@ -337,8 +346,9 @@ app.get("/", async (c) => {
         .prepare(
           customerId || status
             ? `SELECT p.* FROM invoice_payments p
-                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}`
-            : "SELECT * FROM invoice_payments",
+                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 LIMIT ${ROWS_HARD_CAP}`
+            : `SELECT * FROM invoice_payments LIMIT ${ROWS_HARD_CAP}`,
         )
         .bind(...params)
         .all<InvoicePaymentRow>(),

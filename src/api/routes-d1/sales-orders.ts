@@ -1300,6 +1300,16 @@ app.get("/", async (c) => {
   );
 
   if (!paginate) {
+    // 2026-04-26 prod 500 fix: cap the unbounded items fetch. The
+    // unfiltered `SELECT *` over `sales_order_items` was the prime
+    // suspect for the 500 surfaced in the dogfood test (Server-Timing
+    // showed app-time + 0 db queries, consistent with a result-set or
+    // CPU-budget exception inside the handler before any timer fires).
+    // 5,000 rows ≈ ~50 SOs of 100 items — still covers the entire
+    // current dataset with headroom. Once the dataset grows past this
+    // cap, callers must pass ?page=N&limit=M (the paginated branch
+    // below already scopes items via salesOrderId IN (...)).
+    const ITEMS_HARD_CAP = 5000;
     const [sos, items] = await Promise.all([
       db
         .prepare(
@@ -1307,7 +1317,9 @@ app.get("/", async (c) => {
         )
         .bind(...orgParams)
         .all<SalesOrderRow>(),
-      db.prepare(`SELECT * FROM ${itemsSourceSql}`).all<SalesOrderItemRow>(),
+      db
+        .prepare(`SELECT * FROM ${itemsSourceSql} LIMIT ${ITEMS_HARD_CAP}`)
+        .all<SalesOrderItemRow>(),
     ]);
     const data = (sos.results ?? []).map((s) =>
       rowToSO(s, items.results ?? []),

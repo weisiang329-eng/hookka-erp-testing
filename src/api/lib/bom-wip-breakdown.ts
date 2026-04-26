@@ -76,6 +76,13 @@ export type WipProcessEntry = {
   // piece counts instead of the top-level multiplier (not used by the
   // SO → job_card cascade yet, but kept for future UI use).
   nodeQuantity: number;
+  // BOM-branch identifier — the wipCode (raw template, NOT resolved) of
+  // the immediate-child-of-top BOM node this process descended through.
+  // Top-level processes (UPHOLSTERY/PACKING in most BOMs) get "" because
+  // they live on the root and are shared by every branch. Walked from
+  // the actual BOM tree — see collectProcesses() — so a future BOM with
+  // a different branch shape works without code changes.
+  branchKey: string;
 };
 
 export type WipBreakdownItem = {
@@ -145,6 +152,14 @@ function collectProcesses(
   variants: BomVariantContext | null,
   fallbackCode: string,
   fallbackLabel: string,
+  // branchKey passed-down through recursion. Empty at the top-level node;
+  // becomes the immediate child's RAW (unresolved) wipCode on the first
+  // descent, then inherits unchanged at deeper levels. The first-descent
+  // child is the BOM-tree natural definition of "branch root", and using
+  // the raw template (not the resolved value) keeps it stable across PO
+  // variants — every Divan PO gets the same branchKey for the Foam
+  // subtree regardless of fabric / size.
+  branchKey: string,
 ): Map<string, WipProcessEntry> {
   const nodeQty = Number(node.quantity) > 0 ? Number(node.quantity) : 1;
   const rawCode = String(node.wipCode || "");
@@ -179,12 +194,17 @@ function collectProcesses(
         wipCode: resolvedCode || fallbackCode,
         wipLabel: resolvedLabel || fallbackLabel,
         nodeQuantity: nodeQty,
+        branchKey,
       });
     }
   }
   const kids = Array.isArray(node.children) ? node.children : [];
   for (const c of kids) {
-    collectProcesses(c, acc, variants, fallbackCode, fallbackLabel);
+    // First descent from the root (branchKey === "") adopts the child's
+    // raw wipCode as the branch identifier; deeper descents inherit.
+    const childBranch =
+      branchKey || String(c.wipCode || "");
+    collectProcesses(c, acc, variants, fallbackCode, fallbackLabel, childBranch);
   }
   return acc;
 }
@@ -244,6 +264,10 @@ function makeFallbackFgWip(productCode: string): WipBreakdownItem {
       wipCode: "FG_MAIN",
       wipLabel: code,
       nodeQuantity: 1,
+      // Fallback FG-only chain has a single linear branch — every process
+      // shares the synthesized "FG_MAIN" branchKey so the (wipKey,
+      // branchKey) sibling filter still groups them together.
+      branchKey: "FG_MAIN",
     })),
   };
 }
@@ -264,6 +288,10 @@ function fallbackChainForType(
     wipCode: fallbackCode,
     wipLabel: fallbackLabel,
     nodeQuantity: nodeQty,
+    // Fallback chain: no real BOM tree to walk, so every process shares
+    // one synthetic branchKey derived from the top-level wipCode. Lets
+    // the (wipKey, branchKey) consume filter still group them.
+    branchKey: fallbackCode,
   }));
 }
 
@@ -300,12 +328,16 @@ export function breakBomIntoWips(
     const nodeQty = Number(node.quantity) > 0 ? Number(node.quantity) : 1;
     const quantityMultiplier = nodeQty;
 
+    // Top-level call passes branchKey=""; collectProcesses adopts the
+    // first child's raw wipCode as the branch identifier on the first
+    // descent. Top-level processes (UPHOLSTERY/PACKING etc.) keep "".
     const acc = collectProcesses(
       node,
       new Map(),
       variants ?? null,
       wipCode,
       wipLabel,
+      "",
     );
     let processes: WipProcessEntry[];
     if (acc.size === 0) {

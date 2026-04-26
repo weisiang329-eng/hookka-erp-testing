@@ -23,7 +23,6 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { deriveBranchKey } from "../lib/bom-branch";
 import {
   breakBomIntoWips,
   type BomVariantContext,
@@ -84,6 +83,7 @@ type ExpectedJc = {
   sequence: number;
   estMinutes: number;
   category: string;
+  branchKey: string;
 };
 
 function computeExpectedJcs(
@@ -131,6 +131,8 @@ function computeExpectedJcs(
         sequence: i,
         estMinutes: p.minutes,
         category: p.category,
+        // BOM-walker stamped this on the process — no category/dept hardcode.
+        branchKey: p.branchKey ?? "",
       });
     }
   }
@@ -147,6 +149,9 @@ function computeExpectedJcs(
       sequence: 99,
       estMinutes: l1p.minutes,
       category: l1p.category,
+      // FG-level joint terminals (UPHOLSTERY, PACKING) live at root —
+      // shared by every branch, so no specific branch identifier.
+      branchKey: "",
     });
   }
   return expected;
@@ -317,9 +322,10 @@ app.post("/", async (c) => {
             exp.estMinutes,
             "PENDING",
             null,
-            // BOM-branch identifier — matches the same logic the SO-confirm
-            // path uses (src/api/lib/bom-branch.ts).
-            deriveBranchKey(exp.deptCode, exp.wipType),
+            // BOM-branch identifier — straight from computeExpectedJcs
+            // which gets it from the BOM walker. Pure tree-driven, no
+            // category/dept hardcode.
+            exp.branchKey,
           ),
       );
       createdForThisPO.push(exp.deptCode);

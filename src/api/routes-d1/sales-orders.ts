@@ -26,7 +26,6 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
-import { deriveBranchKey } from "../lib/bom-branch";
 import { resolveCustomerPriceAsOf } from "./customer-products";
 import { withOrgScope } from "../lib/tenant";
 
@@ -683,10 +682,12 @@ export async function createProductionOrdersForSO(
             p.minutes,
             "PENDING",
             null,
-            // BOM-branch identifier — see src/api/lib/bom-branch.ts.
-            // (wipKey, branchKey) is the correct sibling key for lock +
-            // consume + WIP-display logic.
-            deriveBranchKey(p.deptCode, p.wipType),
+            // BOM-branch identifier — comes straight from the BOM-walker
+            // in collectProcesses() (src/api/lib/bom-wip-breakdown.ts).
+            // The walker tracks "first child of root" descent and stamps
+            // each process with its actual subtree's wipCode — no
+            // category / dept hardcode.
+            p.branchKey ?? "",
           ),
       );
     }
@@ -970,7 +971,9 @@ async function backfillJobCardsForPo(
             p.minutes,
             "PENDING",
             null,
-            deriveBranchKey(p.deptCode, wip.wipType),
+            // BOM-walker emitted branchKey on each process — use it
+            // directly; no category lookup needed.
+            p.branchKey ?? "",
           ),
       );
       jcCount++;

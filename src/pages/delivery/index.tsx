@@ -191,6 +191,7 @@ type ReadyPORow = {
   sizeLabel: string;
   fabricCode: string;
   quantity: number;
+  unitM3: number;                // per-unit volume from /api/products (Products page · Unit M³)
   completedDate: string | null;
   uphCompletedDate: string | null;
   rackingNumber: string;
@@ -344,22 +345,45 @@ export default function DeliveryPage() {
   const { data: poRaw, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
   const { data: soRaw, loading: soLoading, refresh: refreshSOs } = useCachedJson<{ success?: boolean; data?: { id: string; hookkaExpectedDD?: string; companySOId?: string; customerId?: string }[] }>("/api/sales-orders");
   const { data: custRaw, loading: custLoading, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
+  // Pull product master data so each Planning / Pending Delivery row can
+  // surface its per-unit m³ next to the qty. Source-of-truth is the
+  // Products page (`unitM3` column) — fetching the same /api/products
+  // payload here keeps the value in lockstep with whatever the user last
+  // edited there.
+  const { data: prodRaw, loading: prodLoading, refresh: refreshProducts } =
+    useCachedJson<{ success?: boolean; data?: { code: string; unitM3: number }[] }>("/api/products");
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/delivery-orders");
     invalidateCachePrefix("/api/production-orders");
     invalidateCachePrefix("/api/sales-orders");
     invalidateCachePrefix("/api/customers");
+    invalidateCachePrefix("/api/products");
     refreshDOs();
     refreshDOStats();
     refreshPOs();
     refreshSOs();
     refreshCustomers();
-  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshCustomers]);
+    refreshProducts();
+  }, [refreshDOs, refreshDOStats, refreshPOs, refreshSOs, refreshCustomers, refreshProducts]);
+
+  // Lookup map from productCode → unitM3, rebuilt whenever /api/products
+  // resolves. Used by mapPO to stamp each Planning row with its product's
+  // unit volume.
+  const productM3Map = useMemo(() => {
+    const m = new Map<string, number>();
+    const arr = prodRaw?.success ? prodRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (p?.code) m.set(p.code, Number(p.unitM3) || 0);
+      }
+    }
+    return m;
+  }, [prodRaw]);
 
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR data into mutable local state for optimistic UI */
   useEffect(() => {
-    const anyLoading = doLoading || poLoading || soLoading || custLoading;
+    const anyLoading = doLoading || poLoading || soLoading || custLoading || prodLoading;
     setLoading(anyLoading);
     const dRes = doRaw || { success: false };
     const poRes = poRaw || { success: false };
@@ -416,6 +440,7 @@ export default function DeliveryPage() {
               sizeLabel: po.sizeLabel || "",
               fabricCode: po.fabricCode || "",
               quantity: po.quantity || 0,
+              unitM3: productM3Map.get(po.productCode || "") ?? 0,
               completedDate: po.completedDate || null,
               uphCompletedDate: (() => {
                 const uphCards = (po.jobCards || []).filter(j => j.departmentCode === "UPHOLSTERY");
@@ -1020,6 +1045,17 @@ export default function DeliveryPage() {
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        key: "unitM3",
+        label: "Unit (m\u00B3)",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)} m&sup3;</span>
+        ),
+      },
       { key: "currentDepartment", label: "Current Dept", type: "text", width: "100px", sortable: true },
       {
         key: "progress",
@@ -1135,6 +1171,17 @@ export default function DeliveryPage() {
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        key: "unitM3",
+        label: "Unit (m\u00B3)",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)} m&sup3;</span>
+        ),
+      },
       { key: "rackingNumber", label: "Rack", type: "text", width: "80px", sortable: true },
       {
         key: "uphCompletedDate",
@@ -1269,11 +1316,11 @@ export default function DeliveryPage() {
         key: "totalM3",
         label: "Total M\u00B3",
         type: "number",
-        width: "90px",
+        width: "100px",
         align: "right",
         sortable: true,
         render: (_v, row) => (
-          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)}</span>
+          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)} m&sup3;</span>
         ),
       },
       { key: "driverName", label: "3PL / Driver", type: "text", width: "120px", sortable: true },

@@ -1338,15 +1338,22 @@ export default function ProductionPage({
   };
 
   // Build a DeptSched from a candidate JobCard (or null if no card exists).
-  // `siblings` is the list of job cards in the SAME wipKey branch on the
-  // same PO — used to compute the `locked` flag (true when any later-dept
-  // JC within the branch is COMPLETED or TRANSFERRED, which freezes this
-  // cell's dueDate / completedDate edits client-side).
+  // `poJobCards` is every JobCard on the parent PO. The `locked` flag is
+  // computed by filtering to the **card's own** wipKey — NOT the row's
+  // wipKey — so that a column showing a different wipKey's JC (e.g. the
+  // FAB_CUT column on a WOOD_CUT row, where Wood Cut is the Divan chain
+  // and Fab Cut is the HB chain in a Bedframe BOM) only locks if a later
+  // dept in THAT card's own chain has completed. Previously the caller
+  // pre-filtered siblings by the row's wipKey, which created a false-
+  // positive lock when a row's column displayed a card from a different
+  // chain (Wood Cut DONE wrongly locked Fab Cut + Fab Sew on the same
+  // row even though those three are independent component chains —
+  // reported by user 2026-04-26).
   const buildSched = (
     card: JobCard | null,
     today: string,
     poId: string,
-    siblings: JobCard[] = [],
+    poJobCards: JobCard[] = [],
   ): DeptSched => {
     if (!card) {
       return {
@@ -1363,7 +1370,14 @@ export default function ProductionPage({
     else state = "pending";
     const sortKey = state === "overdue" ? 3 : state === "pending" ? 2 : 1;
     const myPos = DEPT_ORDER.indexOf(card.departmentCode);
-    const locked = myPos >= 0 && siblings.some((j) => {
+    // Scope the lock check to the CARD's own wipKey — siblings from other
+    // wipKey chains (parallel component branches) must NOT influence this
+    // card's lock state. Falls back to whole-PO comparison only when the
+    // card has no wipKey (legacy rows pre-dating BOM-driven chains).
+    const cardSiblings = card.wipKey
+      ? poJobCards.filter((j) => j.wipKey === card.wipKey)
+      : poJobCards;
+    const locked = myPos >= 0 && cardSiblings.some((j) => {
       if (j.id === card.id) return false;
       const jPos = DEPT_ORDER.indexOf(j.departmentCode);
       if (jPos <= myPos) return false;
@@ -1411,12 +1425,12 @@ export default function ProductionPage({
           )[0];
         };
 
-        // Sibling JCs used by buildSched to compute the upstream-lock flag.
-        // Scope to same wipKey when the row carries one — fall back to every
-        // JC on the PO so legacy rows without wipKey still lock sensibly.
-        const siblings: JobCard[] = jc.wipKey
-          ? o.jobCards.filter((j) => j.wipKey === jc.wipKey)
-          : o.jobCards;
+        // Pass the full PO JC list to buildSched — it filters siblings by
+        // each CARD's own wipKey, so a per-column DeptSched only sees
+        // wipKey-matching JCs. Pre-filtering by the row's wipKey here was
+        // the source of the cross-chain false-positive lock (Wood Cut DONE
+        // locking Fab Cut on the same row).
+        const poJobCards: JobCard[] = o.jobCards;
 
         rows.push({
           id: `${o.id}:${jc.id}`,
@@ -1510,14 +1524,14 @@ export default function ProductionPage({
           pic2: jc.pic2Name || "",
           status: jc.status || "",
           poStatus: o.status || "",
-          sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, siblings),
-          sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, siblings),
-          sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, siblings),
-          sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, siblings),
-          sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, siblings),
-          sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, siblings),
-          sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, siblings),
-          sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, siblings),
+          sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, poJobCards),
+          sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, poJobCards),
+          sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, poJobCards),
+          sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, poJobCards),
+          sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, poJobCards),
+          sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, poJobCards),
+          sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, poJobCards),
+          sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, poJobCards),
           _deptCode: jc.departmentCode,
         });
       }

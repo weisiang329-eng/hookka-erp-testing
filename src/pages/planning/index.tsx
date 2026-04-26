@@ -158,6 +158,25 @@ type TabId = (typeof TABS)[number]["id"];
 // ── Master Tracker helpers ──
 
 type TrackerSortField = "poNo" | "customerName" | "productCode" | "targetEndDate" | "progress" | "status";
+
+// Hoisted out of PlanningPage so the parent's render doesn't reset its
+// identity. State is passed in via props.
+function TrackerSortIcon({
+  field,
+  activeField,
+  direction,
+}: {
+  field: TrackerSortField;
+  activeField: TrackerSortField;
+  direction: "asc" | "desc";
+}) {
+  if (activeField !== field) return <ChevronUp className="h-3 w-3 text-[#D1CBC5]" />;
+  return direction === "asc" ? (
+    <ChevronUp className="h-3 w-3 text-[#6B5C32]" />
+  ) : (
+    <ChevronDown className="h-3 w-3 text-[#6B5C32]" />
+  );
+}
 type TrackerSortDir = "asc" | "desc";
 
 function getOverdueDisplay(order: ProductionOrder): { label: string; icon: string; className: string } {
@@ -284,6 +303,7 @@ export default function PlanningPage() {
 
   const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror server lead-time config into editable local state */
   useEffect(() => {
     const json = leadTimesJson;
     const d = json?.data as Record<string, unknown> | undefined;
@@ -308,6 +328,7 @@ export default function PlanningPage() {
       }
     }
   }, [leadTimesJson]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const updateLeadTime = (cat: LeadTimeCat, deptCode: string, value: string) => {
     const n = Number(value);
@@ -490,15 +511,6 @@ export default function PlanningPage() {
       setTrackerSortDir("asc");
     }
   };
-
-  function TrackerSortIcon({ field }: { field: TrackerSortField }) {
-    if (trackerSortField !== field) return <ChevronUp className="h-3 w-3 text-[#D1CBC5]" />;
-    return trackerSortDir === "asc" ? (
-      <ChevronUp className="h-3 w-3 text-[#6B5C32]" />
-    ) : (
-      <ChevronDown className="h-3 w-3 text-[#6B5C32]" />
-    );
-  }
 
   // ── Loading state ──
   if (loading) {
@@ -935,16 +947,16 @@ export default function PlanningPage() {
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="h-9 px-2 text-left font-medium text-[#374151] sticky left-0 bg-[#F0ECE9] z-10 cursor-pointer" onClick={() => toggleTrackerSort("poNo")}>
-                        <div className="flex items-center gap-1">SO ID <TrackerSortIcon field="poNo" /></div>
+                        <div className="flex items-center gap-1">SO ID <TrackerSortIcon field="poNo" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Sales Order</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Cust PO ID</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151] cursor-pointer" onClick={() => toggleTrackerSort("customerName")}>
-                        <div className="flex items-center gap-1">Customer <TrackerSortIcon field="customerName" /></div>
+                        <div className="flex items-center gap-1">Customer <TrackerSortIcon field="customerName" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">State</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151] cursor-pointer" onClick={() => toggleTrackerSort("productCode")}>
-                        <div className="flex items-center gap-1">Product <TrackerSortIcon field="productCode" /></div>
+                        <div className="flex items-center gap-1">Product <TrackerSortIcon field="productCode" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Category</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Size</th>
@@ -955,7 +967,7 @@ export default function PlanningPage() {
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Special</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Notes</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151] cursor-pointer" onClick={() => toggleTrackerSort("targetEndDate")}>
-                        <div className="flex items-center gap-1">Target End <TrackerSortIcon field="targetEndDate" /></div>
+                        <div className="flex items-center gap-1">Target End <TrackerSortIcon field="targetEndDate" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Hookka DD</th>
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Overdue</th>
@@ -971,7 +983,7 @@ export default function PlanningPage() {
                       ))}
                       <th className="h-9 px-2 text-left font-medium text-[#374151]">Stocked In</th>
                       <th className="h-9 px-2 text-right font-medium text-[#374151] cursor-pointer" onClick={() => toggleTrackerSort("progress")}>
-                        <div className="flex items-center gap-1 justify-end">Progress <TrackerSortIcon field="progress" /></div>
+                        <div className="flex items-center gap-1 justify-end">Progress <TrackerSortIcon field="progress" activeField={trackerSortField} direction={trackerSortDir} /></div>
                       </th>
                     </tr>
                   </thead>

@@ -264,6 +264,36 @@ interface ContextMenuProps {
   dismiss: () => void;
 }
 
+interface ContextMenuItemProps {
+  label: string;
+  icon?: React.ReactNode;
+  onClick: () => void;
+  danger?: boolean;
+  dismiss: () => void;
+}
+
+// Hoisted out of ContextMenu so each render of the parent doesn't reset
+// this component's identity (which would defeat HMR + memoisation).
+function ContextMenuItem({ label, icon, onClick, danger, dismiss }: ContextMenuItemProps) {
+  return (
+    <button
+      type="button"
+      onMouseDown={(e) => e.stopPropagation()}
+      onClick={() => {
+        onClick();
+        dismiss();
+      }}
+      className={cn(
+        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[#F0ECE9]",
+        danger ? "text-red-600 hover:bg-red-50" : "text-[#1F1D1B]",
+      )}
+    >
+      {icon && <span className="w-4 h-4 inline-flex items-center justify-center text-[#6B5C32]">{icon}</span>}
+      <span>{label}</span>
+    </button>
+  );
+}
+
 function ContextMenu({
   menu,
   pinned,
@@ -286,34 +316,6 @@ function ContextMenu({
     setPos({ x, y });
   }, [menu]);
 
-  const Item = ({
-    label,
-    icon,
-    onClick,
-    danger,
-  }: {
-    label: string;
-    icon?: React.ReactNode;
-    onClick: () => void;
-    danger?: boolean;
-  }) => (
-    <button
-      type="button"
-      onMouseDown={(e) => e.stopPropagation()}
-      onClick={() => {
-        onClick();
-        dismiss();
-      }}
-      className={cn(
-        "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-[#F0ECE9]",
-        danger ? "text-red-600 hover:bg-red-50" : "text-[#1F1D1B]",
-      )}
-    >
-      {icon && <span className="w-4 h-4 inline-flex items-center justify-center text-[#6B5C32]">{icon}</span>}
-      <span>{label}</span>
-    </button>
-  );
-
   return (
     <div
       ref={ref}
@@ -321,11 +323,12 @@ function ContextMenu({
       onMouseDown={(e) => e.stopPropagation()}
       className="min-w-[180px] rounded-md border border-[#E2DDD8] bg-white shadow-lg py-1"
     >
-      {!pinned && <Item label="Close" onClick={onClose} icon={<X className="h-3.5 w-3.5" />} />}
-      <Item label="Close Others" onClick={onCloseOthers} />
-      <Item label="Close All" onClick={onCloseAll} danger />
+      {!pinned && <ContextMenuItem dismiss={dismiss} label="Close" onClick={onClose} icon={<X className="h-3.5 w-3.5" />} />}
+      <ContextMenuItem dismiss={dismiss} label="Close Others" onClick={onCloseOthers} />
+      <ContextMenuItem dismiss={dismiss} label="Close All" onClick={onCloseAll} danger />
       <hr className="my-1 border-[#E2DDD8]" />
-      <Item
+      <ContextMenuItem
+        dismiss={dismiss}
         label={pinned ? "Unpin" : "Pin"}
         icon={pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
         onClick={onTogglePin}

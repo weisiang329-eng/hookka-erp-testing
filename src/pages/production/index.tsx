@@ -1086,29 +1086,19 @@ export default function ProductionPage({
   );
 
   // Dept fractions for tab bar: done/total rows across all orders per dept.
-  // Counts must match what the Production Sheet shows when that tab is open —
-  // for FAB_CUT that means one merged row per PO (all components of the same
-  // fabric cut collapse to one), so the tab shows 525, not 1194 raw JCs.
+  // Counts must match what the Production Sheet shows when that tab is open.
+  // FAB_CUT used to be special-cased (one merged row per PO) — removed as
+  // part of the FAB_CUT normalisation (Wei Siang Apr 26 2026), now uses the
+  // same per-JC `cellFor` count as every other dept.
   const deptFractions = useMemo(() => {
     return DEPARTMENTS.map((d) => {
       let done = 0;
       let total = 0;
-      if (d.code === "FAB_CUT") {
-        for (const o of orders) {
-          const fc = o.jobCards.filter((j) => j.departmentCode === "FAB_CUT");
-          if (fc.length === 0) continue;
-          total += 1;
-          if (fc.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")) {
-            done += 1;
-          }
-        }
-      } else {
-        for (const o of orders) {
-          const c = cellFor(o, d.code);
-          if (c.state === "empty") continue;
-          total += c.totalCards;
-          done += c.doneCards;
-        }
+      for (const o of orders) {
+        const c = cellFor(o, d.code);
+        if (c.state === "empty") continue;
+        total += c.totalCards;
+        done += c.doneCards;
       }
       return { ...d, done, total };
     });
@@ -1559,202 +1549,12 @@ export default function ProductionPage({
         return { ...clean, rowNo: i + 1 };
       });
 
-    // Fab Cut merge: a cutter lays one bolt of fabric down and cuts every
-    // component of every module that shares that fabric in a single pass.
-    // So the merge key is (SO, fabric) — a whole 3-piece sofa set (1A(LHF)
-    // + 1NA + 1A(RHF) on the same SO using the same cloth) collapses into
-    // ONE Fab Cut row, matching the Google-sheet layout the shop floor has
-    // always used. Falling back to poId when the SO is missing (stock PO)
-    // keeps the row from merging across unrelated orders.
-    // Other depts keep per-WIP rows since each component is handled
-    // individually from FAB_SEW onward.
-    if (activeTab === "FAB_CUT") {
-      const groups = new Map<string, DeptRow[]>();
-      for (const r of rows) {
-        // SOFA merges across POs that share the same SO + fabric (a full
-        // sofa set cut together). BEDFRAME / ACCESSORY already worked
-        // correctly under the per-PO rule, so keep that for them.
-        const key = r.category === "SOFA"
-          ? `SOFA::${r.salesOrderNo || r.poId}::${r.colour || ""}`
-          : r.poId;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key)!.push(r);
-      }
-      const merged: DeptRow[] = [];
-      let rowN = 1;
-      // Helper: strip variant suffix from a product code so '5530-1A(LHF)'
-      // or '1003-(K)' both yield just the baseModel prefix.
-      const stripToBase = (code: string): string => {
-        if (!code) return code;
-        const i = code.indexOf("-");
-        return i > 0 ? code.slice(0, i) : code;
-      };
-      // WIP label formatter for Fab Cut rows — same pipe-separated shape
-      // for every category so sorting / eyeballing the column is uniform.
-      // BF also carries (totalHeight) between size and fabric; sofa and
-      // accessory skip that token because it's not applicable to them.
-      const fabCutWIP = (r: DeptRow, modelText: string): string =>
-        [
-          modelText,
-          r.size ? `(${r.size})` : "",
-          // BF-only: total height first (overall dimension), then Divan
-          // height for the specific panel the cutter sizes the bolt to.
-          r.category === "BEDFRAME" && r.totalHeight ? `(${r.totalHeight})` : "",
-          r.category === "BEDFRAME" && r.divan ? `(DV ${r.divan})` : "",
-          r.colour,
-          "(FC)",
-        ].filter(Boolean).join(" | ");
-      for (const group of groups.values()) {
-        if (group.length === 1) {
-          const r = group[0];
-          // Single-row Fab Cut (e.g. pillow or single-component module)
-          // uses the same "{full code} | {fabric} | ({size}) | (FC)" label
-          // pattern as merged rows, with the Model column showing only
-          // the baseModel — full variant info lives in WIP.
-          const wip = fabCutWIP(r, r.model);
-          merged.push({ ...r, rowNo: rowN++, model: stripToBase(r.model), wip });
-          continue;
-        }
-        const first = group[0];
-        // Stable display order:
-        //   1. Modules with LHF handedness come first (arm on the left)
-        //   2. Non-handed modules (1NA, CNR, 2S, centre pieces, etc.) in
-        //      the middle
-        //   3. Modules with RHF handedness come last (arm on the right)
-        // Within each bucket fall back to component-type alpha so the
-        // ordering is stable for BF / accessory groups too.
-        const handBucket = (m: string): number => {
-          const s = m.toUpperCase();
-          if (s.includes("LHF")) return 0;
-          if (s.includes("RHF")) return 2;
-          return 1;
-        };
-        group.sort((a, b) => {
-          const bucketDiff = handBucket(a.model || "") - handBucket(b.model || "");
-          if (bucketDiff !== 0) return bucketDiff;
-          return (a.wipType || "").localeCompare(b.wipType || "");
-        });
-        const types = [...new Set(group.map((g) => g.wipType).filter(Boolean))].join("+");
-        // WIP column on merged Fab Cut rows: show a single compact label
-        // '{model} {fabric} {size} (FC)' so the cutter sees exactly what
-        // to cut on one line. The individual component counts live in
-        // the Type column already.
-        // Model column on a combined row shows the module variants joined
-        // with '+', matching the Google-sheet convention
-        // (e.g. 5537-1A(LHF)+1NA+1A(RHF)). Strip the shared baseModel
-        // prefix when all rows agree on it so the string stays short.
-        const uniqueModels = [...new Set(group.map((g) => g.model).filter(Boolean))];
-        let modelLabel = uniqueModels.join("+");
-        if (uniqueModels.length > 1) {
-          const firstDash = uniqueModels[0].indexOf("-");
-          if (firstDash > 0) {
-            const prefix = uniqueModels[0].slice(0, firstDash + 1);
-            if (uniqueModels.every((m) => m.startsWith(prefix))) {
-              modelLabel = prefix + uniqueModels.map((m) => m.slice(prefix.length)).join("+");
-            }
-          }
-        }
-        // Only treat the group as completed when every child has a date.
-        const allDone = group.every((g) => !!g.completedDate);
-        const anyDone = group.some((g) => !!g.completedDate);
-        // Aggregate production minutes — the cutter lays the fabric down
-        // once, so the total cut time is the sum of every component.
-        const totalMinutes = group.reduce((s, g) => s + (g.prodTime || 0), 0);
-        // Quantity intentionally inherits from `first` (no sum). For a
-        // sofa set that means "one set" whether the merge is 3 or 8
-        // components; bedframe rows don't merge across modules and
-        // already carry their true per-line qty (e.g. 2 if the customer
-        // ordered 2 × 1013).
-        // Aggregate Fab Cut dept pill state so it matches the merged
-        // status. Previously sched_FAB_CUT inherited from `first`, so the
-        // pill would show DONE while the row-level status still said
-        // IN_PROGRESS because other components in the group were still
-        // pending — visually contradicting the operator. Now: done only
-        // when every child has a completedDate; otherwise earliest due
-        // drives overdue/pending.
-        const todayIso = new Date().toISOString().slice(0, 10);
-        const dueDates = group.map((g) => g.sched_FAB_CUT?.due).filter((d): d is string => !!d);
-        const earliestDue = dueDates.sort()[0] || "";
-        const latestCompleted = group
-          .map((g) => g.sched_FAB_CUT?.completed)
-          .filter((d): d is string => !!d)
-          .sort()
-          .slice(-1)[0] || "";
-        const aggSchedState: "done" | "pending" | "overdue" | "none" =
-          allDone
-            ? "done"
-            : earliestDue
-              ? earliestDue < todayIso
-                ? "overdue"
-                : "pending"
-              : "none";
-        const aggSched: DeptSched = {
-          due: earliestDue,
-          completed: allDone ? (latestCompleted || first.sched_FAB_CUT?.completed || "") : "",
-          state: aggSchedState,
-          sortKey: aggSchedState === "overdue" ? 3 : aggSchedState === "pending" ? 2 : 1,
-          poId: first.poId,
-          jobCardId: first.sched_FAB_CUT?.jobCardId ?? "",
-          deptCode: "FAB_CUT",
-          wipKey: first.sched_FAB_CUT?.wipKey ?? "",
-          locked: false,
-        };
-        const groupKey = `${first.salesOrderNo || first.poId}:${first.colour || ""}`;
-        // Compact WIP label: "{model} · {colour} · {size} · (FC)" —
-        // middle-dot separator so the parts don't run into one another
-        // when fabric codes / sizes share characters with the model.
-        // Size is seat size for sofa (e.g. "30"), bed size for bedframe
-        // (e.g. "6FT"), already normalised in row.size.
-        const wips = fabCutWIP(first, modelLabel || first.model);
-        // BF merged rows: qty is HB's if present, else Divan's (first).
-        // Sofa stays on `first.qty` (one set per SO). Rationale: HB is the
-        // canonical BF piece count — Divan may pair 1:1 with HB but when
-        // the shop orders HB-only or Divan-only the remaining one is the
-        // source of truth for the row's qty.
-        const bfQty = first.category === "BEDFRAME"
-          ? (group.find((g) => (g.wipType || "").toUpperCase() === "HB")?.qty ?? first.qty)
-          : first.qty;
-        // SO ID display rule:
-        //   SOFA merged row → parent SO without -NN suffix (e.g. SO-2604-293)
-        //     because a sofa set spans variants across POs and no single
-        //     suffix belongs to the whole set.
-        //   BF / ACCESSORY → keep first.soId (= poNo with suffix) because
-        //     qty>1 already fans out into per-piece POs (-01, -02, ...) so
-        //     the suffix is genuinely one piece.
-        const mergedSoId = first.category === "SOFA"
-          ? (first.soId || "").replace(/-\d+$/, "")
-          : first.soId;
-        merged.push({
-          ...first,
-          id: `${groupKey}:fabcut-merged`,
-          rowNo: rowN++,
-          soId: mergedSoId,
-          // Model column keeps just the baseModel (e.g. '5530') — the
-          // combined variants (e.g. '5530-1A(LHF)+1NA+1A(RHF)') land in
-          // the WIP label so operators see one at a glance, details on
-          // demand.
-          model: stripToBase(first.model),
-          wipType: types || first.wipType,
-          wip: wips,
-          qty: bfQty,
-          prodTime: totalMinutes,
-          dueDate: earliestDue || first.dueDate,
-          completedDate: allDone ? (latestCompleted || first.completedDate) : "",
-          status: allDone
-            ? "COMPLETED"
-            : anyDone
-              ? "IN_PROGRESS"
-              : first.status,
-          // Fab Cut pill uses the aggregated state so DONE only shows
-          // when every component in the merge is actually complete.
-          sched_FAB_CUT: aggSched,
-          _mergedJobCardIds: group.map((g) => g.jobCardId),
-          _mergedJobCardRefs: group.map((g) => ({ poId: g.poId, jobCardId: g.jobCardId })),
-        });
-      }
-      return merged;
-    }
-
+    // FAB_CUT used to merge multiple component JCs into one row (sofa: by
+    // SO+fabric, BF/accessory: by poId), with downstream fan-out PATCH and
+    // a sentinel sticker. That merge / fan-out / sentinel split was the
+    // source of duplicate-row, qty-mismatch and mixed-status filter bugs
+    // (Wei Siang Apr 26 2026). FAB_CUT now behaves identically to every
+    // other dept — one row per matching JobCard, no merge.
     return rows;
   }, [baseRows, activeTab]);
 

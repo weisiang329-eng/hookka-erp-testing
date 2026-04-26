@@ -1302,11 +1302,13 @@ export default function DeliveryPage() {
         sortable: false,
         render: (_v, row) => {
           if (!row.items.length) return <span className="text-[#9CA3AF]">—</span>;
-          // Full per-item breakdown — product / size / qty / m³. Anything
-          // beyond 2 lines is folded behind a hover tooltip so the row
-          // height stays scannable.
+          // Full per-item breakdown — product / size / qty / volume. The
+          // numeric volume drops the 'm³' suffix to match the rest of the
+          // system (numeric cells go bare; column / label provides the
+          // unit). Anything beyond 2 lines is folded behind a hover
+          // tooltip so the row height stays scannable.
           const fullList = row.items
-            .map((i) => `${i.productCode} ${i.sizeLabel || ""} ×${i.quantity} (${(i.itemM3 * i.quantity).toFixed(2)} m³)`)
+            .map((i) => `${i.productCode} ${i.sizeLabel || ""} ×${i.quantity} (${(i.itemM3 * i.quantity).toFixed(2)})`)
             .join("\n");
           return (
             <div className="flex flex-col gap-0.5 text-xs leading-tight" title={fullList}>
@@ -1315,7 +1317,7 @@ export default function DeliveryPage() {
                   <span className="font-medium text-[#1F1D1B]">{i.productCode}</span>
                   {i.sizeLabel ? <span className="text-[#6B7280]"> {i.sizeLabel}</span> : null}
                   <span className="text-[#9CA3AF]"> ×{i.quantity}</span>
-                  <span className="tabular-nums text-[#6B7280]"> ({(i.itemM3 * i.quantity).toFixed(2)} m³)</span>
+                  <span className="tabular-nums text-[#6B7280]"> ({(i.itemM3 * i.quantity).toFixed(2)})</span>
                 </div>
               ))}
               {row.items.length > 2 && (

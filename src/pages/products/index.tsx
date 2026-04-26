@@ -153,7 +153,7 @@ function ProductionConfig({ config }: { config: ProductDeptConfig }) {
         </div>
         <div>
           <span className="text-[#6B7280]">Unit M3: </span>
-          <span className="font-medium text-[#111827]">{config.unitM3} m&sup3;</span>
+          <span className="font-medium text-[#111827]">{config.unitM3}</span>
         </div>
         <div>
           <span className="text-[#6B7280]">Price 2: </span>

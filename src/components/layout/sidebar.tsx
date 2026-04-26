@@ -2,6 +2,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useState, useEffect, useCallback } from "react";
 import { useInterval } from "@/lib/scheduler";
 import {
+  Activity,
   LayoutDashboard,
   ShoppingCart,
   Factory,
@@ -171,11 +172,19 @@ const navigationGroups: NavGroup[] = [
   },
 ];
 
-// Admin-only extra link inserted into the SYSTEM group at render time.
+// Admin-only extra links inserted into the SYSTEM group at render time.
+// Order: User Management first (admin's most common task), then System
+// Health (P6.4 — KPI dashboard). Both gate on role === SUPER_ADMIN both
+// in the route guard (RequireRole) and in the API.
 const SUPER_ADMIN_LINK: NavItem = {
   name: "User Management",
   href: "/settings/users",
   icon: Users,
+};
+const SUPER_ADMIN_HEALTH_LINK: NavItem = {
+  name: "System Health",
+  href: "/admin/health",
+  icon: Activity,
 };
 
 type OrgInfo = {
@@ -351,12 +360,15 @@ export function Sidebar() {
       return item;
     });
     if (group.label === "SYSTEM" && isSuperAdmin) {
-      // Insert "User Management" just before the trailing "Settings" entry.
+      // Insert "User Management" + "System Health" just before the
+      // trailing "Settings" entry. Order matters: admin tasks (manage
+      // users, view health) sit above the catch-all Settings link.
       const idx = items.findIndex((i) => i.name === "Settings");
       const insertAt = idx === -1 ? items.length : idx;
       items = [
         ...items.slice(0, insertAt),
         SUPER_ADMIN_LINK,
+        SUPER_ADMIN_HEALTH_LINK,
         ...items.slice(insertAt),
       ];
     }

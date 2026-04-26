@@ -99,6 +99,9 @@ const Settings = lazy(() => import('./pages/settings'))
 const Organisations = lazy(() => import('./pages/settings/organisations'))
 const SettingsUsers = lazy(() => import('./pages/settings/Users'))
 
+// Admin (SUPER_ADMIN-only screens — system health, etc.)
+const AdminHealth = lazy(() => import('./pages/admin/health'))
+
 // Consignment
 const Consignment = lazy(() => import('./pages/consignment'))
 const ConsignmentDetail = lazy(() => import('./pages/consignment/detail'))
@@ -305,6 +308,18 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
     element: (
       <RequireRole role="SUPER_ADMIN">
         <S><SettingsUsers /></S>
+      </RequireRole>
+    ),
+  },
+
+  // Admin — SUPER_ADMIN-only system health dashboard (P6.4). Same gate
+  // pattern as /settings/users; both server-side and client-side checks
+  // enforce the role (defense-in-depth).
+  {
+    path: '/admin/health',
+    element: (
+      <RequireRole role="SUPER_ADMIN">
+        <S><AdminHealth /></S>
       </RequireRole>
     ),
   },

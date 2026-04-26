@@ -302,6 +302,8 @@ import bomMasterTemplates from "./routes-d1/bom-master-templates";
 import kvConfig from "./routes-d1/kv-config";
 // Phase 5 — admin maintenance endpoints (archive/run, etc.)
 import admin from "./routes-d1/admin";
+// Phase 6 / P6.4 — health KPI endpoint feeding /admin/health.
+import adminHealth from "./routes-d1/admin-health";
 // Phase 6 — job_card_events audit log read endpoint.
 import jobCards from "./routes-d1/job-cards";
 // Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
@@ -396,6 +398,11 @@ app.route("/api/presence", presence);
 app.route("/api/bom-master-templates", bomMasterTemplates);
 app.route("/api/kv-config", kvConfig);
 // Phase 5 — admin maintenance (archive/run). Behind the normal auth gate.
+// MUST mount /api/admin/health BEFORE /api/admin so the more-specific
+// subapp wins route matching (Hono picks the first registered subapp
+// whose prefix matches; the less-specific /api/admin would otherwise
+// 404 the /health/* paths).
+app.route("/api/admin/health", adminHealth);
 app.route("/api/admin", admin);
 // Phase 6 — job_card_events read surface. Only /:id/events for now;
 // future PATCH/DELETE audit screens can mount here.

@@ -2045,12 +2045,17 @@ app.post("/stock", async (c) => {
 
 // ---------------------------------------------------------------------------
 // POST /api/production-orders/:id/scan-complete-dept
-// Fan-out completion for a merged FG-level sticker (today: FAB_CUT).
-// One QR → every matching dept job card on this PO is marked COMPLETED
-// in one request. Sticker side sets the QR opId to "FG-<DEPT>" so the
-// scan page knows to hit this endpoint instead of per-jc scan-complete.
+// DEPRECATED 2026-04-26 (Wei Siang FAB_CUT normalization): no sticker
+// path emits the FG-<DEPT> sentinel anymore. Each JC now gets its own
+// per-JC sticker scanned through /scan-complete. The route is kept
+// alive for transition safety (in case a paper sticker generated
+// before the change is still in circulation), but new code MUST NOT
+// call it. Logs a warn so we can spot stale call sites.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete-dept", async (c) => {
+  console.warn(
+    "[deprecated] scan-complete-dept invoked — caller should switch to per-JC /scan-complete",
+  );
   const db = c.var.DB;
   const poId = c.req.param("id");
   const po = await db

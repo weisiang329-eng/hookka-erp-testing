@@ -286,6 +286,7 @@ async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {
   return templates;
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- co-located master-template cache helpers used by the BOM page
 export async function hydrateMasterTemplates(): Promise<void> {
   try {
     await migrateLocalMastersToD1IfNeeded();
@@ -307,6 +308,7 @@ export async function hydrateMasterTemplates(): Promise<void> {
   }
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- co-located master-template cache helpers used by the BOM page
 export function onMasterTemplatesHydrated(cb: () => void): () => void {
   hydrateListeners.add(cb);
   if (cacheHydrated) cb();
@@ -1767,7 +1769,8 @@ function CreateBOMDialog({
 
   const selected = products.find((p) => p.code === selectedCode);
 
-  // Auto-generate default BOM when product is selected
+  // Auto-generate default BOM when product is selected.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot seed of editor state when the user picks a product */
   useEffect(() => {
     if (!selected) return;
     const parts = generateDefaultBOMParts(selected);
@@ -1776,6 +1779,7 @@ function CreateBOMDialog({
     setWipComponents(parts.wipComponents);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCode]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function addL1Process() {
     setL1Processes((prev) => [
@@ -2550,6 +2554,7 @@ function EditBOMDialog({
   // Refreshed every time the dialog opens so edits made in the Master
   // Templates dialog show up immediately in the Load Default picker.
   const [masterTemplates, setMasterTemplates] = useState<MasterTemplate[]>([]);
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror master-template cache into local state when dialog opens */
   useEffect(() => {
     if (!open) return;
     const cat = (product.category === "SOFA" ? "SOFA" : "BEDFRAME") as
@@ -2564,6 +2569,7 @@ function EditBOMDialog({
     });
     return unsub;
   }, [open, product.category]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // The master that the auto-resolver WOULD pick for this product — used to
   // highlight the matching row in the Load Default picker so the user can
@@ -2577,7 +2583,8 @@ function EditBOMDialog({
     return match?.id || null;
   }, [masterTemplates, product.sizeCode]);
 
-  // Initialize from template when opened
+  // Initialize from template when opened.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot seed of editor state when dialog opens with a template */
   useEffect(() => {
     if (open) {
       setL1Processes(template.l1Processes.map((p) => ({ ...p })));
@@ -2593,6 +2600,7 @@ function EditBOMDialog({
       setShowLoadDefault(false);
     }
   }, [open, template]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Load a specific master template from the Load Default picker.
   // When masterId is null, falls back to the product-aware auto-resolver
@@ -3324,6 +3332,7 @@ function MasterTemplatesDialog({
         { category: "FABRIC", label: "Fabric" },
       ];
 
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror master-template cache + seed default selection when edit dialog opens */
   useEffect(() => {
     if (!open) return;
     const load = () => {
@@ -3351,6 +3360,7 @@ function MasterTemplatesDialog({
     // the edit lists reflect authoritative D1 data, not fallback defaults.
     return onMasterTemplatesHydrated(load);
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const currentList =
     tab === "BEDFRAME" ? bedframeList : tab === "SOFA" ? sofaList : accessoryList;
@@ -3392,6 +3402,7 @@ function MasterTemplatesDialog({
   function copyTemplate(source?: MasterTemplate) {
     const src = source || current;
     if (!src) return;
+    // eslint-disable-next-line react-hooks/purity -- timestamp ID generation; only invoked from a click handler, never during render
     const ts = Date.now().toString(36).slice(-5).toUpperCase();
     const id = `${tab}-COPY-${ts}`;
     const cloned: MasterTemplate = JSON.parse(JSON.stringify(src));
@@ -3527,6 +3538,7 @@ function MasterTemplatesDialog({
       { type: "word", value: typeLabel },
     ];
     return {
+      // eslint-disable-next-line react-hooks/purity -- WIP id generation; only invoked from addWIP click handler, never during render
       id: `master-wip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       wipCode: buildWipCode(codeSegments),
       codeSegments,
@@ -4103,6 +4115,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // Hydrate from D1 (via the kv-config cache) whenever the dialog opens.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate of categories + times when dialog opens */
   useEffect(() => {
     if (!open) return;
     const defaults = ["CAT 1", "CAT 2", "CAT 3", "CAT 4", "CAT 5", "CAT 6", "CAT 7"];
@@ -4123,6 +4136,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
     void fetchVariantsConfig().then(applyConfig);
     setDirty(false);
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function showToast(msg: string) {
     setToastMsg(msg);
@@ -4533,6 +4547,7 @@ function BatchEditCategoriesDialog({
     });
   }, [templates, filterCategory, filterBaseModel, filterCurrentCat, searchText, deptCode]);
 
+  /* eslint-disable react-hooks/set-state-in-effect -- reset bulk-edit dialog state every time it reopens */
   useEffect(() => {
     if (!open) return;
     setSelectedIds(new Set());
@@ -4543,6 +4558,7 @@ function BatchEditCategoriesDialog({
     setFilterBaseModel("");
     setFilterCurrentCat("");
   }, [open, allCategories]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const allFilteredSelected = filteredTemplates.length > 0 && filteredTemplates.every((t) => selectedIds.has(t.id));
 

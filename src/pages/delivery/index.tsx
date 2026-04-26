@@ -45,7 +45,14 @@ const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 // Types
 // ---------------------------------------------------------------------------
 
-type DOStatus = "PENDING" | "DRAFT" | "LOADED" | "DISPATCHED" | "IN_TRANSIT" | "DELIVERED" | "INVOICED";
+// Status enum mirrors the backend's VALID_TRANSITIONS exactly
+// (src/api/routes-d1/delivery-orders.ts:25-30). The vestigial "PENDING"
+// and "DISPATCHED" labels were dropped 2026-04-26 — backend never had
+// either: PENDING was unreachable code, and "DISPATCHED" was a UI alias
+// for "LOADED" that drifted into a separate type member, masking the
+// missing LOADED → IN_TRANSIT button. Display label "Dispatched" still
+// renders for LOADED rows via STATUS_LABEL — code stays "LOADED".
+type DOStatus = "DRAFT" | "LOADED" | "IN_TRANSIT" | "DELIVERED" | "INVOICED";
 
 type DOItem = {
   id: string;
@@ -89,13 +96,13 @@ type DeliveryOrderRow = {
 // ---------------------------------------------------------------------------
 
 function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
-  let status: DOStatus = "DRAFT";
-  if (d.status === "DRAFT") status = "DRAFT";
-  else if (d.status === "LOADED") status = "DISPATCHED";
-  else if (d.status === "IN_TRANSIT") status = "IN_TRANSIT";
-  else if (d.status === "DELIVERED") status = "DELIVERED";
-  else if (d.status === "INVOICED") status = "INVOICED";
-  else status = d.status as DOStatus;
+  // Status passes through unchanged. The previous code aliased backend
+  // "LOADED" → frontend "DISPATCHED" which decoupled the type from
+  // VALID_TRANSITIONS and made it impossible to wire the LOADED →
+  // IN_TRANSIT button (you'd need to map back at PUT time). Now the
+  // wire-shape and UI-shape are the same string; only the rendered
+  // label differs (see STATUS_LABEL.LOADED = "Dispatched").
+  const status = d.status as DOStatus;
 
   const items: DOItem[] = (d.items || []).map((i) => ({
     id: i.id,
@@ -140,10 +147,11 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
 // ---------------------------------------------------------------------------
 
 const STATUS_LABEL: Record<DOStatus, string> = {
-  PENDING: "Pending",
   DRAFT: "Pending Dispatch",
-  LOADED: "Loaded",
-  DISPATCHED: "Dispatched",
+  // LOADED is rendered as "Dispatched" because the operator-facing flow
+  // calls "mark this DO out the warehouse door" the dispatch moment;
+  // backend keeps it as LOADED to mirror the lifecycle name.
+  LOADED: "Dispatched",
   IN_TRANSIT: "In Transit",
   DELIVERED: "Delivered",
   INVOICED: "Invoiced",
@@ -159,10 +167,15 @@ const ALL_TABS = [
   { key: "invoiced", label: "Invoice" },
 ] as const;
 
-// Which DO statuses map to which tab (only for DO-based tabs)
+// Which DO statuses map to which tab (only for DO-based tabs).
+// "dispatched" tab now includes IN_TRANSIT so the row stays visible while
+// it's out for delivery — previously IN_TRANSIT was unreachable from the
+// UI (no LOADED → IN_TRANSIT button) so this never mattered; now that
+// the button exists, drivers can flip a DO to IN_TRANSIT and the row
+// shouldn't disappear from the queue between dispatch and delivery.
 const TAB_DO_STATUSES: Record<string, DOStatus[]> = {
   pending_dispatch: ["DRAFT"],
-  dispatched: ["DISPATCHED"],
+  dispatched: ["LOADED", "IN_TRANSIT"],
   delivered: ["DELIVERED"],
   invoiced: ["INVOICED"],
 };
@@ -770,7 +783,7 @@ export default function DeliveryPage() {
   const handleMarkDelivered = async () => {
     if (selectedIds.size === 0) return;
     const doIds = deliveryOrders
-      .filter((d) => selectedIds.has(d.id) && (d.status === "DISPATCHED" || d.status === "IN_TRANSIT"))
+      .filter((d) => selectedIds.has(d.id) && (d.status === "LOADED" || d.status === "IN_TRANSIT"))
       .map((d) => d.id);
     if (doIds.length === 0) return;
     try {
@@ -1403,13 +1416,41 @@ export default function DeliveryPage() {
           }
           fetchData();
         },
-        disabled: row.status !== "DISPATCHED",
+        disabled: row.status !== "LOADED",
+      },
+      {
+        // Driver-leaves-warehouse step. Backend transition LOADED →
+        // IN_TRANSIT was always there (delivery-orders.ts:28) but the
+        // frontend never offered a button — the audit caught it as
+        // dead-end UI: dispatched DOs stayed in "Dispatched" state with
+        // no way to record they were physically out for delivery.
+        label: "Mark Out for Delivery (In Transit)",
+        icon: <Send className="h-3.5 w-3.5" />,
+        action: async () => {
+          try {
+            const data = await fetchJson(`/api/delivery-orders/${row.id}`, DOMutationSchema, {
+              method: "PUT",
+              body: { status: "IN_TRANSIT" },
+            });
+            if (!data.success) {
+              toast.error(data.error || "Failed to mark in transit");
+            }
+          } catch (e) {
+            if (e instanceof FetchJsonError) {
+              toast.error((e.body as { error?: string } | undefined)?.error || e.message);
+            } else {
+              toast.error("Failed to mark in transit");
+            }
+          }
+          fetchData();
+        },
+        disabled: row.status !== "LOADED",
       },
       {
         label: "Mark Delivered (DO Signed)",
         icon: <CheckCircle2 className="h-3.5 w-3.5" />,
         action: () => setPodDialog(row),
-        disabled: row.status !== "DISPATCHED" && row.status !== "IN_TRANSIT",
+        disabled: row.status !== "LOADED" && row.status !== "IN_TRANSIT",
       },
       {
         label: "Transfer to Invoice",
@@ -2374,7 +2415,7 @@ export default function DeliveryPage() {
                               body: { status: "LOADED" },
                             });
                             if (data.success) {
-                              setDetailDO({ ...detailDO, status: "DISPATCHED", dispatchDate: new Date().toISOString() });
+                              setDetailDO({ ...detailDO, status: "LOADED", dispatchDate: new Date().toISOString() });
                               fetchData();
                             } else {
                               toast.error(data.error || "Failed to mark dispatched");
@@ -2392,7 +2433,7 @@ export default function DeliveryPage() {
                       </Button>
                     </>
                   )}
-                  {(detailDO.status === "DISPATCHED" || detailDO.status === "IN_TRANSIT") && (
+                  {(detailDO.status === "LOADED" || detailDO.status === "IN_TRANSIT") && (
                     <Button
                       variant="primary"
                       onClick={() => setPodDialog(detailDO)}

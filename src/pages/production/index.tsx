@@ -3,9 +3,9 @@ import { useUrlState } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Check, Plus, Lock } from "lucide-react";
+import { Check, Plus, Lock, ExternalLink } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
-import type { Column } from "@/components/ui/data-grid";
+import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -2060,7 +2060,22 @@ export default function ProductionPage({
               : "";
         return (
           <span className="flex items-center gap-1.5 tabular-nums">
-            <span className="doc-number truncate">{row.soId}</span>
+            {row.salesOrderId ? (
+              <button
+                type="button"
+                className="doc-number truncate text-[#6B5C32] hover:underline cursor-pointer text-left bg-transparent p-0 border-0"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/sales/${row.salesOrderId}`);
+                }}
+                onDoubleClick={(e) => e.stopPropagation()}
+                title={`Open Sales Order ${row.soId}`}
+              >
+                {row.soId}
+              </button>
+            ) : (
+              <span className="doc-number truncate">{row.soId}</span>
+            )}
             {pillLabel && (
               <span
                 className={`text-[9px] font-semibold px-1.5 py-[1px] rounded uppercase tracking-wide ${pillCls}`}
@@ -3077,6 +3092,24 @@ export default function ProductionPage({
             maxHeight="calc(100vh - 300px)"
             emptyMessage={`No job cards in ${activeDept.name}.`}
             onDoubleClick={(row) => navigate(row.salesOrderId ? `/sales/${row.salesOrderId}` : `/production/${row.poId}`)}
+            contextMenuItems={(row): ContextMenuItem[] => [
+              {
+                label: "Open Sales Order",
+                icon: <ExternalLink className="h-3.5 w-3.5" />,
+                action: () => {
+                  if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
+                },
+                disabled: !row.salesOrderId,
+              },
+              {
+                label: "Open Production Order",
+                icon: <ExternalLink className="h-3.5 w-3.5" />,
+                action: () => {
+                  if (row.poId) navigate(`/production/${row.poId}`);
+                },
+                disabled: !row.poId,
+              },
+            ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
             // Fab Sew dept routinely renders 1,200+ rows; without

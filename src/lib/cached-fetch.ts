@@ -23,7 +23,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { buildTraceparent } from "./trace";
 
-const NAMESPACE = "hookka-cache:v1:";
+// Bumped v1 → v2 (Wei Siang Apr 26 2026): old TTL-gated cache had a
+// 5-minute window where stale data hid backend resets. Bumping the
+// namespace orphans every old entry on first bundle load, forcing a
+// fresh API hit — no manual localStorage clear needed.
+const NAMESPACE = "hookka-cache:v2:";
 
 type CacheEntry<T> = {
   data: T;

@@ -21,6 +21,7 @@
 // optimisation, not load-bearing.
 // ---------------------------------------------------------------------------
 import { useCallback, useEffect, useRef, useState } from "react";
+import { buildTraceparent } from "./trace";
 
 const NAMESPACE = "hookka-cache:v1:";
 
@@ -127,7 +128,12 @@ function joinInflight<T>(url: string): Promise<T> {
     return existing.promise as Promise<T>;
   }
   const controller = new AbortController();
-  const promise: Promise<T> = fetch(url, { signal: controller.signal })
+  const promise: Promise<T> = fetch(url, {
+    signal: controller.signal,
+    // P6.1 — W3C Trace Context. trace_id is sticky for the page session
+    // so the worker can stitch every fetch from this tab onto one trace.
+    headers: { traceparent: buildTraceparent() },
+  })
     .then((r) => r.json())
     .finally(() => {
       // Drop the entry once settled — refs no longer matter after resolution.
@@ -192,6 +198,8 @@ export function useCachedJson<T = unknown>(
 
   useEffect(() => {
     if (!url) {
+      // Reseed state when caller passes null URL (e.g. id not yet known).
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- url=null reset path; pre-existing pattern, separate cleanup task
       setData(null);
       setLoading(false);
       setError(null);

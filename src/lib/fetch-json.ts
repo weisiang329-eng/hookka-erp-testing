@@ -19,6 +19,7 @@
 // ---------------------------------------------------------------------------
 import { z } from "zod";
 import { getAuthToken } from "./auth";
+import { buildTraceparent } from "./trace";
 
 export class FetchJsonError extends Error {
   public readonly status: number;
@@ -64,6 +65,10 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
 
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    // P6.1 — W3C Trace Context. One header per fetch; trace_id is sticky
+    // for the page session so the worker can join requests on one trace.
+    // Caller-supplied headers can still override (last-write-wins below).
+    traceparent: buildTraceparent(),
     ...(restInit.headers ?? {}),
   };
   if (!restInit.noAuth) {
@@ -124,7 +129,6 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
   const parsed = schema.safeParse(raw);
   if (!parsed.success) {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.error(`[fetchJson] schema mismatch at ${url}`, {
         issues: parsed.error.issues,
         raw,

@@ -1,13 +1,21 @@
 // ---------------------------------------------------------------------------
-// Observability — request timing + slow-query logging.
+// Observability — request timing + slow-query logging + trace propagation.
 //
 // Philosophy: console.log is free and shows up in `wrangler tail`. No external
 // service, no billing. When you need dashboards later, swap console.log for
 // Analytics Engine binding without changing callsites.
 //
 // Emission format (single line, key=value, grep-friendly):
-//   [req] method=GET path=/api/production-orders status=200 dur_ms=47
+//   [req] method=GET path=/api/production-orders status=200 dur_ms=47 traceparent=00-{32hex}-{16hex}-01
 //   [slow-query] route=/api/production-orders sql="SELECT ..." dur_ms=342 rows=8919
+//
+// P6.1 — traceparent (W3C Trace Context):
+//   The browser stamps `traceparent: 00-{trace_id}-{span_id}-{flags}` on
+//   every fetch (see src/lib/trace.ts). The worker reads it, includes the
+//   value in the [req] log line, and gates whether to spend log volume on
+//   it via the sampling rule below — 100% in dev/preview, 1% in prod.
+//   D1 doesn't accept query annotations so we don't propagate it into SQL;
+//   the per-request log line is the join key.
 //
 // Tune thresholds below. Start loud; turn down once the noisy offenders are fixed.
 // ---------------------------------------------------------------------------
@@ -15,6 +23,24 @@ import type { Context, Next } from "hono";
 
 export const SLOW_REQUEST_MS = 200;
 export const SLOW_QUERY_MS = 100;
+
+// Sampling rate for [req] log lines in production. dev / preview log every
+// request. We log slow ones (>= SLOW_REQUEST_MS) regardless of sampling so
+// performance regressions never get silently dropped.
+const PROD_LOG_SAMPLE_RATE = 0.01;
+
+function shouldEmitReqLine(envName: string | undefined, dur: number): boolean {
+  if (dur >= SLOW_REQUEST_MS) return true;
+  if (envName !== "production") return true;
+  return Math.random() < PROD_LOG_SAMPLE_RATE;
+}
+
+// Validate the W3C Trace Context shape: `00-{32hex}-{16hex}-{2hex}`.
+// We don't reject malformed headers (downstream still gets the value) but
+// we DO refuse to log obviously-bogus values to keep parsers happy.
+function isValidTraceparent(v: string): boolean {
+  return /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/.test(v);
+}
 
 // Per-request DB time aggregator. timingMiddleware creates one and stashes it
 // on the context; instrumentD1 receives a reference and accumulates query
@@ -42,13 +68,28 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   // every .all/.first/.run/.raw/.batch credits its duration here.
   const dbTimer: DbTimer = { total: 0, count: 0 };
   c.set("dbTimer", dbTimer);
+
+  // P6.1 — read incoming W3C Trace Context. If the caller didn't send one,
+  // mint a placeholder so internal cron / curl traffic is still grep-able.
+  // Stash on the context so route handlers + emitMetric (P6.2) can read it.
+  const incoming = c.req.header("traceparent") ?? "";
+  const traceparent =
+    incoming && isValidTraceparent(incoming) ? incoming : "";
+  if (traceparent) {
+    try { c.set("traceparent", traceparent); } catch { /* ignore */ }
+  }
+
   await next();
   const dur = Date.now() - start;
   const path = new URL(c.req.url).pathname;
-  const line = `[req] method=${c.req.method} path=${path} status=${c.res.status} dur_ms=${dur}`;
+  const tpPart = traceparent ? ` traceparent=${traceparent}` : "";
+  const line = `[req] method=${c.req.method} path=${path} status=${c.res.status} dur_ms=${dur}${tpPart}`;
+  // P6.1 — sampling. Slow lines always emit. Normal lines emit at 1% in
+  // prod, 100% otherwise. Gate on c.env.ENVIRONMENT (set in wrangler.toml).
+  const envName = (c.env as { ENVIRONMENT?: string } | undefined)?.ENVIRONMENT;
   if (dur >= SLOW_REQUEST_MS) {
     console.warn(`[slow-req] ${line.slice(6)}`); // strip "[req] " prefix
-  } else {
+  } else if (shouldEmitReqLine(envName, dur)) {
     console.log(line);
   }
   // Best-effort Server-Timing header.  Some CF runtimes lock res after

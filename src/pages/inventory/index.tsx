@@ -194,6 +194,16 @@ type WIPItem = {
   // accumulates exactly BOM + totalPOMins × rate = the final FG cost.
   estUnitCostSen: number;
   estTotalValueSen: number;
+  // Per-JC breakdown (optional — populated for backend-derived rows). Used by
+  // the WIP detail dialog to diagnose qty mismatches between the Production
+  // Sheet and Inventory WIP (e.g. duplicate JCs in the same wipKey vs single
+  // JC with a high wipQty).
+  members?: Array<{
+    poNo: string;
+    jobCardId: string;
+    wipType: string;
+    quantity: number;
+  }>;
 };
 
 // --- Create FG form ---
@@ -1180,6 +1190,7 @@ export default function InventoryPage() {
           sources: r.sources,
           estUnitCostSen: r.estUnitCostSen,
           estTotalValueSen: r.estTotalValueSen,
+          members: r.members,
         })),
     [backendWipRows],
   );
@@ -2113,6 +2124,39 @@ export default function InventoryPage() {
                   ))}
                 </tbody>
               </table>
+
+              {/* Job-Card-level breakdown — diagnoses qty mismatches between
+                  Production Sheet and Inventory WIP. If two rows show the
+                  same wipType for one PO it's duplicate JCs in the wipKey;
+                  one row with a high quantity means wipQty is set on the JC. */}
+              {wipDetail.members && wipDetail.members.length > 0 && (
+                <div className="mt-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-sm font-medium text-[#374151]">Job Cards</span>
+                    <span className="text-xs text-[#6B7280]">{wipDetail.members.length} JC(s)</span>
+                  </div>
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8]">
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">JC ID</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">PO</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">Type</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Qty</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {wipDetail.members.map((m, i) => (
+                        <tr key={i} className="border-b border-[#F0ECE9]">
+                          <td className="py-2 doc-number text-xs" title={m.jobCardId}>{m.jobCardId.slice(0, 8)}</td>
+                          <td className="py-2 doc-number text-xs">{m.poNo}</td>
+                          <td className="py-2 text-xs text-[#374151]">{m.wipType}</td>
+                          <td className="py-2 text-right">{m.quantity}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
             <div className="px-6 py-3 border-t border-[#E2DDD8] flex justify-end">
               <Button variant="outline" size="sm" onClick={() => setWipDetail(null)}>Close</Button>

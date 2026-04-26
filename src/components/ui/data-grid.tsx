@@ -495,10 +495,11 @@ function ColumnCustomizer<T>({
   const dragItem = useRef<number | null>(null);
   const dragOver = useRef<number | null>(null);
 
-  // Order columns by columnOrder
+  // Order columns by columnOrder; exclude parent-hidden columns so users can't
+  // toggle them on (parent's `hidden: true` is final / context-driven).
   const orderedColumns = useMemo(() => {
     const orderMap = new Map(columnOrder.map((k, i) => [k, i]));
-    return [...columns].sort((a, b) => {
+    return columns.filter(c => c.hidden !== true).sort((a, b) => {
       const ai = orderMap.get(a.key) ?? 999;
       const bi = orderMap.get(b.key) ?? 999;
       return ai - bi;
@@ -761,8 +762,14 @@ export function DataGrid<T extends Record<string, any>>({
 
   const visibleColumns = useMemo(() => {
     const orderMap = new Map(columnOrder.map((k, i) => [k, i]));
+    // Parent's `hidden: true` is final — it represents context-driven
+    // visibility (e.g., production page hiding dept-pill columns based on
+    // activeTab). User-toggled visibility (visibleKeys) only matters for
+    // columns the parent has not force-hidden. This prevents stale visibleKeys
+    // entries from causing body cells to drift into wrong header columns when
+    // the parent switches contexts and changes which columns are hidden.
     return columns
-      .filter(c => visibleKeys.has(c.key))
+      .filter(c => c.hidden !== true && visibleKeys.has(c.key))
       .sort((a, b) => (orderMap.get(a.key) ?? 999) - (orderMap.get(b.key) ?? 999));
   }, [columns, visibleKeys, columnOrder]);
 

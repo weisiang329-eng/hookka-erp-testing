@@ -279,40 +279,22 @@ app.get("/", async (c) => {
           (wipKey.includes("::") ? wipKey.split("::")[2] || "" : wipKey) ||
           "";
 
-        // Condensed FAB_CUT label (matches Production page's fabCutWIP):
-        //   {product} | ({size}) | ({totalH"}) | (DV N") | {fabric} | (FC)
-        // BF-only: height tokens included; sofa omits them.
-        // NOTE: do NOT append component tags here — the BOM owns the WIP
-        // naming scheme; adding HB/DV inside (FC …) breaks the user's mental
-        // model (they expect identical FC labels to roll up by PO). The
-        // "duplicate row" the user saw earlier is a quantity / consume bug,
-        // not a labelling bug. See the wip_items consume logic in
-        // production-orders.ts ~line 833.
-        let wipCodeStr: string;
-        if (card.departmentCode === "FAB_CUT") {
-          const totalH =
-            (po.gapInches || 0) +
-            (po.divanHeightInches || 0) +
-            (po.legHeightInches || 0);
-          const isBF = po.itemCategory === "BEDFRAME";
-          wipCodeStr = [
-            po.productCode || "",
-            po.sizeLabel ? `(${po.sizeLabel})` : "",
-            isBF && totalH > 0 ? `(${totalH}")` : "",
-            isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
-            po.fabricCode || "",
-            "(FC)",
-          ]
-            .filter(Boolean)
-            .join(" | ");
-        } else {
-          wipCodeStr =
-            card.wipLabel ||
-            card.wipCode ||
-            WIP_TYPE_LABELS[wipTypeShort] ||
-            wipTypeShort ||
-            wipKey;
-        }
+        // FAB_CUT normalization (Wei Siang Apr 26 2026): every dept reads
+        // its label from the BOM-provided card.wipLabel (with same
+        // fallback chain as every other dept). The synthesized
+        // "{product} | ({size}) | ({totalH}) | (DV N) | {fabric} | (FC)"
+        // shape is gone — that synthesis lumped both HB and DV components
+        // of one PO under an identical wipCode and surfaced as duplicate-
+        // looking rows on the Inventory WIP grid. Now FAB_CUT rows use
+        // the same per-component naming that ships from BOM creation
+        // (e.g. '1007-(K) -HB 20" PC151-01' and '8" Divan-6FT PC151-01'),
+        // matching what the Production sheet renders for the same JCs.
+        const wipCodeStr =
+          card.wipLabel ||
+          card.wipCode ||
+          WIP_TYPE_LABELS[wipTypeShort] ||
+          wipTypeShort ||
+          wipKey;
         const qty = card.wipQty || po.quantity;
 
         // Labor-so-far per unit — sum productionTimeMinutes for every done

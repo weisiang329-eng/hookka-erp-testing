@@ -774,9 +774,57 @@ export function DataGrid<T extends Record<string, any>>({
   }, [columns, visibleKeys, columnOrder]);
 
   // ── Search / Filter ──
-  const [searchText, setSearchText] = useState("");
-  const [columnFilters, setColumnFilters] = useState<Record<string, string>>({});
-  const [columnValueFilters, setColumnValueFilters] = useState<Record<string, Set<string>>>({});
+  // Persisted in sessionStorage keyed by gridId so the search text and
+  // column-filter selections survive tab switches within the same browser
+  // session. Without this, the TabbedOutlet's mount-on-activate model wipes
+  // every search the user types the moment they switch tabs (Wei Siang
+  // report Apr 26 2026: 'I search something, switch tabs, come back, it's
+  // gone'). sessionStorage clears on browser close — the user explicitly
+  // wants the search to NOT persist across days, just across tab hops.
+  const filterStoreKey = gridId ? `datagrid-filters-${gridId}-${userKey()}` : null;
+  const readFilterState = (): {
+    searchText: string;
+    columnFilters: Record<string, string>;
+    columnValueFilters: Record<string, string[]>;
+  } | null => {
+    if (!filterStoreKey || typeof window === "undefined") return null;
+    try {
+      const raw = sessionStorage.getItem(filterStoreKey);
+      return raw ? JSON.parse(raw) : null;
+    } catch { return null; }
+  };
+  const seeded = readFilterState();
+  const [searchText, setSearchText] = useState(seeded?.searchText ?? "");
+  const [columnFilters, setColumnFilters] = useState<Record<string, string>>(
+    seeded?.columnFilters ?? {},
+  );
+  const [columnValueFilters, setColumnValueFilters] = useState<Record<string, Set<string>>>(
+    () => {
+      if (!seeded?.columnValueFilters) return {};
+      const out: Record<string, Set<string>> = {};
+      for (const [k, v] of Object.entries(seeded.columnValueFilters)) {
+        out[k] = new Set(v);
+      }
+      return out;
+    },
+  );
+  // Push state changes back to sessionStorage on every change so a tab
+  // switch picks up the latest snapshot.
+  useEffect(() => {
+    if (!filterStoreKey || typeof window === "undefined") return;
+    try {
+      sessionStorage.setItem(
+        filterStoreKey,
+        JSON.stringify({
+          searchText,
+          columnFilters,
+          columnValueFilters: Object.fromEntries(
+            Object.entries(columnValueFilters).map(([k, v]) => [k, Array.from(v)]),
+          ),
+        }),
+      );
+    } catch { /* ignore quota / serialize errors */ }
+  }, [filterStoreKey, searchText, columnFilters, columnValueFilters]);
   const [filterDropdown, setFilterDropdown] = useState<{ key: string; rect: { left: number; top: number } } | null>(null);
 
   const setColFilter = useCallback((key: string, val: string) => {

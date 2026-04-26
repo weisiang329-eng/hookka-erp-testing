@@ -18,13 +18,23 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parsePublicEndpoints } from "./_security-helpers.mjs";
 
-// Snapshot — exact list as of 2026-04-25. Any drift is a deliberate signal:
-// either the change is intentional (update both lists) or someone widened
-// the public surface by accident (revert).
+// Snapshot contract — these two arrays must mirror PUBLIC_PATHS and
+// PUBLIC_PREFIXES in src/api/lib/auth-middleware.ts EXACTLY. Any drift is
+// a deliberate signal: either the change is intentional (a maintainer adds
+// a new entry here in the same commit that adds it to the middleware) or
+// someone widened the public surface by accident (CI fails, revert).
+//
+// THE WHOLE POINT of this snapshot test is that adding a new public
+// endpoint trips the test, which forces the maintainer to come here and
+// justify — in code review — why a new path bypasses the Bearer-token gate.
+// Do NOT loosen this to "contains" or "subset" semantics — equality is the
+// security control. Each entry is listed explicitly for the same reason.
 const EXPECTED_PATHS = [
   "/api/auth/login",
   "/api/auth/logout",
   "/api/auth/accept-invite",
+  // Phase C.6 — TOTP step-2 of password login (no bearer yet).
+  "/api/auth/totp/login-verify",
   "/api/health",
 ];
 
@@ -32,6 +42,8 @@ const EXPECTED_PREFIXES = [
   "/api/worker-auth/",
   "/api/worker/",
   "/api/auth/invite/",
+  // Phase B.3 — Google Workspace OAuth handshake (/start + /callback).
+  "/api/auth/oauth/",
 ];
 
 test("public endpoint allowlist (exact paths) is locked in", () => {

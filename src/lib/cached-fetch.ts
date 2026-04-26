@@ -289,12 +289,14 @@ export async function cachedFetchJson<T = unknown>(
   url: string,
   ttlSec: number = 300,
 ): Promise<T | null> {
+  // Always-fetch policy (matches useCachedJson SWR pattern, d8f71d2):
+  // the cache is read only as a network-failure fallback. Without this,
+  // a 5-min TTL kept Inventory pages on stale data after backend resets
+  // (Wei Siang Apr 26 2026: cleared all completion dates in D1, frontend
+  // still showed populated WIP for up to 5 min).
+  void ttlSec;
   const cached = readCache<T>(url);
-  const isFresh = cached && Date.now() - cached.fetchedAt < ttlSec * 1000;
-  if (isFresh) return cached.data;
   try {
-    // Reuse the same in-flight dedup as the React hook — concurrent callers
-    // (event handlers + mounting components) share one network request.
     const raw = await joinInflight<T>(url);
     writeCache<T>(url, raw);
     return raw;

@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -200,14 +200,26 @@ export default function SalesPage() {
 
   const hasActiveFilters = filterStatus || filterCustomer || filterDateFrom || filterDateTo || filterCategory || filterDDFrom || filterDDTo;
 
+  // Atomic clear — one setSearchParams call, not seven. Each useUrlState
+  // setter calls navigate() under the hood; firing seven in a row races on
+  // react-router-dom v7 (later setters can read pre-clear state and re-add
+  // the keys we just deleted). Build the new URL once and replace.
+  const [, setSearchParams] = useSearchParams();
   const clearFilters = () => {
-    setFilterStatus("");
-    setFilterCustomer("");
-    setFilterDateFrom("");
-    setFilterDateTo("");
-    setFilterCategory("");
-    setFilterDDFrom("");
-    setFilterDDTo("");
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.delete("status");
+        out.delete("customer");
+        out.delete("from");
+        out.delete("to");
+        out.delete("cat");
+        out.delete("ddFrom");
+        out.delete("ddTo");
+        return out;
+      },
+      { replace: true },
+    );
   };
 
   const filteredOrders = useMemo(() => {

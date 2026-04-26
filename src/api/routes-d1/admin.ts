@@ -695,4 +695,67 @@ app.post("/rebuild-pos/:soId", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/admin/clear-all-completion-dates
+//
+// TEMPORARY testing helper (added 2026-04-26 for the inventory in/out flow
+// QA pass). Resets every job_card row back to WAITING + clears completedDate
+// + flips overdue back to PENDING. Also resets every active production_order
+// to PENDING with progress 0 + nulled completedDate so the parent rollup
+// matches its newly-cleared JCs.
+//
+// Inventory: NOT touched here. wip_items rows stay intact (they're upserted
+// by completion cascades; clearing JCs doesn't physically un-build the WIP
+// stock). The QA loop wants to test fresh JC completions writing to wip_items
+// from a clean slate, so leaving the prior wip_items rows is correct — they
+// represent what was already produced before the reset.
+//
+// Guarded by ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to prevent accidents.
+// Should be removed once the QA pass is done.
+// ---------------------------------------------------------------------------
+app.post("/clear-all-completion-dates", async (c) => {
+  const db = c.var.DB;
+  const confirm = c.req.query("confirm") ?? "";
+  if (confirm !== "YES_CLEAR_ALL_COMPLETION_DATES") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Refusing to clear without confirmation. Pass ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to execute.",
+      },
+      400,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const [jcRes, poRes] = await db.batch([
+    db.prepare(
+      `UPDATE job_cards
+          SET status = 'WAITING',
+              completedDate = NULL,
+              overdue = 'PENDING'
+        WHERE status IN ('COMPLETED','TRANSFERRED','IN_PROGRESS')
+           OR completedDate IS NOT NULL`,
+    ),
+    db
+      .prepare(
+        `UPDATE production_orders
+            SET status = 'PENDING',
+                progress = 0,
+                currentDepartment = '',
+                completedDate = NULL,
+                updated_at = ?
+          WHERE status IN ('IN_PROGRESS','COMPLETED')`,
+      )
+      .bind(now),
+  ]);
+
+  return c.json({
+    success: true,
+    clearedJCs: jcRes.meta?.changes ?? 0,
+    resetPOs: poRes.meta?.changes ?? 0,
+    note: "wip_items rows left intact — they represent stock physically produced before the reset.",
+  });
+});
+
 export default app;

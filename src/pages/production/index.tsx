@@ -9,6 +9,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useToast } from "@/components/ui/toast";
 
 // ----- types -----
 type JobCard = {
@@ -594,6 +595,7 @@ export default function ProductionPage({
   deptCode,
 }: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
+  const { toast } = useToast();
   // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
   // entire piece_pics tree on the wire. The Production page never reads
   // them and this response ships ~530 POs × ~9k JCs — the largest payload
@@ -2551,6 +2553,41 @@ export default function ProductionPage({
           </Button>
           <Button variant="outline" onClick={() => navigate("/planning?tab=tracker")}>Master Tracker</Button>
           <Button variant="outline" onClick={handlePrintSchedule}>Print Schedule</Button>
+          {/* TEMP (2026-04-26 QA): one-click reset of every JC's
+              completedDate + status back to WAITING so the user can
+              re-test inventory in/out cascades from a clean slate.
+              Inventory wip_items rows are intentionally NOT cleared —
+              they represent stock physically built before the reset.
+              Remove this button + the /api/admin/clear-all-completion-dates
+              endpoint once the QA pass wraps. */}
+          <Button
+            variant="outline"
+            className="border-rose-300 text-rose-700 hover:bg-rose-50"
+            onClick={async () => {
+              if (!confirm("DEV: Clear EVERY job-card completion date across the whole system?\n\nThis resets every JC to WAITING and every PO to PENDING. wip_items inventory is left intact. Use only for testing inventory in/out cascades.")) return;
+              try {
+                const res = await fetch(
+                  "/api/admin/clear-all-completion-dates?confirm=YES_CLEAR_ALL_COMPLETION_DATES",
+                  { method: "POST" },
+                );
+                const j = (await res.json().catch(() => null)) as
+                  | { success?: boolean; error?: string; clearedJCs?: number; resetPOs?: number }
+                  | null;
+                if (!res.ok || !j?.success) {
+                  toast.error(j?.error || `Reset failed (HTTP ${res.status})`);
+                  return;
+                }
+                toast.success(`Cleared ${j.clearedJCs ?? 0} JCs · reset ${j.resetPOs ?? 0} POs.`);
+                invalidateCachePrefix("/api/production-orders");
+                invalidateCachePrefix("/api/inventory");
+                fetchOrders();
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "Reset failed");
+              }
+            }}
+          >
+            DEV: Clear All Completion Dates
+          </Button>
           {/* UPHOLSTERY & PACKING scan the finished good, not job cards. Keep
               the FG sticker entry point for those depts only; the QR Stickers
               section below handles job-card printing for all others via its

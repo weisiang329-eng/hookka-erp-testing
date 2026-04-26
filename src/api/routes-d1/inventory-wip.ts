@@ -456,6 +456,22 @@ app.get("/", async (c) => {
     pieceQty: number;                               // sum of component pieces
     memberItemIds: Set<string>;                     // GroupedItem.id set
     members: WIPMember[];                           // per-JC members
+    // Per-PO accumulator for the SET row's `sources` array. Keyed by full
+    // poCode (e.g. "SO-2604-309-02"). Each component contributes its slice
+    // of pieces; we collapse to one row per PO at emit time so the dialog
+    // shows "SO-XXXX qty=N" per contributing PO instead of one row per
+    // (PO, component).
+    sourcesByPo: Map<string, {
+      poCode: string;
+      quantity: number;
+      poQty: number;
+      completedDate: string;
+      ageDays: number;
+      fabricCode: string;
+      sizeLabel: string;
+      baseModel: string;
+      itemCategory: string;
+    }>;
   };
   const sofaBuckets = new Map<string, SofaBucket>();
   const nonSofaItems: GroupedItem[] = [];
@@ -486,8 +502,31 @@ app.get("/", async (c) => {
           pieceQty: 0,
           memberItemIds: new Set(),
           members: [],
+          sourcesByPo: new Map(),
         };
         sofaBuckets.set(key, b);
+      }
+      // Roll this source up into the bucket's per-PO accumulator. Multiple
+      // components of the same PO collapse to one entry; quantity sums.
+      const existing = b.sourcesByPo.get(s.poCode);
+      if (existing) {
+        existing.quantity += s.quantity;
+        if (s.ageDays > existing.ageDays) {
+          existing.ageDays = s.ageDays;
+          existing.completedDate = s.completedDate;
+        }
+      } else {
+        b.sourcesByPo.set(s.poCode, {
+          poCode: s.poCode,
+          quantity: s.quantity,
+          poQty: s.poQty,
+          completedDate: s.completedDate,
+          ageDays: s.ageDays,
+          fabricCode: s.fabricCode,
+          sizeLabel: s.sizeLabel,
+          baseModel: s.baseModel,
+          itemCategory: s.itemCategory,
+        });
       }
       b.qtyByComponent.set(
         g.wipType,
@@ -623,7 +662,7 @@ app.get("/", async (c) => {
       memberItemIds: Array.from(b.memberItemIds),
       components,
       totalQty: setQty,
-      sources: [],
+      sources: Array.from(b.sourcesByPo.values()),
     });
   }
 

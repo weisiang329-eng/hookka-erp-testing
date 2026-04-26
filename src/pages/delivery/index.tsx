@@ -1206,6 +1206,46 @@ export default function DeliveryPage() {
         width: "70px",
         align: "right",
         sortable: true,
+        render: (_v, row) => {
+          const breakdown = row.items
+            .map((i) => `${i.productCode} ${i.sizeLabel || ""} ×${i.quantity} (${(i.itemM3 * i.quantity).toFixed(2)} m³)`)
+            .join("\n");
+          return (
+            <span className="tabular-nums" title={breakdown || "No items"}>
+              {row.itemCount}
+            </span>
+          );
+        },
+      },
+      {
+        key: "itemDetails",
+        label: "Item Details",
+        type: "text",
+        width: "320px",
+        sortable: false,
+        render: (_v, row) => {
+          if (!row.items.length) return <span className="text-[#9CA3AF]">—</span>;
+          // Compact one-liner per item: "PRODUCT (SIZE) ×QTY · m³"
+          // Full list visible on hover via the title attribute on the cell.
+          const breakdown = row.items
+            .map((i) => `${i.productCode} ${i.sizeLabel || ""} ×${i.quantity} (${(i.itemM3 * i.quantity).toFixed(2)} m³)`)
+            .join("\n");
+          return (
+            <div className="flex flex-col gap-0.5 text-xs leading-tight" title={breakdown}>
+              {row.items.slice(0, 2).map((i, idx) => (
+                <div key={idx} className="truncate">
+                  <span className="font-medium text-[#1F1D1B]">{i.productCode}</span>
+                  {i.sizeLabel ? <span className="text-[#6B7280]"> {i.sizeLabel}</span> : null}
+                  <span className="text-[#9CA3AF]"> ×{i.quantity}</span>
+                  <span className="tabular-nums text-[#6B7280]"> ({(i.itemM3 * i.quantity).toFixed(2)} m³)</span>
+                </div>
+              ))}
+              {row.items.length > 2 && (
+                <div className="text-[#9CA3AF]">+{row.items.length - 2} more · hover for full list</div>
+              )}
+            </div>
+          );
+        },
       },
       {
         key: "totalM3",
@@ -1215,7 +1255,9 @@ export default function DeliveryPage() {
         align: "right",
         sortable: true,
         render: (_v, row) => (
-          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)}</span>
+          <span className="tabular-nums" title={`${row.itemCount} items totalling ${(row.totalM3 ?? 0).toFixed(2)} m³`}>
+            {(row.totalM3 ?? 0).toFixed(2)}
+          </span>
         ),
       },
       { key: "driverName", label: "3PL / Driver", type: "text", width: "120px", sortable: true },

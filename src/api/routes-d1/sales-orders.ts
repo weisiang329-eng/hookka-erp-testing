@@ -576,7 +576,14 @@ export async function createProductionOrdersForSO(
     statements.push(
       db
         .prepare(
-          `INSERT INTO production_orders (id, poNo, salesOrderId, salesOrderNo, lineNo,
+          // INSERT OR IGNORE: the salesOrderId-based pre-check above (line ~360)
+          // already short-circuits when any PO exists for the SO, but a concurrent
+          // re-confirm (or a future code path that bypasses the pre-check) could
+          // still attempt to insert the same poId/poNo. With 0056_unique_poNo
+          // adding UNIQUE(poNo), a plain INSERT would explode the whole batch —
+          // OR IGNORE lets the database silently no-op the duplicate row instead.
+          // Matches the same-pattern OR IGNORE used for job_cards below.
+          `INSERT OR IGNORE INTO production_orders (id, poNo, salesOrderId, salesOrderNo, lineNo,
              customerPOId, customerReference, customerName, customerState, companySOId,
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricCode, quantity, gapInches, divanHeightInches, legHeightInches,

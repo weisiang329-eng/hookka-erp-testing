@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate } from "react-router-dom";
 import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
@@ -164,8 +164,6 @@ export default function SalesPage() {
   const [showFilters, setShowFilters] = useSessionState<boolean>("sales:showFilters", false);
 
   // Restore scroll position after navigating back to this page.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const _scrollContainerRef = useRef<HTMLDivElement>(null);
   const [savedScroll, setSavedScroll] = useSessionState<number>("sales:scrollY", 0);
   useEffect(() => {
     if (savedScroll > 0 && window.scrollY === 0) {
@@ -180,12 +178,14 @@ export default function SalesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Reset to page 1 when any filter or tab changes.
-  /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by filter/tab change */
+  // Reset to page 1 when any filter or tab changes. setPage is stable
+  // (memoized inside useUrlStateNumber), so omitting it from deps is safe
+  // and intentional — including it would re-fire whenever any URL param
+  // changed, which would itself recurse into the setPage call below.
   useEffect(() => {
     setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterStatus, filterCustomer, filterDateFrom, filterDateTo, filterCategory, filterDDFrom, filterDDTo, tab]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   const fetchAll = () => {
     invalidateCachePrefix("/api/sales-orders");

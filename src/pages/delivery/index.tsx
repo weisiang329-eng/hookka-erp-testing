@@ -305,12 +305,11 @@ export default function DeliveryPage() {
   const totalPages = Math.max(1, Math.ceil(totalDOsServer / PAGE_SIZE));
 
   // Reset to page 1 when the active tab changes.
-  /* eslint-disable react-hooks/set-state-in-effect -- derived pagination reset triggered by tab change */
   useEffect(() => {
     setPage(1);
+    // setPage is stable (memoized inside useUrlStateNumber).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Scroll position restoration — keyed per active tab so each tab
   // remembers its own scroll position independently.

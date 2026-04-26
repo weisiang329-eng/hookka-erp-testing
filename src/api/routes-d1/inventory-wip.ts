@@ -280,12 +280,14 @@ app.get("/", async (c) => {
           "";
 
         // Condensed FAB_CUT label (matches Production page's fabCutWIP):
-        //   {product} | ({size}) | ({totalH"}) | (DV N") | {fabric} | (FC HB)
-        //   {product} | ({size}) | ({totalH"}) | (DV N") | {fabric} | (FC DV)
-        // The component tag inside (FC …) keeps Headboard / Divan / Base /
-        // Cushion / Armrest rows visually distinct in the WIP table — without
-        // it, every component of the same PO renders as the same wipCode and
-        // the user sees apparent duplicates (Apr 2026 Wei Siang report).
+        //   {product} | ({size}) | ({totalH"}) | (DV N") | {fabric} | (FC)
+        // BF-only: height tokens included; sofa omits them.
+        // NOTE: do NOT append component tags here — the BOM owns the WIP
+        // naming scheme; adding HB/DV inside (FC …) breaks the user's mental
+        // model (they expect identical FC labels to roll up by PO). The
+        // "duplicate row" the user saw earlier is a quantity / consume bug,
+        // not a labelling bug. See the wip_items consume logic in
+        // production-orders.ts ~line 833.
         let wipCodeStr: string;
         if (card.departmentCode === "FAB_CUT") {
           const totalH =
@@ -293,22 +295,13 @@ app.get("/", async (c) => {
             (po.divanHeightInches || 0) +
             (po.legHeightInches || 0);
           const isBF = po.itemCategory === "BEDFRAME";
-          const componentTag = (() => {
-            if (wipTypeShort === "HEADBOARD") return "HB";
-            if (wipTypeShort === "DIVAN") return "DV";
-            if (wipTypeShort === "SOFA_BASE") return "BASE";
-            if (wipTypeShort === "SOFA_CUSHION") return "CUSH";
-            if (wipTypeShort === "SOFA_ARMREST") return "ARM";
-            if (wipTypeShort === "SOFA_HEADREST") return "HR";
-            return "";
-          })();
           wipCodeStr = [
             po.productCode || "",
             po.sizeLabel ? `(${po.sizeLabel})` : "",
             isBF && totalH > 0 ? `(${totalH}")` : "",
             isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
             po.fabricCode || "",
-            componentTag ? `(FC ${componentTag})` : "(FC)",
+            "(FC)",
           ]
             .filter(Boolean)
             .join(" | ");

@@ -1061,10 +1061,17 @@ export function DataGrid<T extends Record<string, any>>({
   // stable across renders is non-negotiable.
   const scrollRef = useRef<HTMLDivElement>(null);
   const virtualizationActive = virtualize && !(groupBy && groupEnabled);
+  // Single source of truth for the per-row height. Used by both the
+  // virtualizer's estimateSize and the body padding math below — without
+  // sharing one constant, the padding calc could fall out of sync with
+  // the virtualizer's height model and reintroduce the alignment drift
+  // that VIRTUALIZE_MIN_ROWS tries to mask. Must match the inline
+  // `style={{ height: "26px" }}` on each row's <td>.
+  const ROW_HEIGHT_PX = 26;
   const rowVirtualizer = useVirtualizer({
     count: virtualizationActive ? sortedData.length : 0,
     getScrollElement: () => scrollRef.current,
-    estimateSize: () => 26, // matches the inline row height set on each <td>
+    estimateSize: () => ROW_HEIGHT_PX,
     overscan: 8,
   });
 
@@ -1599,7 +1606,25 @@ export function DataGrid<T extends Record<string, any>>({
                   const virtualItems = rawVirtualItems.filter(
                     (v) => v.index < sortedData.length,
                   );
-                  const totalSize = rowVirtualizer.getTotalSize();
+                  // Compute totalSize from sortedData.length × ROW_HEIGHT_PX
+                  // instead of rowVirtualizer.getTotalSize(). The virtualizer's
+                  // getTotalSize() lags one render behind a sharp count drop
+                  // (filter narrows 460 → 3): its memo recomputes synchronously
+                  // on the next pass, but THIS pass returns the stale 460-row
+                  // total. paddingBottom then computes against the stale total,
+                  // leaving thousands of pixels of empty space below the 3
+                  // visible rows — the user sees their 3 filtered rows
+                  // separated from the table footer by a giant blank gap, even
+                  // though the badge correctly reads "3 of 3". The
+                  // VIRTUALIZE_MIN_ROWS=100 gate masks the issue when the post-
+                  // filter count crosses below the threshold (legacy path
+                  // takes over) but NOT when both pre- and post-filter counts
+                  // stay above 100 — which is the Fab Sew case (1,200 rows
+                  // filtered down to ~150 still hits this code path). Driving
+                  // totalSize from sortedData.length directly means body and
+                  // footer are derived from the same source of truth in the
+                  // SAME render pass, eliminating the drift.
+                  const totalSize = sortedData.length * ROW_HEIGHT_PX;
                   const colSpan = visibleColumns.length + (selectable ? 1 : 0);
                   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
                   const paddingBottom =

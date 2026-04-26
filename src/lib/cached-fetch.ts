@@ -218,11 +218,21 @@ export function useCachedJson<T = unknown>(
       setError(null);
     }
 
-    const cached = readCache<T>(url);
-    const isFresh = cached && Date.now() - cached.fetchedAt < ttlSec * 1000;
-    // When tick bumps (refresh() called) we always refetch regardless of
-    // TTL — that's the explicit override path.
-    if (isFresh && tick === 0) return;
+    // Stale-while-revalidate: ALWAYS fire a network refetch on mount /
+    // url-change. The TTL check used to skip the refetch when the cache
+    // was <ttlSec old, but that left users staring at stale empty
+    // responses for up to 5 minutes whenever a backend deploy fixed a
+    // 'returns empty list' bug AFTER the page had cached the empty
+    // response. Recurring complaint pattern (Wei Siang Apr 2026: 'Sales
+    // Orders 显示 0 但 stats 314').
+    //
+    // The cache is still used for instant first paint (state was seeded
+    // from readCache() above) — we just no longer trust it as the final
+    // word. Network roundtrip is < 1s typically; the refetch replaces
+    // the cached data the moment it returns, so users never linger on
+    // stale data again. ttlSec is now informational; kept for API
+    // compatibility but no longer gates the refetch.
+    void ttlSec;
 
     let cancelled = false;
     const t0 = performance.now();

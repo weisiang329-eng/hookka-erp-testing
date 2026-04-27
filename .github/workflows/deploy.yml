@@ -137,14 +137,11 @@ jobs:
               });
             }
 
-      # Apply D1 migrations after the deploy, only for main pushes. Feature
-      # branches share the same D1 so preview pushes must never mutate the
-      # production schema, and PRs must never touch it either. Failure here
-      # fails the whole run — schema drift must not slip in silently.
-      - name: Apply D1 migrations (production only)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: cloudflare/wrangler-action@v3
-        with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          command: d1 migrations apply hookka-erp-db --remote
+      # D1 migration step removed 2026-04-27 (Phase 7 retire). Schema now
+      # lives on Supabase Postgres; migrations under migrations-postgres/
+      # are applied manually via the Supabase SQL Editor (or via psql with
+      # the pooler connection string from .dev.vars). The legacy D1
+      # database is no longer in wrangler.toml so this step would fail
+      # with "Couldn't find a D1 DB with the name 'hookka-erp-db'" anyway.
+      # See `chore(infra): retire D1 binding` (commit 7059259) and
+      # `docs/INVENTORY-WIP-FLOW.md` for the migration history.

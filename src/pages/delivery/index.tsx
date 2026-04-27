@@ -711,7 +711,17 @@ export default function DeliveryPage() {
 
   const confirmCreateDO = async () => {
     if (!createDODialog) return;
-    const poIds = createDODialog.map((po) => po.id);
+    // Derive poIds from the LIVE selection (not the dialog-open snapshot)
+    // so any checkbox toggles the user did with the dialog still open are
+    // honored. Without this the snapshot from openCreateDODialog could
+    // include POs the user has since deselected — backend would then see
+    // multi-customer/multi-state selections and reject (BUG-2026-04-27:
+    // user reported "Selected production orders span multiple customers
+    // or states" toast even though only 1 row showed as selected — the
+    // dialog snapshot was stale).
+    const poIds = readyPOs
+      .filter((po) => selectedReadyPOs.has(po.id))
+      .map((po) => po.id);
 
     if (poIds.length === 0) {
       setCreateDODialog(null);

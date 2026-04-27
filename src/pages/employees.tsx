@@ -73,6 +73,7 @@ type Worker = {
   basicSalarySen: number;
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
+  otMultiplier?: number;
   joinDate: string;
   icNumber: string;
   passportNumber: string;
@@ -911,6 +912,7 @@ type WorkerFormData = {
   basicSalarySen: number;
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
+  otMultiplier: number;
   joinDate: string;
   nationality: string;
   status: string;
@@ -925,6 +927,7 @@ const emptyForm: WorkerFormData = {
   basicSalarySen: 180000,
   workingHoursPerDay: 9,
   workingDaysPerMonth: 26,
+  otMultiplier: 1.5,
   joinDate: todayStr(),
   nationality: "",
   status: "ACTIVE",
@@ -972,6 +975,7 @@ function EmployeeMasterTab({
       basicSalarySen: w.basicSalarySen,
       workingHoursPerDay: w.workingHoursPerDay,
       workingDaysPerMonth: w.workingDaysPerMonth,
+      otMultiplier: w.otMultiplier ?? 1.5,
       joinDate: w.joinDate,
       nationality: w.nationality,
       status: w.status,
@@ -1170,6 +1174,35 @@ function EmployeeMasterTab({
           ) : (
             <span>{row.workingDaysPerMonth}</span>
           ),
+      },
+      {
+        key: "otMultiplier",
+        label: "OT ×",
+        align: "center",
+        width: "70px",
+        render: (_value, row) => {
+          const mult = row.otMultiplier ?? 1.5;
+          return editingId === row.id ? (
+            <Input
+              type="number"
+              min={1}
+              step={0.1}
+              value={editForm.otMultiplier}
+              onChange={(e) =>
+                setEditForm((f) => ({
+                  ...f,
+                  otMultiplier: parseFloat(e.target.value) || 1,
+                }))
+              }
+              className="h-8 w-16 text-xs"
+              title="OT premium multiplier — 1.5 = OT pays 1.5× hourly rate; 1.0 = no premium"
+            />
+          ) : (
+            <span title="OT premium multiplier (hourly rate × this for OT hours)">
+              {mult.toFixed(1)}×
+            </span>
+          );
+        },
       },
       {
         key: "joinDate",
@@ -1414,6 +1447,24 @@ function EmployeeMasterTab({
                     setForm((f) => ({
                       ...f,
                       workingHoursPerDay: parseInt(e.target.value) || 0,
+                    }))
+                  }
+                  className="h-8 text-xs"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-[#6B7280]" title="OT premium multiplier — 1.5 = OT pays 1.5× hourly rate; 1.0 = no premium">
+                  OT ×
+                </label>
+                <Input
+                  type="number"
+                  min={1}
+                  step={0.1}
+                  value={form.otMultiplier}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      otMultiplier: parseFloat(e.target.value) || 1,
                     }))
                   }
                   className="h-8 text-xs"

@@ -24,6 +24,7 @@ type WorkerRow = {
   basicSalarySen: number;
   workingHoursPerDay: number;
   workingDaysPerMonth: number;
+  otMultiplier: number | null;
   joinDate: string | null;
   icNumber: string | null;
   passportNumber: string | null;
@@ -49,6 +50,7 @@ function rowToWorker(row: WorkerRow) {
     basicSalarySen: row.basicSalarySen,
     workingHoursPerDay: row.workingHoursPerDay,
     workingDaysPerMonth: row.workingDaysPerMonth,
+    otMultiplier: row.otMultiplier ?? 1.5,
     joinDate: row.joinDate ?? "",
     icNumber: row.icNumber ?? "",
     passportNumber: row.passportNumber ?? "",
@@ -91,6 +93,7 @@ app.post("/", async (c) => {
       phone,
       basicSalarySen,
       workingHoursPerDay,
+      otMultiplier,
     } = body;
 
     if (!name || !empNo) {
@@ -116,9 +119,9 @@ app.post("/", async (c) => {
 
     await c.var.DB.prepare(
       `INSERT INTO workers (id, empNo, name, departmentId, departmentCode, position,
-         phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth,
+         phone, status, basicSalarySen, workingHoursPerDay, workingDaysPerMonth, otMultiplier,
          joinDate, icNumber, passportNumber, nationality)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -132,6 +135,7 @@ app.post("/", async (c) => {
         basicSalarySen ?? 0,
         resolvedHours,
         26,
+        Number.isFinite(otMultiplier) ? otMultiplier : 1.5,
         joinDate,
         "",
         "",
@@ -223,6 +227,8 @@ app.put("/:id", async (c) => {
         body.workingHoursPerDay ?? existing.workingHoursPerDay,
       workingDaysPerMonth:
         body.workingDaysPerMonth ?? existing.workingDaysPerMonth,
+      otMultiplier:
+        body.otMultiplier ?? existing.otMultiplier ?? 1.5,
       joinDate: body.joinDate ?? existing.joinDate ?? "",
       icNumber: body.icNumber ?? existing.icNumber ?? "",
       passportNumber: body.passportNumber ?? existing.passportNumber ?? "",
@@ -233,8 +239,8 @@ app.put("/:id", async (c) => {
       `UPDATE workers SET
          name = ?, empNo = ?, departmentId = ?, departmentCode = ?,
          position = ?, phone = ?, status = ?, basicSalarySen = ?,
-         workingHoursPerDay = ?, workingDaysPerMonth = ?, joinDate = ?,
-         icNumber = ?, passportNumber = ?, nationality = ?
+         workingHoursPerDay = ?, workingDaysPerMonth = ?, otMultiplier = ?,
+         joinDate = ?, icNumber = ?, passportNumber = ?, nationality = ?
        WHERE id = ?`,
     )
       .bind(
@@ -248,6 +254,7 @@ app.put("/:id", async (c) => {
         merged.basicSalarySen,
         merged.workingHoursPerDay,
         merged.workingDaysPerMonth,
+        merged.otMultiplier,
         merged.joinDate,
         merged.icNumber,
         merged.passportNumber,

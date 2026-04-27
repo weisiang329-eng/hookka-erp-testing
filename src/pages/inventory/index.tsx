@@ -1100,6 +1100,7 @@ export default function InventoryPage() {
   // Create RM modal
   const [showCreateRM, setShowCreateRM] = useState(false);
   const [rmForm, setRmForm] = useState<CreateRMForm>({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 });
+  const [rmSaving, setRmSaving] = useState(false);
 
   // ---- Live data fetched from D1 ----
   //
@@ -2106,9 +2107,53 @@ export default function InventoryPage() {
                   </div>
                 </div>
                 <div className="flex justify-end gap-2 pt-4">
-                  <Button variant="outline" size="sm" onClick={() => setShowCreateRM(false)}>Cancel</Button>
-                  <Button variant="primary" size="sm" disabled={!rmForm.itemCode || !rmForm.description} onClick={() => { toast.success("Raw material created: " + rmForm.itemCode); setShowCreateRM(false); setRmForm({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 }); }}>
-                    Save Material
+                  <Button variant="outline" size="sm" onClick={() => setShowCreateRM(false)} disabled={rmSaving}>Cancel</Button>
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={!rmForm.itemCode || !rmForm.description || rmSaving}
+                    onClick={async () => {
+                      // POST to /api/raw-materials. The route handler runs the
+                      // fabric cascade automatically when itemGroup is one of
+                      // B.M-FABR / S.M-FABR / S-FABRIC, mirroring the row into
+                      // both `fabrics` and `fabric_trackings` so the
+                      // /inventory/fabrics page sees it on next mount.
+                      setRmSaving(true);
+                      try {
+                        const res = await fetch("/api/raw-materials", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            itemCode: rmForm.itemCode,
+                            description: rmForm.description,
+                            baseUOM: rmForm.baseUOM,
+                            itemGroup: rmForm.itemGroup,
+                            balanceQty: rmForm.balanceQty,
+                          }),
+                        });
+                        const json = (await res.json()) as { success?: boolean; data?: RawMaterial; error?: string };
+                        if (!res.ok || !json.success) {
+                          toast.error(json.error || `Failed to create raw material (HTTP ${res.status})`);
+                          return;
+                        }
+                        // Optimistic local insert + cache invalidation so other
+                        // pages (Inventory, Fabrics, BOM) refresh on next mount.
+                        if (json.data) setLiveRawMaterials((prev) => [...prev, json.data as RawMaterial]);
+                        invalidateCachePrefix("/api/raw-materials");
+                        invalidateCachePrefix("/api/inventory");
+                        invalidateCachePrefix("/api/fabric-tracking");
+                        invalidateCachePrefix("/api/fabrics");
+                        toast.success(`Raw material created: ${rmForm.itemCode}`);
+                        setShowCreateRM(false);
+                        setRmForm({ itemCode: "", description: "", baseUOM: "PCS", itemGroup: "PLYWOOD", balanceQty: 0 });
+                      } catch (err) {
+                        toast.error(err instanceof Error ? err.message : "Failed to create raw material");
+                      } finally {
+                        setRmSaving(false);
+                      }
+                    }}
+                  >
+                    {rmSaving ? "Saving..." : "Save Material"}
                   </Button>
                 </div>
               </CardContent>

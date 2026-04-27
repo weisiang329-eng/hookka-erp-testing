@@ -298,6 +298,12 @@ export default function DeliveryPage() {
   const printRef = useRef<HTMLDivElement>(null);
 
   // ----- 3PL Providers state -----
+  // The provider form keeps only company-level fields after the 3PL refactor
+  // (vehicle / rate fields moved to per-vehicle sub-table rows). vehicleNo
+  // / vehicleType / capacityM3 / rate fields are still in the form state
+  // for backwards-compat reads of legacy provider rows but are no longer
+  // edited from the company top-form (they're shown / managed under the
+  // Vehicles sub-table below).
   const [providers, setProviders] = useState<ThreePLProvider[]>([]);
   const [providersLoading, setProvidersLoading] = useState(false);
   const [providerSearch, setProviderSearch] = useUrlState<string>("psearch", "");
@@ -307,6 +313,41 @@ export default function DeliveryPage() {
     capacityM3: "", ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE" as ThreePLProvider["status"], remarks: "",
   });
   const [providerSaving, setProviderSaving] = useState(false);
+
+  // ----- 3PL Vehicles + Drivers sub-tables (per-provider) -----
+  // Loaded into the provider edit dialog when the dialog opens for an
+  // existing provider; new-provider mode shows a placeholder until the
+  // company row exists (vehicles/drivers FK to providerId).
+  type ThreePLVehicle = {
+    id: string;
+    providerId: string;
+    plateNo: string;
+    vehicleType: string;
+    capacityM3: number;
+    ratePerTripSen: number;
+    ratePerExtraDropSen: number;
+    status: "ACTIVE" | "INACTIVE";
+    remarks: string;
+  };
+  type ThreePLDriverPerson = {
+    id: string;
+    providerId: string;
+    name: string;
+    phone: string;
+    status: "ACTIVE" | "INACTIVE";
+    remarks: string;
+  };
+  const [providerVehicles, setProviderVehicles] = useState<ThreePLVehicle[]>([]);
+  const [providerDrivers, setProviderDrivers] = useState<ThreePLDriverPerson[]>([]);
+  const [vehicleEditing, setVehicleEditing] = useState<ThreePLVehicle | "new" | null>(null);
+  const [vehicleForm, setVehicleForm] = useState({
+    plateNo: "", vehicleType: "", capacityM3: "",
+    ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
+  });
+  const [driverEditing, setDriverEditing] = useState<ThreePLDriverPerson | "new" | null>(null);
+  const [driverForm, setDriverForm] = useState({
+    name: "", phone: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
+  });
 
   // ----- Customer hub lookup -----
   const [customersData, setCustomersData] = useState<Customer[]>([]);
@@ -576,15 +617,14 @@ export default function DeliveryPage() {
 
   const saveProvider = async () => {
     setProviderSaving(true);
+    // Post-3PL refactor: only send the company-level fields. vehicle /
+    // rate / capacity now live on three_pl_vehicles rows; omitting them
+    // here lets the backend preserve any legacy values on update without
+    // the form silently zeroing them.
     const payload = {
       name: providerForm.name,
       phone: providerForm.phone,
       contactPerson: providerForm.contactPerson,
-      vehicleNo: providerForm.vehicleNo,
-      vehicleType: providerForm.vehicleType,
-      capacityM3: Number(providerForm.capacityM3) || 0,
-      ratePerTripSen: Math.round((Number(providerForm.ratePerTripRM) || 0) * 100),
-      ratePerExtraDropSen: Math.round((Number(providerForm.ratePerExtraDropRM) || 0) * 100),
       status: providerForm.status,
       remarks: providerForm.remarks,
     };
@@ -625,6 +665,201 @@ export default function DeliveryPage() {
       fetchProviders();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Network error — 3PL not deleted");
+    }
+  };
+
+  // ---- Vehicles + Drivers sub-table helpers (3PL refactor) ----
+  // The provider edit dialog opens in either "new" mode (no providerId yet,
+  // sub-tables disabled) or for an existing ThreePLProvider. When editing
+  // existing, fetch the per-provider rows once on dialog open and refetch
+  // after each mutation so the table reflects the live state.
+  const currentProviderId =
+    providerDialog && providerDialog !== "new"
+      ? (providerDialog as ThreePLProvider).id
+      : null;
+
+  const fetchProviderVehicles = useCallback(async (providerId: string) => {
+    try {
+      const res = await fetch(`/api/three-pl-vehicles?providerId=${providerId}`);
+      const body = (await res.json()) as { success?: boolean; data?: ThreePLVehicle[] };
+      if (body?.success && Array.isArray(body.data)) {
+        setProviderVehicles(body.data);
+      }
+    } catch {
+      /* swallow — UI shows empty list, retry on next dialog open */
+    }
+  }, []);
+
+  const fetchProviderDrivers = useCallback(async (providerId: string) => {
+    try {
+      const res = await fetch(`/api/three-pl-drivers?providerId=${providerId}`);
+      const body = (await res.json()) as { success?: boolean; data?: ThreePLDriverPerson[] };
+      if (body?.success && Array.isArray(body.data)) {
+        setProviderDrivers(body.data);
+      }
+    } catch {
+      /* swallow */
+    }
+  }, []);
+
+  // Refetch sub-tables whenever the dialog target changes. fetchProvider*
+  // call setState internally — that's intentional (they're async fetches
+  // synchronizing with an external source), so the lint rule about
+  // setState-in-effect is suppressed for this body.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (currentProviderId) {
+      fetchProviderVehicles(currentProviderId);
+      fetchProviderDrivers(currentProviderId);
+    } else {
+      setProviderVehicles([]);
+      setProviderDrivers([]);
+    }
+    // Also reset any in-progress vehicle/driver inline editor when the
+    // host provider dialog opens/closes/changes.
+    setVehicleEditing(null);
+    setDriverEditing(null);
+  }, [currentProviderId, fetchProviderVehicles, fetchProviderDrivers]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const openVehicleForm = (v: ThreePLVehicle | "new") => {
+    if (v === "new") {
+      setVehicleForm({
+        plateNo: "", vehicleType: "", capacityM3: "",
+        ratePerTripRM: "", ratePerExtraDropRM: "", status: "ACTIVE", remarks: "",
+      });
+    } else {
+      setVehicleForm({
+        plateNo: v.plateNo,
+        vehicleType: v.vehicleType || "",
+        capacityM3: String(v.capacityM3 || ""),
+        ratePerTripRM: String((v.ratePerTripSen || 0) / 100),
+        ratePerExtraDropRM: String((v.ratePerExtraDropSen || 0) / 100),
+        status: v.status,
+        remarks: v.remarks || "",
+      });
+    }
+    setVehicleEditing(v);
+  };
+
+  const saveVehicle = async () => {
+    if (!currentProviderId) return;
+    if (!vehicleForm.plateNo.trim()) {
+      toast.error("Plate number is required");
+      return;
+    }
+    const payload = {
+      providerId: currentProviderId,
+      plateNo: vehicleForm.plateNo.trim(),
+      vehicleType: vehicleForm.vehicleType.trim(),
+      capacityM3: Number(vehicleForm.capacityM3) || 0,
+      ratePerTripSen: Math.round((Number(vehicleForm.ratePerTripRM) || 0) * 100),
+      ratePerExtraDropSen: Math.round((Number(vehicleForm.ratePerExtraDropRM) || 0) * 100),
+      status: vehicleForm.status,
+      remarks: vehicleForm.remarks,
+    };
+    const isEdit = vehicleEditing !== "new" && vehicleEditing !== null;
+    const url = isEdit
+      ? `/api/three-pl-vehicles/${(vehicleEditing as ThreePLVehicle).id}`
+      : "/api/three-pl-vehicles";
+    const method = isEdit ? "PUT" : "POST";
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+      if (!res.ok || !body?.success) {
+        toast.error(body?.error || `Failed (HTTP ${res.status})`);
+        return;
+      }
+      setVehicleEditing(null);
+      fetchProviderVehicles(currentProviderId);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error");
+    }
+  };
+
+  const deleteVehicle = async (id: string) => {
+    if (!confirm("Delete this vehicle?")) return;
+    if (!currentProviderId) return;
+    try {
+      const res = await fetch(`/api/three-pl-vehicles/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        toast.error(body?.error || `Failed (HTTP ${res.status})`);
+        return;
+      }
+      fetchProviderVehicles(currentProviderId);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error");
+    }
+  };
+
+  const openDriverForm = (d: ThreePLDriverPerson | "new") => {
+    if (d === "new") {
+      setDriverForm({ name: "", phone: "", status: "ACTIVE", remarks: "" });
+    } else {
+      setDriverForm({
+        name: d.name,
+        phone: d.phone || "",
+        status: d.status,
+        remarks: d.remarks || "",
+      });
+    }
+    setDriverEditing(d);
+  };
+
+  const saveDriver = async () => {
+    if (!currentProviderId) return;
+    if (!driverForm.name.trim()) {
+      toast.error("Driver name is required");
+      return;
+    }
+    const payload = {
+      providerId: currentProviderId,
+      name: driverForm.name.trim(),
+      phone: driverForm.phone.trim(),
+      status: driverForm.status,
+      remarks: driverForm.remarks,
+    };
+    const isEdit = driverEditing !== "new" && driverEditing !== null;
+    const url = isEdit
+      ? `/api/three-pl-drivers/${(driverEditing as ThreePLDriverPerson).id}`
+      : "/api/three-pl-drivers";
+    const method = isEdit ? "PUT" : "POST";
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };
+      if (!res.ok || !body?.success) {
+        toast.error(body?.error || `Failed (HTTP ${res.status})`);
+        return;
+      }
+      setDriverEditing(null);
+      fetchProviderDrivers(currentProviderId);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error");
+    }
+  };
+
+  const deleteDriverPerson = async (id: string) => {
+    if (!confirm("Delete this driver?")) return;
+    if (!currentProviderId) return;
+    try {
+      const res = await fetch(`/api/three-pl-drivers/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        toast.error(body?.error || `Failed (HTTP ${res.status})`);
+        return;
+      }
+      fetchProviderDrivers(currentProviderId);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Network error");
     }
   };
 
@@ -2811,7 +3046,7 @@ export default function DeliveryPage() {
           {providerDialog !== null && (
             <div className="fixed inset-0 z-50 flex items-center justify-center">
               <div className="absolute inset-0 bg-black/40" onClick={() => !providerSaving && setProviderDialog(null)} />
-              <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4 border border-[#E2DDD8]">
+              <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 border border-[#E2DDD8]">
                 <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
                   <h2 className="text-lg font-bold text-[#1F1D1B]">
                     {providerDialog === "new" ? "New 3PL Provider" : "Edit 3PL Provider"}
@@ -2820,7 +3055,8 @@ export default function DeliveryPage() {
                     <X className="h-5 w-5" />
                   </button>
                 </div>
-                <div className="px-6 py-5 space-y-4 max-h-[60vh] overflow-y-auto">
+                <div className="px-6 py-5 space-y-5 max-h-[75vh] overflow-y-auto">
+                  {/* --- Company-level fields (top section) --- */}
                   <div className="grid grid-cols-2 gap-4">
                     <div className="col-span-2">
                       <label className="text-xs text-[#6B7280] font-medium">Name *</label>
@@ -2850,53 +3086,6 @@ export default function DeliveryPage() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Vehicle No</label>
-                      <input
-                        type="text"
-                        value={providerForm.vehicleNo}
-                        onChange={(e) => setProviderForm((f) => ({ ...f, vehicleNo: e.target.value }))}
-                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Vehicle Type</label>
-                      <input
-                        type="text"
-                        value={providerForm.vehicleType}
-                        onChange={(e) => setProviderForm((f) => ({ ...f, vehicleType: e.target.value }))}
-                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Capacity (M&sup3;)</label>
-                      <input
-                        type="number"
-                        value={providerForm.capacityM3}
-                        onChange={(e) => setProviderForm((f) => ({ ...f, capacityM3: e.target.value }))}
-                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Rate/Trip (RM)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={providerForm.ratePerTripRM}
-                        onChange={(e) => setProviderForm((f) => ({ ...f, ratePerTripRM: e.target.value }))}
-                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Rate/Extra Drop (RM)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={providerForm.ratePerExtraDropRM}
-                        onChange={(e) => setProviderForm((f) => ({ ...f, ratePerExtraDropRM: e.target.value }))}
-                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                      />
-                    </div>
-                    <div>
                       <label className="text-xs text-[#6B7280] font-medium">Status</label>
                       <select
                         value={providerForm.status}
@@ -2917,6 +3106,271 @@ export default function DeliveryPage() {
                         className="mt-1 w-full px-3 py-2 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] resize-none"
                       />
                     </div>
+                  </div>
+
+                  {/* --- Vehicles sub-table --- */}
+                  <div className="pt-4 border-t border-[#E2DDD8]">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-semibold text-[#1F1D1B]">Vehicles</h3>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openVehicleForm("new")}
+                        disabled={!currentProviderId}
+                      >
+                        <Plus className="h-3.5 w-3.5 mr-1" /> Add Vehicle
+                      </Button>
+                    </div>
+                    {!currentProviderId ? (
+                      <div className="text-xs text-[#6B7280] py-3 px-2 bg-[#F9F7F5] rounded-md border border-[#E2DDD8]">
+                        Save the provider first to add vehicles and drivers.
+                      </div>
+                    ) : (
+                      <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead className="bg-[#F9F7F5] text-[#6B7280]">
+                            <tr>
+                              <th className="text-left px-2 py-1.5 font-medium">Plate</th>
+                              <th className="text-left px-2 py-1.5 font-medium">Type</th>
+                              <th className="text-right px-2 py-1.5 font-medium">Cap (m³)</th>
+                              <th className="text-right px-2 py-1.5 font-medium">Rate/Trip</th>
+                              <th className="text-right px-2 py-1.5 font-medium">+Drop</th>
+                              <th className="text-left px-2 py-1.5 font-medium">Status</th>
+                              <th className="text-right px-2 py-1.5 font-medium w-20">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {providerVehicles.length === 0 ? (
+                              <tr>
+                                <td colSpan={7} className="text-center text-[#6B7280] py-3">
+                                  No vehicles yet — click "Add Vehicle" above.
+                                </td>
+                              </tr>
+                            ) : (
+                              providerVehicles.map((v) => (
+                                <tr key={v.id} className="border-t border-[#E2DDD8]">
+                                  <td className="px-2 py-1.5 font-medium">{v.plateNo}</td>
+                                  <td className="px-2 py-1.5">{v.vehicleType || "-"}</td>
+                                  <td className="px-2 py-1.5 text-right">{v.capacityM3 || "-"}</td>
+                                  <td className="px-2 py-1.5 text-right">RM{(v.ratePerTripSen / 100).toFixed(2)}</td>
+                                  <td className="px-2 py-1.5 text-right">RM{(v.ratePerExtraDropSen / 100).toFixed(2)}</td>
+                                  <td className="px-2 py-1.5">
+                                    <Badge variant="status" status={v.status} />
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right">
+                                    <button
+                                      onClick={() => openVehicleForm(v)}
+                                      className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#6B5C32]"
+                                      title="Edit"
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => deleteVehicle(v.id)}
+                                      className="p-1 rounded hover:bg-[#F9E1DA] text-[#6B7280] hover:text-[#7A2E24]"
+                                      title="Delete"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {/* Inline vehicle editor */}
+                    {vehicleEditing !== null && currentProviderId && (
+                      <div className="mt-2 border border-[#6B5C32] rounded-md p-3 bg-[#FBF9F6]">
+                        <div className="text-xs font-semibold text-[#6B5C32] mb-2">
+                          {vehicleEditing === "new" ? "Add Vehicle" : "Edit Vehicle"}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Plate No *</label>
+                            <input
+                              type="text"
+                              value={vehicleForm.plateNo}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, plateNo: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Type</label>
+                            <input
+                              type="text"
+                              value={vehicleForm.vehicleType}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, vehicleType: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Cap (m³)</label>
+                            <input
+                              type="number"
+                              value={vehicleForm.capacityM3}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, capacityM3: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Rate/Trip (RM)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={vehicleForm.ratePerTripRM}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, ratePerTripRM: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">+Drop (RM)</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              value={vehicleForm.ratePerExtraDropRM}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, ratePerExtraDropRM: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Status</label>
+                            <select
+                              value={vehicleForm.status}
+                              onChange={(e) => setVehicleForm((f) => ({ ...f, status: e.target.value as "ACTIVE" | "INACTIVE" }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            >
+                              <option value="ACTIVE">Active</option>
+                              <option value="INACTIVE">Inactive</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={() => setVehicleEditing(null)}>
+                            Cancel
+                          </Button>
+                          <Button variant="primary" size="sm" onClick={saveVehicle} disabled={!vehicleForm.plateNo}>
+                            <Save className="h-3 w-3 mr-1" /> {vehicleEditing === "new" ? "Add" : "Save"}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* --- Drivers sub-table --- */}
+                  <div className="pt-4 border-t border-[#E2DDD8]">
+                    <div className="flex items-center justify-between mb-2">
+                      <h3 className="text-sm font-semibold text-[#1F1D1B]">Drivers</h3>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openDriverForm("new")}
+                        disabled={!currentProviderId}
+                      >
+                        <Plus className="h-3.5 w-3.5 mr-1" /> Add Driver
+                      </Button>
+                    </div>
+                    {!currentProviderId ? (
+                      <div className="text-xs text-[#6B7280] py-3 px-2 bg-[#F9F7F5] rounded-md border border-[#E2DDD8]">
+                        Save the provider first to add vehicles and drivers.
+                      </div>
+                    ) : (
+                      <div className="border border-[#E2DDD8] rounded-md overflow-hidden">
+                        <table className="w-full text-xs">
+                          <thead className="bg-[#F9F7F5] text-[#6B7280]">
+                            <tr>
+                              <th className="text-left px-2 py-1.5 font-medium">Name</th>
+                              <th className="text-left px-2 py-1.5 font-medium">Phone</th>
+                              <th className="text-left px-2 py-1.5 font-medium">Status</th>
+                              <th className="text-right px-2 py-1.5 font-medium w-20">Actions</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {providerDrivers.length === 0 ? (
+                              <tr>
+                                <td colSpan={4} className="text-center text-[#6B7280] py-3">
+                                  No drivers yet — click "Add Driver" above.
+                                </td>
+                              </tr>
+                            ) : (
+                              providerDrivers.map((d) => (
+                                <tr key={d.id} className="border-t border-[#E2DDD8]">
+                                  <td className="px-2 py-1.5 font-medium">{d.name}</td>
+                                  <td className="px-2 py-1.5">{d.phone || "-"}</td>
+                                  <td className="px-2 py-1.5">
+                                    <Badge variant="status" status={d.status} />
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right">
+                                    <button
+                                      onClick={() => openDriverForm(d)}
+                                      className="p-1 rounded hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#6B5C32]"
+                                      title="Edit"
+                                    >
+                                      <Pencil className="h-3 w-3" />
+                                    </button>
+                                    <button
+                                      onClick={() => deleteDriverPerson(d.id)}
+                                      className="p-1 rounded hover:bg-[#F9E1DA] text-[#6B7280] hover:text-[#7A2E24]"
+                                      title="Delete"
+                                    >
+                                      <Trash2 className="h-3 w-3" />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))
+                            )}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                    {/* Inline driver editor */}
+                    {driverEditing !== null && currentProviderId && (
+                      <div className="mt-2 border border-[#6B5C32] rounded-md p-3 bg-[#FBF9F6]">
+                        <div className="text-xs font-semibold text-[#6B5C32] mb-2">
+                          {driverEditing === "new" ? "Add Driver" : "Edit Driver"}
+                        </div>
+                        <div className="grid grid-cols-3 gap-2">
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Name *</label>
+                            <input
+                              type="text"
+                              value={driverForm.name}
+                              onChange={(e) => setDriverForm((f) => ({ ...f, name: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Phone</label>
+                            <input
+                              type="text"
+                              value={driverForm.phone}
+                              onChange={(e) => setDriverForm((f) => ({ ...f, phone: e.target.value }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-[10px] text-[#6B7280] font-medium">Status</label>
+                            <select
+                              value={driverForm.status}
+                              onChange={(e) => setDriverForm((f) => ({ ...f, status: e.target.value as "ACTIVE" | "INACTIVE" }))}
+                              className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
+                            >
+                              <option value="ACTIVE">Active</option>
+                              <option value="INACTIVE">Inactive</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div className="mt-2 flex justify-end gap-2">
+                          <Button variant="outline" size="sm" onClick={() => setDriverEditing(null)}>
+                            Cancel
+                          </Button>
+                          <Button variant="primary" size="sm" onClick={saveDriver} disabled={!driverForm.name}>
+                            <Save className="h-3 w-3 mr-1" /> {driverEditing === "new" ? "Add" : "Save"}
+                          </Button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
                 <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">

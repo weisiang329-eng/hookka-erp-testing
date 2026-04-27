@@ -2494,6 +2494,313 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
   );
 }
 
+// ========== TAB 5b: LABOR COST ==========
+//
+// Per (department × category) labor cost vs same-period category revenue.
+// Cost is computed in the browser by summing working_hour_entries.hours
+// scaled by each worker's hourly rate (basicSalarySen ÷ 26 ÷ 9, with OT
+// hours above 9/day getting × otMultiplier). Revenue comes from the existing
+// /api/accounting/pl endpoint, which buckets revenue by product category.
+//
+// Production Shortfall + Warehousing rows are visually highlighted as the
+// "burning money" buckets. Per spec, Production Shortfall is shown ONLY at
+// the dept-total level (no per-employee drill) so the metric stays
+// blame-free.
+
+type LaborCostRow = {
+  id: string;
+  departmentCode: string;
+  departmentName: string;
+  category: Category;
+  hours: number;
+  laborCostSen: number;
+  revenueSen: number;          // category revenue (same value across all rows of the same category)
+  isProduction: boolean;
+  isShortfall: boolean;
+  isWarehousing: boolean;
+};
+
+function periodToDateRange(period: string): { from: string; to: string } {
+  // period format: YYYY-MM
+  const [yStr, mStr] = period.split("-");
+  const y = Number(yStr);
+  const m = Number(mStr);
+  if (!y || !m) {
+    const today = todayStr();
+    return { from: today, to: today };
+  }
+  const from = `${yStr}-${mStr}-01`;
+  // last day of month — use day 0 of next month
+  const last = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  const to = `${yStr}-${mStr}-${String(last).padStart(2, "0")}`;
+  return { from, to };
+}
+
+function buildPeriodOptions(): { value: string; label: string }[] {
+  // Roll back 12 months from today so users can compare against the prior year.
+  const now = new Date();
+  const out: { value: string; label: string }[] = [];
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1));
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const monthName = d.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+    out.push({ value: `${y}-${m}`, label: `${monthName} ${y}` });
+  }
+  return out;
+}
+
+function LaborCostTab({ workers }: { workers: Worker[] }) {
+  const periodOptions = useMemo(() => buildPeriodOptions(), []);
+  const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
+  const { from, to } = useMemo(() => periodToDateRange(period), [period]);
+
+  // Working hour entries for the selected month.
+  const entriesUrl = useMemo(
+    () => `/api/working-hour-entries?from=${from}&to=${to}`,
+    [from, to],
+  );
+  const { data: entriesResp, loading: entriesLoading } = useCachedJson<{
+    success?: boolean;
+    data?: WorkingHourEntry[];
+  }>(entriesUrl);
+
+  // Same-period revenue, bucketed by product category.
+  const plUrl = useMemo(() => `/api/accounting/pl?period=${period}`, [period]);
+  const { data: plResp, loading: plLoading } = useCachedJson<{
+    success?: boolean;
+    data?: { revenueByProduct?: Record<string, number> };
+  }>(plUrl);
+
+  const workersById = useMemo(() => {
+    const m = new Map<string, Worker>();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
+
+  const rows: LaborCostRow[] = useMemo(() => {
+    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
+    const revenueByCategory = (plResp?.success ? plResp.data?.revenueByProduct ?? {} : {}) as Record<string, number>;
+
+    // Group by (departmentCode, category). Hours summed; cost = sum over each
+    // entry of hours × hourly_rate, with hours-above-9-per-(date,worker)
+    // counted as OT and bumped by otMultiplier.
+    type Bucket = { hours: number; laborCostSen: number };
+    const buckets = new Map<string, Bucket>();
+
+    // First pass: per (workerId, date), classify each entry's hours into
+    // regular vs OT relative to a 9h baseline. Entries are processed in input
+    // order; once cumulative hours for that (worker, date) exceed 9, the
+    // remainder counts as OT and pays at otMultiplier × hourly rate.
+    const cumulativeByWorkerDate = new Map<string, number>();
+    for (const e of entries) {
+      const w = workersById.get(e.workerId);
+      if (!w || !w.basicSalarySen) continue;
+      const hourlyRateSen = w.basicSalarySen / 26 / 9;
+      const otMult = w.otMultiplier ?? 1.5;
+      const wdKey = `${e.workerId}|${e.date}`;
+      const cum = cumulativeByWorkerDate.get(wdKey) ?? 0;
+      const hours = Number(e.hours) || 0;
+      const regularLeft = Math.max(0, 9 - cum);
+      const regularH = Math.min(hours, regularLeft);
+      const otH = hours - regularH;
+      cumulativeByWorkerDate.set(wdKey, cum + hours);
+
+      const cost = regularH * hourlyRateSen + otH * hourlyRateSen * otMult;
+      const cat = (e.category || "") as Category;
+      const key = `${e.departmentCode}|${cat}`;
+      const cur = buckets.get(key) ?? { hours: 0, laborCostSen: 0 };
+      cur.hours += hours;
+      cur.laborCostSen += cost;
+      buckets.set(key, cur);
+    }
+
+    // Materialise rows. Sort production depts first by sequence, then non-
+    // production. Within a dept, order categories SOFA → BEDFRAME → ACCESSORY
+    // → "" (non-production has only the empty bucket).
+    const catOrder: Record<string, number> = { SOFA: 0, BEDFRAME: 1, ACCESSORY: 2, "": 3 };
+    const out: LaborCostRow[] = [];
+    for (const [key, b] of buckets.entries()) {
+      const [departmentCode, category] = key.split("|") as [string, Category];
+      const dept = ALL_DEPARTMENTS.find((d) => d.code === departmentCode);
+      const isProduction = PRODUCTION_DEPT_CODES.has(departmentCode);
+      out.push({
+        id: key,
+        departmentCode,
+        departmentName: dept?.name ?? departmentCode,
+        category,
+        hours: Math.round(b.hours * 100) / 100,
+        laborCostSen: Math.round(b.laborCostSen),
+        revenueSen: isProduction && category ? (revenueByCategory[category] ?? 0) : 0,
+        isProduction,
+        isShortfall: departmentCode === "PRODUCTION_SHORTFALL",
+        isWarehousing: departmentCode === "WAREHOUSING",
+      });
+    }
+    out.sort((a, b) => {
+      const seqA = ALL_DEPARTMENTS.findIndex((d) => d.code === a.departmentCode);
+      const seqB = ALL_DEPARTMENTS.findIndex((d) => d.code === b.departmentCode);
+      if (seqA !== seqB) return seqA - seqB;
+      return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
+    });
+    return out;
+  }, [entriesResp, plResp, workersById]);
+
+  // KPIs across the full table.
+  const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
+  const productionLaborCostSen = rows
+    .filter((r) => r.isProduction)
+    .reduce((s, r) => s + r.laborCostSen, 0);
+  const shortfallLaborCostSen = rows
+    .filter((r) => r.isShortfall)
+    .reduce((s, r) => s + r.laborCostSen, 0);
+  const warehousingLaborCostSen = rows
+    .filter((r) => r.isWarehousing)
+    .reduce((s, r) => s + r.laborCostSen, 0);
+  const totalRevenueSen = useMemo(() => {
+    const rev = (plResp?.success ? plResp.data?.revenueByProduct ?? {} : {}) as Record<string, number>;
+    return Object.values(rev).reduce((s, v) => s + (Number(v) || 0), 0);
+  }, [plResp]);
+  const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
+
+  const loading = entriesLoading || plLoading;
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <CardTitle className="flex items-center gap-2">
+            <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Labor Cost vs Revenue
+          </CardTitle>
+          <div className="flex items-center gap-3">
+            <select
+              value={period}
+              onChange={(e) => setPeriod(e.target.value)}
+              className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+            >
+              {periodOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {/* KPI strip */}
+        <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
+          <Card>
+            <CardContent className="p-3">
+              <p className="text-xs text-[#6B7280]">Total Labor Cost</p>
+              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3">
+              <p className="text-xs text-[#6B7280]">Total Revenue</p>
+              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalRevenueSen)}</p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3">
+              <p className="text-xs text-[#6B7280]">Cost / Revenue</p>
+              <p className={`text-lg font-bold ${overallRatio > 30 ? "text-[#9A3A2D]" : overallRatio > 20 ? "text-[#9C6F1E]" : "text-[#4F7C3A]"}`}>
+                {totalRevenueSen > 0 ? `${overallRatio.toFixed(1)}%` : "—"}
+              </p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3" title="Hours billed to WAREHOUSING — workers lent to warehouse, off the production line">
+              <p className="text-xs text-[#6B7280]">Borrowed (Warehousing)</p>
+              <p className={`text-lg font-bold ${warehousingLaborCostSen > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>
+                {formatCurrency(warehousingLaborCostSen)}
+              </p>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-3" title="Hours billed to PRODUCTION_SHORTFALL — paid time with no work to do">
+              <p className="text-xs text-[#6B7280]">Idle (Shortfall)</p>
+              <p className={`text-lg font-bold ${shortfallLaborCostSen > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                {formatCurrency(shortfallLaborCostSen)}
+              </p>
+            </CardContent>
+          </Card>
+        </div>
+
+        {/* Production-vs-overhead ratio note */}
+        <div className="mb-3 text-xs text-[#6B7280]">
+          Production-only labor cost (excl. warehousing/repair/maint/shortfall):{" "}
+          <span className="font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</span>
+          {" · "}
+          Revenue is recognized at sales-order creation (same-month bucket); labor at the day work happens. Treat any
+          single-month ratio as a leading indicator, not a closed P&amp;L.
+        </div>
+
+        {loading ? (
+          <div className="rounded-md border border-[#E2DDD8] p-8 text-center text-sm text-[#9CA3AF]">
+            Loading labor cost data…
+          </div>
+        ) : (
+          <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
+                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
+                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
+                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
+                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => {
+                  const ratio = r.revenueSen > 0 ? (r.laborCostSen / r.revenueSen) * 100 : 0;
+                  const rowClass = r.isShortfall
+                    ? "bg-[#F9E1DA]/30 border-l-4 border-l-[#9A3A2D]"
+                    : r.isWarehousing
+                      ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
+                      : !r.isProduction
+                        ? "bg-[#F3F4F6]/40"
+                        : "";
+                  return (
+                    <tr key={r.id} className={`border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors ${rowClass}`}>
+                      <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
+                      <td className="h-10 px-3 text-[#4B5563]">
+                        {r.category ? r.category[0] + r.category.slice(1).toLowerCase() : <span className="text-[#9CA3AF]">—</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
+                      <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
+                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                        {r.isProduction && r.category ? formatCurrency(r.revenueSen) : <span className="text-[#9CA3AF]">n/a</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right tabular-nums">
+                        {r.isProduction && r.category && r.revenueSen > 0 ? (
+                          <span className={ratio > 30 ? "font-medium text-[#9A3A2D]" : ratio > 20 ? "font-medium text-[#9C6F1E]" : "font-medium text-[#4F7C3A]"}>
+                            {ratio.toFixed(1)}%
+                          </span>
+                        ) : (
+                          <span className="text-[#9CA3AF]">—</span>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+                {rows.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="h-24 text-center text-[#9CA3AF]">
+                      No working hour entries for this period.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 // ========== TAB 6: LEAVE MANAGEMENT ==========
 
 const LEAVE_TYPES: LeaveRecord["type"][] = ["ANNUAL", "MEDICAL", "UNPAID", "EMERGENCY", "PUBLIC_HOLIDAY"];
@@ -2868,13 +3175,21 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "employee-master" | "efficiency" | "detail" | "payroll" | "leave";
+type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "detail" | "payroll" | "leave";
 
+// Labor Cost tab is wedged between Working Hours and Payroll per spec — the
+// flow goes "what hours did people work" → "what did those hours cost vs the
+// revenue they produced" → "what do we pay them out".
 const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
   {
     key: "working-hours",
     label: "Working Hours",
     icon: <Clock className="h-4 w-4" />,
+  },
+  {
+    key: "labor-cost",
+    label: "Labor Cost",
+    icon: <DollarSign className="h-4 w-4" />,
   },
   {
     key: "efficiency",
@@ -3102,6 +3417,10 @@ export default function EmployeesPage() {
           workers={workers}
           allAttendance={allAttendance}
         />
+      )}
+
+      {activeTab === "labor-cost" && (
+        <LaborCostTab workers={workers} />
       )}
 
       {activeTab === "payroll" && (

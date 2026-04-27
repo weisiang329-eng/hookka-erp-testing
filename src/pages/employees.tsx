@@ -2273,19 +2273,265 @@ function workingDaysInMonth(period: string): number {
   return count;
 }
 
+// Inline panel — create / edit / delete departments. Lives under LaborCostTab
+// but operates on the same /api/departments source-of-truth that every dept
+// dropdown across the page reads from. New depts appear immediately in
+// Working Hours / Employee Master / Labor Cost dropdowns via the shared
+// useCachedJson cache invalidation triggered by `refresh`.
+function DepartmentsManager({
+  departments,
+  refresh,
+}: {
+  departments: DepartmentLite[];
+  refresh: () => void;
+}) {
+  const { toast } = useToast();
+  const [creating, setCreating] = useState(false);
+  const [draft, setDraft] = useState<{ code: string; name: string; shortName: string; sequence: number; color: string; workingHoursPerDay: number; isProduction: boolean }>({
+    code: "",
+    name: "",
+    shortName: "",
+    sequence: (departments.reduce((m, d) => Math.max(m, d.sequence ?? 0), 0) || 0) + 1,
+    color: "#6B7280",
+    workingHoursPerDay: 9,
+    isProduction: false,
+  });
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<DepartmentLite | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const create = async () => {
+    if (!/^[A-Z][A-Z0-9_]*$/.test(draft.code)) {
+      toast.error("Code must be UPPERCASE letters / digits / underscore, starting with a letter");
+      return;
+    }
+    if (!draft.name.trim()) { toast.error("Name required"); return; }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/departments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(draft),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
+      toast.success(`Created ${draft.code}`);
+      setCreating(false);
+      setDraft({ code: "", name: "", shortName: "", sequence: draft.sequence + 1, color: "#6B7280", workingHoursPerDay: 9, isProduction: false });
+      invalidateCachePrefix("/api/departments");
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Create failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const startEdit = (d: DepartmentLite) => {
+    setEditingId(d.id);
+    setEditDraft({ ...d });
+  };
+
+  const saveEdit = async () => {
+    if (!editDraft || !editingId) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/departments/${editingId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editDraft.name,
+          shortName: editDraft.shortName,
+          sequence: editDraft.sequence,
+          color: editDraft.color,
+          workingHoursPerDay: editDraft.workingHoursPerDay,
+          isProduction: editDraft.isProduction,
+        }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
+      toast.success(`Updated ${editDraft.code}`);
+      setEditingId(null);
+      setEditDraft(null);
+      invalidateCachePrefix("/api/departments");
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Update failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (d: DepartmentLite) => {
+    if (!confirm(`Delete department "${d.name}" (${d.code})?\n\nThis only succeeds if no worker is assigned to it. Cannot be undone.`)) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/departments/${d.id}`, { method: "DELETE" });
+      const j = (await res.json()) as { success?: boolean; error?: string; workerCount?: number };
+      if (res.status === 409) {
+        toast.error(`${d.code} still has ${j.workerCount ?? "some"} worker(s) assigned — reassign them first`);
+        return;
+      }
+      if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
+      toast.success(`Deleted ${d.code}`);
+      invalidateCachePrefix("/api/departments");
+      refresh();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Delete failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="mb-4 rounded-md border border-[#E2DDD8] bg-[#FAF7F1] p-3">
+      <div className="flex items-center justify-between mb-2">
+        <h4 className="text-sm font-semibold text-[#1F1D1B]">Manage Departments</h4>
+        <Button variant="outline" size="sm" onClick={() => setCreating((v) => !v)}>
+          <Plus className="h-3.5 w-3.5" /> {creating ? "Cancel" : "Add Department"}
+        </Button>
+      </div>
+      {creating && (
+        <div className="mb-3 rounded border border-[#6B5C32]/30 bg-white p-3 grid grid-cols-2 md:grid-cols-7 gap-2">
+          <div>
+            <label className="text-xs text-[#6B7280]">Code</label>
+            <Input value={draft.code} onChange={(e) => setDraft((d) => ({ ...d, code: e.target.value.toUpperCase() }))} placeholder="QC" className="h-8 text-xs" />
+          </div>
+          <div className="md:col-span-2">
+            <label className="text-xs text-[#6B7280]">Name</label>
+            <Input value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} placeholder="Quality Control" className="h-8 text-xs" />
+          </div>
+          <div>
+            <label className="text-xs text-[#6B7280]">Short</label>
+            <Input value={draft.shortName} onChange={(e) => setDraft((d) => ({ ...d, shortName: e.target.value }))} placeholder="QC" className="h-8 text-xs" />
+          </div>
+          <div>
+            <label className="text-xs text-[#6B7280]">Seq</label>
+            <Input type="number" value={draft.sequence} onChange={(e) => setDraft((d) => ({ ...d, sequence: parseInt(e.target.value) || 0 }))} className="h-8 text-xs" />
+          </div>
+          <div>
+            <label className="text-xs text-[#6B7280]">Color</label>
+            <Input type="color" value={draft.color} onChange={(e) => setDraft((d) => ({ ...d, color: e.target.value }))} className="h-8 text-xs" />
+          </div>
+          <div>
+            <label className="text-xs text-[#6B7280] flex items-center gap-1" title="Production depts require a Sofa/Bedframe/Accessory category on each working_hour_entries row">
+              <input type="checkbox" checked={draft.isProduction} onChange={(e) => setDraft((d) => ({ ...d, isProduction: e.target.checked }))} />
+              Production
+            </label>
+            <Button variant="primary" size="sm" onClick={() => void create()} disabled={busy} className="mt-1 w-full">
+              <Save className="h-3.5 w-3.5" /> Save
+            </Button>
+          </div>
+        </div>
+      )}
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="bg-[#F0ECE9] text-[#374151]">
+              <th className="h-8 px-2 text-left">Code</th>
+              <th className="h-8 px-2 text-left">Name</th>
+              <th className="h-8 px-2 text-left">Short</th>
+              <th className="h-8 px-2 text-left w-12">Seq</th>
+              <th className="h-8 px-2 text-left w-12">Color</th>
+              <th className="h-8 px-2 text-left w-12">Hrs/Day</th>
+              <th className="h-8 px-2 text-left w-20">Production</th>
+              <th className="h-8 px-2 text-left w-32">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {departments.map((d) => {
+              const editing = editingId === d.id && editDraft;
+              return (
+                <tr key={d.id} className="border-t border-[#E2DDD8]">
+                  <td className="px-2 py-1 font-mono text-[#6B5C32]">{d.code}</td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <Input value={editDraft.name} onChange={(e) => setEditDraft((p) => p ? { ...p, name: e.target.value } : p)} className="h-7 text-xs" />
+                      : d.name}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <Input value={editDraft.shortName ?? ""} onChange={(e) => setEditDraft((p) => p ? { ...p, shortName: e.target.value } : p)} className="h-7 text-xs" />
+                      : (d.shortName ?? "")}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <Input type="number" value={editDraft.sequence ?? 0} onChange={(e) => setEditDraft((p) => p ? { ...p, sequence: parseInt(e.target.value) || 0 } : p)} className="h-7 w-12 text-xs" />
+                      : (d.sequence ?? "")}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <Input type="color" value={editDraft.color ?? "#6B7280"} onChange={(e) => setEditDraft((p) => p ? { ...p, color: e.target.value } : p)} className="h-7 w-12" />
+                      : <span className="inline-block h-4 w-8 rounded border border-[#E2DDD8]" style={{ background: d.color ?? "#6B7280" }} />}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <Input type="number" value={editDraft.workingHoursPerDay ?? 9} onChange={(e) => setEditDraft((p) => p ? { ...p, workingHoursPerDay: parseInt(e.target.value) || 0 } : p)} className="h-7 w-12 text-xs" />
+                      : (d.workingHoursPerDay ?? 9)}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing
+                      ? <input type="checkbox" checked={editDraft.isProduction} onChange={(e) => setEditDraft((p) => p ? { ...p, isProduction: e.target.checked } : p)} />
+                      : (d.isProduction ? <span className="text-[#4F7C3A]">✓</span> : <span className="text-[#9CA3AF]">—</span>)}
+                  </td>
+                  <td className="px-2 py-1">
+                    {editing ? (
+                      <div className="flex gap-1">
+                        <Button variant="primary" size="sm" onClick={() => void saveEdit()} disabled={busy}>
+                          <Save className="h-3.5 w-3.5" /> Save
+                        </Button>
+                        <Button variant="outline" size="sm" onClick={() => { setEditingId(null); setEditDraft(null); }}>
+                          <X className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          onClick={() => startEdit(d)}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded text-[#6B5C32] hover:bg-[#F0ECE9]"
+                          aria-label="Edit"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void remove(d)}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded text-[#9A3A2D] hover:bg-[#F9E1DA]"
+                          aria-label="Delete"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <p className="mt-2 text-xs text-[#6B7280]">
+        Code is immutable after creation (it's used as a soft FK by workers / working_hour_entries). Delete is blocked if any worker is still assigned to the dept — reassign them first.
+      </p>
+    </div>
+  );
+}
+
 function LaborCostTab({
   workers,
   departments,
   productionDeptCodes,
-  refreshDepartments: _refreshDepartments,
+  refreshDepartments,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
-  refreshDepartments: () => void;  // wired in next commit when Manage Departments UI lands
+  refreshDepartments: () => void;
 }) {
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
+  const [manageOpen, setManageOpen] = useState(false);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
   const { from, to } = useMemo(() => periodToDateRange(period), [period]);
@@ -2429,7 +2675,16 @@ function LaborCostTab({
           <CardTitle className="flex items-center gap-2">
             <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Labor Cost vs Revenue
           </CardTitle>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManageOpen((v) => !v)}
+              title="Create / edit / delete departments"
+            >
+              <Users className="h-4 w-4" />
+              {manageOpen ? "Close Manage Departments" : "Manage Departments"}
+            </Button>
             <select
               value={period}
               onChange={(e) => setPeriod(e.target.value)}
@@ -2443,6 +2698,12 @@ function LaborCostTab({
         </div>
       </CardHeader>
       <CardContent>
+        {manageOpen && (
+          <DepartmentsManager
+            departments={allDepts}
+            refresh={refreshDepartments}
+          />
+        )}
         {/* KPI strip */}
         <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
           <Card>

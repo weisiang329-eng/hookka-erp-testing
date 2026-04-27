@@ -169,6 +169,43 @@ const DEPARTMENTS = [
   { id: "dept-8", code: "PACKING", name: "Packing" },
 ];
 
+// 12-dept list for the working-hours breakdown rows. The 4 non-production
+// depts (sequence 9-12) accept hours WITHOUT a category — Labor Cost reports
+// surface them as "borrowed/idle" buckets separate from production cost.
+const ALL_DEPARTMENTS = [
+  ...DEPARTMENTS,
+  { id: "dept-9", code: "WAREHOUSING", name: "Warehousing" },
+  { id: "dept-10", code: "REPAIR", name: "Repair" },
+  { id: "dept-11", code: "MAINTENANCE", name: "Maintenance" },
+  { id: "dept-12", code: "PRODUCTION_SHORTFALL", name: "Production Shortfall" },
+];
+
+const PRODUCTION_DEPT_CODES = new Set([
+  "FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING",
+]);
+
+const CATEGORIES = ["SOFA", "BEDFRAME", "ACCESSORY"] as const;
+type Category = (typeof CATEGORIES)[number] | "";
+
+type WorkingHourEntry = {
+  id: string;
+  attendanceId: string;
+  workerId: string;
+  date: string;
+  departmentCode: string;
+  category: Category;
+  hours: number;
+  notes: string;
+};
+
+type BreakdownDraft = {
+  id?: string;            // present for rows already persisted
+  departmentCode: string;
+  category: Category;
+  hours: number;
+  notes: string;
+};
+
 // --------------- TAB COMPONENTS ---------------
 
 // ========== TAB 1: WORKING HOURS ==========
@@ -186,6 +223,16 @@ type AttendanceRowDraft = {
   saved: boolean;
   saveError?: string;
   existing: AttendanceRecord | null;
+  // Breakdown panel state — populated lazily on first expand. The rows
+  // here are drafts; a Save Breakdown button hits POST /bulk to wipe-and-
+  // replace the per-attendance set in one D1 batch.
+  expanded: boolean;
+  breakdown: BreakdownDraft[];
+  breakdownLoaded: boolean;
+  breakdownLoading: boolean;
+  breakdownSaving: boolean;
+  breakdownSavedAt: number | null;
+  breakdownError?: string;
 };
 
 const PRODUCT_TYPE_STORAGE_KEY = "hookka-attendance-product-type";
@@ -222,30 +269,42 @@ function WorkingHoursTab({
   const [rows, setRows] = useState<AttendanceRowDraft[]>([]);
   const [bulkSaving, setBulkSaving] = useState(false);
 
-  // Build rows whenever workers/attendance/date change
+  // Build rows whenever workers/attendance/date change. Preserve in-flight
+  // breakdown drafts across attendance refreshes — losing unsaved breakdown
+  // edits because clockOut auto-refreshed would be a footgun.
   useEffect(() => {
     const dayRecords = attendance.filter((a) => a.date === selectedDate);
     const ptMap = loadProductTypeMap();
-    const newRows: AttendanceRowDraft[] = workers
-      .filter((w) => w.status === "ACTIVE")
-      .map((w) => {
-        const existing = dayRecords.find((r) => r.employeeId === w.id) || null;
-        const dept = DEPARTMENTS.find((d) => d.id === w.departmentId);
-        return {
-          employeeId: w.id,
-          employeeName: w.name,
-          departmentName: dept?.name || w.departmentCode,
-          clockIn: existing?.clockIn || "",
-          clockOut: existing?.clockOut || "",
-          status: existing?.status || "PRESENT",
-          notes: existing?.notes || "",
-          productType: ptMap[`${selectedDate}:${w.id}`] || "",
-          saving: false,
-          saved: false,
-          existing,
-        };
-      });
-    setRows(newRows);
+    setRows((prev) => {
+      const prevByEmp = new Map(prev.map((r) => [r.employeeId, r]));
+      return workers
+        .filter((w) => w.status === "ACTIVE")
+        .map((w) => {
+          const existing = dayRecords.find((r) => r.employeeId === w.id) || null;
+          const dept = DEPARTMENTS.find((d) => d.id === w.departmentId);
+          const prior = prevByEmp.get(w.id);
+          return {
+            employeeId: w.id,
+            employeeName: w.name,
+            departmentName: dept?.name || w.departmentCode,
+            clockIn: existing?.clockIn || "",
+            clockOut: existing?.clockOut || "",
+            status: existing?.status || "PRESENT",
+            notes: existing?.notes || "",
+            productType: ptMap[`${selectedDate}:${w.id}`] || "",
+            saving: false,
+            saved: false,
+            existing,
+            expanded: prior?.expanded ?? false,
+            breakdown: prior?.breakdown ?? [],
+            breakdownLoaded: prior?.breakdownLoaded ?? false,
+            breakdownLoading: false,
+            breakdownSaving: false,
+            breakdownSavedAt: prior?.breakdownSavedAt ?? null,
+            breakdownError: prior?.breakdownError,
+          };
+        });
+    });
   }, [workers, attendance, selectedDate]);
 
   const updateRow = (idx: number, field: string, value: string) => {
@@ -262,6 +321,147 @@ function WorkingHoursTab({
       return copy;
     });
   };
+
+  const patchRow = useCallback((idx: number, patch: Partial<AttendanceRowDraft>) => {
+    setRows((prev) => {
+      const copy = [...prev];
+      copy[idx] = { ...copy[idx], ...patch };
+      return copy;
+    });
+  }, []);
+
+  const loadBreakdown = useCallback(
+    async (idx: number) => {
+      const row = rows[idx];
+      if (!row?.existing) return;
+      patchRow(idx, { breakdownLoading: true, breakdownError: undefined });
+      try {
+        const res = await fetch(
+          `/api/working-hour-entries?attendanceId=${encodeURIComponent(row.existing.id)}`,
+        );
+        const j = (await res.json()) as { success: boolean; data?: WorkingHourEntry[]; error?: string };
+        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
+        const drafts: BreakdownDraft[] = (j.data ?? []).map((e) => ({
+          id: e.id,
+          departmentCode: e.departmentCode,
+          category: e.category,
+          hours: e.hours,
+          notes: e.notes,
+        }));
+        patchRow(idx, { breakdown: drafts, breakdownLoaded: true, breakdownLoading: false });
+      } catch (e) {
+        patchRow(idx, {
+          breakdownLoading: false,
+          breakdownError: e instanceof Error ? e.message : "Failed to load breakdown",
+        });
+      }
+    },
+    [rows, patchRow],
+  );
+
+  const toggleBreakdown = useCallback(
+    (idx: number) => {
+      const row = rows[idx];
+      if (!row) return;
+      const willExpand = !row.expanded;
+      patchRow(idx, { expanded: willExpand });
+      if (willExpand && row.existing && !row.breakdownLoaded) {
+        void loadBreakdown(idx);
+      }
+    },
+    [rows, patchRow, loadBreakdown],
+  );
+
+  const updateBreakdown = useCallback(
+    (idx: number, bIdx: number, patch: Partial<BreakdownDraft>) => {
+      setRows((prev) => {
+        const copy = [...prev];
+        const next = [...copy[idx].breakdown];
+        // Switching to a non-production dept clears any stale category.
+        const merged = { ...next[bIdx], ...patch };
+        if (patch.departmentCode && !PRODUCTION_DEPT_CODES.has(patch.departmentCode)) {
+          merged.category = "";
+        }
+        next[bIdx] = merged;
+        copy[idx] = { ...copy[idx], breakdown: next, breakdownSavedAt: null, breakdownError: undefined };
+        return copy;
+      });
+    },
+    [],
+  );
+
+  const addBreakdown = useCallback((idx: number) => {
+    setRows((prev) => {
+      const copy = [...prev];
+      const row = copy[idx];
+      // Default new row to the worker's primary dept (with category if production)
+      // so a single-dept worker rarely has to touch the dropdown.
+      const primary = workers.find((w) => w.id === row.employeeId)?.departmentCode || "";
+      const isProd = PRODUCTION_DEPT_CODES.has(primary);
+      copy[idx] = {
+        ...row,
+        breakdown: [
+          ...row.breakdown,
+          { departmentCode: primary, category: isProd ? "SOFA" : "", hours: 0, notes: "" },
+        ],
+        breakdownSavedAt: null,
+      };
+      return copy;
+    });
+  }, [workers]);
+
+  const removeBreakdown = useCallback((idx: number, bIdx: number) => {
+    setRows((prev) => {
+      const copy = [...prev];
+      const next = copy[idx].breakdown.filter((_, i) => i !== bIdx);
+      copy[idx] = { ...copy[idx], breakdown: next, breakdownSavedAt: null };
+      return copy;
+    });
+  }, []);
+
+  const saveBreakdown = useCallback(
+    async (idx: number) => {
+      const row = rows[idx];
+      if (!row?.existing) return;
+      patchRow(idx, { breakdownSaving: true, breakdownError: undefined });
+      try {
+        const res = await fetch("/api/working-hour-entries/bulk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            attendanceId: row.existing.id,
+            entries: row.breakdown.map((b) => ({
+              departmentCode: b.departmentCode,
+              category: b.category,
+              hours: b.hours,
+              notes: b.notes,
+            })),
+          }),
+        });
+        const j = (await res.json()) as { success: boolean; data?: WorkingHourEntry[]; error?: string };
+        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
+        const drafts: BreakdownDraft[] = (j.data ?? []).map((e) => ({
+          id: e.id,
+          departmentCode: e.departmentCode,
+          category: e.category,
+          hours: e.hours,
+          notes: e.notes,
+        }));
+        patchRow(idx, {
+          breakdown: drafts,
+          breakdownSaving: false,
+          breakdownSavedAt: Date.now(),
+          breakdownLoaded: true,
+        });
+      } catch (e) {
+        patchRow(idx, {
+          breakdownSaving: false,
+          breakdownError: e instanceof Error ? e.message : "Save failed",
+        });
+      }
+    },
+    [rows, patchRow],
+  );
 
   // Attendance writes used to swallow HTTP errors silently — a 500 on the
   // clock-in POST would leave the row marked "saved" in the UI while the
@@ -369,6 +569,7 @@ function WorkingHoursTab({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                <th className="h-12 w-8 px-2 text-left font-medium text-[#374151]" aria-label="expand"></th>
                 <th className="h-12 px-4 text-left font-medium text-[#374151]">
                   Employee Name
                 </th>
@@ -413,12 +614,35 @@ function WorkingHoursTab({
                 const prodMins = Math.round(workMins * 0.85);
                 const standardMins = 9 * 60;
                 const otMins = Math.max(0, workMins - standardMins);
+                const breakdownTotalH = row.breakdown.reduce((s, b) => s + (Number(b.hours) || 0), 0);
+                const clockH = workMins / 60;
+                const gapH = clockH - breakdownTotalH;
+                const canBreakdown = !!row.existing;
 
                 return (
+                  <Fragment key={row.employeeId}>
                   <tr
-                    key={row.employeeId}
                     className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
                   >
+                    <td className="h-12 px-2 align-middle">
+                      <button
+                        type="button"
+                        onClick={() => toggleBreakdown(idx)}
+                        disabled={!canBreakdown}
+                        title={
+                          canBreakdown
+                            ? "Show / hide working hour breakdown"
+                            : "Save attendance (clock-in) before adding breakdown"
+                        }
+                        className="inline-flex items-center justify-center h-7 w-7 rounded hover:bg-[#E2DDD8] disabled:opacity-30 disabled:cursor-not-allowed"
+                      >
+                        {row.expanded ? (
+                          <ChevronDown className="h-4 w-4" />
+                        ) : (
+                          <ChevronRight className="h-4 w-4" />
+                        )}
+                      </button>
+                    </td>
                     <td className="h-12 px-4 font-medium text-[#1F1D1B]">
                       {row.employeeName}
                     </td>
@@ -514,12 +738,154 @@ function WorkingHoursTab({
                       </Button>
                     </td>
                   </tr>
+                  {row.expanded && (
+                    <tr className="bg-[#FAF7F1] border-b border-[#E2DDD8]">
+                      <td colSpan={12} className="p-4">
+                        <div className="rounded-md border border-[#E2DDD8] bg-white">
+                          <div className="flex items-center justify-between px-3 py-2 border-b border-[#E2DDD8] text-xs">
+                            <div className="font-medium text-[#374151]">
+                              Working Hour Breakdown — {row.employeeName}
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <span className="text-[#6B7280]">
+                                Clock: <span className="font-medium text-[#1F1D1B]">{clockH > 0 ? `${clockH.toFixed(2)}h` : "—"}</span>
+                              </span>
+                              <span className="text-[#6B7280]">
+                                Breakdown: <span className="font-medium text-[#1F1D1B]">{breakdownTotalH.toFixed(2)}h</span>
+                              </span>
+                              <span
+                                className={
+                                  Math.abs(gapH) < 0.01
+                                    ? "text-[#4F7C3A] font-medium"
+                                    : gapH > 0
+                                      ? "text-[#9C6F1E] font-medium"
+                                      : "text-[#9A3A2D] font-medium"
+                                }
+                              >
+                                Gap: {gapH > 0 ? "+" : ""}{gapH.toFixed(2)}h
+                                {gapH > 0.25 && " (idle/unattributed)"}
+                                {gapH < -0.25 && " (over-attributed)"}
+                              </span>
+                            </div>
+                          </div>
+                          {row.breakdownLoading ? (
+                            <div className="px-3 py-4 text-xs text-[#9CA3AF]">Loading…</div>
+                          ) : (
+                            <table className="w-full text-xs">
+                              <thead>
+                                <tr className="bg-[#F0ECE9] text-[#374151]">
+                                  <th className="h-9 px-3 text-left font-medium">Department</th>
+                                  <th className="h-9 px-3 text-left font-medium">Category</th>
+                                  <th className="h-9 px-3 text-left font-medium w-24">Hours</th>
+                                  <th className="h-9 px-3 text-left font-medium">Notes</th>
+                                  <th className="h-9 px-3 w-12"></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {row.breakdown.map((b, bIdx) => {
+                                  const isProd = PRODUCTION_DEPT_CODES.has(b.departmentCode);
+                                  return (
+                                    <tr key={b.id ?? `new-${bIdx}`} className="border-t border-[#E2DDD8]">
+                                      <td className="px-3 py-1.5">
+                                        <select
+                                          value={b.departmentCode}
+                                          onChange={(e) => updateBreakdown(idx, bIdx, { departmentCode: e.target.value })}
+                                          className="h-7 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                                        >
+                                          <option value="">—</option>
+                                          {ALL_DEPARTMENTS.map((d) => (
+                                            <option key={d.code} value={d.code}>{d.name}</option>
+                                          ))}
+                                        </select>
+                                      </td>
+                                      <td className="px-3 py-1.5">
+                                        <select
+                                          value={b.category}
+                                          onChange={(e) => updateBreakdown(idx, bIdx, { category: e.target.value as Category })}
+                                          disabled={!isProd}
+                                          className="h-7 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
+                                          title={isProd ? "Production category" : "Non-production dept — no category"}
+                                        >
+                                          <option value="">{isProd ? "—" : "n/a"}</option>
+                                          {CATEGORIES.map((cat) => (
+                                            <option key={cat} value={cat}>{cat[0] + cat.slice(1).toLowerCase()}</option>
+                                          ))}
+                                        </select>
+                                      </td>
+                                      <td className="px-3 py-1.5">
+                                        <Input
+                                          type="number"
+                                          min={0}
+                                          step={0.5}
+                                          value={b.hours}
+                                          onChange={(e) => updateBreakdown(idx, bIdx, { hours: Number(e.target.value) })}
+                                          className="h-7 w-20 text-xs"
+                                        />
+                                      </td>
+                                      <td className="px-3 py-1.5">
+                                        <Input
+                                          value={b.notes}
+                                          onChange={(e) => updateBreakdown(idx, bIdx, { notes: e.target.value })}
+                                          placeholder="e.g. PO-1234, helper for upholstery"
+                                          className="h-7 text-xs"
+                                        />
+                                      </td>
+                                      <td className="px-3 py-1.5 text-right">
+                                        <button
+                                          type="button"
+                                          onClick={() => removeBreakdown(idx, bIdx)}
+                                          className="inline-flex items-center justify-center h-6 w-6 rounded text-[#9A3A2D] hover:bg-[#F9E1DA]"
+                                          aria-label="Remove row"
+                                        >
+                                          <X className="h-3.5 w-3.5" />
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                                {row.breakdown.length === 0 && (
+                                  <tr>
+                                    <td colSpan={5} className="px-3 py-4 text-center text-[#9CA3AF]">
+                                      No breakdown rows yet. Click <span className="font-medium">+ Add segment</span> below.
+                                    </td>
+                                  </tr>
+                                )}
+                              </tbody>
+                            </table>
+                          )}
+                          <div className="flex items-center justify-between px-3 py-2 border-t border-[#E2DDD8]">
+                            <Button variant="outline" size="sm" onClick={() => addBreakdown(idx)}>
+                              <Plus className="h-3.5 w-3.5" /> Add segment
+                            </Button>
+                            <div className="flex items-center gap-2 text-xs">
+                              {row.breakdownError && (
+                                <span className="text-[#9A3A2D]">{row.breakdownError}</span>
+                              )}
+                              {row.breakdownSavedAt && !row.breakdownError && (
+                                <span className="text-[#4F7C3A]">Saved</span>
+                              )}
+                              <Button
+                                variant="primary"
+                                size="sm"
+                                onClick={() => saveBreakdown(idx)}
+                                disabled={row.breakdownSaving}
+                              >
+                                <Save className="h-3.5 w-3.5" />
+                                {row.breakdownSaving ? "Saving…" : "Save Breakdown"}
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
                 );
               })}
               {rows.length === 0 && (
                 <tr>
                   <td
-                    colSpan={11}
+                    colSpan={12}
                     className="h-24 text-center text-[#9CA3AF]"
                   >
                     No active workers found.

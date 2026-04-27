@@ -84,11 +84,13 @@ type DeliveryOrderRow = {
   receivedDate: string | null;
   status: DOStatus;
   driverName: string;
+  driverContactPerson: string;
   vehicleNo: string;
   lorryName: string;
   deliveryAddress: string;
   contactPerson: string;
   contactPhone: string;
+  deliveryDate: string;
   remarks: string;
 };
 
@@ -135,11 +137,13 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     receivedDate: d.deliveredAt || null,
     status,
     driverName: d.driverName || "",
+    driverContactPerson: (d as Record<string, unknown>).driverContactPerson as string || "",
     vehicleNo: d.vehicleNo || "",
     lorryName: d.lorryName || "",
     deliveryAddress: d.deliveryAddress || "",
     contactPerson: d.contactPerson || "",
     contactPhone: d.contactPhone || "",
+    deliveryDate: d.deliveryDate || "",
     remarks: d.remarks || "",
   };
 }
@@ -2267,56 +2271,149 @@ export default function DeliveryPage() {
                   </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
-                    <p className="font-medium doc-number">{detailDO.doNo}</p>
+                /* Three-section layout, redesigned 2026-04-27. The previous
+                   12-cell grid showed SO No / Customer PO / State as
+                   single-value fields, which silently went blank for any
+                   multi-SO / multi-customer DO (the underlying columns hold
+                   only one value per row). Per-line SO numbers live on the
+                   items table + a "Sales Orders" chip strip below; the
+                   header now only carries fields that aggregate cleanly.
+                   3PL info gets its own section pulling provider name,
+                   contact person (the human dispatcher / driver to call —
+                   not the recipient at the address), and vehicle plate. */
+                <div className="space-y-4">
+                  {/* DO Basics */}
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
+                      <p className="font-medium doc-number">{detailDO.doNo}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
+                      <p className="font-medium">{(detailDO.totalM3 ?? 0).toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
+                      <p className="font-medium">{detailDO.items.length}</p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">SO No.</p>
-                    <p className="font-medium doc-number">{detailDO.companySO}</p>
+
+                  {/* Sales Orders covered — comma-separated dedup. Empty for
+                      a freshly-created blank manual DO; fills in once items
+                      get added. */}
+                  {(() => {
+                    const sos = Array.from(
+                      new Set(
+                        detailDO.items
+                          .map((it) => it.salesOrderNo)
+                          .filter((s) => !!s),
+                      ),
+                    );
+                    if (sos.length === 0) return null;
+                    return (
+                      <div className="text-sm">
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Sales Orders</p>
+                        <p className="font-medium doc-number">{sos.join(", ")}</p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 3PL Info */}
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">3PL Info</p>
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Provider</p>
+                        <p className="font-medium">{detailDO.driverName || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
+                        <p className="font-medium">{detailDO.driverContactPerson || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Vehicle No.</p>
+                        <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Customer PO</p>
-                    <p className="font-medium doc-number">{detailDO.customerPOId}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
-                    <p className="font-medium">{detailDO.customerName}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">State</p>
-                    <p className="font-medium">{detailDO.hubBranch}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
-                    <p className="font-medium">{(detailDO.totalM3 ?? 0).toFixed(2)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">3PL / Driver</p>
-                    <p className="font-medium">{detailDO.driverName || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Vehicle No.</p>
-                    <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
-                    <p className="font-medium text-xs">{detailDO.deliveryAddress || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
-                    <p className="font-medium">{detailDO.contactPerson || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Phone</p>
-                    <p className="font-medium">{detailDO.contactPhone || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
-                    <p className="font-medium">
-                      {detailDO.dispatchDate ? formatDate(detailDO.dispatchDate) : "-"}
-                    </p>
+
+                  {/* Delivery Info */}
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">Delivery Info</p>
+                    {/* Customer line. Multi-drop renders as
+                        "Drop 1: A, Drop 2: B" derived from parsing the
+                        deliveryAddress string the create flow writes. We
+                        keep the parse loose: the format is
+                        "Drop N (Name): address\n..." for multi-drop, and
+                        a plain address string for single-drop. */}
+                    <div className="grid grid-cols-1 gap-3 text-sm">
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
+                        <p className="font-medium">{detailDO.customerName || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
+                        {(() => {
+                          const addr = detailDO.deliveryAddress || "";
+                          // Multi-drop: split on newlines, render each as a
+                          // "Drop N: <Customer>\n  <address>" stanza so the
+                          // operator scans drops at a glance instead of one
+                          // long blob.
+                          if (addr.includes("Drop ") && addr.includes("\n")) {
+                            const drops = addr.split("\n").filter((s) => s.trim());
+                            return (
+                              <div className="space-y-1.5">
+                                {drops.map((line, i) => {
+                                  // line shape: "Drop 1 (Customer Name): address blah"
+                                  const m = line.match(/^(Drop \d+)\s*\(([^)]+)\):\s*(.*)$/);
+                                  if (!m) {
+                                    return (
+                                      <p key={i} className="text-xs text-[#1F1D1B]">{line}</p>
+                                    );
+                                  }
+                                  const [, dropLabel, custName, address] = m;
+                                  return (
+                                    <div key={i}>
+                                      <p className="font-medium text-xs text-[#1F1D1B]">
+                                        {dropLabel}: {custName}
+                                      </p>
+                                      <p className="text-xs text-[#6B7280] pl-3">{address}</p>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          }
+                          return (
+                            <p className="font-medium text-xs">{addr || "-"}</p>
+                          );
+                        })()}
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>
+                          <p className="font-medium">{detailDO.contactPerson || "-"}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Phone</p>
+                          <p className="font-medium doc-number">{detailDO.contactPhone || "-"}</p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Date</p>
+                          <p className="font-medium">
+                            {detailDO.deliveryDate ? formatDate(detailDO.deliveryDate) : "-"}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
+                          <p className="font-medium">
+                            {detailDO.dispatchDate ? formatDate(detailDO.dispatchDate) : "-"}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}

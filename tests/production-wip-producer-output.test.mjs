@@ -115,10 +115,14 @@ test('Fab Sew atomic consume on (salesOrderId, fabricCode) is unchanged', () => 
 test('PATCH route still calls applyWipInventoryChange when status changes', () => {
   const src = read();
   // The cascade must fire on every status patch (not just COMPLETED) so
-  // IN_PROGRESS upstream-consume runs. Pin the call shape.
+  // IN_PROGRESS upstream-consume runs. Pin the call: it must occur inside
+  // an `if (body.status)` block, take db/existing/updated/body.status/
+  // refreshed, AND pass jcRow.status as the prevStatus arg so the
+  // BUG-2026-04-27-002 rollback branch can detect a DONE → non-DONE
+  // transition.
   assert.match(
     src,
-    /if \(body\.status\) \{[\s\S]*?await applyWipInventoryChange\(db, existing, updated, body\.status, refreshed\);/,
-    'PATCH should invoke applyWipInventoryChange on status change',
+    /if \(body\.status\) \{[\s\S]*?await applyWipInventoryChange\(\s*db,\s*existing,\s*updated,\s*body\.status,\s*refreshed,\s*jcRow\.status,?\s*\);/,
+    'PATCH should invoke applyWipInventoryChange(prevStatus=jcRow.status) on status change',
   );
 });

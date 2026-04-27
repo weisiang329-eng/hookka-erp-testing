@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, cn } from "@/lib/utils";
+import { getPrimarySoCategory } from "@/lib/so-category";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import { ScanPOModal } from "@/components/scan-po-modal";
@@ -236,8 +237,11 @@ export default function SalesPage() {
         const orderDate = o.companySODate.split("T")[0];
         if (orderDate > filterDateTo) return false;
       }
-      // Category: SO matches if ANY line is the chosen category.
-      if (filterCategory && !o.items.some(it => it.itemCategory === filterCategory)) return false;
+      // Category: derive ONE primary category per SO (SOFA > BEDFRAME >
+      // ACCESSORY) instead of "any line matches". Each SO is now exactly
+      // one of the three buckets — no double-counting a sofa+pillows order
+      // under both filters. SOFA / BEDFRAME mixing is blocked at create.
+      if (filterCategory && getPrimarySoCategory(o.items) !== filterCategory) return false;
       // Customer delivery date range — what sales staff actually filter on.
       if (filterDDFrom || filterDDTo) {
         const dd = o.customerDeliveryDate ? o.customerDeliveryDate.split("T")[0] : "";

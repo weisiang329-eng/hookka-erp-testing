@@ -55,9 +55,12 @@ const EMPTY_LINE: LineItem = {
   specialOrders: [], specialOrder: "", specialOrderPriceSen: 0, notes: "",
 };
 
+/** Parse inches from a height string like '14"', '10.5"', or 'No Leg'.
+ * Accepts decimals so a Maintenance-config value like 15.5" round-trips
+ * through the dropdown without truncation. */
 function parseInches(h: string): number | null {
-  const m = h.match(/^(\d+)"/);
-  return m ? parseInt(m[1], 10) : null;
+  const m = h.match(/^(\d+(?:\.\d+)?)"/);
+  return m ? parseFloat(m[1]) : null;
 }
 
 function calcSpecialOrderSurcharge(codes: string[]): number {
@@ -742,9 +745,11 @@ export default function EditSalesOrderPage() {
                       <label className="block text-xs text-[#9CA3AF] mb-1">Leg</label>
                       <SearchableSelect
                         value={(() => {
+                          // Format inches directly so any maintenance-config
+                          // value (incl. decimals like 7.5") renders without
+                          // depending on legHeightOptions containing it.
                           if (item.legHeightInches == null || item.legHeightInches === 0) return "No Leg";
-                          const match = legHeightOptions.find(o => parseInches(o.height) === item.legHeightInches);
-                          return match?.height || "No Leg";
+                          return `${item.legHeightInches}"`;
                         })()}
                         onChange={(val) => {
                           const inches = val === "No Leg" ? null : parseInches(val);

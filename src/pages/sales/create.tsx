@@ -132,10 +132,12 @@ function generateSofaWIPs(item: LineItem): { code: string; type: string; qty: nu
   return wips;
 }
 
-/** Parse inches from a height string like '14"' or 'No Leg' */
+/** Parse inches from a height string like '14"', '10.5"', or 'No Leg'.
+ * Accepts decimals so a Maintenance-config value like 15.5" round-trips
+ * through the dropdown without truncation. */
 function parseInches(h: string): number | null {
-  const m = h.match(/^(\d+)"/);
-  return m ? parseInt(m[1], 10) : null;
+  const m = h.match(/^(\d+(?:\.\d+)?)"/);
+  return m ? parseFloat(m[1]) : null;
 }
 
 /**
@@ -1080,27 +1082,36 @@ function LineItemCard({
   const [showSpecialOrders, setShowSpecialOrders] = useState(false);
   const [showModuleDropdown, setShowModuleDropdown] = useState(false);
   const [checkedModules, setCheckedModules] = useState<string[]>([]);
-  // Derive the current divan dropdown value from the inches stored
+  // Derive the current divan dropdown value from the inches stored.
+  // Same lookup-vs-display issue as gapValue (below): the saved divan
+  // height may be a maintenance-config value that isn't in the hardcoded
+  // divanHeightOptions fallback. Format the inches directly so any saved
+  // value renders correctly in the <select>.
   const divanValue = useMemo(() => {
     if (item.divanHeightInches == null) return "";
-    const match = divanHeightOptions.find(o => parseInches(o.height) === item.divanHeightInches);
-    return match?.height || "";
+    return `${item.divanHeightInches}"`;
   }, [item.divanHeightInches]);
 
   // Derive leg dropdown value. Null / 0 / undefined all mean the customer
   // declined a leg — show "No Leg" so the field always carries a selection
   // that comes from the variants config (never blank, per user SOP).
+  // Same maintenance-config tolerance as divanValue — render any saved
+  // inches directly so a user-added leg height (e.g. 7") still displays.
   const legValue = useMemo(() => {
     if (item.legHeightInches == null || item.legHeightInches === 0) return "No Leg";
-    const match = legHeightOptions.find(o => parseInches(o.height) === item.legHeightInches);
-    return match?.height || "No Leg";
+    return `${item.legHeightInches}"`;
   }, [item.legHeightInches]);
 
-  // Derive gap dropdown value
+  // Derive gap dropdown value. The saved gap may be a value the user added
+  // via Product Maintenance (e.g. 14") that isn't in the hardcoded
+  // gapHeightOptions fallback range (4"-10"). Format the inches directly
+  // so the <select> shows whatever value was saved, regardless of whether
+  // the maintenance config has loaded yet — when it does load, the option
+  // with the same string is auto-selected. Without this, gapInches=14
+  // produced gapValue="" and the field rendered as "-".
   const gapValue = useMemo(() => {
     if (item.gapInches == null) return "";
-    const match = gapHeightOptions.find(o => parseInches(o) === item.gapInches);
-    return match || "";
+    return `${item.gapInches}"`;
   }, [item.gapInches]);
 
   // Helper: extract string values from a config array that may contain

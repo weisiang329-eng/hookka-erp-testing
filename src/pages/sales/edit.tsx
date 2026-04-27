@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
+import { hasMixedSofaBedframe, SO_MIXED_CATEGORY_ERROR } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
 import type { Customer, Product, FabricItem, SalesOrder } from "@/lib/mock-data";
 import {
@@ -412,6 +413,12 @@ export default function EditSalesOrderPage() {
     }
     if (items.some(l => l.itemCategory === "SOFA" && !l.seatHeight)) {
       toast.warning("Please select a seat size for all sofa items"); return;
+    }
+    // Hard restriction: SOFA + BEDFRAME may NOT coexist on a single SO.
+    // Server enforces this too — client check just gives instant feedback.
+    if (hasMixedSofaBedframe(items)) {
+      toast.error(SO_MIXED_CATEGORY_ERROR);
+      return;
     }
 
     setSaving(true);

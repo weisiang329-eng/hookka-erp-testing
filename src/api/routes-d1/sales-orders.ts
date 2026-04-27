@@ -16,6 +16,10 @@ import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 import { calculateUnitPrice, calculateLineTotal } from "../../lib/pricing";
 import {
+  hasMixedSofaBedframe,
+  SO_MIXED_CATEGORY_ERROR,
+} from "../../lib/so-category";
+import {
   ensureLeadTimesSeeded,
   loadLeadTimes,
   leadDaysFor,
@@ -1523,6 +1527,21 @@ app.post("/", async (c) => {
       ? body.items
       : [];
 
+    // Hard restriction: SOFA + BEDFRAME may NOT coexist on a single SO. They
+    // run on entirely separate production lines (Fab Cut merge keys, BF qty
+    // from HB, parallel lead times). Validate before any product/price
+    // resolution work to fail fast and cheap.
+    if (
+      hasMixedSofaBedframe(
+        rawItems.map((it) => ({
+          itemCategory:
+            typeof it.itemCategory === "string" ? it.itemCategory : null,
+        })),
+      )
+    ) {
+      return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+    }
+
     // Price-resolution date: use companySODate (may be future-dated) when given,
     // fall back to today so price history resolves correctly on confirm.
     const priceAsOf =
@@ -1858,6 +1877,14 @@ app.post("/:id/confirm", async (c) => {
     .all<SalesOrderItemRow>();
   const items = itemsRes.results ?? [];
 
+  // Hard restriction re-check at confirm. POST + PUT already block this,
+  // but legacy data created before the rule shipped could still slip in
+  // here — keep the gate in place so the production cascade never sees a
+  // mixed-category SO.
+  if (hasMixedSofaBedframe(items)) {
+    return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+  }
+
   // BOM completeness guard — blocks confirm if any line's product has an
   // incomplete BOM. Runs BEFORE the status flip and PO cascade so a 422
   // leaves the SO in its prior status and no production_orders are created.
@@ -2182,14 +2209,28 @@ app.put("/:id", async (c) => {
     let totalSen = existing.totalSen;
 
     if (body.items) {
+      const rawItems: Array<Record<string, unknown>> = body.items;
+
+      // Hard restriction: SOFA + BEDFRAME may NOT coexist on a single SO.
+      // Same rule as POST — see helper for the why. Fail fast before any
+      // DB writes are queued.
+      if (
+        hasMixedSofaBedframe(
+          rawItems.map((it) => ({
+            itemCategory:
+              typeof it.itemCategory === "string" ? it.itemCategory : null,
+          })),
+        )
+      ) {
+        return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+      }
+
       const oldItemsRes = await c.var.DB.prepare(
         "SELECT * FROM sales_order_items WHERE salesOrderId = ?",
       )
         .bind(id)
         .all<SalesOrderItemRow>();
       const oldItems = oldItemsRes.results ?? [];
-
-      const rawItems: Array<Record<string, unknown>> = body.items;
       const priceAsOf =
         typeof merged.companySODate === "string" && merged.companySODate
           ? merged.companySODate.slice(0, 10)

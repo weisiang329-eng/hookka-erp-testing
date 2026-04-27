@@ -331,36 +331,36 @@ function loadMasterTemplateById(id: string): MasterTemplate | null {
   return hit ?? null;
 }
 
-function saveMasterTemplate(tpl: MasterTemplate) {
+async function saveMasterTemplate(tpl: MasterTemplate): Promise<void> {
   const idx = cachedMasters.findIndex((t) => t.id === tpl.id);
   if (idx === -1) cachedMasters.push(tpl);
   else cachedMasters[idx] = tpl;
-  // Background push to D1. Fire-and-forget — cache reflects the write
-  // immediately for synchronous read sites; the server is authoritative
-  // once the page reloads.
-  void fetch(`/api/bom-master-templates/${encodeURIComponent(tpl.id)}`, {
+  // Push to D1 and surface failures to the caller. Cache reflects the write
+  // immediately for synchronous read sites; the server is authoritative once
+  // the page reloads. Callers that want fire-and-forget can `void` the result.
+  const res = await fetch(`/api/bom-master-templates/${encodeURIComponent(tpl.id)}`, {
     method: "PUT",
     headers: authHeaders(),
     body: JSON.stringify(tpl),
-  }).then(() => {
-    invalidateCachePrefix("/api/bom-master-templates");
-    invalidateCachePrefix("/api/products");
-  }).catch(() => {
-    /* offline — next hydrate will refresh */
   });
+  if (!res.ok) {
+    throw new Error(`Failed to save template ${tpl.id}: HTTP ${res.status}`);
+  }
+  invalidateCachePrefix("/api/bom-master-templates");
+  invalidateCachePrefix("/api/products");
 }
 
-function deleteMasterTemplateById(id: string) {
+async function deleteMasterTemplateById(id: string): Promise<void> {
   cachedMasters = cachedMasters.filter((t) => t.id !== id);
-  void fetch(`/api/bom-master-templates/${encodeURIComponent(id)}`, {
+  const res = await fetch(`/api/bom-master-templates/${encodeURIComponent(id)}`, {
     method: "DELETE",
     headers: authHeaders(),
-  }).then(() => {
-    invalidateCachePrefix("/api/bom-master-templates");
-    invalidateCachePrefix("/api/products");
-  }).catch(() => {
-    /* offline — next hydrate will resolve */
   });
+  if (!res.ok) {
+    throw new Error(`Failed to delete template ${id}: HTTP ${res.status}`);
+  }
+  invalidateCachePrefix("/api/bom-master-templates");
+  invalidateCachePrefix("/api/products");
 }
 
 // Loads every master template (bedframe + sofa + all sofa modules) for the
@@ -3767,13 +3767,24 @@ function MasterTemplatesDialog({
     }));
   }
 
-  function handleSave() {
+  async function handleSave() {
     const now = new Date().toISOString();
-    // Persist every template in all lists. saveMasterTemplate updates the
-    // in-memory cache and fires an async PUT to /api/bom-master-templates/:id.
-    [...bedframeList, ...sofaList, ...accessoryList].forEach((t) => saveMasterTemplate({ ...t, updatedAt: now }));
-    // Apply pending deletions (also async to D1).
-    deletedIds.forEach((id) => deleteMasterTemplateById(id));
+    // Persist every template in all lists, plus pending deletions. We await
+    // every PUT/DELETE so an HTTP failure surfaces as a real error toast
+    // instead of silently dropping writes (the in-memory cache would lie to
+    // the next synchronous read until page reload).
+    const saves = [...bedframeList, ...sofaList, ...accessoryList].map((t) =>
+      saveMasterTemplate({ ...t, updatedAt: now }),
+    );
+    const deletes = deletedIds.map((id) => deleteMasterTemplateById(id));
+    try {
+      await Promise.all([...saves, ...deletes]);
+    } catch (err) {
+      toast.error(
+        `Failed to save master templates: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
     setEditMode(false);
     toast.success(
       `Master templates saved — Bedframe: ${bedframeList.length}, Sofa: ${sofaList.length}, Accessory: ${accessoryList.length}` +
@@ -5581,12 +5592,69 @@ export default function BOMManagementPage() {
   function handleImportBOMsCSV(file: File) {
     const reader = new FileReader();
     reader.onload = () => {
-      const text = String(reader.result || "");
-      const result = applyBOMsCSV(templates, text, rawMaterials);
-      setTemplates(result.updated);
-      toast.success(
-        `Import complete — Updated: ${result.matched}, Skipped: ${result.missed}`
-      );
+      void (async () => {
+        const text = String(reader.result || "");
+        const result = applyBOMsCSV(templates, text, rawMaterials);
+        setTemplates(result.updated);
+
+        // applyBOMsCSV is pure - it returns a new array but doesn't tell us
+        // which templates changed. Diff by stringify against the original
+        // list (templates is keyed by id) so we only PUT rows the CSV
+        // actually touched. Without this the import lived in React state
+        // only and silently disappeared on reload.
+        const beforeById: Record<string, string> = {};
+        for (const t of templates) beforeById[t.id] = JSON.stringify(t);
+        const changed = result.updated.filter(
+          (t) => beforeById[t.id] !== JSON.stringify(t),
+        );
+
+        if (changed.length === 0) {
+          toast.success(
+            `Import complete - Updated: ${result.matched}, Skipped: ${result.missed}`,
+          );
+          return;
+        }
+
+        const writes = await Promise.allSettled(
+          changed.map(async (t) => {
+            const res = await fetch(
+              `/api/bom/templates/${encodeURIComponent(t.id)}`,
+              {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(t),
+              },
+            );
+            const json = (await res.json().catch(() => null)) as {
+              success?: boolean;
+              error?: string;
+            } | null;
+            if (!res.ok || !json?.success) {
+              throw new Error(json?.error || `HTTP ${res.status}`);
+            }
+            return t.productCode;
+          }),
+        );
+        const failed = writes
+          .map((w, i) => (w.status === "rejected" ? changed[i].productCode : null))
+          .filter((x): x is string => x !== null);
+
+        if (failed.length > 0) {
+          // Keep in-memory state so the user can retry via manual save.
+          toast.error(
+            `Import persisted partially - ${failed.length} BOM(s) failed: ${failed.join(", ")}`,
+          );
+          return;
+        }
+
+        // All writes succeeded - invalidate caches so subsequent reads hit
+        // fresh data, matching what handleBOMEdited does on a single edit.
+        invalidateCachePrefix("/api/bom");
+        invalidateCachePrefix("/api/products");
+        toast.success(
+          `Import complete - ${changed.length} BOMs persisted (Updated: ${result.matched}, Skipped: ${result.missed})`,
+        );
+      })();
     };
     reader.readAsText(file);
   }

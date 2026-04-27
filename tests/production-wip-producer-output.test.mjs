@@ -169,3 +169,16 @@ test('PATCH route still calls applyWipInventoryChange when status changes', () =
     'PATCH should invoke applyWipInventoryChange(prevStatus=jcRow.status) on status change',
   );
 });
+
+test('applyWipInventoryChange short-circuits on prevStatus === newStatus', () => {
+  const src = read();
+  // BUG-2026-04-27-005: same-status replays must NOT re-run the cascade,
+  // otherwise a duplicate PATCH (form re-submit, two operators racing,
+  // scan-complete + manual-PATCH overlap) doubles every consume and
+  // producer-add.
+  assert.match(
+    src,
+    /if \(prevStatus !== null && prevStatus === newStatus\) return;/,
+    'cascade should bail when the status did not actually change',
+  );
+});

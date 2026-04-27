@@ -849,6 +849,11 @@ async function applyWipInventoryChange(
   allJcRows: JobCardRow[],
   prevStatus: string | null = null,
 ): Promise<void> {
+  // BUG-2026-04-27-005: a PATCH that re-sends the same status (e.g. duplicate
+  // form submit, refresh + retry, two operators racing the same JC) used to
+  // fire the cascade twice — once per PATCH — doubling every consume and
+  // every producer-add. Short-circuit when the status didn't actually change.
+  if (prevStatus !== null && prevStatus === newStatus) return;
   // Producer wipLabel — falls back to a synthesized label when the JC was
   // created without BOM (legacy seed via createJobCards()) so the inventory
   // upsert still lands a row. Without this fallback, completing WOOD_CUT (or

@@ -302,26 +302,45 @@ Need to inspect the BOM editor's save path to confirm.
 
 ## BUG-2026-04-27-005 — `applyWipInventoryChange` not idempotent on COMPLETED→COMPLETED replay
 
-**Status:** 🔴 Identified (low priority)
+**Status:** 🟢 Fixed (2026-04-27)
 
 **Symptom:** Marking the same JC complete twice double-deducts upstream
 wip_items and double-adds the producer row. The cascade has no per-JC guard
-against repeat COMPLETED dispatches.
+against repeat COMPLETED dispatches. Re-surfaced 2026-04-27 on
+`pord-so-f6084c68-02` (5531-L(RHF)): 1 PO, qty=1, 1 UPHOLSTERY JC at
+COMPLETED, but the wip_items rows showed `5531-L(RHF) -Base 24` = +2,
+`(Foam)` = -2, and `M2402-5` = -2 instead of the expected +1 / -1 / -1 —
+the cascade fired twice for the same JC's COMPLETED transition (duplicate
+PATCH: form re-submit / refresh-and-retry / two operators racing the same
+JC / scan-complete + manual-PATCH overlap).
 
-**Root cause:** `src/api/routes-d1/production-orders.ts:823-1019`
-`applyWipInventoryChange` runs the consume + producer-upsert path
+**Root cause:** `src/api/routes-d1/production-orders.ts:844-851`
+`applyWipInventoryChange` ran the consume + producer-upsert path
 unconditionally on every status='COMPLETED' call. The `MAX(0, …)` clamp
-prevents negatives but doesn't prevent drift on the producer side. The
-rollback branch (BUG-2026-04-27-002) only fires on DONE→non-DONE.
+used to hide the upstream-consume side, but BUG-2026-04-27-013 removed
+those clamps so doublings now propagate fully.
 
-**Fix plan:** add an idempotency guard keyed on (jobCardId, prevStatus).
-If `prevStatus === newStatus === COMPLETED` (or TRANSFERRED), short-circuit.
-Or use a `cost_ledger`-style ledger for wip_items movements so re-emission
-is a no-op.
+**Fix:** Added a single-line short-circuit guard at the very top of
+`applyWipInventoryChange()` (`src/api/routes-d1/production-orders.ts:852-856`):
 
-**User judgement (2026-04-27):** deferred. Their mental model: UPH = stock
-entry, PACKING = record racking number only. Repeated PACKING-complete
-events have low real-world impact; revisit if drift becomes visible.
+```ts
+if (prevStatus !== null && prevStatus === newStatus) return;
+```
+
+Bails out only when the PATCH supplied a prevStatus AND it equals the new
+status — i.e. the operator re-sent the same status without an actual
+transition. The first COMPLETED transition still fires (prevStatus is
+WAITING / IN_PROGRESS, !==), the DONE→non-DONE rollback (`wasDone &&
+!isDone`) still fires, and legacy callers that omit prevStatus (default
+`null`) are unaffected — behaviour matches today.
+
+**Verification:** New source-pin test
+`applyWipInventoryChange short-circuits on prevStatus === newStatus` in
+`tests/production-wip-producer-output.test.mjs` greps for the guard and
+fails if a future refactor removes it. The user's reproduction
+(`pord-so-f6084c68-02`, +2 / -2 / -2 instead of +1 / -1 / -1) will
+produce the expected counts once the guard is in place — duplicate
+PATCHes no-op the second cascade fire.
 
 ---
 

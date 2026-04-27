@@ -1690,7 +1690,6 @@ export default function DeliveryPage() {
               emptyMessage="No delivery orders found."
               onDoubleClick={(row) => setDetailDO(row)}
               contextMenuItems={getContextMenuItems}
-              groupBy="hubBranch"
             />
 
             {/* Pagination footer */}

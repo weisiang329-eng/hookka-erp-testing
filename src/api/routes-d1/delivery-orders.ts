@@ -95,7 +95,24 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   }
 }
 
-function rowToItem(row: DeliveryOrderItemRow) {
+// Returns itemM3 from the live products table when available, falling
+// back to the stored row value (legacy DOs created before 2026-04-27
+// were persisted with itemM3=0 — see BUG-2026-04-27).
+function pickItemM3(
+  row: DeliveryOrderItemRow,
+  productM3Map?: Map<string, number>,
+): number {
+  if (productM3Map && row.productCode) {
+    const v = productM3Map.get(row.productCode);
+    if (v && v > 0) return v;
+  }
+  return row.itemM3;
+}
+
+function rowToItem(
+  row: DeliveryOrderItemRow,
+  productM3Map?: Map<string, number>,
+) {
   return {
     id: row.id,
     productionOrderId: row.productionOrderId ?? "",
@@ -105,14 +122,40 @@ function rowToItem(row: DeliveryOrderItemRow) {
     sizeLabel: row.sizeLabel ?? "",
     fabricCode: row.fabricCode ?? "",
     quantity: row.quantity,
-    itemM3: row.itemM3,
+    itemM3: pickItemM3(row, productM3Map),
     rackingNumber: row.rackingNumber ?? "",
     packingStatus: row.packingStatus ?? "PENDING",
     salesOrderNo: row.salesOrderNo ?? "",
   };
 }
 
-function rowToOrder(row: DeliveryOrderRow, items: DeliveryOrderItemRow[] = []) {
+// Loads { productCode → unitM3 } for the given codes. Used by every DO
+// read path so legacy items (itemM3=0) get backfilled on the fly.
+async function loadProductM3Map(
+  db: D1Database,
+  productCodes: Array<string | null | undefined>,
+): Promise<Map<string, number>> {
+  const codes = Array.from(
+    new Set(productCodes.filter((c): c is string => !!c)),
+  );
+  if (codes.length === 0) return new Map();
+  const ph = codes.map(() => "?").join(",");
+  const res = await db
+    .prepare(`SELECT code, unitM3 FROM products WHERE code IN (${ph})`)
+    .bind(...codes)
+    .all<{ code: string; unitM3: number }>();
+  const map = new Map<string, number>();
+  for (const r of res.results ?? []) {
+    map.set(r.code, Number(r.unitM3) || 0);
+  }
+  return map;
+}
+
+function rowToOrder(
+  row: DeliveryOrderRow,
+  items: DeliveryOrderItemRow[] = [],
+  productM3Map?: Map<string, number>,
+) {
   const pod = parseJson<Record<string, unknown> | null>(row.proofOfDelivery, null);
   const fgUnitIds = parseJson<string[]>(row.fgUnitIds, []);
   const base: Record<string, unknown> = {
@@ -141,8 +184,17 @@ function rowToOrder(row: DeliveryOrderRow, items: DeliveryOrderItemRow[] = []) {
     vehicleNo: row.vehicleNo ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
-      .map(rowToItem),
-    totalM3: row.totalM3,
+      .map((it) => rowToItem(it, productM3Map)),
+    // Recompute totalM3 on read using live product unitM3 — legacy DOs
+    // were persisted with itemM3=0 / totalM3=0 before BUG-2026-04-27 fix.
+    totalM3: productM3Map
+      ? Math.round(
+          items
+            .filter((i) => i.deliveryOrderId === row.id)
+            .reduce((s, it) => s + pickItemM3(it, productM3Map) * it.quantity, 0) *
+            100,
+        ) / 100
+      : row.totalM3,
     totalItems: row.totalItems,
     status: row.status,
     overdue: row.overdue ?? "PENDING",
@@ -219,7 +271,9 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
       .all<DeliveryOrderItemRow>(),
   ]);
   if (!order) return null;
-  return rowToOrder(order, itemsRes.results ?? []);
+  const items = itemsRes.results ?? [];
+  const m3Map = await loadProductM3Map(db, items.map((i) => i.productCode));
+  return rowToOrder(order, items, m3Map);
 }
 
 // GET /api/delivery-orders — list all, nested items
@@ -253,8 +307,10 @@ app.get("/", async (c) => {
         .prepare("SELECT * FROM delivery_order_items")
         .all<DeliveryOrderItemRow>(),
     ]);
+    const itemRows = items.results ?? [];
+    const m3Map = await loadProductM3Map(db, itemRows.map((i) => i.productCode));
     const data = (orders.results ?? []).map((o) =>
-      rowToOrder(o, items.results ?? []),
+      rowToOrder(o, itemRows, m3Map),
     );
     return c.json({ success: true, data, total: data.length });
   }
@@ -288,7 +344,8 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const data = orderRows.map((o) => rowToOrder(o, items));
+  const m3Map = await loadProductM3Map(db, items.map((i) => i.productCode));
+  const data = orderRows.map((o) => rowToOrder(o, items, m3Map));
   return c.json({ success: true, data, page, limit, total });
 });
 

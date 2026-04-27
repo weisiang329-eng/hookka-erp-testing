@@ -276,35 +276,44 @@ app.get("/", async (c) => {
     );
   }
 
-  // For a UPH-coded wip_items row whose `code` is shared by multiple POs,
-  // attribute its qty per-PO via the linking UPH JCs. Show only the qty
-  // contributed by POs that are NOT fully UPH-complete; the fully-complete
-  // POs' contributions already surface via FG (`deriveFGStock`).
+  // For a UPH-coded wip_items row, decide visibility — but DO NOT mutate
+  // the displayed qty. `wip_items.stockQty` is the source of truth, kept
+  // accurate by the cascade in production-orders.ts (UPH producer-add at
+  // completion, BUG-2026-04-27-021 dispatch-time decrement, rollback path)
+  // — trust it for the displayed qty.
   //
   // Hide rule: at least one UPH JC links to this row AND every linked PO
-  // is fully UPH-complete → adjusted qty becomes 0 → row is hidden.
+  // is fully UPH-complete → row is hidden (every contributing PO has
+  // surfaced via FG `deriveFGStock`, so showing it on WIP would
+  // double-count).
   //
-  // BUG-2026-04-27-018: multi-PO sharing same wipLabel previously kept
-  // the full aggregate stockQty visible whenever ANY linked PO was
-  // partial, double-counting the fully-complete POs' contribution
-  // (which also showed in FG).
+  // Orphan rows (no linking JC at all — legacy / migration residue /
+  // external entry, BUG-2026-04-27-019) → show as-is so the user can
+  // spot and reconcile.
   //
-  // BUG-2026-04-27-019: orphan UPH rows (no linking JC at all — legacy /
-  // migration residue / external entry) were hidden by the previous
-  // EXISTS-style filter (vacuous "every linked PO is fully complete").
-  // Now: no JC link → show as-is so the user can spot and clean up.
-  const adjustedStockByRowId = new Map<string, number>();
+  // Multi-PO mixed case (BUG-2026-04-27-018, partial vs fully): the row
+  // stays visible at the full ledger qty. The fully-complete portion is
+  // also surfaced via FG (`deriveFGStock`) — that's a known design
+  // decision documented in `docs/INVENTORY-WIP-FLOW.md` § 7.
+  //
+  // BUG-2026-04-27-032: the previous code also wrote a per-JC attribution
+  // sum into `adjustedStockByRowId` and used that as the displayed qty.
+  // That sum counted UPH JC capacity (every linked WAITING UPH JC
+  // contributed `wipQty`), not produced stock — for a wipLabel shared by
+  // many POs whose UPH was still WAITING, the displayed qty inflated to
+  // (Σ JC.wipQty) instead of the ledger-true `stockQty`. Replaced with a
+  // pure visibility filter; `w.stockQty` flows through unchanged.
   const wipItemRows: WipItemRow[] = wipItemRowsAll.filter((w) => {
     if ((w.deptStatus || "").toUpperCase() !== "UPHOLSTERY") return true;
     const linkedUphJcs = (jcsByLabel.get(w.code) ?? []).filter(
       (jc) => (jc.departmentCode || "").toUpperCase() === "UPHOLSTERY",
     );
-    if (linkedUphJcs.length === 0) return true; // orphan → show as-is
-    const wipQty = linkedUphJcs
-      .filter((jc) => !poFullyUphComplete.get(jc.productionOrderId))
-      .reduce((s, jc) => s + (Number(jc.wipQty) || 1), 0);
-    if (wipQty <= 0) return false; // every linked PO is FG → hide
-    adjustedStockByRowId.set(w.id, wipQty);
+    if (
+      linkedUphJcs.length > 0 &&
+      linkedUphJcs.every((jc) => poFullyUphComplete.get(jc.productionOrderId))
+    ) {
+      return false; // hide — every contributing PO is now FG
+    }
     return true;
   });
 
@@ -530,14 +539,12 @@ app.get("/", async (c) => {
     const firstSrc = sources[0];
     const salesOrderNo = firstSrc ? stripPoSuffix(firstSrc.poCode) : null;
 
-    // BUG-2026-04-27-018: for UPH rows shared across POs, the displayed
-    // qty is the per-PO attribution sum (only POs that are NOT fully
-    // UPH-complete contribute). Falls through to raw stockQty for
-    // non-UPH rows and for orphan UPH rows (no linking JC).
-    const displayQty = adjustedStockByRowId.has(w.id)
-      ? (adjustedStockByRowId.get(w.id) ?? w.stockQty)
-      : w.stockQty;
-
+    // BUG-2026-04-27-032: trust `w.stockQty` everywhere — it's the ledger
+    // truth maintained by the cascade in production-orders.ts (forward
+    // consume / producer-add / rollback) plus the DO Dispatch decrement
+    // (BUG-2026-04-27-021). The previous per-PO attribution sum was a
+    // JC-capacity proxy, not produced stock; it inflated the displayed
+    // qty when many POs shared the same UPH wipLabel.
     rows.push({
       id: w.id,
       wipCode: w.code,
@@ -545,15 +552,15 @@ app.get("/", async (c) => {
       category,
       completedBy,
       relatedProduct: productCode,
-      setQty: displayQty,
-      pieceQty: displayQty,
+      setQty: w.stockQty,
+      pieceQty: w.stockQty,
       salesOrderNo,
       fabric: firstSrc?.fabricCode || "",
       oldestAgeDays,
       estUnitCostSen,
       estTotalValueSen,
       members,
-      totalQty: displayQty,
+      totalQty: w.stockQty,
       sources,
     });
   }

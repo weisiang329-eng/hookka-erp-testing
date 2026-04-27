@@ -12,7 +12,11 @@ Status legend:
 
 ---
 
-## BUG-2026-04-27-022 — WIP page inflated displayed qty by summing UPH JC capacity instead of trusting `wip_items.stockQty`
+## BUG-2026-04-27-032 — WIP page inflated displayed qty by summing UPH JC capacity instead of trusting `wip_items.stockQty`
+
+> Originally logged as BUG-2026-04-27-022 in the task brief; renumbered to
+> 032 because IDs 022–031 were already taken by the bulk backfill commit
+> `d6d91fc` (2026-04-27).
 
 **Status:** 🟢 Fixed (2026-04-27)
 

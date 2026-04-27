@@ -660,6 +660,25 @@ export default function DeliveryPage() {
   };
 
   const saveProvider = async () => {
+    // Guard against silent data loss: the inline Vehicle / Driver forms
+    // POST immediately on their own Save button. The footer Save here
+    // only persists company-level fields. If the user typed real data
+    // into either inline form (plate_no / driver name — the required
+    // fields) but didn't click that form's own Save, surface the model
+    // instead of dropping their work. Empty required field = "form is
+    // open but no real input yet", so don't block.
+    if (vehicleEditing !== null && vehicleForm.plateNo.trim()) {
+      toast.error(
+        "You have an unsaved Vehicle form. Click 'Save Vehicle' inside the Vehicles section first, or Cancel that form before saving.",
+      );
+      return;
+    }
+    if (driverEditing !== null && driverForm.name.trim()) {
+      toast.error(
+        "You have an unsaved Driver form. Click 'Save Driver' inside the Drivers section first, or Cancel that form before saving.",
+      );
+      return;
+    }
     setProviderSaving(true);
     // Post-3PL refactor: only send the company-level fields. vehicle /
     // rate / capacity now live on three_pl_vehicles rows; omitting them
@@ -3521,7 +3540,7 @@ export default function DeliveryPage() {
                             Cancel
                           </Button>
                           <Button variant="primary" size="sm" onClick={saveVehicle} disabled={!vehicleForm.plateNo}>
-                            <Save className="h-3 w-3 mr-1" /> {vehicleEditing === "new" ? "Add" : "Save"}
+                            <Save className="h-3 w-3 mr-1" /> Save Vehicle
                           </Button>
                         </div>
                       </div>
@@ -3636,7 +3655,7 @@ export default function DeliveryPage() {
                             Cancel
                           </Button>
                           <Button variant="primary" size="sm" onClick={saveDriver} disabled={!driverForm.name}>
-                            <Save className="h-3 w-3 mr-1" /> {driverEditing === "new" ? "Add" : "Save"}
+                            <Save className="h-3 w-3 mr-1" /> Save Driver
                           </Button>
                         </div>
                       </div>
@@ -3646,7 +3665,7 @@ export default function DeliveryPage() {
                 <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
                   <Button variant="outline" onClick={() => setProviderDialog(null)} disabled={providerSaving}>Cancel</Button>
                   <Button variant="primary" onClick={saveProvider} disabled={providerSaving || !providerForm.name || !providerForm.phone}>
-                    {providerSaving ? <><RefreshCw className="h-4 w-4 animate-spin" /> Saving...</> : providerDialog === "new" ? "Create" : "Save Changes"}
+                    {providerSaving ? <><RefreshCw className="h-4 w-4 animate-spin" /> Saving...</> : providerDialog === "new" ? "Create" : "Save Provider Info"}
                   </Button>
                 </div>
               </div>

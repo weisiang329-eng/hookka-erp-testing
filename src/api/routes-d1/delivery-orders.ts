@@ -781,10 +781,14 @@ app.post("/", async (c) => {
         providerIdResolved,
         resolvedDriverName,
         resolvedDriverContact,
-        resolvedDriverPhone,
-        resolvedVehicleId,
+        // Postgres columns added by migration 0063 are NOT NULL DEFAULT ''.
+        // Bind null here -> "violates not-null constraint" because the
+        // d1-compat adapter passes the literal null through. Coerce to ''
+        // so an unselected driver/vehicle becomes the documented default.
+        resolvedDriverPhone ?? "",
+        resolvedVehicleId ?? "",
         resolvedVehicleNo,
-        resolvedVehicleType,
+        resolvedVehicleType ?? "",
         totalM3,
         totalItems,
         "DRAFT",

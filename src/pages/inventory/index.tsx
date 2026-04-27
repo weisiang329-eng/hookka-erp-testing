@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
-  Search, Archive, Upload,
+  Search, Archive, Upload, ChevronDown, ChevronRight,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 // NOTE: mock arrays were previously imported here and used as the page data
@@ -375,6 +375,17 @@ type BackendWipRow = {
     baseModel: string;
     itemCategory: string;
   }>;
+};
+
+// Skipped-dept anomaly: a wip_items row with stockQty < 0. Means a
+// downstream dept got marked COMPLETED before its upstream — the
+// negative count self-resolves to 0 once the upstream finishes too.
+type WipAnomaly = {
+  id: string;
+  code: string;
+  stockQty: number;
+  deptStatus: string;
+  relatedProduct: string | null;
 };
 
 // LEGACY — superseded by /api/inventory/wip endpoint (Phase 4.5).
@@ -1086,6 +1097,10 @@ export default function InventoryPage() {
   // Phase 4.5 — raw rows from /api/inventory/wip. Replaces the old
   // client-side deriveWIPFromPO + mergeSofaWIPSets pipeline.
   const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>([]);
+  // Skipped-dept anomalies (wip_items.stockQty < 0). Surfaced on the WIP
+  // tab as a warning section above the main grid.
+  const [wipAnomalies, setWipAnomalies] = useState<WipAnomaly[]>([]);
+  const [anomaliesExpanded, setAnomaliesExpanded] = useState(true);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1185,29 +1200,42 @@ export default function InventoryPage() {
     // Phase 4.5 — WIP rows come from /api/inventory/wip now. The endpoint
     // returns a single array containing BOTH per-component rows (wipType !=
     // "SET") and merged sofa-set rows (wipType === "SET"); the UI splits
-    // them at render time.
-    const fetchWipRows = async (): Promise<BackendWipRow[]> => {
+    // them at render time. The same response also carries an `anomalies`
+    // array (wip_items.stockQty < 0 — see Skipped Dept Anomalies section).
+    const fetchWipPayload = async (): Promise<{
+      rows: BackendWipRow[];
+      anomalies: WipAnomaly[];
+    }> => {
       try {
-        const json = await cachedFetchJson<{ success?: boolean; data?: BackendWipRow[]; _stub?: boolean }>("/api/inventory/wip");
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: BackendWipRow[];
+          anomalies?: WipAnomaly[];
+          _stub?: boolean;
+        }>("/api/inventory/wip");
         if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return json.data as BackendWipRow[];
+          return {
+            rows: json.data as BackendWipRow[],
+            anomalies: Array.isArray(json.anomalies) ? json.anomalies : [],
+          };
         }
       } catch { /* fall through */ }
-      return [];
+      return { rows: [], anomalies: [] };
     };
 
     (async () => {
-      const [inv, pos, wipRows, doStates] = await Promise.all([
+      const [inv, pos, wipPayload, doStates] = await Promise.all([
         fetchInventory(),
         fetchPOs(),
-        fetchWipRows(),
+        fetchWipPayload(),
         fetchDOStates(),
       ]);
       if (cancelled) return;
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setPoData(pos);
-      setBackendWipRows(wipRows);
+      setBackendWipRows(wipPayload.rows);
+      setWipAnomalies(wipPayload.anomalies);
       setPoToDOState(doStates);
       setLoading(false);
     })();
@@ -1949,6 +1977,61 @@ export default function InventoryPage() {
               />
             </div>
           </div>
+
+          {/* Skipped Dept Anomalies — wip_items rows with stockQty < 0.
+              Stub rows written when a downstream dept gets COMPLETED
+              before its upstream. They self-resolve once the upstream
+              dept is also marked complete. Only render when N > 0. */}
+          {wipAnomalies.length > 0 && (
+            <Card className="border-[#9C6F1E] bg-[#FFF8EC]">
+              <CardHeader className="pb-3">
+                <button
+                  type="button"
+                  onClick={() => setAnomaliesExpanded(v => !v)}
+                  className="flex w-full items-center justify-between gap-2 text-left"
+                >
+                  <CardTitle className="flex items-center gap-2 text-[#9C6F1E]">
+                    <AlertTriangle className="h-5 w-5" />
+                    <span>Skipped Dept Anomalies ({wipAnomalies.length})</span>
+                  </CardTitle>
+                  {anomaliesExpanded
+                    ? <ChevronDown className="h-4 w-4 text-[#9C6F1E]" />
+                    : <ChevronRight className="h-4 w-4 text-[#9C6F1E]" />}
+                </button>
+              </CardHeader>
+              {anomaliesExpanded && (
+                <CardContent>
+                  <p className="text-xs text-[#6B5C32] mb-3">
+                    These stub rows mean a downstream dept got completed before
+                    its upstream — the negative qty will return to 0 once the
+                    upstream dept is also marked complete.
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-[#E2DDD8] text-left text-xs uppercase text-[#6B7280]">
+                          <th className="py-2 pr-3 font-medium">Code</th>
+                          <th className="py-2 pr-3 font-medium text-right">Qty</th>
+                          <th className="py-2 pr-3 font-medium">Stage</th>
+                          <th className="py-2 pr-3 font-medium">Related Product</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {wipAnomalies.map(a => (
+                          <tr key={a.id} className="border-b border-[#F1ECE6] last:border-b-0">
+                            <td className="py-2 pr-3 font-mono text-[#1F1D1B]">{a.code}</td>
+                            <td className="py-2 pr-3 text-right font-bold text-[#9A3A2D]">{a.stockQty}</td>
+                            <td className="py-2 pr-3 text-[#6B7280]">{a.deptStatus || "—"}</td>
+                            <td className="py-2 pr-3 text-[#6B7280]">{a.relatedProduct || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </CardContent>
+              )}
+            </Card>
+          )}
 
           <Card>
             <CardHeader className="pb-3">

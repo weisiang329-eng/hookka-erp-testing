@@ -471,7 +471,36 @@ app.get("/", async (c) => {
   // Sort by oldest age descending (FIFO — same as the frontend).
   rows.sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
 
-  return c.json({ success: true, data: rows });
+  // ---- Skipped Dept Anomalies --------------------------------------------
+  // wip_items rows with stockQty < 0 are stub rows written by the cascade
+  // when a downstream dept gets COMPLETED before its upstream (BUG-2026-04-
+  // 27-013). They self-resolve back to 0 once the upstream dept is also
+  // marked COMPLETED, but until then they're audit signals the shop floor
+  // should be able to see at a glance.
+  type AnomalyRow = {
+    id: string;
+    code: string;
+    stockQty: number;
+    deptStatus: string | null;
+    relatedProduct: string | null;
+  };
+  const anomaliesRes = await db
+    .prepare(
+      `SELECT id, code, stockQty, deptStatus, relatedProduct
+         FROM wip_items
+        WHERE stockQty < 0
+        ORDER BY code`,
+    )
+    .all<AnomalyRow>();
+  const anomalies = (anomaliesRes.results ?? []).map((r) => ({
+    id: r.id,
+    code: r.code,
+    stockQty: Number(r.stockQty) || 0,
+    deptStatus: r.deptStatus ?? "",
+    relatedProduct: r.relatedProduct ?? null,
+  }));
+
+  return c.json({ success: true, data: rows, anomalies });
 });
 
 export default app;

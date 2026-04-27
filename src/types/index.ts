@@ -162,6 +162,7 @@ export type Worker = {
   icNumber: string;
   passportNumber: string;
   nationality: string;
+  otMultiplier?: number;  // OT premium, default 1.5×; 1.0 = no premium
 };
 
 // --- Sales Orders ---
@@ -406,6 +407,21 @@ export type AttendanceRecord = {
   efficiencyPct: number;
   overtimeMinutes: number;
   deptBreakdown: { deptCode: string; minutes: number; productCode: string }[];
+  notes: string;
+};
+
+// One row per (attendance × department × category) — the breakdown rows that
+// expand under each Working Hours table row. Hours summed across entries for
+// a single attendance should be reconciled against attendance.workingMinutes
+// (the clock-vs-breakdown gap surfaces idle time / unaccounted hours).
+export type WorkingHourEntry = {
+  id: string;
+  attendanceId: string;
+  workerId: string;
+  date: string;                                      // YYYY-MM-DD
+  departmentCode: string;
+  category: "" | "SOFA" | "BEDFRAME" | "ACCESSORY"; // empty for non-production depts
+  hours: number;                                     // decimal, e.g. 7.5
   notes: string;
 };
 

@@ -2603,15 +2603,16 @@ export default function ProductionPage({
   // same print-window pattern, same CSS — but rows are merged so the floor
   // operator sees "make N of X" instead of one-row-per-PO/JC.
   //
-  // Dept sub-tab grouping key: model | wip | size | colour | gap | divan |
-  // leg | status. SO/customer/due intentionally NOT in the key — those
-  // differ across same physical items but should still merge. Different
-  // foam/dimension specs stay separate (Foam=Yes vs Foam=No produce
-  // different `wip` rows and thus different buckets).
+  // Dept sub-tab grouping key: wip | size | colour. Model/gap/divan/leg/
+  // status intentionally NOT in the key — same WIP code is the same
+  // physical production unit (the variant differences are already baked
+  // into the wip code itself, e.g. `8" Divan- 5FT` vs `10" Divan- 6FT`).
+  // SO/customer/due also excluded — those naturally differ across merged
+  // rows but the floor still makes one batch.
   //
-  // Overview grouping key: productCode | fabricCode | sizeLabel | divan |
-  // leg | gap. The 8-dept matrix is intentionally dropped — Total Listing
-  // is for "make N of X", not per-PO progress tracking.
+  // Overview grouping key: productCode | sizeLabel | fabricCode. Same
+  // principle: divan/leg/gap encode model variants, not separate items.
+  // For per-PO progress detail, use Detailed mode.
   const handlePrintTotalListing = useCallback(() => {
     const today = new Date().toLocaleDateString("en-MY", {
       year: "numeric", month: "short", day: "numeric",
@@ -2654,15 +2655,13 @@ export default function ProductionPage({
     let totalQty = 0;
 
     if (activeTab === "ALL") {
-      // Overview merge: group by (productCode, fabricCode, sizeLabel,
-      // divan, leg, gap).
+      // Overview merge: group by (productCode, sizeLabel, fabricCode).
+      // divan/leg/gap intentionally excluded — those are model variants
+      // already encoded in productCode where they matter.
       type Bucket = {
         productCode: string;
         fabricCode: string;
         sizeLabel: string;
-        divan: string;
-        leg: string;
-        gap: string;
         qty: number;
         earliestDue: string;
         soIds: Set<string>;
@@ -2672,11 +2671,8 @@ export default function ProductionPage({
       for (const o of visibleOrders) {
         const key = [
           o.productCode || "",
-          o.fabricCode || "",
           o.sizeLabel || "",
-          o.divanHeightInches != null ? String(o.divanHeightInches) : "",
-          o.legHeightInches != null ? String(o.legHeightInches) : "",
-          o.gapInches != null ? String(o.gapInches) : "",
+          o.fabricCode || "",
         ].join("|");
         let b = buckets.get(key);
         if (!b) {
@@ -2684,9 +2680,6 @@ export default function ProductionPage({
             productCode: o.productCode || "",
             fabricCode: o.fabricCode || "",
             sizeLabel: o.sizeLabel || "",
-            divan: o.divanHeightInches != null ? `DV ${o.divanHeightInches}"` : "",
-            leg: o.legHeightInches != null ? `LG ${o.legHeightInches}"` : "",
-            gap: o.gapInches != null ? `GP ${o.gapInches}"` : "",
             qty: 0,
             earliestDue: "",
             soIds: new Set(),
@@ -2710,15 +2703,11 @@ export default function ProductionPage({
       mergedCount = list.length;
       totalQty = list.reduce((s, x) => s + x.qty, 0);
       const rowsHtml = list.map((b, i) => {
-        const details: string[] = [];
-        if (b.fabricCode) details.push(escapeHtml(b.fabricCode));
-        if (b.sizeLabel) details.push(escapeHtml(b.sizeLabel));
-        if (b.divan) details.push(b.divan);
-        if (b.leg) details.push(b.leg);
-        if (b.gap) details.push(b.gap);
         return `<tr>
           <td class="num">${i + 1}</td>
-          <td class="prod"><b>${escapeHtml(b.productCode)}</b><br/><small>${details.join(" · ")}</small></td>
+          <td class="prod"><b>${escapeHtml(b.productCode)}</b></td>
+          <td>${escapeHtml(b.sizeLabel)}</td>
+          <td>${escapeHtml(b.fabricCode)}</td>
           <td class="num"><b>${b.qty}</b></td>
           <td>${fmt(b.earliestDue)}</td>
           <td class="num">${b.soIds.size}</td>
@@ -2731,110 +2720,90 @@ export default function ProductionPage({
             <tr>
               <th class="num">#</th>
               <th>Product</th>
+              <th>Size</th>
+              <th>Fabric</th>
               <th class="num">Total Qty</th>
               <th>Earliest Due</th>
-              <th class="num">Orders</th>
-              <th class="num">Customers</th>
+              <th class="num">N orders</th>
+              <th class="num">N customers</th>
             </tr>
           </thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
     } else {
-      // Dept sub-tab merge: group by (model, wip, size, colour, gap, divan,
-      // leg, status). Empty-string values form their own bucket — Beige
-      // and (no fabric) do NOT merge.
+      // Dept sub-tab merge: group by (wip, size, colour). Same WIP code
+      // is the same physical production unit — model/gap/divan/leg/status
+      // intentionally excluded so e.g. "8\" Divan- 5FT" rows from
+      // different models/POs collapse into a single floor instruction.
+      // Empty-string values form their own bucket — Beige and (no fabric)
+      // do NOT merge.
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
       type Bucket = {
-        model: string;
         wip: string;
         size: string;
         colour: string;
-        gap: string;
-        divan: string;
-        leg: string;
-        status: string;
         qty: number;
         earliestDue: string;
+        sourceRows: number;
         customers: Set<string>;
       };
       const buckets = new Map<string, Bucket>();
       for (const r of printRows) {
-        const key = [
-          r.model, r.wip, r.size, r.colour,
-          r.gap, r.divan, r.leg, r.status,
-        ].join("|");
+        const key = [r.wip, r.size, r.colour].join("|");
         let b = buckets.get(key);
         if (!b) {
           b = {
-            model: r.model,
             wip: r.wip,
             size: r.size,
             colour: r.colour,
-            gap: r.gap,
-            divan: r.divan,
-            leg: r.leg,
-            status: r.status,
             qty: 0,
             earliestDue: "",
+            sourceRows: 0,
             customers: new Set(),
           };
           buckets.set(key, b);
         }
         b.qty += r.qty || 0;
+        b.sourceRows += 1;
         b.earliestDue = earliestIso([b.earliestDue, r.dueDate].filter(Boolean));
         if (r.customerName) b.customers.add(r.customerName);
       }
       sourceCount = printRows.length;
       const list = Array.from(buckets.values()).sort((a, b) => {
-        const m = a.model.localeCompare(b.model);
-        if (m !== 0) return m;
+        const w = a.wip.localeCompare(b.wip);
+        if (w !== 0) return w;
         const s = a.size.localeCompare(b.size);
         if (s !== 0) return s;
         return a.colour.localeCompare(b.colour);
       });
       mergedCount = list.length;
       totalQty = list.reduce((s, x) => s + x.qty, 0);
-      // If every bucket has only one customer, drop the column and just
-      // surface the total count in the footer.
-      const showCustomerCol = list.some((b) => b.customers.size > 1);
       const rowsHtml = list.map((b, i) => {
-        const customerCell = showCustomerCol
-          ? `<td class="num">${b.customers.size}</td>`
-          : "";
         return `<tr>
           <td class="num">${i + 1}</td>
-          <td><b>${escapeHtml(b.model)}</b></td>
-          <td>${escapeHtml(b.wip)}</td>
+          <td><b>${escapeHtml(b.wip)}</b></td>
           <td>${escapeHtml(b.size)}</td>
           <td>${escapeHtml(b.colour)}</td>
-          <td class="num">${escapeHtml(b.gap || "")}</td>
-          <td class="num">${escapeHtml(b.divan || "")}</td>
-          <td class="num">${escapeHtml(b.leg || "")}</td>
           <td class="num"><b>${b.qty}</b></td>
           <td>${fmt(b.earliestDue)}</td>
-          ${customerCell}
+          <td class="num">${b.sourceRows}</td>
+          <td class="num">${b.customers.size}</td>
         </tr>`;
       }).join("");
-      const customerHeader = showCustomerCol
-        ? `<th class="num">Customers</th>`
-        : "";
       body = `
         <table class="schedule">
           <thead>
             <tr>
               <th class="num">#</th>
-              <th>Model</th>
               <th>WIP</th>
               <th>Size</th>
               <th>Colour</th>
-              <th class="num">Gap</th>
-              <th class="num">Divan</th>
-              <th class="num">Leg</th>
               <th class="num">Total Qty</th>
-              <th>Due</th>
-              ${customerHeader}
+              <th>Earliest Due</th>
+              <th class="num">N orders</th>
+              <th class="num">N customers</th>
             </tr>
           </thead>
           <tbody>${rowsHtml}</tbody>

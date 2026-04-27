@@ -198,6 +198,7 @@ type MinimalJobCardOut = {
   wipType?: string;
   wipLabel?: string;
   wipQty?: number;
+  branchKey?: string;
   sequence: number;
   status: string;
   dueDate: string;

@@ -491,6 +491,7 @@ export async function createProductionOrdersForSO(
       dueDate: string;
       category: string;
       minutes: number;
+      branchKey: string;
     };
     const planned: PlannedJc[] = [];
 
@@ -529,6 +530,7 @@ export async function createProductionOrdersForSO(
             dueDate: addDays(anchor, -leadDays),
             category: p.category,
             minutes: p.minutes,
+            branchKey: p.branchKey ?? "",
           });
         }
       } else {
@@ -553,6 +555,7 @@ export async function createProductionOrdersForSO(
             dueDate: cursor,
             category: p.category,
             minutes: p.minutes,
+            branchKey: p.branchKey ?? "",
           });
         }
       }
@@ -881,6 +884,7 @@ async function backfillJobCardsForPo(
       dueDate: string;
       category: string;
       minutes: number;
+      branchKey: string;
     }> = [];
 
     if (packingAnchor) {
@@ -900,6 +904,7 @@ async function backfillJobCardsForPo(
           dueDate: addDays(anchor, -leadDays),
           category: p.category,
           minutes: p.minutes,
+          branchKey: p.branchKey ?? "",
         });
       }
     } else {
@@ -918,6 +923,7 @@ async function backfillJobCardsForPo(
           dueDate: cursor,
           category: p.category,
           minutes: p.minutes,
+          branchKey: p.branchKey ?? "",
         });
       }
     }

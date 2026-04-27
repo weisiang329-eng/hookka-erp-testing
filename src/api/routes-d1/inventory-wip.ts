@@ -198,7 +198,23 @@ app.get("/", async (c) => {
   const activeStatuses = ["PENDING", "IN_PROGRESS", "ON_HOLD"];
   const placeholders = activeStatuses.map(() => "?").join(",");
 
-  const [posRes, jcsRes] = await Promise.all([
+  // BUG-2026-04-27-034: a negative PENDING stub is written by the cascade
+  // when an UPHOLSTERY JC completes against a missing upstream wip_items
+  // row. UPHOLSTERY is the terminal dept in BF/sofa BOMs, so completing
+  // it flips the PO to status='COMPLETED' in the same transaction —
+  // which is then excluded from the active-status fetch below. Result:
+  // jcsByLabel / jcsByPo don't contain the consumer JCs that triggered
+  // the stub, so the WIP detail panel shows "0 PO(s)" for every stub.
+  // Fix: also fetch JCs from POs in COMPLETED/TRANSFERRED status — we
+  // index those separately so the chain walk for stub source attribution
+  // (around line 411) can find the trigger consumer JCs even after
+  // their PO graduated. Active-status fetches still drive everything
+  // else (positive-row sources, completedBy, age, cost roll-up) — those
+  // SHOULD only consider in-flight POs.
+  const stubAttrStatuses = ["COMPLETED", "TRANSFERRED"];
+  const stubPlaceholders = stubAttrStatuses.map(() => "?").join(",");
+
+  const [posRes, jcsRes, stubPosRes, stubJcsRes] = await Promise.all([
     db
       .prepare(
         `SELECT id, poNo, productId, productCode, productName, itemCategory,
@@ -222,17 +238,64 @@ app.get("/", async (c) => {
       )
       .bind(...activeStatuses)
       .all<JCLite>(),
+    // Stub-attribution-only: POs that have already graduated past active.
+    // Same column set as the active POs so they can share the POLite type.
+    db
+      .prepare(
+        `SELECT id, poNo, productId, productCode, productName, itemCategory,
+                sizeCode, sizeLabel, fabricCode, quantity,
+                gapInches, divanHeightInches, legHeightInches,
+                startDate, status
+           FROM production_orders
+          WHERE status IN (${stubPlaceholders})`,
+      )
+      .bind(...stubAttrStatuses)
+      .all<POLite>(),
+    // Stub-attribution-only: ALL JCs of the graduated POs above. The
+    // chain walk needs both the producer JC (whose wipLabel matches the
+    // stub code — typically a FOAM/WEBBING upstream JC, may be WAITING)
+    // AND the trigger consumer JC (downstream UPH, COMPLETED). Both
+    // belong to a now-COMPLETED PO, so we must fetch the whole chain,
+    // not just UPH.
+    db
+      .prepare(
+        `SELECT jc.id, jc.productionOrderId, jc.departmentCode, jc.sequence,
+                jc.status, jc.completedDate, jc.productionTimeMinutes,
+                jc.wipKey, jc.wipCode, jc.wipType, jc.wipLabel, jc.wipQty,
+                jc.branchKey
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.status IN (${stubPlaceholders})`,
+      )
+      .bind(...stubAttrStatuses)
+      .all<JCLite>(),
   ]);
 
   const pos: POLite[] = posRes.results ?? [];
   const jcs: JCLite[] = jcsRes.results ?? [];
+  const stubPos: POLite[] = stubPosRes.results ?? [];
+  const stubJcs: JCLite[] = stubJcsRes.results ?? [];
 
   // Indexes for fast lookup.
   const poById = new Map<string, POLite>();
   for (const p of pos) poById.set(p.id, p);
+  // BUG-2026-04-27-034: stub-attribution PO lookup includes graduated
+  // (COMPLETED / TRANSFERRED) POs. Used only by the negative-row chain
+  // walk for source attribution. Does NOT participate in
+  // poFullyUphComplete (that's an active-PO concern) or in any other
+  // lookup keyed by `pos`.
+  for (const p of stubPos) {
+    if (!poById.has(p.id)) poById.set(p.id, p);
+  }
 
+  // jcsByPo / jcsByLabel must contain every JC the negative-row chain
+  // walk references — including JCs of POs that have already graduated
+  // to COMPLETED. Without the stub-PO JCs, jcsByLabel.get(stub.code)
+  // returns [] for any stub whose triggering UPH lived on a now-
+  // graduated PO → "0 PO(s)" in the WIP detail panel.
+  const allJcs: JCLite[] = [...jcs, ...stubJcs];
   const jcsByPo = new Map<string, JCLite[]>();
-  for (const jc of jcs) {
+  for (const jc of allJcs) {
     const arr = jcsByPo.get(jc.productionOrderId);
     if (arr) arr.push(jc);
     else jcsByPo.set(jc.productionOrderId, [jc]);
@@ -243,7 +306,7 @@ app.get("/", async (c) => {
   // both for positive-row source aggregation and for negative-row
   // triggering-JC lookup.
   const jcsByLabel = new Map<string, JCLite[]>();
-  for (const jc of jcs) {
+  for (const jc of allJcs) {
     const label = jc.wipLabel || "";
     if (!label) continue;
     const arr = jcsByLabel.get(label);

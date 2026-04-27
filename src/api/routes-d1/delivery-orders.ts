@@ -492,6 +492,31 @@ app.post("/", async (c) => {
       rackingNumber: (item.rackingNumber as string) || "",
       packingStatus: (item.packingStatus as string) || "PENDING",
     }));
+    // Look up unitM3 from the products table for every PO's productCode
+    // so DO line items have accurate volumes — was hardcoded 0 before
+    // (BUG-2026-04-27: DO detail showed Total M³ = 0.00 even when the
+    // upstream Pending Delivery grid reported real per-PO Unit M³).
+    const productM3Map = new Map<string, number>();
+    if (poRowsForItems.length > 0) {
+      const codes = Array.from(
+        new Set(
+          poRowsForItems
+            .map((p) => p.productCode)
+            .filter((c): c is string => !!c),
+        ),
+      );
+      if (codes.length > 0) {
+        const ph = codes.map(() => "?").join(",");
+        const m3Res = await c.var.DB.prepare(
+          `SELECT code, unitM3 FROM products WHERE code IN (${ph})`,
+        )
+          .bind(...codes)
+          .all<{ code: string; unitM3: number }>();
+        for (const r of m3Res.results ?? []) {
+          productM3Map.set(r.code, Number(r.unitM3) || 0);
+        }
+      }
+    }
     // Fallback: if caller didn't pass items but gave productionOrderIds, seed
     // line items from the POs we already loaded.
     const items =
@@ -507,7 +532,7 @@ app.post("/", async (c) => {
             sizeLabel: po.sizeLabel ?? "",
             fabricCode: po.fabricCode ?? "",
             quantity: Number(po.quantity) || 0,
-            itemM3: 0,
+            itemM3: productM3Map.get(po.productCode ?? "") ?? 0,
             rackingNumber: po.rackingNumber ?? "",
             packingStatus: "PENDING" as const,
           }));

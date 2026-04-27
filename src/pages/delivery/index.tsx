@@ -85,6 +85,7 @@ type DeliveryOrderRow = {
   status: DOStatus;
   driverName: string;
   vehicleNo: string;
+  lorryName: string;
   deliveryAddress: string;
   contactPerson: string;
   contactPhone: string;
@@ -135,6 +136,7 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     status,
     driverName: d.driverName || "",
     vehicleNo: d.vehicleNo || "",
+    lorryName: d.lorryName || "",
     deliveryAddress: d.deliveryAddress || "",
     contactPerson: d.contactPerson || "",
     contactPhone: d.contactPhone || "",
@@ -1291,74 +1293,34 @@ export default function DeliveryPage() {
         ),
       },
       { key: "doNo", label: "DO No.", type: "docno", width: "120px", sortable: true },
-      { key: "companySO", label: "SO No.", type: "docno", width: "130px", sortable: true },
-      { key: "customerPOId", label: "Customer PO", type: "docno", width: "130px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", sortable: true },
-      { key: "hubBranch", label: "State", type: "text", width: "80px", sortable: true },
       {
-        key: "itemCount",
-        label: "Items",
-        type: "number",
-        width: "70px",
-        align: "right",
+        key: "status",
+        label: "Status",
+        type: "status",
+        width: "180px",
         sortable: true,
-      },
-      {
-        key: "itemDetails",
-        label: "Item Details",
-        type: "text",
-        width: "320px",
-        sortable: false,
-        render: (_v, row) => {
-          if (!row.items.length) return <span className="text-[#9CA3AF]">—</span>;
-          // Full per-item breakdown — product / size / qty / volume. The
-          // numeric volume drops the 'm³' suffix to match the rest of the
-          // system (numeric cells go bare; column / label provides the
-          // unit). Anything beyond 2 lines is folded behind a hover
-          // tooltip so the row height stays scannable.
-          const fullList = row.items
-            .map((i) => `${i.productCode} ${i.sizeLabel || ""} ×${i.quantity} (${(i.itemM3 * i.quantity).toFixed(2)})`)
-            .join("\n");
-          return (
-            <div className="flex flex-col gap-0.5 text-xs leading-tight" title={fullList}>
-              {row.items.slice(0, 2).map((i, idx) => (
-                <div key={idx} className="truncate">
-                  <span className="font-medium text-[#1F1D1B]">{i.productCode}</span>
-                  {i.sizeLabel ? <span className="text-[#6B7280]"> {i.sizeLabel}</span> : null}
-                  <span className="text-[#9CA3AF]"> ×{i.quantity}</span>
-                  <span className="tabular-nums text-[#6B7280]"> ({(i.itemM3 * i.quantity).toFixed(2)})</span>
-                </div>
-              ))}
-              {row.items.length > 2 && (
-                <div className="text-[#9CA3AF]">+{row.items.length - 2} more · hover for full list</div>
-              )}
-            </div>
-          );
-        },
-      },
-      {
-        key: "totalM3",
-        label: "Total M\u00B3",
-        type: "number",
-        width: "90px",
-        align: "right",
-        sortable: true,
-        render: (_v, row) => (
-          <span className="tabular-nums">{(row.totalM3 ?? 0).toFixed(2)}</span>
+        render: (_value, row) => (
+          <div className="flex flex-col gap-0.5 text-xs leading-tight">
+            <span className="font-medium">{STATUS_LABEL[row.status] ?? row.status}</span>
+            <span className="text-[#9CA3AF] tabular-nums">
+              {row.itemCount} item{row.itemCount === 1 ? "" : "s"} · {(row.totalM3 ?? 0).toFixed(2)} m³
+            </span>
+          </div>
         ),
       },
-      { key: "driverName", label: "3PL / Driver", type: "text", width: "120px", sortable: true },
+      { key: "driverName", label: "Driver", type: "text", width: "130px", sortable: true },
+      { key: "lorryName", label: "Company", type: "text", width: "150px", sortable: true },
       {
         key: "dispatchDate",
         label: "Dispatch Date",
         type: "date",
-        width: "110px",
+        width: "120px",
         sortable: true,
         render: (_value, row) => (
           <span>{row.dispatchDate ? formatDate(row.dispatchDate) : "-"}</span>
         ),
       },
-      { key: "status", label: "Status", type: "status", width: "110px", sortable: true },
     ],
     [selectedIds]
   );

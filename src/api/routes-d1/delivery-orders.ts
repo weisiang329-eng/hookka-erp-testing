@@ -1095,7 +1095,7 @@ app.put("/:id", async (c) => {
       statements.push(
         c.var.DB.prepare(
           `UPDATE fg_units
-              SET doId = NULL, status = 'AVAILABLE', loadedAt = NULL
+              SET doId = NULL, status = 'PENDING', loadedAt = NULL
             WHERE doId = ?`,
         ).bind(id),
       );

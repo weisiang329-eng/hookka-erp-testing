@@ -2614,32 +2614,44 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
     type Bucket = { hours: number; laborCostSen: number };
     const buckets = new Map<string, Bucket>();
 
-    // First pass: per (workerId, date), classify each entry's hours into
-    // regular vs OT relative to a 9h baseline. Entries are processed in input
-    // order; once cumulative hours for that (worker, date) exceed 9, the
-    // remainder counts as OT.
-    const cumulativeByWorkerDate = new Map<string, number>();
+    // Pro-rata OT split per (worker, date): if a worker did 11h split as
+    // 5h Webbing + 6h Framing, the 2h OT is distributed proportionally
+    // (Webbing 5/11, Framing 6/11) — NOT given to whichever segment
+    // happens to push cumulative hours past 9 in DB-row order. Order-
+    // dependent split was the v1 implementation; user flagged it as unfair
+    // since the same total workday could attribute different OT to the
+    // same dept depending on data-entry sequence.
+    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
     for (const e of entries) {
-      const w = workersById.get(e.workerId);
+      const k = `${e.workerId}|${e.date}`;
+      const arr = segsByWorkerDate.get(k) ?? [];
+      arr.push(e);
+      segsByWorkerDate.set(k, arr);
+    }
+
+    for (const [k, segs] of segsByWorkerDate.entries()) {
+      const [workerId] = k.split("|");
+      const w = workersById.get(workerId);
       if (!w || !w.basicSalarySen) continue;
       const regularRateSen = w.basicSalarySen / wdInMonth / 9;
       const otBaseRateSen = w.basicSalarySen / 26 / 9;
       const otMult = w.otMultiplier ?? 1.5;
-      const wdKey = `${e.workerId}|${e.date}`;
-      const cum = cumulativeByWorkerDate.get(wdKey) ?? 0;
-      const hours = Number(e.hours) || 0;
-      const regularLeft = Math.max(0, 9 - cum);
-      const regularH = Math.min(hours, regularLeft);
-      const otH = hours - regularH;
-      cumulativeByWorkerDate.set(wdKey, cum + hours);
+      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const otTotalH = Math.max(0, totalH - 9);
+      const otShare = totalH > 0 ? otTotalH / totalH : 0;
 
-      const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
-      const cat = (e.category || "") as Category;
-      const key = `${e.departmentCode}|${cat}`;
-      const cur = buckets.get(key) ?? { hours: 0, laborCostSen: 0 };
-      cur.hours += hours;
-      cur.laborCostSen += cost;
-      buckets.set(key, cur);
+      for (const e of segs) {
+        const hours = Number(e.hours) || 0;
+        const otH = hours * otShare;
+        const regularH = hours - otH;
+        const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        const cat = (e.category || "") as Category;
+        const bucketKey = `${e.departmentCode}|${cat}`;
+        const cur = buckets.get(bucketKey) ?? { hours: 0, laborCostSen: 0 };
+        cur.hours += hours;
+        cur.laborCostSen += cost;
+        buckets.set(bucketKey, cur);
+      }
     }
 
     // Materialise rows. Sort production depts first by sequence, then non-

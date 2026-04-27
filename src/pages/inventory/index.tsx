@@ -121,7 +121,7 @@ const TABS: { key: Tab; label: string }[] = [
 ];
 
 // --- Finished Products with stock ---
-type FGItem = Product & { stockQty: number };
+type FGItem = Product & { stockQty: number; reservedQty: number };
 
 // Loose shape that covers the fields WIP/FG derivation reads from a
 // production order. Typed loosely so the live API payload (which matches
@@ -255,61 +255,66 @@ type CreateRMForm = {
 function deriveFGStock(
   products: Product[],
   productionOrders: ProductionOrderLike[],
+  poStatusByDO: Map<string, "DRAFT" | "DISPATCHED">,
 ): FGItem[] {
-  // Start with all products at 0 stock
+  // Per-PO state from DOs:
+  //   DISPATCHED → out of warehouse, don't count anywhere
+  //   DRAFT      → still ours but earmarked → reservedQty bucket
+  //   (no DO)    → free stock → stockQty bucket
   const fgMap = new Map<string, FGItem>();
   for (const p of products) {
-    fgMap.set(p.id, { ...p, stockQty: 0 });
+    fgMap.set(p.id, { ...p, stockQty: 0, reservedQty: 0 });
   }
 
-  for (const po of productionOrders) {
-    // Only count if upholstery is all done (= finished good)
-    const uphCards = po.jobCards.filter(jc => jc.departmentCode === "UPHOLSTERY");
-    if (uphCards.length === 0) continue;
-    if (!uphCards.every(jc => jc.status === "COMPLETED" || jc.status === "TRANSFERRED")) continue;
-
-    // Skip if fully delivered (stockedIn = false means already shipped out)
-    // For now count all completed as in-stock; DO dispatch will deduct later
-
-    // Match by productId or productCode
+  const findOrCreate = (po: ProductionOrderLike): FGItem | null => {
     let fg = fgMap.get(po.productId);
     if (!fg) {
-      // Try matching by code
       for (const [, item] of fgMap) {
         if (item.code === po.productCode) { fg = item; break; }
       }
     }
-    if (fg) {
-      fg.stockQty += po.quantity;
+    if (fg) return fg;
+    const id = `fg-dyn-${po.productCode}`;
+    if (!fgMap.has(id)) {
+      const dyn: FGItem = {
+        id,
+        code: po.productCode,
+        name: po.productName || po.productCode,
+        category: po.itemCategory as "BEDFRAME" | "SOFA",
+        description: "",
+        baseModel: po.productCode,
+        sizeCode: po.sizeCode || "",
+        sizeLabel: po.sizeLabel || "",
+        fabricUsage: 0,
+        unitM3: 0,
+        status: "ACTIVE",
+        costPriceSen: 0,
+        productionTimeMinutes: 0,
+        subAssemblies: [],
+        bomComponents: [],
+        deptWorkingTimes: [],
+        stockQty: 0,
+        reservedQty: 0,
+      };
+      fgMap.set(id, dyn);
+    }
+    return fgMap.get(id)!;
+  };
+
+  for (const po of productionOrders) {
+    const uphCards = po.jobCards.filter(jc => jc.departmentCode === "UPHOLSTERY");
+    if (uphCards.length === 0) continue;
+    if (!uphCards.every(jc => jc.status === "COMPLETED" || jc.status === "TRANSFERRED")) continue;
+
+    const doState = poStatusByDO.get(po.id);
+    if (doState === "DISPATCHED") continue; // already out the door
+
+    const fg = findOrCreate(po);
+    if (!fg) continue;
+    if (doState === "DRAFT") {
+      fg.reservedQty += po.quantity;
     } else {
-      // Product not in catalog — create a dynamic FG entry. We fill every
-      // required Product field with a neutral default so the row passes
-      // type-checks; consumers that care about catalog metadata should
-      // treat any `fg-dyn-*` id as "no catalog record".
-      const id = `fg-dyn-${po.productCode}`;
-      if (!fgMap.has(id)) {
-        const dyn: FGItem = {
-          id,
-          code: po.productCode,
-          name: po.productName || po.productCode,
-          category: po.itemCategory as "BEDFRAME" | "SOFA",
-          description: "",
-          baseModel: po.productCode,
-          sizeCode: po.sizeCode || "",
-          sizeLabel: po.sizeLabel || "",
-          fabricUsage: 0,
-          unitM3: 0,
-          status: "ACTIVE",
-          costPriceSen: 0,
-          productionTimeMinutes: 0,
-          subAssemblies: [],
-          bomComponents: [],
-          deptWorkingTimes: [],
-          stockQty: 0,
-        };
-        fgMap.set(id, dyn);
-      }
-      fgMap.get(id)!.stockQty += po.quantity;
+      fg.stockQty += po.quantity;
     }
   }
 
@@ -744,13 +749,30 @@ const fgColumns: Column<FGItem>[] = [
   },
   {
     key: "stockQty",
-    label: "Stock Qty",
+    label: "Available",
     align: "right",
     render: (_v, row) => {
       const sem = getStockSemantic(row.stockQty);
       const cls = row.stockQty === 0 || row.stockQty < 5 ? sem.text : "text-[#1F1D1B]";
       return <span className={`font-medium ${cls}`}>{row.stockQty}</span>;
     },
+  },
+  {
+    key: "reservedQty",
+    label: "Reserved",
+    align: "right",
+    render: (_v, row) => (
+      <span
+        className={
+          row.reservedQty > 0
+            ? "font-medium text-[#A86A1A]"
+            : "text-[#9CA3AF]"
+        }
+        title="In a DRAFT delivery order — still our stock, not yet dispatched/invoiced"
+      >
+        {row.reservedQty}
+      </span>
+    ),
   },
   {
     key: "unitCost",
@@ -1056,6 +1078,10 @@ export default function InventoryPage() {
   const [products, setProducts] = useState<Product[]>([]);
   const [liveRawMaterials, setLiveRawMaterials] = useState<RawMaterial[]>([]);
   const [poData, setPoData] = useState<ProductionOrderLike[]>([]);
+  // Map<poId, "DRAFT" | "DISPATCHED"> built from /api/delivery-orders so
+  // deriveFGStock can split completed POs into Available vs Reserved
+  // and exclude already-dispatched ones.
+  const [poToDOState, setPoToDOState] = useState<Map<string, "DRAFT" | "DISPATCHED">>(new Map());
   // Phase 4.5 — raw rows from /api/inventory/wip. Replaces the old
   // client-side deriveWIPFromPO + mergeSofaWIPSets pipeline.
   const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>([]);
@@ -1117,6 +1143,44 @@ export default function InventoryPage() {
       return [];
     };
 
+    // /api/delivery-orders → map every PO id appearing in DO items to
+    // its DO state. DRAFT = reserved (still our stock); LOADED /
+    // IN_TRANSIT / DELIVERED / INVOICED = dispatched (off the books).
+    const fetchDOStates = async (): Promise<
+      Map<string, "DRAFT" | "DISPATCHED">
+    > => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: Array<{
+            status?: string;
+            items?: Array<{ productionOrderId?: string | null }>;
+          }>;
+          _stub?: boolean;
+        }>("/api/delivery-orders");
+        const map = new Map<string, "DRAFT" | "DISPATCHED">();
+        if (json && json.success && Array.isArray(json.data) && !json._stub) {
+          for (const d of json.data) {
+            const state: "DRAFT" | "DISPATCHED" =
+              d.status === "DRAFT" ? "DRAFT" : "DISPATCHED";
+            for (const item of d.items ?? []) {
+              const poId = item.productionOrderId;
+              if (!poId) continue;
+              // DISPATCHED wins over DRAFT — a PO can't appear in two
+              // active DOs at once, but if backend ever returns both,
+              // the harder state should stick.
+              const cur = map.get(poId);
+              if (cur === "DISPATCHED") continue;
+              map.set(poId, state);
+            }
+          }
+        }
+        return map;
+      } catch {
+        return new Map();
+      }
+    };
+
     // Phase 4.5 — WIP rows come from /api/inventory/wip now. The endpoint
     // returns a single array containing BOTH per-component rows (wipType !=
     // "SET") and merged sofa-set rows (wipType === "SET"); the UI splits
@@ -1132,16 +1196,18 @@ export default function InventoryPage() {
     };
 
     (async () => {
-      const [inv, pos, wipRows] = await Promise.all([
+      const [inv, pos, wipRows, doStates] = await Promise.all([
         fetchInventory(),
         fetchPOs(),
         fetchWipRows(),
+        fetchDOStates(),
       ]);
       if (cancelled) return;
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setPoData(pos);
       setBackendWipRows(wipRows);
+      setPoToDOState(doStates);
       setLoading(false);
     })();
 
@@ -1150,8 +1216,8 @@ export default function InventoryPage() {
 
   // Derived inventory — recomputed whenever the fetches resolve.
   const fgItems = useMemo<FGItem[]>(
-    () => deriveFGStock(products, poData),
-    [products, poData],
+    () => deriveFGStock(products, poData, poToDOState),
+    [products, poData, poToDOState],
   );
   // Inventory WIP table — mirrors Production Order's Fab Cut tab exactly:
   //   - SOFA: one row per (SO, fabric) SET, label "5530-L(LHF)+2A(RHF) | (30)
@@ -1284,6 +1350,7 @@ export default function InventoryPage() {
   const fgBedframeCount = fgItems.filter(p => p.category === "BEDFRAME").length;
   const fgSofaCount = fgItems.filter(p => p.category === "SOFA").length;
   const fgTotalStock = fgItems.reduce((s, p) => s + p.stockQty, 0);
+  const fgTotalReserved = fgItems.reduce((s, p) => s + p.reservedQty, 0);
 
   const wipTotalQty = wipItems.reduce((s, w) => s + w.totalQty, 0);
   const wipOldest = wipItems.length > 0 ? Math.max(...wipItems.map(w => w.oldestAgeDays)) : 0;
@@ -1560,8 +1627,12 @@ export default function InventoryPage() {
               <p className="text-xl font-bold text-[#1F1D1B]">{fgItems.length}</p>
             </CardContent></Card>
             <Card><CardContent className="p-2.5">
-              <p className="text-xs text-[#6B7280]">Total Stock</p>
-              <p className="text-xl font-bold text-[#1F1D1B]">{fgTotalStock.toLocaleString()} pcs</p>
+              <p className="text-xs text-[#6B7280]">Available · Reserved</p>
+              <p className="text-xl font-bold text-[#1F1D1B] tabular-nums">
+                {fgTotalStock.toLocaleString()}
+                <span className="text-[#A86A1A]"> · {fgTotalReserved.toLocaleString()}</span>
+                <span className="text-sm font-normal text-[#9CA3AF]"> pcs</span>
+              </p>
             </CardContent></Card>
             <Card><CardContent className="p-2.5">
               <p className="text-xs text-[#6B7280]">Bedframe SKUs</p>

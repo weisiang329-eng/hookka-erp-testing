@@ -633,37 +633,13 @@ app.post("/", async (c) => {
       );
     }
 
-    // Phase-4: stamp FG units with the new doId (LOADED is the valid CHECK
-    // enum value — there is no RESERVED state) and write one STOCK_OUT
-    // movement per source PO so warehouse history shows the units leaving.
-    if (poRowsForItems.length > 0) {
-      for (const po of poRowsForItems) {
-        statements.push(
-          c.var.DB.prepare(
-            `UPDATE fg_units
-                SET doId = ?, status = 'LOADED', loadedAt = ?
-              WHERE poId = ? AND (doId IS NULL OR doId = '')`,
-          ).bind(id, now, po.id),
-          c.var.DB.prepare(
-            `INSERT INTO stock_movements (
-               id, type, rackLocationId, rackLabel, productionOrderId,
-               productCode, productName, quantity, reason, performedBy,
-               created_at
-             ) VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
-          ).bind(
-            `mov-${crypto.randomUUID().slice(0, 8)}`,
-            null,
-            po.rackingNumber ?? "",
-            po.id,
-            po.productCode ?? "",
-            po.productName ?? "",
-            Number(po.quantity) || 0,
-            `DO ${doNo} created`,
-            now,
-          ),
-        );
-      }
-    }
+    // Phase-4 (revised 2026-04-27): DRAFT DOs no longer lock fg_units —
+    // they show up under "Reserved" on the Inventory page (still our
+    // stock, just earmarked). The actual STOCK_OUT + fg_units LOADED
+    // stamping moves to the DRAFT → LOADED transition in PUT below, so
+    // the inventory deduction tracks the dispatch boundary (which is
+    // also the invoice boundary). See the PUT handler "Phase-4 stamp on
+    // dispatch" block.
 
     await c.var.DB.batch(statements);
 
@@ -964,6 +940,77 @@ app.put("/:id", async (c) => {
             item.salesOrderNo,
           ),
         );
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase-4 stamp on dispatch (DRAFT → LOADED, added 2026-04-27):
+    // This is the inventory boundary — until now the PO is "Reserved"
+    // (still our stock, no invoice yet); flipping to LOADED is the
+    // moment we mark fg_units LOADED and write a STOCK_OUT so the
+    // Inventory page's Available count drops. Mirrors the old POST-time
+    // logic, just deferred to the dispatch event.
+    // -------------------------------------------------------------------
+    const stampedOnDispatch =
+      existing.status === "DRAFT" && nextStatus === "LOADED";
+    if (stampedOnDispatch) {
+      // Source POs come from the items array — either freshly-replaced
+      // (newItems) or the existing delivery_order_items rows.
+      const itemPoIds = newItems
+        ? newItems.map((i) => i.productionOrderId).filter(Boolean)
+        : (
+            await c.var.DB.prepare(
+              `SELECT productionOrderId FROM delivery_order_items
+                 WHERE deliveryOrderId = ?`,
+            )
+              .bind(id)
+              .all<{ productionOrderId: string | null }>()
+          ).results?.map((r) => r.productionOrderId).filter(
+            (s): s is string => !!s,
+          ) ?? [];
+      if (itemPoIds.length > 0) {
+        const ph = itemPoIds.map(() => "?").join(",");
+        const poRows =
+          (
+            await c.var.DB.prepare(
+              `SELECT id, productCode, productName, quantity, rackingNumber
+                 FROM production_orders WHERE id IN (${ph})`,
+            )
+              .bind(...itemPoIds)
+              .all<{
+                id: string;
+                productCode: string | null;
+                productName: string | null;
+                quantity: number | null;
+                rackingNumber: string | null;
+              }>()
+          ).results ?? [];
+        for (const po of poRows) {
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE fg_units
+                  SET doId = ?, status = 'LOADED', loadedAt = ?
+                WHERE poId = ? AND (doId IS NULL OR doId = '')`,
+            ).bind(id, now, po.id),
+            c.var.DB.prepare(
+              `INSERT INTO stock_movements (
+                 id, type, rackLocationId, rackLabel, productionOrderId,
+                 productCode, productName, quantity, reason, performedBy,
+                 created_at
+               ) VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+            ).bind(
+              `mov-${crypto.randomUUID().slice(0, 8)}`,
+              null,
+              po.rackingNumber ?? "",
+              po.id,
+              po.productCode ?? "",
+              po.productName ?? "",
+              Number(po.quantity) || 0,
+              `DO ${existing.doNo} dispatched`,
+              now,
+            ),
+          );
+        }
       }
     }
 

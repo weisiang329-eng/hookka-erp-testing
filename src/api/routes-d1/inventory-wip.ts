@@ -472,30 +472,45 @@ app.get("/", async (c) => {
     let estTotalValueSen = 0;
 
     if (isNegative) {
-      // Find the JC that triggered the consume. Strict rule
-      // (BUG-2026-04-27-015): for each producer JC `P` (its wipLabel ==
-      // this row's code), look at the **immediate** downstream in the
-      // same `(wipKey, branchKey)` — the JC with the smallest sequence
-      // strictly greater than P.sequence. Only that JC could have
-      // written this row's decrement. If that neighbor is COMPLETED/
-      // TRANSFERRED, its PO is a Source. If not completed, that PO did
-      // not trigger this negative — skip it.
+      // BUG-2026-04-27-035: cascade-stub source attribution.
       //
-      // Earlier code grabbed every higher-sequence COMPLETED JC in the
-      // same wipKey. That over-collected: cascading later depts in the
-      // chain (e.g. WEBBING after FRAMING already consumed (WD)) would
-      // each show up as a "source" of (WD), even though only FRAMING
-      // actually triggered the decrement.
+      // The cascade in production-orders.ts (UPH branch, line ~1099-1155)
+      // uses a "branch terminal consume" pattern: when a UPH JC
+      // completes, for each branch in its wipKey, it picks the JC at the
+      // highest sequence below UPH and consumes from that JC's wipLabel.
+      // If the upstream wip_items row doesn't exist (intermediate dept
+      // skipped → no producer-add ever happened), it INSERTs a -N stub.
       //
-      // Edge case: when wip_items.code has no matching JC (the row was
-      // INSERTed by the cascade because the upstream JC didn't exist
-      // yet) we can't recover the wipKey — sources stays empty. This is
-      // correct: there's literally no JC chain to reference.
+      // So the stub's TRIGGER consumer is *always* the UPHOLSTERY JC of
+      // the same PO/wipKey — never some "immediate downstream"
+      // intermediate dept. The earlier rule (BUG-2026-04-27-015's
+      // strict-immediate-downstream) misattributed: it walked from
+      // producer (e.g. WEBBING) to seq+1 (FOAM, still WAITING) and
+      // bailed because FOAM wasn't COMPLETED — even though UPH at seq+2
+      // had already written this stub. Result: 0 PO(s) for every stub
+      // whose chain has an intermediate WAITING dept between the
+      // producer and the COMPLETED UPH.
+      //
+      // Fix: attribute by finding the COMPLETED UPHOLSTERY JC in the
+      // same (PO, wipKey) — that's literally the dept the cascade
+      // consumed from. branchKey doesn't constrain because UPH consumes
+      // from EVERY branch terminal in the wipKey, not just one.
+      //
+      // The earlier "strict-immediate" rule was correct for forward
+      // consume chains (e.g. FRAMING consuming (WD), then WEBBING
+      // consuming (Frame), then UPH consuming (Webbing)) — each
+      // intermediate dept attributes its consume to itself. But that
+      // chain only fires when each dept actually completes; in the
+      // user's "skip-to-UPH" workflow nothing in the middle ever
+      // executed, so the only attribution candidate is the UPH itself.
       type TriggerEntry = { producer: JCLite; trigger: JCLite };
       const triggerEntries: TriggerEntry[] = [];
       for (const producer of matchedJcs) {
         if (!producer.wipKey) continue;
         const myJcs = jcsByPo.get(producer.productionOrderId) ?? [];
+        // 1) Strict-immediate path (BUG-2026-04-27-015): if the JC at
+        //    smallest sequence > producer is COMPLETED, it's the
+        //    forward-consume trigger. This still wins for normal flow.
         const producerBk = producer.branchKey ?? "";
         let immediate: JCLite | null = null;
         for (const candidate of myJcs) {
@@ -507,9 +522,32 @@ app.get("/", async (c) => {
             immediate = candidate;
           }
         }
-        if (!immediate) continue;
-        if (!isDone(immediate)) continue;
-        triggerEntries.push({ producer, trigger: immediate });
+        if (immediate && isDone(immediate)) {
+          triggerEntries.push({ producer, trigger: immediate });
+          continue;
+        }
+        // 2) UPH-skip-to-terminal path (BUG-2026-04-27-035): no immediate
+        //    forward consume found, but the cascade may have written
+        //    this stub via a UPH branch-terminal consume. Look for any
+        //    COMPLETED UPHOLSTERY JC in the same (PO, wipKey) at higher
+        //    sequence. If found, that's the trigger — attribute to it.
+        let uphTrigger: JCLite | null = null;
+        for (const candidate of myJcs) {
+          if (candidate.id === producer.id) continue;
+          if (candidate.wipKey !== producer.wipKey) continue;
+          if (candidate.sequence <= producer.sequence) continue;
+          if (
+            (candidate.departmentCode || "").toUpperCase() !== "UPHOLSTERY"
+          )
+            continue;
+          if (!isDone(candidate)) continue;
+          if (uphTrigger === null || candidate.sequence < uphTrigger.sequence) {
+            uphTrigger = candidate;
+          }
+        }
+        if (uphTrigger) {
+          triggerEntries.push({ producer, trigger: uphTrigger });
+        }
       }
 
       // Dedupe by PO id — a PO contributes at most one Source row even

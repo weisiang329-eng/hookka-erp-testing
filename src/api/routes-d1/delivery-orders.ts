@@ -169,10 +169,24 @@ function genDoItemId(): string {
   return `doi-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function genNextDoNo(): string {
+// Async sequential DO number — DO-YYMM-NNN, NNN = max-existing-suffix-in-YYMM + 1.
+// Was random `DO-YYMM-XXXX` hash before 2026-04-27 (user request: numbering
+// rule in Settings says DO-YYMM-NNN sequential). Mirrors the SO generator
+// in src/api/routes-d1/sales-orders.ts generateCompanySOId.
+async function genNextDoNo(db: D1Database): Promise<string> {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return `DO-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+  const prefix = `DO-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT doNo FROM delivery_orders WHERE doNo LIKE ? ORDER BY doNo DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ doNo: string }>();
+  if (!res) return `${prefix}001`;
+  const seq = parseInt(res.doNo.replace(prefix, ""), 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 function genStatusChangeId(): string {
@@ -502,7 +516,7 @@ app.post("/", async (c) => {
     const totalItems = items.reduce((s, i) => s + i.quantity, 0);
     const now = new Date().toISOString();
     const id = genDoId();
-    const doNo: string = body.doNo || genNextDoNo();
+    const doNo: string = body.doNo || (await genNextDoNo(c.var.DB));
 
     const statements = [
       c.var.DB.prepare(

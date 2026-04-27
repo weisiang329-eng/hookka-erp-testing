@@ -918,7 +918,12 @@ export default function DeliveryPage() {
       sizeLabel: po.sizeLabel,
       fabricCode: po.fabricCode,
       quantity: po.quantity,
-      itemM3: 0.85, // default
+      // itemM3 = per-unit volume from /api/products (Product header is the
+      // source of truth). 0 fallback when the product code isn't in the
+      // map yet — was hardcoded 0.85 before, which caused the Pending
+      // Dispatch grid's Total M³ to disagree with the per-PO Unit M³ on
+      // Pending Delivery (user report 2026-04-27).
+      itemM3: productM3Map.get(po.productCode) ?? 0,
       rackingNumber: "",
     };
     setEditItems((prev) => [...prev, newItem]);
@@ -2019,13 +2024,41 @@ export default function DeliveryPage() {
               </div>
               <div className="flex items-center gap-2">
                 {!editMode && detailDO.status === "DRAFT" && (
-                  <button
-                    onClick={() => enterEditMode(detailDO)}
-                    className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B5C32] hover:text-[#1F1D1B] transition-colors"
-                    title="Edit DO"
-                  >
-                    <Pencil className="h-4 w-4" />
-                  </button>
+                  <>
+                    <button
+                      onClick={() => enterEditMode(detailDO)}
+                      className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B5C32] hover:text-[#1F1D1B] transition-colors"
+                      title="Edit DO"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    {/* Delete DO — only available in DRAFT status. Items
+                        return to Pending Delivery automatically (the dedup
+                        list keys off delivery_order_items.productionOrderId,
+                        which goes away with the DO). */}
+                    <button
+                      onClick={async () => {
+                        if (!confirm(`Delete ${detailDO.doNo}? Items will return to Pending Delivery.`)) return;
+                        try {
+                          const res = await fetch(`/api/delivery-orders/${detailDO.id}`, { method: "DELETE" });
+                          const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+                          if (!res.ok || !j?.success) {
+                            toast.error(j?.error || "Delete failed");
+                            return;
+                          }
+                          toast.success(`${detailDO.doNo} deleted`);
+                          setDetailDO(null);
+                          fetchData();
+                        } catch (e) {
+                          toast.error(e instanceof Error ? e.message : "Delete failed");
+                        }
+                      }}
+                      className="rounded-md p-1.5 hover:bg-rose-50 text-rose-600 hover:text-rose-800 transition-colors"
+                      title="Delete DO (DRAFT only)"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </>
                 )}
                 {!editMode && (
                   <>

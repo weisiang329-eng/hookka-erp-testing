@@ -1046,38 +1046,78 @@ export default function DepartmentProductionPage() {
                           </td>
                         )}
 
-                        {/* Rack (Packing dept only) — dropdown sourced from
-                            warehouse rack locations. Selecting a rack PATCHes
-                            the PO's rackingNumber so the delivery packing
-                            list can later read which rack each item came from. */}
-                        {showRack && (
-                          <td
-                            className="px-3 py-2"
-                            onClick={(e) => e.stopPropagation()}
-                            onDoubleClick={(e) => e.stopPropagation()}
-                          >
-                            <select
-                              value={row.rackingNumber || ""}
-                              onChange={(e) => saveRack(row, e.target.value)}
-                              disabled={saving === row.id}
-                              className="h-7 rounded border border-[#E2DDD8] bg-white px-1.5 text-xs text-[#1F1D1B] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                        {/* Rack (Packing dept only) — multi-rack chip input.
+                            A bedframe PO has multiple physical pieces (HB,
+                            Divan, Cushion, …) and each piece can land in a
+                            different rack; we store the picked racks as a
+                            comma-separated string in PO.rackingNumber so
+                            downstream views (DO Items, Production Tracker)
+                            display the full set "Rack 3, Rack 5" instead of
+                            just one rack. Schema unchanged — rackingNumber is
+                            already TEXT, just longer now.
+                            Click chip × to remove; click dropdown to append. */}
+                        {showRack && (() => {
+                          const picked = (row.rackingNumber || "")
+                            .split(",")
+                            .map((s) => s.trim())
+                            .filter(Boolean);
+                          const pickedSet = new Set(picked);
+                          return (
+                            <td
+                              className="px-3 py-2 align-top"
+                              onClick={(e) => e.stopPropagation()}
+                              onDoubleClick={(e) => e.stopPropagation()}
                             >
-                              <option value="">— Select —</option>
-                              {rackOptions.map((r) => (
-                                <option
-                                  key={r.label}
-                                  value={r.label}
-                                  disabled={r.occupied && r.label !== row.rackingNumber}
+                              <div className="flex flex-wrap items-center gap-1">
+                                {picked.map((rackLabel) => (
+                                  <span
+                                    key={rackLabel}
+                                    className="inline-flex items-center gap-1 rounded-full bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 text-xs"
+                                  >
+                                    {rackLabel}
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const next = picked.filter((r) => r !== rackLabel).join(", ");
+                                        void saveRack(row, next);
+                                      }}
+                                      disabled={saving === row.id}
+                                      className="hover:text-[#9A3A2D] disabled:opacity-40"
+                                      aria-label={`Remove ${rackLabel}`}
+                                    >
+                                      <X className="h-3 w-3" />
+                                    </button>
+                                  </span>
+                                ))}
+                                <select
+                                  value=""
+                                  onChange={(e) => {
+                                    const v = e.target.value;
+                                    if (!v || pickedSet.has(v)) return;
+                                    const next = [...picked, v].join(", ");
+                                    void saveRack(row, next);
+                                  }}
+                                  disabled={saving === row.id}
+                                  className="h-7 rounded border border-[#E2DDD8] bg-white px-1.5 text-xs text-[#1F1D1B] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
                                 >
-                                  {r.label}
-                                  {r.occupied && r.label !== row.rackingNumber
-                                    ? ` (${r.occupant || "used"})`
-                                    : ""}
-                                </option>
-                              ))}
-                            </select>
-                          </td>
-                        )}
+                                  <option value="">+ Add rack</option>
+                                  {rackOptions
+                                    .filter((r) => !pickedSet.has(r.label))
+                                    .map((r) => (
+                                      <option
+                                        key={r.label}
+                                        value={r.label}
+                                        disabled={r.occupied}
+                                      >
+                                        {r.label}
+                                        {r.occupied ? ` (${r.occupant || "used"})` : ""}
+                                      </option>
+                                    ))}
+                                </select>
+                              </div>
+                            </td>
+                          );
+                        })()}
 
                         {/* Status */}
                         <td className="px-3 py-2">

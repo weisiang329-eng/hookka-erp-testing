@@ -48,6 +48,7 @@ type DeliveryOrderRow = {
   hookkaExpectedDD: string | null;
   driverId: string | null;
   driverName: string | null;
+  driverContactPerson: string | null;
   vehicleNo: string | null;
   totalM3: number;
   totalItems: number;
@@ -181,6 +182,7 @@ function rowToOrder(
     hookkaExpectedDD: row.hookkaExpectedDD ?? "",
     driverId: row.driverId,
     driverName: row.driverName ?? "",
+    driverContactPerson: row.driverContactPerson ?? "",
     vehicleNo: row.vehicleNo ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
@@ -602,19 +604,46 @@ app.post("/", async (c) => {
     const id = genDoId();
     const doNo: string = body.doNo || (await genNextDoNo(c.var.DB));
 
+    // Provider lookup: when the client passes only driverId, denormalize
+    // name + vehicleNo + contactPerson onto the DO row. Mirrors the PUT
+    // handler so create/edit behave the same — front-end no longer has to
+    // ship redundant fields, and old DOs keep their historical 3PL contact
+    // even if the provider record is later deleted / renamed.
+    let resolvedDriverName = (body.driverName as string | undefined) ?? "";
+    let resolvedVehicleNo = (body.vehicleNo as string | undefined) ?? "";
+    let resolvedDriverContact =
+      (body.driverContactPerson as string | undefined) ?? "";
+    if (body.driverId) {
+      const provider = await c.var.DB.prepare(
+        "SELECT name, vehicleNo, contactPerson FROM three_pl_providers WHERE id = ?",
+      )
+        .bind(body.driverId)
+        .first<{
+          name: string;
+          vehicleNo: string | null;
+          contactPerson: string | null;
+        }>();
+      if (provider) {
+        resolvedDriverName = provider.name;
+        if (provider.vehicleNo) resolvedVehicleNo = provider.vehicleNo;
+        resolvedDriverContact = provider.contactPerson ?? "";
+      }
+    }
+
     const statements = [
       c.var.DB.prepare(
         `INSERT INTO delivery_orders (
            id, doNo, salesOrderId, companySO, companySOId, customerId,
            customerPOId, customerName, customerState, hubId, hubName,
            deliveryAddress, contactPerson, contactPhone, deliveryDate,
-           hookkaExpectedDD, driverId, driverName, vehicleNo, totalM3,
+           hookkaExpectedDD, driverId, driverName, driverContactPerson,
+           vehicleNo, totalM3,
            totalItems, status, overdue, dispatchedAt, deliveredAt, remarks,
            dropPoints, deliveryCostSen, lorryId, lorryName, doQrCode,
            fgUnitIds, signedAt, signedByWorkerId, signedByWorkerName,
            proofOfDelivery, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         doNo,
@@ -633,8 +662,9 @@ app.post("/", async (c) => {
         body.deliveryDate ?? "",
         salesOrderRow?.hookkaExpectedDD ?? "",
         body.driverId ?? null,
-        body.driverName ?? "",
-        body.vehicleNo ?? "",
+        resolvedDriverName,
+        resolvedDriverContact,
+        resolvedVehicleNo,
         totalM3,
         totalItems,
         "DRAFT",
@@ -826,6 +856,10 @@ app.put("/:id", async (c) => {
         body.driverName === undefined
           ? existing.driverName
           : body.driverName,
+      driverContactPerson:
+        body.driverContactPerson === undefined
+          ? existing.driverContactPerson
+          : body.driverContactPerson,
       vehicleNo:
         body.vehicleNo === undefined ? existing.vehicleNo : body.vehicleNo,
       deliveryAddress:
@@ -877,22 +911,24 @@ app.put("/:id", async (c) => {
       merged.lorryName = "";
     }
 
-    // --- driver → 3PL lookup: auto-fill vehicle + recompute cost ---
+    // --- driver → 3PL lookup: auto-fill vehicle + contact + recompute cost ---
     if (body.driverId !== undefined && body.driverId) {
       const provider = await c.var.DB.prepare(
-        "SELECT id, name, vehicleNo, ratePerTripSen, ratePerExtraDropSen FROM three_pl_providers WHERE id = ?",
+        "SELECT id, name, vehicleNo, contactPerson, ratePerTripSen, ratePerExtraDropSen FROM three_pl_providers WHERE id = ?",
       )
         .bind(body.driverId)
         .first<{
           id: string;
           name: string;
           vehicleNo: string | null;
+          contactPerson: string | null;
           ratePerTripSen: number;
           ratePerExtraDropSen: number;
         }>();
       if (provider) {
         merged.driverName = provider.name;
         if (provider.vehicleNo) merged.vehicleNo = provider.vehicleNo;
+        merged.driverContactPerson = provider.contactPerson ?? "";
         const drops = merged.dropPoints ?? 1;
         merged.deliveryCostSen =
           provider.ratePerTripSen +
@@ -935,7 +971,8 @@ app.put("/:id", async (c) => {
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(
         `UPDATE delivery_orders SET
-           deliveryDate = ?, driverId = ?, driverName = ?, vehicleNo = ?,
+           deliveryDate = ?, driverId = ?, driverName = ?,
+           driverContactPerson = ?, vehicleNo = ?,
            deliveryAddress = ?, contactPerson = ?, contactPhone = ?,
            remarks = ?, dropPoints = ?, deliveryCostSen = ?, lorryId = ?,
            lorryName = ?, status = ?, overdue = ?, dispatchedAt = ?,
@@ -946,6 +983,7 @@ app.put("/:id", async (c) => {
         merged.deliveryDate,
         merged.driverId,
         merged.driverName,
+        merged.driverContactPerson,
         merged.vehicleNo,
         merged.deliveryAddress,
         merged.contactPerson,

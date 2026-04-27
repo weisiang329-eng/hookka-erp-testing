@@ -1,0 +1,16 @@
+-- ============================================================================
+-- Migration 0060 — add driverContactPerson to delivery_orders
+--
+-- The DO detail UI needs to display the 3PL provider's contact person
+-- (e.g. "Mr Lee" from Express Logistics) alongside the existing driverName
+-- (provider company name) and vehicleNo. Existing customer-side
+-- contactPerson / contactPhone columns represent the recipient at the
+-- delivery address (e.g. "Jess"), NOT the transporter contact — those are
+-- different humans.
+--
+-- POST + PUT endpoints denormalize provider.contactPerson into this column
+-- at create / edit time, matching the existing pattern for driverName +
+-- vehicleNo. Live JOIN was rejected because old DOs must keep their
+-- historical 3PL contact even after a provider record is deleted / renamed.
+-- ============================================================================
+ALTER TABLE delivery_orders ADD COLUMN driverContactPerson TEXT NOT NULL DEFAULT '';

@@ -4,6 +4,7 @@
 //   GET    /api/working-hour-entries?attendanceId=...
 //   GET    /api/working-hour-entries?date=YYYY-MM-DD
 //   GET    /api/working-hour-entries?workerId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
+//   GET    /api/working-hour-entries/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
 //   POST   /api/working-hour-entries                — create one entry
 //   POST   /api/working-hour-entries/bulk            — replace all entries for an attendance
 //   PUT    /api/working-hour-entries/:id             — update hours / category / notes
@@ -142,6 +143,82 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
   const notes = typeof input.notes === "string" ? input.notes : "";
   return { ok: true, data: { departmentCode, category: isProduction ? rawCategory : "", hours: hoursNum, notes } };
 }
+
+// ---------------------------------------------------------------------------
+// GET /summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Per-worker totals + per-(worker × dept) breakdown for the date range.
+// Backs the Efficiency Overview and Employee Performance KPIs in the
+// Employees page so they reflect hours entered through the new flat
+// Working Hours grid (which writes working_hour_entries with hours but
+// only stub-creates a PRESENT attendance row with workingMinutes=0).
+//
+// Returns one entry per worker that has ANY working_hour_entries rows
+// in the period:
+//   { workerId, totalHours, byDept: { FAB_CUT: 9, ... }, daysWithEntries }
+// ---------------------------------------------------------------------------
+app.get("/summary", async (c) => {
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  if (!from || !to) {
+    return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
+  }
+
+  // One query per (worker, dept) bucket — totals are derived in JS by
+  // summing across each worker's bucket rows. distinct(date) per worker
+  // gives the daysWithEntries count without a second round trip.
+  const rowsRes = await c.var.DB
+    .prepare(
+      `SELECT workerId,
+              departmentCode,
+              SUM(hours) AS hours,
+              COUNT(DISTINCT date) AS dayCount
+         FROM working_hour_entries
+        WHERE date >= ? AND date <= ?
+        GROUP BY workerId, departmentCode`,
+    )
+    .bind(from, to)
+    .all<{ workerId: string; departmentCode: string; hours: number | string; dayCount: number }>();
+
+  // Worker-level distinct-day count is the union of distinct dates across
+  // all that worker's dept buckets — can't sum the per-bucket dayCounts
+  // (a worker logging both FAB_CUT and FAB_SEW on the same date would
+  // double-count). Second tiny query keeps the math honest.
+  const daysRes = await c.var.DB
+    .prepare(
+      `SELECT workerId, COUNT(DISTINCT date) AS dayCount
+         FROM working_hour_entries
+        WHERE date >= ? AND date <= ?
+        GROUP BY workerId`,
+    )
+    .bind(from, to)
+    .all<{ workerId: string; dayCount: number }>();
+
+  const daysByWorker = new Map<string, number>();
+  for (const r of daysRes.results ?? []) {
+    daysByWorker.set(r.workerId, Number(r.dayCount) || 0);
+  }
+
+  const byWorker = new Map<string, { workerId: string; totalHours: number; byDept: Record<string, number>; daysWithEntries: number }>();
+  for (const r of rowsRes.results ?? []) {
+    const hours = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+    let entry = byWorker.get(r.workerId);
+    if (!entry) {
+      entry = {
+        workerId: r.workerId,
+        totalHours: 0,
+        byDept: {},
+        daysWithEntries: daysByWorker.get(r.workerId) ?? 0,
+      };
+      byWorker.set(r.workerId, entry);
+    }
+    entry.byDept[r.departmentCode] = (entry.byDept[r.departmentCode] ?? 0) + hours;
+    entry.totalHours += hours;
+  }
+
+  const data = Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
+  return c.json({ success: true, data, total: data.length });
+});
 
 // ---------------------------------------------------------------------------
 // GET — three query modes (attendanceId | date | workerId+from+to)

@@ -134,12 +134,6 @@ function formatHours(minutes: number): string {
   return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
-function getEfficiencyColor(pct: number): string {
-  if (pct >= 85) return "text-[#4F7C3A] bg-[#EEF3E4]";
-  if (pct >= 70) return "text-[#9C6F1E] bg-[#FAEFCB]";
-  return "text-[#9A3A2D] bg-[#F9E1DA]";
-}
-
 function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
@@ -1218,12 +1212,20 @@ function EmployeeMasterTab({
 
 // ========== TAB 3: EFFICIENCY OVERVIEW ==========
 
+// Hours-summary endpoint shape (mirrors GET /api/working-hour-entries/summary).
+type WorkerHoursSummary = {
+  workerId: string;
+  totalHours: number;
+  byDept: Record<string, number>;
+  daysWithEntries: number;
+};
+
 function EfficiencyOverviewTab({
-  workers: _workers,
-  allAttendance,
+  workers,
+  departments,
 }: {
   workers: Worker[];
-  allAttendance: AttendanceRecord[];
+  departments: DepartmentLite[];
 }) {
   const { toast } = useToast();
   const [dateFrom, setDateFrom] = useState(() => {
@@ -1233,139 +1235,119 @@ function EfficiencyOverviewTab({
   });
   const [dateTo, setDateTo] = useState(todayStr());
 
-  // Filter attendance by date range
-  const filtered = useMemo(
-    () =>
-      allAttendance.filter((a) => a.date >= dateFrom && a.date <= dateTo),
-    [allAttendance, dateFrom, dateTo]
+  // Per-worker × per-dept hours pivot — mirrors the Google Sheet HOURS
+  // DASHBOARD layout. Aggregation lives server-side (one SQL GROUP BY) so
+  // this tab is just a thin renderer. Falls back to seed depts on first
+  // render so the column layout doesn't reflow once /api/departments lands.
+  const summaryUrl = `/api/working-hour-entries/summary?from=${dateFrom}&to=${dateTo}`;
+  const { data: summaryResp, loading: summaryLoading } = useCachedJson<{ data?: WorkerHoursSummary[] }>(summaryUrl);
+  const summary: WorkerHoursSummary[] = useMemo(
+    () => summaryResp?.data ?? [],
+    [summaryResp]
   );
 
-  // Aggregate per employee
-  const employeeStats = useMemo(() => {
-    const map = new Map<
-      string,
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  // Render order: production depts first (in `sequence` order), then
+  // non-production. Stable secondary sort by code keeps undefined sequences
+  // from jumping around.
+  const orderedDepts = useMemo(() => {
+    const copy = [...allDepts];
+    copy.sort((a, b) => {
+      if (a.isProduction !== b.isProduction) return a.isProduction ? -1 : 1;
+      const sa = a.sequence ?? 999;
+      const sb = b.sequence ?? 999;
+      if (sa !== sb) return sa - sb;
+      return a.code.localeCompare(b.code);
+    });
+    return copy;
+  }, [allDepts]);
+
+  // Workers without any entries in the period are NOT in the summary
+  // response — join client-side to enrich names, drop unknown ids.
+  const workerById = useMemo(() => {
+    const m = new Map<string, Worker>();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
+
+  type EffRow = WorkerHoursSummary & { employeeName: string; empNo: string };
+  const rows: EffRow[] = useMemo(() => {
+    return summary
+      .map((s) => {
+        const w = workerById.get(s.workerId);
+        return {
+          ...s,
+          employeeName: w?.name ?? s.workerId,
+          empNo: w?.empNo ?? "",
+        };
+      })
+      .sort((a, b) => b.totalHours - a.totalHours);
+  }, [summary, workerById]);
+
+  const columns: Column<EffRow>[] = useMemo(() => {
+    const cols: Column<EffRow>[] = [
       {
-        employeeId: string;
-        employeeName: string;
-        departmentName: string;
-        totalWorkingMins: number;
-        totalProductionMins: number;
-        totalItems: number;
-        recordCount: number;
-      }
-    >();
+        key: "employeeName",
+        label: "Employee",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="font-medium text-[#1F1D1B]">
+            {row.empNo ? `${row.empNo} — ` : ""}
+            {row.employeeName}
+          </span>
+        ),
+      },
+      {
+        key: "totalHours",
+        label: "Total",
+        align: "right",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="font-semibold tabular-nums text-[#1F1D1B]">
+            {row.totalHours.toFixed(1)}h
+          </span>
+        ),
+      },
+    ];
 
-    for (const record of filtered) {
-      const existing = map.get(record.employeeId);
-      const items = record.deptBreakdown?.reduce(
-        (sum, b) => sum + (b.productCode ? 1 : 0),
-        0
-      ) || 0;
-
-      if (existing) {
-        existing.totalWorkingMins += record.workingMinutes;
-        existing.totalProductionMins += record.productionTimeMinutes;
-        existing.totalItems += items;
-        existing.recordCount++;
-      } else {
-        map.set(record.employeeId, {
-          employeeId: record.employeeId,
-          employeeName: record.employeeName,
-          departmentName: record.departmentName,
-          totalWorkingMins: record.workingMinutes,
-          totalProductionMins: record.productionTimeMinutes,
-          totalItems: items,
-          recordCount: 1,
-        });
-      }
+    for (const d of orderedDepts) {
+      cols.push({
+        key: `dept_${d.code}`,
+        label: d.shortName || d.name,
+        align: "right",
+        sortable: true,
+        render: (_value, row) => {
+          const h = row.byDept[d.code] ?? 0;
+          if (h <= 0) {
+            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          }
+          // Light green for production, light amber for non-prod —
+          // makes the dept-mix visible at a glance, matching the
+          // googlesheet HOURS DASHBOARD highlighting convention.
+          const cls = d.isProduction
+            ? "bg-[#EEF3E4] text-[#4F7C3A]"
+            : "bg-[#FAEFCB] text-[#9C6F1E]";
+          return (
+            <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium tabular-nums ${cls}`}>
+              {h.toFixed(1)}h
+            </span>
+          );
+        },
+      });
     }
 
-    return Array.from(map.values()).sort(
-      (a, b) => {
-        const effA = a.totalWorkingMins > 0 ? (a.totalProductionMins / a.totalWorkingMins) * 100 : 0;
-        const effB = b.totalWorkingMins > 0 ? (b.totalProductionMins / b.totalWorkingMins) * 100 : 0;
-        return effB - effA;
-      }
-    );
-  }, [filtered]);
-
-  type EffRow = (typeof employeeStats)[number];
-
-  const columns: Column<EffRow>[] = [
-    {
-      key: "employeeName",
-      label: "Employee",
-      sortable: true,
-      render: (_value, row) => (
-        <span className="font-medium text-[#1F1D1B]">{row.employeeName}</span>
-      ),
-    },
-    {
-      key: "departmentName",
-      label: "Department",
-      sortable: true,
-      render: (_value, row) => (
-        <span className="text-[#4B5563]">{row.departmentName}</span>
-      ),
-    },
-    {
-      key: "totalWorkingMins",
-      label: "Total Working Hrs",
-      align: "right",
-      sortable: true,
-      render: (_value, row) => (
-        <span className="font-medium">
-          {(row.totalWorkingMins / 60).toFixed(1)}h
-        </span>
-      ),
-    },
-    {
-      key: "totalProductionMins",
-      label: "Total Production Hrs",
-      align: "right",
-      sortable: true,
-      render: (_value, row) => (
-        <span className="font-medium">
-          {(row.totalProductionMins / 60).toFixed(1)}h
-        </span>
-      ),
-    },
-    {
-      key: "_efficiencyPct",
-      label: "Efficiency %",
-      align: "center",
-      render: (_value, row) => {
-        const pct =
-          row.totalWorkingMins > 0
-            ? (row.totalProductionMins / row.totalWorkingMins) * 100
-            : 0;
-        return (
-          <span
-            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-semibold ${getEfficiencyColor(pct)}`}
-          >
-            {pct.toFixed(1)}%
-          </span>
-        );
-      },
-    },
-    {
-      key: "totalItems",
-      label: "Items Completed",
+    cols.push({
+      key: "daysWithEntries",
+      label: "Days",
       align: "center",
       sortable: true,
-      render: (_value, row) => <span>{row.totalItems || "-"}</span>,
-    },
-    {
-      key: "_avgTimePerItem",
-      label: "Avg Time/Item",
-      align: "right",
-      render: (_value, row) => {
-        if (row.totalItems === 0) return <span>-</span>;
-        const avg = row.totalProductionMins / row.totalItems;
-        return <span>{formatHours(Math.round(avg))}</span>;
-      },
-    },
-  ];
+      render: (_value, row) => (
+        <span className="tabular-nums text-[#4B5563]">{row.daysWithEntries}</span>
+      ),
+    });
+
+    return cols;
+  }, [orderedDepts]);
 
   const contextMenuItems: ContextMenuItem[] = [
     {
@@ -1415,12 +1397,12 @@ function EfficiencyOverviewTab({
       <CardContent>
         <DataGrid
           columns={columns}
-          data={employeeStats}
-          keyField="employeeId"
+          data={rows}
+          keyField="workerId"
           gridId="employees-efficiency"
           contextMenuItems={contextMenuItems}
           onDoubleClick={(row) => toast.info(`Viewing details for ${row.employeeName}`)}
-          emptyMessage="No efficiency data found for the selected date range."
+          emptyMessage={summaryLoading ? "Loading…" : "No working hours recorded for the selected date range."}
         />
       </CardContent>
     </Card>
@@ -1477,7 +1459,23 @@ function EmployeeDetailTab({
     [jcResp]
   );
 
-  // Filter attendance for this employee and date range (client-side)
+  // THIRD data source — working_hour_entries for this worker. The Working
+  // Hrs and Days Present KPIs read from here (not attendance_records.
+  // workingMinutes), because the new flat Working Hours grid writes hours
+  // here while only stub-creating a PRESENT attendance row with
+  // workingMinutes=0. Without this, supervisors entering 9h on the new
+  // grid saw "0h working" on the worker's detail page.
+  const wheUrl = selectedEmployeeId
+    ? `/api/working-hour-entries?workerId=${encodeURIComponent(selectedEmployeeId)}&from=${dateFrom}&to=${dateTo}`
+    : "";
+  const { data: wheResp } = useCachedJson<{ data?: WorkingHourEntry[] }>(wheUrl);
+  const workerEntries: WorkingHourEntry[] = useMemo(
+    () => (wheResp?.data ?? []),
+    [wheResp]
+  );
+
+  // Filter attendance for this employee and date range (client-side) —
+  // still needed for the Daily Breakdown table and for OT.
   const empRecords = useMemo(
     () =>
       allAttendance
@@ -1491,9 +1489,10 @@ function EmployeeDetailTab({
     [allAttendance, selectedEmployeeId, dateFrom, dateTo]
   );
 
-  const totalWorkMins = empRecords.reduce(
-    (s, r) => s + r.workingMinutes,
-    0
+  // Total working hours from the new entries source. Sum decimal hours,
+  // convert to minutes once for downstream math (efficiency ratio, etc).
+  const totalWorkMins = Math.round(
+    workerEntries.reduce((s, e) => s + (e.hours || 0), 0) * 60
   );
   const totalProdMinsAttendance = empRecords.reduce(
     (s, r) => s + r.productionTimeMinutes,
@@ -1507,18 +1506,25 @@ function EmployeeDetailTab({
       return s + (r.picSlot === "PIC2" ? m / 2 : m);
     }, 0);
   }, [workerJcs]);
+  // Production Hrs stays attendance + JC: working_hour_entries records
+  // total time on a dept (incl. setup, breaks, idle), not the per-product
+  // production minutes the JC + attendance pair tracks. Mixing them would
+  // make Production Hrs > Working Hrs in the common new-grid case.
   const totalProdMins = totalProdMinsAttendance + totalProdMinsJc;
-  // Avg Efficiency only meaningful when we have attendance hours to compare
-  // against — if a worker has 0 attendance minutes (purely JC-tracked), the
-  // ratio is undefined / infinite, so render "—" instead of a misleading number.
   const avgEff =
     totalWorkMins > 0
       ? ((totalProdMins / totalWorkMins) * 100).toFixed(1)
       : null;
   const totalOT = empRecords.reduce((s, r) => s + r.overtimeMinutes, 0);
-  const daysPresent = empRecords.filter(
-    (r) => r.status === "PRESENT" || r.status === "HALF_DAY"
-  ).length;
+  // Days Present — distinct dates the worker has any working_hour_entries
+  // row for. Falls through attendance status entirely so workers entered
+  // via the flat grid (whose auto-created attendance row is PRESENT but
+  // with 0 minutes) count correctly.
+  const daysPresent = useMemo(() => {
+    const dates = new Set<string>();
+    for (const e of workerEntries) dates.add(e.date);
+    return dates.size;
+  }, [workerEntries]);
 
   // Flatten every deptBreakdown entry into a per-item row so the Daily
   // Breakdown shows every product this worker touched within the date range
@@ -1762,7 +1768,7 @@ function EmployeeDetailTab({
                 {avgEff}%
               </p>
             ) : (
-              <p className="text-2xl font-bold text-[#9CA3AF]" title="No attendance hours in range — efficiency requires clock-in/out punches.">
+              <p className="text-2xl font-bold text-[#9CA3AF]" title="No working hours recorded in range — efficiency requires hours to compare against.">
                 —
               </p>
             )}
@@ -3522,7 +3528,7 @@ export default function EmployeesPage() {
       {activeTab === "efficiency" && (
         <EfficiencyOverviewTab
           workers={workers}
-          allAttendance={allAttendance}
+          departments={departments}
         />
       )}
 

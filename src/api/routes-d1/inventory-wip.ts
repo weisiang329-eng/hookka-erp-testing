@@ -155,25 +155,35 @@ app.get("/", async (c) => {
   // 1) The ledger — every wip_items row with non-zero stock. This is
   //    the row set we project to the grid.
   //
-  //    BUG-2026-04-27-017: rows with deptStatus='UPHOLSTERY' are excluded.
-  //    Per the user's mental model, UPHOLSTERY-completed = the piece is now
-  //    Finished Good in stock, surfaced via deriveFGStock() on the Inventory
-  //    > Finished Products tab. Showing it on the WIP tab too double-counted
-  //    it (user-reported screenshot showed e.g. `5531 -Back Cushion 24` rows
-  //    with positive qty appearing on WIP after UPH completion). Filtering
-  //    at the SQL level keeps the negative-row stub semantics intact:
-  //    cascade-written stubs carry deptStatus='PENDING' (BUG-2026-04-27-013)
-  //    and still surface here.
+  //    BUG-2026-04-27-017 (initial fix): rows with deptStatus='UPHOLSTERY'
+  //    were blanket-excluded, on the theory that UPH-completed = the piece
+  //    is now FG and `deriveFGStock` surfaces it on the Finished Products
+  //    tab. The blanket filter over-hid for partial-UPH POs (BF: Divan UPH
+  //    done, HB UPH still WAITING; sofa: Cushion UPH done, Base/Armrest
+  //    still WAITING). In that state the PO doesn't qualify as FG yet
+  //    (deriveFGStock requires every UPH JC of the PO to be COMPLETED), so
+  //    the completed component must remain visible on the WIP tab.
+  //
+  //    Refined rule (BUG-2026-04-27-017 follow-up): a UPH wip_items row is
+  //    hidden ONLY when, for every PO that links to it via any JC's
+  //    wipLabel, all of that PO's UPH JCs are COMPLETED/TRANSFERRED. If
+  //    any linked PO still has a pending UPH JC, the row stays visible.
+  //
+  //    Implementation: read all non-zero rows from SQL, then post-filter
+  //    in JS using the (pos, jcs) maps already loaded for derivation
+  //    below. Cheaper than a triple-nested correlated subquery and reuses
+  //    the indexes we build anyway. Negative-row stub semantics (deptStatus
+  //    = 'PENDING', BUG-2026-04-27-013) are unaffected — only the
+  //    'UPHOLSTERY' deptStatus rows are subject to the conditional hide.
   const wipRowsRes = await db
     .prepare(
       `SELECT id, code, type, relatedProduct, deptStatus, stockQty
          FROM wip_items
         WHERE stockQty != 0
-          AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')
         ORDER BY code`,
     )
     .all<WipItemRow>();
-  const wipItemRows: WipItemRow[] = (wipRowsRes.results ?? []).map((r) => ({
+  const wipItemRowsAll: WipItemRow[] = (wipRowsRes.results ?? []).map((r) => ({
     id: r.id,
     code: r.code,
     type: r.type ?? "",
@@ -240,6 +250,54 @@ app.get("/", async (c) => {
     if (arr) arr.push(jc);
     else jcsByLabel.set(label, [jc]);
   }
+
+  // ---- BUG-2026-04-27-017 follow-up: conditional UPH hide -----------
+  // Pre-compute "PO is fully UPH-complete" once per PO: TRUE iff the PO
+  // has at least one UPH JC AND every UPH JC is COMPLETED/TRANSFERRED.
+  // A PO with no UPH JCs at all (e.g. accessory) is NOT considered
+  // fully UPH-complete — but its wip_items rows wouldn't carry
+  // deptStatus='UPHOLSTERY' anyway, so the flag is only consulted for
+  // POs that did write a UPH producer row.
+  const poFullyUphComplete = new Map<string, boolean>();
+  for (const po of pos) {
+    const myJcs = jcsByPo.get(po.id) ?? [];
+    const uphJcs = myJcs.filter(
+      (j) => (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
+    );
+    if (uphJcs.length === 0) {
+      poFullyUphComplete.set(po.id, false);
+      continue;
+    }
+    poFullyUphComplete.set(
+      po.id,
+      uphJcs.every(
+        (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+      ),
+    );
+  }
+
+  // A UPH-coded wip_items row is HIDDEN iff every PO that links to it
+  // (via any JC's wipLabel = row.code) is fully UPH-complete. If even
+  // one linked PO still has a pending UPH JC, keep the row visible —
+  // that PO can't qualify as FG yet, so the component must surface
+  // somewhere.
+  //
+  // Edge case: a UPH row whose code has no matching JC at all leaves
+  // `linkedPoIds` empty. Mirrors the "blanket-hide" intent from the
+  // original BUG-2026-04-27-017 fix (no PO is asserting partial-UPH
+  // visibility, so hide it). Preserves existing behavior for stale
+  // rows whose JCs got purged.
+  const wipItemRows: WipItemRow[] = wipItemRowsAll.filter((w) => {
+    if ((w.deptStatus || "").toUpperCase() !== "UPHOLSTERY") return true;
+    const linked = jcsByLabel.get(w.code) ?? [];
+    const linkedPoIds = new Set<string>();
+    for (const jc of linked) linkedPoIds.add(jc.productionOrderId);
+    if (linkedPoIds.size === 0) return false;
+    for (const poId of linkedPoIds) {
+      if (!poFullyUphComplete.get(poId)) return true; // partial → keep
+    }
+    return false; // every linked PO is fully UPH-complete → hide
+  });
 
   const today = new Date();
   const todayLaborRatePerMinSen = laborRateForDate(today);

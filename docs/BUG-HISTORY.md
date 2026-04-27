@@ -32,28 +32,73 @@ non-terminal depts). And `/api/inventory/wip` was reading every
 non-zero `wip_items` row, so those UPH producer rows showed up on the
 WIP grid too.
 
-**Fix:** Filter at the SQL source in
-`src/api/routes-d1/inventory-wip.ts:159-166`. The main query now reads:
+**Fix (initial):** Filter at the SQL source in
+`src/api/routes-d1/inventory-wip.ts`. The main query was tightened to
+`stockQty != 0 AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')`.
 
-```sql
-SELECT id, code, type, relatedProduct, deptStatus, stockQty
-  FROM wip_items
- WHERE stockQty != 0
-   AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')
- ORDER BY code
-```
-
-Rationale for SQL-level filter (vs JS post-filter): smaller payload, no
-join cost wasted on rows we'd discard. Negative-row stub semantics
+Rationale for SQL-level filter at the time: smaller payload, no join
+cost wasted on rows we'd discard. Negative-row stub semantics
 (BUG-2026-04-27-013) are unaffected — those carry
 `deptStatus='PENDING'`, not `'UPHOLSTERY'`. FG view and `deriveFGStock`
 are untouched; PO-level UPH-all-completed still drives FG appearance.
 
-**Verification:** typecheck + lint clean; existing 84 tests unaffected
-(no test asserted the UPH-row-on-WIP behavior because it was a bug).
-Manual: with a PO whose UPH is fully COMPLETED, /api/inventory/wip no
-longer returns the UPH-coded rows; /api/inventory/finished-products (or
-its frontend equivalent via `deriveFGStock`) still does.
+**Verification (initial):** typecheck + lint clean; existing 84 tests
+unaffected (no test asserted the UPH-row-on-WIP behavior because it was
+a bug). Manual: with a PO whose UPH was fully COMPLETED,
+`/api/inventory/wip` no longer returned the UPH-coded rows;
+`/api/inventory/finished-products` (or its frontend equivalent via
+`deriveFGStock`) still did.
+
+### Follow-up (2026-04-27): blanket filter over-hid partial-UPH POs
+
+**Symptom:** For BF or sofa POs that are only **partially** UPH-complete
+(e.g. BF Divan UPH done but HB still WAITING; sofa Cushion UPH done but
+Base/Armrest still WAITING), the completed component's UPH `wip_items`
+row got hidden from the WIP grid AND the PO didn't qualify as FG yet
+(`deriveFGStock` requires *every* UPH JC of the PO to be COMPLETED). Net
+result: the completed components disappeared from BOTH the WIP and FG
+views — they were "in limbo".
+
+**Root cause:** The initial SQL filter
+`AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')` was a
+PO-blind blanket exclusion. It assumed UPH-completed = PO-FG, but for a
+multi-UPH-JC PO (BF has Divan+HB, sofa has Base+Cushion+Armrest) the
+"this row is FG-equivalent" implication only holds when the PO's *last*
+UPH JC is COMPLETED. While any UPH JC is still WAITING, the producer
+rows for the already-completed UPH JCs need to remain WIP-visible.
+
+**Fix (refined):** Replace the blanket SQL exclusion with a
+PO-conditional JS post-filter in `src/api/routes-d1/inventory-wip.ts`.
+Read all non-zero `wip_items` rows from SQL, then after the
+`(pos, jcs, jcsByLabel, jcsByPo)` maps are built (used downstream for
+sources / age / cost derivation anyway), compute per-PO
+`fullyUphComplete` (TRUE iff the PO has at least one UPH JC and every
+UPH JC is COMPLETED/TRANSFERRED). A UPH-coded `wip_items` row is HIDDEN
+iff every PO that links to it via any JC's `wipLabel` is fully
+UPH-complete; if any linked PO still has a pending UPH JC, the row
+stays visible.
+
+Implementation chose JS post-filter over the equivalent triple-nested
+correlated SQL subquery because the route already loads `pos`/`jcs`
+into memory for the per-row derivation that follows the filter — reuses
+the same indexes for a smaller, more readable diff.
+
+| State | WIP page | FG page |
+|---|---|---|
+| Only one UPH JC of a PO done (partial) | **Show** UPH row | Don't show |
+| All UPH JCs of the PO done (full) | **Hide** UPH row | Show via `deriveFGStock` |
+| Non-UPH dept rows | Always show | n/a |
+
+Edge case preserved: a UPH-deptStatus row whose code has no matching JC
+at all is still hidden (no PO is asserting partial-UPH visibility, so
+the original blanket-hide intent applies).
+
+**Verification (follow-up):** typecheck + lint clean (warnings/errors
+present in the working tree are pre-existing and unrelated to this
+file); 84/84 tests pass; manual SQL spot-checks per the task brief
+(partial-BF: Divan row visible, HB row absent; full-BF: both rows
+absent on WIP, PO surfaces as FG via `deriveFGStock`; partial-sofa:
+Cushion row visible).
 
 ---
 

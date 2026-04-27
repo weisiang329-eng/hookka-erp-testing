@@ -2731,19 +2731,19 @@ export default function ProductionPage({
           <tbody>${rowsHtml}</tbody>
         </table>`;
     } else {
-      // Dept sub-tab merge: group by (wip, size, colour). Same WIP code
-      // is the same physical production unit — model/gap/divan/leg/status
-      // intentionally excluded so e.g. "8\" Divan- 5FT" rows from
-      // different models/POs collapse into a single floor instruction.
-      // Empty-string values form their own bucket — Beige and (no fabric)
-      // do NOT merge.
+      // Dept sub-tab merge: group by WIP code ONLY. The user has already
+      // baked every relevant attribute (size, fabric, dept tag like (WD)
+      // / (Frame) / NINJA 08 Foam) into the WIP code itself, so the WIP
+      // string is the canonical "what to produce" identifier. Splitting
+      // by separate size/colour columns just inflates the printout with
+      // duplicate rows that read identically to the operator. Same WIP =
+      // same physical production unit, regardless of which model variant
+      // / customer / due date the source row carried.
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
       type Bucket = {
         wip: string;
-        size: string;
-        colour: string;
         qty: number;
         earliestDue: string;
         sourceRows: number;
@@ -2751,13 +2751,11 @@ export default function ProductionPage({
       };
       const buckets = new Map<string, Bucket>();
       for (const r of printRows) {
-        const key = [r.wip, r.size, r.colour].join("|");
+        const key = r.wip;
         let b = buckets.get(key);
         if (!b) {
           b = {
             wip: r.wip,
-            size: r.size,
-            colour: r.colour,
             qty: 0,
             earliestDue: "",
             sourceRows: 0,
@@ -2771,21 +2769,15 @@ export default function ProductionPage({
         if (r.customerName) b.customers.add(r.customerName);
       }
       sourceCount = printRows.length;
-      const list = Array.from(buckets.values()).sort((a, b) => {
-        const w = a.wip.localeCompare(b.wip);
-        if (w !== 0) return w;
-        const s = a.size.localeCompare(b.size);
-        if (s !== 0) return s;
-        return a.colour.localeCompare(b.colour);
-      });
+      const list = Array.from(buckets.values()).sort((a, b) =>
+        a.wip.localeCompare(b.wip),
+      );
       mergedCount = list.length;
       totalQty = list.reduce((s, x) => s + x.qty, 0);
       const rowsHtml = list.map((b, i) => {
         return `<tr>
           <td class="num">${i + 1}</td>
           <td><b>${escapeHtml(b.wip)}</b></td>
-          <td>${escapeHtml(b.size)}</td>
-          <td>${escapeHtml(b.colour)}</td>
           <td class="num"><b>${b.qty}</b></td>
           <td>${fmt(b.earliestDue)}</td>
           <td class="num">${b.sourceRows}</td>
@@ -2798,8 +2790,6 @@ export default function ProductionPage({
             <tr>
               <th class="num">#</th>
               <th>WIP</th>
-              <th>Size</th>
-              <th>Colour</th>
               <th class="num">Total Qty</th>
               <th>Earliest Due</th>
               <th class="num">N orders</th>

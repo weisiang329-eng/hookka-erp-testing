@@ -428,12 +428,21 @@ export default function DeliveryPage() {
             }
           }
 
-          const linkedSoIds = new Set(
-            (dRes.success && Array.isArray(dRes.data) ? (dRes.data as DeliveryOrder[]) : [])
-              .filter((d) => d.status !== "CANCELLED" && !d.id.startsWith("virt-"))
-              .map((d) => d.salesOrderId)
-              .filter((s): s is string => !!s),
-          );
+          // Build the set of PO IDs already on a non-cancelled DO so the
+          // "Production Complete — Ready for DO" list excludes them
+          // (BUG-2026-04-27: previous SO-level dedup wrongly kept POs
+          // visible whose SO's OTHER POs were on a multi-SO DO — the DO
+          // stores only one representative salesOrderId, so SO-level
+          // matching missed siblings carried via the items array).
+          const linkedPOIds = new Set<string>();
+          if (dRes.success && Array.isArray(dRes.data)) {
+            for (const d of dRes.data as DeliveryOrder[]) {
+              if (d.status === "CANCELLED" || d.id.startsWith("virt-")) continue;
+              for (const it of d.items || []) {
+                if (it.productionOrderId) linkedPOIds.add(it.productionOrderId);
+              }
+            }
+          }
 
           const allPOs = poRes.data as ProductionOrderApiShape[];
 
@@ -491,7 +500,7 @@ export default function DeliveryPage() {
               if (uphCards.length === 0) return false;
               return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
             })
-            .filter((po) => !po.salesOrderId || !linkedSoIds.has(po.salesOrderId))
+            .filter((po) => !linkedPOIds.has(po.id))
             .map(mapPO);
           setReadyPOs(ready);
         }

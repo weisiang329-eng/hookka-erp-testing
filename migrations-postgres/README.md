@@ -1,63 +1,139 @@
-# `migrations-postgres/` — generated Postgres schema
+# `migrations-postgres/` — Postgres schema (live source of truth)
 
-**Do NOT hand-edit files 0001-0044 in this directory.** They are produced by
-`scripts/d1-to-postgres.mjs` from the authoritative SQLite migrations in
-`migrations/`.
+These files are applied to **Supabase Postgres** — the runtime data store
+for hookka-erp. The legacy D1 path (`migrations/` + `wrangler d1 migrations
+apply`) was retired on 2026-04-27 (see `docs/d1-retirement-plan.md`).
 
-## Why two directories exist (Phase 0-7 coexistence)
+Routes connect via the Hyperdrive binding configured in `wrangler.toml`,
+through the `D1Compat` adapter (`src/api/lib/d1-compat.ts`) that translates
+SQLite-flavoured route SQL to Postgres on the fly.
 
-- `migrations/` — the historical source of truth (SQLite, applied to D1).
-  New migrations land here.
-- `migrations-postgres/` — generated output of the preprocessor; applied
-  to Supabase via `scripts/apply-postgres-migrations.mjs`.
-- The runtime SQL translator (`src/api/lib/d1-compat.ts`) uses the
-  `column-rename-map` derived from the same preprocessor to camelCase-proof
-  the 68 codemod'd routes.
+---
 
-Phase 7 of the D1 retirement plan (`docs/d1-retirement-plan.md`) collapses
-this down to a single directory. Until then, **both must stay in sync**.
+## TL;DR — daily workflow
 
-## Adding a new migration
+```bash
+# 1. Author a new migration. Two options:
+#    (a) Write SQLite, regen Postgres + rename map (preserves d1-compat path):
+echo "ALTER TABLE foo ADD COLUMN bar TEXT;" > migrations/0064_add_bar.sql
+node scripts/d1-to-postgres.mjs
 
-1. Write `migrations/NNNN_description.sql` in SQLite dialect, matching the
-   existing style (camelCase columns, `INTEGER PRIMARY KEY AUTOINCREMENT`,
-   `datetime('now')`, `INSERT OR IGNORE`, etc.).
-2. Apply to local D1: `npm run d1:migrate:local`.
-3. Regenerate the Postgres copies: `node scripts/d1-to-postgres.mjs`.
-   This rewrites every file in this directory AND writes the updated
-   `src/api/lib/column-rename-map.json`.
-4. Apply to Supabase (dev first, prod second):
-   - Dev: `node scripts/apply-postgres-migrations.mjs` (prompts for
-     confirmation if the target DB already has tables; pass `--reset` to
-     wipe and re-seed).
-   - Prod: same script against the prod `DATABASE_URL` with `--reset`
-     **only if you mean it**. Live data will be destroyed.
-5. Commit both `migrations/NNNN_*.sql` AND the regenerated
-   `migrations-postgres/` + `src/api/lib/column-rename-map.json`.
+#    (b) OR write Postgres directly (skip if no new camelCase identifiers):
+echo "ALTER TABLE foo ADD COLUMN bar TEXT;" > migrations-postgres/0064_add_bar.sql
 
-## Exceptions to the generated rule
+# 2. Preview what will be applied (idempotent, safe — uses _migrations table):
+npm run db:migrate:supabase:dry
 
-- `9901_dashboard_mat_views.sql` — hand-written Postgres-only
-  (materialized views don't exist in SQLite). Numbered in the 9xxx range to
-  stay after the auto-generated 0xxx migrations.
-- `0027_sofa_upholstery_packing.sql` and `0029_refresh_sofa_dept_backfill.sql` —
-  data-only repairs that use SQLite-specific functions
-  (`json_extract`, `randomblob`). Skipped by the applier; the affected rows
-  are already present in the D1 data dump imported via
-  `scripts/import-d1-data-to-supabase.mjs`.
+# 3. Apply to whatever DATABASE_URL is in .dev.vars (set to local OR prod):
+npm run db:migrate:supabase
+```
 
-## Debugging column errors
+---
 
-`column "foo" does not exist` usually means one of:
+## How `db:migrate:supabase` works
 
-1. A camelCase identifier was added to a migration in `migrations/` but
+`scripts/apply-postgres-migrations-incremental.mjs`:
+
+1. Reads `DATABASE_URL` from `.dev.vars` and connects via `postgres.js`.
+2. Creates `_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ
+   DEFAULT NOW())` if missing.
+3. Lists `migrations-postgres/*.sql`, sorted lexically.
+4. Skips files whose name is already in `_migrations` (so re-runs are no-ops).
+5. For each pending file: opens a transaction, runs the SQL, INSERTs into
+   `_migrations`, commits. On failure: ROLLBACK and stop (later migrations
+   are NOT attempted).
+6. Reports applied / skipped / failed counts.
+
+It does **not** drop schema and does **not** mutate data outside what your
+migration says. Safe to re-run.
+
+`--dry-run` prints the file list without applying.
+
+---
+
+## First-time setup against an existing Supabase prod
+
+The new tool would otherwise try to apply ALL migrations from scratch on
+its first run, which would fail because the schema already exists. Run the
+backfill helper ONCE to mark every migration up to and including 0060 as
+already-applied:
+
+```bash
+node scripts/backfill-postgres-migration-tracker.mjs
+```
+
+After that, `npm run db:migrate:supabase` will only attempt files newer
+than 0060 (i.e. 0061, 0062, 0063, plus any future files).
+
+The backfill script is idempotent: it uses `INSERT ... ON CONFLICT DO
+NOTHING`, so re-running it is harmless.
+
+If you ever stand up a NEW Supabase project from scratch, do NOT run the
+backfill — instead use `npm run db:reset:supabase` (which calls the
+destructive script) for the initial schema, or run `db:migrate:supabase`
+from the start so each migration goes through the tracker normally.
+
+---
+
+## Reset (rare; dev/scratch only)
+
+For a clean slate (DROP SCHEMA public CASCADE → re-apply everything):
+
+```bash
+npm run db:reset:supabase    # → scripts/apply-postgres-migrations.mjs --reset
+```
+
+This script refuses to run if the target DB already has tables UNLESS you
+pass `--reset`. It does not use the `_migrations` tracker — it always
+applies every file from 0001 onwards. Reserved for fresh local DBs and the
+nuclear-option dev reset.
+
+---
+
+## Generated-vs-handwritten migrations
+
+- `0001_*.sql` through `0044_*.sql`: generated by
+  `scripts/d1-to-postgres.mjs` from `migrations/`. Do not hand-edit; rerun
+  the preprocessor instead.
+- `0045_*.sql` onwards: a mix. New files can be authored in either
+  directory. The preprocessor is still the source of truth for the
+  camelCase → snake_case rename map, so if you skip `migrations/` you must
+  manually maintain `src/api/lib/column-rename-map.json` for any new
+  camelCase identifiers your routes touch.
+- `9901_dashboard_mat_views.sql`: hand-written Postgres-only (materialized
+  views don't exist in SQLite). Numbered in the 9xxx range to stay after
+  the auto-generated 0xxx series.
+
+## Skipped historical migrations
+
+`scripts/apply-postgres-migrations.mjs` (the destructive `--reset` script)
+explicitly skips two SQLite-only data-repair migrations:
+
+- `0027_sofa_upholstery_packing.sql`
+- `0029_refresh_sofa_dept_backfill.sql`
+
+They use SQLite-specific functions (`json_extract`, `randomblob`) and
+target pre-existing D1 rows. The data they would patch is already present
+in the Supabase row import done via
+`scripts/import-d1-data-to-supabase.mjs`. The new incremental script
+applies whatever it finds — these two files would still fail in fresh
+applies, so leave them alone unless the Postgres-equivalent rewrite is
+done.
+
+---
+
+## Debugging `column "foo" does not exist`
+
+Usually one of:
+
+1. A camelCase identifier was added to a `migrations/NNNN_*.sql` file but
    the preprocessor wasn't re-run. → `node scripts/d1-to-postgres.mjs`.
-2. A camelCase identifier appears as a SELECT **alias**
-   (`SELECT x AS fooBar`) that the D1-compat adapter doesn't rewrite. The
-   rename map only covers identifiers that appeared in migrations — aliases
-   coined in route code are invisible to it. Fix: quote the alias
-   (`AS "fooBar"`) or use snake_case with a camelCase property via
-   postgres.js's `toCamel` transform (`AS foo_bar` → `row.fooBar`).
-3. A materialized view column was referenced through the rename map.
-   MV column names (e.g. `order_count` in `mv_so_summary`) are NOT in the
+2. A camelCase identifier appears as a SELECT alias (`SELECT x AS fooBar`)
+   that the D1Compat adapter doesn't rewrite. The rename map only covers
+   identifiers that appeared in CREATE TABLE / ALTER TABLE statements —
+   aliases coined in route code are invisible to it. Fix: quote the alias
+   (`AS "fooBar"`) or use snake_case with `postgres.js`'s `toCamel` (e.g.
+   `AS foo_bar` → `row.fooBar`).
+3. A materialized view column was referenced through the rename map. MV
+   column names (e.g. `order_count` in `mv_so_summary`) are NOT in the
    rename map — reference them literally in snake_case.

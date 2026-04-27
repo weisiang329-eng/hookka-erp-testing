@@ -1,7 +1,17 @@
-# D1 Retirement Plan (Phase 7)
+# D1 Retirement Plan (Phase 7) — [LEGACY/HISTORICAL]
 
-Status: **not yet executed.** D1 binding retained on main branch as hot
-rollback; Supabase/Hyperdrive running on the `claude-phase2-smoke` preview.
+> **Status (2026-04-27): EXECUTED.** D1 binding removed from
+> `wrangler.toml` (commit `7059259`); the `D1Database` field is gone from
+> `Bindings`; every route flows `c.var.DB → D1Compat → Postgres → Hyperdrive
+> → Supabase`. The original D1 instance (`hookka-erp-db`) still exists in
+> Cloudflare for snapshot rollback only — it has zero live traffic. The
+> CI step `wrangler d1 migrations apply --remote` was removed from
+> `.github/workflows/deploy.yml`; Postgres migrations now apply via
+> `npm run db:migrate:supabase` (see `migrations-postgres/README.md`).
+>
+> The plan below is preserved as historical context.
+
+---
 
 ## Pre-conditions
 

@@ -85,20 +85,27 @@ JWT_SECRET=<…>
 
 ---
 
-## C. D1 / Postgres migrations
+## C. Postgres migrations
 
-Apply both migrations:
+D1 was retired 2026-04-27 — apply only against Supabase Postgres now:
 
 ```bash
-# D1 (legacy / rollback path)
-npm run db:migrate:remote
+# Preview pending migrations against the DATABASE_URL in .dev.vars
+npm run db:migrate:supabase:dry
 
-# Postgres (Supabase — the live source of truth)
+# Apply (idempotent — uses _migrations tracker table; safe to re-run)
+npm run db:migrate:supabase
+```
+
+Or apply specific files manually if you know exactly what you want:
+
+```bash
 psql "$DATABASE_URL" -f migrations-postgres/0053_oauth_identities.sql
 psql "$DATABASE_URL" -f migrations-postgres/0054_user_totp.sql
 ```
 
-Both files are idempotent (`IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`).
+The migration files themselves are idempotent (`IF NOT EXISTS` /
+`ADD COLUMN IF NOT EXISTS`).
 
 ---
 

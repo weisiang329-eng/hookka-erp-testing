@@ -5,11 +5,16 @@
 #   - Vite SPA builds to ./dist → deployed to Cloudflare Pages
 #   - Hono API runs as a Pages Function under ./functions/api/[[route]].ts
 #     (or a separate Worker — see "Alternative" below)
-#   - D1 database holds all business data (customers, SOs, POs, etc.)
+#   - Supabase Postgres (via the Hyperdrive binding below) holds all
+#     business data — customers, SOs, POs, job cards, inventory, etc.
+#     [LEGACY] D1 was the source of truth pre-Phase 7. The binding was
+#     retired in commit 7059259 (2026-04-27) and every route now flows
+#     through the D1Compat → Postgres adapter wired up in worker.ts.
 #
 # Local dev:
-#   npm run dev         # Vite dev server on 3000 (proxies /api → wrangler)
-#   npm run dev:worker  # wrangler dev on 8787 (Workers runtime + D1 local)
+#   npm run dev         # Vite dev server on 3000 (proxies /api → mock API)
+#   npm run dev:worker  # wrangler dev on 8787 (Workers runtime; talks to
+#                       # Supabase via DATABASE_URL in .dev.vars)
 # ---------------------------------------------------------------------------
 
 name = "hookka-erp-testing"
@@ -64,11 +69,12 @@ id = "8f4c4b7ac1f142ff8378eada4602458a"
 # DISABLED 2026-04-26: enabling this binding without enabling Analytics
 # Engine on the Cloudflare account caused 30 consecutive CI deploy failures
 # ("You need to enable Analytics Engine"). Net effect: prod was running
-# stale code from before commit 3de901a AND post-deploy `d1 migrations
-# apply --remote` was never running. Re-enable AFTER the user enables
-# Analytics Engine at https://dash.cloudflare.com → Analytics & Logs →
-# Analytics Engine. Until then, observability emits via console only
-# (visible via `wrangler pages deployment tail`).
+# stale code from before commit 3de901a AND the post-deploy schema-apply
+# step (then `d1 migrations apply --remote`, now removed entirely — see
+# 2026-04-27 cleanup commit) was never running. Re-enable AFTER the user
+# enables Analytics Engine at https://dash.cloudflare.com → Analytics &
+# Logs → Analytics Engine. Until then, observability emits via console
+# only (visible via `wrangler pages deployment tail`).
 # [[analytics_engine_datasets]]
 # binding = "ERP_METRICS"
 # dataset = "hookka_erp_metrics"
@@ -96,7 +102,9 @@ id = "8f4c4b7ac1f142ff8378eada4602458a"
 #      mutations happen).  Lowest latency, most code touch points.
 #
 # Until one of the above ships, dashboard tiles will reflect the MV state at
-# the last manual refresh — see docs/d1-retirement-plan.md for the runbook.
+# the last manual refresh — see migrations-postgres/README.md for the
+# Supabase migration flow and docs/d1-retirement-plan.md ([LEGACY] now
+# fully executed) for historical context.
 
 # ---------------------------------------------------------------------------
 # Phase C #3 quick-win — PO emission queue (scaffold).

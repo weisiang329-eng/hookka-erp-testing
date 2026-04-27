@@ -109,7 +109,7 @@ jobs:
               ``,
               `Preview URL: ${url}`,
               ``,
-              `This branch is wired to the same Hyperdrive / D1 / KV bindings as production. Test changes here before merging — see [docs/CANARY-DEPLOY.md](../blob/main/docs/CANARY-DEPLOY.md) for the review checklist.`,
+              `This branch is wired to the same Hyperdrive (→ Supabase Postgres) and KV bindings as production. (D1 binding was retired 2026-04-27; runtime data path is Postgres.) Test changes here before merging — see [docs/CANARY-DEPLOY.md](../blob/main/docs/CANARY-DEPLOY.md) for the review checklist.`,
               ``,
               `Promote to main = merge this PR.`,
             ].join("\n");
@@ -137,11 +137,34 @@ jobs:
               });
             }
 
-      # D1 migration step removed 2026-04-27 (Phase 7 retire). Schema now
-      # lives on Supabase Postgres; migrations under migrations-postgres/
-      # are applied manually via the Supabase SQL Editor (or via psql with
-      # the pooler connection string from .dev.vars). The legacy D1
-      # database is no longer in wrangler.toml so this step would fail
-      # with "Couldn't find a D1 DB with the name 'hookka-erp-db'" anyway.
-      # See `chore(infra): retire D1 binding` (commit 7059259) and
-      # `docs/INVENTORY-WIP-FLOW.md` for the migration history.
+      # ---------------------------------------------------------------------
+      # [LEGACY-RETIRED 2026-04-27] D1 migrations step removed.
+      # ---------------------------------------------------------------------
+      # The runtime data layer is Supabase Postgres (via Hyperdrive); the D1
+      # binding was removed in commit 7059259. The previous step here ran
+      # `wrangler d1 migrations apply hookka-erp-db --remote` against an
+      # instance with zero live traffic, which silently masked the fact
+      # that migrations 0061-0063 never reached prod Supabase.
+      #
+      # Postgres migrations are applied manually for now — the operator
+      # runs locally:
+      #   npm run db:migrate:supabase:dry   # preview pending files
+      #   npm run db:migrate:supabase       # apply to prod (uses _migrations
+      #                                     # tracker table, idempotent)
+      # against the prod DATABASE_URL in .dev.vars. See
+      # migrations-postgres/README.md for the full flow.
+      #
+      # Why not re-add an automated CI step against Supabase?
+      # 1. The Supabase prod DATABASE_URL would need to live as a CI secret.
+      # 2. A failed migration mid-deploy is harder to recover than a
+      #     deliberate operator-run apply.
+      # 3. The new incremental tool is safe to re-run, so the operator can
+      #     simply re-run after fixing a bad SQL file.
+      # If/when this gets automated, wire `npm run db:migrate:supabase`
+      # into a step gated on `github.ref == 'refs/heads/main'` with the
+      # Supabase pooler URL exposed via `secrets.SUPABASE_DATABASE_URL`.
+      - name: Schema migrations (manual reminder)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "::notice::Postgres migrations are applied manually. Run 'npm run db:migrate:supabase:dry' locally to preview, then 'npm run db:migrate:supabase' against prod DATABASE_URL. See migrations-postgres/README.md."
+>>>>>>> f083ff8 (chore(supabase): retire D1 references, document Postgres-only flow, add incremental migration tool)

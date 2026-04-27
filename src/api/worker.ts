@@ -2,26 +2,31 @@
 // Hono app for Cloudflare Pages Functions — the hookka-erp backend.
 //
 // Data layer (post Phase 0-7 migration, see docs/d1-retirement-plan.md):
-//   Browser → Pages Functions (this app) → D1-compat adapter (c.var.DB)
+//   Browser → Pages Functions (this app) → D1Compat adapter (c.var.DB)
 //     → postgres.js → Hyperdrive (CF pool) → Supabase Postgres (Singapore)
 //
+// [LEGACY DIRECTORY NAMES] `routes-d1/` and `D1Compat` are named after the
+// pre-2026-04-27 stack. The actual runtime data path is 100% Postgres.
+// The D1 binding has been removed entirely (commit 7059259); no route
+// touches a real D1Database any more. See src/api/routes-d1/README.md.
+//
 // Key bindings (wrangler.toml):
-//   HYPERDRIVE       — production/preview Postgres connection
+//   HYPERDRIVE       — production/preview Postgres pool to Supabase
 //   SESSION_CACHE    — KV cache for auth sessions + hot lookup tables
-//   DB (D1Database)  — LEGACY, retained for rollback only.  Routes MUST use
-//                      c.var.DB, NOT c.env.DB.  See the DB-injection
-//                      middleware below.
+//   (No DB / D1Database binding — retired 2026-04-27.)
 //
 // Per-request lifecycle:
 //   1. CORS       — allow Pages origin + local Vite dev
 //   2. timingMdw  — emits [req] / [slow-req] log lines for wrangler tail
-//   3. dbInject   — constructs a D1-compat adapter over Hyperdrive and
-//                   stashes it on c.var.DB.  Every authenticated route
+//   3. dbInject   — constructs a D1Compat adapter over Hyperdrive and
+//                   stashes it on c.var.DB. Every authenticated route
 //                   below this line transacts via c.var.DB.
 //   4. authMdw    — Bearer-token gate with KV session cache (see
 //                   lib/auth-middleware.ts); public endpoints registered
 //                   BEFORE this line bypass auth by virtue of order.
-//   5. Route handlers — imported from routes-d1/*.
+//   5. Route handlers — imported from routes-d1/* (legacy name only;
+//                   actual runtime is Postgres). New routes can land in
+//                   the same directory until the rename PR happens.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { cors } from "hono/cors";

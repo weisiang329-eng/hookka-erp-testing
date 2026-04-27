@@ -1,5 +1,13 @@
 // ---------------------------------------------------------------------------
+// [LEGACY-NAMED COMPONENT, but actively load-bearing.]
 // D1 → Supabase Postgres compatibility adapter.
+//
+// The "D1" in the name reflects the *interface shape* this exposes
+// (Cloudflare's `D1Database` API surface), not the destination — every
+// query routed through here lands in Postgres. The real D1 binding was
+// retired 2026-04-27 (commit 7059259). This adapter is the bridge that
+// lets ~60 route files keep their existing `c.var.DB.prepare(...)` calls
+// unchanged while talking to Supabase under the hood.
 //
 // Wraps a postgres.js client and exposes a *subset* of the Cloudflare D1
 // `D1Database` interface — just enough that existing routes written against

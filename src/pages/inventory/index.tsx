@@ -180,14 +180,13 @@ type WIPItem = {
   id: string;
   wipCode: string;      // e.g. "1013-(Q) -HB 20" (WD)"
   wipType: string;      // e.g. "Divan", "Headboard", "Base", "Cushion", "SET"
-  // "" for skipped-dept anomaly rows (wip_items.stockQty < 0) merged in
-  // from /api/inventory/wip's `anomalies` field — the wip_items table
-  // has no category column, so the pill is suppressed for those rows.
-  category: "SOFA" | "BEDFRAME" | "ACCESSORY" | "";
+  category: "SOFA" | "BEDFRAME" | "ACCESSORY";
   relatedProduct: string;
-  completedBy: string;  // department that completed this WIP
-  totalQty: number;     // summed qty across all POs
-  oldestAgeDays: number; // FIFO: oldest item's age
+  completedBy: string;  // department that completed this WIP ("PENDING" for negative rows)
+  totalQty: number;     // summed qty across all POs (negative for skipped-upstream stubs)
+  // FIFO oldest age; null on negative (skipped-upstream) rows since
+  // there's no producer JC yet — the UI renders "—" for null.
+  oldestAgeDays: number | null;
   sources: WIPSource[]; // individual POs for detail view
   // Estimated cost (display only — WIP has no real FIFO batch).
   // Material is allocated across the WHOLE PO's minutes: each production
@@ -196,6 +195,7 @@ type WIPItem = {
   // (doneMinsInThisWipGroup × laborRate) of labor. This scheme is fully
   // self-consistent: walking every WIP through every dept of the PO
   // accumulates exactly BOM + totalPOMins × rate = the final FG cost.
+  // Both 0 on negative rows — UI renders "—" in those cells.
   estUnitCostSen: number;
   estTotalValueSen: number;
   // Per-JC breakdown (optional — populated for backend-derived rows). Used by
@@ -336,15 +336,17 @@ type SofaSetRow = {
   salesOrderNo: string;
   fabric: string;
   totalQty: number;
-  oldestAgeDays: number;
+  oldestAgeDays: number | null;
   estTotalValueSen: number;
   components: { wipType: string; qty: number }[];
   members: WIPItem[];
 };
 
-// Raw response shape from GET /api/inventory/wip. Each row is either a
-// per-component WIPItem (wipType != "SET") or a merged sofa set
-// (wipType === "SET"); the UI splits them at render time.
+// Raw response shape from GET /api/inventory/wip. One row per wip_items
+// ledger entry (stock_qty != 0) — positive rows are produced WIP stock,
+// negative rows are skipped-upstream stubs. The frontend renders both
+// in the same DataGrid; the only visual treatment for negatives is red
+// bold qty + dashes in the age/cost/value cells.
 type BackendWipRow = {
   id: string;
   wipCode: string;
@@ -356,7 +358,7 @@ type BackendWipRow = {
   pieceQty: number;
   salesOrderNo: string | null;
   fabric: string;
-  oldestAgeDays: number;
+  oldestAgeDays: number | null;
   estUnitCostSen: number;
   estTotalValueSen: number;
   members: Array<{
@@ -378,20 +380,6 @@ type BackendWipRow = {
     baseModel: string;
     itemCategory: string;
   }>;
-};
-
-// Skipped-dept anomaly row from /api/inventory/wip's `anomalies` field —
-// a wip_items row with stockQty < 0. Means a downstream dept got marked
-// COMPLETED before its upstream; the negative count self-resolves to 0
-// once the upstream finishes too. These rows are merged into the main
-// WIP grid (same column structure) — the negative qty is the primary
-// visual signal, plus a small warning indicator next to the code.
-type WipAnomaly = {
-  id: string;
-  code: string;
-  stockQty: number;
-  deptStatus: string;
-  relatedProduct: string | null;
 };
 
 // LEGACY — superseded by /api/inventory/wip endpoint (Phase 4.5).
@@ -845,34 +833,14 @@ const wipColumns: Column<WIPItem>[] = [
   {
     key: "wipCode",
     label: "WIP Code",
-    render: (_v, row) => {
-      // Negative-qty rows are wip_items.stockQty < 0 — written by the
-      // cascade when a downstream dept gets COMPLETED before its
-      // upstream. Subtle inline warning so the code still reads
-      // naturally; the red qty in the next column is the primary signal.
-      if (row.totalQty < 0) {
-        return (
-          <span
-            className="inline-flex items-center gap-1.5 text-sm font-medium text-[#1F1D1B]"
-            title="Negative qty — downstream dept completed before upstream. Self-resolves to 0 once the upstream dept is also completed."
-          >
-            <AlertTriangle className="h-3.5 w-3.5 text-[#9A3A2D]" />
-            {row.wipCode}
-          </span>
-        );
-      }
-      return <span className="text-sm font-medium text-[#1F1D1B]">{row.wipCode}</span>;
-    },
+    render: (_v, row) => (
+      <span className="text-sm font-medium text-[#1F1D1B]">{row.wipCode}</span>
+    ),
   },
   {
     key: "category",
     label: "Category",
     render: (_v, row) => {
-      // Anomaly rows (wip_items.stockQty < 0) carry no category — show
-      // a dash rather than a misleading pill.
-      if (!row.category) {
-        return <span className="text-[#9CA3AF]">—</span>;
-      }
       const sem = INVENTORY_TYPE_COLOR[row.category] ?? NEUTRAL;
       return <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${sem.bg} ${sem.text} ${sem.border}`}>{row.category}</span>;
     },
@@ -933,7 +901,14 @@ const wipColumns: Column<WIPItem>[] = [
     key: "oldestAgeDays",
     label: "Age (FIFO)",
     align: "right",
-    render: (_v, row) => renderAgeCell(row.oldestAgeDays),
+    render: (_v, row) => {
+      // Negative rows have no producer JC yet — render dash instead of
+      // a misleading "0 days".
+      if (row.totalQty < 0 || row.oldestAgeDays == null) {
+        return <span className="text-[#9CA3AF]">—</span>;
+      }
+      return renderAgeCell(row.oldestAgeDays);
+    },
   },
   // Estimated cost: WIP has no real FIFO batch so this is a computed
   // estimate (material prorated by labor progress + labor-so-far). Shown
@@ -942,27 +917,37 @@ const wipColumns: Column<WIPItem>[] = [
     key: "estUnitCostSen",
     label: "Unit Cost (RM)",
     align: "right",
-    render: (_v, row) => (
-      <div className="text-right tabular-nums">
-        <div className="text-[#1F1D1B] text-sm font-medium">
-          {formatUnitCost(row.estUnitCostSen)}
+    render: (_v, row) => {
+      if (row.totalQty < 0) {
+        return <span className="text-[#9CA3AF]">—</span>;
+      }
+      return (
+        <div className="text-right tabular-nums">
+          <div className="text-[#1F1D1B] text-sm font-medium">
+            {formatUnitCost(row.estUnitCostSen)}
+          </div>
+          <div className="text-[10px] text-[#9CA3AF]">est.</div>
         </div>
-        <div className="text-[10px] text-[#9CA3AF]">est.</div>
-      </div>
-    ),
+      );
+    },
   },
   {
     key: "estTotalValueSen",
     label: "Stock Value (RM)",
     align: "right",
-    render: (_v, row) => (
-      <div className="text-right tabular-nums">
-        <div className="text-[#1F1D1B] text-sm font-medium">
-          {formatValue(row.estTotalValueSen)}
+    render: (_v, row) => {
+      if (row.totalQty < 0) {
+        return <span className="text-[#9CA3AF]">—</span>;
+      }
+      return (
+        <div className="text-right tabular-nums">
+          <div className="text-[#1F1D1B] text-sm font-medium">
+            {formatValue(row.estTotalValueSen)}
+          </div>
+          <div className="text-[10px] text-[#9CA3AF]">est.</div>
         </div>
-        <div className="text-[10px] text-[#9CA3AF]">est.</div>
-      </div>
-    ),
+      );
+    },
   },
 ];
 
@@ -1020,7 +1005,12 @@ const _sofaSetColumns = (
     key: "oldestAgeDays",
     label: "Oldest Age (days)",
     align: "right",
-    render: (_v, row) => renderAgeCell(row.oldestAgeDays),
+    render: (_v, row) => {
+      if (row.oldestAgeDays == null) {
+        return <span className="text-[#9CA3AF]">—</span>;
+      }
+      return renderAgeCell(row.oldestAgeDays);
+    },
   },
   {
     key: "estTotalValueSen",
@@ -1132,14 +1122,11 @@ export default function InventoryPage() {
   // deriveFGStock can split completed POs into Available vs Reserved
   // and exclude already-dispatched ones.
   const [poToDOState, setPoToDOState] = useState<Map<string, "DRAFT" | "DISPATCHED">>(new Map());
-  // Phase 4.5 — raw rows from /api/inventory/wip. Replaces the old
-  // client-side deriveWIPFromPO + mergeSofaWIPSets pipeline.
+  // Raw rows from /api/inventory/wip — the wip_items ledger view.
+  // Each row corresponds to one wip_items row with stock_qty != 0;
+  // negatives are skipped-upstream stubs and live in the same list as
+  // positives so the grid is a single uniform render.
   const [backendWipRows, setBackendWipRows] = useState<BackendWipRow[]>([]);
-  // Skipped-dept anomalies (wip_items.stockQty < 0). Merged directly into
-  // the main WIP grid as negative-qty rows (red bold qty + small warning
-  // indicator) so the user can watch +1/-1 加加减减 in one unified view as
-  // they advance/backfill depts.
-  const [wipAnomalies, setWipAnomalies] = useState<WipAnomaly[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -1236,45 +1223,36 @@ export default function InventoryPage() {
       }
     };
 
-    // Phase 4.5 — WIP rows come from /api/inventory/wip now. The endpoint
-    // returns a single array containing BOTH per-component rows (wipType !=
-    // "SET") and merged sofa-set rows (wipType === "SET"); the UI splits
-    // them at render time. The same response also carries an `anomalies`
-    // array (wip_items.stockQty < 0 — see Skipped Dept Anomalies section).
-    const fetchWipPayload = async (): Promise<{
-      rows: BackendWipRow[];
-      anomalies: WipAnomaly[];
-    }> => {
+    // /api/inventory/wip — every wip_items row with stock_qty != 0
+    // already projected to the WIPItem grid shape. Includes both
+    // positive (produced WIP stock) and negative (skipped-upstream
+    // stub) rows in a single uniform list.
+    const fetchWipRows = async (): Promise<BackendWipRow[]> => {
       try {
         const json = await cachedFetchJson<{
           success?: boolean;
           data?: BackendWipRow[];
-          anomalies?: WipAnomaly[];
           _stub?: boolean;
         }>("/api/inventory/wip");
         if (json && json.success && Array.isArray(json.data) && !json._stub) {
-          return {
-            rows: json.data as BackendWipRow[],
-            anomalies: Array.isArray(json.anomalies) ? json.anomalies : [],
-          };
+          return json.data as BackendWipRow[];
         }
       } catch { /* fall through */ }
-      return { rows: [], anomalies: [] };
+      return [];
     };
 
     (async () => {
-      const [inv, pos, wipPayload, doStates] = await Promise.all([
+      const [inv, pos, wipRows, doStates] = await Promise.all([
         fetchInventory(),
         fetchPOs(),
-        fetchWipPayload(),
+        fetchWipRows(),
         fetchDOStates(),
       ]);
       if (cancelled) return;
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setPoData(pos);
-      setBackendWipRows(wipPayload.rows);
-      setWipAnomalies(wipPayload.anomalies);
+      setBackendWipRows(wipRows);
       setPoToDOState(doStates);
       setLoading(false);
     })();
@@ -1295,11 +1273,10 @@ export default function InventoryPage() {
   // So we keep SOFA SET rows, drop SOFA per-component, and keep BF/ACC
   // per-component as-is.
   const wipItems = useMemo<WIPItem[]>(
-    () => {
-      const fromBackend = backendWipRows
-        // FAB_CUT normalization (Wei Siang Apr 26 2026): every row is now
-        // per-component. The backend no longer emits SET rows; this filter
-        // is defensive in case a stale cached payload still carries one.
+    () =>
+      backendWipRows
+        // Backend no longer emits SET rows; defensive filter in case a
+        // stale cached payload still carries one.
         .filter((r) => r.wipType !== "SET")
         .map<WIPItem>((r) => ({
           id: r.id,
@@ -1314,48 +1291,8 @@ export default function InventoryPage() {
           estUnitCostSen: r.estUnitCostSen,
           estTotalValueSen: r.estTotalValueSen,
           members: r.members,
-        }));
-
-      // Merge skipped-dept anomalies (wip_items.stockQty < 0) into the
-      // main row list. They show with the same column structure as
-      // positive rows — the negative qty (rendered red bold) is the
-      // primary signal. Skip codes already present from the backend
-      // edge-derived rows so we don't double-count.
-      const existingCodes = new Set(fromBackend.map((r) => r.wipCode));
-      const fromAnomalies = wipAnomalies
-        .filter((a) => !existingCodes.has(a.code))
-        .map<WIPItem>((a) => {
-          // Best-effort wipType parse from the code: FAB_CUT codes end
-          // in "(FC)" and most component codes embed a hint like "DV",
-          // "HB", "BS"; if no match, fall back to "WIP".
-          const code = a.code || "";
-          let wipType = "WIP";
-          if (/\(FC\)\s*$/.test(code)) wipType = "FAB_CUT";
-          else if (/\bDV\b|\bDIVAN\b/i.test(code)) wipType = "Divan";
-          else if (/\bHB\b|HEADBOARD/i.test(code)) wipType = "Headboard";
-          else if (/\bBS\b|BASE/i.test(code)) wipType = "Base";
-          else if (/CUSHION/i.test(code)) wipType = "Cushion";
-          return {
-            id: a.id,
-            wipCode: a.code,
-            wipType,
-            // wip_items has no category column — the category cell
-            // renders a dash for empty-string rows.
-            category: "" as const,
-            relatedProduct: a.relatedProduct ?? "",
-            completedBy: a.deptStatus || "",
-            totalQty: a.stockQty,
-            oldestAgeDays: 0,
-            sources: [],
-            estUnitCostSen: 0,
-            estTotalValueSen: 0,
-            members: [],
-          };
-        });
-
-      return [...fromBackend, ...fromAnomalies];
-    },
-    [backendWipRows, wipAnomalies],
+        })),
+    [backendWipRows],
   );
 
   // Unique item-groups for the RM filter dropdown — derived from live
@@ -1428,7 +1365,7 @@ export default function InventoryPage() {
           members,
         };
       })
-      .sort((a, b) => b.oldestAgeDays - a.oldestAgeDays);
+      .sort((a, b) => (b.oldestAgeDays ?? -1) - (a.oldestAgeDays ?? -1));
   }, [backendWipRows, wipSearch, wipItemsById]);
 
   // Non-sofa WIPs shown alongside sofa set rows when merged-view is on.
@@ -1461,8 +1398,13 @@ export default function InventoryPage() {
   const fgTotalReserved = fgItems.reduce((s, p) => s + p.reservedQty, 0);
 
   const wipTotalQty = wipItems.reduce((s, w) => s + w.totalQty, 0);
-  const wipOldest = wipItems.length > 0 ? Math.max(...wipItems.map(w => w.oldestAgeDays)) : 0;
-  const wipOver7Days = wipItems.filter(w => w.oldestAgeDays > 7).length;
+  // Negative (skipped-upstream) rows have null oldestAgeDays — they
+  // contribute nothing to the "Oldest" / "> 7 Days" KPIs.
+  const positiveAges = wipItems
+    .map((w) => w.oldestAgeDays)
+    .filter((v): v is number => typeof v === "number");
+  const wipOldest = positiveAges.length > 0 ? Math.max(...positiveAges) : 0;
+  const wipOver7Days = positiveAges.filter((d) => d > 7).length;
 
   const rmCategoriesCount = RM_ITEM_GROUPS.length;
   const rmLowStock = liveRawMaterials.filter(r => r.balanceQty > 0 && r.balanceQty < 5).length;

@@ -336,6 +336,7 @@ import { timingMiddleware } from "./lib/observability";
 // continuity; the routes themselves are fully durable.
 import accounting from "./routes-d1/accounting";
 import attendance from "./routes-d1/attendance";
+import workingHourEntries from "./routes-d1/working-hour-entries";
 import cashFlow from "./routes-d1/cash-flow";
 import consignments from "./routes-d1/consignments";
 import consignmentNotes from "./routes-d1/consignment-notes";
@@ -440,6 +441,7 @@ app.route("/api/files", files);
 // claim was stale and actively misleading the next dev.
 app.route("/api/accounting", accounting);
 app.route("/api/attendance", attendance);
+app.route("/api/working-hour-entries", workingHourEntries);
 app.route("/api/cash-flow", cashFlow);
 app.route("/api/consignments", consignments);
 app.route("/api/consignment-notes", consignmentNotes);

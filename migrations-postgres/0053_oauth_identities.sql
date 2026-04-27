@@ -1,33 +1,31 @@
 -- ============================================================================
--- Phase B.3 / C.6 — Federated OAuth identities (Postgres mirror of D1
--- migrations/0053_oauth_identities.sql).
+-- Phase B.3 / C.6 — Federated OAuth identities (Google Workspace today;
+-- Microsoft 365 tomorrow). One users row can have multiple federated logins
+-- (one per provider) plus a password — they are all routed through this
+-- table.
 --
--- Schema parity notes:
---   * D1 is the legacy/rollback path; Supabase-via-Hyperdrive is the live
---     source of truth. Column names follow snake_case here, camelCase there
---     — the D1Compat adapter handles the mapping at query time
---     (see src/api/lib/column-rename-map.json).
---   * Booleans are real BOOLEAN here (vs INTEGER 0/1 in D1).
---   * Timestamps are TIMESTAMPTZ default now() (vs TEXT ISO 8601 in D1).
+-- Why a separate table (vs columns on users):
+--   * A user might link to several providers (Google + Microsoft) over time.
+--   * The unique key is (provider, providerSubject) — Google's `sub` claim is
+--     the only stable per-account identifier (email can change).
+--   * `rawProfile` archives the raw id_token claims for forensic / future
+--     enrichment (admin can attribute a sign-in to a Google sub even if
+--     the email later changes).
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS oauth_identities (
-  id              TEXT        PRIMARY KEY,
-  user_id         TEXT        NOT NULL,
-  provider        TEXT        NOT NULL,
-  provider_subject TEXT       NOT NULL,
-  email           TEXT        NOT NULL,
-  email_verified  BOOLEAN     NOT NULL DEFAULT FALSE,
-  hosted_domain   TEXT,
-  raw_profile     TEXT,
-  linked_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  last_seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT oauth_identities_provider_subject_uq
-    UNIQUE (provider, provider_subject)
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  provider TEXT NOT NULL,            -- 'google' (later 'microsoft')
+  provider_subject TEXT NOT NULL,     -- Google id_token `sub` — stable per Google account
+  email TEXT NOT NULL,
+  email_verified INTEGER NOT NULL DEFAULT 0,
+  hosted_domain TEXT,                 -- 'hookka.com' for Workspace; null for gmail.com
+  raw_profile TEXT,                   -- JSON of id_token claims for forensics
+  linked_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  last_seen_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (provider, provider_subject)
 );
 
-CREATE INDEX IF NOT EXISTS idx_oauth_user
-  ON oauth_identities(user_id);
-
-CREATE INDEX IF NOT EXISTS idx_oauth_email
-  ON oauth_identities(email);
+CREATE INDEX IF NOT EXISTS idx_oauth_user ON oauth_identities(user_id);
+CREATE INDEX IF NOT EXISTS idx_oauth_email ON oauth_identities(email);

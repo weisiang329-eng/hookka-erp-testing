@@ -1,0 +1,24 @@
+-- ============================================================================
+-- Migration 0056 — UNIQUE INDEX on production_orders.poNo
+--
+-- Background: the schema in 0001_init.sql declares production_orders.poNo as
+-- NOT NULL but did NOT enforce uniqueness. Two rows could carry the same poNo
+-- and the only collision guard was the PRIMARY KEY on `id` (the deterministic
+-- pord-<so>-<seq> id used in createProductionOrdersForSO).
+--
+-- Symptom that prompted this fix (Apr 26 2026): SO-2604-312 displayed in the
+-- production sheet with -04 appearing twice and -01 missing. Investigation
+-- showed the production_orders table itself had no duplicate poNos at the time
+-- (the rendered duplicates traced back to FAB_CUT merge logic in the sheet
+-- view, owned by another change). Adding the UNIQUE INDEX hardens the schema
+-- against future regressions — any code path that ever tries to insert two
+-- rows with the same poNo will be rejected by the database itself.
+--
+-- Pre-flight: at the time of writing, a GROUP BY poNo HAVING cnt > 1 against
+-- the remote D1 returned zero rows, so this migration applies cleanly. If the
+-- migration ever fails on a future environment due to existing duplicates,
+-- the duplicate set must be reconciled first (renumber suffixes or delete
+-- the surviving duplicate row + cascade job_cards via productionOrderId FK).
+-- ============================================================================
+CREATE UNIQUE INDEX IF NOT EXISTS idx_production_orders_po_no
+  ON production_orders(po_no);

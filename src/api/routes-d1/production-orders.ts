@@ -888,7 +888,9 @@ async function applyWipInventoryChange(
   // Generic upstream-consume gate — fires on IN_PROGRESS OR COMPLETED for
   // every non-UPH, non-FAB_CUT dept. Date-cell clicks skip IN_PROGRESS
   // (WAITING → COMPLETED directly), which used to orphan upstream stock.
-  // Idempotent: sofa zeros in place, BF uses MAX(0, stockQty - qty) clamp.
+  // BUG-2026-04-27-013: consume is unclamped (no MAX(0)) so a skipped /
+  // out-of-order upstream dept surfaces as negative stock_qty rather
+  // than being silently swallowed.
   const deptUpper = deptCodeRaw;
   const isFabCut = deptUpper === "FAB_CUT";
   // WOOD_CUT is parallel to FAB_CUT — both are raw-material entry points
@@ -919,11 +921,13 @@ async function applyWipInventoryChange(
   if (wasDone && !isDone) {
     const refundQty = wipQty;
     if (isUpholstery) {
-      // Subtract UPH's own row (clamped at 0 so a duplicate rollback is a
-      // no-op rather than going negative).
+      // Subtract UPH's own row.
+      // BUG-2026-04-27-013: no MAX(0) clamp — symmetric with the forward
+      // consume; a rollback before any completion can go negative as a
+      // visibility signal.
       await db
         .prepare(
-          "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
+          "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
         )
         .bind(refundQty, wipLabel)
         .run();
@@ -953,9 +957,12 @@ async function applyWipInventoryChange(
     }
 
     // Non-UPH dept rollback: subtract this JC's own row first.
+    // BUG-2026-04-27-013: no MAX(0) clamp — symmetric with the forward
+    // consume so a "rollback before any completion" goes negative as a
+    // visibility signal that something is out of order.
     await db
       .prepare(
-        "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
+        "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
       )
       .bind(refundQty, wipLabel)
       .run();
@@ -1016,12 +1023,38 @@ async function applyWipInventoryChange(
       const child = children[0];
       if (child?.wipLabel) {
         const consumeQty = jcRow.wipQty || poRow.quantity || 1;
-        await db
-          .prepare(
-            "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
-          )
-          .bind(consumeQty, child.wipLabel)
-          .run();
+        // BUG-2026-04-27-013: cascade consume always decrements (no MAX
+        // clamp). If the upstream wip_items row doesn't exist (because
+        // the upstream JC was skipped / never completed), INSERT one
+        // with stock_qty = -consumeQty so the negative number surfaces
+        // the missed dept on the WIP board.
+        const upstream = await db
+          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
+          .bind(child.wipLabel)
+          .first<{ id: string; stockQty: number }>();
+        if (upstream) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
+            )
+            .bind(consumeQty, upstream.id)
+            .run();
+        } else {
+          await db
+            .prepare(
+              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
+            )
+            .bind(
+              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+              child.wipLabel,
+              shortType,
+              poRow.productCode ?? "",
+              "PENDING",
+              -consumeQty,
+            )
+            .run();
+        }
       }
     }
     // For IN_PROGRESS-only we stop here — COMPLETED falls through to
@@ -1052,12 +1085,37 @@ async function applyWipInventoryChange(
           }
         }
         for (const label of upstreamLabels) {
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = MAX(0, stockQty - ?) WHERE code = ?",
-            )
-            .bind(consumeQty, label)
-            .run();
+          // BUG-2026-04-27-013: cascade consume always decrements (no
+          // MAX clamp). If the upstream wip_items row doesn't exist
+          // (upstream dept was skipped), INSERT one with negative qty
+          // so the WIP board surfaces the missed dept.
+          const upstream = await db
+            .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
+            .bind(label)
+            .first<{ id: string; stockQty: number }>();
+          if (upstream) {
+            await db
+              .prepare(
+                "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
+              )
+              .bind(consumeQty, upstream.id)
+              .run();
+          } else {
+            await db
+              .prepare(
+                `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+                 VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
+              )
+              .bind(
+                `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+                label,
+                shortType,
+                poRow.productCode ?? "",
+                "PENDING",
+                -consumeQty,
+              )
+              .run();
+          }
         }
       }
       // Add UPH's own wip_items row (treat UPH like every other producer

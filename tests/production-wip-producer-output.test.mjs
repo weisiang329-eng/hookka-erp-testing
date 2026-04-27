@@ -112,6 +112,49 @@ test('Fab Sew atomic consume on (salesOrderId, fabricCode) is unchanged', () => 
   );
 });
 
+test('cascade consume is unclamped — no MAX(0, stockQty - qty)', () => {
+  const src = read();
+  // BUG-2026-04-27-013: skipped / out-of-order dept completions must
+  // surface as negative wip_items.stock_qty instead of being clamped to
+  // 0. The forward consume, the rollback own-row decrement, and the
+  // UPH cascade must all use plain `stockQty - ?` (no MAX(0, ...)).
+  // This pin guards against a future refactor silently re-introducing
+  // the clamp.
+  assert.doesNotMatch(
+    src,
+    /UPDATE wip_items SET stockQty = MAX\(0, stockQty - \?\)/,
+    'no MAX(0, stockQty - ?) clamp anywhere in applyWipInventoryChange',
+  );
+  // The forward consume / rollback / UPH cascade must still use the
+  // unclamped subtraction form on wip_items.
+  assert.match(
+    src,
+    /UPDATE wip_items SET stockQty = stockQty - \?/,
+    'cascade consume still subtracts from stockQty (just without the MAX clamp)',
+  );
+});
+
+test('cascade consume inserts a negative-qty row when upstream is missing', () => {
+  const src = read();
+  // BUG-2026-04-27-013: when the consume target wip_items row doesn't
+  // exist (upstream JC was skipped / never completed), the consume
+  // must INSERT a placeholder with stock_qty = -consumeQty so the
+  // negative number surfaces the missed dept on the WIP board, instead
+  // of silently no-op'ing.
+  assert.match(
+    src,
+    /-consumeQty/,
+    'forward / UPH cascade must INSERT with negative qty when row is missing',
+  );
+  // The PENDING deptStatus marks these stub rows as "no real owner yet"
+  // so the UI / queries can distinguish them from completed-by-dept rows.
+  assert.match(
+    src,
+    /VALUES \(\?, \?, \?, \?, \?, \?, 'PENDING'\)/,
+    'missing-upstream INSERT uses status=PENDING to flag the stub row',
+  );
+});
+
 test('PATCH route still calls applyWipInventoryChange when status changes', () => {
   const src = read();
   // The cascade must fire on every status patch (not just COMPLETED) so

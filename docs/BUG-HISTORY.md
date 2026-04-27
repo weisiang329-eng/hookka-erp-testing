@@ -12,6 +12,74 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-013 — wip_items consume silently no-ops on missing/zero upstream — now goes negative
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** When a downstream dept (e.g. FAB_SEW) is marked COMPLETED
+without its upstream dept (e.g. FAB_CUT) ever being completed, the
+inventory cascade silently no-op'd. The `wip_items` row for the upstream
+dept either didn't exist (so the UPDATE missed) or sat at `stockQty = 0`
+(so the `MAX(0, stockQty - ?)` clamp pinned it at 0). The user had no
+WIP-board signal that an upstream dept got skipped.
+
+**Root cause:** `applyWipInventoryChange()` in
+`src/api/routes-d1/production-orders.ts` had three call sites that all
+used `MAX(0, stockQty - ?)`:
+
+1. **Forward non-UPH consume** (around line 906) — fires on
+   `becomingActive` for non-FAB_CUT, non-WOOD_CUT, non-UPH depts.
+   Updated the most recent done sibling's `wip_items` row at lower
+   sequence within the same `(wipKey, branchKey)` chain.
+2. **Rollback non-UPH own-row decrement** (around line 957) — the
+   `wasDone && !isDone` branch.
+3. **UPH cascade upstream consume** (around line 1057) — when UPH
+   completes, iterates every upstream `wipKey` sibling and decrements.
+
+In all three, the clamp swallowed the signal: stock just floored at 0.
+And the forward path was further blind to the case where the upstream
+`wip_items` row had never been INSERTed at all (the UPDATE quietly
+matched 0 rows).
+
+**Fix:** Per user's reason ("the negative number is the visibility
+signal"), the cascade now **always decrements without clamp**. If the
+target row is missing, INSERT a stub row with `stock_qty = -consumeQty`,
+`status = 'PENDING'`, matching the producer-upsert path's INSERT shape.
+Rollback own-row decrement is also unclamped, symmetric with the forward
+path.
+
+Edits in `src/api/routes-d1/production-orders.ts`:
+- Forward non-UPH consume: SELECT-then-UPDATE-or-INSERT, no MAX clamp.
+- Rollback non-UPH own-row: `stockQty = stockQty - ?`, no MAX clamp.
+- UPH cascade upstream: SELECT-then-UPDATE-or-INSERT per upstream label,
+  no MAX clamp.
+- UPH rollback own-row: also unclamped (symmetric).
+- Stale comment "BF uses MAX(0, stockQty - qty) clamp" updated.
+
+**Verification:**
+1. `npm run typecheck:app` clean for the production-orders.ts changes
+   (the one pre-existing `inventory/index.tsx` ProductionOrderLike.id
+   error is unrelated to this fix).
+2. `npm run lint:app` no new errors / warnings.
+3. `npm test` 83/83 passing, including two new pins in
+   `tests/production-wip-producer-output.test.mjs`:
+   - "cascade consume is unclamped — no MAX(0, stockQty - qty)"
+   - "cascade consume inserts a negative-qty row when upstream is missing"
+4. Walked through the FAB_SEW-before-FAB_CUT scenario for a PENDING
+   sofa PO. Expected behaviour with the fix: the FAB_SEW
+   becomingActive consume looks up the most recent `(wipKey, branchKey)`
+   sibling at lower sequence (FAB_CUT). FAB_CUT's `wip_items` row does
+   not exist (FAB_CUT was never completed). The SELECT returns null,
+   the INSERT path fires, a `wip_items` row appears with
+   `code = <FAB_CUT wipLabel>`, `stockQty = -1`, `status = 'PENDING'` —
+   surfacing the skipped FAB_CUT on the WIP board.
+
+**Not in scope:** the COMPLETED→COMPLETED replay non-idempotency
+(BUG-2026-04-27-005) is unchanged; this fix only swaps clamp for
+unclamped + insert-if-missing.
+
+---
+
 ## BUG-2026-04-27-010 — Dept-Pivot editor lists DRAFT BOMs as duplicate rows
 
 **Status:** 🟢 Fixed (2026-04-27)

@@ -304,55 +304,85 @@ app.get("/", async (c) => {
     let estTotalValueSen = 0;
 
     if (isNegative) {
-      // Find the JC that triggered the consume: same wipKey as one of
-      // this code's matched (upstream) JCs, higher sequence, and
-      // COMPLETED. The PO of that JC is the one whose action wrote the
-      // negative.
+      // Find the JC that triggered the consume. Strict rule
+      // (BUG-2026-04-27-015): for each producer JC `P` (its wipLabel ==
+      // this row's code), look at the **immediate** downstream in the
+      // same `(wipKey, branchKey)` — the JC with the smallest sequence
+      // strictly greater than P.sequence. Only that JC could have
+      // written this row's decrement. If that neighbor is COMPLETED/
+      // TRANSFERRED, its PO is a Source. If not completed, that PO did
+      // not trigger this negative — skip it.
+      //
+      // Earlier code grabbed every higher-sequence COMPLETED JC in the
+      // same wipKey. That over-collected: cascading later depts in the
+      // chain (e.g. WEBBING after FRAMING already consumed (WD)) would
+      // each show up as a "source" of (WD), even though only FRAMING
+      // actually triggered the decrement.
       //
       // Edge case: when wip_items.code has no matching JC (the row was
       // INSERTed by the cascade because the upstream JC didn't exist
       // yet) we can't recover the wipKey — sources stays empty. This is
       // correct: there's literally no JC chain to reference.
-      const triggerJcs: JCLite[] = [];
-      for (const j of matchedJcs) {
-        if (!j.wipKey) continue;
-        const myJcs = jcsByPo.get(j.productionOrderId) ?? [];
+      type TriggerEntry = { producer: JCLite; trigger: JCLite };
+      const triggerEntries: TriggerEntry[] = [];
+      for (const producer of matchedJcs) {
+        if (!producer.wipKey) continue;
+        const myJcs = jcsByPo.get(producer.productionOrderId) ?? [];
+        const producerBk = producer.branchKey ?? "";
+        let immediate: JCLite | null = null;
         for (const candidate of myJcs) {
-          if (
-            candidate.wipKey === j.wipKey &&
-            candidate.sequence > j.sequence &&
-            isDone(candidate)
-          ) {
-            triggerJcs.push(candidate);
+          if (candidate.id === producer.id) continue;
+          if (candidate.wipKey !== producer.wipKey) continue;
+          if ((candidate.branchKey ?? "") !== producerBk) continue;
+          if (candidate.sequence <= producer.sequence) continue;
+          if (immediate === null || candidate.sequence < immediate.sequence) {
+            immediate = candidate;
           }
         }
+        if (!immediate) continue;
+        if (!isDone(immediate)) continue;
+        triggerEntries.push({ producer, trigger: immediate });
       }
-      // Dedupe by JC id.
-      const seenIds = new Set<string>();
-      const uniqueTriggerJcs = triggerJcs.filter((j) => {
-        if (seenIds.has(j.id)) return false;
-        seenIds.add(j.id);
+
+      // Dedupe by PO id — a PO contributes at most one Source row even
+      // if multiple producer-JCs in that PO map to the same downstream.
+      const seenPoIds = new Set<string>();
+      const uniqueEntries = triggerEntries.filter((e) => {
+        const poId = e.trigger.productionOrderId;
+        if (seenPoIds.has(poId)) return false;
+        seenPoIds.add(poId);
         return true;
       });
 
-      for (const tj of uniqueTriggerJcs) {
-        const tpo = poById.get(tj.productionOrderId);
+      for (const { producer, trigger } of uniqueEntries) {
+        const tpo = poById.get(trigger.productionOrderId);
         if (!tpo) continue;
+        const consumeQty = producer.wipQty || tpo.quantity || 0;
+        const completedDate = trigger.completedDate || tpo.startDate || "";
+        const ageDays = completedDate
+          ? Math.max(
+              0,
+              Math.floor(
+                (today.getTime() - new Date(completedDate).getTime()) /
+                  86400000,
+              ),
+            )
+          : 0;
         sources.push({
           poCode: tpo.poNo,
-          quantity: tj.wipQty || tpo.quantity || 0,
+          quantity: consumeQty,
           poQty: tpo.quantity || 1,
-          completedDate: tj.completedDate || tpo.startDate || "",
-          ageDays: 0,
+          completedDate,
+          ageDays,
           fabricCode: tpo.fabricCode || "",
           baseModel: (tpo.productCode || "").split("-")[0],
           itemCategory: tpo.itemCategory || "",
         });
         members.push({
           poNo: tpo.poNo,
-          jobCardId: tj.id,
+          jobCardId: trigger.id,
           wipType: wipTypeLabel,
-          quantity: tj.wipQty || tpo.quantity || 0,
+          quantity: consumeQty,
         });
       }
       completedBy = "PENDING";

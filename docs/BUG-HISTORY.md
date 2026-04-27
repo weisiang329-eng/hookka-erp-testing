@@ -12,6 +12,89 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-015 — Negative-row Source POs over-collected: every higher-sequence COMPLETED JC in same wipKey was treated as a "trigger"
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** Clicking any negative-qty row on the WIP page popped open
+the detail modal and listed **too many** Source POs. The same PO would
+even repeat when it had multiple COMPLETED downstream JCs in the same
+`wipKey`, even though only ONE of those downstreams actually triggered
+the consume that wrote the negative.
+
+User's reproduced examples (in D1):
+
+- `wip_items.code = '1007-(K) -HB 20" (WD)"'`, stockQty = -1.
+  Producer JC: WOOD_CUT seq=3 (WAITING) on PO `pord-so-bb601356-01`,
+  branchKey `(Webbing)`. Cascade trigger: FRAMING seq=4 (COMPLETED)
+  consumed `(WD)` → -1. WEBBING seq=5 (COMPLETED) consumed `(Frame)`,
+  not `(WD)`. Popup listed **2** sources (both `SO-2604-314-01`)
+  because the derivation also picked up WEBBING's completion as a
+  "source" of `(WD)`.
+- `1007-(K) -HB 20" PC151-01 (FC)` row showed **3** sources
+  (FAB_SEW + FRAMING + WEBBING all completed downstream of FAB_CUT in
+  the same wipKey).
+
+**Root cause:** In `src/api/routes-d1/inventory-wip.ts` (lines 306-358),
+the negative-row sources derivation walked every JC in the same
+`wipKey` with `sequence > P.sequence` and status COMPLETED/TRANSFERRED,
+not just the **immediate** downstream of the producer in the **same
+branch**. For BOMs with parallel branches or multi-step chains this
+over-collected: every later completed JC in the chain was attributed
+as a "trigger" of the missing producer's negative, even though only the
+direct neighbor that ran the cascade consume actually wrote the row.
+
+The cascade write path (`applyWipInventoryChange()` in
+`src/api/routes-d1/production-orders.ts`, BUG-2026-04-27-014) is
+already correct: each dept's consume targets its **immediate** branch
+upstream, and only that completion triggers the negative. The
+inventory-wip read path was just attributing causality wrong.
+
+**Fix:** Replaced the higher-sequence-in-same-wipKey collection with a
+strict immediate-downstream pick. For each producer JC `P`:
+
+1. Among JCs in `P`'s same `(wipKey, branchKey)`, take the one with the
+   smallest `sequence > P.sequence` — this is `P`'s immediate
+   downstream in that branch. There is at most one.
+2. If that neighbor is COMPLETED or TRANSFERRED, its PO is a Source.
+3. If not completed (still WAITING / IN_PROGRESS / NOT_STARTED), that
+   PO did **not** trigger this row's negative — skip.
+
+Then dedupe by **PO id** (defensive — under the immediate-downstream
+rule duplicates shouldn't surface, but two producer JCs from the same
+PO mapping to the same downstream stays one row).
+
+Also fixed the `ageDays` field on negative-row sources: was hardcoded
+`0`, now correctly computed as days since the triggering JC's
+`completed_date`. `quantity` keeps using the **producer JC's** wipQty
+(the consume amount), `completedDate` keeps coming from the
+**triggering downstream JC** (the moment the negative was written) —
+both per the user spec.
+
+Edit in `src/api/routes-d1/inventory-wip.ts` around line 306-385: the
+positive-row branch is unchanged. Producer-side wip_items writes /
+cascade consume math is unchanged.
+
+**Verification:**
+1. `npm run typecheck:app` — clean for inventory-wip.ts (the
+   pre-existing `delivery/index.tsx` merge-conflict markers are the
+   same set documented in BUG-2026-04-27-014, unrelated to this fix).
+2. `npm run lint:app` — 0 new errors, 0 new warnings (only the same
+   pre-existing baseline warnings + the unrelated delivery/index.tsx
+   merge-conflict parse error).
+3. `npm test` — 83/83 passing.
+4. Manual: with the fix, the user's `1007-(K) -HB 20" (WD)` row shows
+   1 source (`pord-so-bb601356-01` whose FRAMING completed) instead
+   of 2. The `(FC)` row shows 1 source (`pord-so-bb601356-01` whose
+   FAB_SEW completed) instead of 3.
+
+**Not touched:**
+- The positive-row branch — unchanged.
+- The cascade write path (`applyWipInventoryChange()`) — unchanged.
+- Any DB schema or producer-side wip_items emit logic.
+
+---
+
 ## BUG-2026-04-27-014 — UPH cascade decremented every upstream JC, not just per-branch terminals
 
 **Status:** 🟢 Fixed (2026-04-27)

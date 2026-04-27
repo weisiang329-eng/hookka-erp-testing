@@ -2369,7 +2369,7 @@ function SubWIPTree({
   onRemoveMaterial,
   onSelectMaterial,
   onUpdateMaterial,
-  onInsert,
+  onWrap,
   onMoveUp,
   onMoveDown,
   fabricOptions,
@@ -2391,7 +2391,7 @@ function SubWIPTree({
   onRemoveMaterial: (path: number[], mi: number) => void;
   onSelectMaterial: (path: number[], mi: number, rm: RawMaterialOption) => void;
   onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number) => void;
-  onInsert?: (path: number[], beforeIdx: number) => void;
+  onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
   onMoveDown?: (path: number[], si: number) => void;
   fabricOptions: string[];
@@ -2425,11 +2425,11 @@ function SubWIPTree({
               </select>
               <input type="number" value={sub.quantity} onChange={(e) => onUpdate(childPath, "quantity", parseInt(e.target.value) || 1)} className={`text-xs ${c.border} border rounded px-1.5 py-1 w-12 bg-white`} min={1} />
               <span className="text-[10px] text-gray-500">PCS</span>
-              {onInsert && (
+              {onWrap && (
                 <button
-                  onClick={() => onInsert(path, si)}
+                  onClick={() => onWrap(path, si)}
                   className={`ml-auto text-[10px] px-1.5 py-0.5 rounded ${c.btn}`}
-                  title="Insert a new sub-WIP above this one"
+                  title="Wrap this sub-WIP inside a new parent (上游)"
                 >
                   + Above
                 </button>
@@ -2438,7 +2438,7 @@ function SubWIPTree({
                 <button
                   onClick={() => onMoveUp(path, si)}
                   disabled={si === 0}
-                  className={`text-[10px] px-1.5 py-0.5 rounded ${c.btn} disabled:opacity-30 disabled:cursor-not-allowed ${onInsert ? "" : "ml-auto"}`}
+                  className={`text-[10px] px-1.5 py-0.5 rounded ${c.btn} disabled:opacity-30 disabled:cursor-not-allowed ${onWrap ? "" : "ml-auto"}`}
                   title="Move up"
                 >
                   ↑
@@ -2454,7 +2454,7 @@ function SubWIPTree({
                   ↓
                 </button>
               )}
-              <button onClick={() => onRemove(path, si)} className={`text-[#9A3A2D] hover:text-[#7A2E24] ${onInsert || onMoveUp || onMoveDown ? "" : "ml-auto"}`}>
+              <button onClick={() => onRemove(path, si)} className={`text-[#9A3A2D] hover:text-[#7A2E24] ${onWrap || onMoveUp || onMoveDown ? "" : "ml-auto"}`}>
                 <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
               </button>
             </div>
@@ -2539,7 +2539,7 @@ function SubWIPTree({
               onRemoveMaterial={onRemoveMaterial}
               onSelectMaterial={onSelectMaterial}
               onUpdateMaterial={onUpdateMaterial}
-              onInsert={onInsert}
+              onWrap={onWrap}
               onMoveUp={onMoveUp}
               onMoveDown={onMoveDown}
               fabricOptions={fabricOptions}
@@ -3591,13 +3591,24 @@ function MasterTemplatesDialog({
   function addWIP() {
     setCurrent((prev) => ({ ...prev, wipItems: [...prev.wipItems, makeEmptyWIP(prev.category)] }));
   }
+  // 删除 WIP — 把它的 children 提升到它原本的位置（不级联删除下游）
   function removeWIP(wi: number) {
-    setCurrent((prev) => ({ ...prev, wipItems: prev.wipItems.filter((_, idx) => idx !== wi) }));
-  }
-  function insertWIPAt(idx: number) {
     setCurrent((prev) => {
+      const target = prev.wipItems[wi];
+      if (!target) return prev;
       const next = [...prev.wipItems];
-      next.splice(idx, 0, makeEmptyWIP(prev.category));
+      next.splice(wi, 1, ...(target.children || []));
+      return { ...prev, wipItems: next };
+    });
+  }
+  // 把 wi 这个 WIP 包进一个新的空 WIP（成为它的上游 / 父节点）
+  function wrapWIPAt(idx: number) {
+    setCurrent((prev) => {
+      const target = prev.wipItems[idx];
+      if (!target) return prev;
+      const wrapper: WIPComponent = { ...makeEmptyWIP(prev.category), children: [target] };
+      const next = [...prev.wipItems];
+      next.splice(idx, 1, wrapper);
       return { ...prev, wipItems: next };
     });
   }
@@ -3638,16 +3649,26 @@ function MasterTemplatesDialog({
       children: [...(node.children || []), makeEmptyWIP(current.category)],
     }));
   }
+  // 删除 sub-WIP — 把被删节点的 children 提升到它原本的位置（不级联删除下游）
   function removeSubWIPAtPath(wi: number, path: number[], si: number) {
-    mutateWIP(wi, path, (node) => ({
-      ...node,
-      children: (node.children || []).filter((_, i) => i !== si),
-    }));
-  }
-  function insertSubWIPAtPath(wi: number, path: number[], beforeIdx: number) {
     mutateWIP(wi, path, (node) => {
-      const next = [...(node.children || [])];
-      next.splice(beforeIdx, 0, makeEmptyWIP(current.category));
+      const list = node.children || [];
+      const target = list[si];
+      if (!target) return node;
+      const next = [...list];
+      next.splice(si, 1, ...(target.children || []));
+      return { ...node, children: next };
+    });
+  }
+  // 把 si 这个 sub-WIP 包进一个新的空 WIP（成为它的上游 / 父节点）
+  function wrapSubWIPAtPath(wi: number, path: number[], si: number) {
+    mutateWIP(wi, path, (node) => {
+      const list = node.children || [];
+      const target = list[si];
+      if (!target) return node;
+      const wrapper: WIPComponent = { ...makeEmptyWIP(current.category), children: [target] };
+      const next = [...list];
+      next.splice(si, 1, wrapper);
       return { ...node, children: next };
     });
   }
@@ -4039,9 +4060,9 @@ function MasterTemplatesDialog({
                     <input type="number" value={w.quantity} onChange={(e) => updateWIPAtPath(wi, [], "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
                     <span className="text-xs text-gray-500">PCS</span>
                     <button
-                      onClick={() => insertWIPAt(wi)}
+                      onClick={() => wrapWIPAt(wi)}
                       className="ml-auto text-[10px] px-1.5 py-0.5 bg-[#A8CAD2] text-[#3E6570] rounded hover:bg-[#8FB4BD]"
-                      title="Insert a new WIP above this one"
+                      title="Wrap this WIP inside a new parent (上游)"
                     >
                       + Above
                     </button>
@@ -4165,7 +4186,7 @@ function MasterTemplatesDialog({
                     onRemoveMaterial={(path, mi) => removeMaterialAtPath(wi, path, mi)}
                     onSelectMaterial={(path, mi, rm) => selectMaterialAtPath(wi, path, mi, rm)}
                     onUpdateMaterial={(path, mi, field, value) => updateMaterialAtPath(wi, path, mi, field, value)}
-                    onInsert={(path, beforeIdx) => insertSubWIPAtPath(wi, path, beforeIdx)}
+                    onWrap={(path, si) => wrapSubWIPAtPath(wi, path, si)}
                     onMoveUp={(path, si) => moveSubWIPUpAtPath(wi, path, si)}
                     onMoveDown={(path, si) => moveSubWIPDownAtPath(wi, path, si)}
                     fabricOptions={fabricOptions}

@@ -414,8 +414,25 @@ app.post("/", async (c) => {
       }
     }
 
-    const customerId: string | undefined =
+    // customerId fallback chain (relaxed 2026-04-27 for multi-SO DOs):
+    //   1. body.customerId (explicit)
+    //   2. salesOrderRow.customerId (single-SO path)
+    //   3. lookup by name from the first PO row's customerName when the
+    //      DO spans multiple SOs (so multi-customer DOs still have a
+    //      representative customer for legacy contact / cascade fields).
+    let customerId: string | undefined =
       body.customerId ?? salesOrderRow?.customerId;
+    if (!customerId && poRowsForItems.length > 0) {
+      const firstName = poRowsForItems[0].customerName;
+      if (firstName) {
+        const cr = await c.var.DB.prepare(
+          `SELECT id FROM customers WHERE name = ? LIMIT 1`,
+        )
+          .bind(firstName)
+          .first<{ id: string }>();
+        if (cr?.id) customerId = cr.id;
+      }
+    }
     if (!customerId) {
       return c.json(
         { success: false, error: "customerId or salesOrderId is required" },

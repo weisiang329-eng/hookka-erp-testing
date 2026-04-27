@@ -167,4 +167,21 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           echo "::notice::Postgres migrations are applied manually. Run 'npm run db:migrate:supabase:dry' locally to preview, then 'npm run db:migrate:supabase' against prod DATABASE_URL. See migrations-postgres/README.md."
->>>>>>> f083ff8 (chore(supabase): retire D1 references, document Postgres-only flow, add incremental migration tool)
+
+      # Guard against the "migration file landed but Supabase never got it"
+      # bug we hit with three_pl_vehicles / three_pl_drivers (0063 sat in
+      # migrations-postgres/ for days while the live DB was missing the
+      # tables, so 3PL Save Vehicle silently failed with "relation does
+      # not exist"). Parses every CREATE TABLE in migrations-postgres/*.sql,
+      # diffs against information_schema.tables on Supabase, fails if any
+      # migration-declared table is missing. Runs AFTER deploy so a deploy
+      # is never gated on a schema diff that itself requires the deploy.
+      # Push-to-main only - preview / PR builds skip this step.
+      #
+      # Set DATABASE_URL in repo secrets to the Supabase pooler URL
+      # (port 6543) for this check to run.
+      - name: Verify Postgres schema is in sync
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: node scripts/check-schema-applied.mjs
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}

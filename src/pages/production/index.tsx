@@ -891,6 +891,10 @@ export default function ProductionPage({
   // by product+size+fabric for FG), so the picker only shows SKUs the
   // factory has actually built before — no need to prefill a catalog.
   const [stockDialogOpen, setStockDialogOpen] = useState(false);
+  // Print Schedule mode toggle. "detailed" → handlePrintSchedule (one row
+  // per PO/JC). "total" → handlePrintTotalListing (rows merged on
+  // model+spec so the floor sees "make N of X").
+  const [printMode, setPrintMode] = useState<"detailed" | "total">("detailed");
 
   const fetchOrders = useCallback(() => {
     invalidateCachePrefix("/api/production-orders");
@@ -2595,6 +2599,344 @@ export default function ProductionPage({
     fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
   ]);
 
+  // "Total Listing" — sibling to handlePrintSchedule. Same filter inputs,
+  // same print-window pattern, same CSS — but rows are merged so the floor
+  // operator sees "make N of X" instead of one-row-per-PO/JC.
+  //
+  // Dept sub-tab grouping key: model | wip | size | colour | gap | divan |
+  // leg | status. SO/customer/due intentionally NOT in the key — those
+  // differ across same physical items but should still merge. Different
+  // foam/dimension specs stay separate (Foam=Yes vs Foam=No produce
+  // different `wip` rows and thus different buckets).
+  //
+  // Overview grouping key: productCode | fabricCode | sizeLabel | divan |
+  // leg | gap. The 8-dept matrix is intentionally dropped — Total Listing
+  // is for "make N of X", not per-PO progress tracking.
+  const handlePrintTotalListing = useCallback(() => {
+    const today = new Date().toLocaleDateString("en-MY", {
+      year: "numeric", month: "short", day: "numeric",
+    });
+    const fmt = (iso: string) => {
+      if (!iso) return "";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return "";
+      return `${d.getDate()} ${d.toLocaleString("en-US", { month: "short" })}`;
+    };
+    // Earliest non-empty ISO date string. Empty strings are skipped so
+    // a row missing a due date doesn't claim "earliest" by sorting first.
+    const earliestIso = (dates: string[]) => {
+      const valid = dates.filter((s) => s && !isNaN(new Date(s).getTime()));
+      if (!valid.length) return "";
+      return valid.sort()[0]!;
+    };
+    const escapeHtml = (s: string) =>
+      s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const filterBits: string[] = [];
+    if (fltSearch) filterBits.push(`Search: "${fltSearch}"`);
+    if (fltCustomer) filterBits.push(`Customer: ${fltCustomer}`);
+    if (fltState) filterBits.push(`State: ${fltState}`);
+    if (fltDueFrom || fltDueTo) {
+      filterBits.push(`Due: ${fltDueFrom || "…"} → ${fltDueTo || "…"}`);
+    }
+    const filterLine = filterBits.length
+      ? `<div class="filters">Filters — ${filterBits.join(" · ")}</div>`
+      : "";
+
+    const title =
+      activeTab === "ALL"
+        ? "Production Schedule — Total Listing — Overview"
+        : `Production Schedule — Total Listing — ${activeDept?.name}`;
+
+    let body = "";
+    let sourceCount = 0;
+    let mergedCount = 0;
+    let totalQty = 0;
+
+    if (activeTab === "ALL") {
+      // Overview merge: group by (productCode, fabricCode, sizeLabel,
+      // divan, leg, gap).
+      type Bucket = {
+        productCode: string;
+        fabricCode: string;
+        sizeLabel: string;
+        divan: string;
+        leg: string;
+        gap: string;
+        qty: number;
+        earliestDue: string;
+        soIds: Set<string>;
+        customers: Set<string>;
+      };
+      const buckets = new Map<string, Bucket>();
+      for (const o of visibleOrders) {
+        const key = [
+          o.productCode || "",
+          o.fabricCode || "",
+          o.sizeLabel || "",
+          o.divanHeightInches != null ? String(o.divanHeightInches) : "",
+          o.legHeightInches != null ? String(o.legHeightInches) : "",
+          o.gapInches != null ? String(o.gapInches) : "",
+        ].join("|");
+        let b = buckets.get(key);
+        if (!b) {
+          b = {
+            productCode: o.productCode || "",
+            fabricCode: o.fabricCode || "",
+            sizeLabel: o.sizeLabel || "",
+            divan: o.divanHeightInches != null ? `DV ${o.divanHeightInches}"` : "",
+            leg: o.legHeightInches != null ? `LG ${o.legHeightInches}"` : "",
+            gap: o.gapInches != null ? `GP ${o.gapInches}"` : "",
+            qty: 0,
+            earliestDue: "",
+            soIds: new Set(),
+            customers: new Set(),
+          };
+          buckets.set(key, b);
+        }
+        b.qty += o.quantity || 0;
+        b.earliestDue = earliestIso([b.earliestDue, o.targetEndDate].filter(Boolean));
+        if (o.poNo) b.soIds.add(o.poNo);
+        if (o.customerName) b.customers.add(o.customerName);
+      }
+      sourceCount = visibleOrders.length;
+      const list = Array.from(buckets.values()).sort((a, b) => {
+        const m = a.productCode.localeCompare(b.productCode);
+        if (m !== 0) return m;
+        const s = a.sizeLabel.localeCompare(b.sizeLabel);
+        if (s !== 0) return s;
+        return a.fabricCode.localeCompare(b.fabricCode);
+      });
+      mergedCount = list.length;
+      totalQty = list.reduce((s, x) => s + x.qty, 0);
+      const rowsHtml = list.map((b, i) => {
+        const details: string[] = [];
+        if (b.fabricCode) details.push(escapeHtml(b.fabricCode));
+        if (b.sizeLabel) details.push(escapeHtml(b.sizeLabel));
+        if (b.divan) details.push(b.divan);
+        if (b.leg) details.push(b.leg);
+        if (b.gap) details.push(b.gap);
+        return `<tr>
+          <td class="num">${i + 1}</td>
+          <td class="prod"><b>${escapeHtml(b.productCode)}</b><br/><small>${details.join(" · ")}</small></td>
+          <td class="num"><b>${b.qty}</b></td>
+          <td>${fmt(b.earliestDue)}</td>
+          <td class="num">${b.soIds.size}</td>
+          <td class="num">${b.customers.size}</td>
+        </tr>`;
+      }).join("");
+      body = `
+        <table class="schedule">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Product</th>
+              <th class="num">Total Qty</th>
+              <th>Earliest Due</th>
+              <th class="num">Orders</th>
+              <th class="num">Customers</th>
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>`;
+    } else {
+      // Dept sub-tab merge: group by (model, wip, size, colour, gap, divan,
+      // leg, status). Empty-string values form their own bucket — Beige
+      // and (no fabric) do NOT merge.
+      const printRows = gridFilterIdSet
+        ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
+        : deptRows;
+      type Bucket = {
+        model: string;
+        wip: string;
+        size: string;
+        colour: string;
+        gap: string;
+        divan: string;
+        leg: string;
+        status: string;
+        qty: number;
+        earliestDue: string;
+        customers: Set<string>;
+      };
+      const buckets = new Map<string, Bucket>();
+      for (const r of printRows) {
+        const key = [
+          r.model, r.wip, r.size, r.colour,
+          r.gap, r.divan, r.leg, r.status,
+        ].join("|");
+        let b = buckets.get(key);
+        if (!b) {
+          b = {
+            model: r.model,
+            wip: r.wip,
+            size: r.size,
+            colour: r.colour,
+            gap: r.gap,
+            divan: r.divan,
+            leg: r.leg,
+            status: r.status,
+            qty: 0,
+            earliestDue: "",
+            customers: new Set(),
+          };
+          buckets.set(key, b);
+        }
+        b.qty += r.qty || 0;
+        b.earliestDue = earliestIso([b.earliestDue, r.dueDate].filter(Boolean));
+        if (r.customerName) b.customers.add(r.customerName);
+      }
+      sourceCount = printRows.length;
+      const list = Array.from(buckets.values()).sort((a, b) => {
+        const m = a.model.localeCompare(b.model);
+        if (m !== 0) return m;
+        const s = a.size.localeCompare(b.size);
+        if (s !== 0) return s;
+        return a.colour.localeCompare(b.colour);
+      });
+      mergedCount = list.length;
+      totalQty = list.reduce((s, x) => s + x.qty, 0);
+      // If every bucket has only one customer, drop the column and just
+      // surface the total count in the footer.
+      const showCustomerCol = list.some((b) => b.customers.size > 1);
+      const rowsHtml = list.map((b, i) => {
+        const customerCell = showCustomerCol
+          ? `<td class="num">${b.customers.size}</td>`
+          : "";
+        return `<tr>
+          <td class="num">${i + 1}</td>
+          <td><b>${escapeHtml(b.model)}</b></td>
+          <td>${escapeHtml(b.wip)}</td>
+          <td>${escapeHtml(b.size)}</td>
+          <td>${escapeHtml(b.colour)}</td>
+          <td class="num">${escapeHtml(b.gap || "")}</td>
+          <td class="num">${escapeHtml(b.divan || "")}</td>
+          <td class="num">${escapeHtml(b.leg || "")}</td>
+          <td class="num"><b>${b.qty}</b></td>
+          <td>${fmt(b.earliestDue)}</td>
+          ${customerCell}
+        </tr>`;
+      }).join("");
+      const customerHeader = showCustomerCol
+        ? `<th class="num">Customers</th>`
+        : "";
+      body = `
+        <table class="schedule">
+          <thead>
+            <tr>
+              <th class="num">#</th>
+              <th>Model</th>
+              <th>WIP</th>
+              <th>Size</th>
+              <th>Colour</th>
+              <th class="num">Gap</th>
+              <th class="num">Divan</th>
+              <th class="num">Leg</th>
+              <th class="num">Total Qty</th>
+              <th>Due</th>
+              ${customerHeader}
+            </tr>
+          </thead>
+          <tbody>${rowsHtml}</tbody>
+        </table>`;
+    }
+
+    const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>${title}</title>
+  <style>
+    /* A4 landscape — matches on-screen listing. White-only to save ink. */
+    @page { size: A4 landscape; margin: 8mm; background: #ffffff; }
+    * { box-sizing: border-box; }
+    html, body { background: #ffffff; }
+    body {
+      font-family: "Segoe UI", Helvetica, Arial, sans-serif;
+      color: #000;
+      font-size: 8.5px;
+      margin: 0;
+      padding: 0;
+    }
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1.5px solid #000; padding-bottom: 5px; margin-bottom: 6px;
+    }
+    .brand {
+      font-size: 14px; font-weight: 700; color: #000; letter-spacing: 0.5px;
+    }
+    .brand small {
+      display: block; font-size: 7px; font-weight: 500; color: #555;
+      letter-spacing: 1px; text-transform: uppercase;
+    }
+    .meta { text-align: right; font-size: 8px; color: #333; }
+    .meta .t { font-size: 10px; font-weight: 700; color: #000; }
+    .filters {
+      margin-bottom: 4px; font-size: 7.5px; color: #333;
+      padding: 2px 5px; background: #fff; border-left: 2px solid #000;
+    }
+    table.schedule {
+      width: 100%; border-collapse: collapse; font-size: 7.5px;
+      table-layout: auto; background: #ffffff;
+    }
+    table.schedule th {
+      background: #ffffff; color: #000; font-weight: 700;
+      text-align: left; padding: 3px 4px; border: 0.75px solid #000;
+      text-transform: uppercase; font-size: 7px; letter-spacing: 0.3px;
+    }
+    table.schedule td {
+      padding: 3px 4px; border: 0.5px solid #333; vertical-align: middle;
+      background: #ffffff; color: #000;
+    }
+    table.schedule td.num, table.schedule th.num { text-align: right; }
+    table.schedule td.so { font-weight: 700; white-space: nowrap; }
+    table.schedule td.prod small,
+    table.schedule tbody small { color: #555; font-size: 6.5px; }
+    tr { page-break-inside: avoid; }
+    thead { display: table-header-group; }
+    .footer {
+      margin-top: 8px; padding-top: 3px; border-top: 0.5px solid #666;
+      font-size: 6.5px; color: #333; text-align: center;
+    }
+    @media print {
+      .no-print { display: none !important; }
+      html, body { background: #ffffff !important; }
+    }
+    .no-print {
+      position: fixed; top: 10px; right: 10px; z-index: 1000;
+    }
+    .no-print button {
+      background: #000; color: #fff; border: 0; padding: 8px 14px;
+      border-radius: 4px; cursor: pointer; font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div class="no-print"><button onclick="window.print()">Print / Save as PDF</button></div>
+  <div class="header">
+    <div class="brand">HOOKKA<small>Furniture Manufacturing</small></div>
+    <div class="meta">
+      <div class="t">${title}</div>
+      <div>Generated: ${today} · ${mergedCount} unique item(s)</div>
+    </div>
+  </div>
+  ${filterLine}
+  ${body}
+  <div class="footer">Hookka ERP — Production Schedule (Total Listing) · Merged from ${sourceCount} source rows into ${mergedCount} unique items · Total qty across all items: ${totalQty} · Printed ${today}</div>
+  <script>setTimeout(function(){ window.print(); }, 300);</${''}script>
+</body>
+</html>`;
+
+    const w = window.open("", "_blank", "width=1200,height=800");
+    if (!w) return;
+    w.document.open();
+    w.document.write(html);
+    w.document.close();
+  }, [
+    activeTab, activeDept, visibleOrders, deptRows,
+    fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
+  ]);
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -2620,7 +2962,30 @@ export default function ProductionPage({
             Create Stock PO
           </Button>
           <Button variant="outline" onClick={() => navigate("/planning?tab=tracker")}>Master Tracker</Button>
-          <Button variant="outline" onClick={handlePrintSchedule}>Print Schedule</Button>
+          {/* Print Schedule mode picker. Detailed = one row per PO/JC
+              (handlePrintSchedule). Total Listing = rows merged by
+              model+spec for the floor (handlePrintTotalListing). Both
+              modes respect the same on-screen filters. */}
+          <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+            Mode:
+            <select
+              value={printMode}
+              onChange={(e) => setPrintMode(e.target.value as "detailed" | "total")}
+              className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
+              title="Print Schedule mode"
+            >
+              <option value="detailed">Detailed</option>
+              <option value="total">Total Listing</option>
+            </select>
+          </label>
+          <Button
+            variant="outline"
+            onClick={
+              printMode === "total" ? handlePrintTotalListing : handlePrintSchedule
+            }
+          >
+            Print Schedule
+          </Button>
           {/* TEMP (2026-04-26 QA): one-click reset of every JC's
               completedDate + status back to WAITING so the user can
               re-test inventory in/out cascades from a clean slate.

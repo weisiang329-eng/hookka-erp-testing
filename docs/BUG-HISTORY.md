@@ -12,6 +12,74 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-014 — UPH cascade decremented every upstream JC, not just per-branch terminals
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** Marking an Upholstery (UPH) JC `COMPLETED` on a sofa Base BOM
+wrote 6 separate `-consumeQty` decrements — one for **every** upstream JC
+in the same `wipKey` (FAB_CUT, FAB_SEW, WOOD_CUT, FRAMING, WEBBING, FOAM)
+— instead of only the **branch terminal** of each BOM branch. So
+completing UPH while wood-side depts (Wood Cut, Framing, Webbing) were
+all incomplete drove three separate negative wip_items rows for that
+branch, when only Webbing (the branch terminal — the JC immediately
+upstream of UPH on that branch) should have gone negative.
+
+User's correction: "Webbing missing should not also make Framing/WoodCut
+negative — those would only go negative if Webbing itself were marked
+complete with Framing/WoodCut missing." Each dept's negative is the
+responsibility of the **direct downstream dept that completes** (FRAMING
+consumes WOOD_CUT, WEBBING consumes FRAMING), not transitively from UPH.
+
+**Root cause:** The UPH branch of `applyWipInventoryChange()` in
+`src/api/routes-d1/production-orders.ts` (around line 1077-1119) did
+`upstreamLabels = new Set<string>()` over every JC with `wipKey === wipKey
+&& sequence < jcRow.sequence`, then decremented each one. That flattened
+the BOM into a single chain — for a sofa Base with 6 upstream JCs across
+2 parallel branches it wrote 6 decrements instead of 2.
+
+The non-UPH consume gate (line 1015) was already correct: filter by
+`(wipKey, branchKey)`, sort by sequence desc, take `[0]` — immediate
+upstream only.
+
+**Fix:** Replace the upstream-collection loop with a per-branch terminal
+pick. Group upstream JCs by `branchKey`, keep the highest-sequence JC
+per branch — that JC's wipLabel is the branch terminal, the only thing
+UPH should consume. For the sofa Base BOM:
+
+- Branch `(Webbing)` (wood-side): JCs at seq 2 (WOOD_CUT), 3 (FRAMING),
+  4 (WEBBING) → terminal is WEBBING.
+- Branch `{FABRIC} Foam` (fabric-side): JCs at seq 0 (FAB_CUT), 1
+  (FAB_SEW), 5 (FOAM) → terminal is FOAM.
+
+Result: UPH writes 2 decrements (one per branch terminal), not 6.
+
+Edit in `src/api/routes-d1/production-orders.ts` around line 1077-1133:
+swapped the `upstreamLabels = new Set<string>()` collection for a
+`Map<branchKey, JobCardRow>` that keeps the highest-sequence JC per
+branch. The downstream SELECT-then-UPDATE-or-INSERT logic (BUG-2026-04-27-013)
+is unchanged. Added a code comment explaining the per-branch-terminal
+invariant so a future refactor doesn't silently flatten it back.
+
+**Not touched:**
+- The non-UPH forward consume gate (around line 1015) — already correct,
+  per-branch terminal pick already in place.
+- The UPH rollback path (around line 936-955) — explicitly out of scope
+  per the task brief.
+- The producer-add path for UPH's own wip_items row.
+
+**Verification:**
+1. `npm run typecheck:app` clean for the production-orders.ts changes
+   (the pre-existing `delivery/index.tsx` deliveryDate errors are
+   unrelated to this fix and existed before this branch).
+2. `npm run lint:app` 0 errors, only pre-existing react-hooks/exhaustive-deps
+   warnings unchanged from baseline.
+3. `npm test` 83/83 passing, including the BUG-2026-04-27-013 pins:
+   - "cascade consume is unclamped — no MAX(0, stockQty - qty)"
+   - "cascade consume inserts a negative-qty row when upstream is missing"
+
+---
+
 ## BUG-2026-04-27-013 — wip_items consume silently no-ops on missing/zero upstream — now goes negative
 
 **Status:** 🟢 Fixed (2026-04-27)

@@ -1074,17 +1074,31 @@ async function applyWipInventoryChange(
       //      "completed-by-Upholstery" stock until Packing picks it up.
       const consumeQty = jcRow.wipQty || poRow.quantity || 1;
       if (wipKey) {
-        const upstreamLabels = new Set<string>();
+        // BUG-2026-04-27-014: UPH only consumes the BRANCH TERMINAL of each
+        // BOM branch — i.e., within each branchKey, the JC at the highest
+        // sequence below UPH's. Earlier upstreams in the chain are NOT
+        // UPH's direct upstream; their stock is consumed by their own
+        // direct downstream dept (FRAMING consumes WOOD_CUT, WEBBING
+        // consumes FRAMING, etc.). Per the user: "Webbing missing should
+        // not also make Framing/WoodCut negative — those would only go
+        // negative if Webbing itself were marked complete with
+        // Framing/WoodCut missing." The previous code flattened every
+        // upstream wipKey sibling into a Set and decremented all of them,
+        // which for a sofa Base BOM (6 upstream JCs) wrote 6 separate
+        // -consumeQty entries instead of 2 (one per branch terminal).
+        const byBranch = new Map<string, JobCardRow>();
         for (const j of allJcRows) {
-          if (
-            j.wipKey === wipKey &&
-            j.sequence < jcRow.sequence &&
-            j.wipLabel
-          ) {
-            upstreamLabels.add(j.wipLabel);
+          if (j.wipKey !== wipKey) continue;
+          if (j.sequence >= jcRow.sequence) continue;
+          if (!j.wipLabel) continue;
+          const bk = j.branchKey ?? "";
+          const cur = byBranch.get(bk);
+          if (!cur || j.sequence > cur.sequence) {
+            byBranch.set(bk, j);
           }
         }
-        for (const label of upstreamLabels) {
+        for (const [, terminal] of byBranch) {
+          const label = terminal.wipLabel!;
           // BUG-2026-04-27-013: cascade consume always decrements (no
           // MAX clamp). If the upstream wip_items row doesn't exist
           // (upstream dept was skipped), INSERT one with negative qty

@@ -100,6 +100,51 @@ file); 84/84 tests pass; manual SQL spot-checks per the task brief
 absent on WIP, PO surfaces as FG via `deriveFGStock`; partial-sofa:
 Cushion row visible).
 
+### Follow-up · BUG-2026-04-27-018: multi-PO sharing same wipLabel double-counted
+
+**Symptom:** When two POs both produced the same UPH `wipLabel` (e.g.
+two sofa POs both producing `5531 -Back Cushion 24`),
+`wip_items.stockQty` aggregated both contributions (+2). If PO A was
+fully UPH-complete (its +1 already in FG via `deriveFGStock`) but PO B
+was partial (its +1 should still be in WIP), the per-PO filter saw "at
+least one PO is partial → keep visible" and showed the **full** +2 on
+the WIP grid. PO A's +1 was double-counted (also in FG).
+
+**Root cause:** The PO-conditional filter from BUG-2026-04-27-017 was a
+boolean show/hide gate that ignored qty attribution. It correctly kept
+shared rows visible when any PO was partial but emitted the full
+aggregate `stockQty`, not the partial-PO subset.
+
+**Fix:** Per-PO attribution. For each UPH `wip_items` row, sum the
+`wipQty` of UPH JCs whose PO is NOT fully UPH-complete; that sum is the
+displayed `setQty` / `pieceQty` / `totalQty`. Sum = 0 → hide entirely
+(every linked PO has gone to FG). Implemented as `adjustedStockByRowId`
+in `src/api/routes-d1/inventory-wip.ts` next to the existing post-filter.
+
+The raw `stock_qty` is **not** overridden in the ledger; only the
+displayed WIP qty reflects "components not yet FG". Source aggregation
+and cost roll-up still walk all completed producer JCs (unchanged) — a
+fully-complete PO's source still appears in the row's `sources[]` if
+the row is partial-but-shared, so the user can see who has gone to FG.
+
+### Follow-up · BUG-2026-04-27-019: orphan UPH rows incorrectly hidden
+
+**Symptom:** A `wip_items` row whose `code` matched no JC's `wipLabel`
+at all (legacy / migration residue / external manual entry / stale
+data after a JC purge) was hidden from the WIP grid — invisible to
+the user with no recourse for cleanup.
+
+**Root cause:** The follow-up filter from BUG-2026-04-27-017 read "no
+linked PO" as vacuous-true on the EXISTS-style "every linked PO is
+fully complete" check, so the row was treated as "fully complete
+somewhere" and hidden. The original blanket-hide intent (preserved on
+purpose) was wrong for orphan rows that have no PO context at all.
+
+**Fix:** Default UPH orphans to **show**. Hide rule is now strictly:
+at least one UPH JC links to this row AND every linked PO is fully
+UPH-complete. No JC link → keep visible with the raw `stock_qty` so
+the user can spot and reconcile orphan ledger entries.
+
 ---
 
 ## BUG-2026-04-27-016 — PACKING participated in inventory cascade — should be metadata-only step

@@ -276,27 +276,36 @@ app.get("/", async (c) => {
     );
   }
 
-  // A UPH-coded wip_items row is HIDDEN iff every PO that links to it
-  // (via any JC's wipLabel = row.code) is fully UPH-complete. If even
-  // one linked PO still has a pending UPH JC, keep the row visible —
-  // that PO can't qualify as FG yet, so the component must surface
-  // somewhere.
+  // For a UPH-coded wip_items row whose `code` is shared by multiple POs,
+  // attribute its qty per-PO via the linking UPH JCs. Show only the qty
+  // contributed by POs that are NOT fully UPH-complete; the fully-complete
+  // POs' contributions already surface via FG (`deriveFGStock`).
   //
-  // Edge case: a UPH row whose code has no matching JC at all leaves
-  // `linkedPoIds` empty. Mirrors the "blanket-hide" intent from the
-  // original BUG-2026-04-27-017 fix (no PO is asserting partial-UPH
-  // visibility, so hide it). Preserves existing behavior for stale
-  // rows whose JCs got purged.
+  // Hide rule: at least one UPH JC links to this row AND every linked PO
+  // is fully UPH-complete → adjusted qty becomes 0 → row is hidden.
+  //
+  // BUG-2026-04-27-018: multi-PO sharing same wipLabel previously kept
+  // the full aggregate stockQty visible whenever ANY linked PO was
+  // partial, double-counting the fully-complete POs' contribution
+  // (which also showed in FG).
+  //
+  // BUG-2026-04-27-019: orphan UPH rows (no linking JC at all — legacy /
+  // migration residue / external entry) were hidden by the previous
+  // EXISTS-style filter (vacuous "every linked PO is fully complete").
+  // Now: no JC link → show as-is so the user can spot and clean up.
+  const adjustedStockByRowId = new Map<string, number>();
   const wipItemRows: WipItemRow[] = wipItemRowsAll.filter((w) => {
     if ((w.deptStatus || "").toUpperCase() !== "UPHOLSTERY") return true;
-    const linked = jcsByLabel.get(w.code) ?? [];
-    const linkedPoIds = new Set<string>();
-    for (const jc of linked) linkedPoIds.add(jc.productionOrderId);
-    if (linkedPoIds.size === 0) return false;
-    for (const poId of linkedPoIds) {
-      if (!poFullyUphComplete.get(poId)) return true; // partial → keep
-    }
-    return false; // every linked PO is fully UPH-complete → hide
+    const linkedUphJcs = (jcsByLabel.get(w.code) ?? []).filter(
+      (jc) => (jc.departmentCode || "").toUpperCase() === "UPHOLSTERY",
+    );
+    if (linkedUphJcs.length === 0) return true; // orphan → show as-is
+    const wipQty = linkedUphJcs
+      .filter((jc) => !poFullyUphComplete.get(jc.productionOrderId))
+      .reduce((s, jc) => s + (Number(jc.wipQty) || 1), 0);
+    if (wipQty <= 0) return false; // every linked PO is FG → hide
+    adjustedStockByRowId.set(w.id, wipQty);
+    return true;
   });
 
   const today = new Date();
@@ -521,6 +530,14 @@ app.get("/", async (c) => {
     const firstSrc = sources[0];
     const salesOrderNo = firstSrc ? stripPoSuffix(firstSrc.poCode) : null;
 
+    // BUG-2026-04-27-018: for UPH rows shared across POs, the displayed
+    // qty is the per-PO attribution sum (only POs that are NOT fully
+    // UPH-complete contribute). Falls through to raw stockQty for
+    // non-UPH rows and for orphan UPH rows (no linking JC).
+    const displayQty = adjustedStockByRowId.has(w.id)
+      ? (adjustedStockByRowId.get(w.id) ?? w.stockQty)
+      : w.stockQty;
+
     rows.push({
       id: w.id,
       wipCode: w.code,
@@ -528,15 +545,15 @@ app.get("/", async (c) => {
       category,
       completedBy,
       relatedProduct: productCode,
-      setQty: w.stockQty,
-      pieceQty: w.stockQty,
+      setQty: displayQty,
+      pieceQty: displayQty,
       salesOrderNo,
       fabric: firstSrc?.fabricCode || "",
       oldestAgeDays,
       estUnitCostSen,
       estTotalValueSen,
       members,
-      totalQty: w.stockQty,
+      totalQty: displayQty,
       sources,
     });
   }

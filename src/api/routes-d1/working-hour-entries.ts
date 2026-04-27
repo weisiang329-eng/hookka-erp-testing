@@ -17,7 +17,7 @@
 // the existing per-attendance rows and inserts the new ones in one shot, so
 // the UI doesn't have to track which rows changed.
 // ---------------------------------------------------------------------------
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
 
 const app = new Hono<Env>();
@@ -65,6 +65,54 @@ function rowToEntry(r: EntryRow) {
 
 function genId(): string {
   return `whe-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function genAttId(): string {
+  return `att-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// Resolve (workerId, date) → attendance_records.id, auto-creating a PRESENT
+// row if none exists. The flat Working Hours grid lets supervisors enter
+// hours rows without first clocking the worker in — this helper makes that
+// work transparently. Returns null if the worker doesn't exist.
+async function resolveOrCreateAttendance(
+  c: Context<Env>,
+  workerId: string,
+  date: string,
+): Promise<{ id: string; employeeId: string; date: string } | null> {
+  const existing = await c.var.DB
+    .prepare("SELECT id, employeeId, date FROM attendance_records WHERE employeeId = ? AND date = ?")
+    .bind(workerId, date)
+    .first<{ id: string; employeeId: string; date: string }>();
+  if (existing) return existing;
+
+  const worker = await c.var.DB
+    .prepare(
+      "SELECT w.id, w.name, w.departmentCode, d.shortName as deptShortName FROM workers w LEFT JOIN departments d ON d.id = w.departmentId WHERE w.id = ?",
+    )
+    .bind(workerId)
+    .first<{ id: string; name: string; departmentCode: string | null; deptShortName: string | null }>();
+  if (!worker) return null;
+
+  const id = genAttId();
+  await c.var.DB
+    .prepare(
+      `INSERT INTO attendance_records (
+         id, employeeId, employeeName, departmentCode, departmentName,
+         date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
+         efficiencyPct, overtimeMinutes, deptBreakdown, notes
+       ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, 'PRESENT', 0, 0, 0, 0, '[]', '')`,
+    )
+    .bind(
+      id,
+      worker.id,
+      worker.name,
+      worker.departmentCode ?? "",
+      worker.deptShortName ?? "",
+      date,
+    )
+    .run();
+  return { id, employeeId: worker.id, date };
 }
 
 type EntryInput = {
@@ -142,18 +190,30 @@ app.post("/", async (c) => {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
 
-  const attendanceId = typeof body.attendanceId === "string" ? body.attendanceId : "";
-  if (!attendanceId) return c.json({ success: false, error: "attendanceId required" }, 400);
-
-  const att = await c.var.DB.prepare(
-    "SELECT id, employeeId, date FROM attendance_records WHERE id = ?",
-  )
-    .bind(attendanceId)
-    .first<{ id: string; employeeId: string; date: string }>();
-  if (!att) return c.json({ success: false, error: "Attendance record not found" }, 400);
-
-  const workerId = (typeof body.workerId === "string" && body.workerId) || att.employeeId;
-  const date = (typeof body.date === "string" && body.date) || att.date;
+  // Two ways to attribute an entry to its parent attendance row:
+  //   - explicit attendanceId (legacy / direct), OR
+  //   - workerId + date — server auto-resolves to the existing attendance
+  //     row, or auto-creates a PRESENT row if the worker hasn't been
+  //     clocked-in yet for that date. This is the path used by the new
+  //     flat Working Hours grid: supervisors enter (worker × dept × cat ×
+  //     hours) directly without first opening an attendance row.
+  let att: { id: string; employeeId: string; date: string } | null = null;
+  const explicitAttId = typeof body.attendanceId === "string" ? body.attendanceId : "";
+  if (explicitAttId) {
+    att = await c.var.DB
+      .prepare("SELECT id, employeeId, date FROM attendance_records WHERE id = ?")
+      .bind(explicitAttId)
+      .first<{ id: string; employeeId: string; date: string }>();
+    if (!att) return c.json({ success: false, error: "Attendance record not found" }, 400);
+  } else {
+    const workerId = typeof body.workerId === "string" ? body.workerId : "";
+    const date = typeof body.date === "string" ? body.date : "";
+    if (!workerId || !date) {
+      return c.json({ success: false, error: "Provide attendanceId, or workerId + date" }, 400);
+    }
+    att = await resolveOrCreateAttendance(c, workerId, date);
+    if (!att) return c.json({ success: false, error: "Worker not found" }, 400);
+  }
 
   const v = validateEntry(body);
   if (!v.ok) return c.json({ success: false, error: v.error }, 400);
@@ -165,9 +225,9 @@ app.post("/", async (c) => {
   )
     .bind(
       id,
-      attendanceId,
-      workerId,
-      date,
+      att.id,
+      att.employeeId,
+      att.date,
       v.data.departmentCode,
       v.data.category || null,
       v.data.hours,
@@ -183,26 +243,35 @@ app.post("/", async (c) => {
 
 // ---------------------------------------------------------------------------
 // POST /bulk — replace all entries for an attendance row in one transaction.
-// Body: { attendanceId, entries: [{ departmentCode, category, hours, notes }] }
+// Body: { attendanceId | (workerId + date), entries: [{ departmentCode, category, hours, notes }] }
 // ---------------------------------------------------------------------------
 app.post("/bulk", async (c) => {
-  let body: { attendanceId?: unknown; entries?: unknown };
+  let body: { attendanceId?: unknown; workerId?: unknown; date?: unknown; entries?: unknown };
   try {
     body = await c.req.json();
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
 
-  const attendanceId = typeof body.attendanceId === "string" ? body.attendanceId : "";
-  if (!attendanceId) return c.json({ success: false, error: "attendanceId required" }, 400);
   if (!Array.isArray(body.entries)) return c.json({ success: false, error: "entries must be an array" }, 400);
 
-  const att = await c.var.DB.prepare(
-    "SELECT id, employeeId, date FROM attendance_records WHERE id = ?",
-  )
-    .bind(attendanceId)
-    .first<{ id: string; employeeId: string; date: string }>();
-  if (!att) return c.json({ success: false, error: "Attendance record not found" }, 400);
+  let att: { id: string; employeeId: string; date: string } | null = null;
+  const explicitAttId = typeof body.attendanceId === "string" ? body.attendanceId : "";
+  if (explicitAttId) {
+    att = await c.var.DB
+      .prepare("SELECT id, employeeId, date FROM attendance_records WHERE id = ?")
+      .bind(explicitAttId)
+      .first<{ id: string; employeeId: string; date: string }>();
+    if (!att) return c.json({ success: false, error: "Attendance record not found" }, 400);
+  } else {
+    const workerId = typeof body.workerId === "string" ? body.workerId : "";
+    const date = typeof body.date === "string" ? body.date : "";
+    if (!workerId || !date) {
+      return c.json({ success: false, error: "Provide attendanceId, or workerId + date" }, 400);
+    }
+    att = await resolveOrCreateAttendance(c, workerId, date);
+    if (!att) return c.json({ success: false, error: "Worker not found" }, 400);
+  }
 
   // Validate every entry up-front so a single bad row aborts before any write.
   const validated: Array<{ departmentCode: string; category: string; hours: number; notes: string }> = [];
@@ -213,14 +282,14 @@ app.post("/bulk", async (c) => {
   }
 
   const stmts = [
-    c.var.DB.prepare("DELETE FROM working_hour_entries WHERE attendanceId = ?").bind(attendanceId),
+    c.var.DB.prepare("DELETE FROM working_hour_entries WHERE attendanceId = ?").bind(att.id),
     ...validated.map((e) =>
       c.var.DB.prepare(
         `INSERT INTO working_hour_entries (id, attendanceId, workerId, date, departmentCode, category, hours, notes)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         genId(),
-        attendanceId,
+        att.id,
         att.employeeId,
         att.date,
         e.departmentCode,
@@ -235,7 +304,7 @@ app.post("/bulk", async (c) => {
   const res = await c.var.DB.prepare(
     "SELECT * FROM working_hour_entries WHERE attendanceId = ? ORDER BY departmentCode, category",
   )
-    .bind(attendanceId)
+    .bind(att.id)
     .all<EntryRow>();
   const data = (res.results ?? []).map(rowToEntry);
   return c.json({ success: true, data, total: data.length });

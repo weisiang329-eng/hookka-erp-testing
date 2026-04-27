@@ -367,26 +367,11 @@ app.post("/", async (c) => {
           400,
         );
       }
-      // Multi-SO DO is now allowed (2026-04-27 user request — same
-      // customer can have multiple SOs going to the same address; one
-      // truck trip should be one DO, not N). Constraint loosened from
-      // "same SO" to "same customer + same state". Different customers
-      // or different states still split — they need separate trips.
-      const customerKeys = new Set(
-        poRowsForItems.map(
-          (r) => `${r.customerName ?? ""}::${r.customerState ?? ""}`,
-        ),
-      );
-      if (customerKeys.size > 1) {
-        return c.json(
-          {
-            success: false,
-            error:
-              "Selected production orders span multiple customers or states — split into separate DOs (one per delivery destination)",
-          },
-          400,
-        );
-      }
+      // No customer/state/SO restriction (2026-04-27 user request) —
+      // operators can mix any POs onto one DO regardless of destination.
+      // The page UI groups by customer for readability but doesn't enforce
+      // grouping; that's the operator's call (one DO might genuinely cover
+      // multiple drops on a single truck trip).
       const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
       soIds.delete("");
       // Pick a representative salesOrderId for the legacy single-SO

@@ -1659,31 +1659,10 @@ export default function DeliveryPage() {
                   size="sm"
                   disabled={creatingDOFromPO}
                   onClick={() => {
+                    // Multi-customer/multi-state selections are allowed
+                    // (user request 2026-04-27). One DO can carry POs
+                    // for multiple destinations — operator's call.
                     const selected = readyPOs.filter((po) => selectedReadyPOs.has(po.id));
-                    // Client-side pre-flight (BUG-2026-04-27): mirror the
-                    // backend's multi-customer/state guard so the operator
-                    // sees the issue WITH the selection in context (not
-                    // after the fact via a faded toast). Also dumps the
-                    // exact rows to the console so a real bug here can be
-                    // diagnosed from a screenshot of DevTools.
-                    const customerKeys = new Set(
-                      selected.map((p) => `${p.customerName}::${p.customerState}`),
-                    );
-                    if (customerKeys.size > 1) {
-                      console.warn(
-                        "[create-do] client-side block: selection spans multiple customers/states",
-                        selected.map((p) => ({
-                          poNo: p.poNo,
-                          id: p.id,
-                          customer: p.customerName,
-                          state: p.customerState,
-                        })),
-                      );
-                      toast.error(
-                        `Selection spans ${customerKeys.size} delivery destinations: ${Array.from(customerKeys).join(", ")}. Pick rows from the same customer + state.`,
-                      );
-                      return;
-                    }
                     openCreateDODialog(selected);
                   }}
                 >

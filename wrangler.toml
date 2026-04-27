@@ -19,15 +19,14 @@ compatibility_flags = ["nodejs_compat"]
 # Pages project (SPA + Pages Functions)
 pages_build_output_dir = "dist"
 
-# D1 database binding — legacy source of truth. Being phased out in favor
-# of Supabase behind Hyperdrive (see [[hyperdrive]] below). Routes now go
-# through the D1Compat adapter that targets Supabase; the D1 binding is
-# retained so fallback / rollback remains one config toggle away until
-# Phase 7 retires it.
-[[d1_databases]]
-binding = "DB"
-database_name = "hookka-erp-db"
-database_id = "f17f29b5-b511-4824-a476-34767e5d9001"
+# D1 database binding — REMOVED 2026-04-27 (Phase 7 retire). All reads/
+# writes flow through the D1Compat adapter to Supabase Postgres via
+# Hyperdrive (see [[hyperdrive]] below). The legacy D1 instance was empty
+# and had no live traffic — every route uses `c.var.DB` which is the
+# Postgres adapter set in worker.ts middleware. The original D1 database
+# (`hookka-erp-db`, id `f17f29b5-b511-4824-a476-34767e5d9001`) still exists
+# in Cloudflare for snapshot-based rollback if needed; if you ever need
+# to re-bind, copy it back from git history.
 
 # Hyperdrive — proxies the Supabase pooler (Singapore) from Workers with
 # edge connection pooling. Without this, postgres wire-protocol round trips

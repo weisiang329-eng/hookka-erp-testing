@@ -28,7 +28,10 @@ import { cors } from "hono/cors";
 
 export type Env = {
   Bindings: {
-    DB: D1Database;               // legacy D1 binding (kept for rollback; routes use c.var.DB)
+    // D1 binding removed 2026-04-27 (Phase 7). Every route uses c.var.DB
+    // which is the D1Compat→Postgres adapter set up in middleware below.
+    // The Bindings shape no longer exposes a raw D1Database — if a route
+    // accidentally reaches for `c.env.DB`, TypeScript will catch it.
     ENVIRONMENT: string;
     API_CORS_ORIGIN: string;
     APP_URL: string;              // e.g. "http://localhost:8788" or "https://hookka-erp-testing.pages.dev"

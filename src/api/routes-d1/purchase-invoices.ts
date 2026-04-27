@@ -81,7 +81,7 @@ async function generatePiNo(db: D1Database): Promise<string> {
 //   ?dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD  (filters invoiceDate)
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
-  const db = c.env.DB;
+  const db = c.var.DB;
   const statusParam = c.req.query("status") ?? "";
   const supplierIdParam = c.req.query("supplierId") ?? "";
   const dateFrom = c.req.query("dateFrom") ?? "";
@@ -120,7 +120,7 @@ app.get("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.env.DB.prepare(
+  const row = await c.var.DB.prepare(
     "SELECT * FROM purchase_invoices WHERE id = ?",
   )
     .bind(id)
@@ -139,7 +139,7 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "create");
   if (denied) return denied;
 
-  const db = c.env.DB;
+  const db = c.var.DB;
   const body = await c.req.json().catch(() => ({})) as {
     purchaseOrderId?: string;
     supplierId?: string;
@@ -224,7 +224,7 @@ app.put("/:id", async (c) => {
   if (denied) return denied;
 
   const id = c.req.param("id");
-  const db = c.env.DB;
+  const db = c.var.DB;
   const existing = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
@@ -305,7 +305,7 @@ app.delete("/:id", async (c) => {
   if (denied) return denied;
 
   const id = c.req.param("id");
-  const db = c.env.DB;
+  const db = c.var.DB;
   const existing = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)

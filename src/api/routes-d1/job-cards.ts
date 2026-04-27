@@ -1,15 +1,22 @@
 // ---------------------------------------------------------------------------
 // Phase 6 — job_cards read endpoints.
 //
-// Intentionally narrow scope right now:
-//   GET /api/job-cards/:id/events   Event audit log (newest first,
+// Endpoints:
+//   GET /api/job-cards?picId=X&from=YYYY-MM-DD&to=YYYY-MM-DD
+//                                    Worker-scoped completed job cards
+//                                    (status COMPLETED/TRANSFERRED). Used by
+//                                    the Employee Performance tab so workers
+//                                    who only get recorded via PIC slots
+//                                    (not attendance punches) still surface.
+//                                    Returns rows joined to production_orders
+//                                    so each entry carries productCode + poNo.
+//   GET /api/job-cards/:id/events    Event audit log (newest first,
 //                                    paginated). Reads from the
 //                                    parallel write table created in
 //                                    migrations/0039_job_card_events.sql.
 //
-// No UI yet — this endpoint exists for future audit screens + programmatic
-// rollback tooling. Writes to job_cards themselves keep happening through
-// the PATCH handler in production-orders.ts.
+// Writes to job_cards themselves keep happening through the PATCH handler in
+// production-orders.ts.
 //
 // NOTE: this file is DISTINCT from routes-d1/jobcard-sync.ts, which is
 // an admin one-shot that reconciles job_cards against the current BOM.
@@ -19,6 +26,116 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 
 const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// GET /api/job-cards?picId=X[&from=YYYY-MM-DD][&to=YYYY-MM-DD][&status=...]
+//
+// Returns COMPLETED + TRANSFERRED job_cards rows where the worker is PIC1 or
+// PIC2 (matched on pic1Id / pic2Id), joined to production_orders so each row
+// carries productCode + poNo without a second round-trip.
+//
+// Why this exists: Employee Performance tab used to read attendance_records
+// only — workers who do real production work (PIC on completed JCs) but
+// don't have explicit clock-in/clock-out punches looked like they did
+// nothing. This endpoint is the second data source.
+//
+// Each row's `picSlot` tells the caller which side this worker was on so
+// the FE can apply the existing "halve PIC2 contribution" convention if it
+// wants to.
+// ---------------------------------------------------------------------------
+type WorkerJcRow = {
+  id: string;
+  productionOrderId: string;
+  poNo: string | null;
+  productCode: string | null;
+  departmentCode: string | null;
+  wipCode: string | null;
+  wipLabel: string | null;
+  completedDate: string | null;
+  productionTimeMinutes: number;
+  status: string;
+  pic1Id: string | null;
+  pic2Id: string | null;
+};
+
+app.get("/", async (c) => {
+  const picId = c.req.query("picId");
+  if (!picId) {
+    return c.json({ success: false, error: "picId required" }, 400);
+  }
+  const from = c.req.query("from") ?? null;
+  const to = c.req.query("to") ?? null;
+
+  // Allowed terminal statuses. Default to both COMPLETED + TRANSFERRED — both
+  // mean "the worker finished the job", just one was handed off downstream.
+  const statusParam = c.req.query("status");
+  const statuses = statusParam
+    ? statusParam.split(",").map((s) => s.trim()).filter(Boolean)
+    : ["COMPLETED", "TRANSFERRED"];
+  if (statuses.length === 0) {
+    return c.json({ success: false, error: "status filter empty" }, 400);
+  }
+
+  const db = c.var.DB;
+  const statusPlaceholders = statuses.map(() => "?").join(",");
+  const dateFilter: string[] = [];
+  const dateBinds: string[] = [];
+  if (from) {
+    dateFilter.push("jc.completedDate >= ?");
+    dateBinds.push(from);
+  }
+  if (to) {
+    dateFilter.push("jc.completedDate <= ?");
+    dateBinds.push(to);
+  }
+  const dateClause = dateFilter.length > 0 ? ` AND ${dateFilter.join(" AND ")}` : "";
+
+  const sql = `
+    SELECT
+      jc.id              AS id,
+      jc.productionOrderId AS productionOrderId,
+      po.poNo            AS poNo,
+      po.productCode     AS productCode,
+      jc.departmentCode  AS departmentCode,
+      jc.wipCode         AS wipCode,
+      jc.wipLabel        AS wipLabel,
+      jc.completedDate   AS completedDate,
+      jc.productionTimeMinutes AS productionTimeMinutes,
+      jc.status          AS status,
+      jc.pic1Id          AS pic1Id,
+      jc.pic2Id          AS pic2Id
+    FROM job_cards jc
+    LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+    WHERE (jc.pic1Id = ? OR jc.pic2Id = ?)
+      AND jc.status IN (${statusPlaceholders})
+      AND jc.completedDate IS NOT NULL
+      ${dateClause}
+    ORDER BY jc.completedDate DESC, jc.id DESC
+    LIMIT 5000
+  `;
+
+  const res = await db
+    .prepare(sql)
+    .bind(picId, picId, ...statuses, ...dateBinds)
+    .all<WorkerJcRow>();
+
+  const rows = res.results ?? [];
+  const data = rows.map((r) => ({
+    id: r.id,
+    productionOrderId: r.productionOrderId,
+    poNo: r.poNo ?? "",
+    productCode: r.productCode ?? "",
+    departmentCode: r.departmentCode ?? "",
+    wipCode: r.wipCode ?? "",
+    wipLabel: r.wipLabel ?? "",
+    completedDate: r.completedDate,
+    productionTimeMinutes: r.productionTimeMinutes ?? 0,
+    status: r.status,
+    picSlot: r.pic1Id === picId ? "PIC1" : r.pic2Id === picId ? "PIC2" : "",
+  }));
+
+  return c.json({ success: true, data });
+});
 
 // ---------------------------------------------------------------------------
 // GET /api/job-cards/:id/events

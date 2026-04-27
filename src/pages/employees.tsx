@@ -1429,6 +1429,20 @@ function EfficiencyOverviewTab({
 
 // ========== TAB 4: EMPLOYEE DETAIL ==========
 
+type WorkerJobCardRow = {
+  id: string;
+  productionOrderId: string;
+  poNo: string;
+  productCode: string;
+  departmentCode: string;
+  wipCode: string;
+  wipLabel: string;
+  completedDate: string | null;
+  productionTimeMinutes: number;
+  status: string;
+  picSlot: "PIC1" | "PIC2" | "";
+};
+
 function EmployeeDetailTab({
   workers,
   allAttendance,
@@ -1449,6 +1463,20 @@ function EmployeeDetailTab({
 
   const selectedWorker = workers.find((w) => w.id === selectedEmployeeId);
 
+  // SECOND data source — completed job_cards where the worker is PIC1 or PIC2.
+  // Workers who do real production work but never get explicit attendance
+  // punches (operator forgets to log clock-in/out) used to show up as zero on
+  // this page even when they were on dozens of completed JCs. This pulls
+  // those rows so the Daily Breakdown table merges both signals.
+  const jcUrl = selectedEmployeeId
+    ? `/api/job-cards?picId=${encodeURIComponent(selectedEmployeeId)}&from=${dateFrom}&to=${dateTo}`
+    : "";
+  const { data: jcResp } = useCachedJson<{ data?: WorkerJobCardRow[] }>(jcUrl);
+  const workerJcs: WorkerJobCardRow[] = useMemo(
+    () => (jcResp?.data ?? []),
+    [jcResp]
+  );
+
   // Filter attendance for this employee and date range (client-side)
   const empRecords = useMemo(
     () =>
@@ -1467,14 +1495,26 @@ function EmployeeDetailTab({
     (s, r) => s + r.workingMinutes,
     0
   );
-  const totalProdMins = empRecords.reduce(
+  const totalProdMinsAttendance = empRecords.reduce(
     (s, r) => s + r.productionTimeMinutes,
     0
   );
+  // Job-card production minutes — halve PIC2 contribution to match the
+  // existing convention used elsewhere (PIC2 is "assist", not solo work).
+  const totalProdMinsJc = useMemo(() => {
+    return workerJcs.reduce((s, r) => {
+      const m = r.productionTimeMinutes || 0;
+      return s + (r.picSlot === "PIC2" ? m / 2 : m);
+    }, 0);
+  }, [workerJcs]);
+  const totalProdMins = totalProdMinsAttendance + totalProdMinsJc;
+  // Avg Efficiency only meaningful when we have attendance hours to compare
+  // against — if a worker has 0 attendance minutes (purely JC-tracked), the
+  // ratio is undefined / infinite, so render "—" instead of a misleading number.
   const avgEff =
     totalWorkMins > 0
       ? ((totalProdMins / totalWorkMins) * 100).toFixed(1)
-      : "0";
+      : null;
   const totalOT = empRecords.reduce((s, r) => s + r.overtimeMinutes, 0);
   const daysPresent = empRecords.filter(
     (r) => r.status === "PRESENT" || r.status === "HALF_DAY"
@@ -1482,7 +1522,9 @@ function EmployeeDetailTab({
 
   // Flatten every deptBreakdown entry into a per-item row so the Daily
   // Breakdown shows every product this worker touched within the date range
-  // (matching the googlesheet Employee Detail Dashboard layout).
+  // (matching the googlesheet Employee Detail Dashboard layout). Each row
+  // also carries a `source` tag so the table can distinguish attendance-
+  // sourced rows ("ATT") from job-card-sourced rows ("JC").
   type ItemRow = {
     id: string;
     date: string;
@@ -1490,6 +1532,8 @@ function EmployeeDetailTab({
     deptCode: string;
     minutes: number;
     status: string;
+    source: "ATT" | "JC";
+    picSlot?: "PIC1" | "PIC2" | "";
   };
   const itemRows: ItemRow[] = useMemo(() => {
     const out: ItemRow[] = [];
@@ -1497,17 +1541,32 @@ function EmployeeDetailTab({
       if (!r.deptBreakdown || r.deptBreakdown.length === 0) continue;
       r.deptBreakdown.forEach((b, i) => {
         out.push({
-          id: `${r.id}-${i}`,
+          id: `att-${r.id}-${i}`,
           date: r.date,
           productCode: b.productCode || "—",
           deptCode: b.deptCode,
           minutes: b.minutes,
           status: r.status,
+          source: "ATT",
         });
       });
     }
+    for (const jc of workerJcs) {
+      if (!jc.completedDate) continue;
+      out.push({
+        id: `jc-${jc.id}`,
+        date: jc.completedDate,
+        productCode: jc.productCode || jc.wipLabel || jc.wipCode || "—",
+        deptCode: jc.departmentCode || "—",
+        minutes: jc.productionTimeMinutes || 0,
+        status: jc.status,
+        source: "JC",
+        picSlot: jc.picSlot,
+      });
+    }
+    out.sort((a, b) => b.date.localeCompare(a.date));
     return out;
-  }, [empRecords]);
+  }, [empRecords, workerJcs]);
 
   const itemColumns: Column<ItemRow>[] = [
     {
@@ -1521,7 +1580,17 @@ function EmployeeDetailTab({
       label: "Product / Item",
       sortable: true,
       render: (_v, row) => (
-        <span className="font-medium text-[#1F1D1B]">{row.productCode}</span>
+        <span className="flex items-center gap-1.5">
+          <span className="font-medium text-[#1F1D1B]">{row.productCode}</span>
+          {row.source === "JC" && (
+            <span
+              className="inline-flex items-center rounded-sm bg-[#E0EDF0] px-1 text-[10px] font-semibold text-[#3E6570]"
+              title={`From job card${row.picSlot ? ` (${row.picSlot})` : ""}`}
+            >
+              JC
+            </span>
+          )}
+        </span>
       ),
     },
     {
@@ -1550,6 +1619,8 @@ function EmployeeDetailTab({
       render: (_v, row) => <Badge variant="status" status={row.status} />,
     },
   ];
+
+  const jcCount = workerJcs.length;
 
   const contextMenuItems: ContextMenuItem[] = [
     {
@@ -1664,6 +1735,9 @@ function EmployeeDetailTab({
               {(totalWorkMins / 60).toFixed(1)}h
             </p>
             <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
+            {jcCount > 0 && (
+              <p className="mt-0.5 text-[10px] text-[#3E6570]">+{jcCount} JC completions</p>
+            )}
           </CardContent>
         </Card>
         <Card>
@@ -1672,15 +1746,26 @@ function EmployeeDetailTab({
               {(totalProdMins / 60).toFixed(1)}h
             </p>
             <p className="text-xs text-[#6B7280]">Total Production Hrs</p>
+            {totalProdMinsJc > 0 && (
+              <p className="mt-0.5 text-[10px] text-[#3E6570]">
+                {(totalProdMinsAttendance / 60).toFixed(1)}h att + {(totalProdMinsJc / 60).toFixed(1)}h jc
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 text-center">
-            <p
-              className={`text-2xl font-bold ${Number(avgEff) >= 85 ? "text-[#4F7C3A]" : Number(avgEff) >= 70 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}
-            >
-              {avgEff}%
-            </p>
+            {avgEff !== null ? (
+              <p
+                className={`text-2xl font-bold ${Number(avgEff) >= 85 ? "text-[#4F7C3A]" : Number(avgEff) >= 70 ? "text-[#9C6F1E]" : "text-[#9A3A2D]"}`}
+              >
+                {avgEff}%
+              </p>
+            ) : (
+              <p className="text-2xl font-bold text-[#9CA3AF]" title="No attendance hours in range — efficiency requires clock-in/out punches.">
+                —
+              </p>
+            )}
             <p className="text-xs text-[#6B7280]">Avg Efficiency</p>
           </CardContent>
         </Card>

@@ -326,6 +326,8 @@ app.post("/", async (c) => {
       fabricCode: string | null;
       quantity: number | null;
       rackingNumber: string | null;
+      customerName: string | null;
+      customerState: string | null;
     };
     const productionOrderIds: string[] = Array.isArray(body.productionOrderIds)
       ? (body.productionOrderIds as unknown[]).filter(
@@ -338,7 +340,8 @@ app.post("/", async (c) => {
       const placeholders = productionOrderIds.map(() => "?").join(",");
       const poRes = await c.var.DB.prepare(
         `SELECT id, poNo, salesOrderId, companySOId, productCode, productName,
-                sizeLabel, fabricCode, quantity, rackingNumber
+                sizeLabel, fabricCode, quantity, rackingNumber,
+                customerName, customerState
            FROM production_orders WHERE id IN (${placeholders})`,
       )
         .bind(...productionOrderIds)
@@ -350,18 +353,33 @@ app.post("/", async (c) => {
           400,
         );
       }
-      const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
-      soIds.delete("");
-      if (soIds.size > 1) {
+      // Multi-SO DO is now allowed (2026-04-27 user request — same
+      // customer can have multiple SOs going to the same address; one
+      // truck trip should be one DO, not N). Constraint loosened from
+      // "same SO" to "same customer + same state". Different customers
+      // or different states still split — they need separate trips.
+      const customerKeys = new Set(
+        poRowsForItems.map(
+          (r) => `${r.customerName ?? ""}::${r.customerState ?? ""}`,
+        ),
+      );
+      if (customerKeys.size > 1) {
         return c.json(
           {
             success: false,
             error:
-              "Selected production orders span multiple sales orders — split into separate DOs",
+              "Selected production orders span multiple customers or states — split into separate DOs (one per delivery destination)",
           },
           400,
         );
       }
+      const soIds = new Set(poRowsForItems.map((r) => r.salesOrderId ?? ""));
+      soIds.delete("");
+      // Pick a representative salesOrderId for the legacy single-SO
+      // cascade fields (sales_orders.hookkaDeliveryOrder etc.). When the
+      // DO genuinely spans multiple SOs, leave salesOrderId NULL — the
+      // DELIVERED cascade walks fg_units → poId to find every SO and
+      // updates each (added below).
       if (!resolvedSalesOrderId && soIds.size === 1) {
         resolvedSalesOrderId = [...soIds][0];
       }

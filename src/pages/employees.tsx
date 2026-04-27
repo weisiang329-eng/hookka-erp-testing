@@ -144,31 +144,46 @@ function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
 
-const DEPARTMENTS = [
-  { id: "dept-1", code: "FAB_CUT", name: "Fabric Cutting" },
-  { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing" },
-  { id: "dept-3", code: "WOOD_CUT", name: "Wood Cutting" },
-  { id: "dept-4", code: "FOAM", name: "Foam Bonding" },
-  { id: "dept-5", code: "FRAMING", name: "Framing" },
-  { id: "dept-6", code: "WEBBING", name: "Webbing" },
-  { id: "dept-7", code: "UPHOLSTERY", name: "Upholstery" },
-  { id: "dept-8", code: "PACKING", name: "Packing" },
+// Lightweight projection of /api/departments for in-page use. Full Department
+// type lives in src/types/index.ts; we only need these fields for dropdowns
+// and the production/non-production routing logic.
+type DepartmentLite = {
+  id: string;
+  code: string;
+  name: string;
+  shortName?: string;
+  sequence?: number;
+  color?: string;
+  workingHoursPerDay?: number;
+  isProduction: boolean;
+};
+
+// Fallback list — used while /api/departments hasn't loaded yet, so empty
+// dropdowns don't flash on first render. Source of truth at runtime is the
+// API; these match the migration 0061 + 0062 seed.
+const SEED_DEPARTMENTS: DepartmentLite[] = [
+  { id: "dept-1",  code: "FAB_CUT",              name: "Fabric Cutting",       isProduction: true },
+  { id: "dept-2",  code: "FAB_SEW",              name: "Fabric Sewing",        isProduction: true },
+  { id: "dept-3",  code: "WOOD_CUT",             name: "Wood Cutting",         isProduction: true },
+  { id: "dept-4",  code: "FOAM",                 name: "Foam Bonding",         isProduction: true },
+  { id: "dept-5",  code: "FRAMING",              name: "Framing",              isProduction: true },
+  { id: "dept-6",  code: "WEBBING",              name: "Webbing",              isProduction: true },
+  { id: "dept-7",  code: "UPHOLSTERY",           name: "Upholstery",           isProduction: true },
+  { id: "dept-8",  code: "PACKING",              name: "Packing",              isProduction: true },
+  { id: "dept-9",  code: "WAREHOUSING",          name: "Warehousing",          isProduction: false },
+  { id: "dept-10", code: "REPAIR",               name: "Repair",               isProduction: false },
+  { id: "dept-11", code: "MAINTENANCE",          name: "Maintenance",          isProduction: false },
+  { id: "dept-12", code: "PRODUCTION_SHORTFALL", name: "Production Shortfall", isProduction: false },
+  { id: "dept-13", code: "R_AND_D",              name: "R&D",                  isProduction: false },
 ];
 
-// 12-dept list for the working-hours breakdown rows. The 4 non-production
-// depts (sequence 9-12) accept hours WITHOUT a category — Labor Cost reports
-// surface them as "borrowed/idle" buckets separate from production cost.
-const ALL_DEPARTMENTS = [
-  ...DEPARTMENTS,
-  { id: "dept-9", code: "WAREHOUSING", name: "Warehousing" },
-  { id: "dept-10", code: "REPAIR", name: "Repair" },
-  { id: "dept-11", code: "MAINTENANCE", name: "Maintenance" },
-  { id: "dept-12", code: "PRODUCTION_SHORTFALL", name: "Production Shortfall" },
-];
-
-const PRODUCTION_DEPT_CODES = new Set([
-  "FAB_CUT", "FAB_SEW", "WOOD_CUT", "FOAM", "FRAMING", "WEBBING", "UPHOLSTERY", "PACKING",
-]);
+// Legacy constants — kept for module-level references that don't have access
+// to the dynamic departments prop yet (mostly inside tab components that
+// haven't been wired through). Sized & shaped against SEED_DEPARTMENTS so
+// the runtime defaults match the migration seed exactly.
+const DEPARTMENTS = SEED_DEPARTMENTS.filter((d) => d.isProduction);
+const ALL_DEPARTMENTS = SEED_DEPARTMENTS;
+const PRODUCTION_DEPT_CODES = new Set(SEED_DEPARTMENTS.filter((d) => d.isProduction).map((d) => d.code));
 
 const CATEGORIES = ["SOFA", "BEDFRAME", "ACCESSORY"] as const;
 type Category = (typeof CATEGORIES)[number] | "";
@@ -210,11 +225,20 @@ type EntryDraft = {
 function WorkingHoursTab({
   workers,
   refreshAttendance,
+  departments,
+  productionDeptCodes,
 }: {
   workers: Worker[];
   attendance: AttendanceRecord[];
   refreshAttendance: (date: string) => void;
+  departments: DepartmentLite[];
+  productionDeptCodes: Set<string>;
 }) {
+  // Fall back to seed if API hasn't loaded — avoids dropdown flash on first
+  // render. After /api/departments resolves, the prop wins and any new
+  // dept added via the Manage Departments UI on Labor Cost shows up here too.
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
   const [selectedDate, setSelectedDate] = useState(todayStr());
   const [rows, setRows] = useState<EntryDraft[]>([]);
   const [loading, setLoading] = useState(false);
@@ -259,13 +283,13 @@ function WorkingHoursTab({
       const copy = [...prev];
       const merged = { ...copy[idx], ...patch, saved: false, saveError: undefined };
       // Switching to non-production dept clears category.
-      if (patch.departmentCode !== undefined && !PRODUCTION_DEPT_CODES.has(patch.departmentCode)) {
+      if (patch.departmentCode !== undefined && !prodCodes.has(patch.departmentCode)) {
         merged.category = "";
       }
       copy[idx] = merged;
       return copy;
     });
-  }, []);
+  }, [prodCodes]);
 
   const addRow = useCallback(() => {
     setRows((prev) => [
@@ -328,7 +352,7 @@ function WorkingHoursTab({
       patchRow(idx, { saveError: "Employee and department are required" });
       return;
     }
-    if (PRODUCTION_DEPT_CODES.has(row.departmentCode) && !row.category) {
+    if (prodCodes.has(row.departmentCode) && !row.category) {
       patchRow(idx, { saveError: "Production dept requires a category" });
       return;
     }
@@ -371,7 +395,7 @@ function WorkingHoursTab({
         saveError: e instanceof Error ? e.message : "Save failed",
       });
     }
-  }, [rows, selectedDate, patchRow, refreshAttendance]);
+  }, [rows, selectedDate, patchRow, refreshAttendance, prodCodes]);
 
   const saveAll = useCallback(async () => {
     setBulkSaving(true);
@@ -471,7 +495,7 @@ function WorkingHoursTab({
                 </tr>
               )}
               {rows.map((row, idx) => {
-                const isProd = PRODUCTION_DEPT_CODES.has(row.departmentCode);
+                const isProd = prodCodes.has(row.departmentCode);
                 return (
                   <tr key={row.id ?? `new-${idx}`} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
                     <td className="px-3 py-1.5">
@@ -495,7 +519,7 @@ function WorkingHoursTab({
                         className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
                       >
                         <option value="">— select dept —</option>
-                        {ALL_DEPARTMENTS.map((d) => (
+                        {allDepts.map((d) => (
                           <option key={d.code} value={d.code}>{d.name}</option>
                         ))}
                       </select>
@@ -612,10 +636,16 @@ const emptyForm: WorkerFormData = {
 function EmployeeMasterTab({
   workers,
   refreshWorkers,
+  departments,
 }: {
   workers: Worker[];
   refreshWorkers: () => void;
+  departments: DepartmentLite[];
 }) {
+  // Primary-dept dropdown can pick any of the 13 (and counting) depts —
+  // workers can have R&D / Maintenance as their primary too, not just
+  // production. Falls back to seed if API hasn't loaded.
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const { toast } = useToast();
   const [showAddForm, setShowAddForm] = useState(false);
   const [form, setForm] = useState<WorkerFormData>({ ...emptyForm });
@@ -740,7 +770,7 @@ function EmployeeMasterTab({
               }
               className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
             >
-              {DEPARTMENTS.map((d) => (
+              {allDepts.map((d) => (
                 <option key={d.id} value={d.id}>
                   {d.name}
                 </option>
@@ -748,7 +778,7 @@ function EmployeeMasterTab({
             </select>
           ) : (
             <span className="text-[#4B5563]">
-              {DEPARTMENTS.find((d) => d.id === row.departmentId)?.name ||
+              {allDepts.find((d) => d.id === row.departmentId)?.name ||
                 row.departmentCode}
             </span>
           ),
@@ -1067,7 +1097,7 @@ function EmployeeMasterTab({
                   }
                   className="flex h-8 w-full rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
                 >
-                  {DEPARTMENTS.map((d) => (
+                  {allDepts.map((d) => (
                     <option key={d.id} value={d.id}>
                       {d.name}
                     </option>
@@ -2243,7 +2273,19 @@ function workingDaysInMonth(period: string): number {
   return count;
 }
 
-function LaborCostTab({ workers }: { workers: Worker[] }) {
+function LaborCostTab({
+  workers,
+  departments,
+  productionDeptCodes,
+  refreshDepartments: _refreshDepartments,
+}: {
+  workers: Worker[];
+  departments: DepartmentLite[];
+  productionDeptCodes: Set<string>;
+  refreshDepartments: () => void;  // wired in next commit when Manage Departments UI lands
+}) {
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
   const { from, to } = useMemo(() => periodToDateRange(period), [period]);
@@ -2337,8 +2379,8 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
     const out: LaborCostRow[] = [];
     for (const [key, b] of buckets.entries()) {
       const [departmentCode, category] = key.split("|") as [string, Category];
-      const dept = ALL_DEPARTMENTS.find((d) => d.code === departmentCode);
-      const isProduction = PRODUCTION_DEPT_CODES.has(departmentCode);
+      const dept = allDepts.find((d) => d.code === departmentCode);
+      const isProduction = prodCodes.has(departmentCode);
       out.push({
         id: key,
         departmentCode,
@@ -2353,13 +2395,13 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
       });
     }
     out.sort((a, b) => {
-      const seqA = ALL_DEPARTMENTS.findIndex((d) => d.code === a.departmentCode);
-      const seqB = ALL_DEPARTMENTS.findIndex((d) => d.code === b.departmentCode);
+      const seqA = allDepts.findIndex((d) => d.code === a.departmentCode);
+      const seqB = allDepts.findIndex((d) => d.code === b.departmentCode);
       if (seqA !== seqB) return seqA - seqB;
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period]);
+  }, [entriesResp, plResp, workersById, period, allDepts, prodCodes]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -2939,12 +2981,25 @@ export default function EmployeesPage() {
 
   const { data: workersResp, loading: workersLoading, refresh: refreshWorkersHook } = useCachedJson<{ data?: Worker[] }>("/api/workers");
   const { data: attendanceResp, loading: attendanceLoading, refresh: refreshAttendanceHook } = useCachedJson<{ data?: AttendanceRecord[] }>("/api/attendance");
+  // /api/departments is the source of truth for which dept codes exist + which
+  // are production. Replaces the formerly-hardcoded ALL_DEPARTMENTS and
+  // PRODUCTION_DEPT_CODES constants — new depts added via the Manage UI on the
+  // Labor Cost tab show up automatically in every dept-aware dropdown.
+  const { data: deptsResp, refresh: refreshDeptsHook } = useCachedJson<{ data?: DepartmentLite[] }>("/api/departments");
 
   const workers: Worker[] = useMemo(
     () => ((workersResp as { data?: Worker[] } | Worker[] | null)
       ? ((workersResp as { data?: Worker[] }).data ?? (Array.isArray(workersResp) ? (workersResp as Worker[]) : []))
       : []),
     [workersResp]
+  );
+  const departments: DepartmentLite[] = useMemo(
+    () => deptsResp?.data ?? [],
+    [deptsResp]
+  );
+  const productionDeptCodes = useMemo(
+    () => new Set(departments.filter((d) => d.isProduction).map((d) => d.code)),
+    [departments]
   );
   const allAttendance: AttendanceRecord[] = useMemo(
     () => ((attendanceResp as { data?: AttendanceRecord[] } | AttendanceRecord[] | null)
@@ -3113,11 +3168,13 @@ export default function EmployeesPage() {
           workers={workers}
           attendance={allAttendance}
           refreshAttendance={refreshAttendance}
+          departments={departments}
+          productionDeptCodes={productionDeptCodes}
         />
       )}
 
       {activeTab === "employee-master" && (
-        <EmployeeMasterTab workers={workers} refreshWorkers={fetchWorkers} />
+        <EmployeeMasterTab workers={workers} refreshWorkers={fetchWorkers} departments={departments} />
       )}
 
       {activeTab === "efficiency" && (
@@ -3135,7 +3192,12 @@ export default function EmployeesPage() {
       )}
 
       {activeTab === "labor-cost" && (
-        <LaborCostTab workers={workers} />
+        <LaborCostTab
+          workers={workers}
+          departments={departments}
+          productionDeptCodes={productionDeptCodes}
+          refreshDepartments={refreshDeptsHook}
+        />
       )}
 
       {activeTab === "payroll" && (

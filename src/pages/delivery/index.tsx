@@ -84,11 +84,13 @@ type DeliveryOrderRow = {
   receivedDate: string | null;
   status: DOStatus;
   driverName: string;
+  driverContactPerson: string;
   vehicleNo: string;
   lorryName: string;
   deliveryAddress: string;
   contactPerson: string;
   contactPhone: string;
+  deliveryDate: string;
   remarks: string;
 };
 
@@ -135,11 +137,13 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     receivedDate: d.deliveredAt || null,
     status,
     driverName: d.driverName || "",
+    driverContactPerson: (d as Record<string, unknown>).driverContactPerson as string || "",
     vehicleNo: d.vehicleNo || "",
     lorryName: d.lorryName || "",
     deliveryAddress: d.deliveryAddress || "",
     contactPerson: d.contactPerson || "",
     contactPhone: d.contactPhone || "",
+    deliveryDate: d.deliveryDate || "",
     remarks: d.remarks || "",
   };
 }
@@ -262,8 +266,15 @@ export default function DeliveryPage() {
   const [activeTab, setActiveTab] = useUrlState<string>("tab", "planning");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [detailDO, setDetailDO] = useState<DeliveryOrderRow | null>(null);
-  const [createDODialog, setCreateDODialog] = useState<ReadyPORow[] | null>(null);
-  const [createDOForm, setCreateDOForm] = useState({ driverId: "", remarks: "" });
+  // "manual" sentinel = Pending Dispatch's blank-DO entry point (Path A);
+  // ReadyPORow[] = converting selected Pending Delivery POs (Path B). One
+  // state keeps the dialog body unified so both paths share the same 3PL /
+  // date / address / remarks block instead of duplicating markup.
+  const [createDODialog, setCreateDODialog] = useState<ReadyPORow[] | "manual" | null>(null);
+  const [createDOForm, setCreateDOForm] = useState({ driverId: "", remarks: "", deliveryDate: "" });
+  // Customer chosen in manual mode — drives default hub lookup. Empty in
+  // convert mode (customer is derived from the selected POs there).
+  const [manualCustomerId, setManualCustomerId] = useState<string>("");
   // Each drop point = one customer hub destination
   const [createDODrops, setCreateDODrops] = useState<{ customerId: string; customerName: string; hubId: string; address: string; contactName: string; contactPhone: string; poIds: string[] }[]>([]);
   const [printDialog, setPrintDialog] = useState<DeliveryOrderRow[] | null>(null);
@@ -276,7 +287,7 @@ export default function DeliveryPage() {
 
   // ----- Detail Edit mode -----
   const [editMode, setEditMode] = useState(false);
-  const [editForm, setEditForm] = useState({ driverId: "", deliveryAddress: "", dropPoints: "1", remarks: "", contactPerson: "", contactPhone: "" });
+  const [editForm, setEditForm] = useState({ driverId: "", deliveryAddress: "", dropPoints: "1", remarks: "", contactPerson: "", contactPhone: "", deliveryDate: "" });
   const [editItems, setEditItems] = useState<DOItem[]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [addItemSearch, setAddItemSearch] = useState("");
@@ -716,45 +727,87 @@ export default function DeliveryPage() {
     });
 
     setCreateDODrops(drops);
-    setCreateDOForm({ driverId: "", remarks: "" });
+    setCreateDOForm({ driverId: "", remarks: "", deliveryDate: "" });
     setCreateDODialog(pos);
+  };
+
+  // Manual create — Pending Dispatch tab can spawn a blank DO that has no
+  // PO items yet. Customer is required (drives default hub / address);
+  // items get added afterwards from Edit mode's Add-Item panel. Distinct
+  // from openCreateDODialog by the "manual" sentinel so the same dialog
+  // body can render either flow without duplicating markup.
+  const openManualCreateDODialog = () => {
+    setCreateDODrops([]);
+    setCreateDOForm({ driverId: "", remarks: "", deliveryDate: "" });
+    setManualCustomerId("");
+    setCreateDODialog("manual");
   };
 
   const confirmCreateDO = async () => {
     if (!createDODialog) return;
-    // Derive poIds from the LIVE selection (not the dialog-open snapshot)
-    // so any checkbox toggles the user did with the dialog still open are
-    // honored. Without this the snapshot from openCreateDODialog could
-    // include POs the user has since deselected — backend would then see
-    // multi-customer/multi-state selections and reject (BUG-2026-04-27:
-    // user reported "Selected production orders span multiple customers
-    // or states" toast even though only 1 row showed as selected — the
-    // dialog snapshot was stale).
-    const poIds = readyPOs
-      .filter((po) => selectedReadyPOs.has(po.id))
-      .map((po) => po.id);
 
-    if (poIds.length === 0) {
-      setCreateDODialog(null);
-      return;
+    const isManual = createDODialog === "manual";
+
+    // Per-mode body assembly. Manual mode posts customerId only (blank DO,
+    // 0 items); convert mode posts productionOrderIds derived from the
+    // live PO selection.
+    let body: Record<string, unknown>;
+    if (isManual) {
+      if (!manualCustomerId) {
+        toast.error("Please pick a customer");
+        return;
+      }
+      const cust = customersData.find((c) => c.id === manualCustomerId);
+      const hub =
+        cust?.deliveryHubs.find((h) => h.isDefault) ?? cust?.deliveryHubs[0];
+      body = {
+        customerId: manualCustomerId,
+        productionOrderIds: [],
+        driverId: createDOForm.driverId || null,
+        deliveryAddress: hub?.address ?? "",
+        contactPerson: hub?.contactName ?? "",
+        contactPhone: hub?.phone ?? "",
+        dropPoints: 1,
+        remarks: createDOForm.remarks,
+        deliveryDate: createDOForm.deliveryDate || "",
+      };
+    } else {
+      // Derive poIds from the LIVE selection (not the dialog-open snapshot)
+      // so any checkbox toggles the user did with the dialog still open are
+      // honored. Without this the snapshot from openCreateDODialog could
+      // include POs the user has since deselected — backend would then see
+      // multi-customer/multi-state selections and reject (BUG-2026-04-27:
+      // user reported "Selected production orders span multiple customers
+      // or states" toast even though only 1 row showed as selected — the
+      // dialog snapshot was stale).
+      const poIds = readyPOs
+        .filter((po) => selectedReadyPOs.has(po.id))
+        .map((po) => po.id);
+      if (poIds.length === 0) {
+        setCreateDODialog(null);
+        return;
+      }
+      const deliveryAddress =
+        createDODrops.length === 1
+          ? createDODrops[0].address
+          : createDODrops
+              .map((d, i) => `Drop ${i + 1} (${d.customerName}): ${d.address}`)
+              .join("\n");
+      body = {
+        productionOrderIds: poIds,
+        driverId: createDOForm.driverId || null,
+        deliveryAddress,
+        dropPoints: createDODrops.length,
+        remarks: createDOForm.remarks,
+        deliveryDate: createDOForm.deliveryDate || "",
+      };
     }
-
-    // Build combined delivery address from drops
-    const deliveryAddress = createDODrops.length === 1
-      ? createDODrops[0].address
-      : createDODrops.map((d, i) => `Drop ${i + 1} (${d.customerName}): ${d.address}`).join("\n");
 
     setCreatingDOFromPO(true);
     try {
       const data = await fetchJson("/api/delivery-orders", DOMutationSchema, {
         method: "POST",
-        body: {
-          productionOrderIds: poIds,
-          driverId: createDOForm.driverId || null,
-          deliveryAddress,
-          dropPoints: createDODrops.length,
-          remarks: createDOForm.remarks,
-        },
+        body,
       });
       if (!data.success) {
         toast.error(data.error || "Failed to create delivery order");
@@ -889,6 +942,7 @@ export default function DeliveryPage() {
       remarks: row.remarks || "",
       contactPerson: row.contactPerson || "",
       contactPhone: row.contactPhone || "",
+      deliveryDate: row.deliveryDate ? row.deliveryDate.split("T")[0] : "",
     });
     setEditItems([...row.items]);
     setEditMode(true);
@@ -966,6 +1020,7 @@ export default function DeliveryPage() {
           remarks: editForm.remarks,
           contactPerson: editForm.contactPerson,
           contactPhone: editForm.contactPhone,
+          deliveryDate: editForm.deliveryDate || "",
           items: editItems.map((i) => ({
             id: i.id,
             productionOrderId: i.productionOrderId,
@@ -1664,19 +1719,34 @@ export default function DeliveryPage() {
               <CardTitle className="flex items-center gap-2">
                 <Truck className="h-5 w-5 text-[#6B5C32]" /> Delivery Orders
               </CardTitle>
-              {filteredOrders.length > 0 && (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.size === filteredOrders.length && filteredOrders.length > 0}
-                    onChange={toggleSelectAll}
-                    className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
-                  />
-                  <span className="text-xs text-[#6B7280]">
-                    {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}
-                  </span>
-                </div>
-              )}
+              <div className="flex items-center gap-3">
+                {/* Manual create — only meaningful on Pending Dispatch.
+                    Dispatched / Delivered / Invoice tabs already represent
+                    DOs that have moved past creation, so the entry point
+                    would be confusing there. */}
+                {activeTab === "pending_dispatch" && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={openManualCreateDODialog}
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Create DO
+                  </Button>
+                )}
+                {filteredOrders.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size === filteredOrders.length && filteredOrders.length > 0}
+                      onChange={toggleSelectAll}
+                      className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
+                    />
+                    <span className="text-xs text-[#6B7280]">
+                      {selectedIds.size > 0 ? `${selectedIds.size} selected` : "Select all"}
+                    </span>
+                  </div>
+                )}
+              </div>
             </div>
           </CardHeader>
           <CardContent>
@@ -1731,21 +1801,63 @@ export default function DeliveryPage() {
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8]">
               <h2 className="text-lg font-bold text-[#1F1D1B]">Create Delivery Order</h2>
-              <p className="text-xs text-[#6B7280]">Assign 3PL provider, delivery address, and generate DO</p>
+              <p className="text-xs text-[#6B7280]">
+                {createDODialog === "manual"
+                  ? "Pick a customer to spawn a blank DO. Items can be added afterwards from the DO detail."
+                  : "Assign 3PL provider, delivery address, and generate DO"}
+              </p>
             </div>
             <div className="px-6 py-5 space-y-4">
-              {/* Items summary */}
-              <div className="bg-[#E0EDF0] border border-[#A8CAD2] rounded-lg p-3">
-                <p className="text-sm text-[#3E6570] font-medium mb-2">Items ({createDODialog.length})</p>
-                <div className="space-y-1 max-h-40 overflow-y-auto">
-                  {createDODialog.map((po) => (
-                    <div key={po.id} className="flex items-center justify-between text-xs">
-                      <span className="font-mono text-[#3E6570]">{po.productCode} — {po.sizeLabel}</span>
-                      <span className="text-[#3E6570]">{po.customerName} · Qty {po.quantity}</span>
-                    </div>
-                  ))}
+              {createDODialog === "manual" ? (
+                /* Manual mode: customer picker drives default hub for the
+                   address. No items panel — operator adds POs in Edit mode
+                   after the blank DO lands. */
+                <div>
+                  <label className="text-xs text-[#6B7280] font-medium">
+                    Customer <span className="text-rose-600">*</span>
+                  </label>
+                  <select
+                    value={manualCustomerId}
+                    onChange={(e) => setManualCustomerId(e.target.value)}
+                    className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                  >
+                    <option value="">— Select customer —</option>
+                    {customersData.map((c) => (
+                      <option key={c.id} value={c.id}>{c.name}</option>
+                    ))}
+                  </select>
+                  {manualCustomerId && (() => {
+                    const cust = customersData.find((c) => c.id === manualCustomerId);
+                    const hub = cust?.deliveryHubs.find((h) => h.isDefault) ?? cust?.deliveryHubs[0];
+                    if (!hub) {
+                      return (
+                        <p className="text-xs text-rose-600 mt-2">
+                          This customer has no delivery hub configured. Add one before creating a DO.
+                        </p>
+                      );
+                    }
+                    return (
+                      <div className="mt-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md p-2 text-xs text-[#6B7280]">
+                        <p className="font-medium text-[#1F1D1B]">{hub.address}</p>
+                        <p>{hub.contactName ?? "—"} · {hub.phone ?? "—"}</p>
+                      </div>
+                    );
+                  })()}
                 </div>
-              </div>
+              ) : (
+                /* Convert mode: items pre-selected from Pending Delivery */
+                <div className="bg-[#E0EDF0] border border-[#A8CAD2] rounded-lg p-3">
+                  <p className="text-sm text-[#3E6570] font-medium mb-2">Items ({createDODialog.length})</p>
+                  <div className="space-y-1 max-h-40 overflow-y-auto">
+                    {createDODialog.map((po) => (
+                      <div key={po.id} className="flex items-center justify-between text-xs">
+                        <span className="font-mono text-[#3E6570]">{po.productCode} — {po.sizeLabel}</span>
+                        <span className="text-[#3E6570]">{po.customerName} · Qty {po.quantity}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* 3PL Provider */}
               <div>
@@ -1764,7 +1876,9 @@ export default function DeliveryPage() {
                 </select>
               </div>
 
-              {/* Drop Points — each detected customer+hub */}
+              {/* Drop Points — only meaningful in convert mode (manual mode
+                  pulls a single hub from the chosen customer above) */}
+              {createDODialog !== "manual" && (
               <div>
                 <label className="text-xs text-[#6B7280] font-medium mb-2 block">
                   Delivery Destinations ({createDODrops.length} drop{createDODrops.length > 1 ? "s" : ""})
@@ -1834,6 +1948,7 @@ export default function DeliveryPage() {
                   })}
                 </div>
               </div>
+              )}
 
               {/* Est. Delivery Cost */}
               <div className="flex items-center justify-between bg-[#F5F3F0] rounded-lg px-3 py-2">
@@ -1849,6 +1964,19 @@ export default function DeliveryPage() {
                 </span>
               </div>
 
+              {/* Delivery Date — planned drop-off date the customer expects.
+                  Optional at create time so users with no firm date yet can
+                  still cut a DO; can be filled in later via Edit. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Delivery Date</label>
+                <input
+                  type="date"
+                  value={createDOForm.deliveryDate}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, deliveryDate: e.target.value }))}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                />
+              </div>
+
               {/* Remarks */}
               <div>
                 <label className="text-xs text-[#6B7280] font-medium">Remarks</label>
@@ -1862,7 +1990,14 @@ export default function DeliveryPage() {
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
               <Button variant="outline" onClick={() => setCreateDODialog(null)}>Cancel</Button>
-              <Button variant="primary" onClick={confirmCreateDO} disabled={creatingDOFromPO}>
+              <Button
+                variant="primary"
+                onClick={confirmCreateDO}
+                disabled={
+                  creatingDOFromPO ||
+                  (createDODialog === "manual" && !manualCustomerId)
+                }
+              >
                 {creatingDOFromPO ? (
                   <><RefreshCw className="h-4 w-4 animate-spin" /> Creating...</>
                 ) : (
@@ -2136,56 +2271,149 @@ export default function DeliveryPage() {
                   </div>
                 </div>
               ) : (
-                <div className="grid grid-cols-3 gap-4 text-sm">
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
-                    <p className="font-medium doc-number">{detailDO.doNo}</p>
+                /* Three-section layout, redesigned 2026-04-27. The previous
+                   12-cell grid showed SO No / Customer PO / State as
+                   single-value fields, which silently went blank for any
+                   multi-SO / multi-customer DO (the underlying columns hold
+                   only one value per row). Per-line SO numbers live on the
+                   items table + a "Sales Orders" chip strip below; the
+                   header now only carries fields that aggregate cleanly.
+                   3PL info gets its own section pulling provider name,
+                   contact person (the human dispatcher / driver to call —
+                   not the recipient at the address), and vehicle plate. */
+                <div className="space-y-4">
+                  {/* DO Basics */}
+                  <div className="grid grid-cols-3 gap-4 text-sm">
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">DO Number</p>
+                      <p className="font-medium doc-number">{detailDO.doNo}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
+                      <p className="font-medium">{(detailDO.totalM3 ?? 0).toFixed(2)}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
+                      <p className="font-medium">{detailDO.items.length}</p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">SO No.</p>
-                    <p className="font-medium doc-number">{detailDO.companySO}</p>
+
+                  {/* Sales Orders covered — comma-separated dedup. Empty for
+                      a freshly-created blank manual DO; fills in once items
+                      get added. */}
+                  {(() => {
+                    const sos = Array.from(
+                      new Set(
+                        detailDO.items
+                          .map((it) => it.salesOrderNo)
+                          .filter((s) => !!s),
+                      ),
+                    );
+                    if (sos.length === 0) return null;
+                    return (
+                      <div className="text-sm">
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Sales Orders</p>
+                        <p className="font-medium doc-number">{sos.join(", ")}</p>
+                      </div>
+                    );
+                  })()}
+
+                  {/* 3PL Info */}
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">3PL Info</p>
+                    <div className="grid grid-cols-3 gap-4 text-sm">
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Provider</p>
+                        <p className="font-medium">{detailDO.driverName || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
+                        <p className="font-medium">{detailDO.driverContactPerson || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Vehicle No.</p>
+                        <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Customer PO</p>
-                    <p className="font-medium doc-number">{detailDO.customerPOId}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
-                    <p className="font-medium">{detailDO.customerName}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">State</p>
-                    <p className="font-medium">{detailDO.hubBranch}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
-                    <p className="font-medium">{(detailDO.totalM3 ?? 0).toFixed(2)}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">3PL / Driver</p>
-                    <p className="font-medium">{detailDO.driverName || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Vehicle No.</p>
-                    <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
-                    <p className="font-medium text-xs">{detailDO.deliveryAddress || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
-                    <p className="font-medium">{detailDO.contactPerson || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Phone</p>
-                    <p className="font-medium">{detailDO.contactPhone || "-"}</p>
-                  </div>
-                  <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
-                    <p className="font-medium">
-                      {detailDO.dispatchDate ? formatDate(detailDO.dispatchDate) : "-"}
-                    </p>
+
+                  {/* Delivery Info */}
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">Delivery Info</p>
+                    {/* Customer line. Multi-drop renders as
+                        "Drop 1: A, Drop 2: B" derived from parsing the
+                        deliveryAddress string the create flow writes. We
+                        keep the parse loose: the format is
+                        "Drop N (Name): address\n..." for multi-drop, and
+                        a plain address string for single-drop. */}
+                    <div className="grid grid-cols-1 gap-3 text-sm">
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
+                        <p className="font-medium">{detailDO.customerName || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
+                        {(() => {
+                          const addr = detailDO.deliveryAddress || "";
+                          // Multi-drop: split on newlines, render each as a
+                          // "Drop N: <Customer>\n  <address>" stanza so the
+                          // operator scans drops at a glance instead of one
+                          // long blob.
+                          if (addr.includes("Drop ") && addr.includes("\n")) {
+                            const drops = addr.split("\n").filter((s) => s.trim());
+                            return (
+                              <div className="space-y-1.5">
+                                {drops.map((line, i) => {
+                                  // line shape: "Drop 1 (Customer Name): address blah"
+                                  const m = line.match(/^(Drop \d+)\s*\(([^)]+)\):\s*(.*)$/);
+                                  if (!m) {
+                                    return (
+                                      <p key={i} className="text-xs text-[#1F1D1B]">{line}</p>
+                                    );
+                                  }
+                                  const [, dropLabel, custName, address] = m;
+                                  return (
+                                    <div key={i}>
+                                      <p className="font-medium text-xs text-[#1F1D1B]">
+                                        {dropLabel}: {custName}
+                                      </p>
+                                      <p className="text-xs text-[#6B7280] pl-3">{address}</p>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            );
+                          }
+                          return (
+                            <p className="font-medium text-xs">{addr || "-"}</p>
+                          );
+                        })()}
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>
+                          <p className="font-medium">{detailDO.contactPerson || "-"}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Phone</p>
+                          <p className="font-medium doc-number">{detailDO.contactPhone || "-"}</p>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 gap-4">
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Date</p>
+                          <p className="font-medium">
+                            {detailDO.deliveryDate ? formatDate(detailDO.deliveryDate) : "-"}
+                          </p>
+                        </div>
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
+                          <p className="font-medium">
+                            {detailDO.dispatchDate ? formatDate(detailDO.dispatchDate) : "-"}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               )}

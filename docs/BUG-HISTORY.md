@@ -12,6 +12,28 @@ Status legend:
 
 ---
 
+## Categories — Quick Index
+
+Each entry below jumps to the first BUG with that category tag.
+Entries themselves stay newest-first.
+
+- `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
+- `ui-frontend` (19) — [BUG-2026-04-26-004](#bug-2026-04-26-004-fix-strip-remaining-inline-m³-suffixes-full-system-uniform)
+- `production-orders` (17) — [BUG-2026-04-26-003](#bug-2026-04-26-003-upstream-sequence-lock-disabled)
+- `bom` (15) — [BUG-2026-04-27-010](#bug-2026-04-27-010-dept-pivot-editor-lists-draft-boms-as-duplicate-rows)
+- `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
+- `inventory-cascade` (15) — [BUG-2026-04-27-021](#bug-2026-04-27-021-do-dispatch-left-wip_itemsstockqty-qty-forever)
+- `delivery-orders` (9) — [BUG-2026-04-27-022](#bug-2026-04-27-022-fixdo-customerid-fallback-to-first-pos-customername-for-multi-so-dos)
+- `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
+- `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
+- `data-migration` (5) — [BUG-2026-04-25-014](#bug-2026-04-25-014-fixd1-compat-ifnullcoalesce-bom-search-likeilike)
+- `data-integrity` (4) — [BUG-2026-04-25-008](#bug-2026-04-25-008-stability-add-timeout-abort-propagation-to-fetchjson)
+- `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
+- `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
+- `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
 ## BUG-2026-04-27-032 — WIP page inflated displayed qty by summing UPH JC capacity instead of trusting `wip_items.stockQty`
 
 > Originally logged as BUG-2026-04-27-022 in the task brief; renumbered to
@@ -19,6 +41,7 @@ Status legend:
 > `d6d91fc` (2026-04-27).
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-display
 
 **Symptom (user-reported):** the WIP grid showed three rows at 322 / 190
 / 42 for wipLabels whose ledger `stock_qty` was 4 / 2 / 1 respectively.
@@ -90,6 +113,7 @@ the cascade + reading bug-history threads.
 ## BUG-2026-04-27-021 — DO Dispatch left wip_items.stockQty +qty forever
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** When a Delivery Order transitioned DRAFT → LOADED (the
 "dispatch" / stamp-on-dispatch event), the wip_items rows produced by
@@ -137,6 +161,7 @@ task brief).
 ## BUG-2026-04-27-020 — UPH rollback didn't reverse cascadeUpholsteryToSO
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** When an operator un-completed a UPHOLSTERY job card (DONE
 → WAITING via the Production Sheet date-cell or the form), the
@@ -189,6 +214,7 @@ optional per task brief).
 ## BUG-2026-04-27-017 — WIP page double-counted UPH-completed rows alongside FG view
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-display
 
 **Symptom:** Items that had finished UPHOLSTERY were appearing on the
 warehouse **WIP** tab AND on the **Finished Products** tab at the same
@@ -324,6 +350,7 @@ the user can spot and reconcile orphan ledger entries.
 ## BUG-2026-04-27-016 — PACKING participated in inventory cascade — should be metadata-only step
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** Completing a PACKING job_card was firing the same
 inventory-cascade write path as upstream depts: a producer-add to
@@ -382,6 +409,7 @@ No test pinned the prior PACKING-cascade behavior (it was a bug).
 ## BUG-2026-04-27-015 — Negative-row Source POs over-collected: every higher-sequence COMPLETED JC in same wipKey was treated as a "trigger"
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-display
 
 **Symptom:** Clicking any negative-qty row on the WIP page popped open
 the detail modal and listed **too many** Source POs. The same PO would
@@ -465,6 +493,7 @@ cascade consume math is unchanged.
 ## BUG-2026-04-27-014 — UPH cascade decremented every upstream JC, not just per-branch terminals
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** Marking an Upholstery (UPH) JC `COMPLETED` on a sofa Base BOM
 wrote 6 separate `-consumeQty` decrements — one for **every** upstream JC
@@ -533,6 +562,7 @@ invariant so a future refactor doesn't silently flatten it back.
 ## BUG-2026-04-27-013 — wip_items consume silently no-ops on missing/zero upstream — now goes negative
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** When a downstream dept (e.g. FAB_SEW) is marked COMPLETED
 without its upstream dept (e.g. FAB_CUT) ever being completed, the
@@ -601,6 +631,7 @@ unclamped + insert-if-missing.
 ## BUG-2026-04-27-010 — Dept-Pivot editor lists DRAFT BOMs as duplicate rows
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** bom
 
 **Symptom:** In the new Dept-Pivot Category Editor, products like `1003-(K)`
 and `5530-1NA` show twice (identical category/minutes) because the row
@@ -622,6 +653,7 @@ duplicates) when Wood Cut is selected.
 ## BUG-2026-04-27-011 — Dept-Pivot Branch/Code shows raw template tokens
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** bom
 
 **Symptom:** Branch/Code column reads
 `{DIVAN_HEIGHT} Divan- {SIZE} / {DIVAN_HEIGHT} Divan- {SIZE} Foam / ...`
@@ -646,6 +678,7 @@ Drop the ancestor-chain join — the leaf alone is the meaningful label.
 ## BUG-2026-04-27-012 — DRAFT BOM versions left orphaned after confirm flow
 
 **Status:** 🔴 Identified (deferred)
+**Category:** bom
 
 **Symptom:** `bom_templates` carries 2 leftover DRAFT rows
 (`bom-tpl-1003-(K)-v2`, `bom-tpl-5530-1NA-v2`, both v2.0 effective
@@ -670,6 +703,7 @@ Need to inspect the BOM editor's save path to confirm.
 ## BUG-2026-04-27-005 — `applyWipInventoryChange` not idempotent on COMPLETED→COMPLETED replay
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:** Marking the same JC complete twice double-deducts upstream
 wip_items and double-adds the producer row. The cascade has no per-JC guard
@@ -714,6 +748,7 @@ PATCHes no-op the second cascade fire.
 ## BUG-2026-04-27-006 — `cascadeUpholsteryToSO` runs on every PATCH, not just status changes
 
 **Status:** 🔴 Identified (low priority)
+**Category:** inventory-cascade
 
 **Symptom:** Every PATCH to a job_card (PIC re-assign, due-date edit, etc.)
 fires `cascadeUpholsteryToSO`, even when status didn't change.
@@ -731,6 +766,7 @@ a precondition check that bails when no relevant JC has transitioned.
 ## BUG-2026-04-27-007 — Audit event write failures swallowed silently
 
 **Status:** 🔴 Identified (low priority)
+**Category:** audit-logging
 
 **Symptom:** When `diffJobCardEvents` → batch INSERT to `job_card_events`
 fails (D1 hiccup, schema drift, etc.), the JC update at T+2 has already
@@ -750,6 +786,7 @@ can alert.
 ## BUG-2026-04-27-008 — `fg_units.status='PENDING'` after PO completion (not `IN_STOCK`)
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-display
 
 **Symptom:** Post-PACKING-complete, the cascade writes `fg_units` rows
 with `status='PENDING'` (see `src/api/routes-d1/fg-units.ts:272`). Name
@@ -782,6 +819,7 @@ migration was required.
 ## BUG-2026-04-27-009 — `inventory-wip.ts` derives baseModel via `productCode.split("-")[0]`
 
 **Status:** 🔴 Identified (display only)
+**Category:** inventory-display
 
 **Symptom:** The inventory-WIP grouping uses
 `(po.productCode || "").split("-")[0]` to compute baseModel
@@ -803,6 +841,7 @@ parse SKU via the existing `parseSku` util elsewhere in the codebase.
 ## BUG-2026-04-27-001 — `completed_date` silently cleared on unrelated PATCH
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom (user-reported):**
 User filled the Foam dept completion date for SO-2604-309 / `pord-so-f6084c68-02`
@@ -849,6 +888,7 @@ overrides as before.
 ## BUG-2026-04-27-002 — `applyWipInventoryChange` has no rollback path
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** inventory-cascade
 
 **Symptom:**
 Toggling a job card COMPLETED → WAITING (intentionally or via bug #001)
@@ -894,6 +934,7 @@ is not, run the inverse:
 ## BUG-2026-04-26-003 — Upstream-sequence lock disabled
 
 **Status:** 🔴 Identified (deferred)
+**Category:** production-orders
 
 **Symptom:**
 Operators can mark a downstream dept (e.g. UPHOLSTERY) COMPLETED while
@@ -920,6 +961,7 @@ have larger blast radius.
 ## BUG-2026-04-27-004 — `wip_label` frozen at JC creation, never resyncs from BOM
 
 **Status:** 🟢 Fixed (2026-04-27)
+**Category:** bom
 
 **Symptom (user-reported):**
 BOM page for SOFA 5531 defines the back-cushion / armrest WIPs as
@@ -984,6 +1026,7 @@ do not pick up the new naming.
 ## BUG-2026-04-27-022 — fix(do): customerId fallback to first PO's customerName for multi-SO DOs
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** After 9d30215 dropped the multi-customer/state restriction, multi-SO
 selections hit the next downstream guard: "customerId or salesOrderId
@@ -997,6 +1040,7 @@ OR a resolved salesOrderRow — multi-SO DOs left both null.
 ## BUG-2026-04-27-023 — fix(do): single source of truth for Pending Delivery selection
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** ROOT CAUSE of every "multi-customer" toast despite "1 selected" badge:
 two parallel selection states.
@@ -1008,6 +1052,7 @@ two parallel selection states.
 ## BUG-2026-04-27-024 — Reapply "fix(delivery): pending-delivery dedup by PO id, not SO id"
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** This reverts commit af815d7ed7016d1e29888e638a6aa3afeeca5518.
 
@@ -1018,6 +1063,7 @@ two parallel selection states.
 ## BUG-2026-04-27-025 — Revert "fix(delivery): pending-delivery dedup by PO id, not SO id"
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** This reverts commit 13ce4f8e892a834392156bcbb8973e81148f6240.
 
@@ -1028,6 +1074,7 @@ two parallel selection states.
 ## BUG-2026-04-27-026 — fix(delivery): pending-delivery dedup by PO id, not SO id
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** BUG-2026-04-27 (multi-SO DO follow-up): after creating a DO that spans
 multiple SOs (now allowed since 3e2682b), the source POs stayed visible
@@ -1041,6 +1088,7 @@ add them to a second DO.
 ## BUG-2026-04-27-027 — fix(do): create-DO uses live selection, not dialog-open snapshot
 
 **Status:** Fixed (2026-04-27)
+**Category:** delivery-orders
 
 **Symptom / Fix:** User report 2026-04-27: clicking Create DO with 1 row selected still
 returned "Selected production orders span multiple customers or states"
@@ -1054,6 +1102,7 @@ cause was on the frontend:
 ## BUG-2026-04-27-028 — fix(bom): master-template + Above wraps as parent · delete promotes children
 
 **Status:** Fixed (2026-04-27)
+**Category:** bom
 
 **Symptom / Fix:** Two semantic fixes in the Master Template editor:
 
@@ -1064,6 +1113,7 @@ cause was on the frontend:
 ## BUG-2026-04-27-029 — fix(db): Hyperdrive needs prepare:false (Supavisor 6543 rejects prepared statements)
 
 **Status:** Fixed (2026-04-27)
+**Category:** infrastructure
 
 **Symptom / Fix:** ROOT CAUSE for every "empty grid / Data Not Found" the user has reported
 since the Cloudflare migration. EVERY DB-touching endpoint returns 500
@@ -1081,6 +1131,7 @@ since the Cloudflare migration. EVERY DB-touching endpoint returns 500
 ## BUG-2026-04-27-030 — fix(production): packing-row upstream date aggregate (sofa merge view)
 
 **Status:** Fixed (2026-04-27)
+**Category:** production-orders
 
 **Symptom / Fix:** Sofa POs have 3 component branches (Base / Cushion / Armrest), each with
 their own per-dept JCs. At PACKING they merge into one JC with
@@ -1094,6 +1145,7 @@ every upstream-dept date column on sofa rows because:
 ## BUG-2026-04-27-031 — fix(bom): s/Faom/Foam/ across BOM + JC + wip_items (Sofa Base typo)
 
 **Status:** Fixed (2026-04-27)
+**Category:** bom
 
 **Symptom / Fix:** The Sofa Base BOM had a long-standing "(Faom)" typo. Functionally
 harmless (the BOM-walked branchKey still groups correctly within each
@@ -1108,6 +1160,7 @@ and confusing because every other Sofa wood branch reads "(Foam)".
 ## BUG-2026-04-26-004 — fix: strip remaining inline 'm³' suffixes — full system uniform
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Wei Siang Apr 26 2026: '不需要的 我们就全部系统都统一吧'. Cell values
 go bare across the system; column/label provides the unit.
@@ -1119,6 +1172,7 @@ go bare across the system; column/label provides the unit.
 ## BUG-2026-04-26-005 — fix: drop inline m³ suffix on cell values — header already labels the unit
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Wei Siang Apr 26 2026: 'Unit (m³) 那边放了一点格式 可是我其他的没有 ...
 你就跟着普通格式就行 不需要把那个 M3 特别放出来 我们已经有 header 了'.
@@ -1130,6 +1184,7 @@ go bare across the system; column/label provides the unit.
 ## BUG-2026-04-26-006 — fix(fe-be-align): #2 build /api/purchase-invoices CRUD + migration
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** src/pages/procurement/pi.tsx was 100% client-side mock — generateMockPIs
 synthesized rows from RECEIVED purchase_orders and "Approve" / "Mark
@@ -1143,6 +1198,7 @@ case #2.
 ## BUG-2026-04-26-007 — fix(inventory-wip): FAB_CUT now uses card.wipLabel like every other dept
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-display
 
 **Symptom / Fix:** Wei Siang Apr 26 2026: Inventory WIP page still showed the old
 synthesized merged-style label for FAB_CUT rows ('1007-(K) | (6FT) |
@@ -1157,6 +1213,7 @@ the Production sheet shows them with proper per-component BOM names
 ## BUG-2026-04-26-008 — fix(fe-be-align): #4 wire Resend into supplier PO notification
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** notifySupplierPoSubmitted was a console.log stub: clicking "Send to
 Supplier" returned 200, audit_events recorded a status change, but no
@@ -1170,6 +1227,7 @@ they didn't know existed. UI promised something the backend never did.
 ## BUG-2026-04-26-009 — fix(fe-be-align): #3 DO status enum + missing LOADED→IN_TRANSIT button
 
 **Status:** Fixed (2026-04-26)
+**Category:** delivery-orders
 
 **Symptom / Fix:** Frontend's DOStatus type drifted from backend's VALID_TRANSITIONS in
 two ways the audit caught:
@@ -1181,6 +1239,7 @@ two ways the audit caught:
 ## BUG-2026-04-26-010 — fix(fe-be-align): batch A — PO close transition · _stub warn · lock UI off · stale comment
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Four FE/BE drift fixes from the 2026-04-26 audit, bundled because each
 is a small change with no shared surface area:
@@ -1192,6 +1251,7 @@ is a small change with no shared surface area:
 ## BUG-2026-04-26-011 — fix(data-grid): drive virtualizer paddingBottom from sortedData.length
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Filter alignment in Fab Sew was still drifting after the
 VIRTUALIZE_MIN_ROWS=100 fix. Root cause: rowVirtualizer.getTotalSize()
@@ -1207,6 +1267,7 @@ total, leaving a multi-thousand-pixel blank gap below the visible rows.
 ## BUG-2026-04-26-012 — fix(delivery): revert Items + Total M³ tooltip mods — only add new column
 
 **Status:** Fixed (2026-04-26)
+**Category:** delivery-orders
 
 **Symptom / Fix:** Per Wei Siang Apr 26 2026: '添加 column 不是加进去'. Reverts the
 hover tooltip injection on the existing 'Items' (count) and 'Total
@@ -1220,6 +1281,7 @@ new 'Item Details' column remains as the only addition.
 ## BUG-2026-04-26-013 — fix(ts): replace stale JcPatch type reference with Parameters<>
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** See commit `4cf5562` for details.
 
@@ -1230,6 +1292,7 @@ new 'Item Details' column remains as the only addition.
 ## BUG-2026-04-26-014 — fix(api): no-store cache-control on every /api/* response
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Wei Siang Apr 26 2026: after wrangler --remote D1 reset, browser kept
 seeing pre-reset rows even though wrangler confirmed 0 done JCs in
@@ -1243,6 +1306,7 @@ holding stale API responses without explicit no-store directive.
 ## BUG-2026-04-26-015 — revert(cache): undo v1→v2 namespace bump (was one-shot, not needed)
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Per Wei Siang Apr 26 2026: 'this is only one-time'. 375adc1 already
 drops the TTL gate from cachedFetchJson, so once a browser loads the
@@ -1257,6 +1321,7 @@ not what the user asked for. Reverting.
 ## BUG-2026-04-26-016 — fix(cache): bump namespace v1→v2 to orphan stale frontend caches
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Wei Siang Apr 26 2026: every D1 reset / data update was hidden by the
 5-min TTL gate on cachedFetchJson. Even after 375adc1 dropped the
@@ -1269,6 +1334,7 @@ gate, browsers still on the OLD bundle kept reading the OLD v1 cache.
 ## BUG-2026-04-26-017 — fix(cache): drop TTL gate on imperative cachedFetchJson too
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Mirror of d8f71d2 (useCachedJson SWR) but for the imperative
 `cachedFetchJson` callers. Without this, the 5-min TTL kept Inventory
@@ -1283,6 +1349,7 @@ Production page emptied immediately, Inventory WIP didn't budge).
 ## BUG-2026-04-26-018 — revert(wip): drop PO-level FAB_CUT suppression (7/8)
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-display
 
 **Symptom / Fix:** Reverts `25099c9`. Inventory WIP Pass 1 now uses pure per-component
 edge detection (card done && next not done) for every dept including
@@ -1295,6 +1362,7 @@ FAB_CUT. No more PO-level fabric-pulled fan-out.
 ## BUG-2026-04-26-019 — fix(wip): synthesize wipLabel fallback for non-BOM producer JCs
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** Wood Cut completion silently skipped the wip_items upsert when
 jcRow.wipLabel was null (createJobCards() emits non-BOM JCs without
@@ -1309,6 +1377,7 @@ always lands a wip_items row.
 ## BUG-2026-04-26-020 — fix(production): scope upstream lock to same wipKey (Wood Cut ≠ Fab Cut chain)
 
 **Status:** Fixed (2026-04-26)
+**Category:** production-orders
 
 **Symptom / Fix:** User reported (2026-04-26): Wood Cut completion locked Fab Cut + Fab
 Sew on the same row, even though those three are independent component
@@ -1323,6 +1392,7 @@ upstream lock should only fire across the SAME wipKey chain.
 ## BUG-2026-04-26-021 — fix(sales): drop wrong '(Mattress)' label on SOFA category option
 
 **Status:** Fixed (2026-04-26)
+**Category:** sales-orders
 
 **Symptom / Fix:** The system has 3 categories: BEDFRAME / SOFA / ACCESSORY. There is no
 'mattress' category — that word was the user's verbal shorthand for
@@ -1337,6 +1407,7 @@ the app.
 ## BUG-2026-04-26-022 — fix(data-grid): below 100 rows skip virtualizer (cures filter alignment)
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** User reported "为什这个一直不alignment 上千次了" on /production/fab-cut.
 After applying a column filter (460 → 3 rows), badge correctly read
@@ -1349,6 +1420,7 @@ After applying a column filter (460 → 3 rows), badge correctly read
 ## BUG-2026-04-26-023 — fix(sales): atomic clearFilters — single setSearchParams, not 7 races
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** User reported "我clear不到那个filter" on /sales. The clearFilters handler
 was firing 7 sequential setFilterX("") calls; each calls navigate() under
@@ -1363,6 +1435,7 @@ deletes could overwrite earlier ones — net effect: filters re-appear.
 ## BUG-2026-04-26-024 — fix(data-grid): clip virtualItems to sortedData.length so body matches badge
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Fab Cut Production Sheet: applying the Status column dropdown filter
 ("COMPLETED" only) updated the "X of Y records" badge to "3 of 460" but
@@ -1379,6 +1452,7 @@ even after React passed the shrunken count (3) on the same render.
 ## BUG-2026-04-26-025 — fix(prod-500): defensive try/catch + LIMIT caps on 3 dogfood crash sites
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** Real-browser dogfood test on prod (https://hookka-erp-testing.pages.dev)
 showed three endpoints returning 500 with no `db;dur=` segment in the
@@ -1391,6 +1465,7 @@ Server-Timing header — handler crashing before any D1 query completes:
 ## BUG-2026-04-26-026 — fix(delivery): cap POD photo size + dashboard Dispatched count
 
 **Status:** Fixed (2026-04-26)
+**Category:** delivery-orders
 
 **Symptom / Fix:** POD-dialog now resizes photos to 1280px JPEG@0.7 (~200KB each) before
 base64-encoding. Total POD JSON is checked against 700KB ceiling to
@@ -1404,6 +1479,7 @@ stay safely below D1's 1MB row size limit. Pre-launch audit found that
 ## BUG-2026-04-26-027 — fix(cache): SWR — always refetch on mount, cache only for first paint
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** useCachedJson used to skip refetch when cache was <ttlSec old (5 min
 default). After a backend deploy fixed an empty-response bug, users
@@ -1417,6 +1493,7 @@ stayed on the cached empty data for up to 5 minutes — exactly the
 ## BUG-2026-04-26-028 — fix(wip): populate sources[] on sofa SET rows so dialog shows POs
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-display
 
 **Symptom / Fix:** The SET row dialog ('SO ID / Qty / Completed / Age' table) reads from
 WIPRow.sources. Sofa SET rows were emitting sources: [] which rendered
@@ -1431,6 +1508,7 @@ contributing PO (component qtys summed) and emits that on the SET row.
 ## BUG-2026-04-26-029 — fix(wip): PO-level Fab Cut suppression when any Fab Sew is done
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-display
 
 **Symptom / Fix:** Behavior change per Wei Siang Apr 26 2026: when ANY Fab Sew JC inside
 a PO is COMPLETED/TRANSFERRED, every remaining FAB_CUT JC in that PO
@@ -1443,6 +1521,7 @@ disappears from Inventory WIP — not just the matching component.
 ## BUG-2026-04-26-030 — fix: persist Reports active tab to URL + DataGrid column-hide alignment
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Reports tab persistence
 - /reports?tab=inventory now drives the visible tab. Switching shell
@@ -1457,6 +1536,7 @@ disappears from Inventory WIP — not just the matching component.
 ## BUG-2026-04-26-031 — revert(wip): drop (FC HB) component tags from FAB_CUT label
 
 **Status:** Fixed (2026-04-26)
+**Category:** inventory-display
 
 **Symptom / Fix:** User push-back: BOM owns the WIP naming scheme. Adding HB/DV inside
 (FC …) wasn't asked for and breaks the user's mental model. The
@@ -1470,6 +1550,7 @@ bug — investigating that separately.
 ## BUG-2026-04-26-032 — fix(critical): unblock empty Sales/Production pages + WIP duplicate UX
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** PRIMARY FIX — orgScope safety gate
 `withOrgScope` was emitting `WHERE orgId = ?` against tables whose orgId
@@ -1486,6 +1567,7 @@ the helper degrades to a no-op so the app keeps serving rows.
 ## BUG-2026-04-26-033 — fix(authz): invalidate KV session cache on role change (P3.8)
 
 **Status:** Fixed (2026-04-26)
+**Category:** auth-rbac
 
 **Symptom / Fix:** Was: 5-min KV TTL meant role revocation took up to 5 minutes to
 propagate. Now: explicit invalidation on user role update + user
@@ -1499,6 +1581,7 @@ win, but security-critical changes propagate instantly.
 ## BUG-2026-04-26-034 — fix(queue): drop hard Env import to break circular type dep
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** See commit `446df78` for details.
 
@@ -1509,6 +1592,7 @@ win, but security-critical changes propagate instantly.
 ## BUG-2026-04-26-035 — fix(env): declare FILES/QUEUE/OAUTH bindings as optional Env fields
 
 **Status:** Fixed (2026-04-26)
+**Category:** infrastructure
 
 **Symptom / Fix:** See commit `072fb71` for details.
 
@@ -1519,6 +1603,7 @@ win, but security-critical changes propagate instantly.
 ## BUG-2026-04-26-036 — fix(production): unbreak Fab Cut merged-row fan-out PATCH
 
 **Status:** Fixed (2026-04-26)
+**Category:** production-orders
 
 **Symptom / Fix:** The merged-row date-cell click on the Production Sheet sends both
 status='COMPLETED' and completedDate=<today> in one PATCH. The upstream-
@@ -1535,6 +1620,7 @@ could surface a phantom 409 and the toast 'Fab Cut complete applied to
 ## BUG-2026-04-26-037 — fix(production): unbreak Fab Cut merged-row fan-out PATCH
 
 **Status:** Fixed (2026-04-26)
+**Category:** production-orders
 
 **Symptom / Fix:** The merged-row date-cell click on the Production Sheet sends both
 status='COMPLETED' and completedDate=<today> in one PATCH. The upstream-
@@ -1551,6 +1637,7 @@ could surface a phantom 409 and the toast 'Fab Cut complete applied to
 ## BUG-2026-04-26-038 — fix(production): repair filters + add 4 new + lazy-load
 
 **Status:** Fixed (2026-04-26)
+**Category:** ui-frontend
 
 **Symptom / Fix:** See commit `6795619` for details.
 
@@ -1561,6 +1648,7 @@ could surface a phantom 409 and the toast 'Fab Cut complete applied to
 ## BUG-2026-04-26-039 — fix(sidebar): replace hardcoded "Lim / Director" with current user (P3.7)
 
 **Status:** Fixed (2026-04-26)
+**Category:** auth-rbac
 
 **Symptom / Fix:** Sidebar bottom-left was rendering a stale demo user regardless of who
 was logged in. Now reads from getCurrentUser() in src/lib/auth.ts and
@@ -1573,6 +1661,7 @@ shows displayName / role for the actual session.
 ## BUG-2026-04-25-001 — fix(bom): PUT /templates/:id is now upsert (was 404 on Create-from-Default flow)
 
 **Status:** Fixed (2026-04-25)
+**Category:** bom
 
 **Symptom / Fix:** Frontend bom.tsx 'Create from Default Template' and 'Start Blank' buttons
 construct a new BOMTemplate locally with id 'bom-${Date.now()}', add it to
@@ -1587,6 +1676,7 @@ required the row to already exist and returned 404, surfacing as a
 ## BUG-2026-04-25-002 — fix(ts): clear remaining 59 TS18046+TS2339 errors across 8 pages
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Final pass on the type-error migration that started in earlier batches.
 Targets the 8 files Codex didn't touch:
@@ -1598,6 +1688,7 @@ Targets the 8 files Codex didn't touch:
 ## BUG-2026-04-25-003 — fix(router): add trailing /* to parent Route so nested Routes match (P-router-warning)
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Console warned "<Routes> rendered under a parent route with no trailing
 *" — child routes were about to silently stop matching on deeper
@@ -1610,6 +1701,7 @@ navigation. Fix per React Router v7 docs.
 ## BUG-2026-04-25-004 — fix(ts): migrate worker/* (scan, index, issue) to Zod-validated parses
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Drop 21 TS18046 errors across worker scan/index/issue pages by validating
 workerFetch JSON responses through passthrough Zod envelopes (workerFetch
@@ -1622,6 +1714,7 @@ is preserved as-is for its 401 handling and X-Worker-Token header).
 ## BUG-2026-04-25-005 — fix(ts): migrate sales/* + invoices/* to fetchJson + Zod schemas
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Drop 18 TS18046 errors across sales/index.tsx and the 5 invoice pages
 (index, detail, payments, credit-notes, debit-notes) by piping fetch
@@ -1635,6 +1728,7 @@ CreditNoteSchema/DebitNoteSchema mutation envelopes.
 ## BUG-2026-04-25-006 — fix(ts): migrate products + rd pages to fetchJson + Zod schemas
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Drop 20 TS18046 errors in products/index.tsx and rd/{index,detail}.tsx by
 piping fetch responses through fetchJson with ProductSchema/RdProjectSchema
@@ -1648,6 +1742,7 @@ products/index.tsx are also flattened to typed `fetchJson(...).then(...)`.
 ## BUG-2026-04-25-007 — fix(ts): migrate delivery/* to fetchJson + Zod schemas
 
 **Status:** Fixed (2026-04-25)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Drop 18 TS18046 'data is of type unknown' errors in delivery pages by
 piping fetch responses through fetchJson + a shared DeliveryOrderSchema.
@@ -1661,6 +1756,7 @@ rowToX mappers — schemas validate the boundary, extra fields flow through.
 ## BUG-2026-04-25-008 — stability: add timeout + abort propagation to fetchJson
 
 **Status:** Fixed (2026-04-25)
+**Category:** data-integrity
 
 **Symptom / Fix:** See commit `db2ecb6` for details.
 
@@ -1671,6 +1767,7 @@ rowToX mappers — schemas validate the boundary, extra fields flow through.
 ## BUG-2026-04-25-009 — fix(bom): per-wipType production order chain (sofa FOAM after WEBBING)
 
 **Status:** Fixed (2026-04-25)
+**Category:** bom
 
 **Symptom / Fix:** The flat DEPT_ORDER (FAB_CUT, FAB_SEW, WOOD_CUT, FOAM, FRAMING, WEBBING,
 UPH, PACK) lied for sofa: per BOM tree FOAM is downstream of WEBBING
@@ -1686,6 +1783,7 @@ direction (sofa FOAM tried to consume WOOD_CUT instead of WEBBING).
 ## BUG-2026-04-25-010 — fix(production): UPH consume by qty (not zero) + add own wip_items row
 
 **Status:** Fixed (2026-04-25)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** User reported: Fab Sewing has 11 items / 13 qty in WIP inventory.
 Upholstery completes 6 items / 7 qty.  Expected:
@@ -1699,6 +1797,7 @@ Upholstery completes 6 items / 7 qty.  Expected:
 ## BUG-2026-04-25-011 — fix(production): gate sofa atomic-FAB_CUT-zero on isFabSew
 
 **Status:** Fixed (2026-04-25)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** Bug: the (SO, fabric) sofa-bolt-leaves-Fab-Cut-shelf logic fired for
 every sofa dept transition, not just FAB_SEW.  When a sofa FOAM /
@@ -1713,6 +1812,7 @@ fabricCode) group -- regardless of whether FAB_SEW had even started.
 ## BUG-2026-04-25-012 — fix(production): derive upstream dept columns from BOM/JC sequence
 
 **Status:** Fixed (2026-04-25)
+**Category:** production-orders
 
 **Symptom / Fix:** Replaced the hardcoded UPSTREAM map (FAB_SEW <- FAB_CUT, FOAM <-
 FAB_SEW, etc.) with a useMemo that walks every loaded JC matching the
@@ -1726,6 +1826,7 @@ sequence.  Each sibling's deptCode is a BOM-defined upstream.
 ## BUG-2026-04-25-013 — fix(production): include same-wipKey siblings when ?dept= is set
 
 **Status:** Fixed (2026-04-25)
+**Category:** production-orders
 
 **Symptom / Fix:** Bug: every prev-dept CD column on the per-dept Production page rendered
 "—" for every row.  On the Upholstery tab, only Upholstery itself
@@ -1739,6 +1840,7 @@ collapsed to dashes.
 ## BUG-2026-04-25-014 — fix(d1-compat): IFNULL→COALESCE + bom search LIKE→ILIKE
 
 **Status:** Fixed (2026-04-25)
+**Category:** data-migration
 
 **Symptom / Fix:** Two more SQLite-vs-Postgres semantic gaps that survived the migration:
 
@@ -1749,6 +1851,7 @@ collapsed to dashes.
 ## BUG-2026-04-25-015 — fix(db): preserve acronym casing on column read transform
 
 **Status:** Fixed (2026-04-25)
+**Category:** data-migration
 
 **Symptom / Fix:** postgres.toCamel is lossy for acronym fields:
   customer_po -> customerPo  (wrong, code reads customerPO)
@@ -1763,6 +1866,7 @@ collapsed to dashes.
 ## BUG-2026-04-25-016 — fix(db): coerce BIGINT to JS number, fixes Sales Order count explosion
 
 **Status:** Fixed (2026-04-25)
+**Category:** data-migration
 
 **Symptom / Fix:** User-reported symptom: 'Sales Order 资料全错了，然后 Sales Order 突然爆发，
 变得很多'.  Stats tile showed counts like '029014' instead of 294.
@@ -1774,6 +1878,7 @@ collapsed to dashes.
 ## BUG-2026-04-25-017 — stability: restore typecheck gate + fix 3 specific bugs flagged by 3 external reviewers
 
 **Status:** Fixed (2026-04-25)
+**Category:** infrastructure
 
 **Symptom / Fix:** Three independent reviewers (Apr 24-25) all flagged the same core issue:
 typecheck + lint are red, and the 'build' script was silently bypassing
@@ -1789,6 +1894,7 @@ the reviewers could point at concretely.
 ## BUG-2026-04-24-001 — fix(production): dept routes actually render dept view + Wood Cut producer-only
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** 1. /production/fab-cut etc. were redirecting to /production because
    dept.tsx used useParams() on LITERAL routes (no :deptCode binding) →
@@ -1805,6 +1911,7 @@ the reviewers could point at concretely.
 ## BUG-2026-04-24-002 — revert: restore DIVAN BOM qty=2 + undo JC/wip_items halving
 
 **Status:** Fixed (2026-04-24)
+**Category:** bom
 
 **Symptom / Fix:** I shouldn't have modified user's BOM without asking. Migration 0044
 undoes every change 0043 made: BOM back to quantity=2, DIVAN JC wipQty
@@ -1817,6 +1924,7 @@ doubled back, DIVAN wip_items stockQty doubled back.
 ## BUG-2026-04-24-003 — fix(bom): DIVAN qty = 1 per BF (not 2) — BOM + JC + wip_items retro
 
 **Status:** Fixed (2026-04-24)
+**Category:** bom
 
 **Symptom / Fix:** See commit `9092b53` for details.
 
@@ -1827,6 +1935,7 @@ doubled back, DIVAN wip_items stockQty doubled back.
 ## BUG-2026-04-24-004 — revert: don't merge BF at Fab Cut — user wants HB/Divan separate
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** BF components are physically separate stock piles (HB on one shelf,
 Divan on another) so Inventory displays them as separate rows — does
@@ -1840,6 +1949,7 @@ merges for scheduling convenience; Inventory tracks actual stock.
 ## BUG-2026-04-24-005 — fix(inventory-wip): per-dept filter — sofa SET only at Fab Cut, per-component after
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Sofa at Fab Cut stage shows the merged SET row (one row per set,
 matching Production Fab Cut tab). After Fab Sew starts, each component
@@ -1853,6 +1963,7 @@ show per-component rows instead of hiding them.
 ## BUG-2026-04-24-006 — fix(wip-consume): generalize consume to all depts + fix per-component group
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** Two bugs fixed in one:
 
@@ -1863,6 +1974,7 @@ show per-component rows instead of hiding them.
 ## BUG-2026-04-24-007 — fix(wip-consume): Fab Sew COMPLETED also deducts Fab Cut stock
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** applyWipInventoryChange's sibling-consume used to fire only on
 IN_PROGRESS transition, but users who set the completion date directly
@@ -1877,6 +1989,7 @@ never decremented — Inventory showed ghost Fab Cut stock forever.
 ## BUG-2026-04-24-008 — fix(inventory-wip): sofa SET label matches Production Fab Cut exactly
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Sofa SET rows now emit "5535-L(LHF)+2A(RHF) | (30) | PC151-02 | (FC)"
 — piped format with (size) and (FC) tokens, same as Production page's
@@ -1890,6 +2003,7 @@ confused operators cross-referencing the two views.
 ## BUG-2026-04-24-009 — fix(inventory-wip): Merged sofa rows show set count, not piece sum
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Production Fab Cut's merged sofa row reads "Qty 1" (one set). The
 Inventory WIP Merged sets view previously read "Qty N" where N was
@@ -1903,6 +2017,7 @@ which didn't match the operator's mental model.
 ## BUG-2026-04-24-010 — fix(so-confirm): BF/ACC qty>1 now fans out into N POs (qty=1 each)
 
 **Status:** Fixed (2026-04-24)
+**Category:** sales-orders
 
 **Symptom / Fix:** Sofa stays as one PO per SO line (one set per SO by convention).
 For BEDFRAME / ACCESSORY, qty=N → N POs each with quantity=1, poNo
@@ -1918,6 +2033,7 @@ fabric cut, frame, sticker).
 ## BUG-2026-04-24-011 — fix(inventory-wip): Fab Cut stage uses condensed label matching Production page
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** deriveWIPFromPO now computes wipCodeStr on the fly for FAB_CUT cards:
   {productCode} | ({sizeLabel}) | ({totalH"} only BF) | {fabricCode} | (FC)
@@ -1932,6 +2048,7 @@ so stock consumption math matches operator expectations.
 ## BUG-2026-04-24-012 — fix(fab-cut): merged-row completion fans across sibling POs (sofa)
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Sofa merge groups by (SO, fabric) and can span multiple POs (one per
 variant). The patch fan-out was sending every JC id under row.poId,
@@ -1948,6 +2065,7 @@ groups key on poId (all refs share row.poId).
 ## BUG-2026-04-24-013 — fix(fab-cut): BF merged row qty follows HB (fallback Divan)
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** BF group alpha-sorts DIVAN before HB, so `...first` was pulling
 Divan's qty. User rule: HB is canonical BF piece count; Divan-only
@@ -1960,6 +2078,7 @@ BFs fall through to `first.qty`. Sofa unchanged (one set per SO).
 ## BUG-2026-04-24-014 — fix(fab-cut): merged sched_FAB_CUT pill + due/completed match row status
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Merged Fab Cut rows showed 'DONE' on the Fab Cut pill even when the
 overall row status was IN_PROGRESS because sched_FAB_CUT was inherited
@@ -1974,6 +2093,7 @@ Visually contradictory for operators.
 ## BUG-2026-04-24-015 — fix(production): qty > 1 fans QR stickers to one per physical piece
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Before: every production-sheet row generated exactly one QR sticker,
 regardless of the row's qty. A row with qty=2 came out as a single
@@ -1987,6 +2107,7 @@ deliberately rejects as a duplicate.
 ## BUG-2026-04-24-016 — fix(fab-cut): unify WIP layout — every category pipe-separated
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Sofa no longer glues seat size to the model with a space. All categories
 now share one shape:
@@ -1999,6 +2120,7 @@ now share one shape:
 ## BUG-2026-04-24-017 — fix(fab-cut): reorder WIP label parts, sofa glues seat size to model
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** WIP label now reads category-aware so sorting / eyeballing is easier:
   BEDFRAME:  '1003-(K) | (6FT) | (18") | PC151-02 | (FC)'
@@ -2014,6 +2136,7 @@ now share one shape:
 ## BUG-2026-04-24-018 — fix(fab-cut): bedframe WIP label adds total height after size
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** BF rows now read e.g. '1003-(K) | PC151-02 | (6FT) | (18") | (FC)'.
 Sofa / accessory unchanged (totalHeight stays empty for them per the
@@ -2026,6 +2149,7 @@ earlier deptRow gate).
 ## BUG-2026-04-24-019 — fix(fab-cut): Model column shows baseModel only, WIP carries the variants
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Fab Cut rows (merged + single) now render Model as the clean baseModel
 prefix — '5530', '5531', '1003', etc. — and the full variant combo
@@ -2041,6 +2165,7 @@ need the component detail for the set you're about to cut.
 ## BUG-2026-04-24-020 — fix(inventory): sofa Fab Sew first scan consumes the whole Fab Cut set
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-cascade
 
 **Symptom / Fix:** Before: each FAB_SEW JC going IN_PROGRESS decremented only its own
 wipQty from its immediate upstream wip_items row. For a 3-piece sofa
@@ -2056,6 +2181,7 @@ the first scan already represents the whole batch leaving storage.
 ## BUG-2026-04-24-021 — fix(fab-cut): merged module order — LHF first, RHF last, middle in between
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Previous alpha sort on wipType didn't convey sofa layout ordering. Now
 bucket by handedness first: modules with 'LHF' in the model come first,
@@ -2072,6 +2198,7 @@ team reads a sofa set from left to right.
 ## BUG-2026-04-24-022 — fix(fab-cut): use pipe separator in merged WIP label
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Per user: '5537-1A(LHF)+1NA+1A(RHF) | BO315-2 | (30) | (FC)'.
 
@@ -2082,6 +2209,7 @@ team reads a sofa set from left to right.
 ## BUG-2026-04-24-023 — fix(fab-cut): wrap seat/bed size in parens — '(30)' in merged WIP label
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Gives the size token a visual boundary matching the '(FC)' marker.
 Now reads: '5537-1A(LHF)+1NA+1A(RHF) · BO315-2 · (30) · (FC)'.
@@ -2093,6 +2221,7 @@ Now reads: '5537-1A(LHF)+1NA+1A(RHF) · BO315-2 · (30) · (FC)'.
 ## BUG-2026-04-24-024 — fix(fab-cut): middle-dot separator between WIP label parts
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Single-space was letting the model, fabric code and size mash together
 when they share character classes (e.g. '5537-1A(LHF)+1NA+1A(RHF) BO315-2 30 (FC)').
@@ -2106,6 +2235,7 @@ Middle-dot splits them cleanly:
 ## BUG-2026-04-24-025 — fix(fab-cut): merged WIP label is '{model} {fabric} {seat/bed size} (FC)'
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** User's preferred compact format. The per-type count variant I tried first
 was too abstract — cutters read this column to confirm 'which bolt, which
@@ -2122,6 +2252,7 @@ cleanup) and the bed size for bedframe.
 ## BUG-2026-04-24-026 — fix(fab-cut): compact merged WIP column to type counts instead of full labels
 
 **Status:** Fixed (2026-04-24)
+**Category:** inventory-display
 
 **Symptom / Fix:** Merged Fab Cut rows were dumping every child job card's full wipLabel
 (model + component + fabric + '(FC)' marker) separated by '  |  ', so a
@@ -2138,6 +2269,7 @@ pieces of each component kind to cut.
 ## BUG-2026-04-24-027 — fix(fab-cut): sofa rows merge by SO+fabric so a full set is one row
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** The cutter lays one bolt of fabric and cuts every module of the sofa
 set in a single pass. Before, Fab Cut merged only within a single PO,
@@ -2152,6 +2284,7 @@ fabric can't be split between them.
 ## BUG-2026-04-24-028 — fix(bom): normalize l1Processes/wipComponents on load to stop crash
 
 **Status:** Fixed (2026-04-24)
+**Category:** bom
 
 **Symptom / Fix:** BOMManagementPage was hitting the ErrorBoundary because a template with
 null l1Processes or wipComponents from D1 (or a stale cache entry) would
@@ -2167,6 +2300,7 @@ authoritative source from cachedFetchJson('/api/bom/templates').
 ## BUG-2026-04-24-029 — fix(customers): sofa seat prices now render in Customer Products panel
 
 **Status:** Fixed (2026-04-24)
+**Category:** pricing-products
 
 **Symptom / Fix:** The panel's seatHeightPrices column was rendering '—' for every sofa
 row because the TS type declared Record<string,number> but the API
@@ -2182,6 +2316,7 @@ show e.g. '24":517 28":572 30":572 32":772 35":772' as intended.
 ## BUG-2026-04-24-030 — fix(production): QR strip + FG preview hidden by default · sofa BF-only fields blanked
 
 **Status:** Fixed (2026-04-24)
+**Category:** production-orders
 
 **Symptom / Fix:** Two UX problems collapsed into one change:
 
@@ -2192,6 +2327,7 @@ show e.g. '24":517 28":572 30":572 32":772 35":772' as intended.
 ## BUG-2026-04-24-031 — fix: sofa cascade is Line-1-only, customer price moves to SO confirm, Add FG polish
 
 **Status:** Fixed (2026-04-24)
+**Category:** sales-orders
 
 **Symptom / Fix:** Three batched fixes:
 
@@ -2202,6 +2338,7 @@ show e.g. '24":517 28":572 30":572 32":772 35":772' as intended.
 ## BUG-2026-04-24-032 — revert(products): drop 4 stool variants from 0033 — user adds them manually
 
 **Status:** Fixed (2026-04-24)
+**Category:** bom
 
 **Symptom / Fix:** 0033 seeded 5530-STOOL / 5531-STOOL / 5535-STOOL / 5536-STOOL by cloning
 5537-STOOL. User decided to add these through the Products UI instead
@@ -2215,6 +2352,7 @@ need to go before anyone creates an SO against them.
 ## BUG-2026-04-24-033 — fix(sales): sofa special-order toggle propagates to sibling modules
 
 **Status:** Fixed (2026-04-24)
+**Category:** sales-orders
 
 **Symptom / Fix:** Checking / unchecking a Special Order on one sofa module line now cascades
 the same selection (and matching surcharge + label string) to every other
@@ -2228,6 +2366,7 @@ and seat size. Non-sofa lines still edit in isolation.
 ## BUG-2026-04-24-034 — fix(sales): product picker shows ALL categories even after one is bound
 
 **Status:** Fixed (2026-04-24)
+**Category:** sales-orders
 
 **Symptom / Fix:** Filtered-by-current-category options trapped users on whatever they picked
 first — no way to switch a line from bedframe to sofa without manually
@@ -2243,6 +2382,7 @@ strip) flips on the next render.
 ## BUG-2026-04-24-035 — fix(schedule): lead time = days-before-delivery per dept, parallel not serial
 
 **Status:** Fixed (2026-04-24)
+**Category:** scheduling
 
 **Symptom / Fix:** Rewrites reverse-schedule semantics everywhere job_card dueDates are
 computed. Old chain-walk summed lead times backwards, producing 22-day BF
@@ -2257,6 +2397,7 @@ delivery date. Depts run in PARALLEL, each staggered by its own window.
 ## BUG-2026-04-24-036 — fix(leadtimes): Planning page's GET/PUT URL finally matches backend mount
 
 **Status:** Fixed (2026-04-24)
+**Category:** scheduling
 
 **Symptom / Fix:** Root cause for "I updated lead times but the data disappears": frontend
 Planning page reads + writes `/api/production/leadtimes` (slash), but the
@@ -2273,6 +2414,7 @@ with no handler (save looked like it worked, nothing persisted).
 ## BUG-2026-04-24-037 — fix(products): widen sofa seat-height price columns + reclassify pillows to ACCESSORY
 
 **Status:** Fixed (2026-04-24)
+**Category:** pricing-products
 
 **Symptom / Fix:** Two independent fixes landed together:
 
@@ -2283,6 +2425,7 @@ with no handler (save looked like it worked, nothing persisted).
 ## BUG-2026-04-24-038 — fix(pricing): sofa seat-height keys must be strings, defensively match any shape
 
 **Status:** Fixed (2026-04-24)
+**Category:** pricing-products
 
 **Symptom / Fix:** Root cause for the "sofa prices not showing on Products page" + the
 5530-2A(LHF) duplicate-entry bug: the UI iterates seat heights as strings
@@ -2302,6 +2445,7 @@ so:
 ## BUG-2026-04-24-039 — fix(pricing): rewrite sofa seatHeightPrices to canonical 5-tier JSON (Prod Sheet v10)
 
 **Status:** Fixed (2026-04-24)
+**Category:** pricing-products
 
 **Symptom / Fix:** Production Sheet v10 (2026-04-23 SKU SF tab) is the authoritative source
 for sofa base + per-seat-height pricing. At least one record — 5530-2A(LHF)
@@ -2316,6 +2460,7 @@ zero row and showed the sofa as free.
 ## BUG-2026-04-24-040 — fix(db): re-run sofa UPH+PKG backfill so Packing dates show on Overview
 
 **Status:** Fixed (2026-04-24)
+**Category:** data-migration
 
 **Symptom / Fix:** Migration 0027 ran on 2026-04-23 before the sofa BOM templates had their
 l1Processes[deptCode=PACKING] entries populated, so the INSERT's JOIN on
@@ -2331,6 +2476,7 @@ Packing cells for most sofa rows.
 ## BUG-2026-04-24-041 — fix(pricing): correct BF + SF master SKU prices from Production Sheet v5
 
 **Status:** Fixed (2026-04-24)
+**Category:** pricing-products
 
 **Symptom / Fix:** Restores authoritative SKU pricing from the master Production Sheet (v5, 2026-04-24).
 
@@ -2341,6 +2487,7 @@ Packing cells for most sofa rows.
 ## BUG-2026-04-23-001 — fix(db): move seed.sql out of migrations/ so CI stops retrying it
 
 **Status:** Fixed (2026-04-23)
+**Category:** infrastructure
 
 **Symptom / Fix:** Wrangler applied every file in migrations/ as a migration, including seed.sql — a 4984-line INSERT-only file meant for local dev seeding. On prod (which already has data) it fails with primary-key conflicts, and with continue-on-error: true in the deploy workflow the failure was silent.
 
@@ -2351,6 +2498,7 @@ Packing cells for most sofa rows.
 ## BUG-2026-04-23-002 — fix(deletes): guard delete mutations against silent HTTP failures
 
 **Status:** Fixed (2026-04-23)
+**Category:** data-integrity
 
 **Symptom / Fix:** Last batch from the HTTP-audit triage. Each of these DELETE handlers
 used to either ignore errors entirely or only peek at json.success,
@@ -2367,6 +2515,7 @@ idea why.
 ## BUG-2026-04-23-003 — fix(sales): guard create / update / status / confirm against silent HTTP failures
 
 **Status:** Fixed (2026-04-23)
+**Category:** data-integrity
 
 **Symptom / Fix:** Four mutation paths on the Sales Orders pages only checked json.success
 and ignored res.ok, so a 401 (expired auth), 500, or worker crash that
@@ -2383,6 +2532,7 @@ orders never got created.
 ## BUG-2026-04-23-004 — fix: sofa seat height stored consistently + kv-config save no longer silently fails
 
 **Status:** Fixed (2026-04-23)
+**Category:** data-integrity
 
 **Symptom / Fix:** Two related data-integrity bugs surfaced together when users complained
 that (a) sofa SO rows showed the module code ("2A(LHF)") under Size
@@ -2397,6 +2547,7 @@ badge said "Auto-saved".
 ## BUG-2026-04-23-005 — fix(products): allow negative variant surcharge (discount)
 
 **Status:** Fixed (2026-04-23)
+**Category:** pricing-products
 
 **Symptom / Fix:** The variant-price inputs in Product Maintenance were fronted by a
 literal "+RM" label, making it look like only positive amounts were
@@ -2413,6 +2564,7 @@ RM 50 from the unit price.
 ## BUG-2026-04-23-006 — fix(sales): sofa Seat Size dropdown on edit page also follows config
 
 **Status:** Fixed (2026-04-23)
+**Category:** sales-orders
 
 **Symptom / Fix:** edit.tsx was still reading SEAT_HEIGHT_OPTIONS (hardcoded in mock-data)
 for the sofa Seat Size picker, so any sofa size the user added under
@@ -2427,6 +2579,7 @@ the same source, keeping the hardcoded list as a hydration fallback.
 ## BUG-2026-04-23-007 — fix(sales): read variants config as source of truth, don't filter it
 
 **Status:** Fixed (2026-04-23)
+**Category:** sales-orders
 
 **Symptom / Fix:** The bedframe Gap dropdown on the SO create page stopped at 10" even
 after Product Maintenance had 17 gap options up to 20". Same
@@ -2440,6 +2593,7 @@ orders (both bedframe and sofa variants).
 ## BUG-2026-04-23-008 — fix(data-grid): column toggle not hiding in customizer
 
 **Status:** Fixed (2026-04-23)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Unchecking a column in the Columns customizer looked like a no-op —
 the checkbox appeared to click but the column never left the sheet.
@@ -2452,6 +2606,7 @@ localStorage also stayed unchanged.
 ## BUG-2026-04-23-009 — fix(bom): add UPHOLSTERY + PACKING to sofa WIP process chains
 
 **Status:** Fixed (2026-04-23)
+**Category:** bom
 
 **Symptom / Fix:** Sofa BOM templates (SF_BASE / SF_CUSHION / SF_ARM) stopped at WEBBING,
 so when an SO was confirmed, `createProductionOrdersForSO` never created
@@ -2464,6 +2619,7 @@ UPHOLSTERY or PACKING job cards for sofa POs. This caused:
 ## BUG-2026-04-23-010 — fix(data-grid): align right-aligned column headers with cell values
 
 **Status:** Fixed (2026-04-23)
+**Category:** ui-frontend
 
 **Symptom / Fix:** For columns marked align="right" (or numeric/currency), the header label
 was sitting on the LEFT of the sort/filter icons, while cell values
@@ -2477,6 +2633,7 @@ floated away from the numbers below them.
 ## BUG-2026-04-23-011 — Robustness: per-page ErrorBoundary + per-user grid prefs + deploy-version toast
 
 **Status:** Fixed (2026-04-23)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Three defenses so the app stays usable after a crash or mid-session deploy:
 
@@ -2487,6 +2644,7 @@ floated away from the numbers below them.
 ## BUG-2026-04-23-012 — Fix BF tracker col mapping + SO grouping in orders migration
 
 **Status:** Fixed (2026-04-23)
+**Category:** data-migration
 
 **Symptom / Fix:** BF Master Tracker headers are misleading:
   col17 = "Blank(Dont use for sofa)"  -> actual Gap (inches)
@@ -2503,6 +2661,7 @@ is unchanged.
 ## BUG-2026-04-23-013 — Fix job_card ID collision between parallel WIPs sharing leaf names
 
 **Status:** Fixed (2026-04-23)
+**Category:** production-orders
 
 **Symptom / Fix:** After the per-dept wipCode override landed, jcId = `jc-{po}-{wipCode}-{dept}`
 collapsed DIVAN's FRAMING row and HEADBOARD's FRAMING row into one
@@ -2518,6 +2677,7 @@ never collide even if they share leaf node names.
 ## BUG-2026-04-23-014 — Fix BOM+QR root-cause regressions from stale cache state
 
 **Status:** Fixed (2026-04-23)
+**Category:** bom
 
 **Symptom / Fix:** - bom.tsx: remove the useEffect → saveStoredTemplates fan-out that
   PUT the entire templates list back to /api/bom/templates on every
@@ -2539,6 +2699,7 @@ never collide even if they share leaf node names.
 ## BUG-2026-04-23-015 — Fix BOM page resurrecting stale localStorage on every mount
 
 **Status:** Fixed (2026-04-23)
+**Category:** bom
 
 **Symptom / Fix:** The legacy localStorage overlay (hookka-bom-templates-v2) was loaded
 IN PREFERENCE to the API response and auto-PUT back to /api/bom/templates
@@ -2553,6 +2714,7 @@ source; clear the stale overlay key on mount instead.
 ## BUG-2026-04-22-001 — Fix crash: variants page coerces object entries to strings on load
 
 **Status:** Fixed (2026-04-22)
+**Category:** ui-frontend
 
 **Symptom / Fix:** Three pages share the localStorage key `hookka-variants-config` but
 write incompatible shapes:

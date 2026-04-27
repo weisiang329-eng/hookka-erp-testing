@@ -17,6 +17,7 @@ import {
   Layers,
   Boxes,
   CheckCircle2,
+  RotateCcw,
 } from "lucide-react";
 import type { MonthlyStockValue, StockAccount } from "@/lib/mock-data";
 
@@ -188,6 +189,7 @@ function EntryTab({
 }) {
   const [editingPhysical, setEditingPhysical] = useState<Record<string, string>>({});
   const [posting, setPosting] = useState(false);
+  const [reopening, setReopening] = useState(false);
   const [initializingMonth, setInitializingMonth] = useState(false);
 
   // Build display rows: merge accounts with stock values
@@ -264,7 +266,41 @@ function EntryTab({
     onRefresh();
   };
 
+  const handleReopenPeriod = async () => {
+    const confirmed = window.confirm(
+      `Reopen ${periodLabel(selectedPeriod)}? All POSTED entries will return to DRAFT and become editable again.`
+    );
+    if (!confirmed) return;
+
+    setReopening(true);
+    const postedEntries = stockValues.filter((v) => v.status === "POSTED");
+
+    if (postedEntries.length > 0) {
+      console.warn(
+        `[stock-value reopen] Reopening ${postedEntries.length} POSTED entries for period ${selectedPeriod}`
+      );
+    }
+
+    await Promise.all(
+      postedEntries.map((sv) =>
+        fetch(`/api/stock-value/${sv.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            status: "DRAFT",
+            postedDate: null,
+            postedBy: null,
+          }),
+        })
+      )
+    );
+    invalidateCachePrefix("/api/stock-value");
+    setReopening(false);
+    onRefresh();
+  };
+
   const hasDraftEntries = stockValues.some((v) => v.status === "DRAFT");
+  const hasPostedEntries = stockValues.some((v) => v.status === "POSTED");
   const hasEntries = stockValues.length > 0;
 
   return (
@@ -308,6 +344,16 @@ function EntryTab({
             >
               <CheckCircle2 className="h-4 w-4" />
               {posting ? "Posting..." : "Calculate & Post"}
+            </Button>
+          )}
+          {hasPostedEntries && (
+            <Button
+              variant="outline"
+              onClick={handleReopenPeriod}
+              disabled={reopening}
+            >
+              <RotateCcw className="h-4 w-4" />
+              {reopening ? "Reopening..." : "Reopen Period"}
             </Button>
           )}
         </div>

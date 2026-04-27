@@ -49,7 +49,10 @@ type DeliveryOrderRow = {
   driverId: string | null;
   driverName: string | null;
   driverContactPerson: string | null;
+  driverPhone: string | null;
+  vehicleId: string | null;
   vehicleNo: string | null;
+  vehicleType: string | null;
   totalM3: number;
   totalItems: number;
   status: string;
@@ -183,7 +186,10 @@ function rowToOrder(
     driverId: row.driverId,
     driverName: row.driverName ?? "",
     driverContactPerson: row.driverContactPerson ?? "",
+    driverPhone: row.driverPhone ?? "",
+    vehicleId: row.vehicleId ?? "",
     vehicleNo: row.vehicleNo ?? "",
+    vehicleType: row.vehicleType ?? "",
     items: items
       .filter((i) => i.deliveryOrderId === row.id)
       .map((it) => rowToItem(it, productM3Map)),
@@ -604,32 +610,142 @@ app.post("/", async (c) => {
     const id = genDoId();
     const doNo: string = body.doNo || (await genNextDoNo(c.var.DB));
 
-    // Provider lookup: when the client passes only driverId, denormalize
-    // name + vehicleNo + contactPerson onto the DO row. Mirrors the PUT
-    // handler so create/edit behave the same — front-end no longer has to
-    // ship redundant fields, and old DOs keep their historical 3PL contact
-    // even if the provider record is later deleted / renamed.
+    // Provider / vehicle / driver lookup chain (3PL refactor 2026-04-27).
+    //
+    // body.providerId — id of a row in the `drivers` table (the legacy
+    //   COMPANY table — see migration 0014's naming-misnomer note). Used
+    //   to denormalize the company's display name + dispatcher contact.
+    // body.vehicleId  — id of a row in `three_pl_vehicles`. Provides the
+    //   plate + vehicleType and the per-trip / per-extra-drop rates that
+    //   recompute deliveryCostSen.
+    // body.driverId   — id of a row in `three_pl_drivers` (an actual
+    //   PERSON). Provides driverName + driverPhone.
+    //
+    // Backwards compat: pre-refactor callers passed body.driverId meaning
+    // "company id". If body.providerId is missing AND body.driverId
+    // doesn't resolve to a person but DOES resolve to a `drivers` row,
+    // treat it as the legacy provider id.
+    let providerIdResolved =
+      (body.providerId as string | undefined) ?? null;
+    let resolvedDriverId = (body.driverId as string | undefined) ?? null;
     let resolvedDriverName = (body.driverName as string | undefined) ?? "";
-    let resolvedVehicleNo = (body.vehicleNo as string | undefined) ?? "";
+    let resolvedDriverPhone = (body.driverPhone as string | undefined) ?? "";
     let resolvedDriverContact =
       (body.driverContactPerson as string | undefined) ?? "";
-    if (body.driverId) {
-      const provider = await c.var.DB.prepare(
-        "SELECT name, vehicleNo, contactPerson FROM three_pl_providers WHERE id = ?",
+    let resolvedVehicleId = (body.vehicleId as string | undefined) ?? null;
+    let resolvedVehicleNo = (body.vehicleNo as string | undefined) ?? "";
+    let resolvedVehicleType = (body.vehicleType as string | undefined) ?? "";
+    let resolvedDeliveryCostSen = Number(body.deliveryCostSen) || 0;
+    const dropPointsForCost = Number(body.dropPoints) || 1;
+
+    // Driver person lookup first — and the legacy-id fallback path needs
+    // to know whether driverId hit a person row or not.
+    if (resolvedDriverId) {
+      const person = await c.var.DB.prepare(
+        "SELECT id, providerId, name, phone FROM three_pl_drivers WHERE id = ?",
       )
-        .bind(body.driverId)
+        .bind(resolvedDriverId)
         .first<{
+          id: string;
+          providerId: string;
           name: string;
-          vehicleNo: string | null;
-          contactPerson: string | null;
+          phone: string | null;
         }>();
-      if (provider) {
-        resolvedDriverName = provider.name;
-        if (provider.vehicleNo) resolvedVehicleNo = provider.vehicleNo;
-        resolvedDriverContact = provider.contactPerson ?? "";
+      if (person) {
+        resolvedDriverName = person.name;
+        resolvedDriverPhone = person.phone ?? "";
+        // Auto-fill provider from the driver's parent if caller didn't
+        // pass one explicitly — the UI normally picks provider first
+        // anyway, but this keeps the DO row consistent.
+        if (!providerIdResolved) providerIdResolved = person.providerId;
+      } else {
+        // Backcompat: maybe driverId was a legacy COMPANY id from the
+        // pre-refactor mutation contract. If so, treat it as providerId.
+        const legacyProvider = await c.var.DB.prepare(
+          "SELECT id FROM drivers WHERE id = ?",
+        )
+          .bind(resolvedDriverId)
+          .first<{ id: string }>();
+        if (legacyProvider && !providerIdResolved) {
+          providerIdResolved = legacyProvider.id;
+          // The pre-refactor contract treated driverId as company id and
+          // had no separate person field — clear the resolved person id
+          // so downstream code doesn't store a non-person id in driverId.
+          resolvedDriverId = null;
+        }
       }
     }
 
+    // Provider (company) lookup — denormalize name + dispatcher contact.
+    if (providerIdResolved) {
+      const provider = await c.var.DB.prepare(
+        "SELECT id, name, vehicleNo, contactPerson, ratePerTripSen, ratePerExtraDropSen FROM drivers WHERE id = ?",
+      )
+        .bind(providerIdResolved)
+        .first<{
+          id: string;
+          name: string;
+          vehicleNo: string | null;
+          contactPerson: string | null;
+          ratePerTripSen: number;
+          ratePerExtraDropSen: number;
+        }>();
+      if (provider) {
+        // When a driver person was picked, prefer their name as the
+        // displayed driverName; otherwise fall back to the company name
+        // (legacy DOs read driverName as "the 3PL").
+        if (!resolvedDriverName) resolvedDriverName = provider.name;
+        resolvedDriverContact = provider.contactPerson ?? "";
+        // Fall back to the company-level vehicleNo only if no vehicle
+        // was picked (kept for the partial-data case where the operator
+        // hasn't assigned a specific lorry yet).
+        if (!resolvedVehicleId && provider.vehicleNo && !resolvedVehicleNo) {
+          resolvedVehicleNo = provider.vehicleNo;
+        }
+        // Provider-level rate fallback for cost — overridden below if a
+        // vehicle is picked (vehicle rates take precedence).
+        if (!resolvedVehicleId && !body.deliveryCostSen) {
+          resolvedDeliveryCostSen =
+            provider.ratePerTripSen +
+            Math.max(0, dropPointsForCost - 1) * provider.ratePerExtraDropSen;
+        }
+      }
+    }
+
+    // Vehicle lookup — plate + type + per-vehicle rate (overrides company rate).
+    if (resolvedVehicleId) {
+      const vehicle = await c.var.DB.prepare(
+        "SELECT id, plateNo, vehicleType, ratePerTripSen, ratePerExtraDropSen FROM three_pl_vehicles WHERE id = ?",
+      )
+        .bind(resolvedVehicleId)
+        .first<{
+          id: string;
+          plateNo: string;
+          vehicleType: string | null;
+          ratePerTripSen: number;
+          ratePerExtraDropSen: number;
+        }>();
+      if (vehicle) {
+        resolvedVehicleNo = vehicle.plateNo;
+        resolvedVehicleType = vehicle.vehicleType ?? "";
+        if (!body.deliveryCostSen) {
+          resolvedDeliveryCostSen =
+            vehicle.ratePerTripSen +
+            Math.max(0, dropPointsForCost - 1) * vehicle.ratePerExtraDropSen;
+        }
+      } else {
+        // Stored id no longer exists — null it out so the DO doesn't
+        // dangle a stale FK.
+        resolvedVehicleId = null;
+      }
+    }
+
+    // driverId column on delivery_orders historically meant "company id"
+    // and is what existing reads (and the SO cascade) rely on. After the
+    // 3PL refactor we store providerIdResolved here so the column stays
+    // semantically the same; the new vehicleId / vehicleType / driverPhone
+    // columns carry the per-trip specifics. driverName denormalizes the
+    // PERSON when one is picked, otherwise the company (legacy behavior).
     const statements = [
       c.var.DB.prepare(
         `INSERT INTO delivery_orders (
@@ -637,13 +753,14 @@ app.post("/", async (c) => {
            customerPOId, customerName, customerState, hubId, hubName,
            deliveryAddress, contactPerson, contactPhone, deliveryDate,
            hookkaExpectedDD, driverId, driverName, driverContactPerson,
-           vehicleNo, totalM3,
+           driverPhone, vehicleId, vehicleNo, vehicleType, totalM3,
            totalItems, status, overdue, dispatchedAt, deliveredAt, remarks,
            dropPoints, deliveryCostSen, lorryId, lorryName, doQrCode,
            fgUnitIds, signedAt, signedByWorkerId, signedByWorkerName,
            proofOfDelivery, created_at, updated_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?)`,
       ).bind(
         id,
         doNo,
@@ -661,10 +778,13 @@ app.post("/", async (c) => {
         body.contactPhone ?? customerRow.phone ?? "",
         body.deliveryDate ?? "",
         salesOrderRow?.hookkaExpectedDD ?? "",
-        body.driverId ?? null,
+        providerIdResolved,
         resolvedDriverName,
         resolvedDriverContact,
+        resolvedDriverPhone,
+        resolvedVehicleId,
         resolvedVehicleNo,
+        resolvedVehicleType,
         totalM3,
         totalItems,
         "DRAFT",
@@ -672,8 +792,8 @@ app.post("/", async (c) => {
         null,
         null,
         body.remarks ?? "",
-        Number(body.dropPoints) || 1,
-        Number(body.deliveryCostSen) || 0,
+        dropPointsForCost,
+        resolvedDeliveryCostSen,
         body.lorryId ?? null,
         body.lorryName ?? null,
         body.doQrCode ?? null,
@@ -845,13 +965,22 @@ app.put("/:id", async (c) => {
     }
 
     // --- simple field merges ---
+    // The driverId column on delivery_orders historically meant "company id"
+    // and stays semantically the same after the 3PL refactor. Callers can
+    // pass providerId (preferred) or driverId (legacy alias for the company)
+    // to update it; the new vehicleId / driverPhone / vehicleType columns
+    // travel separately. See the lookup chain further down.
     const merged = {
       deliveryDate:
         body.deliveryDate === undefined
           ? existing.deliveryDate
           : body.deliveryDate,
       driverId:
-        body.driverId === undefined ? existing.driverId : body.driverId,
+        body.providerId !== undefined
+          ? body.providerId
+          : body.driverId === undefined
+            ? existing.driverId
+            : body.driverId,
       driverName:
         body.driverName === undefined
           ? existing.driverName
@@ -860,8 +989,18 @@ app.put("/:id", async (c) => {
         body.driverContactPerson === undefined
           ? existing.driverContactPerson
           : body.driverContactPerson,
+      driverPhone:
+        body.driverPhone === undefined
+          ? existing.driverPhone
+          : body.driverPhone,
+      vehicleId:
+        body.vehicleId === undefined ? existing.vehicleId : body.vehicleId,
       vehicleNo:
         body.vehicleNo === undefined ? existing.vehicleNo : body.vehicleNo,
+      vehicleType:
+        body.vehicleType === undefined
+          ? existing.vehicleType
+          : body.vehicleType,
       deliveryAddress:
         body.deliveryAddress === undefined
           ? existing.deliveryAddress
@@ -911,12 +1050,69 @@ app.put("/:id", async (c) => {
       merged.lorryName = "";
     }
 
-    // --- driver → 3PL lookup: auto-fill vehicle + contact + recompute cost ---
-    if (body.driverId !== undefined && body.driverId) {
-      const provider = await c.var.DB.prepare(
-        "SELECT id, name, vehicleNo, contactPerson, ratePerTripSen, ratePerExtraDropSen FROM three_pl_providers WHERE id = ?",
+    // --- 3PL refactor lookup chain (provider + vehicle + driver person) ---
+    //
+    // body.providerId — preferred field for the COMPANY id (legacy
+    //   `drivers` table). body.driverId is also accepted for backcompat
+    //   when it resolves to a `drivers` row (pre-refactor mutation
+    //   contract treated driverId as the company id).
+    // body.vehicleId  — three_pl_vehicles row. Per-vehicle rates take
+    //   precedence over company rates for deliveryCostSen recompute.
+    // body.driverId   — when it resolves in `three_pl_drivers`, sets
+    //   driverName + driverPhone for the actual person. Otherwise we
+    //   treat it as a legacy company id (see above).
+    const incomingDriverId =
+      body.driverId !== undefined ? body.driverId : null;
+    let incomingProviderId =
+      body.providerId !== undefined ? body.providerId : null;
+
+    // Resolve the driver-person side first (so we can detect the legacy
+    // "driverId == company id" case and not stamp it onto driverName).
+    if (incomingDriverId) {
+      const person = await c.var.DB.prepare(
+        "SELECT id, providerId, name, phone FROM three_pl_drivers WHERE id = ?",
       )
-        .bind(body.driverId)
+        .bind(incomingDriverId)
+        .first<{
+          id: string;
+          providerId: string;
+          name: string;
+          phone: string | null;
+        }>();
+      if (person) {
+        merged.driverName = person.name;
+        merged.driverPhone = person.phone ?? "";
+        if (!incomingProviderId && merged.driverId !== person.providerId) {
+          // Auto-fill provider from the driver's parent if caller didn't
+          // pass one (keeps the DO row consistent).
+          incomingProviderId = person.providerId;
+          merged.driverId = person.providerId;
+        }
+      } else {
+        // Backcompat: driverId may be a legacy COMPANY id from the
+        // pre-refactor contract — only treat it as such if no providerId
+        // was passed explicitly.
+        const legacyProvider = await c.var.DB.prepare(
+          "SELECT id FROM drivers WHERE id = ?",
+        )
+          .bind(incomingDriverId)
+          .first<{ id: string }>();
+        if (legacyProvider && !incomingProviderId) {
+          incomingProviderId = legacyProvider.id;
+          merged.driverId = legacyProvider.id;
+        }
+      }
+    }
+
+    // Provider (company) lookup — denormalize name + dispatcher contact.
+    // Only triggers when the caller actively touched the provider field
+    // this PUT (so editing unrelated fields doesn't overwrite the stored
+    // company name/contact silently).
+    if (incomingProviderId) {
+      const provider = await c.var.DB.prepare(
+        "SELECT id, name, vehicleNo, contactPerson, ratePerTripSen, ratePerExtraDropSen FROM drivers WHERE id = ?",
+      )
+        .bind(incomingProviderId)
         .first<{
           id: string;
           name: string;
@@ -926,14 +1122,54 @@ app.put("/:id", async (c) => {
           ratePerExtraDropSen: number;
         }>();
       if (provider) {
-        merged.driverName = provider.name;
-        if (provider.vehicleNo) merged.vehicleNo = provider.vehicleNo;
+        // Don't clobber a person's name if one was just resolved above.
+        if (!incomingDriverId || merged.driverName === existing.driverName) {
+          merged.driverName = merged.driverName || provider.name;
+        }
         merged.driverContactPerson = provider.contactPerson ?? "";
-        const drops = merged.dropPoints ?? 1;
-        merged.deliveryCostSen =
-          provider.ratePerTripSen +
-          Math.max(0, drops - 1) * provider.ratePerExtraDropSen;
+        if (
+          !merged.vehicleId &&
+          provider.vehicleNo &&
+          (body.vehicleNo === undefined || !merged.vehicleNo)
+        ) {
+          merged.vehicleNo = provider.vehicleNo;
+        }
+        if (!merged.vehicleId && body.deliveryCostSen === undefined) {
+          const drops = merged.dropPoints ?? 1;
+          merged.deliveryCostSen =
+            provider.ratePerTripSen +
+            Math.max(0, drops - 1) * provider.ratePerExtraDropSen;
+        }
       }
+    }
+
+    // Vehicle lookup — plate + type + per-vehicle rate (overrides company rate).
+    if (body.vehicleId !== undefined && body.vehicleId) {
+      const vehicle = await c.var.DB.prepare(
+        "SELECT id, plateNo, vehicleType, ratePerTripSen, ratePerExtraDropSen FROM three_pl_vehicles WHERE id = ?",
+      )
+        .bind(body.vehicleId)
+        .first<{
+          id: string;
+          plateNo: string;
+          vehicleType: string | null;
+          ratePerTripSen: number;
+          ratePerExtraDropSen: number;
+        }>();
+      if (vehicle) {
+        merged.vehicleId = vehicle.id;
+        merged.vehicleNo = vehicle.plateNo;
+        merged.vehicleType = vehicle.vehicleType ?? "";
+        if (body.deliveryCostSen === undefined) {
+          const drops = merged.dropPoints ?? 1;
+          merged.deliveryCostSen =
+            vehicle.ratePerTripSen +
+            Math.max(0, drops - 1) * vehicle.ratePerExtraDropSen;
+        }
+      }
+    } else if (body.vehicleId === null) {
+      merged.vehicleId = null;
+      merged.vehicleType = "";
     }
 
     // --- totals recomputed only if items replaced ---
@@ -972,7 +1208,8 @@ app.put("/:id", async (c) => {
       c.var.DB.prepare(
         `UPDATE delivery_orders SET
            deliveryDate = ?, driverId = ?, driverName = ?,
-           driverContactPerson = ?, vehicleNo = ?,
+           driverContactPerson = ?, driverPhone = ?, vehicleId = ?,
+           vehicleNo = ?, vehicleType = ?,
            deliveryAddress = ?, contactPerson = ?, contactPhone = ?,
            remarks = ?, dropPoints = ?, deliveryCostSen = ?, lorryId = ?,
            lorryName = ?, status = ?, overdue = ?, dispatchedAt = ?,
@@ -984,7 +1221,10 @@ app.put("/:id", async (c) => {
         merged.driverId,
         merged.driverName,
         merged.driverContactPerson,
+        merged.driverPhone,
+        merged.vehicleId,
         merged.vehicleNo,
+        merged.vehicleType,
         merged.deliveryAddress,
         merged.contactPerson,
         merged.contactPhone,

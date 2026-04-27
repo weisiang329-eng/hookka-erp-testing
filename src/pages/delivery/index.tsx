@@ -1168,30 +1168,15 @@ export default function DeliveryPage() {
   );
 
   // ---------- Pending Delivery columns ----------
+  // Selection column removed 2026-04-27 (BUG dual-state: this custom
+  // checkbox tracked `selectedReadyPOs` while the grid had its OWN
+  // `selectedKeys` driven by row-body clicks. They could diverge — user
+  // saw "1 selected" badge from the grid while the custom checkboxes
+  // showed 3 ticked, then Create DO POSTed all 3 → multi-customer
+  // reject. Now using the grid's built-in `selectable` prop +
+  // `onSelectionChange` callback so there's exactly one source of truth.)
   const pendingDeliveryColumns: Column<ReadyPORow>[] = useMemo(
     () => [
-      {
-        key: "_select",
-        label: "",
-        width: "40px",
-        align: "center",
-        render: (_value, row) => (
-          <input
-            type="checkbox"
-            checked={selectedReadyPOs.has(row.id)}
-            onChange={(e) => {
-              e.stopPropagation();
-              setSelectedReadyPOs((prev) => {
-                const next = new Set(prev);
-                if (next.has(row.id)) next.delete(row.id);
-                else next.add(row.id);
-                return next;
-              });
-            }}
-            className="h-4 w-4 rounded border-[#E2DDD8] accent-[#6B5C32]"
-          />
-        ),
-      },
       { key: "salesOrderNo", label: "SO No.", type: "docno", width: "130px", sortable: true },
       {
         key: "poNo",
@@ -1721,6 +1706,10 @@ export default function DeliveryPage() {
               maxHeight="calc(100vh - 280px)"
               emptyMessage="No items pending delivery."
               groupBy="customerState"
+              selectable
+              onSelectionChange={(rows) =>
+                setSelectedReadyPOs(new Set(rows.map((r) => r.id)))
+              }
             />
           </CardContent>
         </Card>

@@ -154,11 +154,22 @@ app.get("/", async (c) => {
 
   // 1) The ledger — every wip_items row with non-zero stock. This is
   //    the row set we project to the grid.
+  //
+  //    BUG-2026-04-27-017: rows with deptStatus='UPHOLSTERY' are excluded.
+  //    Per the user's mental model, UPHOLSTERY-completed = the piece is now
+  //    Finished Good in stock, surfaced via deriveFGStock() on the Inventory
+  //    > Finished Products tab. Showing it on the WIP tab too double-counted
+  //    it (user-reported screenshot showed e.g. `5531 -Back Cushion 24` rows
+  //    with positive qty appearing on WIP after UPH completion). Filtering
+  //    at the SQL level keeps the negative-row stub semantics intact:
+  //    cascade-written stubs carry deptStatus='PENDING' (BUG-2026-04-27-013)
+  //    and still surface here.
   const wipRowsRes = await db
     .prepare(
       `SELECT id, code, type, relatedProduct, deptStatus, stockQty
          FROM wip_items
         WHERE stockQty != 0
+          AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')
         ORDER BY code`,
     )
     .all<WipItemRow>();

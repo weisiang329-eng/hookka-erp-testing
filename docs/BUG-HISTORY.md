@@ -12,6 +12,109 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-017 — WIP page double-counted UPH-completed rows alongside FG view
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** Items that had finished UPHOLSTERY were appearing on the
+warehouse **WIP** tab AND on the **Finished Products** tab at the same
+time, double-counting them. User screenshot showed rows like
+`5531 -Back Cushion 24` with positive `pieceQty` on the WIP grid even
+though those pieces were already finished and should only live in FG.
+
+**Root cause:** Per the user's mental model, UPHOLSTERY-completed = the
+piece is now FG (in-stock), surfaced via `deriveFGStock` (frontend
+roll-up that counts POs whose UPH JCs are all COMPLETED). The
+`applyWipInventoryChange` cascade still writes a positive
+`wip_items` row for the UPH JC's own `wipLabel` though (the
+"producer-add" leg, written at UPH COMPLETED for symmetry with the
+non-terminal depts). And `/api/inventory/wip` was reading every
+non-zero `wip_items` row, so those UPH producer rows showed up on the
+WIP grid too.
+
+**Fix:** Filter at the SQL source in
+`src/api/routes-d1/inventory-wip.ts:159-166`. The main query now reads:
+
+```sql
+SELECT id, code, type, relatedProduct, deptStatus, stockQty
+  FROM wip_items
+ WHERE stockQty != 0
+   AND (deptStatus IS NULL OR deptStatus != 'UPHOLSTERY')
+ ORDER BY code
+```
+
+Rationale for SQL-level filter (vs JS post-filter): smaller payload, no
+join cost wasted on rows we'd discard. Negative-row stub semantics
+(BUG-2026-04-27-013) are unaffected — those carry
+`deptStatus='PENDING'`, not `'UPHOLSTERY'`. FG view and `deriveFGStock`
+are untouched; PO-level UPH-all-completed still drives FG appearance.
+
+**Verification:** typecheck + lint clean; existing 84 tests unaffected
+(no test asserted the UPH-row-on-WIP behavior because it was a bug).
+Manual: with a PO whose UPH is fully COMPLETED, /api/inventory/wip no
+longer returns the UPH-coded rows; /api/inventory/finished-products (or
+its frontend equivalent via `deriveFGStock`) still does.
+
+---
+
+## BUG-2026-04-27-016 — PACKING participated in inventory cascade — should be metadata-only step
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** Completing a PACKING job_card was firing the same
+inventory-cascade write path as upstream depts: a producer-add to
+`wip_items` for the FG-level wipLabel, and (via the `deptUpper !== 'UPHOLSTERY'`
+generic-consume gate) potential consume-from-upstream side effects.
+This contradicted the user's mental model:
+
+- **UPHOLSTERY completed** = goods physically built. UPH consumes
+  upstream wip_items (Divan, HB, Cushion, ...) and writes the FG-level
+  +qty rows. Once all UPH JCs of a PO are complete, `deriveFGStock`
+  surfaces the PO as FG.
+- **PACKING completed** = just records `racking_number` on the PO row.
+  It is a metadata step, NOT an inventory event — it does not consume
+  any wip_items, it does not produce any. Boxes are just being put
+  onto a shelf.
+
+**Root cause:** `applyWipInventoryChange` had no PACKING short-circuit
+— it treated PACKING like any other dept, falling through to the
+generic upstream-consume gate (BUG-2026-04-27-013) and the
+producer-add write at the bottom.
+
+**Fix:** New short-circuit at the top of `applyWipInventoryChange`
+(`src/api/routes-d1/production-orders.ts:864-879`), placed AFTER the
+BUG-005 same-status guard and BEFORE the `wipLabel` computation:
+
+```ts
+const deptCodeRaw = (jcRow.departmentCode || "").toUpperCase();
+const isPacking = deptCodeRaw === "PACKING";
+if (isPacking) return;
+```
+
+Critically this only suppresses the wip_items writes. The PO-level
+cascades that DO need to fire on PACKING completion all live in the
+OUTER PATCH handler, not in `applyWipInventoryChange`:
+
+- `current_department` flip (`production-orders.ts:1657`)
+- PO PENDING/IN_PROGRESS → COMPLETED transition
+  (`production-orders.ts:1644-1648`)
+- `postJobCardLabor` (labor cost ledger, `production-orders.ts:1622-1635`)
+- `postProductionOrderCompletion` — fg_units + fg_batches generation
+  (`production-orders.ts:1697-1708`)
+- `cascadePoCompletionToSO` (`production-orders.ts:1709-1717`)
+- `cascadeUpholsteryToSO` (`production-orders.ts:1719-1726`)
+
+All of those continue to fire on PACKING completion exactly as before.
+
+Updated comment on the existing FAB_CUT/WOOD_CUT generic-consume gate
+(`production-orders.ts:907-913`) to mention PACKING is bypassed at the
+top.
+
+**Verification:** typecheck + lint clean; existing 84 tests pass.
+No test pinned the prior PACKING-cascade behavior (it was a bug).
+
+---
+
 ## BUG-2026-04-27-015 — Negative-row Source POs over-collected: every higher-sequence COMPLETED JC in same wipKey was treated as a "trigger"
 
 **Status:** 🟢 Fixed (2026-04-27)
@@ -382,7 +485,7 @@ can alert.
 
 ## BUG-2026-04-27-008 — `fg_units.status='PENDING'` after PO completion (not `IN_STOCK`)
 
-**Status:** 🔴 Identified (cosmetic / naming clarity)
+**Status:** 🟢 Fixed (2026-04-27)
 
 **Symptom:** Post-PACKING-complete, the cascade writes `fg_units` rows
 with `status='PENDING'` (see `src/api/routes-d1/fg-units.ts:272`). Name
@@ -394,9 +497,21 @@ DELIVERED via the delivery_orders flow.
 `deriveFGStock` (frontend) counts UPH-done POs independently of
 `fg_units.status` masks the confusion in most views.
 
-**Fix plan:** rename the initial state to `IN_STOCK` (or similar) and add
-a separate flag/column for "ready for DO" lifecycle if needed. Schema
-migration + UI text update.
+**Fix:** Flipped the INSERT default in `generateFGUnitsForPO`
+(`src/api/routes-d1/fg-units.ts:284`) from `'PENDING'` to `'PACKED'`. The
+schema CHECK constraint allows
+`PENDING / PENDING_UPHOLSTERY / UPHOLSTERED / PACKED / LOADED / DELIVERED
+/ RETURNED` (`migrations/0001_init.sql:769`); there is no `IN_STOCK` /
+`READY` / `AVAILABLE` value, so we picked the closest existing value.
+`PACKED` matches the post-PACKING-JC reality: `generateFGUnitsForPO` is
+only invoked from `postProductionOrderCompletion`, which fires on the
+PO's PENDING → COMPLETED transition (i.e. ALL job_cards including
+PACKING are done). By the time fg_units rows land, the unit is boxed
+and racked, awaiting LOAD onto a DO. Downstream scan transitions
+(LOADED → DELIVERED → RETURNED) are unchanged. The PACK action handler
+gracefully no-ops on already-PACKED rows ("Cannot PACK — unit already
+PACKED"), which now reflects the correct lifecycle. No schema
+migration was required.
 
 ---
 

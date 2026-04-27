@@ -262,6 +262,19 @@ export async function generateFGUnitsForPO(
     }
   }
 
+  // BUG-2026-04-27-008: initial status was 'PENDING', which read as "not yet
+  // built / awaiting something". Misleading: generateFGUnitsForPO is invoked
+  // from postProductionOrderCompletion, which only fires on the PO's PENDING
+  // → COMPLETED transition (i.e. ALL job_cards including PACKING are done).
+  // By the time these rows land, the unit IS upholstered AND racked — it's
+  // physically in stock, sitting on the shelf, ready to be loaded onto a
+  // delivery_order. The schema CHECK constraint (migrations/0001_init.sql)
+  // allows: PENDING, PENDING_UPHOLSTERY, UPHOLSTERED, PACKED, LOADED,
+  // DELIVERED, RETURNED — there is no IN_STOCK / READY / AVAILABLE value.
+  // 'PACKED' is the closest semantic match: it means "boxed and racked,
+  // awaiting LOAD onto a DO", which is exactly the post-PACKING-JC reality.
+  // The downstream lifecycle (PACKED → LOADED → DELIVERED → RETURNED) stays
+  // unchanged in the scan handlers below.
   const statements = newUnits.map((unit) =>
     db
       .prepare(
@@ -269,7 +282,7 @@ export async function generateFGUnitsForPO(
            poId, poNo, productCode, productName, unitNo, totalUnits,
            pieceNo, totalPieces, pieceName, customerName, customerHub,
            mfdDate, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PACKED')`,
       )
       .bind(
         unit.id,

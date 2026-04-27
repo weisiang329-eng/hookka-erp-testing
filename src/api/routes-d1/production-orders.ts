@@ -854,13 +854,28 @@ async function applyWipInventoryChange(
   // fire the cascade twice — once per PATCH — doubling every consume and
   // every producer-add. Short-circuit when the status didn't actually change.
   if (prevStatus !== null && prevStatus === newStatus) return;
+  const deptCodeRaw = (jcRow.departmentCode || "").toUpperCase();
+  // BUG-2026-04-27-016: PACKING is a metadata-only step — it only records the
+  // racking_number on the PO row. It does NOT participate in the inventory
+  // cascade: no producer-add for FG-level PACKING rows, no consume of UPH
+  // wip_items. UPH already wrote the +qty rows (and zeroed its upstream
+  // siblings); `deriveFGStock` counts the PO as FG once all UPH JCs are
+  // COMPLETED; and the DO/DR flow handles dispatch from FG. The PO-level
+  // current_department flip, the PO COMPLETED transition,
+  // postProductionOrderCompletion (fg_units / fg_batches), postJobCardLabor,
+  // cascadePoCompletionToSO, and cascadeUpholsteryToSO all run in the OUTER
+  // PATCH handler (see the body.status branch around lines 1590-1726), NOT
+  // here — so PACKING's progression / FG generation / SO cascades all still
+  // fire on PACKING completion. This short-circuit only suppresses the
+  // wip_items writes.
+  const isPacking = deptCodeRaw === "PACKING";
+  if (isPacking) return;
   // Producer wipLabel — falls back to a synthesized label when the JC was
   // created without BOM (legacy seed via createJobCards()) so the inventory
   // upsert still lands a row. Without this fallback, completing WOOD_CUT (or
   // any producer dept) on a non-BOM PO silently skipped the wip_items
   // upsert, leaving nothing in the warehouse WIP view — reported by user
   // 2026-04-26.
-  const deptCodeRaw = (jcRow.departmentCode || "").toUpperCase();
   const wipType = jcRow.wipType;
   const wipKey = jcRow.wipKey;
   const wipQty = jcRow.wipQty || poRow.quantity || 1;
@@ -891,8 +906,10 @@ async function applyWipInventoryChange(
   })();
 
   // Generic upstream-consume gate — fires on IN_PROGRESS OR COMPLETED for
-  // every non-UPH, non-FAB_CUT dept. Date-cell clicks skip IN_PROGRESS
-  // (WAITING → COMPLETED directly), which used to orphan upstream stock.
+  // every non-UPH, non-FAB_CUT, non-WOOD_CUT dept. (PACKING is already
+  // bypassed at the top of this function, see BUG-2026-04-27-016.) Date-cell
+  // clicks skip IN_PROGRESS (WAITING → COMPLETED directly), which used to
+  // orphan upstream stock.
   // BUG-2026-04-27-013: consume is unclamped (no MAX(0)) so a skipped /
   // out-of-order upstream dept surfaces as negative stock_qty rather
   // than being silently swallowed.

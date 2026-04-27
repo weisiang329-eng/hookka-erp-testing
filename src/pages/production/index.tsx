@@ -1248,6 +1248,63 @@ export default function ProductionPage({
   // chain (Wood Cut DONE wrongly locked Fab Cut + Fab Sew on the same
   // row even though those three are independent component chains —
   // reported by user 2026-04-26).
+  // Aggregate-form DeptSched for the sofa PACKING merge-row case (wipKey
+  // === "FG"). At PACKING, sofa's 3 component branches (Base / Cushion /
+  // Armrest) collapse into one JC keyed "FG". For each upstream dept we
+  // need to summarize across ALL component-branch JCs in that dept on
+  // this PO — NOT pick one JC scoped to the row's wipKey (FG has no
+  // upstream). Mirrors `cellFor()`'s semantics for the Overview matrix.
+  //
+  // Output shape matches buildSched so the same DataGrid renderer works:
+  //   - due       = earliest non-empty dueDate across cards
+  //   - completed = max completedDate iff EVERY card is COMPLETED/
+  //                 TRANSFERRED, else "" (matches user spec — only show a
+  //                 date when the merged dept is fully done)
+  //   - state     = "done" if all done; else "overdue" if earliest due
+  //                 already passed; else "pending"
+  // jobCardId/deptCode/wipKey come from the first card so the patch
+  // route still resolves, but the cell is conceptually a roll-up — see
+  // TODO below.
+  const buildSchedAgg = (
+    cards: JobCard[],
+    today: string,
+    poId: string,
+  ): DeptSched => {
+    if (cards.length === 0) {
+      return {
+        due: "", completed: "", state: "none", sortKey: 0, poId,
+        jobCardId: "", deptCode: "", wipKey: "", locked: false,
+      };
+    }
+    const due =
+      cards.map((c) => c.dueDate || "").filter(Boolean).sort()[0] || "";
+    const allDone = cards.every(
+      (c) => c.status === "COMPLETED" || c.status === "TRANSFERRED",
+    );
+    const completed = allDone
+      ? cards.map((c) => c.completedDate || "").filter(Boolean).sort().slice(-1)[0] || ""
+      : "";
+    let state: PrevState;
+    if (allDone) state = "done";
+    else if (due && due < today) state = "overdue";
+    else state = "pending";
+    const sortKey = state === "overdue" ? 3 : state === "pending" ? 2 : 1;
+    // TODO: aggregate cells aren't directly patch-clickable — jobCardId/
+    // deptCode/wipKey reflect the first underlying card only. The
+    // PACKING merge-row's upstream date columns are read-only from the
+    // operator's perspective; date edits happen on the per-component
+    // dept tabs (Fab Cut / Foam / Wood Cut etc.) where individual JCs
+    // are still rendered.
+    const first = cards[0];
+    return {
+      due, completed, state, sortKey, poId,
+      jobCardId: first.id,
+      deptCode: first.departmentCode,
+      wipKey: first.wipKey || "",
+      locked: false,
+    };
+  };
+
   const buildSched = (
     card: JobCard | null,
     today: string,
@@ -1437,14 +1494,38 @@ export default function ProductionPage({
           pic2: jc.pic2Name || "",
           status: jc.status || "",
           poStatus: o.status || "",
-          sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, poJobCards),
-          sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, poJobCards),
-          sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, poJobCards),
-          sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, poJobCards),
-          sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, poJobCards),
-          sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, poJobCards),
-          sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, poJobCards),
-          sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, poJobCards),
+          // Sofa PACKING merge case: jc.wipKey === "FG" means this row IS
+          // the merged Packing JC (sofa's 3 component branches —
+          // Base / Cushion / Armrest — collapse here). Upstream depts
+          // still have per-component JCs in this PO with non-"FG"
+          // wipKeys. The picker would scope by jc.wipKey="FG" → no
+          // match → fall back to most-recent-due card, which is
+          // semantically wrong for a merge view. Use per-dept aggregate
+          // across ALL JCs in that dept on this PO instead.  Bedframe
+          // PACKING JCs use wipKeys like `1007-(K)::0::DIVAN::...` (not
+          // "FG"), so this branch leaves the existing picker path alone
+          // for bedframes — only the sofa Packing merge row aggregates.
+          ...(jc.wipKey === "FG"
+            ? {
+                sched_FAB_CUT:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FAB_CUT"),    today, o.id),
+                sched_FAB_SEW:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FAB_SEW"),    today, o.id),
+                sched_FOAM:       buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FOAM"),       today, o.id),
+                sched_WOOD_CUT:   buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "WOOD_CUT"),   today, o.id),
+                sched_FRAMING:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "FRAMING"),    today, o.id),
+                sched_WEBBING:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "WEBBING"),    today, o.id),
+                sched_UPHOLSTERY: buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "UPHOLSTERY"), today, o.id),
+                sched_PACKING:    buildSchedAgg(o.jobCards.filter((j) => j.departmentCode === "PACKING"),    today, o.id),
+              }
+            : {
+                sched_FAB_CUT:    buildSched(picker("FAB_CUT"),    today, o.id, poJobCards),
+                sched_FAB_SEW:    buildSched(picker("FAB_SEW"),    today, o.id, poJobCards),
+                sched_FOAM:       buildSched(picker("FOAM"),       today, o.id, poJobCards),
+                sched_WOOD_CUT:   buildSched(picker("WOOD_CUT"),   today, o.id, poJobCards),
+                sched_FRAMING:    buildSched(picker("FRAMING"),    today, o.id, poJobCards),
+                sched_WEBBING:    buildSched(picker("WEBBING"),    today, o.id, poJobCards),
+                sched_UPHOLSTERY: buildSched(picker("UPHOLSTERY"), today, o.id, poJobCards),
+                sched_PACKING:    buildSched(picker("PACKING"),    today, o.id, poJobCards),
+              }),
           _deptCode: jc.departmentCode,
         });
       }

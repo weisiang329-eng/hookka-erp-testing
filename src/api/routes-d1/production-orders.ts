@@ -464,16 +464,21 @@ async function fetchFilteredPOs(
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
-  // PLUS legacy JCs (wipKey NULL) whose PO has a matching-dept JC.  The
-  // production page's prev-dept-CD pills need upstream sibling JCs in
-  // the same wipKey -- the original `WHERE departmentCode = ?` filter
+  // PLUS legacy JCs (wipKey NULL) whose PO has a matching-dept JC,
+  // PLUS *every* JC on a PO whose matching-dept JC is FG-keyed (sofa
+  // PACKING merge-row case — the only matching wipKey is "FG", which
+  // would otherwise strip every upstream component-branch JC and leave
+  // the Packing tab's upstream date columns rendering "—" for sofas).
+  // The production page's prev-dept-CD pills need upstream sibling JCs
+  // in the same wipKey -- the original `WHERE departmentCode = ?` filter
   // stripped them, leaving every upstream column rendering "—".  This
   // wipKey-grouped variant keeps the JC-row payload down (only loads
   // wipKeys that the active dept actually touches) while letting the
   // frontend picker find the full chain.
   const jcWhereDept = deptFilter
     ? ` WHERE wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL)
-          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL))`
+          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL))
+          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG')`
     : "";
 
   if (!includeJobCards) {
@@ -494,7 +499,7 @@ async function fetchFilteredPOs(
       // payload bounded. Leave it untouched.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(deptFilter, deptFilter);
+        .bind(deptFilter, deptFilter, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -536,7 +541,7 @@ async function fetchFilteredPOs(
   if (deptFilter) {
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(deptFilter, deptFilter);
+      .bind(deptFilter, deptFilter, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -674,11 +679,19 @@ async function fetchPaginatedPOs(
       const chunkResults = await Promise.all(
         chunks.map((chunk) => {
           const ph = chunk.map(() => "?").join(",");
+          // The 3rd OR clause covers the sofa PACKING merge-row case: when
+          // the matching-dept JC's wipKey is "FG" (sofa Packing), include
+          // *every* JC on that PO so the frontend has the upstream
+          // component-branch JCs (Base / Cushion / Armrest) it needs to
+          // aggregate completedDate across the merged set. Without this,
+          // the wipKey IN (...FG only...) clause would strip the upstream
+          // chain and the Packing tab's date columns render "—".
           const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${ph}))
-            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph}))))`;
+            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph})))
+            OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG' AND productionOrderId IN (${ph})))`;
           return db
             .prepare(sql)
-            .bind(...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
+            .bind(...chunk, deptFilter, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
             .all<JobCardRow>();
         }),
       );

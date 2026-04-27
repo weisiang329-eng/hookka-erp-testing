@@ -217,78 +217,75 @@ app.post("/raw-materials", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/inventory/fg-source/:productCode
 //
-// Drill-down for the FG detail dialog: every fg_unit row that has the
-// matching productCode, with its source production_order info. Sorted by
-// mfdDate DESC so the freshest units come first. Used by the inventory
-// page's FG dialog ("which POs produced this finished good?").
+// Drill-down for the FG detail dialog: lists every production_order that
+// contributed to the on-hand stock for this productCode. "Contributed"
+// means EVERY UPHOLSTERY job_card on the PO is COMPLETED/TRANSFERRED —
+// the same rule deriveFGStock() uses on the frontend so the dialog and
+// the Stock Qty column always agree (BUG-2026-04-27: previously this
+// endpoint pulled from fg_units which has placeholder rows for unfinished
+// POs, returning 22 sources for a stock-of-1 product).
+//
+// The mfdDate in the response is the LATEST UPHOLSTERY completedDate
+// across all UPH cards on that PO — that's literally the moment the PO
+// became a finished good.
 // ---------------------------------------------------------------------------
 app.get("/fg-source/:productCode", async (c) => {
   const productCode = c.req.param("productCode");
   if (!productCode) {
     return c.json({ success: false, error: "productCode required" }, 400);
   }
+  // First: every PO with this productCode + count of UPH JCs + count of
+  // DONE UPH JCs + max DONE UPH completedDate. Then in JS we keep only
+  // POs where uphTotal > 0 AND uphDone === uphTotal.
   const res = await c.var.DB
     .prepare(
-      `SELECT id, unitSerial, poId, poNo, soNo, productCode, productName,
-              status, mfdDate, packedAt, customerName
-         FROM fg_units
-        WHERE productCode = ?
-        ORDER BY mfdDate DESC, unitSerial ASC`,
+      `SELECT po.id           AS poId,
+              po.poNo         AS poNo,
+              po.companySOId  AS soNo,
+              po.customerName AS customerName,
+              po.quantity     AS qty,
+              SUM(CASE WHEN jc.departmentCode = 'UPHOLSTERY' THEN 1 ELSE 0 END) AS uphTotal,
+              SUM(CASE WHEN jc.departmentCode = 'UPHOLSTERY'
+                        AND jc.status IN ('COMPLETED','TRANSFERRED') THEN 1 ELSE 0 END) AS uphDone,
+              MAX(CASE WHEN jc.departmentCode = 'UPHOLSTERY'
+                        AND jc.status IN ('COMPLETED','TRANSFERRED')
+                       THEN jc.completedDate END) AS uphCompletedDate
+         FROM production_orders po
+         JOIN job_cards jc ON jc.productionOrderId = po.id
+        WHERE po.productCode = ?
+        GROUP BY po.id, po.poNo, po.companySOId, po.customerName, po.quantity`,
     )
     .bind(productCode)
     .all<{
-      id: string;
-      unitSerial: string;
-      poId: string | null;
+      poId: string;
       poNo: string | null;
       soNo: string | null;
-      productCode: string | null;
-      productName: string | null;
-      status: string | null;
-      mfdDate: string | null;
-      packedAt: string | null;
       customerName: string | null;
+      qty: number | null;
+      uphTotal: number;
+      uphDone: number;
+      uphCompletedDate: string | null;
     }>();
-  const units = res.results ?? [];
-  // Group by poId so the dialog renders one row per source PO with its
-  // total qty, mfdDate, and status — same shape as the WIP detail dialog.
-  type Group = {
-    poId: string;
-    poNo: string;
-    soNo: string;
-    customerName: string;
-    qty: number;
-    mfdDate: string;
-    statusCounts: Record<string, number>;
-  };
-  const byPo = new Map<string, Group>();
-  for (const u of units) {
-    const key = u.poId ?? "";
-    const g = byPo.get(key);
-    if (g) {
-      g.qty += 1;
-      const s = u.status ?? "UNKNOWN";
-      g.statusCounts[s] = (g.statusCounts[s] ?? 0) + 1;
-      if ((u.mfdDate ?? "") > g.mfdDate) g.mfdDate = u.mfdDate ?? "";
-    } else {
-      byPo.set(key, {
-        poId: u.poId ?? "",
-        poNo: u.poNo ?? "",
-        soNo: u.soNo ?? "",
-        customerName: u.customerName ?? "",
-        qty: 1,
-        mfdDate: u.mfdDate ?? "",
-        statusCounts: { [u.status ?? "UNKNOWN"]: 1 },
-      });
-    }
-  }
-  const sources = Array.from(byPo.values()).sort((a, b) =>
-    (b.mfdDate || "").localeCompare(a.mfdDate || ""),
-  );
+  const sources = (res.results ?? [])
+    .filter((r) => r.uphTotal > 0 && r.uphDone === r.uphTotal)
+    .map((r) => ({
+      poId: r.poId,
+      poNo: r.poNo ?? "",
+      soNo: r.soNo ?? "",
+      customerName: r.customerName ?? "",
+      qty: r.qty ?? 0,
+      mfdDate: r.uphCompletedDate ?? "",
+      // Kept for API shape parity with the previous fg_units-based
+      // response. The new query collapses by PO, so per-status counts
+      // aren't broken out — UPH-done POs are always "READY/IN_STOCK".
+      statusCounts: { READY: r.qty ?? 0 },
+    }))
+    .sort((a, b) => (b.mfdDate || "").localeCompare(a.mfdDate || ""));
+  const totalUnits = sources.reduce((s, r) => s + r.qty, 0);
   return c.json({
     success: true,
     productCode,
-    totalUnits: units.length,
+    totalUnits,
     sources,
   });
 });

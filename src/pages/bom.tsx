@@ -4956,6 +4956,405 @@ function BatchEditCategoriesDialog({
   );
 }
 
+// ---------- Dept-Pivot Category Editor Dialog ----------
+// Pick a department (e.g. "Fab Sew"); the dialog lists every process row
+// across every per-product BOM template that touches that dept. The user
+// edits Category inline, minutes auto-fill from the variants-config matrix
+// via getProductionMinutes(deptCode, category). Save once → POSTs every
+// dirty row to /api/bom/templates/bulk-process-edit.
+//
+// Out of scope here: master templates (bom_master_templates), production
+// orders, job cards. Only bom_templates are touched.
+type DeptPivotRow = {
+  rowKey: string;        // unique React key
+  templateId: string;
+  productCode: string;
+  baseModel: string;
+  bomCategory: BOMCategory;
+  // Path through wipComponents to the WIP node owning this process. [] for L1.
+  path: number[];
+  // Display label for the WIP node (or "L1 / FG" when path === []).
+  branchLabel: string;
+  processIndex: number;
+  // Initial values, captured when the row was built.
+  initialCategory: string;
+  initialMinutes: number;
+  // User-edited values (start === initial).
+  category: string;
+  minutes: number;
+};
+
+function buildDeptPivotRows(
+  templates: BOMTemplate[],
+  deptCode: string,
+): DeptPivotRow[] {
+  const rows: DeptPivotRow[] = [];
+
+  function pushRow(
+    t: BOMTemplate,
+    path: number[],
+    branchLabel: string,
+    processIndex: number,
+    p: BOMProcess,
+  ) {
+    rows.push({
+      rowKey: `${t.id}|${path.join(".")}|${processIndex}`,
+      templateId: t.id,
+      productCode: t.productCode,
+      baseModel: t.baseModel,
+      bomCategory: t.category,
+      path,
+      branchLabel,
+      processIndex,
+      initialCategory: p.category || "",
+      initialMinutes: p.minutes || 0,
+      category: p.category || "",
+      minutes: p.minutes || 0,
+    });
+  }
+
+  function walk(
+    wips: WIPComponent[],
+    parentPath: number[],
+    parentLabel: string,
+    t: BOMTemplate,
+  ) {
+    wips.forEach((w, idx) => {
+      const path = [...parentPath, idx];
+      const ownLabel = w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
+      const fullLabel = parentLabel ? `${parentLabel} / ${ownLabel}` : ownLabel;
+      w.processes.forEach((p, pi) => {
+        if (p.deptCode === deptCode) {
+          pushRow(t, path, fullLabel, pi, p);
+        }
+      });
+      if (w.children && w.children.length > 0) {
+        walk(w.children, path, fullLabel, t);
+      }
+    });
+  }
+
+  for (const t of templates) {
+    t.l1Processes.forEach((p, pi) => {
+      if (p.deptCode === deptCode) {
+        pushRow(t, [], "L1 / FG", pi, p);
+      }
+    });
+    walk(t.wipComponents, [], "", t);
+  }
+
+  // Sort: productCode, then branchLabel, then processIndex.
+  rows.sort((a, b) => {
+    if (a.productCode !== b.productCode) {
+      return a.productCode.localeCompare(b.productCode);
+    }
+    if (a.branchLabel !== b.branchLabel) {
+      return a.branchLabel.localeCompare(b.branchLabel);
+    }
+    return a.processIndex - b.processIndex;
+  });
+
+  return rows;
+}
+
+function DeptPivotCategoryDialog({
+  open,
+  onClose,
+  templates,
+  onTemplatesUpdated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  templates: BOMTemplate[];
+  onTemplatesUpdated: (updated: BOMTemplate[]) => void;
+}) {
+  const { toast } = useToast();
+  const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
+  const [rows, setRows] = useState<DeptPivotRow[]>([]);
+  const [search, setSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Rebuild rows whenever the dialog opens, the dept changes, or the
+  // upstream template list changes (e.g. after a save).
+  /* eslint-disable react-hooks/set-state-in-effect -- rebuild rows when inputs change */
+  useEffect(() => {
+    if (!open) return;
+    setRows(buildDeptPivotRows(templates, deptCode));
+    setSearch("");
+  }, [open, deptCode, templates]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const categoryOptions = useMemo(() => getCategoryOptions(), []);
+
+  const dirtyCount = useMemo(
+    () => rows.filter((r) => r.category !== r.initialCategory).length,
+    [rows],
+  );
+
+  const filteredRows = useMemo(() => {
+    if (!search.trim()) return rows;
+    const q = search.toLowerCase();
+    return rows.filter(
+      (r) =>
+        r.productCode.toLowerCase().includes(q) ||
+        r.baseModel.toLowerCase().includes(q) ||
+        r.branchLabel.toLowerCase().includes(q),
+    );
+  }, [rows, search]);
+
+  function handleCategoryChange(rowKey: string, newCat: string) {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.rowKey !== rowKey) return r;
+        const newMinutes = getProductionMinutes(deptCode, newCat);
+        return { ...r, category: newCat, minutes: newMinutes };
+      }),
+    );
+  }
+
+  async function handleSave() {
+    const dirty = rows.filter((r) => r.category !== r.initialCategory);
+    if (dirty.length === 0) {
+      toast.warning("No changes to save.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch("/api/bom/templates/bulk-process-edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          edits: dirty.map((r) => ({
+            templateId: r.templateId,
+            path: r.path,
+            processIndex: r.processIndex,
+            newCategory: r.category,
+            newMinutes: r.minutes,
+          })),
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success?: boolean; updated?: number; failed?: Array<{ templateId: string; error: string }>; error?: string }
+        | null;
+      if (!res.ok || !json?.success) {
+        throw new Error(json?.error || `HTTP ${res.status}`);
+      }
+
+      // Mirror the server change back into the local templates state so the
+      // rest of the BOM page renders the new categories without a refetch.
+      const dirtyByTemplate = new Map<string, DeptPivotRow[]>();
+      for (const d of dirty) {
+        const arr = dirtyByTemplate.get(d.templateId);
+        if (arr) arr.push(d);
+        else dirtyByTemplate.set(d.templateId, [d]);
+      }
+
+      const failedIds = new Set((json.failed || []).map((f) => f.templateId));
+
+      const nextTemplates = templates.map((t) => {
+        const tEdits = dirtyByTemplate.get(t.id);
+        if (!tEdits || failedIds.has(t.id)) return t;
+        // Deep clone the JSON-ish bits we're about to mutate.
+        const clone: BOMTemplate = {
+          ...t,
+          l1Processes: JSON.parse(JSON.stringify(t.l1Processes)) as BOMProcess[],
+          wipComponents: JSON.parse(JSON.stringify(t.wipComponents)) as WIPComponent[],
+        };
+        for (const e of tEdits) {
+          let target: BOMProcess | undefined;
+          if (e.path.length === 0) {
+            target = clone.l1Processes[e.processIndex];
+          } else {
+            let node: WIPComponent | undefined = clone.wipComponents[e.path[0]];
+            for (let i = 1; i < e.path.length && node; i++) {
+              node = node.children?.[e.path[i]];
+            }
+            target = node?.processes[e.processIndex];
+          }
+          if (target) {
+            target.category = e.category;
+            target.minutes = e.minutes;
+          }
+        }
+        return clone;
+      });
+      onTemplatesUpdated(nextTemplates);
+      invalidateCachePrefix("/api/bom");
+
+      const updated = json.updated ?? 0;
+      const failedCount = (json.failed || []).length;
+      if (failedCount > 0) {
+        toast.warning(
+          `Updated ${updated} template${updated !== 1 ? "s" : ""}; ${failedCount} failed.`,
+        );
+      } else {
+        toast.success(
+          `Updated ${updated} template${updated !== 1 ? "s" : ""}.`,
+        );
+      }
+      onClose();
+    } catch (err) {
+      toast.error(
+        `Failed to save: ${err instanceof Error ? err.message : "unknown error"}`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-2xl w-[1080px] max-w-[97vw] max-h-[92vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-bold text-[#111827]">Dept-Pivot Category Editor</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Pick a department → edit category on every per-product BOM process row that touches it.
+            Minutes auto-fill from Production Times. Saves directly to bom_templates.
+          </p>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-4 overflow-y-auto flex-1 space-y-3">
+          <div className="flex gap-3 items-end">
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
+              <select
+                value={deptCode}
+                onChange={(e) => setDeptCode(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              >
+                {DEPT_ORDER.map((d) => (
+                  <option key={d} value={d}>{DEPT_LABELS[d]}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
+              <input
+                type="text"
+                placeholder="Filter by code / model / branch..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              />
+            </div>
+            <div className="text-xs text-gray-500 pb-2">
+              {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty
+            </div>
+          </div>
+
+          {/* Pivot table */}
+          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+            <div className="max-h-[60vh] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#FAF9F7] sticky top-0 z-10">
+                  <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
+                    <th className="px-3 py-2 font-medium">Model</th>
+                    <th className="px-3 py-2 font-medium">Branch / Code</th>
+                    <th className="px-3 py-2 font-medium">Process</th>
+                    <th className="px-3 py-2 font-medium w-32">Category</th>
+                    <th className="px-3 py-2 font-medium w-20 text-right">Minutes</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="px-3 py-8 text-center text-gray-400">
+                        {rows.length === 0
+                          ? `No process rows on any BOM touch ${DEPT_LABELS[deptCode]}.`
+                          : "No rows match the search."}
+                      </td>
+                    </tr>
+                  )}
+                  {filteredRows.map((r) => {
+                    const dirty = r.category !== r.initialCategory;
+                    return (
+                      <tr
+                        key={r.rowKey}
+                        className={`border-t border-[#E2DDD8] ${dirty ? "bg-[#FAEFCB]/40" : "hover:bg-[#FAF9F7]"}`}
+                      >
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-[#111827]">{r.productCode}</div>
+                          <div className="text-[10px] text-gray-400">{r.baseModel}</div>
+                        </td>
+                        <td className="px-3 py-2 text-gray-600">{r.branchLabel}</td>
+                        <td className="px-3 py-2 text-gray-600">
+                          <span
+                            className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded"
+                            style={{
+                              backgroundColor: `${DEPT_COLORS[deptCode] || "#9CA3AF"}22`,
+                              color: DEPT_COLORS[deptCode] || "#374151",
+                            }}
+                          >
+                            {DEPT_LABELS[deptCode]}
+                          </span>
+                          <span className="ml-2 text-[10px] text-gray-400">#{r.processIndex}</span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={r.category}
+                            onChange={(e) => handleCategoryChange(r.rowKey, e.target.value)}
+                            className={`w-full border rounded px-2 py-1 text-xs focus:outline-none focus:border-[#6B5C32] ${
+                              dirty ? "border-[#9C6F1E] bg-white" : "border-[#E2DDD8] bg-white"
+                            }`}
+                          >
+                            {/* If the current value isn't in the canonical list (legacy data),
+                                still show it so the dropdown reflects reality. */}
+                            {!categoryOptions.includes(r.category) && r.category && (
+                              <option value={r.category}>{r.category}</option>
+                            )}
+                            {categoryOptions.map((c) => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-600">
+                          {r.minutes} min
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
+          <span className="text-xs text-gray-500">
+            {dirtyCount > 0
+              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter((r) => r.category !== r.initialCategory).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
+              : "No pending changes"}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={dirtyCount === 0 || saving}
+              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {saving ? "Saving..." : `Save ${dirtyCount}`}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- Main Page ----------
 export default function BOMManagementPage() {
   const { toast } = useToast();
@@ -4976,6 +5375,7 @@ export default function BOMManagementPage() {
   const [showMaster, setShowMaster] = useState(false);
   const [showProductionTimes, setShowProductionTimes] = useState(false);
   const [showBatchEditCat, setShowBatchEditCat] = useState(false);
+  const [showDeptPivot, setShowDeptPivot] = useState(false);
 
   useEffect(() => {
     async function load() {
@@ -5257,6 +5657,16 @@ export default function BOMManagementPage() {
             Batch Edit Categories
           </button>
           <button
+            onClick={() => setShowDeptPivot(true)}
+            title="Dept-Pivot Category Editor — edit every process row in a department across all BOMs"
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
+          >
+            <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M3 14h18M9 6v12M15 6v12" />
+            </svg>
+            Dept-Pivot Editor
+          </button>
+          <button
             onClick={() => setShowProductionTimes(true)}
             title="Production Times — minutes per department x category"
             className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
@@ -5284,6 +5694,12 @@ export default function BOMManagementPage() {
       <BatchEditCategoriesDialog
         open={showBatchEditCat}
         onClose={() => setShowBatchEditCat(false)}
+        templates={templates}
+        onTemplatesUpdated={(updated) => setTemplates(updated)}
+      />
+      <DeptPivotCategoryDialog
+        open={showDeptPivot}
+        onClose={() => setShowDeptPivot(false)}
         templates={templates}
         onTemplatesUpdated={(updated) => setTemplates(updated)}
       />

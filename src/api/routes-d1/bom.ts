@@ -522,6 +522,171 @@ app.put("/templates/:id", async (c) => {
   }
 });
 
+// POST /api/bom/templates/bulk-process-edit — batch-update process category
+// (and minutes) on existing per-product BOM templates. Powers the
+// Dept-Pivot Category Editor dialog in src/pages/bom.tsx.
+//
+// Body shape:
+//   {
+//     edits: Array<{
+//       templateId: string;
+//       path: number[];        // [wipItemIdx, childIdx, childIdx, ...] — the
+//                              // chain through wipComponents to the WIP node
+//                              // that owns the process. May be [] for L1.
+//       processIndex: number;  // index into the target node's processes[]
+//       newCategory: string;
+//       newMinutes: number;
+//     }>;
+//   }
+//
+// Edits are grouped by templateId. For each template we read the current
+// wipComponents JSON, walk to each process and mutate its category +
+// minutes, then UPDATE the row. l1Processes are addressable with an empty
+// path (path === []).
+//
+// Each template's update is wrapped in its own batch — if one template's
+// update fails (bad JSON, missing path, DB error) we record it in `failed`
+// and keep going so a single bad row doesn't abort the whole save.
+//
+// Response: { success: true, updated: N, failed: [{templateId, error}] }
+app.post("/templates/bulk-process-edit", async (c) => {
+  try {
+    const body = await c.req.json();
+    const incoming: unknown = body?.edits;
+    if (!Array.isArray(incoming)) {
+      return c.json(
+        { success: false, error: "edits must be an array" },
+        400,
+      );
+    }
+
+    type Edit = {
+      templateId: string;
+      path: number[];
+      processIndex: number;
+      newCategory: string;
+      newMinutes: number;
+    };
+
+    // Sanitize incoming edits — drop anything malformed rather than 400'ing
+    // the whole batch. The caller already validated client-side.
+    const edits: Edit[] = [];
+    for (const raw of incoming as Array<Record<string, unknown>>) {
+      if (!raw || typeof raw !== "object") continue;
+      const templateId = raw.templateId;
+      const path = raw.path;
+      const processIndex = raw.processIndex;
+      const newCategory = raw.newCategory;
+      const newMinutes = raw.newMinutes;
+      if (typeof templateId !== "string" || !templateId) continue;
+      if (!Array.isArray(path)) continue;
+      if (!path.every((n) => typeof n === "number" && Number.isInteger(n) && n >= 0)) continue;
+      if (typeof processIndex !== "number" || !Number.isInteger(processIndex) || processIndex < 0) continue;
+      if (typeof newCategory !== "string" || !newCategory) continue;
+      if (typeof newMinutes !== "number" || !Number.isFinite(newMinutes)) continue;
+      edits.push({
+        templateId,
+        path: path as number[],
+        processIndex,
+        newCategory,
+        newMinutes,
+      });
+    }
+
+    // Group by templateId so we touch each row only once.
+    const byTemplate = new Map<string, Edit[]>();
+    for (const e of edits) {
+      const arr = byTemplate.get(e.templateId);
+      if (arr) arr.push(e);
+      else byTemplate.set(e.templateId, [e]);
+    }
+
+    type WipNode = {
+      processes?: Array<Record<string, unknown>>;
+      children?: WipNode[];
+    };
+
+    let updated = 0;
+    const failed: Array<{ templateId: string; error: string }> = [];
+
+    for (const [templateId, templateEdits] of byTemplate) {
+      try {
+        const row = await c.var.DB.prepare(
+          "SELECT * FROM bom_templates WHERE id = ?",
+        )
+          .bind(templateId)
+          .first<BOMTemplateRow>();
+        if (!row) {
+          failed.push({ templateId, error: "Template not found" });
+          continue;
+        }
+
+        const wipComponents = safeParse<WipNode[]>(row.wipComponents, []);
+        const l1Processes = safeParse<Array<Record<string, unknown>>>(
+          row.l1Processes,
+          [],
+        );
+
+        let editError: string | null = null;
+
+        for (const e of templateEdits) {
+          // Resolve target processes[] array. Empty path means l1Processes.
+          let processes: Array<Record<string, unknown>> | null = null;
+          if (e.path.length === 0) {
+            processes = l1Processes;
+          } else {
+            let node: WipNode | undefined = wipComponents[e.path[0]];
+            for (let i = 1; i < e.path.length && node; i++) {
+              node = node.children?.[e.path[i]];
+            }
+            if (node && Array.isArray(node.processes)) {
+              processes = node.processes;
+            }
+          }
+          if (!processes) {
+            editError = `Path [${e.path.join(",")}] not found in template`;
+            break;
+          }
+          const target = processes[e.processIndex];
+          if (!target || typeof target !== "object") {
+            editError = `processIndex ${e.processIndex} out of range`;
+            break;
+          }
+          target.category = e.newCategory;
+          target.minutes = e.newMinutes;
+        }
+
+        if (editError) {
+          failed.push({ templateId, error: editError });
+          continue;
+        }
+
+        await c.var.DB.prepare(
+          `UPDATE bom_templates
+             SET l1Processes = ?, wipComponents = ?
+             WHERE id = ?`,
+        )
+          .bind(
+            JSON.stringify(l1Processes),
+            JSON.stringify(wipComponents),
+            templateId,
+          )
+          .run();
+        updated += 1;
+      } catch (err) {
+        failed.push({
+          templateId,
+          error: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
+    return c.json({ success: true, updated, failed });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // bom_versions dynamic-id routes — MUST come AFTER /templates
 // ---------------------------------------------------------------------------

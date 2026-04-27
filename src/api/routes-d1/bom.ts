@@ -608,6 +608,7 @@ app.post("/templates/bulk-process-edit", async (c) => {
 
     let updated = 0;
     const failed: Array<{ templateId: string; error: string }> = [];
+    const debug: Array<Record<string, unknown>> = [];
 
     for (const [templateId, templateEdits] of byTemplate) {
       try {
@@ -661,7 +662,7 @@ app.post("/templates/bulk-process-edit", async (c) => {
           continue;
         }
 
-        await c.var.DB.prepare(
+        const updateResult = await c.var.DB.prepare(
           `UPDATE bom_templates
              SET l1Processes = ?, wipComponents = ?
              WHERE id = ?`,
@@ -672,6 +673,13 @@ app.post("/templates/bulk-process-edit", async (c) => {
             templateId,
           )
           .run();
+        debug.push({
+          templateId,
+          editsApplied: templateEdits.length,
+          wipComponentsBytes: JSON.stringify(wipComponents).length,
+          l1ProcessesBytes: JSON.stringify(l1Processes).length,
+          updateMetaChanges: updateResult.meta?.changes,
+        });
         updated += 1;
       } catch (err) {
         failed.push({
@@ -681,7 +689,17 @@ app.post("/templates/bulk-process-edit", async (c) => {
       }
     }
 
-    return c.json({ success: true, updated, failed });
+    return c.json({
+      success: true,
+      updated,
+      failed,
+      debug: {
+        incoming: incoming.length,
+        validated: edits.length,
+        templates: byTemplate.size,
+        perTemplate: debug,
+      },
+    });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

@@ -48,7 +48,7 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
     creditTerms: row.creditTerms ?? "NET30",
     creditLimitSen: row.creditLimitSen,
     outstandingSen: row.outstandingSen,
-    isActive: row.isActive === 1,
+    isActive: Boolean(row.isActive),
     contactName: row.contactName ?? "",
     phone: row.phone ?? "",
     email: row.email ?? "",
@@ -63,7 +63,7 @@ function rowToCustomer(row: CustomerRow, hubs: HubRow[] = []) {
         contactName: h.contactName ?? "",
         phone: h.phone ?? "",
         email: h.email ?? "",
-        isDefault: h.isDefault === 1,
+        isDefault: Boolean(h.isDefault),
       })),
   };
 }

@@ -48,9 +48,12 @@ function rowToDepartment(row: DepartmentRow): Department {
     sequence: row.sequence,
     color: row.color,
     workingHoursPerDay: row.workingHoursPerDay,
-    // SQLite stores booleans as 0/1 — surface a real boolean to the client
-    // so the frontend doesn't have to remember to truthy-check the int.
-    isProduction: row.isProduction === 1,
+    // Postgres currently stores this as INTEGER NOT NULL DEFAULT 1 (0/1) —
+    // surface a real boolean to the client so the frontend doesn't have to
+    // remember to truthy-check the int. Use Boolean(...) so a future BOOLEAN
+    // migration (where the driver returns true/false) doesn't silently flip
+    // every dept to non-production.
+    isProduction: Boolean(row.isProduction),
   };
 }
 
@@ -255,7 +258,7 @@ app.put("/:id", async (c) => {
       isProduction:
         body.isProduction !== undefined
           ? body.isProduction
-          : existing.isProduction === 1,
+          : Boolean(existing.isProduction),
     };
 
     await c.var.DB.prepare(

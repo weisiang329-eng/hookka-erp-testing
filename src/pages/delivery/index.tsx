@@ -83,9 +83,17 @@ type DeliveryOrderRow = {
   dispatchDate: string | null;
   receivedDate: string | null;
   status: DOStatus;
+  // Provider (company) — driverId historically holds the COMPANY id
+  // (legacy column name; see migration 0014). driverName denormalizes
+  // either the picked PERSON's name or the company name (legacy DOs).
+  driverId: string;
   driverName: string;
   driverContactPerson: string;
+  driverPhone: string;
+  // Vehicle picked from three_pl_vehicles (added by 3PL refactor 2026-04-27).
+  vehicleId: string;
   vehicleNo: string;
+  vehicleType: string;
   lorryName: string;
   deliveryAddress: string;
   contactPerson: string;
@@ -136,9 +144,13 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     dispatchDate: d.dispatchedAt || null,
     receivedDate: d.deliveredAt || null,
     status,
+    driverId: d.driverId || "",
     driverName: d.driverName || "",
     driverContactPerson: (d as Record<string, unknown>).driverContactPerson as string || "",
+    driverPhone: (d as Record<string, unknown>).driverPhone as string || "",
+    vehicleId: (d as Record<string, unknown>).vehicleId as string || "",
     vehicleNo: d.vehicleNo || "",
+    vehicleType: (d as Record<string, unknown>).vehicleType as string || "",
     lorryName: d.lorryName || "",
     deliveryAddress: d.deliveryAddress || "",
     contactPerson: d.contactPerson || "",
@@ -271,7 +283,16 @@ export default function DeliveryPage() {
   // state keeps the dialog body unified so both paths share the same 3PL /
   // date / address / remarks block instead of duplicating markup.
   const [createDODialog, setCreateDODialog] = useState<ReadyPORow[] | "manual" | null>(null);
-  const [createDOForm, setCreateDOForm] = useState({ driverId: "", remarks: "", deliveryDate: "" });
+  // driverId here is the COMPANY id (legacy field name kept for the form
+  // shape — wired to body.providerId on submit per the 3PL refactor). The
+  // new vehicleId / driverPersonId carry the per-trip lorry + person ids.
+  const [createDOForm, setCreateDOForm] = useState({
+    driverId: "",
+    vehicleId: "",
+    driverPersonId: "",
+    remarks: "",
+    deliveryDate: "",
+  });
   // Customer chosen in manual mode — drives default hub lookup. Empty in
   // convert mode (customer is derived from the selected POs there).
   const [manualCustomerId, setManualCustomerId] = useState<string>("");
@@ -287,7 +308,20 @@ export default function DeliveryPage() {
 
   // ----- Detail Edit mode -----
   const [editMode, setEditMode] = useState(false);
-  const [editForm, setEditForm] = useState({ driverId: "", deliveryAddress: "", dropPoints: "1", remarks: "", contactPerson: "", contactPhone: "", deliveryDate: "" });
+  // editForm.driverId = COMPANY id (kept name for backwards-compat with
+  // existing edit handler). vehicleId + driverPersonId added by the 3PL
+  // refactor for per-trip lorry + driver-person selection.
+  const [editForm, setEditForm] = useState({
+    driverId: "",
+    vehicleId: "",
+    driverPersonId: "",
+    deliveryAddress: "",
+    dropPoints: "1",
+    remarks: "",
+    contactPerson: "",
+    contactPhone: "",
+    deliveryDate: "",
+  });
   const [editItems, setEditItems] = useState<DOItem[]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [addItemSearch, setAddItemSearch] = useState("");
@@ -348,6 +382,16 @@ export default function DeliveryPage() {
   const [driverForm, setDriverForm] = useState({
     name: "", phone: "", status: "ACTIVE" as "ACTIVE" | "INACTIVE", remarks: "",
   });
+
+  // ----- Vehicle + Driver pickers (DO Create / Edit dialogs) -----
+  // Two separate caches scoped per-provider — one feeds the Create DO
+  // dialog (key by createDOForm.driverId), the other the Edit dialog
+  // (key by editForm.driverId). Loaded lazily when the host dialog
+  // mounts and the provider id changes.
+  const [createDialogVehicles, setCreateDialogVehicles] = useState<ThreePLVehicle[]>([]);
+  const [createDialogDrivers, setCreateDialogDrivers] = useState<ThreePLDriverPerson[]>([]);
+  const [editDialogVehicles, setEditDialogVehicles] = useState<ThreePLVehicle[]>([]);
+  const [editDialogDrivers, setEditDialogDrivers] = useState<ThreePLDriverPerson[]>([]);
 
   // ----- Customer hub lookup -----
   const [customersData, setCustomersData] = useState<Customer[]>([]);
@@ -722,6 +766,68 @@ export default function DeliveryPage() {
   }, [currentProviderId, fetchProviderVehicles, fetchProviderDrivers]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Fetch vehicle + driver lists for the Create / Edit DO dialogs whenever
+  // the chosen provider changes. Empty provider clears the lists.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    const pid = createDOForm.driverId;
+    if (!pid) {
+      setCreateDialogVehicles([]);
+      setCreateDialogDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      fetch(`/api/three-pl-vehicles?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLVehicle[] }>,
+      ),
+      fetch(`/api/three-pl-drivers?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLDriverPerson[] }>,
+      ),
+    ])
+      .then(([vRes, dRes]) => {
+        if (cancelled) return;
+        if (vRes?.success && Array.isArray(vRes.data)) setCreateDialogVehicles(vRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) setCreateDialogDrivers(dRes.data);
+      })
+      .catch(() => {
+        /* swallow */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [createDOForm.driverId]);
+
+  useEffect(() => {
+    const pid = editForm.driverId;
+    if (!pid) {
+      setEditDialogVehicles([]);
+      setEditDialogDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      fetch(`/api/three-pl-vehicles?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLVehicle[] }>,
+      ),
+      fetch(`/api/three-pl-drivers?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLDriverPerson[] }>,
+      ),
+    ])
+      .then(([vRes, dRes]) => {
+        if (cancelled) return;
+        if (vRes?.success && Array.isArray(vRes.data)) setEditDialogVehicles(vRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) setEditDialogDrivers(dRes.data);
+      })
+      .catch(() => {
+        /* swallow */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editForm.driverId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   const openVehicleForm = (v: ThreePLVehicle | "new") => {
     if (v === "new") {
       setVehicleForm({
@@ -962,7 +1068,7 @@ export default function DeliveryPage() {
     });
 
     setCreateDODrops(drops);
-    setCreateDOForm({ driverId: "", remarks: "", deliveryDate: "" });
+    setCreateDOForm({ driverId: "", vehicleId: "", driverPersonId: "", remarks: "", deliveryDate: "" });
     setCreateDODialog(pos);
   };
 
@@ -973,7 +1079,7 @@ export default function DeliveryPage() {
   // body can render either flow without duplicating markup.
   const openManualCreateDODialog = () => {
     setCreateDODrops([]);
-    setCreateDOForm({ driverId: "", remarks: "", deliveryDate: "" });
+    setCreateDOForm({ driverId: "", vehicleId: "", driverPersonId: "", remarks: "", deliveryDate: "" });
     setManualCustomerId("");
     setCreateDODialog("manual");
   };
@@ -998,7 +1104,9 @@ export default function DeliveryPage() {
       body = {
         customerId: manualCustomerId,
         productionOrderIds: [],
-        driverId: createDOForm.driverId || null,
+        providerId: createDOForm.driverId || null,
+        vehicleId: createDOForm.vehicleId || null,
+        driverId: createDOForm.driverPersonId || null,
         deliveryAddress: hub?.address ?? "",
         contactPerson: hub?.contactName ?? "",
         contactPhone: hub?.phone ?? "",
@@ -1030,7 +1138,9 @@ export default function DeliveryPage() {
               .join("\n");
       body = {
         productionOrderIds: poIds,
-        driverId: createDOForm.driverId || null,
+        providerId: createDOForm.driverId || null,
+        vehicleId: createDOForm.vehicleId || null,
+        driverId: createDOForm.driverPersonId || null,
         deliveryAddress,
         dropPoints: createDODrops.length,
         remarks: createDOForm.remarks,
@@ -1168,10 +1278,16 @@ export default function DeliveryPage() {
 
   // ---------- Edit mode helpers ----------
   const enterEditMode = (row: DeliveryOrderRow) => {
-    // Find the provider that matches this row's driverName
-    const matchedProvider = providers.find((p) => p.name === row.driverName);
+    // Prefer the persisted driverId (company id, post-3PL-refactor) — fall
+    // back to name-match for legacy DOs that pre-date the column being
+    // populated reliably.
+    const matchedProvider =
+      providers.find((p) => p.id === row.driverId) ??
+      providers.find((p) => p.name === row.driverName);
     setEditForm({
       driverId: matchedProvider?.id || "",
+      vehicleId: row.vehicleId || "",
+      driverPersonId: "",
       deliveryAddress: row.deliveryAddress || "",
       dropPoints: "1",
       remarks: row.remarks || "",
@@ -1243,13 +1359,17 @@ export default function DeliveryPage() {
     if (!detailDO) return;
     setEditSaving(true);
     try {
-      const provider = providers.find((p) => p.id === editForm.driverId);
+      // 3PL refactor: send providerId for the company plus the new
+      // vehicleId / driverId (PERSON) pickers. Backend's denormalize
+      // step fills in vehicleNo/vehicleType/driverName/driverPhone from
+      // the picked vehicle + person rows; providerId mirrors into the
+      // legacy driverId column on delivery_orders for backwards-compat.
       const data = await fetchJson(`/api/delivery-orders/${detailDO.id}`, DOMutationSchema, {
         method: "PUT",
         body: {
-          driverId: editForm.driverId || null,
-          driverName: provider?.name || "",
-          vehicleNo: provider?.vehicleNo || "",
+          providerId: editForm.driverId || null,
+          vehicleId: editForm.vehicleId || null,
+          driverId: editForm.driverPersonId || null,
           deliveryAddress: editForm.deliveryAddress,
           dropPoints: Number(editForm.dropPoints) || 1,
           remarks: editForm.remarks,
@@ -2094,20 +2214,76 @@ export default function DeliveryPage() {
                 </div>
               )}
 
-              {/* 3PL Provider */}
+              {/* 3PL Provider — picks the company; vehicle + driver pickers
+                  below filter to that provider's three_pl_vehicles +
+                  three_pl_drivers rows respectively. */}
               <div>
-                <label className="text-xs text-[#6B7280] font-medium">3PL Provider / Driver</label>
+                <label className="text-xs text-[#6B7280] font-medium">3PL Provider</label>
                 <select
                   value={createDOForm.driverId}
-                  onChange={(e) => setCreateDOForm((f) => ({ ...f, driverId: e.target.value }))}
+                  onChange={(e) =>
+                    // Reset vehicle + driver picks when provider changes —
+                    // their option lists are scoped to the chosen company.
+                    setCreateDOForm((f) => ({
+                      ...f,
+                      driverId: e.target.value,
+                      vehicleId: "",
+                      driverPersonId: "",
+                    }))
+                  }
                   className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
                 >
                   <option value="">— Select 3PL Provider —</option>
                   {providers.filter((p) => p.status === "ACTIVE").map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name} — {p.vehicleNo || "No vehicle"} (RM{(p.ratePerTripSen / 100).toFixed(0)}/trip)
+                      {p.name}
                     </option>
                   ))}
+                </select>
+              </div>
+
+              {/* Vehicle / Lorry — optional. Per-vehicle rate overrides
+                  the company rate when computing Est. Delivery Cost. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Vehicle / Lorry</label>
+                <select
+                  value={createDOForm.vehicleId}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, vehicleId: e.target.value }))}
+                  disabled={!createDOForm.driverId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {createDOForm.driverId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {createDialogVehicles
+                    .filter((v) => v.status === "ACTIVE")
+                    .map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.plateNo} — {v.vehicleType || "—"} (RM{(v.ratePerTripSen / 100).toFixed(0)}/trip)
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Driver — optional, the actual person from three_pl_drivers. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Driver</label>
+                <select
+                  value={createDOForm.driverPersonId}
+                  onChange={(e) => setCreateDOForm((f) => ({ ...f, driverPersonId: e.target.value }))}
+                  disabled={!createDOForm.driverId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {createDOForm.driverId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {createDialogDrivers
+                    .filter((d) => d.status === "ACTIVE")
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}{d.phone ? ` — ${d.phone}` : ""}
+                      </option>
+                    ))}
                 </select>
               </div>
 
@@ -2185,14 +2361,21 @@ export default function DeliveryPage() {
               </div>
               )}
 
-              {/* Est. Delivery Cost */}
+              {/* Est. Delivery Cost — picks per-vehicle rate when a vehicle
+                  is chosen, falls back to the legacy company rate otherwise.
+                  Drops scale via ratePerExtraDropSen. */}
               <div className="flex items-center justify-between bg-[#F5F3F0] rounded-lg px-3 py-2">
                 <span className="text-xs text-[#6B7280]">Est. Delivery Cost</span>
                 <span className="text-sm font-semibold text-[#1F1D1B]">
                   {(() => {
+                    const drops = Math.max(1, createDODrops.length);
+                    const v = createDialogVehicles.find((vv) => vv.id === createDOForm.vehicleId);
+                    if (v) {
+                      const cost = v.ratePerTripSen + Math.max(0, drops - 1) * v.ratePerExtraDropSen;
+                      return `RM ${(cost / 100).toFixed(2)}`;
+                    }
                     const p = providers.find((pr) => pr.id === createDOForm.driverId);
                     if (!p) return "—";
-                    const drops = Math.max(1, createDODrops.length);
                     const cost = p.ratePerTripSen + Math.max(0, drops - 1) * p.ratePerExtraDropSen;
                     return `RM ${(cost / 100).toFixed(2)}`;
                   })()}
@@ -2441,16 +2624,25 @@ export default function DeliveryPage() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="text-xs text-[#6B7280] font-medium">3PL Provider / Driver</label>
+                      <label className="text-xs text-[#6B7280] font-medium">3PL Provider</label>
                       <select
                         value={editForm.driverId}
-                        onChange={(e) => setEditForm((f) => ({ ...f, driverId: e.target.value }))}
+                        onChange={(e) =>
+                          // Reset vehicle + driver picks when provider changes —
+                          // their option lists are scoped to the chosen company.
+                          setEditForm((f) => ({
+                            ...f,
+                            driverId: e.target.value,
+                            vehicleId: "",
+                            driverPersonId: "",
+                          }))
+                        }
                         className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
                       >
                         <option value="">— Select 3PL Provider —</option>
                         {providers.filter((p) => p.status === "ACTIVE").map((p) => (
                           <option key={p.id} value={p.id}>
-                            {p.name} — {p.vehicleNo || "No vehicle"} (RM{(p.ratePerTripSen / 100).toFixed(0)}/trip)
+                            {p.name}
                           </option>
                         ))}
                       </select>
@@ -2464,6 +2656,46 @@ export default function DeliveryPage() {
                         onChange={(e) => setEditForm((f) => ({ ...f, dropPoints: e.target.value }))}
                         className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
                       />
+                    </div>
+                    <div>
+                      <label className="text-xs text-[#6B7280] font-medium">Vehicle / Lorry</label>
+                      <select
+                        value={editForm.vehicleId}
+                        onChange={(e) => setEditForm((f) => ({ ...f, vehicleId: e.target.value }))}
+                        disabled={!editForm.driverId}
+                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                      >
+                        <option value="">
+                          {editForm.driverId ? "— Optional —" : "Pick provider first"}
+                        </option>
+                        {editDialogVehicles
+                          .filter((v) => v.status === "ACTIVE")
+                          .map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.plateNo} — {v.vehicleType || "—"} (RM{(v.ratePerTripSen / 100).toFixed(0)}/trip)
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-[#6B7280] font-medium">Driver</label>
+                      <select
+                        value={editForm.driverPersonId}
+                        onChange={(e) => setEditForm((f) => ({ ...f, driverPersonId: e.target.value }))}
+                        disabled={!editForm.driverId}
+                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                      >
+                        <option value="">
+                          {editForm.driverId ? "— Optional —" : "Pick provider first"}
+                        </option>
+                        {editDialogDrivers
+                          .filter((d) => d.status === "ACTIVE")
+                          .map((d) => (
+                            <option key={d.id} value={d.id}>
+                              {d.name}{d.phone ? ` — ${d.phone}` : ""}
+                            </option>
+                          ))}
+                      </select>
                     </div>
                   </div>
                   <div>

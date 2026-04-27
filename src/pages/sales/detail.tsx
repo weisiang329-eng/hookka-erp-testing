@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 import {
   ArrowLeft, Trash2, Download, Edit, Copy,
-  CheckCircle2, Play, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
+  CheckCircle2, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
@@ -512,21 +512,6 @@ export default function SalesOrderDetailPage() {
                 )}
               >
                 <CheckCircle2 className="h-4 w-4" /> Confirm Order
-              </Button>
-            )}
-
-            {/* CONFIRMED -> Release to Production */}
-            {order.status === "CONFIRMED" && (
-              <Button
-                variant="primary" size="sm" disabled={updating}
-                onClick={() => openConfirm(
-                  "Release to Production",
-                  "Are you sure you want to release this order to production? Production will begin on all job cards.",
-                  "Release to Production",
-                  () => updateStatus("IN_PRODUCTION"),
-                )}
-              >
-                <Play className="h-4 w-4" /> Release to Production
               </Button>
             )}
 

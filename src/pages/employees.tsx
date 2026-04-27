@@ -2287,13 +2287,16 @@ function DepartmentsManager({
 }) {
   const { toast } = useToast();
   const [creating, setCreating] = useState(false);
-  const [draft, setDraft] = useState<{ code: string; name: string; shortName: string; sequence: number; color: string; workingHoursPerDay: number; isProduction: boolean }>({
+  // Hrs/Day is a legacy schema column kept at default 9 — not surfaced in
+  // this UI because the runtime never reads it (worker-level
+  // workers.workingHoursPerDay is the source for any per-worker hours, and
+  // hourly-rate / OT calc uses a fixed 9-hour standard day).
+  const [draft, setDraft] = useState<{ code: string; name: string; shortName: string; sequence: number; color: string; isProduction: boolean }>({
     code: "",
     name: "",
     shortName: "",
     sequence: (departments.reduce((m, d) => Math.max(m, d.sequence ?? 0), 0) || 0) + 1,
     color: "#6B7280",
-    workingHoursPerDay: 9,
     isProduction: false,
   });
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -2317,7 +2320,7 @@ function DepartmentsManager({
       if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
       toast.success(`Created ${draft.code}`);
       setCreating(false);
-      setDraft({ code: "", name: "", shortName: "", sequence: draft.sequence + 1, color: "#6B7280", workingHoursPerDay: 9, isProduction: false });
+      setDraft({ code: "", name: "", shortName: "", sequence: draft.sequence + 1, color: "#6B7280", isProduction: false });
       invalidateCachePrefix("/api/departments");
       refresh();
     } catch (e) {
@@ -2344,7 +2347,6 @@ function DepartmentsManager({
           shortName: editDraft.shortName,
           sequence: editDraft.sequence,
           color: editDraft.color,
-          workingHoursPerDay: editDraft.workingHoursPerDay,
           isProduction: editDraft.isProduction,
         }),
       });
@@ -2433,7 +2435,6 @@ function DepartmentsManager({
               <th className="h-8 px-2 text-left">Short</th>
               <th className="h-8 px-2 text-left w-12">Seq</th>
               <th className="h-8 px-2 text-left w-12">Color</th>
-              <th className="h-8 px-2 text-left w-12">Hrs/Day</th>
               <th className="h-8 px-2 text-left w-20">Production</th>
               <th className="h-8 px-2 text-left w-32">Actions</th>
             </tr>
@@ -2463,11 +2464,6 @@ function DepartmentsManager({
                     {editing
                       ? <Input type="color" value={editDraft.color ?? "#6B7280"} onChange={(e) => setEditDraft((p) => p ? { ...p, color: e.target.value } : p)} className="h-7 w-12" />
                       : <span className="inline-block h-4 w-8 rounded border border-[#E2DDD8]" style={{ background: d.color ?? "#6B7280" }} />}
-                  </td>
-                  <td className="px-2 py-1">
-                    {editing
-                      ? <Input type="number" value={editDraft.workingHoursPerDay ?? 9} onChange={(e) => setEditDraft((p) => p ? { ...p, workingHoursPerDay: parseInt(e.target.value) || 0 } : p)} className="h-7 w-12 text-xs" />
-                      : (d.workingHoursPerDay ?? 9)}
                   </td>
                   <td className="px-2 py-1">
                     {editing

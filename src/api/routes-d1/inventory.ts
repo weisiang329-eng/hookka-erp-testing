@@ -214,4 +214,141 @@ app.post("/raw-materials", async (c) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/inventory/fg-source/:productCode
+//
+// Drill-down for the FG detail dialog: every fg_unit row that has the
+// matching productCode, with its source production_order info. Sorted by
+// mfdDate DESC so the freshest units come first. Used by the inventory
+// page's FG dialog ("which POs produced this finished good?").
+// ---------------------------------------------------------------------------
+app.get("/fg-source/:productCode", async (c) => {
+  const productCode = c.req.param("productCode");
+  if (!productCode) {
+    return c.json({ success: false, error: "productCode required" }, 400);
+  }
+  const res = await c.var.DB
+    .prepare(
+      `SELECT id, unitSerial, poId, poNo, soNo, productCode, productName,
+              status, mfdDate, packedAt, customerName
+         FROM fg_units
+        WHERE productCode = ?
+        ORDER BY mfdDate DESC, unitSerial ASC`,
+    )
+    .bind(productCode)
+    .all<{
+      id: string;
+      unitSerial: string;
+      poId: string | null;
+      poNo: string | null;
+      soNo: string | null;
+      productCode: string | null;
+      productName: string | null;
+      status: string | null;
+      mfdDate: string | null;
+      packedAt: string | null;
+      customerName: string | null;
+    }>();
+  const units = res.results ?? [];
+  // Group by poId so the dialog renders one row per source PO with its
+  // total qty, mfdDate, and status — same shape as the WIP detail dialog.
+  type Group = {
+    poId: string;
+    poNo: string;
+    soNo: string;
+    customerName: string;
+    qty: number;
+    mfdDate: string;
+    statusCounts: Record<string, number>;
+  };
+  const byPo = new Map<string, Group>();
+  for (const u of units) {
+    const key = u.poId ?? "";
+    const g = byPo.get(key);
+    if (g) {
+      g.qty += 1;
+      const s = u.status ?? "UNKNOWN";
+      g.statusCounts[s] = (g.statusCounts[s] ?? 0) + 1;
+      if ((u.mfdDate ?? "") > g.mfdDate) g.mfdDate = u.mfdDate ?? "";
+    } else {
+      byPo.set(key, {
+        poId: u.poId ?? "",
+        poNo: u.poNo ?? "",
+        soNo: u.soNo ?? "",
+        customerName: u.customerName ?? "",
+        qty: 1,
+        mfdDate: u.mfdDate ?? "",
+        statusCounts: { [u.status ?? "UNKNOWN"]: 1 },
+      });
+    }
+  }
+  const sources = Array.from(byPo.values()).sort((a, b) =>
+    (b.mfdDate || "").localeCompare(a.mfdDate || ""),
+  );
+  return c.json({
+    success: true,
+    productCode,
+    totalUnits: units.length,
+    sources,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/inventory/rm-source/:rmId
+//
+// Drill-down for the RM detail dialog: every rm_batches row for the given
+// raw material, in FIFO order (received_date ASC) with the originating
+// purchase order looked up via the GRN. Each row shows: PO No (purchasing),
+// supplier, received date, original qty, remaining qty, unit cost.
+// ---------------------------------------------------------------------------
+app.get("/rm-source/:rmId", async (c) => {
+  const rmId = c.req.param("rmId");
+  if (!rmId) return c.json({ success: false, error: "rmId required" }, 400);
+  const res = await c.var.DB
+    .prepare(
+      `SELECT b.id, b.receivedDate, b.originalQty, b.remainingQty,
+              b.unitCostSen, b.notes, b.grnId, b.supplierId,
+              g.grnNumber, g.poNumber, g.poId, g.supplierName
+         FROM rm_batches b
+         LEFT JOIN grns g ON g.id = b.grnId
+        WHERE b.rmId = ?
+        ORDER BY b.receivedDate ASC, b.id ASC`,
+    )
+    .bind(rmId)
+    .all<{
+      id: string;
+      receivedDate: string | null;
+      originalQty: number;
+      remainingQty: number;
+      unitCostSen: number;
+      notes: string | null;
+      grnId: string | null;
+      supplierId: string | null;
+      grnNumber: string | null;
+      poNumber: string | null;
+      poId: string | null;
+      supplierName: string | null;
+    }>();
+  const batches = (res.results ?? []).map((b) => ({
+    id: b.id,
+    receivedDate: b.receivedDate ?? "",
+    originalQty: b.originalQty,
+    remainingQty: b.remainingQty,
+    unitCostSen: b.unitCostSen,
+    notes: b.notes ?? "",
+    grnNumber: b.grnNumber ?? "",
+    poNumber: b.poNumber ?? "", // purchase order number
+    poId: b.poId ?? "",
+    supplierName: b.supplierName ?? "",
+  }));
+  const totalRemaining = batches.reduce((s, b) => s + (b.remainingQty || 0), 0);
+  return c.json({
+    success: true,
+    rmId,
+    totalBatches: batches.length,
+    totalRemaining,
+    batches, // already FIFO-ordered
+  });
+});
+
 export default app;

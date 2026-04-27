@@ -1298,8 +1298,22 @@ export default function InventoryPage() {
   // Edit FG dialog state
   const [editFG, setEditFG] = useState<FGItem | null>(null);
   const [editFGForm, setEditFGForm] = useState({ costPriceSen: 0, stockQty: 0, unitM3: 0, fabricUsage: 0, productionTimeMinutes: 0 });
+  // FG source-PO drilldown — populated when the dialog opens (2026-04-27).
+  // Lists every production_order that produced this FG, qty + mfdDate per
+  // PO. Mirrors the WIP detail dialog's "Job Cards" section.
+  type FGSource = {
+    poId: string;
+    poNo: string;
+    soNo: string;
+    customerName: string;
+    qty: number;
+    mfdDate: string;
+    statusCounts: Record<string, number>;
+  };
+  const [fgSources, setFgSources] = useState<FGSource[]>([]);
+  const [fgSourcesLoading, setFgSourcesLoading] = useState(false);
 
-  const handleDoubleClickFG = (row: FGItem) => {
+  const handleDoubleClickFG = async (row: FGItem) => {
     setEditFG(row);
     setEditFGForm({
       costPriceSen: row.costPriceSen,
@@ -1308,6 +1322,20 @@ export default function InventoryPage() {
       fabricUsage: row.fabricUsage,
       productionTimeMinutes: row.productionTimeMinutes,
     });
+    // Fire the source-PO lookup in the background so the dialog opens
+    // instantly and the table fills in when ready.
+    setFgSources([]);
+    setFgSourcesLoading(true);
+    try {
+      const res = await fetch(`/api/inventory/fg-source/${encodeURIComponent(row.code)}`);
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; sources?: FGSource[] }
+        | null;
+      setFgSources(j?.sources ?? []);
+    } catch {
+      setFgSources([]);
+    }
+    setFgSourcesLoading(false);
   };
   const [wipDetail, setWipDetail] = useState<WIPItem | null>(null);
   const handleDoubleClickWIP = (row: WIPItem) => { setWipDetail(row); };
@@ -1315,8 +1343,25 @@ export default function InventoryPage() {
   // Edit RM dialog state
   const [editRM, setEditRM] = useState<RawMaterial | null>(null);
   const [editRMForm, setEditRMForm] = useState({ description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  // RM source-batch drilldown (FIFO order). Each batch has the originating
+  // purchase order so operators can trace which batch / PO supplied this
+  // material — required for FIFO costing + supplier traceability.
+  type RMBatch = {
+    id: string;
+    receivedDate: string;
+    originalQty: number;
+    remainingQty: number;
+    unitCostSen: number;
+    notes: string;
+    grnNumber: string;
+    poNumber: string; // Purchase Order
+    poId: string;
+    supplierName: string;
+  };
+  const [rmBatches, setRmBatches] = useState<RMBatch[]>([]);
+  const [rmBatchesLoading, setRmBatchesLoading] = useState(false);
 
-  const handleDoubleClickRM = (row: RawMaterial) => {
+  const handleDoubleClickRM = async (row: RawMaterial) => {
     setEditRM(row);
     setEditRMForm({
       description: row.description,
@@ -1324,6 +1369,18 @@ export default function InventoryPage() {
       itemGroup: row.itemGroup,
       balanceQty: row.balanceQty,
     });
+    setRmBatches([]);
+    setRmBatchesLoading(true);
+    try {
+      const res = await fetch(`/api/inventory/rm-source/${encodeURIComponent(row.id)}`);
+      const j = (await res.json().catch(() => null)) as
+        | { success?: boolean; batches?: RMBatch[] }
+        | null;
+      setRmBatches(j?.batches ?? []);
+    } catch {
+      setRmBatches([]);
+    }
+    setRmBatchesLoading(false);
   };
 
   // Batch import state (FG and RM share the same dialog component with
@@ -2054,6 +2111,49 @@ export default function InventoryPage() {
                   </div>
                 </div>
               </div>
+
+              {/* Source POs — which production orders produced this FG.
+                  Mirrors the WIP detail dialog's PO breakdown. Backend
+                  endpoint /api/inventory/fg-source/:productCode walks
+                  fg_units grouped by poId. */}
+              <div className="pt-2 border-t border-[#E2DDD8]">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-[#374151]">Source Production Orders</span>
+                  <span className="text-xs text-[#6B7280]">
+                    {fgSourcesLoading ? "loading…" : `${fgSources.length} PO(s)`}
+                  </span>
+                </div>
+                {fgSourcesLoading ? (
+                  <p className="text-xs text-[#9CA3AF] py-2">Looking up source POs…</p>
+                ) : fgSources.length === 0 ? (
+                  <p className="text-xs text-[#9CA3AF] py-2">No fg_units rows for this product yet.</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8]">
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">PO No</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">SO No</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">Customer</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Qty</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">MFD Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fgSources.map((s) => (
+                        <tr key={s.poId} className="border-b border-[#F0ECE9]">
+                          <td className="py-2 doc-number font-medium">{s.poNo || "—"}</td>
+                          <td className="py-2 doc-number text-xs text-[#6B7280]">{s.soNo || "—"}</td>
+                          <td className="py-2 text-xs text-[#374151]">{s.customerName || "—"}</td>
+                          <td className="py-2 text-right">{s.qty}</td>
+                          <td className="py-2 text-right text-xs text-[#6B7280]">
+                            {s.mfdDate?.split("T")[0] || "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
             </div>
 
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
@@ -2157,7 +2257,7 @@ export default function InventoryPage() {
       {/* Edit RM Dialog */}
       {editRM && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md mx-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl mx-4 max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
               <div>
                 <h2 className="text-lg font-bold text-[#111827]">{editRM.itemCode}</h2>
@@ -2167,7 +2267,7 @@ export default function InventoryPage() {
                 <X className="h-4 w-4 text-gray-400" />
               </button>
             </div>
-            <div className="px-6 py-4 space-y-4">
+            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Item Code</label>
@@ -2199,6 +2299,53 @@ export default function InventoryPage() {
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">Item Group</label>
                 <Input value={editRMForm.itemGroup} onChange={(e) => setEditRMForm(f => ({ ...f, itemGroup: e.target.value }))} />
+              </div>
+
+              {/* Source batches in FIFO order — backed by rm_batches joined
+                  to grns to recover the originating Purchase Order No. The
+                  FIFO ordering matches what the cost-cascade uses to consume
+                  stock, so this is the same view the accounting cascade sees. */}
+              <div className="pt-2 border-t border-[#E2DDD8]">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-sm font-medium text-[#374151]">Source Batches (FIFO)</span>
+                  <span className="text-xs text-[#6B7280]">
+                    {rmBatchesLoading ? "loading…" : `${rmBatches.length} batch(es)`}
+                  </span>
+                </div>
+                {rmBatchesLoading ? (
+                  <p className="text-xs text-[#9CA3AF] py-2">Looking up source batches…</p>
+                ) : rmBatches.length === 0 ? (
+                  <p className="text-xs text-[#9CA3AF] py-2">No batches recorded for this raw material yet.</p>
+                ) : (
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8]">
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">PO No</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">GRN</th>
+                        <th className="text-left py-2 text-xs text-[#6B7280] font-medium">Supplier</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Received</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Original</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Remaining</th>
+                        <th className="text-right py-2 text-xs text-[#6B7280] font-medium">Unit Cost</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rmBatches.map((b) => (
+                        <tr key={b.id} className={`border-b border-[#F0ECE9] ${b.remainingQty === 0 ? "text-[#9CA3AF]" : ""}`}>
+                          <td className="py-2 doc-number font-medium">{b.poNumber || "—"}</td>
+                          <td className="py-2 doc-number text-xs text-[#6B7280]">{b.grnNumber || "—"}</td>
+                          <td className="py-2 text-xs text-[#374151]">{b.supplierName || "—"}</td>
+                          <td className="py-2 text-right text-xs text-[#6B7280]">
+                            {b.receivedDate?.split("T")[0] || "—"}
+                          </td>
+                          <td className="py-2 text-right">{b.originalQty}</td>
+                          <td className="py-2 text-right font-medium">{b.remainingQty}</td>
+                          <td className="py-2 text-right text-xs">RM {(b.unitCostSen / 100).toFixed(2)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
               </div>
             </div>
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">

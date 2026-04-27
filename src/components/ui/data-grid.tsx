@@ -17,6 +17,7 @@ import React, {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn, formatDateDMY, formatNumber, formatRM, getStatusColor } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
+import { useToast } from "@/components/ui/toast";
 
 // Stable identifier for namespacing per-user grid preferences in localStorage.
 // Using email (lowercased) so column visibility / order / saved views are
@@ -483,6 +484,8 @@ function ColumnCustomizer<T>({
   onToggle,
   onReorder,
   onClose,
+  onSaveAsOrgDefault,
+  onResetToOrgDefault,
 }: {
   columns: Column<T>[];
   visibleKeys: Set<string>;
@@ -490,7 +493,21 @@ function ColumnCustomizer<T>({
   onToggle: (key: string) => void;
   onReorder: (order: string[]) => void;
   onClose: () => void;
+  // Optional admin actions — only wired when the grid has a `gridId`
+  // (without an id there's no stable key to namespace per-grid org default).
+  onSaveAsOrgDefault?: () => boolean;
+  onResetToOrgDefault?: () => boolean;
 }) {
+  const { toast } = useToast();
+  // SUPER_ADMIN is the only role allowed to publish an org-wide default.
+  // Mirrors the gate in `src/components/layout/sidebar.tsx`.
+  const isSuperAdmin = (() => {
+    try {
+      return getCurrentUser()?.role === "SUPER_ADMIN";
+    } catch {
+      return false;
+    }
+  })();
   const ref = useRef<HTMLDivElement>(null);
   const dragItem = useRef<number | null>(null);
   const dragOver = useRef<number | null>(null);
@@ -604,6 +621,47 @@ function ColumnCustomizer<T>({
           Show All
         </button>
       </div>
+      {(onSaveAsOrgDefault || onResetToOrgDefault) && (
+        <div className="border-t border-[#E5E5E5] px-3 py-2 space-y-1.5 bg-[#FAF8F5]">
+          {onSaveAsOrgDefault && isSuperAdmin && (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 text-[11px] font-medium text-[#6B5C32] hover:underline"
+              onClick={() => {
+                const ok = onSaveAsOrgDefault();
+                if (ok) {
+                  toast.success(
+                    "Saved as Org Default - new users on this browser will see this layout.",
+                  );
+                } else {
+                  toast.error("Could not save org default.");
+                }
+              }}
+              title="Publish current layout as the org-wide default"
+            >
+              <span aria-hidden>★</span>
+              Save as Org Default
+            </button>
+          )}
+          {onResetToOrgDefault && (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 text-[10px] text-[#888] hover:text-[#555] hover:underline"
+              onClick={() => {
+                const ok = onResetToOrgDefault();
+                if (ok) {
+                  toast.success("Reset to Org Default.");
+                } else {
+                  toast.error("Could not reset to org default.");
+                }
+              }}
+              title="Discard your personal layout and reload the org default"
+            >
+              Reset to Org Default
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -683,11 +741,23 @@ export function DataGrid<T extends Record<string, any>>({
   virtualize = false,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
+  // Two-tier persistence per gridId:
+  //   1. Personal layout `datagrid-cols-${gridId}-${userKey()}` — written
+  //      whenever the user toggles a column or drags to reorder. Always wins
+  //      when present.
+  //   2. Org default `datagrid-cols-${gridId}-org-default` — written by an
+  //      admin via "Save as Org Default" inside the Columns popover. Used as
+  //      INITIAL state for users who have not yet customized this grid (we
+  //      do not copy it into Personal — letting their first toggle create
+  //      the Personal entry).
+  //   3. Falls back to the column definitions' `hidden` attribute.
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(() => {
     if (gridId && typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem(`datagrid-cols-${gridId}-${userKey()}`);
-        if (saved) return new Set(JSON.parse(saved));
+        const personal = localStorage.getItem(`datagrid-cols-${gridId}-${userKey()}`);
+        if (personal) return new Set(JSON.parse(personal));
+        const orgDefault = localStorage.getItem(`datagrid-cols-${gridId}-org-default`);
+        if (orgDefault) return new Set(JSON.parse(orgDefault));
       } catch { /* ignore */ }
     }
     return new Set(columns.filter(c => !c.hidden).map(c => c.key));
@@ -695,8 +765,10 @@ export function DataGrid<T extends Record<string, any>>({
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     if (gridId && typeof window !== "undefined") {
       try {
-        const saved = localStorage.getItem(`datagrid-colorder-${gridId}-${userKey()}`);
-        if (saved) return JSON.parse(saved);
+        const personal = localStorage.getItem(`datagrid-colorder-${gridId}-${userKey()}`);
+        if (personal) return JSON.parse(personal);
+        const orgDefault = localStorage.getItem(`datagrid-colorder-${gridId}-org-default`);
+        if (orgDefault) return JSON.parse(orgDefault);
       } catch { /* ignore */ }
     }
     return columns.map(c => c.key);
@@ -721,6 +793,53 @@ export function DataGrid<T extends Record<string, any>>({
       try { localStorage.setItem(`datagrid-colorder-${gridId}-${userKey()}`, JSON.stringify(order)); } catch { /* ignore */ }
     }
   }, [gridId]);
+
+  // Admin-only: snapshot the current Personal layout (visible columns + order)
+  // into the org-default keys so future first-time viewers of this grid see
+  // the curated layout. Personal layouts always still take precedence on
+  // read, so this never clobbers a user who has already customized.
+  const saveAsOrgDefault = useCallback((): boolean => {
+    if (!gridId || typeof window === "undefined") return false;
+    try {
+      localStorage.setItem(
+        `datagrid-cols-${gridId}-org-default`,
+        JSON.stringify([...visibleKeys]),
+      );
+      localStorage.setItem(
+        `datagrid-colorder-${gridId}-org-default`,
+        JSON.stringify(columnOrder),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, [gridId, visibleKeys, columnOrder]);
+
+  // Drop the user's Personal layout for this grid and re-seed state from the
+  // Org Default (or column-definition defaults if no Org Default exists).
+  const resetToOrgDefault = useCallback((): boolean => {
+    if (!gridId || typeof window === "undefined") return false;
+    try {
+      localStorage.removeItem(`datagrid-cols-${gridId}-${userKey()}`);
+      localStorage.removeItem(`datagrid-colorder-${gridId}-${userKey()}`);
+
+      const orgCols = localStorage.getItem(`datagrid-cols-${gridId}-org-default`);
+      const orgOrder = localStorage.getItem(`datagrid-colorder-${gridId}-org-default`);
+      setVisibleKeys(
+        orgCols
+          ? new Set(JSON.parse(orgCols) as string[])
+          : new Set(columns.filter(c => !c.hidden).map(c => c.key)),
+      );
+      setColumnOrder(
+        orgOrder
+          ? (JSON.parse(orgOrder) as string[])
+          : columns.map(c => c.key),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, [gridId, columns]);
 
   // When the parent passes a new `columns` array (e.g., the production page
   // changes activeTab and rebuilds dept-pill columns, or BOM-driven upstream
@@ -1369,6 +1488,8 @@ export function DataGrid<T extends Record<string, any>>({
               onToggle={toggleColumn}
               onReorder={reorderColumns}
               onClose={() => setShowCustomizer(false)}
+              onSaveAsOrgDefault={gridId ? saveAsOrgDefault : undefined}
+              onResetToOrgDefault={gridId ? resetToOrgDefault : undefined}
             />
           )}
         </div>

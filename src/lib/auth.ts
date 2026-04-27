@@ -79,11 +79,18 @@ const PER_USER_PREFIXES = [
 ];
 const SNAPSHOT_KEY_PREFIX = "hookka-ui-state:";
 
+// Keys matching a PER_USER_PREFIX but ending in one of these suffixes are
+// org-wide (shared across all users on this browser) — admin-published
+// defaults that future first-time viewers should still see after logout.
+// Skipping them here is what keeps "Save as Org Default" durable.
+const SHARED_SUFFIXES = ["-org-default"];
+
 function userSpecificKeys(): string[] {
   const keys = new Set<string>(PER_USER_EXACT_KEYS);
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
     if (!k) continue;
+    if (SHARED_SUFFIXES.some((s) => k.endsWith(s))) continue;
     if (PER_USER_PREFIXES.some((p) => k.startsWith(p))) keys.add(k);
   }
   return [...keys];

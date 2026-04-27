@@ -12,6 +12,177 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-010 — Dept-Pivot editor lists DRAFT BOMs as duplicate rows
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** In the new Dept-Pivot Category Editor, products like `1003-(K)`
+and `5530-1NA` show twice (identical category/minutes) because the row
+builder reads ALL rows in `bom_templates`, not just the ACTIVE one.
+
+**Root cause:** `src/pages/bom.tsx` `DeptPivotCategoryDialog` calls
+`buildDeptPivotRows(templates, deptCode)` with the unfiltered `templates`
+array. Two products currently have a v2.0 DRAFT alongside the v1.0
+ACTIVE row.
+
+**Fix:** filter `templates` to `version_status === 'ACTIVE'` at the call
+site before passing to the row builder. Helper stays generic.
+
+**Verification:** total row count drops from 512 → expected ~510 (drops the 2
+duplicates) when Wood Cut is selected.
+
+---
+
+## BUG-2026-04-27-011 — Dept-Pivot Branch/Code shows raw template tokens
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** Branch/Code column reads
+`{DIVAN_HEIGHT} Divan- {SIZE} / {DIVAN_HEIGHT} Divan- {SIZE} Foam / ...`
+instead of the resolved sample (`8" Divan- 6FT (WD)`) the BOM Structure tree
+shows. Hard to read at scale.
+
+**Root cause:** `buildDeptPivotRows` joins ancestor `wipCode` strings
+verbatim without running them through `resolveWipTokens`. The pivot also
+doesn't carry per-product variant context (sizeLabel / divanHeightInches /
+fabric etc.) — so even if it tried, the substitutions would be empty.
+
+**Fix:** at row build time, look up the `Product` row by `productCode`,
+build a `BomVariantContext`, and call `resolveWipTokens(template, ctx)` on
+the **leaf** node's wipCode (the deepest node owning the matched process).
+Drop the ancestor-chain join — the leaf alone is the meaningful label.
+
+**Verification:** Wood Cut row for `1003-(K)` should display
+`8" Divan- 6FT (WD)`, matching the BOM Structure view.
+
+---
+
+## BUG-2026-04-27-012 — DRAFT BOM versions left orphaned after confirm flow
+
+**Status:** 🔴 Identified (deferred)
+
+**Symptom:** `bom_templates` carries 2 leftover DRAFT rows
+(`bom-tpl-1003-(K)-v2`, `bom-tpl-5530-1NA-v2`, both v2.0 effective
+2026-05-01) alongside their ACTIVE v1.0 counterparts. User asked: "I
+confirmed it, why is the DRAFT still there?"
+
+**Root cause (suspected):** the BOM versioning UI lets the user create a
+v2.0 DRAFT but doesn't have a clean "confirm = promote DRAFT to ACTIVE,
+mark old ACTIVE as OBSOLETE" flow. After "save" the DRAFT just lingers.
+Need to inspect the BOM editor's save path to confirm.
+
+**Fix plan (not yet implemented):**
+1. Audit the create-DRAFT-then-save code path in `src/pages/bom.tsx`. If
+   confirm is supposed to promote the DRAFT, fix the save handler to
+   transition `DRAFT → ACTIVE` and the previous `ACTIVE → OBSOLETE`.
+2. Until that's done, the 2 leftover DRAFTs are safe to delete (no
+   downstream queries match `version_status='DRAFT'` because the BOM-fetch
+   helpers all filter `WHERE version_status = 'ACTIVE'`).
+
+---
+
+## BUG-2026-04-27-005 — `applyWipInventoryChange` not idempotent on COMPLETED→COMPLETED replay
+
+**Status:** 🔴 Identified (low priority)
+
+**Symptom:** Marking the same JC complete twice double-deducts upstream
+wip_items and double-adds the producer row. The cascade has no per-JC guard
+against repeat COMPLETED dispatches.
+
+**Root cause:** `src/api/routes-d1/production-orders.ts:823-1019`
+`applyWipInventoryChange` runs the consume + producer-upsert path
+unconditionally on every status='COMPLETED' call. The `MAX(0, …)` clamp
+prevents negatives but doesn't prevent drift on the producer side. The
+rollback branch (BUG-2026-04-27-002) only fires on DONE→non-DONE.
+
+**Fix plan:** add an idempotency guard keyed on (jobCardId, prevStatus).
+If `prevStatus === newStatus === COMPLETED` (or TRANSFERRED), short-circuit.
+Or use a `cost_ledger`-style ledger for wip_items movements so re-emission
+is a no-op.
+
+**User judgement (2026-04-27):** deferred. Their mental model: UPH = stock
+entry, PACKING = record racking number only. Repeated PACKING-complete
+events have low real-world impact; revisit if drift becomes visible.
+
+---
+
+## BUG-2026-04-27-006 — `cascadeUpholsteryToSO` runs on every PATCH, not just status changes
+
+**Status:** 🔴 Identified (low priority)
+
+**Symptom:** Every PATCH to a job_card (PIC re-assign, due-date edit, etc.)
+fires `cascadeUpholsteryToSO`, even when status didn't change.
+
+**Root cause:** the call sits **outside** the `if (body.status …)` gate at
+`src/api/routes-d1/production-orders.ts:1642`. Functionally safe (only
+writes when SO-completion conditions are met) but does redundant DB work
+on every save.
+
+**Fix plan:** move the call inside the `if (body.status …)` branch, or add
+a precondition check that bails when no relevant JC has transitioned.
+
+---
+
+## BUG-2026-04-27-007 — Audit event write failures swallowed silently
+
+**Status:** 🔴 Identified (low priority)
+
+**Symptom:** When `diffJobCardEvents` → batch INSERT to `job_card_events`
+fails (D1 hiccup, schema drift, etc.), the JC update at T+2 has already
+committed and we lose the audit row with no user-visible signal.
+
+**Root cause:** `src/api/routes-d1/production-orders.ts:1481-1501` wraps
+the audit batch in try/catch and only `console.error`s. Audit-row
+insert-failure is not surfaced to the user, so audit gaps accumulate.
+
+**Fix plan:** stand up a dead-letter queue for failed audit rows (so we
+can replay), or at least bump these to a structured monitor (Cloudflare
+Logs Insights / Analytics Engine) instead of plain console.error so we
+can alert.
+
+---
+
+## BUG-2026-04-27-008 — `fg_units.status='PENDING'` after PO completion (not `IN_STOCK`)
+
+**Status:** 🔴 Identified (cosmetic / naming clarity)
+
+**Symptom:** Post-PACKING-complete, the cascade writes `fg_units` rows
+with `status='PENDING'` (see `src/api/routes-d1/fg-units.ts:272`). Name
+is misleading — these units ARE finished / in stock; PENDING here means
+"not yet packed/loaded onto a DO". They later transition to LOADED →
+DELIVERED via the delivery_orders flow.
+
+**Root cause:** legacy naming choice. The fact that
+`deriveFGStock` (frontend) counts UPH-done POs independently of
+`fg_units.status` masks the confusion in most views.
+
+**Fix plan:** rename the initial state to `IN_STOCK` (or similar) and add
+a separate flag/column for "ready for DO" lifecycle if needed. Schema
+migration + UI text update.
+
+---
+
+## BUG-2026-04-27-009 — `inventory-wip.ts` derives baseModel via `productCode.split("-")[0]`
+
+**Status:** 🔴 Identified (display only)
+
+**Symptom:** The inventory-WIP grouping uses
+`(po.productCode || "").split("-")[0]` to compute baseModel
+(`src/api/routes-d1/inventory-wip.ts:343`). Works for sofa
+(`5531-L(RHF)` → `5531`) but fails for BF variants whose suffix uses
+parens before any hyphen (e.g. `1003(A)(HF)(W)` has no hyphen → returns
+the whole string). Causes incorrect grouping in the WIP board for those
+SKUs.
+
+**Root cause:** heuristic instead of reading
+`bom_templates.baseModel` (which IS authoritative).
+
+**Fix plan:** join wip_items rows back to `bom_templates` (or
+`products.baseModel` if present) and use the canonical value. Alternative:
+parse SKU via the existing `parseSku` util elsewhere in the codebase.
+
+---
+
 ## BUG-2026-04-27-001 — `completed_date` silently cleared on unrelated PATCH
 
 **Status:** 🟢 Fixed (2026-04-27)

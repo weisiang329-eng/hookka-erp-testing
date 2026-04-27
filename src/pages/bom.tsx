@@ -7,6 +7,7 @@ import {
   patchVariantsConfig,
   type VariantsConfig,
 } from "@/lib/kv-config";
+import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
 
 // ---------- Types ----------
 type BOMProcess = {
@@ -62,6 +63,11 @@ type BOMTemplate = {
   l1Materials?: WIPMaterial[];
   wipComponents: WIPComponent[];
   autoSeeded?: boolean;
+  // Set by /api/bom/templates rowToTemplate. Optional locally because some
+  // code paths (master-template seeding, auto-generated rows) build a
+  // BOMTemplate-shaped object without it. The Dept-Pivot editor filters on
+  // it to avoid showing duplicate ACTIVE+DRAFT rows for the same product.
+  versionStatus?: "DRAFT" | "ACTIVE" | "OBSOLETE";
 };
 
 type Product = {
@@ -4973,8 +4979,13 @@ type DeptPivotRow = {
   bomCategory: BOMCategory;
   // Path through wipComponents to the WIP node owning this process. [] for L1.
   path: number[];
-  // Display label for the WIP node (or "L1 / FG" when path === []).
+  // Resolved label for the LEAF WIP node owning this process (or "L1 / FG"
+  // when path === []). Tokens like {DIVAN_HEIGHT}/{SIZE} are resolved
+  // against the matching product so the cell reads "8" Divan- 6FT (WD)"
+  // instead of the raw template.
   branchLabel: string;
+  // Full ancestor chain ("Top / Mid / Leaf"), resolved. Shown on hover only.
+  branchAncestry: string;
   processIndex: number;
   // Initial values, captured when the row was built.
   initialCategory: string;
@@ -4984,16 +4995,37 @@ type DeptPivotRow = {
   minutes: number;
 };
 
+// Build a sample variant context for token resolution. The dept-pivot is a
+// catalog-level view — there is no SO line driving variant values — so we
+// fall back to the same defaults `buildWipCodeDisplay` uses for the BOM
+// Structure tree (DIVAN_HEIGHT=8", LEG_HEIGHT=2"). Product fields
+// (productCode, baseModel, sizeLabel/sizeCode) override where present.
+function buildSampleVariantCtx(p: Product | undefined, t: BOMTemplate): BomVariantContext {
+  return {
+    productCode: p?.code || t.productCode,
+    model: p?.baseModel || t.baseModel,
+    sizeLabel: p?.sizeLabel || (t.category === "SOFA" ? "3-Seater" : "6FT"),
+    sizeCode: p?.sizeCode || "",
+    fabricCode: "PC151-01",
+    divanHeightInches: 8,
+    legHeightInches: 2,
+    gapInches: 0,
+  };
+}
+
 function buildDeptPivotRows(
   templates: BOMTemplate[],
   deptCode: string,
+  products: Product[],
 ): DeptPivotRow[] {
   const rows: DeptPivotRow[] = [];
+  const productByCode = new Map(products.map((p) => [p.code, p]));
 
   function pushRow(
     t: BOMTemplate,
     path: number[],
-    branchLabel: string,
+    leafLabel: string,
+    ancestry: string,
     processIndex: number,
     p: BOMProcess,
   ) {
@@ -5004,7 +5036,8 @@ function buildDeptPivotRows(
       baseModel: t.baseModel,
       bomCategory: t.category,
       path,
-      branchLabel,
+      branchLabel: leafLabel,
+      branchAncestry: ancestry,
       processIndex,
       initialCategory: p.category || "",
       initialMinutes: p.minutes || 0,
@@ -5016,31 +5049,36 @@ function buildDeptPivotRows(
   function walk(
     wips: WIPComponent[],
     parentPath: number[],
-    parentLabel: string,
+    parentAncestry: string,
+    ctx: BomVariantContext,
     t: BOMTemplate,
   ) {
     wips.forEach((w, idx) => {
       const path = [...parentPath, idx];
-      const ownLabel = w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
-      const fullLabel = parentLabel ? `${parentLabel} / ${ownLabel}` : ownLabel;
+      const rawLabel = w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
+      const ownLabel = resolveWipTokens(rawLabel, ctx) || rawLabel;
+      const ancestry = parentAncestry ? `${parentAncestry} / ${ownLabel}` : ownLabel;
       w.processes.forEach((p, pi) => {
         if (p.deptCode === deptCode) {
-          pushRow(t, path, fullLabel, pi, p);
+          // Leaf == the node owning this process. Use the leaf's own label,
+          // not the full ancestor chain — see Bug 2 in the dept-pivot editor.
+          pushRow(t, path, ownLabel, ancestry, pi, p);
         }
       });
       if (w.children && w.children.length > 0) {
-        walk(w.children, path, fullLabel, t);
+        walk(w.children, path, ancestry, ctx, t);
       }
     });
   }
 
   for (const t of templates) {
+    const ctx = buildSampleVariantCtx(productByCode.get(t.productCode), t);
     t.l1Processes.forEach((p, pi) => {
       if (p.deptCode === deptCode) {
-        pushRow(t, [], "L1 / FG", pi, p);
+        pushRow(t, [], "L1 / FG", "L1 / FG", pi, p);
       }
     });
-    walk(t.wipComponents, [], "", t);
+    walk(t.wipComponents, [], "", ctx, t);
   }
 
   // Sort: productCode, then branchLabel, then processIndex.
@@ -5061,11 +5099,13 @@ function DeptPivotCategoryDialog({
   open,
   onClose,
   templates,
+  products,
   onTemplatesUpdated,
 }: {
   open: boolean;
   onClose: () => void;
   templates: BOMTemplate[];
+  products: Product[];
   onTemplatesUpdated: (updated: BOMTemplate[]) => void;
 }) {
   const { toast } = useToast();
@@ -5075,13 +5115,17 @@ function DeptPivotCategoryDialog({
   const [saving, setSaving] = useState(false);
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
-  // upstream template list changes (e.g. after a save).
+  // upstream template/products list changes (e.g. after a save).
   /* eslint-disable react-hooks/set-state-in-effect -- rebuild rows when inputs change */
   useEffect(() => {
     if (!open) return;
-    setRows(buildDeptPivotRows(templates, deptCode));
+    // Only show ACTIVE versions. Some products carry a parallel DRAFT v2.0
+    // alongside their live v1.0 — surfacing both made every process row
+    // appear twice. The rest of the BOM page still sees the unfiltered list.
+    const activeOnly = templates.filter((t) => (t.versionStatus ?? "ACTIVE") === "ACTIVE");
+    setRows(buildDeptPivotRows(activeOnly, deptCode, products));
     setSearch("");
-  }, [open, deptCode, templates]);
+  }, [open, deptCode, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const categoryOptions = useMemo(() => getCategoryOptions(), []);
@@ -5098,7 +5142,8 @@ function DeptPivotCategoryDialog({
       (r) =>
         r.productCode.toLowerCase().includes(q) ||
         r.baseModel.toLowerCase().includes(q) ||
-        r.branchLabel.toLowerCase().includes(q),
+        r.branchLabel.toLowerCase().includes(q) ||
+        r.branchAncestry.toLowerCase().includes(q),
     );
   }, [rows, search]);
 
@@ -5283,7 +5328,12 @@ function DeptPivotCategoryDialog({
                           <div className="font-medium text-[#111827]">{r.productCode}</div>
                           <div className="text-[10px] text-gray-400">{r.baseModel}</div>
                         </td>
-                        <td className="px-3 py-2 text-gray-600">{r.branchLabel}</td>
+                        <td
+                          className="px-3 py-2 text-gray-600"
+                          title={r.branchAncestry !== r.branchLabel ? r.branchAncestry : undefined}
+                        >
+                          {r.branchLabel}
+                        </td>
                         <td className="px-3 py-2 text-gray-600">
                           <span
                             className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded"
@@ -5701,6 +5751,7 @@ export default function BOMManagementPage() {
         open={showDeptPivot}
         onClose={() => setShowDeptPivot(false)}
         templates={templates}
+        products={products}
         onTemplatesUpdated={(updated) => setTemplates(updated)}
       />
 

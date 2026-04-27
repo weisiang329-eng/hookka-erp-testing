@@ -1106,6 +1106,60 @@ app.put("/:id", async (c) => {
             ),
           );
         }
+
+        // -----------------------------------------------------------------
+        // BUG-2026-04-27-021: decrement wip_items.stockQty for every UPH
+        // wipLabel produced by these POs.
+        //
+        // Background: when a UPH JC completes, applyWipInventoryChange
+        // writes a +qty producer-add to the wip_items row keyed by the
+        // JC's wipLabel. Once the PO is fully UPH-complete the WIP read
+        // path filters that row OUT of the WIP grid (BUG-2026-04-27-017,
+        // -018) and the FG read path (deriveFGStock) surfaces the PO as
+        // FG instead — the +qty stayed in wip_items as a ledger reside,
+        // hidden but accounting-incorrect. When the DO physically ships
+        // (stamping LOADED via this dispatch path) the goods leave our
+        // warehouse, and the FG view drops the PO too — at which point
+        // the residual +qty in wip_items has no view backing it. This
+        // decrement balances the books.
+        //
+        // Idempotency: this branch is gated on `existing.status === DRAFT
+        // && nextStatus === LOADED` (`stampedOnDispatch` predicate above),
+        // so re-PATCHing a LOADED DO with status=LOADED is a no-op. The
+        // reverse DRAFT→LOADED→DRAFT path re-credits wip_items in the
+        // `revertedToDraft` block below.
+        //
+        // No MAX(0) clamp — symmetric with BUG-013 (negative stockQty is
+        // a visibility signal, not a clamp violation).
+        // -----------------------------------------------------------------
+        const uphRowsRes = await c.var.DB.prepare(
+          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
+             WHERE productionOrderId IN (${ph})
+               AND departmentCode = 'UPHOLSTERY'
+               AND wipLabel IS NOT NULL
+               AND wipLabel != ''`,
+        )
+          .bind(...itemPoIds)
+          .all<{
+            productionOrderId: string;
+            wipLabel: string;
+            wipQty: number | null;
+          }>();
+        const uphRows = uphRowsRes.results ?? [];
+        const poById = new Map(poRows.map((p) => [p.id, p]));
+        for (const u of uphRows) {
+          const po = poById.get(u.productionOrderId);
+          if (!po) continue;
+          // Prefer the JC's own wipQty (per-component qty, e.g. cushion
+          // multiplicity) if set; fall back to the PO's quantity.
+          const dec = Number(u.wipQty) || Number(po.quantity) || 0;
+          if (dec === 0) continue;
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?`,
+            ).bind(dec, u.wipLabel),
+          );
+        }
       }
     }
 
@@ -1170,6 +1224,50 @@ app.put("/:id", async (c) => {
             now,
           ),
         );
+      }
+
+      // -------------------------------------------------------------------
+      // BUG-2026-04-27-021 (reverse): re-credit wip_items.stockQty for
+      // every UPH wipLabel produced by these POs. Symmetric inverse of the
+      // dispatch-time decrement above. Idempotency mirror: gated on
+      // `existing.status === LOADED && nextStatus === DRAFT`, so a DO that
+      // never made it to LOADED never enters this branch.
+      // -------------------------------------------------------------------
+      if (stampedPoIds.length > 0) {
+        const ph = stampedPoIds.map(() => "?").join(",");
+        const reverseRes = await c.var.DB.prepare(
+          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
+             WHERE productionOrderId IN (${ph})
+               AND departmentCode = 'UPHOLSTERY'
+               AND wipLabel IS NOT NULL
+               AND wipLabel != ''`,
+        )
+          .bind(...stampedPoIds)
+          .all<{
+            productionOrderId: string;
+            wipLabel: string;
+            wipQty: number | null;
+          }>();
+        const reverseRows = reverseRes.results ?? [];
+        // Look up each PO's quantity once (small N, indexed PK).
+        const poQtyByIdRes = await c.var.DB.prepare(
+          `SELECT id, quantity FROM production_orders WHERE id IN (${ph})`,
+        )
+          .bind(...stampedPoIds)
+          .all<{ id: string; quantity: number | null }>();
+        const poQtyById = new Map(
+          (poQtyByIdRes.results ?? []).map((r) => [r.id, r.quantity]),
+        );
+        for (const u of reverseRows) {
+          const inc =
+            Number(u.wipQty) || Number(poQtyById.get(u.productionOrderId)) || 0;
+          if (inc === 0) continue;
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`,
+            ).bind(inc, u.wipLabel),
+          );
+        }
       }
     }
 

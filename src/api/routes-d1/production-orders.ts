@@ -1384,6 +1384,119 @@ async function cascadeUpholsteryToSO(
   }
 }
 
+// ---------------------------------------------------------------------------
+// BUG-2026-04-27-020: rollback companion to cascadeUpholsteryToSO.
+//
+// `cascadeUpholsteryToSO` (the forward path) bumps the SO to READY_TO_SHIP
+// once every sibling PO under the SO has all UPH JCs in COMPLETED/TRANSFERRED.
+// When an operator un-completes a UPH JC (via the dept Production Sheet
+// date-cell or the form), the BUG-2026-04-27-002 rollback inside
+// `applyWipInventoryChange` correctly refunds the wip_items numbers, but
+// without this companion the SO stays wedged at READY_TO_SHIP — the SO
+// thinks it's good to ship even though one of its UPH JCs is back to
+// WAITING.
+//
+// This helper is gated on the JC actually transitioning OUT of a DONE
+// status (the caller passes prevStatus from the pre-UPDATE row), and only
+// fires for UPH JCs (other depts don't drive the READY_TO_SHIP cascade).
+// It re-runs the same condition the forward path uses ("every sibling PO
+// is fully UPH-complete"); if it's no longer true and the SO is currently
+// at READY_TO_SHIP, we flip back to CONFIRMED and emit a so_status_changes
+// audit row mirroring the forward audit pattern in sales-orders.ts.
+//
+// `stockedIn` on this PO is also cleared, since the corresponding forward
+// path sets stockedIn=1 once UPH is done — symmetric reverse keeps the
+// flag truthful.
+// ---------------------------------------------------------------------------
+async function cascadeUpholsteryRollbackToSO(
+  db: D1Database,
+  poId: string,
+  actorName: string,
+): Promise<void> {
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po || !po.salesOrderId) return;
+
+  // Clear stockedIn on this PO — the forward cascade flips it to 1 when UPH
+  // completes; rolling a UPH JC back means the PO is no longer fully
+  // upholstered and the flag is now wrong.
+  if (po.stockedIn) {
+    await db
+      .prepare("UPDATE production_orders SET stockedIn = 0 WHERE id = ?")
+      .bind(po.id)
+      .run();
+  }
+
+  const so = await db
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+    .bind(po.salesOrderId)
+    .first<{ id: string; status: string }>();
+  if (!so) return;
+
+  // Only act when the SO currently thinks it's READY_TO_SHIP — if it's
+  // already CONFIRMED or earlier, there's nothing to undo.
+  if (so.status !== "READY_TO_SHIP") return;
+
+  const siblings = await db
+    .prepare("SELECT id FROM production_orders WHERE salesOrderId = ?")
+    .bind(so.id)
+    .all<{ id: string }>();
+  const siblingPOs = siblings.results ?? [];
+  if (siblingPOs.length === 0) return;
+
+  const sibIds = siblingPOs.map((p) => p.id);
+  const placeholders = sibIds.map(() => "?").join(",");
+  const uphRes = await db
+    .prepare(
+      `SELECT productionOrderId, status FROM job_cards
+        WHERE departmentCode = 'UPHOLSTERY' AND productionOrderId IN (${placeholders})`,
+    )
+    .bind(...sibIds)
+    .all<{ productionOrderId: string; status: string }>();
+  const uphJcs = uphRes.results ?? [];
+
+  // Mirror the forward path: every sibling PO must have all its UPH JCs in
+  // COMPLETED/TRANSFERRED for the SO to remain READY_TO_SHIP. POs with no
+  // UPH JCs at all are treated as vacuous-true (matches the forward path).
+  const everyUphDone = siblingPOs.every((p) => {
+    const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+    if (mine.length === 0) return true;
+    return mine.every(
+      (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+    );
+  });
+  if (everyUphDone) return; // Forward condition still holds — nothing to undo.
+
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(
+        "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
+      )
+      .bind(now, so.id),
+    db
+      .prepare(
+        `INSERT INTO so_status_changes
+           (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `sc-${crypto.randomUUID().slice(0, 8)}`,
+        so.id,
+        "READY_TO_SHIP",
+        "CONFIRMED",
+        actorName,
+        now,
+        "UPH job card rolled back to non-DONE",
+        JSON.stringify([
+          `PO ${po.poNo} UPH rolled back — SO no longer fully upholstered`,
+        ]),
+      ),
+  ]);
+}
+
 // Cascade when a PO itself reaches COMPLETED (not just Upholstery). Bumps SO
 // to READY_TO_SHIP once every sibling is fully done.
 async function cascadePoCompletionToSO(
@@ -1446,6 +1559,11 @@ async function applyPoUpdate(
   let updatedProgress = existing.progress;
   let updatedCurrentDept = existing.currentDepartment ?? "";
   let updatedCompletedDate = existing.completedDate;
+  // BUG-2026-04-27-020: track when this PATCH rolls a UPHOLSTERY JC out of
+  // a DONE state so the SO-rollback companion to cascadeUpholsteryToSO
+  // fires after the JC + PO UPDATEs commit. Set inside the body.jobCardId
+  // block, consumed near the existing cascadeUpholsteryToSO call below.
+  let uphRollbackTriggered = false;
 
   if (body.jobCardId) {
     const jcRow = allJcRows.find((j) => j.id === body.jobCardId);
@@ -1490,6 +1608,16 @@ async function applyPoUpdate(
       const isDone = body.status === "COMPLETED" || body.status === "TRANSFERRED";
       const wasDone =
         jcRow.status === "COMPLETED" || jcRow.status === "TRANSFERRED";
+      // BUG-2026-04-27-020: detect UPH rollback (DONE → non-DONE on a
+      // UPHOLSTERY JC). The SO-rollback helper runs after the PO UPDATE
+      // below, mirroring how the forward cascadeUpholsteryToSO is invoked.
+      if (
+        wasDone &&
+        !isDone &&
+        (jcRow.departmentCode || "").toUpperCase() === "UPHOLSTERY"
+      ) {
+        uphRollbackTriggered = true;
+      }
       if (isDone) {
         if (!updated.completedDate) updated.completedDate = today;
         updated.overdue = "COMPLETED";
@@ -1740,6 +1868,24 @@ async function applyPoUpdate(
       poId: id,
       err: err instanceof Error ? err.message : String(err),
     });
+  }
+
+  // BUG-2026-04-27-020: SO-rollback companion. Fires only when this PATCH
+  // moved a UPHOLSTERY JC out of a DONE state. Defensive try/catch — same
+  // contract as the cascades above: a rollback bookkeeping miss must not
+  // void the operator's primary write.
+  if (uphRollbackTriggered) {
+    try {
+      const actorUserId =
+        (c.get as unknown as (k: string) => string | undefined)("userId") ??
+        null;
+      await cascadeUpholsteryRollbackToSO(db, id, actorUserId ?? "System");
+    } catch (err) {
+      console.error("[cascadeUpholsteryRollbackToSO] cascade failed", {
+        poId: id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   const fresh = await fetchPO(db, id);

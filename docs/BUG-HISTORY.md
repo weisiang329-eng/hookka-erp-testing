@@ -12,6 +12,105 @@ Status legend:
 
 ---
 
+## BUG-2026-04-27-021 — DO Dispatch left wip_items.stockQty +qty forever
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** When a Delivery Order transitioned DRAFT → LOADED (the
+"dispatch" / stamp-on-dispatch event), the wip_items rows produced by
+each PO's UPHOLSTERY job cards stayed at +qty in D1 indefinitely. The
+WIP read path (`/api/inventory/wip`) hides them because the PO is fully
+UPH-complete (BUG-2026-04-27-017) and the FG read path (`deriveFGStock`)
+drops the PO once its DO is dispatched, so the +qty was effectively
+invisible — but the underlying `wip_items` ledger was wrong: a row that
+no longer represented physical stock kept claiming inventory.
+
+**Root cause:** The dispatch path in
+`src/api/routes-d1/delivery-orders.ts` (the `stampedOnDispatch`
+DRAFT→LOADED branch) wrote `STOCK_OUT` into `stock_movements` and
+flipped `fg_units` to LOADED, but never decremented `wip_items.stockQty`
+for the UPH-coded rows produced by those POs. The UPH producer-add
+write at JC completion time (`applyWipInventoryChange`) had no
+counterparty in the DO state machine.
+
+**Fix:** Two symmetric writes added inside the existing
+`stampedOnDispatch` and `revertedToDraft` branches in
+`src/api/routes-d1/delivery-orders.ts`:
+
+- DRAFT → LOADED: query `job_cards` for every UPH JC of every PO
+  referenced by the DO that has `wipLabel IS NOT NULL`. For each, push
+  `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?` into
+  the same batch as the existing dispatch SQL. Decrement uses the JC's
+  own `wipQty` if set, else falls back to the PO's quantity.
+- LOADED → DRAFT (the existing reversal path): symmetric inverse,
+  re-credit `+ ?` for each UPH wipLabel of each PO that was stamped.
+
+Idempotency is the predicate gates: `stampedOnDispatch` only fires when
+`existing.status === 'DRAFT' && nextStatus === 'LOADED'`, so re-PATCHing
+a LOADED DO with the same status is a no-op. Same for `revertedToDraft`.
+No `MAX(0)` clamp — symmetric with BUG-2026-04-27-013, where negative
+`stockQty` is a visibility signal rather than a clamp violation.
+
+**Verification:** typecheck:app clean for delivery-orders.ts (the
+pre-existing `delivery/index.tsx` merge-conflict markers are unchanged
+and unrelated to this fix); lint:app clean for delivery-orders.ts;
+`npm test` 84/84 passing (no new test pinned — out-of-scope per the
+task brief).
+
+---
+
+## BUG-2026-04-27-020 — UPH rollback didn't reverse cascadeUpholsteryToSO
+
+**Status:** 🟢 Fixed (2026-04-27)
+
+**Symptom:** When an operator un-completed a UPHOLSTERY job card (DONE
+→ WAITING via the Production Sheet date-cell or the form), the
+inventory cascade rollback (BUG-2026-04-27-002) correctly refunded the
+wip_items numbers, but the parent Sales Order stayed at READY_TO_SHIP
+forever — even though one of its UPH JCs was now back to WAITING.
+The SO supervisor saw the order ready to ship; the floor saw a UPH JC
+still pending.
+
+**Root cause:** `cascadeUpholsteryToSO` (the forward path that bumps
+the SO to READY_TO_SHIP once every sibling PO is fully UPH-complete)
+has an `else if` branch that flips READY_TO_SHIP back to CONFIRMED
+when the condition no longer holds, but it (a) emits no audit row and
+(b) doesn't clear the PO's `stockedIn` flag, leaving partial state
+that the PO/SO views read inconsistently. Operationally, callers
+treated the absence of an audit row as "this transition didn't
+happen", and the `stockedIn=1` flag pinned by the forward path was
+never reset.
+
+**Fix:** New helper `cascadeUpholsteryRollbackToSO` in
+`src/api/routes-d1/production-orders.ts` (added after
+`cascadeUpholsteryToSO`). The helper:
+
+1. Looks up the SO via the PO row.
+2. Clears `stockedIn = 0` on the PO (the forward cascade sets it to 1).
+3. If the SO is currently READY_TO_SHIP, recomputes the
+   "every sibling PO is fully UPH-complete" condition. If it no longer
+   holds, batches a SO status flip back to CONFIRMED with a
+   `so_status_changes` audit row (mirrors the forward audit pattern in
+   `sales-orders.ts`).
+
+Hook point: `applyPoUpdate` tracks a `uphRollbackTriggered` flag in
+the body.jobCardId block, set when `wasDone && !isDone` and the JC's
+`departmentCode` is UPHOLSTERY. After the JC + PO UPDATEs commit and
+the existing `cascadeUpholsteryToSO` runs, the new helper fires gated
+on the flag. Defensive try/catch matches the existing cascade pattern.
+
+The forward `cascadeUpholsteryToSO` is unchanged — its existing
+`else if` is correct as-is and continues to handle the soft case
+(rollback during a non-UPH PATCH that triggers the cascade); the new
+helper adds the audit + stockedIn reset that the operator-facing
+rollback specifically needs.
+
+**Verification:** typecheck:app clean for production-orders.ts; lint
+clean for the same; `npm test` 84/84 passing (no new test pinned —
+optional per task brief).
+
+---
+
 ## BUG-2026-04-27-017 — WIP page double-counted UPH-completed rows alongside FG view
 
 **Status:** 🟢 Fixed (2026-04-27)

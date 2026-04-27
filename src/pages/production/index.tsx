@@ -614,10 +614,17 @@ export default function ProductionPage({
   // payload is only pulled when the operator actually wants to look at
   // something. Per-dept routes (mode="dept") still auto-fetch since landing
   // there means the user already wants the dept's queue.
+  // No PO-status pre-filter at the API layer (2026-04-27 user request) —
+  // load ALL POs (PENDING / IN_PROGRESS / ON_HOLD / COMPLETED /
+  // CANCELLED) and let the per-column Status filter on the grid handle
+  // any narrowing the operator wants. Total PO count is ~560 so the
+  // payload size penalty is negligible vs the dropped Lifecycle dropdown
+  // it replaces (which was redundant with the column filter the user
+  // already had at hand).
   const baseUrl =
     mode === "dept" && deptCode
-      ? `/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal&dept=${encodeURIComponent(deptCode)}`
-      : "/api/production-orders?status=PENDING,IN_PROGRESS,ON_HOLD&fields=minimal";
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}`
+      : `/api/production-orders?fields=minimal`;
   const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
   const ordersUrl: string | null = shouldFetch ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
@@ -705,12 +712,8 @@ export default function ProductionPage({
   const [fltCustomer, setFltCustomer] = useUrlState<string>("customer", "");
   const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
   const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
-  // Status lifecycle filter: Active (default) hides ON_HOLD + CANCELLED.
-  // "all" shows everything; "onhold" / "cancelled" / "completed" isolate
-  // a single bucket for supervisors auditing the queue.
-  const [fltLifecycle, setFltLifecycle] = useUrlState<
-    "active" | "all" | "onhold" | "cancelled" | "completed"
-  >("life", "active");
+  // (Lifecycle dropdown removed 2026-04-27 — replaced by the Status
+  // column's per-column filter. The grid loads all PO statuses now.)
   // New filters (2026-04-25):
   //   • Category — itemCategory (BEDFRAME / SOFA / ACCESSORY).
   //   • Date axis — switches the from/to range between targetEndDate
@@ -743,8 +746,7 @@ export default function ProductionPage({
     !!fltDueTo ||
     !!fltCategory ||
     !!fltItemType ||
-    !!fltModel ||
-    fltLifecycle !== "active";
+    !!fltModel;
   /* eslint-disable react-hooks/set-state-in-effect -- arm shouldFetch on first filter activity */
   useEffect(() => {
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
@@ -1086,31 +1088,16 @@ export default function ProductionPage({
             : (o.createdAt || "")) || "";
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
-      // Lifecycle filter — "active" is the default since day-to-day operators
-      // don't want ON_HOLD / CANCELLED POs cluttering their queue. Supervisors
-      // can flip to "all" or drill into a specific bucket.
-      switch (fltLifecycle) {
-        case "active":
-          if (o.status === "ON_HOLD" || o.status === "CANCELLED") return false;
-          break;
-        case "onhold":
-          if (o.status !== "ON_HOLD") return false;
-          break;
-        case "cancelled":
-          if (o.status !== "CANCELLED") return false;
-          break;
-        case "completed":
-          if (o.status !== "COMPLETED") return false;
-          break;
-        // "all" — no-op
-      }
+      // (Lifecycle filter removed 2026-04-27 — moved to per-column Status
+      // filter on the grid. ON_HOLD / CANCELLED / COMPLETED rows still
+      // get the colored row background via rowClassName so they stay
+      // visually distinct in the unfiltered view.)
       return true;
     });
   }, [
     orders,
     fltSearch, fltState, fltCustomer,
     fltDueFrom, fltDueTo, fltDateAxis,
-    fltLifecycle,
     fltCategory, fltItemType, fltModel,
   ]);
 
@@ -2749,24 +2736,11 @@ export default function ProductionPage({
           <option value="">All models</option>
           {modelOptions.map((m) => (<option key={m} value={m}>{m}</option>))}
         </select>
-        {/* Lifecycle status filter — default "Active" hides ON_HOLD + CANCELLED */}
-        <select
-          value={fltLifecycle}
-          onChange={(e) =>
-            setFltLifecycle(
-              e.target.value as
-                | "active" | "all" | "onhold" | "cancelled" | "completed",
-            )
-          }
-          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
-          title="Production order lifecycle filter"
-        >
-          <option value="active">Active</option>
-          <option value="all">All</option>
-          <option value="onhold">On Hold</option>
-          <option value="cancelled">Cancelled</option>
-          <option value="completed">Completed</option>
-        </select>
+        {/* (Lifecycle status dropdown removed 2026-04-27 — replaced by
+            the per-column Status filter on the dept grid. Operators
+            click ▼ on the Status column header to narrow by JC status
+            (WAITING / DONE / OVERDUE) and the colored row background
+            still flags ON_HOLD / CANCELLED / COMPLETED PO rows.) */}
         {/* Date axis toggle — picks WHICH date column the from/to range
             applies to. dueDate (default) is the production target end date.
             customerDeliveryDate is what the customer was promised (TODO:
@@ -2820,12 +2794,12 @@ export default function ProductionPage({
           </button>
         )}
         {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo ||
-          fltLifecycle !== "active" || fltCategory || fltItemType || fltModel ||
+          fltCategory || fltItemType || fltModel ||
           fltDateAxis !== "dueDate") && (
           <button
             onClick={() => {
               setFltSearch(""); setFltState(""); setFltCustomer("");
-              setFltDueFrom(""); setFltDueTo(""); setFltLifecycle("active");
+              setFltDueFrom(""); setFltDueTo("");
               setFltCategory(""); setFltItemType(""); setFltModel("");
               setFltDateAxis("dueDate");
             }}

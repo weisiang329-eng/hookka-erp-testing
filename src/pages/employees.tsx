@@ -2550,6 +2550,23 @@ function buildPeriodOptions(): { value: string; label: string }[] {
   return out;
 }
 
+// Calendar-based working days for the period — Mon–Sat in the actual month,
+// Sundays excluded. Replaces the earlier fixed-26 baseline so months with
+// extra Saturdays (27 days) or short Februarys (24 days) are reflected
+// faithfully in the hourly rate. Falls back to 26 on bad input so the rate
+// calc never divides by zero.
+function workingDaysInMonth(period: string): number {
+  const [y, m] = period.split("-").map(Number);
+  if (!y || !m) return 26;
+  const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  let count = 0;
+  for (let d = 1; d <= lastDay; d++) {
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    if (dow !== 0) count++;
+  }
+  return count;
+}
+
 function LaborCostTab({ workers }: { workers: Worker[] }) {
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
@@ -2582,21 +2599,31 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const revenueByCategory = (plResp?.success ? plResp.data?.revenueByProduct ?? {} : {}) as Record<string, number>;
 
+    // Two rates per worker, intentionally asymmetric:
+    //  - Regular hourly rate uses calendar-based working days for the
+    //    selected month (Mon–Sat; Sundays excluded). Feb (24 days) → higher
+    //    regular rate; months with 27 working days → lower regular rate.
+    //  - OT base rate stays anchored at the fixed-26 standard rate, then
+    //    multiplied by otMultiplier (default 1.5×). OT premium does NOT
+    //    fluctuate month-to-month — it's tied to a "standard" hourly rate
+    //    so a worker doing OT in February doesn't get a windfall vs March.
+    const wdInMonth = workingDaysInMonth(period);
+
     // Group by (departmentCode, category). Hours summed; cost = sum over each
-    // entry of hours × hourly_rate, with hours-above-9-per-(date,worker)
-    // counted as OT and bumped by otMultiplier.
+    // entry of regular_hours × regular_rate + ot_hours × ot_base_rate × multiplier.
     type Bucket = { hours: number; laborCostSen: number };
     const buckets = new Map<string, Bucket>();
 
     // First pass: per (workerId, date), classify each entry's hours into
     // regular vs OT relative to a 9h baseline. Entries are processed in input
     // order; once cumulative hours for that (worker, date) exceed 9, the
-    // remainder counts as OT and pays at otMultiplier × hourly rate.
+    // remainder counts as OT.
     const cumulativeByWorkerDate = new Map<string, number>();
     for (const e of entries) {
       const w = workersById.get(e.workerId);
       if (!w || !w.basicSalarySen) continue;
-      const hourlyRateSen = w.basicSalarySen / 26 / 9;
+      const regularRateSen = w.basicSalarySen / wdInMonth / 9;
+      const otBaseRateSen = w.basicSalarySen / 26 / 9;
       const otMult = w.otMultiplier ?? 1.5;
       const wdKey = `${e.workerId}|${e.date}`;
       const cum = cumulativeByWorkerDate.get(wdKey) ?? 0;
@@ -2606,7 +2633,7 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
       const otH = hours - regularH;
       cumulativeByWorkerDate.set(wdKey, cum + hours);
 
-      const cost = regularH * hourlyRateSen + otH * hourlyRateSen * otMult;
+      const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
       const cat = (e.category || "") as Category;
       const key = `${e.departmentCode}|${cat}`;
       const cur = buckets.get(key) ?? { hours: 0, laborCostSen: 0 };
@@ -2644,7 +2671,7 @@ function LaborCostTab({ workers }: { workers: Worker[] }) {
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById]);
+  }, [entriesResp, plResp, workersById, period]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);

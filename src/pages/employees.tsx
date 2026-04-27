@@ -144,21 +144,6 @@ function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
 
-function calcWorkingMinutes(clockIn: string, clockOut: string): number {
-  const [inH, inM] = clockIn.split(":").map(Number);
-  const [outH, outM] = clockOut.split(":").map(Number);
-  return Math.max(0, outH * 60 + outM - (inH * 60 + inM));
-}
-
-const ATTENDANCE_STATUSES: AttendanceStatus[] = [
-  "PRESENT",
-  "ABSENT",
-  "HALF_DAY",
-  "MEDICAL_LEAVE",
-  "ANNUAL_LEAVE",
-  "REST_DAY",
-];
-
 const DEPARTMENTS = [
   { id: "dept-1", code: "FAB_CUT", name: "Fabric Cutting" },
   { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing" },
@@ -199,67 +184,31 @@ type WorkingHourEntry = {
   notes: string;
 };
 
-type BreakdownDraft = {
-  id?: string;            // present for rows already persisted
+
+// --------------- TAB COMPONENTS ---------------
+
+// ========== TAB 1: WORKING HOURS — flat grid (Google Sheet style) ==========
+//
+// Each row is one working_hour_entries record: a single (date × worker × dept
+// × category × hours × notes) tuple. The same worker can appear on any date
+// any number of times — supervisor adds rows as the day's segments are
+// recorded. Backend auto-creates the parent attendance_records row on first
+// POST per (worker, date), so there's no separate clock-in step in this UI.
+
+type EntryDraft = {
+  id?: string;                 // undefined = new draft; defined = persisted
+  workerId: string;
   departmentCode: string;
   category: Category;
   hours: number;
   notes: string;
-};
-
-// --------------- TAB COMPONENTS ---------------
-
-// ========== TAB 1: WORKING HOURS ==========
-
-type AttendanceRowDraft = {
-  employeeId: string;
-  employeeName: string;
-  departmentName: string;
-  clockIn: string;
-  clockOut: string;
-  status: AttendanceStatus;
-  notes: string;
-  productType: string;
   saving: boolean;
   saved: boolean;
   saveError?: string;
-  existing: AttendanceRecord | null;
-  // Breakdown panel state — populated lazily on first expand. The rows
-  // here are drafts; a Save Breakdown button hits POST /bulk to wipe-and-
-  // replace the per-attendance set in one D1 batch.
-  expanded: boolean;
-  breakdown: BreakdownDraft[];
-  breakdownLoaded: boolean;
-  breakdownLoading: boolean;
-  breakdownSaving: boolean;
-  breakdownSavedAt: number | null;
-  breakdownError?: string;
 };
-
-const PRODUCT_TYPE_STORAGE_KEY = "hookka-attendance-product-type";
-
-function loadProductTypeMap(): Record<string, string> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = localStorage.getItem(PRODUCT_TYPE_STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveProductTypeMap(map: Record<string, string>) {
-  if (typeof window === "undefined") return;
-  try {
-    localStorage.setItem(PRODUCT_TYPE_STORAGE_KEY, JSON.stringify(map));
-  } catch {
-    // ignore
-  }
-}
 
 function WorkingHoursTab({
   workers,
-  attendance,
   refreshAttendance,
 }: {
   workers: Worker[];
@@ -267,63 +216,37 @@ function WorkingHoursTab({
   refreshAttendance: (date: string) => void;
 }) {
   const [selectedDate, setSelectedDate] = useState(todayStr());
-  const [rows, setRows] = useState<AttendanceRowDraft[]>([]);
+  const [rows, setRows] = useState<EntryDraft[]>([]);
+  const [loading, setLoading] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
 
-  // Build rows whenever workers/attendance/date change. Preserve in-flight
-  // breakdown drafts across attendance refreshes — losing unsaved breakdown
-  // edits because clockOut auto-refreshed would be a footgun.
-  useEffect(() => {
-    const dayRecords = attendance.filter((a) => a.date === selectedDate);
-    const ptMap = loadProductTypeMap();
-    setRows((prev) => {
-      const prevByEmp = new Map(prev.map((r) => [r.employeeId, r]));
-      return workers
-        .filter((w) => w.status === "ACTIVE")
-        .map((w) => {
-          const existing = dayRecords.find((r) => r.employeeId === w.id) || null;
-          const dept = DEPARTMENTS.find((d) => d.id === w.departmentId);
-          const prior = prevByEmp.get(w.id);
-          return {
-            employeeId: w.id,
-            employeeName: w.name,
-            departmentName: dept?.name || w.departmentCode,
-            clockIn: existing?.clockIn || "",
-            clockOut: existing?.clockOut || "",
-            status: existing?.status || "PRESENT",
-            notes: existing?.notes || "",
-            productType: ptMap[`${selectedDate}:${w.id}`] || "",
-            saving: false,
-            saved: false,
-            existing,
-            expanded: prior?.expanded ?? false,
-            breakdown: prior?.breakdown ?? [],
-            breakdownLoaded: prior?.breakdownLoaded ?? false,
-            breakdownLoading: false,
-            breakdownSaving: false,
-            breakdownSavedAt: prior?.breakdownSavedAt ?? null,
-            breakdownError: prior?.breakdownError,
-          };
-        });
-    });
-  }, [workers, attendance, selectedDate]);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/working-hour-entries?date=${selectedDate}`);
+      const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry[] };
+      const drafts: EntryDraft[] = (j?.data ?? []).map((e) => ({
+        id: e.id,
+        workerId: e.workerId,
+        departmentCode: e.departmentCode,
+        category: e.category,
+        hours: e.hours,
+        notes: e.notes,
+        saving: false,
+        saved: true,
+      }));
+      setRows(drafts);
+    } finally {
+      setLoading(false);
+    }
+  }, [selectedDate]);
 
-  const updateRow = (idx: number, field: string, value: string) => {
-    setRows((prev) => {
-      const copy = [...prev];
-      copy[idx] = { ...copy[idx], [field]: value, saved: false };
-      if (field === "productType") {
-        const map = loadProductTypeMap();
-        const key = `${selectedDate}:${copy[idx].employeeId}`;
-        if (value) map[key] = value;
-        else delete map[key];
-        saveProductTypeMap(map);
-      }
-      return copy;
-    });
-  };
+  // One-shot sync of server entries into local EntryDraft rows on date
+  // change. setState here is intentional — the source is external (fetch).
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void refresh(); }, [refresh]);
 
-  const patchRow = useCallback((idx: number, patch: Partial<AttendanceRowDraft>) => {
+  const patchRow = useCallback((idx: number, patch: Partial<EntryDraft>) => {
     setRows((prev) => {
       const copy = [...prev];
       copy[idx] = { ...copy[idx], ...patch };
@@ -331,215 +254,151 @@ function WorkingHoursTab({
     });
   }, []);
 
-  const loadBreakdown = useCallback(
-    async (idx: number) => {
-      const row = rows[idx];
-      if (!row?.existing) return;
-      patchRow(idx, { breakdownLoading: true, breakdownError: undefined });
-      try {
-        const res = await fetch(
-          `/api/working-hour-entries?attendanceId=${encodeURIComponent(row.existing.id)}`,
-        );
-        const j = (await res.json()) as { success: boolean; data?: WorkingHourEntry[]; error?: string };
-        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
-        const drafts: BreakdownDraft[] = (j.data ?? []).map((e) => ({
-          id: e.id,
-          departmentCode: e.departmentCode,
-          category: e.category,
-          hours: e.hours,
-          notes: e.notes,
-        }));
-        patchRow(idx, { breakdown: drafts, breakdownLoaded: true, breakdownLoading: false });
-      } catch (e) {
-        patchRow(idx, {
-          breakdownLoading: false,
-          breakdownError: e instanceof Error ? e.message : "Failed to load breakdown",
-        });
-      }
-    },
-    [rows, patchRow],
-  );
-
-  const toggleBreakdown = useCallback(
-    (idx: number) => {
-      const row = rows[idx];
-      if (!row) return;
-      const willExpand = !row.expanded;
-      patchRow(idx, { expanded: willExpand });
-      if (willExpand && row.existing && !row.breakdownLoaded) {
-        void loadBreakdown(idx);
-      }
-    },
-    [rows, patchRow, loadBreakdown],
-  );
-
-  const updateBreakdown = useCallback(
-    (idx: number, bIdx: number, patch: Partial<BreakdownDraft>) => {
-      setRows((prev) => {
-        const copy = [...prev];
-        const next = [...copy[idx].breakdown];
-        // Switching to a non-production dept clears any stale category.
-        const merged = { ...next[bIdx], ...patch };
-        if (patch.departmentCode && !PRODUCTION_DEPT_CODES.has(patch.departmentCode)) {
-          merged.category = "";
-        }
-        next[bIdx] = merged;
-        copy[idx] = { ...copy[idx], breakdown: next, breakdownSavedAt: null, breakdownError: undefined };
-        return copy;
-      });
-    },
-    [],
-  );
-
-  const addBreakdown = useCallback((idx: number) => {
+  const updateField = useCallback((idx: number, patch: Partial<EntryDraft>) => {
     setRows((prev) => {
       const copy = [...prev];
-      const row = copy[idx];
-      // Default new row to the worker's primary dept (with category if production)
-      // so a single-dept worker rarely has to touch the dropdown.
-      const primary = workers.find((w) => w.id === row.employeeId)?.departmentCode || "";
-      const isProd = PRODUCTION_DEPT_CODES.has(primary);
-      copy[idx] = {
-        ...row,
-        breakdown: [
-          ...row.breakdown,
-          { departmentCode: primary, category: isProd ? "SOFA" : "", hours: 0, notes: "" },
-        ],
-        breakdownSavedAt: null,
-      };
-      return copy;
-    });
-  }, [workers]);
-
-  const removeBreakdown = useCallback((idx: number, bIdx: number) => {
-    setRows((prev) => {
-      const copy = [...prev];
-      const next = copy[idx].breakdown.filter((_, i) => i !== bIdx);
-      copy[idx] = { ...copy[idx], breakdown: next, breakdownSavedAt: null };
+      const merged = { ...copy[idx], ...patch, saved: false, saveError: undefined };
+      // Switching to non-production dept clears category.
+      if (patch.departmentCode !== undefined && !PRODUCTION_DEPT_CODES.has(patch.departmentCode)) {
+        merged.category = "";
+      }
+      copy[idx] = merged;
       return copy;
     });
   }, []);
 
-  const saveBreakdown = useCallback(
-    async (idx: number) => {
-      const row = rows[idx];
-      if (!row?.existing) return;
-      patchRow(idx, { breakdownSaving: true, breakdownError: undefined });
-      try {
-        const res = await fetch("/api/working-hour-entries/bulk", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            attendanceId: row.existing.id,
-            entries: row.breakdown.map((b) => ({
-              departmentCode: b.departmentCode,
-              category: b.category,
-              hours: b.hours,
-              notes: b.notes,
-            })),
-          }),
-        });
-        const j = (await res.json()) as { success: boolean; data?: WorkingHourEntry[]; error?: string };
-        if (!res.ok || !j.success) throw new Error(j.error || `HTTP ${res.status}`);
-        const drafts: BreakdownDraft[] = (j.data ?? []).map((e) => ({
-          id: e.id,
-          departmentCode: e.departmentCode,
-          category: e.category,
-          hours: e.hours,
-          notes: e.notes,
-        }));
-        patchRow(idx, {
-          breakdown: drafts,
-          breakdownSaving: false,
-          breakdownSavedAt: Date.now(),
-          breakdownLoaded: true,
-        });
-      } catch (e) {
-        patchRow(idx, {
-          breakdownSaving: false,
-          breakdownError: e instanceof Error ? e.message : "Save failed",
-        });
-      }
-    },
-    [rows, patchRow],
-  );
+  const addRow = useCallback(() => {
+    setRows((prev) => [
+      ...prev,
+      {
+        workerId: "",
+        departmentCode: "",
+        category: "",
+        hours: 0,
+        notes: "",
+        saving: false,
+        saved: false,
+      },
+    ]);
+  }, []);
 
-  // Attendance writes used to swallow HTTP errors silently — a 500 on the
-  // clock-in POST would leave the row marked "saved" in the UI while the
-  // server never recorded it, then payroll would compute incorrect hours
-  // for that worker. Keep the row in an unsaved state + mark it failed
-  // when any step of the save fails so the operator knows to retry.
-  const postAttendanceOrThrow = async (body: Record<string, unknown>): Promise<void> => {
-    const res = await fetch("/api/attendance", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      let msg = `HTTP ${res.status}`;
-      try {
-        const j = (await res.json()) as { error?: string };
-        if (j?.error) msg = j.error;
-      } catch { /* ignore */ }
-      throw new Error(msg);
-    }
-  };
-
-  const saveRow = async (idx: number) => {
-    const row = rows[idx];
+  const duplicateRow = useCallback((idx: number) => {
     setRows((prev) => {
+      const src = prev[idx];
+      if (!src) return prev;
       const copy = [...prev];
-      copy[idx] = { ...copy[idx], saving: true };
+      // Insert a new draft right after the source row, pre-filled with the
+      // same worker — common case is "same person, different segment".
+      copy.splice(idx + 1, 0, {
+        workerId: src.workerId,
+        departmentCode: "",
+        category: "",
+        hours: 0,
+        notes: "",
+        saving: false,
+        saved: false,
+      });
       return copy;
     });
+  }, []);
 
+  const removeRow = useCallback(async (idx: number) => {
+    const row = rows[idx];
+    if (!row) return;
+    if (row.id) {
+      // Persisted — DELETE on server first; pop from local state on success.
+      try {
+        const res = await fetch(`/api/working-hour-entries/${row.id}`, { method: "DELETE" });
+        if (!res.ok) {
+          patchRow(idx, { saveError: `Delete failed: HTTP ${res.status}` });
+          return;
+        }
+      } catch (e) {
+        patchRow(idx, { saveError: e instanceof Error ? e.message : "Delete failed" });
+        return;
+      }
+    }
+    setRows((prev) => prev.filter((_, i) => i !== idx));
+  }, [rows, patchRow]);
+
+  const saveRow = useCallback(async (idx: number) => {
+    const row = rows[idx];
+    if (!row) return;
+    if (!row.workerId || !row.departmentCode) {
+      patchRow(idx, { saveError: "Employee and department are required" });
+      return;
+    }
+    if (PRODUCTION_DEPT_CODES.has(row.departmentCode) && !row.category) {
+      patchRow(idx, { saveError: "Production dept requires a category" });
+      return;
+    }
+    patchRow(idx, { saving: true, saveError: undefined });
     try {
-      if (row.clockIn) {
-        await postAttendanceOrThrow({
-          employeeId: row.employeeId,
-          action: "CLOCK_IN",
-          date: selectedDate,
-          time: row.clockIn,
-        });
-      }
-      if (row.clockOut && row.clockIn) {
-        await postAttendanceOrThrow({
-          employeeId: row.employeeId,
-          action: "CLOCK_OUT",
-          date: selectedDate,
-          time: row.clockOut,
-        });
-      }
-      setRows((prev) => {
-        const copy = [...prev];
-        copy[idx] = { ...copy[idx], saving: false, saved: true };
-        return copy;
+      const url = row.id
+        ? `/api/working-hour-entries/${row.id}`
+        : "/api/working-hour-entries";
+      const method = row.id ? "PUT" : "POST";
+      const body = row.id
+        ? { departmentCode: row.departmentCode, category: row.category, hours: row.hours, notes: row.notes }
+        : {
+            workerId: row.workerId,
+            date: selectedDate,
+            departmentCode: row.departmentCode,
+            category: row.category,
+            hours: row.hours,
+            notes: row.notes,
+          };
+      const res = await fetch(url, {
+        method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
       });
-      refreshAttendance(selectedDate);
+      const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry; error?: string };
+      if (!res.ok || !j.success || !j.data) {
+        throw new Error(j.error || `HTTP ${res.status}`);
+      }
+      patchRow(idx, {
+        id: j.data.id,
+        saving: false,
+        saved: true,
+      });
+      // Auto-create on POST may have created an attendance row; refresh
+      // the parent attendance list so any clock-in/out summary stays in sync.
+      if (!row.id) refreshAttendance(selectedDate);
     } catch (e) {
-      setRows((prev) => {
-        const copy = [...prev];
-        copy[idx] = {
-          ...copy[idx],
-          saving: false,
-          saveError: e instanceof Error ? e.message : "Save failed",
-        };
-        return copy;
+      patchRow(idx, {
+        saving: false,
+        saveError: e instanceof Error ? e.message : "Save failed",
       });
     }
-  };
+  }, [rows, selectedDate, patchRow, refreshAttendance]);
 
-  const bulkSave = async () => {
+  const saveAll = useCallback(async () => {
     setBulkSaving(true);
-    const unsaved = rows
-      .map((r, i) => ({ ...r, idx: i }))
-      .filter((r) => !r.saved && r.clockIn);
-    for (const row of unsaved) {
-      await saveRow(row.idx);
+    const indices = rows
+      .map((r, i) => ({ r, i }))
+      .filter((x) => !x.r.saved && x.r.workerId && x.r.departmentCode)
+      .map((x) => x.i);
+    for (const i of indices) {
+      // sequential; bulk parallel POSTs would race the auto-create
+      // attendance helper for the same (worker, date) pair.
+      await saveRow(i);
     }
     setBulkSaving(false);
-    refreshAttendance(selectedDate);
-  };
+  }, [rows, saveRow]);
+
+  // Per-worker totals on this date — surfaces over/under for the day at a
+  // glance so the supervisor can spot mis-attributed hours before saving.
+  const workerTotals = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of rows) {
+      if (!r.workerId) continue;
+      m.set(r.workerId, (m.get(r.workerId) ?? 0) + (Number(r.hours) || 0));
+    }
+    return m;
+  }, [rows]);
+
+  const dirtyCount = rows.filter((r) => !r.saved && r.workerId).length;
 
   return (
     <Card>
@@ -548,351 +407,168 @@ function WorkingHoursTab({
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5 text-[#6B5C32]" /> Daily Working Hours
           </CardTitle>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <Input
               type="date"
               value={selectedDate}
-              onChange={(e) => {
-                setSelectedDate(e.target.value);
-                refreshAttendance(e.target.value);
-              }}
+              onChange={(e) => setSelectedDate(e.target.value)}
               className="w-44"
             />
-            <Button variant="primary" onClick={bulkSave} disabled={bulkSaving}>
+            <Button variant="outline" onClick={addRow}>
+              <Plus className="h-4 w-4" /> Add Row
+            </Button>
+            <Button variant="primary" onClick={saveAll} disabled={bulkSaving || dirtyCount === 0}>
               <Save className="h-4 w-4" />
-              {bulkSaving ? "Saving..." : "Save All"}
+              {bulkSaving ? "Saving…" : dirtyCount > 0 ? `Save All (${dirtyCount})` : "Saved"}
             </Button>
           </div>
         </div>
       </CardHeader>
       <CardContent>
+        {/* Per-worker total chip strip — over 9h shows amber (OT zone). */}
+        {workerTotals.size > 0 && (
+          <div className="mb-3 flex flex-wrap gap-1.5">
+            {Array.from(workerTotals.entries()).map(([wid, total]) => {
+              const w = workers.find((x) => x.id === wid);
+              if (!w) return null;
+              const over = total > 9;
+              return (
+                <span
+                  key={wid}
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs ${
+                    over ? "bg-[#FAEFCB] text-[#9C6F1E]" : "bg-[#EEF3E4] text-[#4F7C3A]"
+                  }`}
+                  title={over ? `${total.toFixed(1)}h — OT (>9h)` : `${total.toFixed(1)}h`}
+                >
+                  <span className="font-medium">{w.name}</span>
+                  <span className="tabular-nums">{total.toFixed(1)}h</span>
+                </span>
+              );
+            })}
+          </div>
+        )}
         <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                <th className="h-12 w-8 px-2 text-left font-medium text-[#374151]" aria-label="expand"></th>
-                <th className="h-12 px-4 text-left font-medium text-[#374151]">
-                  Employee Name
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Department
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Product Type
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Clock In
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Clock Out
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Working Hrs
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Production
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  OT Hrs
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Status
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Notes
-                </th>
-                <th className="h-12 px-3 text-left font-medium text-[#374151]">
-                  Action
-                </th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151]">Employee</th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151] w-24">Hours</th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151]">Notes</th>
+                <th className="h-10 px-3 text-left font-medium text-[#374151] w-44">Action</th>
               </tr>
             </thead>
             <tbody>
-              {rows.map((row, idx) => {
-                const workMins =
-                  row.clockIn && row.clockOut
-                    ? calcWorkingMinutes(row.clockIn, row.clockOut)
-                    : 0;
-                const prodMins = Math.round(workMins * 0.85);
-                const standardMins = 9 * 60;
-                const otMins = Math.max(0, workMins - standardMins);
-                const breakdownTotalH = row.breakdown.reduce((s, b) => s + (Number(b.hours) || 0), 0);
-                const clockH = workMins / 60;
-                const gapH = clockH - breakdownTotalH;
-                const canBreakdown = !!row.existing;
-
-                return (
-                  <Fragment key={row.employeeId}>
-                  <tr
-                    className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
-                  >
-                    <td className="h-12 px-2 align-middle">
-                      <button
-                        type="button"
-                        onClick={() => toggleBreakdown(idx)}
-                        disabled={!canBreakdown}
-                        title={
-                          canBreakdown
-                            ? "Show / hide working hour breakdown"
-                            : "Save attendance (clock-in) before adding breakdown"
-                        }
-                        className="inline-flex items-center justify-center h-7 w-7 rounded hover:bg-[#E2DDD8] disabled:opacity-30 disabled:cursor-not-allowed"
-                      >
-                        {row.expanded ? (
-                          <ChevronDown className="h-4 w-4" />
-                        ) : (
-                          <ChevronRight className="h-4 w-4" />
-                        )}
-                      </button>
-                    </td>
-                    <td className="h-12 px-4 font-medium text-[#1F1D1B]">
-                      {row.employeeName}
-                    </td>
-                    <td className="h-12 px-3 text-[#4B5563]">
-                      {row.departmentName}
-                    </td>
-                    <td className="h-12 px-3">
-                      <select
-                        value={row.productType}
-                        onChange={(e) => updateRow(idx, "productType", e.target.value)}
-                        className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                      >
-                        <option value="">—</option>
-                        <option value="SOFA">Sofa</option>
-                        <option value="BEDFRAME">Bedframe</option>
-                      </select>
-                    </td>
-                    <td className="h-12 px-3">
-                      <Input
-                        type="time"
-                        value={row.clockIn}
-                        onChange={(e) =>
-                          updateRow(idx, "clockIn", e.target.value)
-                        }
-                        className="w-28 h-8 text-xs"
-                      />
-                    </td>
-                    <td className="h-12 px-3">
-                      <Input
-                        type="time"
-                        value={row.clockOut}
-                        onChange={(e) =>
-                          updateRow(idx, "clockOut", e.target.value)
-                        }
-                        className="w-28 h-8 text-xs"
-                      />
-                    </td>
-                    <td className="h-12 px-3 font-medium">
-                      {workMins > 0 ? formatHours(workMins) : "-"}
-                    </td>
-                    <td className="h-12 px-3 font-medium">
-                      {prodMins > 0 ? formatHours(prodMins) : "-"}
-                    </td>
-                    <td className="h-12 px-3">
-                      <span
-                        className={
-                          otMins > 0
-                            ? "font-medium text-[#6B5C32]"
-                            : "text-[#9CA3AF]"
-                        }
-                      >
-                        {otMins > 0 ? formatHours(otMins) : "-"}
-                      </span>
-                    </td>
-                    <td className="h-12 px-3">
-                      <select
-                        value={row.status}
-                        onChange={(e) =>
-                          updateRow(
-                            idx,
-                            "status",
-                            e.target.value
-                          )
-                        }
-                        className="h-8 rounded-md border border-[#E2DDD8] bg-white px-2 text-xs focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
-                      >
-                        {ATTENDANCE_STATUSES.map((s) => (
-                          <option key={s} value={s}>
-                            {s.replace(/_/g, " ")}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-                    <td className="h-12 px-3">
-                      <Input
-                        value={row.notes}
-                        onChange={(e) =>
-                          updateRow(idx, "notes", e.target.value)
-                        }
-                        placeholder="Notes..."
-                        className="w-28 h-8 text-xs"
-                      />
-                    </td>
-                    <td className="h-12 px-3">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => saveRow(idx)}
-                        disabled={row.saving}
-                        className={row.saved ? "border-[#C6DBA8] text-[#4F7C3A]" : ""}
-                      >
-                        {row.saving ? "..." : row.saved ? "Saved" : "Save"}
-                      </Button>
-                    </td>
-                  </tr>
-                  {row.expanded && (
-                    <tr className="bg-[#FAF7F1] border-b border-[#E2DDD8]">
-                      <td colSpan={12} className="p-4">
-                        <div className="rounded-md border border-[#E2DDD8] bg-white">
-                          <div className="flex items-center justify-between px-3 py-2 border-b border-[#E2DDD8] text-xs">
-                            <div className="font-medium text-[#374151]">
-                              Working Hour Breakdown — {row.employeeName}
-                            </div>
-                            <div className="flex items-center gap-3">
-                              <span className="text-[#6B7280]">
-                                Clock: <span className="font-medium text-[#1F1D1B]">{clockH > 0 ? `${clockH.toFixed(2)}h` : "—"}</span>
-                              </span>
-                              <span className="text-[#6B7280]">
-                                Breakdown: <span className="font-medium text-[#1F1D1B]">{breakdownTotalH.toFixed(2)}h</span>
-                              </span>
-                              <span
-                                className={
-                                  Math.abs(gapH) < 0.01
-                                    ? "text-[#4F7C3A] font-medium"
-                                    : gapH > 0
-                                      ? "text-[#9C6F1E] font-medium"
-                                      : "text-[#9A3A2D] font-medium"
-                                }
-                              >
-                                Gap: {gapH > 0 ? "+" : ""}{gapH.toFixed(2)}h
-                                {gapH > 0.25 && " (idle/unattributed)"}
-                                {gapH < -0.25 && " (over-attributed)"}
-                              </span>
-                            </div>
-                          </div>
-                          {row.breakdownLoading ? (
-                            <div className="px-3 py-4 text-xs text-[#9CA3AF]">Loading…</div>
-                          ) : (
-                            <table className="w-full text-xs">
-                              <thead>
-                                <tr className="bg-[#F0ECE9] text-[#374151]">
-                                  <th className="h-9 px-3 text-left font-medium">Department</th>
-                                  <th className="h-9 px-3 text-left font-medium">Category</th>
-                                  <th className="h-9 px-3 text-left font-medium w-24">Hours</th>
-                                  <th className="h-9 px-3 text-left font-medium">Notes</th>
-                                  <th className="h-9 px-3 w-12"></th>
-                                </tr>
-                              </thead>
-                              <tbody>
-                                {row.breakdown.map((b, bIdx) => {
-                                  const isProd = PRODUCTION_DEPT_CODES.has(b.departmentCode);
-                                  return (
-                                    <tr key={b.id ?? `new-${bIdx}`} className="border-t border-[#E2DDD8]">
-                                      <td className="px-3 py-1.5">
-                                        <select
-                                          value={b.departmentCode}
-                                          onChange={(e) => updateBreakdown(idx, bIdx, { departmentCode: e.target.value })}
-                                          className="h-7 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-                                        >
-                                          <option value="">—</option>
-                                          {ALL_DEPARTMENTS.map((d) => (
-                                            <option key={d.code} value={d.code}>{d.name}</option>
-                                          ))}
-                                        </select>
-                                      </td>
-                                      <td className="px-3 py-1.5">
-                                        <select
-                                          value={b.category}
-                                          onChange={(e) => updateBreakdown(idx, bIdx, { category: e.target.value as Category })}
-                                          disabled={!isProd}
-                                          className="h-7 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
-                                          title={isProd ? "Production category" : "Non-production dept — no category"}
-                                        >
-                                          <option value="">{isProd ? "—" : "n/a"}</option>
-                                          {CATEGORIES.map((cat) => (
-                                            <option key={cat} value={cat}>{cat[0] + cat.slice(1).toLowerCase()}</option>
-                                          ))}
-                                        </select>
-                                      </td>
-                                      <td className="px-3 py-1.5">
-                                        <Input
-                                          type="number"
-                                          min={0}
-                                          step={0.5}
-                                          value={b.hours}
-                                          onChange={(e) => updateBreakdown(idx, bIdx, { hours: Number(e.target.value) })}
-                                          className="h-7 w-20 text-xs"
-                                        />
-                                      </td>
-                                      <td className="px-3 py-1.5">
-                                        <Input
-                                          value={b.notes}
-                                          onChange={(e) => updateBreakdown(idx, bIdx, { notes: e.target.value })}
-                                          placeholder="e.g. PO-1234, helper for upholstery"
-                                          className="h-7 text-xs"
-                                        />
-                                      </td>
-                                      <td className="px-3 py-1.5 text-right">
-                                        <button
-                                          type="button"
-                                          onClick={() => removeBreakdown(idx, bIdx)}
-                                          className="inline-flex items-center justify-center h-6 w-6 rounded text-[#9A3A2D] hover:bg-[#F9E1DA]"
-                                          aria-label="Remove row"
-                                        >
-                                          <X className="h-3.5 w-3.5" />
-                                        </button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                                {row.breakdown.length === 0 && (
-                                  <tr>
-                                    <td colSpan={5} className="px-3 py-4 text-center text-[#9CA3AF]">
-                                      No breakdown rows yet. Click <span className="font-medium">+ Add segment</span> below.
-                                    </td>
-                                  </tr>
-                                )}
-                              </tbody>
-                            </table>
-                          )}
-                          <div className="flex items-center justify-between px-3 py-2 border-t border-[#E2DDD8]">
-                            <Button variant="outline" size="sm" onClick={() => addBreakdown(idx)}>
-                              <Plus className="h-3.5 w-3.5" /> Add segment
-                            </Button>
-                            <div className="flex items-center gap-2 text-xs">
-                              {row.breakdownError && (
-                                <span className="text-[#9A3A2D]">{row.breakdownError}</span>
-                              )}
-                              {row.breakdownSavedAt && !row.breakdownError && (
-                                <span className="text-[#4F7C3A]">Saved</span>
-                              )}
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                onClick={() => saveBreakdown(idx)}
-                                disabled={row.breakdownSaving}
-                              >
-                                <Save className="h-3.5 w-3.5" />
-                                {row.breakdownSaving ? "Saving…" : "Save Breakdown"}
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      </td>
-                    </tr>
-                  )}
-                  </Fragment>
-                );
-              })}
-              {rows.length === 0 && (
+              {loading && rows.length === 0 && (
+                <tr><td colSpan={6} className="h-20 text-center text-[#9CA3AF]">Loading…</td></tr>
+              )}
+              {!loading && rows.length === 0 && (
                 <tr>
-                  <td
-                    colSpan={12}
-                    className="h-24 text-center text-[#9CA3AF]"
-                  >
-                    No active workers found.
+                  <td colSpan={6} className="h-20 text-center text-[#9CA3AF]">
+                    No entries for {selectedDate}. Click <span className="font-medium">+ Add Row</span> to start.
                   </td>
                 </tr>
               )}
+              {rows.map((row, idx) => {
+                const isProd = PRODUCTION_DEPT_CODES.has(row.departmentCode);
+                return (
+                  <tr key={row.id ?? `new-${idx}`} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                    <td className="px-3 py-1.5">
+                      <select
+                        value={row.workerId}
+                        onChange={(e) => updateField(idx, { workerId: e.target.value })}
+                        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                      >
+                        <option value="">— select worker —</option>
+                        {workers
+                          .filter((w) => w.status === "ACTIVE")
+                          .map((w) => (
+                            <option key={w.id} value={w.id}>{w.name}</option>
+                          ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <select
+                        value={row.departmentCode}
+                        onChange={(e) => updateField(idx, { departmentCode: e.target.value })}
+                        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                      >
+                        <option value="">— select dept —</option>
+                        {ALL_DEPARTMENTS.map((d) => (
+                          <option key={d.code} value={d.code}>{d.name}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <select
+                        value={row.category}
+                        onChange={(e) => updateField(idx, { category: e.target.value as Category })}
+                        disabled={!isProd}
+                        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
+                        title={isProd ? "Production category" : "Non-production dept — no category"}
+                      >
+                        <option value="">{isProd ? "— select —" : "n/a"}</option>
+                        {CATEGORIES.map((cat) => (
+                          <option key={cat} value={cat}>{cat[0] + cat.slice(1).toLowerCase()}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <Input
+                        type="number"
+                        min={0}
+                        step={0.5}
+                        value={row.hours}
+                        onChange={(e) => updateField(idx, { hours: Number(e.target.value) })}
+                        className="h-8 w-20 text-xs"
+                      />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <Input
+                        value={row.notes}
+                        onChange={(e) => updateField(idx, { notes: e.target.value })}
+                        placeholder="e.g. PO-1234"
+                        className="h-8 text-xs"
+                      />
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() => saveRow(idx)}
+                          disabled={row.saving}
+                          className={row.saved ? "border-[#C6DBA8] text-[#4F7C3A]" : ""}
+                        >
+                          {row.saving ? "…" : row.saved ? "Saved" : "Save"}
+                        </Button>
+                        <button
+                          type="button"
+                          onClick={() => duplicateRow(idx)}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded text-[#6B5C32] hover:bg-[#F0ECE9]"
+                          title="Duplicate (same worker, new segment)"
+                          aria-label="Duplicate row"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void removeRow(idx)}
+                          className="inline-flex items-center justify-center h-7 w-7 rounded text-[#9A3A2D] hover:bg-[#F9E1DA]"
+                          title={row.id ? "Delete entry" : "Discard draft"}
+                          aria-label="Remove row"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                      {row.saveError && (
+                        <div className="mt-1 text-xs text-[#9A3A2D]">{row.saveError}</div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>

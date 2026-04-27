@@ -2624,30 +2624,32 @@ export default function ProductionPage({
           {/* TEMP (2026-04-26 QA): one-click reset of every JC's
               completedDate + status back to WAITING so the user can
               re-test inventory in/out cascades from a clean slate.
-              Inventory wip_items rows are intentionally NOT cleared —
-              they represent stock physically built before the reset.
+              Also wipes cascade-written wip_items rows (positive
+              producer-adds + negative skipped-upstream stubs) so the
+              WIP page returns to a true zero state.
               Remove this button + the /api/admin/clear-all-completion-dates
               endpoint once the QA pass wraps. */}
           <Button
             variant="outline"
             className="border-rose-300 text-rose-700 hover:bg-rose-50"
             onClick={async () => {
-              if (!confirm("DEV: Clear EVERY job-card completion date across the whole system?\n\nThis resets every JC to WAITING and every PO to PENDING. wip_items inventory is left intact. Use only for testing inventory in/out cascades.")) return;
+              if (!confirm("DEV: Clear EVERY job-card completion date AND wipe cascade-written wip_items?\n\nThis resets every JC to WAITING, every PO to PENDING, AND deletes every wip_items row written by the cascade (positive producer-add rows + negative skipped-upstream stubs). Manually-seeded zero-stock rows are preserved. Use only for testing inventory in/out cascades.")) return;
               try {
                 const res = await fetch(
                   "/api/admin/clear-all-completion-dates?confirm=YES_CLEAR_ALL_COMPLETION_DATES",
                   { method: "POST" },
                 );
                 const j = (await res.json().catch(() => null)) as
-                  | { success?: boolean; error?: string; clearedJCs?: number; resetPOs?: number }
+                  | { success?: boolean; error?: string; clearedJCs?: number; resetPOs?: number; clearedWipItems?: number }
                   | null;
                 if (!res.ok || !j?.success) {
                   toast.error(j?.error || `Reset failed (HTTP ${res.status})`);
                   return;
                 }
-                toast.success(`Cleared ${j.clearedJCs ?? 0} JCs · reset ${j.resetPOs ?? 0} POs.`);
+                toast.success(`Cleared ${j.clearedJCs ?? 0} JCs · reset ${j.resetPOs ?? 0} POs · cleared ${j.clearedWipItems ?? 0} wip_items.`);
                 invalidateCachePrefix("/api/production-orders");
                 invalidateCachePrefix("/api/inventory");
+                invalidateCachePrefix("/api/inventory/wip");
                 fetchOrders();
               } catch (e) {
                 toast.error(e instanceof Error ? e.message : "Reset failed");

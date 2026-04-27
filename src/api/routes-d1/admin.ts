@@ -704,11 +704,14 @@ app.post("/rebuild-pos/:soId", async (c) => {
 // to PENDING with progress 0 + nulled completedDate so the parent rollup
 // matches its newly-cleared JCs.
 //
-// Inventory: NOT touched here. wip_items rows stay intact (they're upserted
-// by completion cascades; clearing JCs doesn't physically un-build the WIP
-// stock). The QA loop wants to test fresh JC completions writing to wip_items
-// from a clean slate, so leaving the prior wip_items rows is correct — they
-// represent what was already produced before the reset.
+// Inventory: ALSO wipes cascade-written wip_items rows. Any wip_items row with
+// a non-zero stockQty gets zeroed out (these are positive producer-add rows or
+// negative skipped-upstream stub rows written by the JC completion cascade in
+// production-orders.ts). Cascade-created stub rows (id LIKE 'wip-dyn-%') with
+// stockQty=0 are deleted outright since they're pure cascade artefacts.
+// Manually-seeded zero-stock rows (id NOT LIKE 'wip-dyn-%') are preserved.
+// Without this, prior cascade writes would be orphaned and the WIP page would
+// still show stale (often negative) stock after a "fresh" reset.
 //
 // Guarded by ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to prevent accidents.
 // Should be removed once the QA pass is done.
@@ -728,7 +731,7 @@ app.post("/clear-all-completion-dates", async (c) => {
   }
 
   const now = new Date().toISOString();
-  const [jcRes, poRes] = await db.batch([
+  const [jcRes, poRes, wipZeroRes, wipDeleteRes] = await db.batch([
     db.prepare(
       `UPDATE job_cards
           SET status = 'WAITING',
@@ -748,13 +751,18 @@ app.post("/clear-all-completion-dates", async (c) => {
           WHERE status IN ('IN_PROGRESS','COMPLETED')`,
       )
       .bind(now),
+    db.prepare(`UPDATE wip_items SET stockQty = 0 WHERE stockQty != 0`),
+    db.prepare(`DELETE FROM wip_items WHERE id LIKE 'wip-dyn-%'`),
   ]);
+
+  const clearedWipItems =
+    (wipZeroRes.meta?.changes ?? 0) + (wipDeleteRes.meta?.changes ?? 0);
 
   return c.json({
     success: true,
     clearedJCs: jcRes.meta?.changes ?? 0,
     resetPOs: poRes.meta?.changes ?? 0,
-    note: "wip_items rows left intact — they represent stock physically produced before the reset.",
+    clearedWipItems,
   });
 });
 

@@ -867,8 +867,13 @@ app.post("/", async (c) => {
     });
 
     return c.json({ success: true, data: created }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/delivery-orders] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json({ success: false, error: msg || "Internal error creating delivery order" }, 500);
   }
 });
 
@@ -1774,8 +1779,13 @@ app.put("/:id", async (c) => {
     }
 
     return c.json({ success: true, data: updated });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[PUT /api/delivery-orders/:id] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json({ success: false, error: msg || "Internal error updating delivery order" }, 500);
   }
 });
 

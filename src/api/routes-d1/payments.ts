@@ -380,8 +380,13 @@ app.post("/", async (c) => {
       after: paymentRow,
     });
     return c.json({ success: true, data: paymentRow }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/payments] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json({ success: false, error: msg || "Internal error creating payment" }, 500);
   }
 });
 
@@ -507,8 +512,13 @@ app.put("/:id", async (c) => {
       success: true,
       data: updated ? rowToPayment(updated) : null,
     });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[PUT /api/payments/:id] failed:", msg, err);
+    if (err instanceof SyntaxError) {
+      return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
+    }
+    return c.json({ success: false, error: msg || "Internal error updating payment" }, 500);
   }
 });
 

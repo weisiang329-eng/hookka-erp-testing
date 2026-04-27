@@ -127,6 +127,7 @@ type FGItem = Product & { stockQty: number; reservedQty: number };
 // production order. Typed loosely so the live API payload (which matches
 // the shape but isn't typed by mock-data anymore) fits without churn.
 type ProductionOrderLike = {
+  id: string;
   poNo: string;
   productId: string;
   productCode: string;

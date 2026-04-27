@@ -27,3 +27,20 @@ DATABASE_URL=postgres://... node scripts/check-schema-applied.mjs --dry-run
 Applies every migration in `migrations-postgres/` against `DATABASE_URL`.
 Drops & recreates `public` schema - pass `--reset` to confirm against a
 populated DB.
+
+## apply-missing-migrations-2026-04-27.sql
+
+One-shot catch-up bundle for the 9 tables the schema-diff agent (commit
+`bfb7c2c`) flagged as declared in `migrations-postgres/` but missing from
+live Supabase Postgres: `audit_events`, `file_assets`, `ledger_journal_entries`,
+`mdm_review_queue`, `oauth_identities`, `permissions`, `role_permissions`,
+`roles`, `worker_sessions`.
+
+Concatenates migrations 0045 / 0046 / 0048 / 0051 / 0052 / 0053 / 0055 with
+`-- === <filename> ===` split markers. Every `CREATE TABLE` / `CREATE INDEX`
+already uses `IF NOT EXISTS` and every `INSERT` uses `ON CONFLICT DO NOTHING`,
+so the file is idempotent and safe to re-run.
+
+Apply by pasting into the Supabase SQL Editor (Project → SQL Editor → New
+query) and clicking Run. If a single block errors, copy from the preceding
+`-- === ... ===` marker to the next one and re-run that slice in isolation.

@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
-  Search, Archive, Upload,
+  Search, Archive, Upload, Trash2,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 // NOTE: mock arrays were previously imported here and used as the page data
@@ -1461,6 +1461,10 @@ export default function InventoryPage() {
   // Edit RM dialog state
   const [editRM, setEditRM] = useState<RawMaterial | null>(null);
   const [editRMForm, setEditRMForm] = useState({ description: "", baseUOM: "", itemGroup: "", balanceQty: 0 });
+  // Delete-in-flight flag so the dialog footer can disable both buttons while
+  // DELETE /api/raw-materials/:id is in transit. Mirrors the rmSaving / busy
+  // pattern used elsewhere (employees.tsx Manage Departments, Add RM dialog).
+  const [deletingRM, setDeletingRM] = useState(false);
   // RM source-batch drilldown (FIFO order). Each batch has the originating
   // purchase order so operators can trace which batch / PO supplied this
   // material — required for FIFO costing + supplier traceability.
@@ -2514,12 +2518,58 @@ export default function InventoryPage() {
                 )}
               </div>
             </div>
-            <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setEditRM(null)}>Cancel</Button>
-              <Button variant="primary" size="sm" onClick={() => {
-                toast.success("Saved: " + editRM.itemCode);
-                setEditRM(null);
-              }}>Save</Button>
+            <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between gap-2">
+              {/* Delete sits on the LEFT (secondary, destructive) so it
+                  reads as a separate flow from the Save button. Matches
+                  the "danger-on-the-far-side" placement used in the
+                  Edit Department dialog (employees.tsx :2367 remove()). */}
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={deletingRM}
+                onClick={async () => {
+                  if (!confirm(`Delete raw material "${editRM.itemCode}" (${editRM.description})?\n\nThis cannot be undone.`)) return;
+                  setDeletingRM(true);
+                  try {
+                    const res = await fetch(`/api/raw-materials/${encodeURIComponent(editRM.id)}`, { method: "DELETE" });
+                    const j = (await res.json().catch(() => null)) as { success?: boolean; error?: string } | null;
+                    if (res.status === 409) {
+                      // FK / fabric-still-referenced guard. Surface the
+                      // backend message verbatim so ops know exactly which
+                      // SO line is blocking the delete.
+                      toast.error(j?.error || `Cannot delete ${editRM.itemCode}: still in use`);
+                      return;
+                    }
+                    if (!res.ok || !j?.success) {
+                      toast.error(j?.error || `Delete failed (HTTP ${res.status})`);
+                      return;
+                    }
+                    toast.success(`Deleted ${editRM.itemCode}`);
+                    // Optimistic local removal + cache invalidation so other
+                    // pages (BOM, Fabrics, Stock Value) refresh on next mount.
+                    const deletedId = editRM.id;
+                    setLiveRawMaterials((prev) => prev.filter((r) => r.id !== deletedId));
+                    invalidateCachePrefix("/api/raw-materials");
+                    invalidateCachePrefix("/api/inventory");
+                    invalidateCachePrefix("/api/fabric-tracking");
+                    invalidateCachePrefix("/api/fabrics");
+                    setEditRM(null);
+                  } catch (err) {
+                    toast.error(err instanceof Error ? err.message : "Delete failed");
+                  } finally {
+                    setDeletingRM(false);
+                  }
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" /> {deletingRM ? "Deleting..." : "Delete"}
+              </Button>
+              <div className="flex items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => setEditRM(null)} disabled={deletingRM}>Cancel</Button>
+                <Button variant="primary" size="sm" disabled={deletingRM} onClick={() => {
+                  toast.success("Saved: " + editRM.itemCode);
+                  setEditRM(null);
+                }}>Save</Button>
+              </div>
             </div>
           </div>
         </div>

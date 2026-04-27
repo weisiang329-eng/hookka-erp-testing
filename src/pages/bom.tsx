@@ -5112,10 +5112,14 @@ function DeptPivotCategoryDialog({
   const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
   const [rows, setRows] = useState<DeptPivotRow[]>([]);
   const [search, setSearch] = useState("");
+  const [modelFilter, setModelFilter] = useState<string>("");
+  const [branchFilter, setBranchFilter] = useState<string>("");
   const [saving, setSaving] = useState(false);
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
   // upstream template/products list changes (e.g. after a save).
+  // Reset MODEL & BRANCH dropdowns to "All" when dept changes, since the
+  // available options are scoped to the new dept's row set.
   /* eslint-disable react-hooks/set-state-in-effect -- rebuild rows when inputs change */
   useEffect(() => {
     if (!open) return;
@@ -5125,6 +5129,8 @@ function DeptPivotCategoryDialog({
     const activeOnly = templates.filter((t) => (t.versionStatus ?? "ACTIVE") === "ACTIVE");
     setRows(buildDeptPivotRows(activeOnly, deptCode, products));
     setSearch("");
+    setModelFilter("");
+    setBranchFilter("");
   }, [open, deptCode, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -5135,17 +5141,36 @@ function DeptPivotCategoryDialog({
     [rows],
   );
 
+  // Unique MODEL options, scoped to the current dept-filtered row set.
+  const modelOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) set.add(r.productCode);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
+
+  // Unique BRANCH/CODE options, scoped to the current dept-filtered row set.
+  const branchOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) set.add(r.branchLabel);
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [rows]);
+
   const filteredRows = useMemo(() => {
-    if (!search.trim()) return rows;
-    const q = search.toLowerCase();
-    return rows.filter(
-      (r) =>
-        r.productCode.toLowerCase().includes(q) ||
-        r.baseModel.toLowerCase().includes(q) ||
-        r.branchLabel.toLowerCase().includes(q) ||
-        r.branchAncestry.toLowerCase().includes(q),
-    );
-  }, [rows, search]);
+    const q = search.trim().toLowerCase();
+    return rows.filter((r) => {
+      if (modelFilter && r.productCode !== modelFilter) return false;
+      if (branchFilter && r.branchLabel !== branchFilter) return false;
+      if (q) {
+        const hit =
+          r.productCode.toLowerCase().includes(q) ||
+          r.baseModel.toLowerCase().includes(q) ||
+          r.branchLabel.toLowerCase().includes(q) ||
+          r.branchAncestry.toLowerCase().includes(q);
+        if (!hit) return false;
+      }
+      return true;
+    });
+  }, [rows, search, modelFilter, branchFilter]);
 
   function handleCategoryChange(rowKey: string, newCat: string) {
     setRows((prev) =>
@@ -5266,7 +5291,7 @@ function DeptPivotCategoryDialog({
 
         {/* Body */}
         <div className="px-6 py-4 overflow-y-auto flex-1 space-y-3">
-          <div className="flex gap-3 items-end">
+          <div className="flex gap-3 items-end flex-wrap">
             <div className="w-48">
               <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
               <select
@@ -5279,7 +5304,7 @@ function DeptPivotCategoryDialog({
                 ))}
               </select>
             </div>
-            <div className="flex-1">
+            <div className="flex-1 min-w-[200px]">
               <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
               <input
                 type="text"
@@ -5288,6 +5313,32 @@ function DeptPivotCategoryDialog({
                 onChange={(e) => setSearch(e.target.value)}
                 className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
               />
+            </div>
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Model</label>
+              <select
+                value={modelFilter}
+                onChange={(e) => setModelFilter(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              >
+                <option value="">All Models</option>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            </div>
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Branch / Code</label>
+              <select
+                value={branchFilter}
+                onChange={(e) => setBranchFilter(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              >
+                <option value="">All Branches</option>
+                {branchOptions.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
             </div>
             <div className="text-xs text-gray-500 pb-2">
               {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty

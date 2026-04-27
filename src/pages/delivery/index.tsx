@@ -2785,21 +2785,59 @@ export default function DeliveryPage() {
                     );
                   })()}
 
-                  {/* 3PL Info */}
+                  {/* 3PL — split into three sections (3PL refactor 2026-04-27).
+                      Provider = the company + dispatcher contact person.
+                      Vehicle  = the picked lorry (plate + type) — pricing
+                                 follows the truck, not the company.
+                      Driver   = the actual person on the trip + their phone.
+                      All three are independent and any may be blank for
+                      DOs created before a pick was made. Provider name
+                      lookup falls back to the legacy driverName field for
+                      pre-refactor rows where no separate person was
+                      captured. */}
                   <div className="border-t border-[#E2DDD8] pt-3">
-                    <p className="text-xs text-[#6B7280] font-medium mb-2">3PL Info</p>
-                    <div className="grid grid-cols-3 gap-4 text-sm">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">Provider</p>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Provider</p>
-                        <p className="font-medium">{detailDO.driverName || "-"}</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
+                        <p className="font-medium">
+                          {(() => {
+                            const p = providers.find((pr) => pr.id === detailDO.driverId);
+                            return p?.name || detailDO.driverName || "-";
+                          })()}
+                        </p>
                       </div>
                       <div>
                         <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
                         <p className="font-medium">{detailDO.driverContactPerson || "-"}</p>
                       </div>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">Vehicle</p>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Vehicle No.</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Plate No.</p>
                         <p className="font-medium doc-number">{detailDO.vehicleNo || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Type</p>
+                        <p className="font-medium">{detailDO.vehicleType || "-"}</p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border-t border-[#E2DDD8] pt-3">
+                    <p className="text-xs text-[#6B7280] font-medium mb-2">Driver</p>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
+                        <p className="font-medium">{detailDO.driverName || "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Phone</p>
+                        <p className="font-medium doc-number">{detailDO.driverPhone || "-"}</p>
                       </div>
                     </div>
                   </div>

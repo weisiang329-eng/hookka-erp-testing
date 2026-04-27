@@ -352,6 +352,7 @@
   "isGroupCompany": "is_group_company",
   "isMainSupplier": "is_main_supplier",
   "isParent": "is_parent",
+  "isProduction": "is_production",
   "isRead": "is_read",
   "isReconciled": "is_reconciled",
   "issuedAt": "issued_at",

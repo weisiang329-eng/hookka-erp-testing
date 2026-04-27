@@ -107,6 +107,7 @@ emit(
     sequence: d.sequence,
     color: d.color,
     workingHoursPerDay: d.workingHoursPerDay,
+    isProduction: d.isProduction,
   })),
 );
 

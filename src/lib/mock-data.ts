@@ -33,23 +33,29 @@ export function generateId(): string {
   return `id-${Date.now()}-${(_idCounter++).toString(36)}`;
 }
 
-// --- Departments — 8 production + 4 non-production (per Working Hours revamp) ---
+// --- Departments — 8 production + 4 non-production + R&D (per Working Hours revamp) ---
 //   1-8   production (carry SOFA / BEDFRAME / ACCESSORY category in working_hour_entries)
 //   9-12  non-production (no category): WAREHOUSING (借工), REPAIR (修货),
 //         MAINTENANCE (维护), PRODUCTION_SHORTFALL (闲置)
+//   13    R&D — non-production
+//
+// `isProduction` replaces the previously hardcoded PRODUCTION_DEPT_CODES set
+// in the frontend so new depts added via the admin UI carry the right
+// SOFA/BEDFRAME/ACCESSORY-category semantics without a code change.
 export const departments: Department[] = [
-  { id: "dept-1", code: "FAB_CUT", name: "Fabric Cutting", shortName: "Fab Cut", sequence: 1, color: "#3B82F6", workingHoursPerDay: 9 },
-  { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing", shortName: "Fab Sew", sequence: 2, color: "#6366F1", workingHoursPerDay: 9 },
-  { id: "dept-3", code: "WOOD_CUT", name: "Wood Cutting", shortName: "Wood Cut", sequence: 3, color: "#F59E0B", workingHoursPerDay: 9 },
-  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam", sequence: 4, color: "#8B5CF6", workingHoursPerDay: 9 },
-  { id: "dept-5", code: "FRAMING", name: "Framing", shortName: "Framing", sequence: 5, color: "#F97316", workingHoursPerDay: 9 },
-  { id: "dept-6", code: "WEBBING", name: "Webbing", shortName: "Webbing", sequence: 6, color: "#10B981", workingHoursPerDay: 9 },
-  { id: "dept-7", code: "UPHOLSTERY", name: "Upholstery", shortName: "Upholstery", sequence: 7, color: "#F43F5E", workingHoursPerDay: 9 },
-  { id: "dept-8", code: "PACKING", name: "Packing", shortName: "Packing", sequence: 8, color: "#06B6D4", workingHoursPerDay: 9 },
-  { id: "dept-9", code: "WAREHOUSING", name: "Warehousing", shortName: "Warehouse", sequence: 9, color: "#14B8A6", workingHoursPerDay: 9 },
-  { id: "dept-10", code: "REPAIR", name: "Repair", shortName: "Repair", sequence: 10, color: "#EAB308", workingHoursPerDay: 9 },
-  { id: "dept-11", code: "MAINTENANCE", name: "Maintenance", shortName: "Maint", sequence: 11, color: "#64748B", workingHoursPerDay: 9 },
-  { id: "dept-12", code: "PRODUCTION_SHORTFALL", name: "Production Shortfall", shortName: "Shortfall", sequence: 12, color: "#DC2626", workingHoursPerDay: 9 },
+  { id: "dept-1", code: "FAB_CUT", name: "Fabric Cutting", shortName: "Fab Cut", sequence: 1, color: "#3B82F6", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-2", code: "FAB_SEW", name: "Fabric Sewing", shortName: "Fab Sew", sequence: 2, color: "#6366F1", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-3", code: "WOOD_CUT", name: "Wood Cutting", shortName: "Wood Cut", sequence: 3, color: "#F59E0B", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-4", code: "FOAM", name: "Foam Bonding", shortName: "Foam", sequence: 4, color: "#8B5CF6", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-5", code: "FRAMING", name: "Framing", shortName: "Framing", sequence: 5, color: "#F97316", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-6", code: "WEBBING", name: "Webbing", shortName: "Webbing", sequence: 6, color: "#10B981", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-7", code: "UPHOLSTERY", name: "Upholstery", shortName: "Upholstery", sequence: 7, color: "#F43F5E", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-8", code: "PACKING", name: "Packing", shortName: "Packing", sequence: 8, color: "#06B6D4", workingHoursPerDay: 9, isProduction: true },
+  { id: "dept-9", code: "WAREHOUSING", name: "Warehousing", shortName: "Warehouse", sequence: 9, color: "#14B8A6", workingHoursPerDay: 9, isProduction: false },
+  { id: "dept-10", code: "REPAIR", name: "Repair", shortName: "Repair", sequence: 10, color: "#EAB308", workingHoursPerDay: 9, isProduction: false },
+  { id: "dept-11", code: "MAINTENANCE", name: "Maintenance", shortName: "Maint", sequence: 11, color: "#64748B", workingHoursPerDay: 9, isProduction: false },
+  { id: "dept-12", code: "PRODUCTION_SHORTFALL", name: "Production Shortfall", shortName: "Shortfall", sequence: 12, color: "#DC2626", workingHoursPerDay: 9, isProduction: false },
+  { id: "dept-13", code: "R_AND_D", name: "R&D", shortName: "R&D", sequence: 13, color: "#0EA5E9", workingHoursPerDay: 9, isProduction: false },
 ];
 
 // --- Customers ---

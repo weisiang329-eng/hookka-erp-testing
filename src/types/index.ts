@@ -29,6 +29,7 @@ export type Department = {
   sequence: number;
   color: string;
   workingHoursPerDay: number;
+  isProduction: boolean;
 };
 
 // --- Customers ---

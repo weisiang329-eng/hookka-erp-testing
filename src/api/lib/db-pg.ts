@@ -69,11 +69,18 @@ const columnFrom = (col: string): string =>
  *
  * Hyperdrive-backed connections: DO NOT set `ssl` — Hyperdrive terminates
  * TLS origin-side and exposes an internal binding; the driver must not
- * negotiate TLS itself.  Keep `prepare: true` (default) so Hyperdrive's
- * query cache works.
+ * negotiate TLS itself.  MUST set `prepare: false` — Hyperdrive proxies
+ * to Supabase's Supavisor on port 6543 (transaction-mode pooler) which
+ * does NOT support prepared statements (Bug 2026-04-27 — every DB query
+ * was returning 500 with text-plain "Internal Server Error" because the
+ * Parse/Bind protocol the driver was sending got rejected). The earlier
+ * "Keep prepare:true so Hyperdrive's query cache works" comment was
+ * wrong: Hyperdrive's cache doesn't depend on the driver-side prepare
+ * flag, it caches simple queries at the proxy.
  *
  * Local dev without Hyperdrive (direct Supavisor pooler): ssl required,
- * prepare off (transaction pooler can't keep prepared-statement state).
+ * prepare off (same reason — transaction pooler can't keep
+ * prepared-statement state).
  */
 export function getSql(databaseUrl: string): Sql {
   const isHyperdrive = /hyperdrive\.local/i.test(databaseUrl)
@@ -84,6 +91,7 @@ export function getSql(databaseUrl: string): Sql {
         // different request" when postgres.js keeps pool sockets alive past
         // the request boundary.
         max: 1,
+        prepare: false,
         fetch_types: false,
         idle_timeout: 0,
         types: { bigint: bigintAsNumber },

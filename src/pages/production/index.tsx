@@ -714,7 +714,20 @@ export default function ProductionPage({
   // sub-tabs. URL-synced so a refresh / nav-and-back / share-link all
   // keep the user's exact view. The dept-tab itself is already URL'd via
   // the route (/production/<code>); these are the dropdowns alongside.
+  // Sprint 5 F1: debounce the search query before it hits the URL. Direct
+  // useUrlState binding pushed history.replace + a full filter useMemo on
+  // every keystroke; on a 1k-PO dataset that re-runs through the picker /
+  // baseRows pipeline four times per character. The local input state
+  // updates instantly so the field stays responsive; the URL + filter
+  // run lags by 200ms, which is below human perception for "did the
+  // results filter".
   const [fltSearch, setFltSearch] = useUrlState<string>("q", "");
+  const [fltSearchInput, setFltSearchInput] = useState(fltSearch);
+  useEffect(() => {
+    // eslint-disable-next-line no-restricted-syntax -- debounce timer with cancellation; useTimeout doesn't compose with the per-effect cleanup pattern here
+    const t = setTimeout(() => setFltSearch(fltSearchInput), 200);
+    return () => clearTimeout(t);
+  }, [fltSearchInput, setFltSearch]);
   const [fltState, setFltState] = useUrlState<string>("state", "");
   const [fltCustomer, setFltCustomer] = useUrlState<string>("customer", "");
   const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
@@ -1040,31 +1053,52 @@ export default function ProductionPage({
   const overallTotal = deptFractions.reduce((s, d) => s + d.total, 0);
   const overallDone  = deptFractions.reduce((s, d) => s + d.done, 0);
 
+  // Sprint 5 F2: pre-compute the lowercased haystack string for every PO
+  // once when `orders` lands, then look it up by id during filter. The
+  // previous implementation rebuilt 9 toLowerCase()+join() per row per
+  // keystroke — at 1k POs and a 5-char query that's 45k string ops on the
+  // hot path. Now: 9k once at load, O(1) lookup per filter pass.
+  const haystackByPo = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const o of orders) {
+      m.set(o.id, [
+        o.poNo, o.companySOId, o.customerPOId, o.customerReference,
+        o.customerName, o.productCode, o.productName, o.fabricCode,
+        o.sizeLabel,
+      ].map((v) => (v || "").toLowerCase()).join(" "));
+    }
+    return m;
+  }, [orders]);
+
+  // Sprint 5 F3: pre-compute the set of WIP item-type flags present on
+  // each PO's job cards. Filter checks become Set.has() instead of
+  // jcs.some(j => predicate(j.wipType.toUpperCase())) per row per render.
+  const itemTypesByPo = useMemo(() => {
+    const m = new Map<string, Set<string>>();
+    for (const o of orders) {
+      const flags = new Set<string>();
+      for (const j of o.jobCards ?? []) {
+        const t = String(j.wipType || "").toUpperCase();
+        if (t === "HEADBOARD" || t === "HB") flags.add("HB");
+        if (t === "DIVAN") flags.add("DIVAN");
+        if (t.endsWith("BASE")) flags.add("BASE");
+        if (t.endsWith("CUSHION")) flags.add("CUSHION");
+        if (t.endsWith("ARMREST")) flags.add("ARMREST");
+        if (t.endsWith("HEADREST")) flags.add("HEADREST");
+      }
+      m.set(o.id, flags);
+    }
+    return m;
+  }, [orders]);
+
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
   // a non-empty cell in that dept).
   const filteredOrders = useMemo(() => {
     const q = fltSearch.trim().toLowerCase();
-    // Item-type substring map: the wipType field stores canonical names
-    // (HEADBOARD / DIVAN / SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST /
-    // SOFA_HEADREST). The user-facing dropdown uses short labels — we
-    // map each label to a predicate so the match still works even when
-    // the underlying value is e.g. "SOFA_BASE".
-    const itemTypeMatch: Record<string, (s: string) => boolean> = {
-      HB: (s) => s === "HEADBOARD" || s === "HB",
-      DIVAN: (s) => s === "DIVAN",
-      BASE: (s) => s.endsWith("BASE"),
-      CUSHION: (s) => s.endsWith("CUSHION"),
-      ARMREST: (s) => s.endsWith("ARMREST"),
-      HEADREST: (s) => s.endsWith("HEADREST"),
-    };
     return orders.filter((o) => {
       if (q) {
-        const hay = [
-          o.poNo, o.companySOId, o.customerPOId, o.customerReference,
-          o.customerName, o.productCode, o.productName, o.fabricCode,
-          o.sizeLabel,
-        ].map((v) => (v || "").toLowerCase()).join(" ");
+        const hay = haystackByPo.get(o.id) || "";
         if (!hay.includes(q)) return false;
       }
       if (fltState && o.customerState !== fltState) return false;
@@ -1077,12 +1111,9 @@ export default function ProductionPage({
       // (legacy / partially-built) bypass this filter rather than getting
       // hidden, since we can't tell what they are.
       if (fltItemType) {
-        const m = itemTypeMatch[fltItemType];
+        const flags = itemTypesByPo.get(o.id);
         const jcs = o.jobCards ?? [];
-        if (m && jcs.length > 0) {
-          const ok = jcs.some((j) => m(String(j.wipType || "").toUpperCase()));
-          if (!ok) return false;
-        }
+        if (flags && jcs.length > 0 && !flags.has(fltItemType)) return false;
       }
       // Date range against the user-chosen axis. Falls back to targetEndDate
       // when customerDeliveryDate isn't on the payload (TODO near the state
@@ -1106,7 +1137,7 @@ export default function ProductionPage({
       return true;
     });
   }, [
-    orders,
+    orders, haystackByPo, itemTypesByPo,
     fltSearch, fltState, fltCustomer,
     fltDueFrom, fltDueTo, fltDateAxis,
     fltCategory, fltItemType, fltModel,
@@ -1357,28 +1388,68 @@ export default function ProductionPage({
   // Attaching _deptCode on the row (rather than filtering JCs upstream)
   // keeps the sched_FAB_CUT…sched_PACKING grid-column data intact for
   // every row — those columns are user-toggleable on any dept tab.
+  // Sprint 5 F4: pre-compute the picker index. Per (poId, deptCode, wipKey)
+  // store the latest-due JobCard; per (poId, deptCode, "*") store the
+  // fallback (any wipKey on that PO/dept). The previous implementation
+  // ran o.jobCards.filter twice + a sort INSIDE picker(code) for every
+  // (PO, JC) × every dept-column the grid renders — at 500 POs × 8 JCs ×
+  // 8 dept-columns that's 32k filter+sort passes per render. Now: 8 ×
+  // (jobCards × 2) per PO at index time, O(1) lookups during render.
+  type PickerByDept = Map<string, Map<string, JobCard>>;
+  const pickerIndex = useMemo(() => {
+    const idx = new Map<string, PickerByDept>();
+    for (const o of filteredOrders) {
+      const byDept: PickerByDept = new Map();
+      for (const j of o.jobCards) {
+        const code = j.departmentCode;
+        let m = byDept.get(code);
+        if (!m) {
+          m = new Map();
+          byDept.set(code, m);
+        }
+        const wipKey = j.wipKey || "";
+        // Latest-due wins (mirrors the previous picker's sort step).
+        const prevForKey = m.get(wipKey);
+        if (
+          !prevForKey ||
+          (j.dueDate || "").localeCompare(prevForKey.dueDate || "") > 0
+        ) {
+          m.set(wipKey, j);
+        }
+        // Track the fallback ("*") = latest-due across ALL wipKeys in
+        // this (PO, dept). Mirrors the picker's second pass when no
+        // wipKey-matched card exists.
+        const prevAny = m.get("*");
+        if (
+          !prevAny ||
+          (j.dueDate || "").localeCompare(prevAny.dueDate || "") > 0
+        ) {
+          m.set("*", j);
+        }
+      }
+      idx.set(o.id, byDept);
+    }
+    return idx;
+  }, [filteredOrders]);
+
   const baseRows = useMemo<Array<DeptRow & { _deptCode: string }>>(() => {
     const today = new Date().toISOString().slice(0, 10);
     const rows: Array<DeptRow & { _deptCode: string }> = [];
     let n = 1;
     for (const o of filteredOrders) {
+      const poDeptIndex = pickerIndex.get(o.id);
       for (const jc of o.jobCards) {
-        // For every department in the workflow, find the JobCard in the
-        // same wipKey branch (so Divan Fab Sew is scoped to the Divan side,
-        // not HB). Fall back to any card in that dept for this PO if the
-        // branch has none. This populates one DeptSched per department so
-        // the grid's Columns toggle can show/hide any dept's date column.
+        // F4: O(1) picker lookup against the pre-built (deptCode, wipKey)
+        // index. Falls back to the "*" entry when no wipKey-matched card
+        // exists, matching the original picker's two-pass behaviour.
         const picker = (code: string): JobCard | null => {
-          let cands = o.jobCards.filter(
-            (j) => j.departmentCode === code && jc.wipKey && j.wipKey === jc.wipKey,
-          );
-          if (cands.length === 0) {
-            cands = o.jobCards.filter((j) => j.departmentCode === code);
+          const byDept = poDeptIndex?.get(code);
+          if (!byDept) return null;
+          if (jc.wipKey) {
+            const exact = byDept.get(jc.wipKey);
+            if (exact) return exact;
           }
-          if (cands.length === 0) return null;
-          return cands.sort(
-            (a, b) => (b.dueDate || "").localeCompare(a.dueDate || ""),
-          )[0];
+          return byDept.get("*") || null;
         };
 
         // Pass the full PO JC list to buildSched — it filters siblings by
@@ -1543,9 +1614,10 @@ export default function ProductionPage({
     return rows;
     // buildSched is stable (defined in render) but references no state we
     // care about beyond `today`; excluding it keeps the memo from recomputing
-    // on every render. Intentionally not listed.
+    // on every render. Intentionally not listed. pickerIndex is recomputed
+    // when filteredOrders changes so listing both is fine.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filteredOrders]);
+  }, [filteredOrders, pickerIndex]);
 
   const deptRows = useMemo<DeptRow[]>(() => {
     if (activeTab === "ALL") return [];
@@ -3012,8 +3084,8 @@ export default function ProductionPage({
         <input
           type="text"
           placeholder="Search SO / customer / model / fabric…"
-          value={fltSearch}
-          onChange={(e) => setFltSearch(e.target.value)}
+          value={fltSearchInput}
+          onChange={(e) => setFltSearchInput(e.target.value)}
           className="flex-1 min-w-[240px] text-xs px-3 py-1.5 border border-[#E6E0D9] rounded focus:outline-none focus:border-[#6B5C32]"
         />
         <select
@@ -3135,7 +3207,8 @@ export default function ProductionPage({
           fltDateAxis !== "dueDate") && (
           <button
             onClick={() => {
-              setFltSearch(""); setFltState(""); setFltCustomer("");
+              setFltSearch(""); setFltSearchInput("");
+              setFltState(""); setFltCustomer("");
               setFltDueFrom(""); setFltDueTo("");
               setFltCategory(""); setFltItemType(""); setFltModel("");
               setFltDateAxis("dueDate");

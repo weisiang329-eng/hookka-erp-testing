@@ -37,6 +37,7 @@ import {
   parseL1Processes,
   type CreatedProductionOrder,
 } from "./_shared/production-builder";
+import { checkSalesOrderLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -1666,7 +1667,23 @@ app.put("/:id", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Order not found" }, 404);
     }
+    // Cascade lock — once any production order has reached COMPLETED, the
+    // SO's structural fields (items, quantities, prices, customer) become
+    // read-only because tangible output exists. Status transitions
+    // (CONFIRM, ON_HOLD, RESUME, CANCEL) bypass the lock — those are
+    // handled below this guard, BEFORE the items/header re-write block.
+    const lockMsg = await checkSalesOrderLocked(c.var.DB, id);
     const body = await c.req.json();
+    const isStatusOnly =
+      body.status &&
+      !body.items &&
+      !body.customerId &&
+      !body.companySODate &&
+      !body.customerDeliveryDate &&
+      !body.hookkaExpectedDD;
+    if (lockMsg && !isStatusOnly) {
+      return c.json(lockedResponse(lockMsg), 403);
+    }
     const now = new Date().toISOString();
 
     const statements: D1PreparedStatement[] = [];

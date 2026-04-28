@@ -22,6 +22,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 import { appendJournalEntries } from "../lib/journal-hash";
+import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -632,8 +633,23 @@ app.put("/:id", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Invoice not found" }, 404);
     }
-
+    // Cascade lock — once a payment is recorded (paidAmountSen > 0 or
+    // status='PAID'), the invoice is GL-posted and edits would orphan
+    // the accounting trail. Reversals must go through a credit note.
+    // Status transitions to CANCELLED still need to flow through, so the
+    // status-change branch below runs unconditionally; the lock only
+    // blocks field-level edits.
+    const lockMsg = await checkInvoiceLocked(c.var.DB, id);
     const body = await c.req.json();
+    const isStatusOnly =
+      body.status &&
+      !body.dueDate &&
+      !body.notes &&
+      !body.lineItems &&
+      !body.subtotalSen;
+    if (lockMsg && !isStatusOnly) {
+      return c.json(lockedResponse(lockMsg), 403);
+    }
     const now = new Date().toISOString();
 
     // --- validate status transition (same rules as mock-data) ---

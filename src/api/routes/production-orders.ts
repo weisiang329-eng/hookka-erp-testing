@@ -28,6 +28,7 @@ import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
+import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -1543,8 +1544,24 @@ async function applyPoUpdate(
   if (!existing) {
     return c.json({ success: false, error: "Production order not found" }, 404);
   }
-
+  // Cascade lock — once a Delivery Order (or Consignment Note) references
+  // the parent SO/CO, the PO's identity (quantity, productCode, dueDate)
+  // is committed downstream and edits would corrupt the shipment trail.
+  // Job-card status flips and per-PIC scans bypass the lock — those are
+  // operational-flow events, not PO identity edits. Identity edits go
+  // through body.quantity / body.productCode / body.targetEndDate / body.poNo.
   const body = await c.req.json();
+  const isIdentityEdit =
+    body.quantity != null ||
+    body.productCode != null ||
+    body.targetEndDate != null ||
+    body.poNo != null;
+  if (isIdentityEdit) {
+    const lockMsg = await checkProductionOrderLocked(c.var.DB, id);
+    if (lockMsg) {
+      return c.json(lockedResponse(lockMsg), 403);
+    }
+  }
   const nowIso = new Date().toISOString();
   const today = nowIso.split("T")[0];
 

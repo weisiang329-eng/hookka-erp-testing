@@ -21,6 +21,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
+import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -354,6 +355,40 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/consignment-orders/stats — whole-dataset status bucket counts.
+// Mirrors /api/sales-orders/stats. Used by the list-page tab badges.
+// MUST be registered BEFORE /:id (Hono matches in registration order; a
+// wildcard /:id would otherwise swallow "/stats").
+// ---------------------------------------------------------------------------
+app.get("/stats", async (c) => {
+  const res = await c.var.DB
+    .prepare(
+      "SELECT status, COUNT(*) AS n FROM consignment_orders GROUP BY status",
+    )
+    .all<{ status: string; n: number }>();
+  const byStatus: Record<string, number> = {};
+  let total = 0;
+  for (const row of res.results ?? []) {
+    byStatus[row.status] = row.n;
+    total += row.n;
+  }
+  return c.json({ success: true, byStatus, total });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/consignment-orders/status-changes — full audit log.
+// Currently returns an empty list because consignment_order_status_changes
+// table doesn't exist yet (parallel to so_status_changes). The CO Detail
+// page subscribes to this hook so we return the success envelope to keep
+// it from showing a loading skeleton forever.
+// TODO: add a consignment_order_status_changes table (and INSERT rows from
+// the /confirm + /:id PUT handlers) so CO status history is observable.
+// ---------------------------------------------------------------------------
+app.get("/status-changes", async (c) => {
+  return c.json({ success: true, data: [], total: 0 });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/consignment-orders/:id
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
@@ -470,6 +505,183 @@ app.post("/:id/confirm", async (c) => {
       preExisting: result.preExisting,
     },
   });
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/consignment-orders/:id — update header + items.
+//
+// Cascade lock: rejects field edits (items / customer / dates) once any
+// production order has reached COMPLETED OR a Consignment Note exists for
+// the parent customer. Status-only transitions still pass through (the
+// caller wants to flip DRAFT → ON_HOLD or similar, not rewrite the order).
+// ---------------------------------------------------------------------------
+app.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM consignment_orders WHERE id = ?",
+    )
+      .bind(id)
+      .first<ConsignmentOrderRow>();
+    if (!existing) {
+      return c.json(
+        { success: false, error: "Consignment order not found" },
+        404,
+      );
+    }
+
+    const body = await c.req.json();
+    const isStatusOnly =
+      body.status &&
+      !body.items &&
+      !body.customerId &&
+      !body.companyCODate &&
+      !body.customerDeliveryDate &&
+      !body.hookkaExpectedDD;
+
+    if (!isStatusOnly) {
+      const lockMsg = await checkConsignmentOrderLocked(c.var.DB, id);
+      if (lockMsg) {
+        return c.json(lockedResponse(lockMsg), 403);
+      }
+    }
+
+    const now = new Date().toISOString();
+
+    // Header field updates — preserve existing values when not provided.
+    const merged = {
+      customerCO: body.customerCO ?? existing.customerCO ?? null,
+      customerCOId: body.customerCOId ?? existing.customerCOId ?? null,
+      customerCODate: body.customerCODate ?? existing.customerCODate ?? null,
+      reference: body.reference ?? existing.reference ?? null,
+      hubId: body.hubId ?? existing.hubId ?? null,
+      hubName: body.hubName ?? existing.hubName ?? null,
+      companyCODate: body.companyCODate ?? existing.companyCODate ?? null,
+      customerDeliveryDate:
+        body.customerDeliveryDate ?? existing.customerDeliveryDate ?? null,
+      hookkaExpectedDD:
+        body.hookkaExpectedDD ?? existing.hookkaExpectedDD ?? null,
+      notes: body.notes ?? existing.notes ?? null,
+      status: body.status ?? existing.status,
+    };
+
+    const stmts: D1PreparedStatement[] = [];
+
+    // If items are provided, replace them (and recompute totals)
+    let subtotalSen = existing.subtotalSen;
+    let totalSen = existing.totalSen;
+    if (Array.isArray(body.items)) {
+      stmts.push(
+        c.var.DB.prepare(
+          "DELETE FROM consignment_order_items WHERE consignmentOrderId = ?",
+        ).bind(id),
+      );
+      let runningSubtotal = 0;
+      for (let idx = 0; idx < body.items.length; idx++) {
+        const it = body.items[idx] as Record<string, unknown>;
+        const qty = Number(it.quantity) || 1;
+        const basePrice = Number(it.basePriceSen) || 0;
+        const divanPrice = Number(it.divanPriceSen) || 0;
+        const legPrice = Number(it.legPriceSen) || 0;
+        const specialPrice = Number(it.specialOrderPriceSen) || 0;
+        const unitPrice = basePrice + divanPrice + legPrice + specialPrice;
+        const lineTotal = unitPrice * qty;
+        runningSubtotal += lineTotal;
+        const lineNo = Number(it.lineNo) || idx + 1;
+        const itemId =
+          (it.id as string) || `coi-${crypto.randomUUID().slice(0, 8)}`;
+        stmts.push(
+          c.var.DB.prepare(
+            `INSERT INTO consignment_order_items (id, consignmentOrderId, lineNo, lineSuffix,
+               productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
+               fabricId, fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
+               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+               basePriceSen, unitPriceSen, lineTotalSen, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            itemId,
+            id,
+            lineNo,
+            (it.lineSuffix as string) ?? null,
+            (it.productId as string) ?? null,
+            (it.productCode as string) ?? null,
+            (it.productName as string) ?? null,
+            (it.itemCategory as string) ?? null,
+            (it.sizeCode as string) ?? null,
+            (it.sizeLabel as string) ?? null,
+            (it.fabricId as string) ?? null,
+            (it.fabricCode as string) ?? null,
+            qty,
+            it.gapInches != null ? Number(it.gapInches) : null,
+            it.divanHeightInches != null ? Number(it.divanHeightInches) : null,
+            divanPrice,
+            it.legHeightInches != null ? Number(it.legHeightInches) : null,
+            legPrice,
+            (it.specialOrder as string) ?? null,
+            specialPrice,
+            basePrice,
+            unitPrice,
+            lineTotal,
+            (it.notes as string) ?? null,
+          ),
+        );
+      }
+      subtotalSen = runningSubtotal;
+      totalSen = runningSubtotal;
+    }
+
+    stmts.push(
+      c.var.DB.prepare(
+        `UPDATE consignment_orders SET
+           customerCO = ?, customerCOId = ?, customerCODate = ?, reference = ?,
+           hubId = ?, hubName = ?, companyCODate = ?, customerDeliveryDate = ?,
+           hookkaExpectedDD = ?, subtotalSen = ?, totalSen = ?, status = ?,
+           notes = ?, updated_at = ?
+         WHERE id = ?`,
+      ).bind(
+        merged.customerCO,
+        merged.customerCOId,
+        merged.customerCODate,
+        merged.reference,
+        merged.hubId,
+        merged.hubName,
+        merged.companyCODate,
+        merged.customerDeliveryDate,
+        merged.hookkaExpectedDD,
+        subtotalSen,
+        totalSen,
+        merged.status,
+        merged.notes,
+        now,
+        id,
+      ),
+    );
+
+    await c.var.DB.batch(stmts);
+
+    const [updated, items] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
+        .bind(id)
+        .first<ConsignmentOrderRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_order_items WHERE consignmentOrderId = ?",
+      )
+        .bind(id)
+        .all<ConsignmentOrderItemRow>(),
+    ]);
+    if (!updated) {
+      return c.json(
+        { success: false, error: "Failed to reload after update" },
+        500,
+      );
+    }
+    return c.json({
+      success: true,
+      data: rowToCO(updated, items.results ?? []),
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
 });
 
 // ---------------------------------------------------------------------------

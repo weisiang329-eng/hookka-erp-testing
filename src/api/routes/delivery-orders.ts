@@ -17,6 +17,7 @@ import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
+import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -957,8 +958,23 @@ app.put("/:id", async (c) => {
         404,
       );
     }
-
+    // Cascade lock — once an Invoice references this DO, the DO becomes
+    // read-only (its line items are already on the customer's bill).
+    // Status-only transitions to CANCELLED still go through here, but
+    // those are gated by other guards below; the lock only fires for
+    // edits that touch items / quantities / customer / driver.
+    const lockMsg = await checkDeliveryOrderLocked(c.var.DB, id);
     const body = await c.req.json();
+    const isStatusOnly =
+      body.status &&
+      !body.items &&
+      !body.customerId &&
+      !body.driverId &&
+      !body.vehicleId &&
+      !body.deliveryDate;
+    if (lockMsg && !isStatusOnly) {
+      return c.json(lockedResponse(lockMsg), 403);
+    }
     const now = new Date().toISOString();
 
     // --- status transition validation (same rules as mock-data) ---

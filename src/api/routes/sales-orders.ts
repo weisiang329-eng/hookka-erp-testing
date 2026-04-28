@@ -1081,14 +1081,15 @@ app.post("/backfill-job-cards", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id/edit-eligibility — can this SO be edited right now?
 //
-// Lightweight pre-flight check used by the SO edit page. Replaces the old
-// status-only block ("Only DRAFT/CONFIRMED can be edited") with a richer
-// rule set that also allows IN_PRODUCTION orders to be edited as long as
-//   (a) production hasn't started yet — earliest PO start ≥ today + 2 days
-//   (b) no job_card on any of the SO's POs has a completedDate stamped
-// Either guard tripping locks the order; the response carries the trigger
-// values (earliest start date, completed dept name + date) so the UI can
-// surface a precise reason rather than a generic "cannot edit".
+// Rules (per user 2026-04-28, simplified from the original 3-rule version):
+//   1. Status must be DRAFT / CONFIRMED / IN_PRODUCTION (anything later =
+//      already shipping → no edits).
+//   2. No job_card under the SO's POs may have a completedDate stamped
+//      (any dept finishing a piece commits inventory; editing past that
+//      would strand WIP).
+// The previous "production_window > 2 days" rule was DROPPED — operators
+// asked to keep editing IN_PRODUCTION orders as long as nothing has been
+// completed yet, regardless of how long ago production started.
 //
 // Registered BEFORE /:id so Hono's trie picks the right handler.
 // ---------------------------------------------------------------------------
@@ -1102,13 +1103,6 @@ app.get("/:id/edit-eligibility", async (c) => {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
 
-  // Cutoff = today + 2 calendar days, compared as YYYY-MM-DD strings so we
-  // don't accidentally drag a timezone offset into what is meant to be a
-  // calendar-day comparison.
-  const cutoff = new Date();
-  cutoff.setUTCDate(cutoff.getUTCDate() + 2);
-  const cutoffStr = cutoff.toISOString().slice(0, 10);
-
   // Rule 1: status must be one of DRAFT / CONFIRMED / IN_PRODUCTION.
   if (so.status !== "DRAFT" && so.status !== "CONFIRMED" && so.status !== "IN_PRODUCTION") {
     return c.json({
@@ -1116,7 +1110,6 @@ app.get("/:id/edit-eligibility", async (c) => {
       editable: false,
       reason: "status",
       status: so.status,
-      cutoffDate: cutoffStr,
     });
   }
 
@@ -1126,74 +1119,41 @@ app.get("/:id/edit-eligibility", async (c) => {
       success: true,
       editable: true,
       status: so.status,
-      cutoffDate: cutoffStr,
     });
   }
 
-  // IN_PRODUCTION — pull the SO's POs + their job-cards in one round trip.
-  const [posRes, jcRes] = await Promise.all([
-    c.var.DB
-      .prepare(
-        `SELECT id, startDate, targetEndDate
-           FROM production_orders
-          WHERE salesOrderId = ?`,
-      )
-      .bind(id)
-      .all<{ id: string; startDate: string | null; targetEndDate: string | null }>(),
-    c.var.DB
-      .prepare(
-        `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
-           FROM job_cards jc
-           JOIN production_orders po ON po.id = jc.productionOrderId
-          WHERE po.salesOrderId = ?
-            AND jc.completedDate IS NOT NULL
-            AND jc.completedDate <> ''
-          ORDER BY jc.completedDate ASC
-          LIMIT 1`,
-      )
-      .bind(id)
-      .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>(),
-  ]);
+  // IN_PRODUCTION — earliest completed JC across the SO's POs (if any).
+  const jcRes = await c.var.DB
+    .prepare(
+      `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE po.salesOrderId = ?
+          AND jc.completedDate IS NOT NULL
+          AND jc.completedDate <> ''
+        ORDER BY jc.completedDate ASC
+        LIMIT 1`,
+    )
+    .bind(id)
+    .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>();
 
-  // Rule 2b: any dept stamped a completion → fully locked, regardless of dates.
+  // Rule 2: any dept stamped a completion → fully locked.
   if (jcRes && jcRes.completedDate) {
     return c.json({
       success: true,
       editable: false,
       reason: "dept_completed",
       status: so.status,
-      cutoffDate: cutoffStr,
       completedDept: jcRes.departmentName || jcRes.departmentCode || "A department",
       completedAt: jcRes.completedDate,
     });
   }
 
-  // Rule 2a: earliest production start (per-PO startDate) must be ≥ cutoff.
-  // We treat empty/null start dates as "not yet started" so they don't
-  // accidentally lock the SO; only POs with a real ISO date contribute.
-  const startDates = (posRes.results ?? [])
-    .map((p) => (p.startDate || "").slice(0, 10))
-    .filter((d) => d.length === 10);
-  if (startDates.length > 0) {
-    const earliest = startDates.reduce((min, d) => (d < min ? d : min), startDates[0]);
-    if (earliest < cutoffStr) {
-      return c.json({
-        success: true,
-        editable: false,
-        reason: "production_window",
-        status: so.status,
-        earliestStartDate: earliest,
-        cutoffDate: cutoffStr,
-      });
-    }
-  }
-
-  // IN_PRODUCTION but neither guard tripped — editable.
+  // IN_PRODUCTION, no JC done yet — editable.
   return c.json({
     success: true,
     editable: true,
     status: so.status,
-    cutoffDate: cutoffStr,
   });
 });
 

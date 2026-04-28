@@ -608,11 +608,15 @@ app.post("/", async (c) => {
 app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "invoices", "read");
   if (denied) return denied;
-  const inv = await fetchInvoiceWithChildren(c.var.DB, c.req.param("id"));
+  const id = c.req.param("id");
+  const inv = await fetchInvoiceWithChildren(c.var.DB, id);
   if (!inv) {
     return c.json({ success: false, error: "Invoice not found" }, 404);
   }
-  return c.json({ success: true, data: inv });
+  // Lock status (payment recorded / status=PAID?) — surfaced to the
+  // detail page so it can render a "credit note required" banner.
+  const lockReason = await checkInvoiceLocked(c.var.DB, id);
+  return c.json({ success: true, data: inv, lockReason });
 });
 
 // PUT /api/invoices/:id — update (status transitions, payments, fields)

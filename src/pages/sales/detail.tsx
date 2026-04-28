@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
+import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { SalesOrder, SOStatus, Customer } from "@/lib/mock-data";
 
@@ -165,7 +166,7 @@ export default function SalesOrderDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
-  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
+  const { data: orderResp, loading, refresh: refreshOrder } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null; linkedPOs?: LinkedPO[]; statusHistory?: StatusChange[]; priceOverrides?: PriceOverrideRecord[] }>(id ? `/api/sales-orders/${id}` : null);
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
@@ -387,13 +388,21 @@ export default function SalesOrderDetailPage() {
   if (!order) return <div className="flex flex-col items-center justify-center h-64 gap-4"><div className="text-[#6B7280]">Order not found</div><Button variant="outline" onClick={() => navigate("/sales")}>Back</Button></div>;
 
   const totalQty = order.items.reduce((s, i) => s + i.quantity, 0);
-  const canEdit = ["DRAFT", "CONFIRMED"].includes(order.status);
+  // Cascade lock — surfaced from the API; if non-null the SO has a downstream
+  // PO that's already COMPLETED so item/header edits are blocked. Status
+  // transitions still go through (CONFIRM, ON_HOLD, CANCEL pass the
+  // lock-guard's `isStatusOnly` check on the backend).
+  const lockReason = orderResp?.lockReason ?? null;
+  const isLocked = !!lockReason;
+  const canEdit = ["DRAFT", "CONFIRMED"].includes(order.status) && !isLocked;
   const canCancel = ["DRAFT", "CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const canHold = ["CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const isOnHold = order.status === "ON_HOLD";
 
   return (
     <div className="space-y-6">
+      <LockBanner reason={lockReason} />
+
       {/* Confirmation Modal */}
       <ConfirmModal
         open={modal.open}

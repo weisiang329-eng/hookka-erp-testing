@@ -409,9 +409,14 @@ app.get("/:id", async (c) => {
       404,
     );
   }
+  // Lock status — surfaced to the CO detail / edit pages so they can
+  // disable inputs + render a banner when locked (PO COMPLETED or
+  // CN already created).
+  const lockReason = await checkConsignmentOrderLocked(c.var.DB, id);
   return c.json({
     success: true,
     data: rowToCO(row, items.results ?? []),
+    lockReason,
   });
 });
 

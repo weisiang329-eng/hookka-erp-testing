@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { LockBanner } from "@/components/ui/lock-banner";
 import {
   ArrowLeft,
   Trash2,
@@ -40,7 +41,7 @@ const PAYMENT_METHODS = [
 export default function InvoiceDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
-  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice }>(id ? `/api/invoices/${id}` : null);
+  const { data: invResp, loading: invLoading, refresh: refreshInvoice } = useCachedJson<{ success?: boolean; data?: Invoice; lockReason?: string | null }>(id ? `/api/invoices/${id}` : null);
   const invoice: Invoice | null = useMemo(() => {
     if (!invResp) return null;
     if (invResp.success && invResp.data) return invResp.data;
@@ -170,9 +171,13 @@ export default function InvoiceDetailPage() {
   const balanceSen = invoice.totalSen - invoice.paidAmount;
   const totalQty = invoice.items.reduce((s, i) => s + i.quantity, 0);
   const payments = invoice.payments || [];
+  // Cascade lock — surfaced from /api/invoices/:id. Non-null when payment
+  // is recorded against this invoice (status=PAID or paidAmountSen > 0).
+  const lockReason = (invResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
 
   return (
     <div className="space-y-6">
+      <LockBanner reason={lockReason} />
       {/* Toast */}
       {toast && (
         <div className="fixed top-4 right-4 z-50 bg-[#4F7C3A] text-white px-6 py-3 rounded-lg shadow-lg flex items-center gap-2 animate-in slide-in-from-top-2">

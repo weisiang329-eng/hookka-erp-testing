@@ -126,9 +126,8 @@ export function generateCOPdf(order: ConsignmentOrder, customer?: Customer | nul
   doc.line(rX, y + 5, rX + halfW, y + 5);
 
   const orderFields: [string, string][] = [
-    ["Date", fmtDate(order.companySODate)],
-    ["Customer PO", order.customerPOId || "-"],
-    ["Customer SO", order.customerSOId || "-"],
+    ["Date", fmtDate(order.companyCODate)],
+    ["Customer CO", order.customerCOId || "-"],
     ["Reference", order.reference || "-"],
     ["Delivery Date", order.customerDeliveryDate ? fmtDate(order.customerDeliveryDate) : "-"],
     ["Terms", "Net 30"],
@@ -457,5 +456,5 @@ export function generateCOPdf(order: ConsignmentOrder, customer?: Customer | nul
     doc.text(`Page ${p} of ${totalPages}`, pw - m, fy, { align: "right" });
   }
 
-  doc.save(`${order.companySOId}.pdf`);
+  doc.save(`${order.companyCOId ?? order.id}.pdf`);
 }

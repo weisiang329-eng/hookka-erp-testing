@@ -18,6 +18,7 @@ import {
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { useActiveTabDirty } from "@/contexts/tabs-context";
@@ -263,7 +264,7 @@ export default function EditSalesOrderPage() {
   };
 
   // Load existing order
-  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder }>(id ? `/api/consignment-orders/${id}` : null);
+  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/consignment-orders/${id}` : null);
   useEffect(() => {
     const d = orderResp;
     if (!d) {
@@ -498,19 +499,29 @@ export default function EditSalesOrderPage() {
   }
 
   const selectedCustomer = customers.find(c => c.id === customerId);
+  // Cascade lock — disable Save when CO has any PO COMPLETED OR a CN exists.
+  const lockReason = orderResp?.lockReason ?? null;
+  const isLocked = !!lockReason;
 
   return (
     <div className="space-y-6">
+      <LockBanner reason={lockReason} />
+
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(`/consignment/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
         </Button>
         <div className="flex-1">
           <h1 className="text-xl font-bold text-[#1F1D1B]">Edit {order.companyCOId}</h1>
-          <p className="text-xs text-[#6B7280]">Modify sales order details and line items</p>
+          <p className="text-xs text-[#6B7280]">Modify consignment order details and line items</p>
         </div>
         <Button variant="outline" onClick={() => navigate(`/consignment/${id}`)}>Cancel</Button>
-        <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+        <Button
+          variant="primary"
+          onClick={handleSubmit}
+          disabled={saving || isLocked}
+          title={isLocked ? lockReason ?? undefined : undefined}
+        >
           <Save className="h-4 w-4" />
           {saving ? "Saving..." : "Save Changes"}
         </Button>

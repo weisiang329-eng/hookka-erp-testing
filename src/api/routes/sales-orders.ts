@@ -1634,9 +1634,15 @@ app.get("/:id", async (c) => {
   if (!so) {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
+  // Lock status — surfaced to the frontend so the SO detail / edit pages
+  // can disable inputs + render a banner ("locked because PO X is
+  // COMPLETED — cancel that PO to unlock"). Same query the PUT guard
+  // runs; cheap (single index lookup on production_orders).
+  const lockReason = await checkSalesOrderLocked(c.var.DB, id);
   return c.json({
     success: true,
     data: rowToSO(so, itemsRes.results ?? []),
+    lockReason,
     linkedPOs: (posRes.results ?? []).map((p) => ({
       id: p.id,
       poNo: p.poNo,

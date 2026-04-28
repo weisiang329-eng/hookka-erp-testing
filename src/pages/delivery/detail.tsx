@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { LockBanner } from "@/components/ui/lock-banner";
 import {
   ArrowLeft,
   User,
@@ -131,7 +132,7 @@ export default function DeliveryDetailPage() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const otherEditors = usePresence("delivery_order", id, Boolean(id));
-  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder }>(id ? `/api/delivery-orders/${id}` : null);
+  const { data: doResp, loading: doLoading } = useCachedJson<{ success?: boolean; data?: DeliveryOrder; lockReason?: string | null }>(id ? `/api/delivery-orders/${id}` : null);
   const { data: lorryResp, loading: lorryLoading } = useCachedJson<{ success?: boolean; data?: LorryInfo[] }>("/api/lorries");
   const [orderOverride, setOrderOverride] = useState<DeliveryOrder | null>(null);
   const order: DeliveryOrder | null = useMemo(() => {
@@ -262,9 +263,13 @@ export default function DeliveryDetailPage() {
   const flow = STATUS_FLOW[order.status];
   const overdueDays = calculateOverdueDays(order.deliveryDate, order.deliveredAt);
   const currentLorry = lorries.find((l) => l.id === order.lorryId);
+  // Cascade lock — surfaced from /api/delivery-orders/:id. Non-null when
+  // an Invoice has been issued referencing this DO.
+  const lockReason = (doResp as { lockReason?: string | null } | undefined)?.lockReason ?? null;
 
   return (
     <div className="space-y-6">
+      <LockBanner reason={lockReason} />
       <PresenceBanner holders={otherEditors} />
       {/* Header */}
       <div className="flex items-center gap-4">

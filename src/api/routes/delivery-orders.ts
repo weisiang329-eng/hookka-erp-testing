@@ -929,11 +929,15 @@ app.get("/:id", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "read");
   if (denied) return denied;
 
-  const order = await fetchOrderWithItems(c.var.DB, c.req.param("id"));
+  const id = c.req.param("id");
+  const order = await fetchOrderWithItems(c.var.DB, id);
   if (!order) {
     return c.json({ success: false, error: "Delivery order not found" }, 404);
   }
-  return c.json({ success: true, data: order });
+  // Lock status (Invoice exists?) — surfaced to the DO detail page so the
+  // edit form can disable + render a "locked because Invoice X exists" banner.
+  const lockReason = await checkDeliveryOrderLocked(c.var.DB, id);
+  return c.json({ success: true, data: order, lockReason });
 });
 
 // PUT /api/delivery-orders/:id — update (supports status transitions, PoD,

@@ -1734,9 +1734,24 @@ export default function DeliveryPage() {
         type: "date",
         width: "120px",
         sortable: true,
-        render: (_value, row) => (
-          <span>{row.dispatchDate ? formatDate(row.dispatchDate) : "-"}</span>
-        ),
+        // Pending Dispatch DOs have no actual dispatchDate yet — fall back to
+        // the planned deliveryDate (set at SO/DO creation) with a small
+        // "(planned)" tag so operators see SOMETHING to plan against instead
+        // of a "-" placeholder.
+        render: (_value, row) => {
+          if (row.dispatchDate) {
+            return <span>{formatDate(row.dispatchDate)}</span>;
+          }
+          if (row.deliveryDate) {
+            return (
+              <span>
+                {formatDate(row.deliveryDate)}{" "}
+                <span className="text-[10px] text-[#9C8E72]">(planned)</span>
+              </span>
+            );
+          }
+          return <span>-</span>;
+        },
       },
       { key: "doNo", label: "DO No.", type: "docno", width: "120px", sortable: true },
       {

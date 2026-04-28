@@ -147,45 +147,41 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 // ---------------------------------------------------------------------------
 // GET /production-revenue?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
-// "Production Revenue" — revenue is recognized the day each PHYSICAL UNIT
-// completes production, NOT per-job_card. A single product unit (e.g. one
-// CODY BEDFRAME) consists of multiple PIECES (HB, Divan, Cushion, …) each
-// tracked as its own job_card. Counting per-job_card means the unit's
-// catalog price gets scored 2-4× as each piece completes.
+// "Production Revenue" — revenue is recognized the day each PRODUCTION ORDER
+// (PO) finishes upholstery, NOT per-job_card. A single PO can spawn multiple
+// PIECES (HB, Divan, Cushion, …) each tracked as its own UPHOLSTERY job_card.
+// Counting per-job_card multi-counts revenue as each piece completes.
 //
-// Per spec: revenue recognizes ONCE per (productionOrderId, unitNo) — on the
-// date the LAST piece of that unit finishes production. Source of truth is
-// the fg_units table, which has one row per (poId, unitNo, pieceNo) and
-// tracks `upholsteredAt` / `packedAt` on each piece.
+// Source of truth: `job_cards` (department_code = 'UPHOLSTERY'). The earlier
+// fg_units approach (commit be6a455) had the right dedup intent but the wrong
+// data source: `fg_units.upholsteredAt` / `packedAt` are not consistently set
+// in production — operators jump statuses without writing those timestamps —
+// while `job_cards.completedDate` IS reliably populated and is the same
+// signal the Production Tracking screen renders.
 //
-// Completion timestamp uses COALESCE(upholsteredAt, packedAt). Operators
-// frequently jump straight from prior stages to PACKED, skipping a separate
-// UPHOLSTERED stamp — packedAt then carries the same semantic ("the day
-// the last piece of this unit completed production") because you cannot
-// pack a unit until upholstery is physically done. Filtering on
-// upholsteredAt alone returned RM 0 against real production data even
-// when 31 units were genuinely PACKED.
+// Per-PO dedup: GROUP BY productionOrderId across the PO's UPHOLSTERY job
+// cards. Recognition date = MAX(completedDate) across that group (when the
+// LAST piece finished). A bedframe with HB + Divan + Cushion still books
+// revenue once, on the last piece's completion date.
 //
-// Stage 1: aggregate fg_units → unit-level "completed" set (every piece for
-//          (poId, unitNo) has reached UPHOLSTERED+ status). Recognition date
-//          = max(COALESCE(upholsteredAt, packedAt)) across the unit's pieces.
-// Stage 2: join unit → production_order → sales_order_item / product for
-//          price + category bucketing.
+// Quantity / total: `production_orders.quantity` is the number of physical
+// units in the PO (e.g. PO for 2 bedframes → qty=2). Revenue per PO =
+// unit_price × quantity.
 //
 // Price COALESCE chain: sales_order_items.unitPriceSen → products.basePriceSen
 // → products.price1Sen → 0. SO line wins because it's the contract price the
 // customer actually pays (catalog price misses promo/contract pricing).
 //
 // Edge cases:
-//   - Pieces with both upholsteredAt AND packedAt NULL are skipped (status
-//     alone isn't enough proof that production actually completed on a
-//     known date).
-//   - totalPieces NULL → treated as 1 via MAX(COALESCE(totalPieces, 1)).
-//   - Window filter is on max(COALESCE(upholsteredAt, packedAt)) so a unit
-//     straddling the boundary gets attributed to the date of its FINAL piece.
+//   - Job cards with NULL completedDate are excluded (no recognition date).
+//   - Status filter: COMPLETED + TRANSFERRED. TRANSFERRED means the piece
+//     moved past UPHOLSTERY (e.g. into PACKING) — still counts as upholstery
+//     done.
+//   - Window filter is on MAX(completedDate) so a PO straddling the boundary
+//     gets attributed to its final piece's completion date.
 //
-// Response also includes a `rows` array — one entry per recognized unit —
-// for the "Revenue Raw Data" audit table on the Labor Cost tab.
+// Response also includes a `rows` array — one entry per recognized PO — for
+// the "Revenue Raw Data" audit table on the Labor Cost tab.
 // ---------------------------------------------------------------------------
 app.get("/production-revenue", async (c) => {
   const from = c.req.query("from");
@@ -194,55 +190,51 @@ app.get("/production-revenue", async (c) => {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
-  // Single SQL: per_unit CTE finds fully-upholstered units in the window,
-  // then we join out to PO/SO/product for price + category + display fields.
-  // ORDER BY unit_completed_at DESC so the rows array is already sorted for
-  // the frontend table.
+  // Single SQL: per_po CTE collapses UPHOLSTERY job_cards to one row per PO
+  // (recognition date = MAX completedDate), then we join out to PO/SO/SO line
+  // /product for qty/price/category/display fields. ORDER BY DESC so the rows
+  // array is already sorted for the frontend table.
   const rowsRes = await c.var.DB
     .prepare(
-      `WITH per_unit AS (
-         SELECT poId,
-                unitNo,
-                COUNT(*) AS pieces_done,
-                MAX(COALESCE(totalPieces, 1)) AS expected_pieces,
-                MAX(COALESCE(upholsteredAt, packedAt)) AS unit_completed_at
-           FROM fg_units
-          WHERE poId IS NOT NULL
-            AND unitNo IS NOT NULL
-            AND status IN ('UPHOLSTERED','PACKED','LOADED','DELIVERED')
-            AND COALESCE(upholsteredAt, packedAt) IS NOT NULL
-          GROUP BY poId, unitNo
-         HAVING COUNT(*) >= MAX(COALESCE(totalPieces, 1))
-            AND MAX(COALESCE(upholsteredAt, packedAt)) >= ?
-            AND MAX(COALESCE(upholsteredAt, packedAt)) <= ?
+      `WITH per_po AS (
+         SELECT productionOrderId,
+                MAX(completedDate) AS unit_completed_at,
+                COUNT(*) AS uph_jc_count
+           FROM job_cards
+          WHERE departmentCode = 'UPHOLSTERY'
+            AND status IN ('COMPLETED','TRANSFERRED')
+            AND completedDate IS NOT NULL
+          GROUP BY productionOrderId
+         HAVING MAX(completedDate) >= ?
+            AND MAX(completedDate) <= ?
        )
-       SELECT u.poId               AS poId,
-              u.unitNo             AS unitNo,
-              u.unit_completed_at  AS completedAt,
+       SELECT po.id                AS poId,
+              per_po.unit_completed_at AS completedAt,
               po.productCode       AS productCode,
               po.productName       AS productName,
               po.customerName      AS customerName,
               po.salesOrderNo      AS soNo,
+              po.quantity          AS qty,
               p.category           AS category,
               COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0) AS unitPriceSen
-         FROM per_unit u
-         JOIN production_orders po ON po.id = u.poId
+         FROM per_po
+         JOIN production_orders po ON po.id = per_po.productionOrderId
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
          LEFT JOIN products p ON p.id = po.productId
         WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
-        ORDER BY u.unit_completed_at DESC`,
+        ORDER BY per_po.unit_completed_at DESC`,
     )
     .bind(from, to)
     .all<{
       poId: string;
-      unitNo: number;
       completedAt: string;
       productCode: string | null;
       productName: string | null;
       customerName: string | null;
       soNo: string | null;
+      qty: number | string | null;
       category: "SOFA" | "BEDFRAME" | "ACCESSORY";
       unitPriceSen: number | string | null;
     }>();
@@ -252,7 +244,7 @@ app.get("/production-revenue", async (c) => {
     BEDFRAME: 0,
     ACCESSORY: 0,
   };
-  // qty is always 1 — one fg_units row group == one physical unit.
+  // One row per PO: qty = production_orders.quantity, total = unit × qty.
   const rows: Array<{
     date: string;
     productCode: string;
@@ -267,8 +259,10 @@ app.get("/production-revenue", async (c) => {
 
   for (const r of rowsRes.results ?? []) {
     if (r.category !== "SOFA" && r.category !== "BEDFRAME" && r.category !== "ACCESSORY") continue;
-    const priceSen = Math.round(typeof r.unitPriceSen === "number" ? r.unitPriceSen : Number(r.unitPriceSen) || 0);
-    totals[r.category] += priceSen;
+    const unitPriceSen = Math.round(typeof r.unitPriceSen === "number" ? r.unitPriceSen : Number(r.unitPriceSen) || 0);
+    const qty = Math.max(1, Math.round(typeof r.qty === "number" ? r.qty : Number(r.qty) || 1));
+    const totalPriceSen = unitPriceSen * qty;
+    totals[r.category] += totalPriceSen;
     // completedAt may include time-of-day; the table only needs the date.
     const date = (r.completedAt ?? "").slice(0, 10);
     rows.push({
@@ -276,9 +270,9 @@ app.get("/production-revenue", async (c) => {
       productCode: r.productCode ?? "",
       productName: r.productName ?? "",
       category: r.category,
-      qty: 1,
-      unitPriceSen: priceSen,
-      totalPriceSen: priceSen,
+      qty,
+      unitPriceSen,
+      totalPriceSen,
       customerName: r.customerName ?? "",
       soNo: r.soNo ?? "",
     });

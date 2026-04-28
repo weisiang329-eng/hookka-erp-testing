@@ -1,26 +1,52 @@
-import { useState, useMemo, useCallback } from "react";
+// ---------------------------------------------------------------------------
+// Consignment Notes (CN) page — refactored 2026-04-28 to mirror the
+// Delivery Orders (DO) page at src/pages/delivery/index.tsx.
+//
+// Domain mapping (Hookka has two parallel post-production flows):
+//   Sales Order      (SO)  ↔  Consignment Order (CO)        — `/api/consignment-orders`
+//   Delivery Order   (DO)  ↔  Consignment Note  (CN)        — `/api/consignment-notes`
+//   PO source on prod_orders.salesOrderId  ↔  prod_orders.consignmentOrderId
+//
+// Why the mirror: the user sees DO and CN as two visually identical
+// post-production dispatch boards — one for SO-origin furniture, one for
+// CO-origin (consignment). Before this refactor, CN was a barebones list
+// missing the KPI strip, the planning tabs, the "Production Complete →
+// Ready for CN" panel, and the polished DataGrid columns. Operators
+// complained the two pages "look different" — this commit aligns them.
+//
+// Backend constraints (kept as-is per task scope):
+//   - CN backend (consignment_notes table) does NOT yet store
+//     dispatchedAt / deliveredAt / driverId / vehicleId. The legacy CN
+//     status enum (ACTIVE/PARTIALLY_SOLD/FULLY_SOLD/RETURNED/CLOSED) is
+//     mapped to the DO-style lifecycle below; transport columns render
+//     "—" until the backend grows those columns. Documented for follow-up.
+//   - CN does NOT store productionOrderId or consignmentOrderId, so
+//     the Pending-CN dedup is approximate (matches by customer + CO
+//     existence rather than per-PO linkage). Same caveat documented.
+// ---------------------------------------------------------------------------
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
+import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatDate } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Package,
+  PackageCheck,
   Truck,
+  Send,
   CheckCircle2,
   Eye,
   Printer,
   RefreshCw,
-  ArrowRight,
   Download,
   FileText,
-  PackageCheck,
   RotateCcw,
   X,
+  ClipboardList,
 } from "lucide-react";
 import type { ConsignmentNote } from "@/lib/mock-data";
 
@@ -28,84 +54,199 @@ import type { ConsignmentNote } from "@/lib/mock-data";
 // Types
 // ---------------------------------------------------------------------------
 
-type CNStatus = "PENDING" | "DISPATCHED" | "DELIVERED" | "ACKNOWLEDGED";
+// CN lifecycle in the UI mirrors DO's 4-stage flow. The legacy
+// ACTIVE/PARTIALLY_SOLD/FULLY_SOLD/CLOSED states from consignment_notes
+// are mapped onto these codes for display; backend stores the legacy
+// codes unchanged. See cnStatusFromBackend() below.
+type CNStatus = "PENDING" | "DISPATCHED" | "IN_TRANSIT" | "DELIVERED" | "ACKNOWLEDGED";
 
-// View-model row for the CN grid. We join each ConsignmentNote to its parent
-// ConsignmentOrder on the client to show customer/branch in the table.
+// View-model for one row in the CN DataGrid. Mirrors DeliveryOrderRow on
+// the DO page — every field has a parallel meaning, with SO/DO swapped
+// for CO/CN respectively.
 type ConsignmentNoteRow = {
-  id: string;
-  cnNo: string;
-  coRef: string;              // parent CO's noteNumber (CON-YYMM-XXX)
-  consignmentId: string;      // parent CO id (for drill-through)
+  id: string;             // CN id (for API + row key) — DO equivalent: doNo
+  cnNo: string;           // CON-YYMM-XXX — DO equivalent: doNo
+  coRef: string;          // parent CO's company id (CO-YY###) — DO equiv: companySO
+  consignmentId: string;  // parent CO id (for drill-through) — DO equiv: salesOrderId
   customerId: string;
   customerName: string;
-  branchName: string;
-  items: number;              // count of line items
-  totalQty: number;           // sum of item qty
-  totalValueSen: number;      // computed from parent CO items where possible
+  branchName: string;     // CN destination branch — DO equiv: hubState/hubBranch
+  itemCount: number;
+  totalQty: number;
+  totalValueSen: number;
   dispatchDate: string | null;
   deliveredDate: string | null;
+  status: CNStatus;
+  // Transport fields — backend doesn't store these on CN today, but the
+  // columns are rendered (showing "—") so the layout matches DO and the
+  // schema can grow into them without UI changes. DO equivalents:
+  // driverId/driverName/vehicleNo.
+  driverCompany: string;
   driverName: string;
   vehicleNo: string;
-  status: CNStatus;
   remarks: string;
 };
 
-// Build grid rows from ConsignmentNote records.
-// ConsignmentNote serves as both the consignment order and the dispatch note,
-// so we map its fields directly to ConsignmentNoteRow.
-function joinCNsWithOrders(
-  cns: ConsignmentNote[],
-  _orders: ConsignmentNote[],
-): ConsignmentNoteRow[] {
-  return cns.map((cn) => {
-    const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
-    const totalValueSen = cn.totalValue;
-    return {
-      id: cn.id,
-      cnNo: cn.noteNumber,
-      coRef: cn.noteNumber,
-      consignmentId: cn.id,
-      customerId: cn.customerId,
-      customerName: cn.customerName,
-      branchName: cn.branchName,
-      items: cn.items.length,
-      totalQty,
-      totalValueSen,
-      dispatchDate: cn.sentDate || null,
-      deliveredDate: null,
-      driverName: "",
-      vehicleNo: "",
-      status: (
-        cn.status === "ACTIVE" ? "PENDING" :
-        cn.status === "PARTIALLY_SOLD" ? "DISPATCHED" :
-        cn.status === "FULLY_SOLD" ? "DELIVERED" :
-        cn.status === "RETURNED" ? "DELIVERED" :
-        cn.status === "CLOSED" ? "ACKNOWLEDGED" : "PENDING"
-      ) as CNStatus,
-      remarks: cn.notes || "",
-    };
-  });
+// CN status mapping. See note on CNStatus above for why we re-skin the
+// legacy status enum into a DO-shaped lifecycle.
+function cnStatusFromBackend(s: string | undefined | null): CNStatus {
+  switch (s) {
+    case "ACTIVE": return "PENDING";          // created, not yet dispatched
+    case "PARTIALLY_SOLD": return "DISPATCHED"; // some items left the warehouse
+    case "FULLY_SOLD": return "DELIVERED";    // all items delivered to branch
+    case "RETURNED": return "DELIVERED";      // returns are still "delivered" from a logistics view
+    case "CLOSED": return "ACKNOWLEDGED";     // branch confirmed receipt and closed
+    default: return "PENDING";
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Status helpers
+// Status helpers — labels match DO so operators see the same phrase across
+// both boards.
 // ---------------------------------------------------------------------------
 
 const STATUS_LABEL: Record<CNStatus, string> = {
-  PENDING: "Pending",
+  PENDING: "Pending Dispatch",
   DISPATCHED: "Dispatched",
+  IN_TRANSIT: "In Transit",
   DELIVERED: "Delivered",
   ACKNOWLEDGED: "Acknowledged",
 };
 
-const TAB_FILTERS: { key: string; label: string; statuses: CNStatus[] | null }[] = [
-  { key: "all", label: "All", statuses: null },
-  { key: "pending", label: "Pending", statuses: ["PENDING"] },
-  { key: "dispatched", label: "Dispatched", statuses: ["DISPATCHED"] },
-  { key: "delivered", label: "Delivered", statuses: ["DELIVERED"] },
-  { key: "acknowledged", label: "Acknowledged", statuses: ["ACKNOWLEDGED"] },
-];
+// 6-stage CN workflow tabs. Mirrors DO's ALL_TABS structure:
+//   Planning           — POs from CO that are still in production (no upholstery done)
+//   Pending CN         — POs production-complete, no CN yet (DO equiv: Pending Delivery)
+//   Pending Dispatch   — CN created, not yet dispatched (DO equiv: same name)
+//   Dispatched         — CN dispatched, in transit
+//   Delivered          — CN delivered to branch
+//   Acknowledged       — branch confirmed receipt (DO equiv: Invoice — but CN doesn't generate invoices on dispatch)
+const ALL_TABS = [
+  { key: "planning", label: "Planning" },
+  { key: "pending_cn", label: "Pending CN" },
+  { key: "pending_dispatch", label: "Pending Dispatch" },
+  { key: "dispatched", label: "Dispatched" },
+  { key: "delivered", label: "Delivered" },
+  { key: "acknowledged", label: "Acknowledged" },
+] as const;
+
+// Which CN statuses map to which CN-list tab. Planning + Pending CN are
+// PO-based tabs (show production_orders, not consignment_notes) — handled
+// in PO_TABS below.
+const TAB_CN_STATUSES: Record<string, CNStatus[]> = {
+  pending_dispatch: ["PENDING"],
+  dispatched: ["DISPATCHED", "IN_TRANSIT"],
+  delivered: ["DELIVERED"],
+  acknowledged: ["ACKNOWLEDGED"],
+};
+
+const PO_TABS = new Set(["planning", "pending_cn"]);
+
+// ---------------------------------------------------------------------------
+// Production order row (used for Planning + Pending CN tabs). Mirrors
+// ReadyPORow on the DO page — same shape, same display rules. The CO
+// equivalent of an SO is surfaced via consignmentOrderId / companyCOId
+// (production_orders columns added in migration 0064).
+// ---------------------------------------------------------------------------
+type ReadyPORow = {
+  id: string;
+  poNo: string;
+  consignmentOrderId: string;       // CO id — DO equiv: salesOrderId
+  consignmentOrderNo: string;       // companyCOId (CO-YY###) — DO equiv: salesOrderNo
+  customerId: string;
+  customerName: string;
+  customerState: string;
+  productCode: string;
+  productName: string;
+  itemCategory: string;
+  sizeLabel: string;
+  fabricCode: string;
+  quantity: number;
+  unitM3: number;
+  completedDate: string | null;
+  uphCompletedDate: string | null;
+  rackingNumber: string;
+  hookkaExpectedDD: string;
+  currentDepartment: string;
+  progress: number;
+};
+
+// Same line-set rule as DO: Sofa POs span variant suffixes for one set,
+// Bedframe / Accessory POs are 1 PO = 1 piece. Display the CO ID without
+// the -NN suffix for sofa rows so a 4-piece set reads as one line.
+function displayCoId(row: { poNo: string; itemCategory: string }): string {
+  if ((row.itemCategory || "").toUpperCase() === "SOFA") {
+    return row.poNo.replace(/-\d+$/, "");
+  }
+  return row.poNo;
+}
+
+type ProductionOrderApiShape = {
+  id: string;
+  poNo: string;
+  salesOrderId?: string;
+  salesOrderNo?: string;
+  companySOId?: string;
+  consignmentOrderId?: string;
+  companyCOId?: string;
+  customerId?: string;
+  customerName?: string;
+  customerState?: string;
+  productCode?: string;
+  productName?: string;
+  itemCategory?: string;
+  sizeLabel?: string;
+  fabricCode?: string;
+  quantity?: number;
+  status: string;
+  currentDepartment?: string;
+  progress?: number;
+  completedDate?: string | null;
+  targetEndDate?: string;
+  rackingNumber?: string;
+  jobCards?: { departmentCode: string; status: string; completedDate?: string | null }[];
+};
+
+// Shape we read from /api/consignment-orders so we can join hookkaExpectedDD
+// onto each Pending-CN row (same trick DO uses with /api/sales-orders).
+type ConsignmentOrderApiShape = {
+  id: string;
+  hookkaExpectedDD?: string;
+  companyCOId?: string;
+  customerId?: string;
+};
+
+// ---------------------------------------------------------------------------
+// Map ConsignmentNote (legacy backend shape) → ConsignmentNoteRow.
+// Equivalent to DO's mapDOToRow.
+// ---------------------------------------------------------------------------
+
+function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
+  const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
+  // Backend currently stores noteNumber as both the CN identifier AND
+  // the closest thing to a CO ref (legacy CN had no separate CO concept).
+  // When the schema grows a real consignmentOrderId column we'll prefer
+  // that; until then, use noteNumber for both fields so the column
+  // renders something rather than blank.
+  return {
+    id: cn.id,
+    cnNo: cn.noteNumber,
+    coRef: cn.noteNumber,
+    consignmentId: cn.id,
+    customerId: cn.customerId,
+    customerName: cn.customerName,
+    branchName: cn.branchName,
+    itemCount: cn.items.length,
+    totalQty,
+    totalValueSen: cn.totalValue,
+    dispatchDate: cn.sentDate || null,
+    deliveredDate: null, // not tracked in legacy schema
+    status: cnStatusFromBackend(cn.status),
+    driverCompany: "",
+    driverName: "",
+    vehicleNo: "",
+    remarks: cn.notes || "",
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -114,10 +255,27 @@ const TAB_FILTERS: { key: string; label: string; statuses: CNStatus[] | null }[]
 export default function ConsignmentNotePage() {
   const { toast } = useToast();
   const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState("all");
+
+  // Top-level page tab. CN page has no "3PL Providers" sister section
+  // (that's owned by the DO page), so we skip the second tab — but keep
+  // the variable so future expansion is symmetric with DO.
+  const [pageTab] = useUrlState<"orders">("section", "orders");
+  void pageTab;
+
+  // Active inner tab — URL-synced so refresh and back/forward keep position.
+  const [activeTab, setActiveTab] = useUrlState<string>("tab", "planning");
+
+  // ----- Data state (mirrors DO) -----
+  const [cnList, setCnList] = useState<ConsignmentNoteRow[]>([]);
+  const [planningPOs, setPlanningPOs] = useState<ReadyPORow[]>([]);
+  const [readyPOs, setReadyPOs] = useState<ReadyPORow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // ----- Detail / dialog state -----
   const [detailCN, setDetailCN] = useState<ConsignmentNoteRow | null>(null);
 
-  // Transfer dialog states
+  // Transfer dialogs (preserved from the original CN page — these flows
+  // still work and the user expects them in the right-click menu).
   const [transferDORow, setTransferDORow] = useState<ConsignmentNoteRow | null>(null);
   const [transferDOLoading, setTransferDOLoading] = useState(false);
   const [transferCRRow, setTransferCRRow] = useState<ConsignmentNoteRow | null>(null);
@@ -127,118 +285,539 @@ export default function ConsignmentNotePage() {
   const [transferSIRow, setTransferSIRow] = useState<ConsignmentNoteRow | null>(null);
   const [transferSILoading, setTransferSILoading] = useState(false);
 
-  // Filters
-  const [filterStatus, setFilterStatus] = useState("");
-  const [filterCustomer, setFilterCustomer] = useState("");
-  const [filterDateFrom, setFilterDateFrom] = useState("");
-  const [filterDateTo, setFilterDateTo] = useState("");
+  // ----- Selection (Pending CN list) -----
+  const [selectedReadyPOs, setSelectedReadyPOs] = useState<Set<string>>(new Set());
+  const [creatingCNFromPO, setCreatingCNFromPO] = useState(false);
+
+  // ----- Inline Expected DD editing on Planning / Pending CN -----
+  const [editingDDId, setEditingDDId] = useState<string | null>(null);
+  const [editingDDValue, setEditingDDValue] = useState("");
+
+  // ---------- Pagination ----------
+  // Same rationale as DO: 200 page size keeps daily working set on page 1.
+  const PAGE_SIZE = 200;
+  const [page, setPage] = useUrlStateNumber("page", 1);
 
   // ---------- Fetch ----------
-  // Pull real ConsignmentNote rows from /api/consignment-notes and join them
-  // client-side with their parent ConsignmentOrder so the grid can show
-  // customer / branch / CO ref alongside the dispatch info.
-  const { data: cnResp, loading: cnLoading, refresh: refreshCNs } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignment-notes");
-  const { data: coResp, loading: coLoading, refresh: refreshCOs } = useCachedJson<{ success?: boolean; data?: ConsignmentNote[] }>("/api/consignments");
+  // Pull CN list from /api/consignment-notes (legacy CN dispatch table).
+  const { data: cnRaw, loading: cnLoading, refresh: refreshCNs } = useCachedJson<{
+    success?: boolean;
+    data?: ConsignmentNote[];
+  }>(`/api/consignment-notes?page=${page}&limit=${PAGE_SIZE}`);
 
-  const cnRows: ConsignmentNoteRow[] = useMemo(() => {
-    if (cnResp?.success && coResp?.success) {
-      const cns = (cnResp.data || []) as ConsignmentNote[];
-      const orders = (coResp.data || []) as ConsignmentNote[];
-      return joinCNsWithOrders(cns, orders);
-    }
-    return [];
-  }, [cnResp, coResp]);
+  // Pull POs to build Planning + Pending CN tabs. Same endpoint DO uses,
+  // but we filter for `consignmentOrderId` set instead of `salesOrderId`.
+  const { data: poRaw, loading: poLoading, refresh: refreshPOs } =
+    useCachedJson<{ success?: boolean; data?: ProductionOrderApiShape[] }>("/api/production-orders");
 
-  const loading = cnLoading || coLoading;
+  // Pull CO list for hookkaExpectedDD + companyCOId join (DO uses
+  // /api/sales-orders for the same purpose).
+  const { data: coOrdersRaw, loading: coOrdersLoading, refresh: refreshCOs } =
+    useCachedJson<{ success?: boolean; data?: ConsignmentOrderApiShape[] }>("/api/consignment-orders");
+
+  // Product master for per-unit m³ — same source DO uses.
+  const { data: prodRaw, loading: prodLoading, refresh: refreshProducts } =
+    useCachedJson<{ success?: boolean; data?: { code: string; unitM3: number }[] }>("/api/products");
 
   const fetchData = useCallback(() => {
+    invalidateCachePrefix("/api/consignment-notes");
+    invalidateCachePrefix("/api/consignment-orders");
+    invalidateCachePrefix("/api/production-orders");
+    invalidateCachePrefix("/api/products");
     refreshCNs();
     refreshCOs();
-  }, [refreshCNs, refreshCOs]);
+    refreshPOs();
+    refreshProducts();
+  }, [refreshCNs, refreshCOs, refreshPOs, refreshProducts]);
 
-  // ---------- Filtered data ----------
-  const filteredRows = useMemo(() => {
-    let data = cnRows;
+  // Lookup: productCode → unitM3 (mirrors DO's productM3Map).
+  const productM3Map = useMemo(() => {
+    const m = new Map<string, number>();
+    const arr = prodRaw?.success ? prodRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (p?.code) m.set(p.code, Number(p.unitM3) || 0);
+      }
+    }
+    return m;
+  }, [prodRaw]);
 
-    // Tab filter
-    const tabDef = TAB_FILTERS.find((t) => t.key === activeTab);
-    if (tabDef && tabDef.statuses) {
-      data = data.filter((d) => tabDef.statuses!.includes(d.status));
+  // Mirror SWR data → local state. Same eslint suppression as DO.
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR data into mutable local state for optimistic UI */
+  useEffect(() => {
+    const anyLoading = cnLoading || poLoading || coOrdersLoading || prodLoading;
+    setLoading(anyLoading);
+
+    // Map CN rows
+    if (cnRaw?.success && Array.isArray(cnRaw.data)) {
+      setCnList((cnRaw.data as ConsignmentNote[]).map(mapCNToRow));
     }
 
-    // Status filter
-    if (filterStatus) {
-      data = data.filter((d) => d.status === filterStatus);
-    }
+    // Build PO-based tab data (Planning + Pending CN)
+    if (poRaw?.success && Array.isArray(poRaw.data)) {
+      // CO lookup map for hookkaExpectedDD + companyCOId join.
+      const coMap = new Map<string, { hookkaExpectedDD: string; companyCOId: string; customerId: string }>();
+      if (coOrdersRaw?.success && Array.isArray(coOrdersRaw.data)) {
+        for (const co of coOrdersRaw.data) {
+          coMap.set(co.id, {
+            hookkaExpectedDD: co.hookkaExpectedDD || "",
+            companyCOId: co.companyCOId || "",
+            customerId: co.customerId || "",
+          });
+        }
+      }
 
-    // Customer filter
-    if (filterCustomer) {
-      data = data.filter((d) =>
-        d.customerName.toLowerCase().includes(filterCustomer.toLowerCase())
-      );
-    }
+      // CN dedup approximation: backend doesn't link CN ↔ PO ↔ CO yet,
+      // so we can't filter "PO is on a non-cancelled CN" the way DO
+      // does for DOs. Best-effort fallback: dedup by customer match on
+      // any CN with status PENDING/DISPATCHED — coarse but better than
+      // nothing. Documented as a follow-up: add productionOrderId or
+      // consignmentOrderId column to consignment_notes.
+      const cnLinkedCustomers = new Set<string>();
+      if (cnRaw?.success && Array.isArray(cnRaw.data)) {
+        for (const cn of cnRaw.data as ConsignmentNote[]) {
+          if (cn.status === "ACTIVE" || cn.status === "PARTIALLY_SOLD") {
+            cnLinkedCustomers.add(cn.customerId);
+          }
+        }
+      }
 
-    // Date filters
-    if (filterDateFrom) {
-      const from = new Date(filterDateFrom);
-      data = data.filter((d) => d.dispatchDate && new Date(d.dispatchDate) >= from);
-    }
-    if (filterDateTo) {
-      const to = new Date(filterDateTo);
-      to.setHours(23, 59, 59, 999);
-      data = data.filter((d) => d.dispatchDate && new Date(d.dispatchDate) <= to);
-    }
+      const allPOs = poRaw.data as ProductionOrderApiShape[];
 
-    return data;
-  }, [cnRows, activeTab, filterStatus, filterCustomer, filterDateFrom, filterDateTo]);
+      const mapPO = (po: ProductionOrderApiShape): ReadyPORow => {
+        const coInfo = coMap.get(po.consignmentOrderId || "");
+        return {
+          id: po.id,
+          poNo: po.poNo,
+          consignmentOrderId: po.consignmentOrderId || "",
+          consignmentOrderNo: po.companyCOId || coInfo?.companyCOId || "",
+          customerId: po.customerId || coInfo?.customerId || "",
+          customerName: po.customerName || "",
+          customerState: po.customerState || "",
+          productCode: po.productCode || "",
+          productName: po.productName || "",
+          itemCategory: po.itemCategory || "",
+          sizeLabel: po.sizeLabel || "",
+          fabricCode: po.fabricCode || "",
+          quantity: po.quantity || 0,
+          unitM3: productM3Map.get(po.productCode || "") ?? 0,
+          completedDate: po.completedDate || null,
+          uphCompletedDate: (() => {
+            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            if (uphCards.length === 0) return null;
+            const dates = uphCards.map((j) => j.completedDate).filter((d): d is string => !!d);
+            return dates.length > 0 ? dates.sort().reverse()[0] : null;
+          })(),
+          rackingNumber: po.rackingNumber || "",
+          hookkaExpectedDD: coInfo?.hookkaExpectedDD || po.targetEndDate || "",
+          currentDepartment: po.currentDepartment || "",
+          progress: po.progress || 0,
+        };
+      };
 
-  // ---------- Summary counts ----------
-  const totalNotes = cnRows.length;
-  const pendingCount = cnRows.filter((d) => d.status === "PENDING").length;
-  const inTransitCount = cnRows.filter((d) => d.status === "DISPATCHED").length;
+      // Planning: CO-origin POs still in production (upholstery not yet
+      // complete). Mirrors DO's "planning" filter but on consignmentOrderId.
+      const planning = allPOs
+        .filter((po) => {
+          if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
+          if (!po.consignmentOrderId) return false; // SO-origin POs go to DO page
+          const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+          if (uphCards.length === 0) return false;
+          return uphCards.some((j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED");
+        })
+        .map(mapPO);
+      setPlanningPOs(planning);
+
+      // Pending CN: CO-origin POs with all upholstery done, no CN yet
+      // for that customer. Mirrors DO's "Ready for DO" — see dedup
+      // caveat above.
+      const ready = allPOs
+        .filter((po) => {
+          if (po.status === "CANCELLED") return false;
+          if (!po.consignmentOrderId) return false;
+          const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+          if (uphCards.length === 0) return false;
+          return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+        })
+        .filter((po) => !cnLinkedCustomers.has(po.customerId || ""))
+        .map(mapPO);
+      setReadyPOs(ready);
+    }
+  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ---------- Filtered data (CN-list tabs only) ----------
+  const filteredCNs = useMemo(() => {
+    const statuses = TAB_CN_STATUSES[activeTab];
+    if (!statuses) return []; // PO-based tab — no CN rows
+    return cnList.filter((c) => statuses.includes(c.status));
+  }, [cnList, activeTab]);
+
+  // ---------- Summary counts (mirrors DO's KPI strip) ----------
+  // Counts pulled from the loaded CN list. CN backend has no /stats
+  // endpoint yet, so we compute client-side. Will move to server-side
+  // counts once /api/consignment-notes/stats lands (follow-up).
+  const pendingDispatchCount = useMemo(
+    () => cnList.filter((c) => c.status === "PENDING").length,
+    [cnList],
+  );
+  const dispatchedCount = useMemo(
+    () => cnList.filter((c) => c.status === "DISPATCHED").length,
+    [cnList],
+  );
+  const inTransitCount = useMemo(
+    () => cnList.filter((c) => c.status === "IN_TRANSIT").length,
+    [cnList],
+  );
   const deliveredMTD = useMemo(() => {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    return cnRows.filter(
-      (d) =>
-        d.status === "DELIVERED" &&
-        d.deliveredDate &&
-        new Date(d.deliveredDate) >= startOfMonth
+    return cnList.filter(
+      (c) =>
+        c.status === "DELIVERED" &&
+        c.deliveredDate &&
+        new Date(c.deliveredDate) >= startOfMonth,
     ).length;
-  }, [cnRows]);
+  }, [cnList]);
+  // Pending-CN count ignores the customer dedup since the user wants to
+  // see the raw pipeline pressure.
+  const pendingCNCount = readyPOs.length;
 
-  // ---------- Export CSV ----------
-  const handleExportCSV = () => {
-    const headers = ["CN No.", "CO Ref", "Customer", "Branch", "Items", "Total Value", "Dispatch Date", "Status"];
-    const csvRows = filteredRows.map((r) => [
-      r.cnNo,
-      r.coRef,
-      r.customerName,
-      r.branchName,
-      r.items,
-      (r.totalValueSen / 100).toFixed(2),
-      r.dispatchDate ? formatDate(r.dispatchDate) : "",
-      STATUS_LABEL[r.status],
-    ]);
-    const csv = [headers, ...csvRows].map((row) => row.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `consignment-notes-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+  // ---------- Pending Dispatch (Pending CN) → Create CN ----------
+  // Mirrors DO's Create-DO flow but POSTs to /api/consignment-notes.
+  // Backend's POST shape is permissive (it accepts customerId + items)
+  // — we synthesize one CN per (customerId+CO) group from the selected
+  // POs, with line items derived from PO data.
+  const openCreateCN = useCallback(
+    async (pos: ReadyPORow[]) => {
+      if (pos.length === 0) return;
+      setCreatingCNFromPO(true);
+      try {
+        // Group selected POs by customer — one CN per customer batch.
+        // (Multi-customer in one CN doesn't make sense — each CN has a
+        // single branch destination.)
+        const byCustomer = new Map<string, ReadyPORow[]>();
+        for (const po of pos) {
+          const key = po.customerId || "_unknown";
+          const arr = byCustomer.get(key) || [];
+          arr.push(po);
+          byCustomer.set(key, arr);
+        }
 
-  // ---------- Columns ----------
-  const columns: Column<ConsignmentNoteRow>[] = useMemo(
+        let okCount = 0;
+        for (const [, group] of byCustomer.entries()) {
+          const first = group[0];
+          const body = {
+            type: "OUT",
+            customerId: first.customerId,
+            customerName: first.customerName,
+            branchName: first.customerState || "Branch",
+            sentDate: new Date().toISOString().split("T")[0],
+            notes: `Auto-created from CO ${first.consignmentOrderNo} on Pending CN dispatch`,
+            items: group.map((po) => ({
+              productId: "",
+              productName: po.productName,
+              productCode: po.productCode,
+              quantity: po.quantity,
+              unitPrice: 0, // CN unit price not tracked at PO level — future: pull from CO line items
+            })),
+          };
+          const res = await fetch("/api/consignment-notes", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (res.ok) okCount += 1;
+        }
+        if (okCount > 0) {
+          toast.success(`Created ${okCount} consignment note${okCount === 1 ? "" : "s"}`);
+        } else {
+          toast.error("Failed to create consignment notes");
+        }
+      } catch {
+        toast.error("Failed to create consignment notes");
+      } finally {
+        setCreatingCNFromPO(false);
+        setSelectedReadyPOs(new Set());
+        fetchData();
+      }
+    },
+    [fetchData, toast],
+  );
+
+  // ---------- Inline Expected DD update on the CO ----------
+  // DO updates SO.hookkaExpectedDD via PUT /api/sales-orders/:id; same
+  // pattern here against /api/consignment-orders/:id.
+  const updateExpectedDD = useCallback(
+    async (consignmentOrderId: string, newDate: string, rowId: string) => {
+      if (!consignmentOrderId) return;
+      try {
+        const res = await fetch(`/api/consignment-orders/${consignmentOrderId}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ hookkaExpectedDD: newDate }),
+        });
+        if (res.ok) {
+          setPlanningPOs((prev) =>
+            prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r)),
+          );
+          setReadyPOs((prev) =>
+            prev.map((r) => (r.id === rowId ? { ...r, hookkaExpectedDD: newDate } : r)),
+          );
+        }
+      } catch {
+        /* swallow — same pattern as DO */
+      } finally {
+        setEditingDDId(null);
+      }
+    },
+    [],
+  );
+
+  // ---------- Planning columns (CO-origin POs in production) ----------
+  // 1:1 mirror of DO's planningColumns with SO → CO renames.
+  const planningColumns: Column<ReadyPORow>[] = useMemo(
     () => [
-      { key: "cnNo", label: "CN No.", type: "docno", width: "120px", sortable: true },
+      { key: "consignmentOrderNo", label: "CO No.", type: "docno", width: "130px", sortable: true },
+      {
+        key: "poNo",
+        label: "CO ID",
+        type: "docno",
+        width: "150px",
+        sortable: true,
+        render: (_v, row) => <span className="doc-number">{displayCoId(row)}</span>,
+      },
+      { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
+      { key: "productName", label: "Product", type: "text", sortable: true },
+      { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },
+      { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
+      { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
+      { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
+      { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        key: "unitM3",
+        label: "Unit (m³)",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)}</span>
+        ),
+      },
+      { key: "currentDepartment", label: "Current Dept", type: "text", width: "100px", sortable: true },
+      {
+        key: "progress",
+        label: "Progress",
+        type: "number",
+        width: "120px",
+        align: "right",
+        sortable: true,
+        render: (_v, row) => (
+          <div className="flex items-center gap-1.5 justify-end">
+            <div className="w-14 h-1.5 bg-[#E2DDD8] rounded-full overflow-hidden">
+              <div className="h-full bg-[#6B5C32] rounded-full" style={{ width: `${row.progress}%` }} />
+            </div>
+            <span className="text-xs tabular-nums text-[#6B7280]">{row.progress}%</span>
+          </div>
+        ),
+      },
+      {
+        key: "hookkaExpectedDD",
+        label: "Expected DD",
+        type: "date",
+        width: "110px",
+        sortable: true,
+        render: (_v, row) => {
+          if (editingDDId === row.id) {
+            return (
+              <input
+                type="date"
+                autoFocus
+                value={editingDDValue}
+                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
+                onChange={(e) => setEditingDDValue(e.target.value)}
+                onBlur={() => {
+                  if (editingDDValue) {
+                    updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
+                  } else {
+                    setEditingDDId(null);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (editingDDValue) {
+                      updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
+                    } else {
+                      setEditingDDId(null);
+                    }
+                  } else if (e.key === "Escape") {
+                    setEditingDDId(null);
+                  }
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            );
+          }
+          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
+          return (
+            <span
+              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setEditingDDId(row.id);
+                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
+              }}
+            >
+              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
+            </span>
+          );
+        },
+      },
+    ],
+    [editingDDId, editingDDValue, updateExpectedDD],
+  );
+
+  // ---------- Pending CN columns (CO-origin POs ready for CN) ----------
+  // 1:1 mirror of DO's pendingDeliveryColumns. SO → CO rename.
+  const pendingCNColumns: Column<ReadyPORow>[] = useMemo(
+    () => [
+      { key: "consignmentOrderNo", label: "CO No.", type: "docno", width: "130px", sortable: true },
+      {
+        key: "poNo",
+        label: "CO ID",
+        type: "docno",
+        width: "150px",
+        sortable: true,
+        render: (_v, row) => <span className="doc-number">{displayCoId(row)}</span>,
+      },
+      { key: "productCode", label: "Product Code", type: "docno", width: "110px", sortable: true },
+      { key: "productName", label: "Product", type: "text", sortable: true },
+      { key: "sizeLabel", label: "Size", type: "text", width: "80px", sortable: true },
+      { key: "fabricCode", label: "Fabric", type: "text", width: "80px", sortable: true },
+      { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
+      { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
+      { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        key: "unitM3",
+        label: "Unit (m³)",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="tabular-nums">{(row.unitM3 ?? 0).toFixed(3)}</span>
+        ),
+      },
+      { key: "rackingNumber", label: "Rack", type: "text", width: "80px", sortable: true },
+      {
+        key: "uphCompletedDate",
+        label: "Uph. Completed",
+        type: "date",
+        width: "120px",
+        sortable: true,
+        render: (_v, row) => (
+          <span className="tabular-nums">{row.uphCompletedDate ? formatDate(row.uphCompletedDate) : "-"}</span>
+        ),
+      },
+      {
+        key: "hookkaExpectedDD",
+        label: "Expected DD",
+        type: "date",
+        width: "110px",
+        sortable: true,
+        render: (_v, row) => {
+          if (editingDDId === row.id) {
+            return (
+              <input
+                type="date"
+                autoFocus
+                value={editingDDValue}
+                className="h-7 w-[120px] text-xs rounded border border-[#E2DDD8] px-1.5 focus:outline-none focus:border-[#6B5C32]"
+                onChange={(e) => setEditingDDValue(e.target.value)}
+                onBlur={() => {
+                  if (editingDDValue) {
+                    updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
+                  } else {
+                    setEditingDDId(null);
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (editingDDValue) {
+                      updateExpectedDD(row.consignmentOrderId, editingDDValue, row.id);
+                    } else {
+                      setEditingDDId(null);
+                    }
+                  } else if (e.key === "Escape") {
+                    setEditingDDId(null);
+                  }
+                }}
+                onClick={(e) => e.stopPropagation()}
+              />
+            );
+          }
+          const isOverdue = row.hookkaExpectedDD && new Date(row.hookkaExpectedDD) < new Date();
+          return (
+            <span
+              className={`cursor-pointer hover:underline hover:text-[#6B5C32] ${isOverdue ? "text-[#9A3A2D] font-medium" : ""}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setEditingDDId(row.id);
+                setEditingDDValue(row.hookkaExpectedDD ? row.hookkaExpectedDD.slice(0, 10) : "");
+              }}
+            >
+              {row.hookkaExpectedDD ? formatDate(row.hookkaExpectedDD) : <span className="text-[#9CA3AF]">—</span>}
+            </span>
+          );
+        },
+      },
+    ],
+    [editingDDId, editingDDValue, updateExpectedDD],
+  );
+
+  // ---------- CN columns (bottom DataGrid for CN list tabs) ----------
+  // Mirrors DO's columns array. SO → CO rename for the "Sales Orders"
+  // column ("Consignment Orders" here). Transport columns render "—"
+  // until the backend grows those fields — see top-of-file note.
+  const cnColumns: Column<ConsignmentNoteRow>[] = useMemo(
+    () => [
+      {
+        key: "dispatchDate",
+        label: "Dispatch Date",
+        type: "date",
+        width: "120px",
+        sortable: true,
+        render: (_value, row) => (
+          <span>{row.dispatchDate ? formatDate(row.dispatchDate) : <span className="text-[#9CA3AF]">-</span>}</span>
+        ),
+      },
+      { key: "cnNo", label: "CN No.", type: "docno", width: "130px", sortable: true },
+      {
+        key: "customerName",
+        label: "Customers",
+        type: "text",
+        width: "150px",
+        sortable: true,
+        render: (_value, row) => <span className="text-[#1F1D1B]">{row.customerName || "-"}</span>,
+      },
+      {
+        key: "branchName",
+        label: "State",
+        type: "text",
+        width: "100px",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="text-[#4B5563]">{row.branchName || "-"}</span>
+        ),
+      },
       {
         key: "coRef",
-        label: "CO Ref",
-        type: "docno",
-        width: "130px",
+        label: "Consignment Orders",
+        type: "text",
+        width: "180px",
         sortable: true,
         render: (_value, row) => (
           <button
@@ -255,54 +834,57 @@ export default function ConsignmentNotePage() {
         ),
       },
       {
-        key: "customerName",
-        label: "Customer",
-        type: "text",
+        key: "status",
+        label: "Status",
+        type: "status",
+        width: "180px",
         sortable: true,
         render: (_value, row) => (
-          <div>
-            <p className="font-medium text-[#1F1D1B]">{row.customerName}</p>
+          <div className="flex flex-col gap-0.5 text-xs leading-tight">
+            <span className="font-medium">{STATUS_LABEL[row.status] ?? row.status}</span>
+            <span className="text-[#9CA3AF] tabular-nums">
+              {row.itemCount} item{row.itemCount === 1 ? "" : "s"} · {formatCurrency(row.totalValueSen)}
+            </span>
           </div>
         ),
       },
+      // Transport columns — placeholders until backend grows the fields.
+      // Same column widths as DO so the two grids visually align.
       {
-        key: "branchName",
-        label: "Branch",
+        key: "driverCompany",
+        label: "Transport Co.",
+        type: "text",
+        width: "180px",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="text-[#1F1D1B]">{row.driverCompany || <span className="text-[#9CA3AF]">—</span>}</span>
+        ),
+      },
+      {
+        key: "driverName",
+        label: "Driver",
         type: "text",
         width: "120px",
         sortable: true,
+        render: (_value, row) => (
+          <span className="text-[#4B5563]">{row.driverName || <span className="text-[#9CA3AF]">—</span>}</span>
+        ),
       },
       {
-        key: "items",
-        label: "Items",
-        type: "number",
-        width: "70px",
-        align: "right",
-        sortable: true,
-      },
-      {
-        key: "totalValueSen",
-        label: "Total Value",
-        type: "currency",
-        width: "120px",
-        sortable: true,
-      },
-      {
-        key: "dispatchDate",
-        label: "Dispatch Date",
-        type: "date",
+        key: "vehicleNo",
+        label: "Vehicle",
+        type: "text",
         width: "110px",
         sortable: true,
         render: (_value, row) => (
-          <span>{row.dispatchDate ? formatDate(row.dispatchDate) : "-"}</span>
+          <span className="font-mono text-[#1F1D1B]">{row.vehicleNo || <span className="text-[#9CA3AF]">—</span>}</span>
         ),
       },
-      { key: "status", label: "Status", type: "status", width: "120px", sortable: true },
     ],
-    [navigate]
+    [navigate],
   );
 
-  // ---------- Context menu ----------
+  // ---------- Context menu for CN rows ----------
   const getContextMenuItems = useCallback(
     (row: ConsignmentNoteRow): ContextMenuItem[] => [
       {
@@ -314,6 +896,73 @@ export default function ConsignmentNotePage() {
         label: "Print CN",
         icon: <Printer className="h-3.5 w-3.5" />,
         action: () => toast.info(`Printing CN: ${row.cnNo} — coming soon`),
+      },
+      { label: "", separator: true, action: () => {} },
+      // Mark Dispatched — flips ACTIVE → PARTIALLY_SOLD on the backend
+      // (which we re-skin as PENDING → DISPATCHED in the UI). Same
+      // transition the DO board offers as DRAFT → LOADED.
+      {
+        label: "Mark Dispatched",
+        icon: <Send className="h-3.5 w-3.5" />,
+        disabled: row.status !== "PENDING",
+        action: async () => {
+          try {
+            const res = await fetch("/api/consignment-notes", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: row.id, status: "PARTIALLY_SOLD" }),
+            });
+            if (!res.ok) {
+              toast.error("Failed to mark dispatched");
+            } else {
+              fetchData();
+            }
+          } catch {
+            toast.error("Failed to mark dispatched");
+          }
+        },
+      },
+      {
+        label: "Mark Delivered",
+        icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+        disabled: row.status !== "DISPATCHED" && row.status !== "IN_TRANSIT",
+        action: async () => {
+          try {
+            const res = await fetch("/api/consignment-notes", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: row.id, status: "FULLY_SOLD" }),
+            });
+            if (!res.ok) {
+              toast.error("Failed to mark delivered");
+            } else {
+              fetchData();
+            }
+          } catch {
+            toast.error("Failed to mark delivered");
+          }
+        },
+      },
+      {
+        label: "Mark Acknowledged",
+        icon: <PackageCheck className="h-3.5 w-3.5" />,
+        disabled: row.status !== "DELIVERED",
+        action: async () => {
+          try {
+            const res = await fetch("/api/consignment-notes", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: row.id, status: "CLOSED" }),
+            });
+            if (!res.ok) {
+              toast.error("Failed to mark acknowledged");
+            } else {
+              fetchData();
+            }
+          } catch {
+            toast.error("Failed to mark acknowledged");
+          }
+        },
       },
       { label: "", separator: true, action: () => {} },
       {
@@ -332,8 +981,7 @@ export default function ConsignmentNotePage() {
         action: () => {
           const qtys: Record<string, number> = {};
           const selected: Record<string, boolean> = {};
-          // We only have item count, not actual items, so create placeholder entries
-          for (let i = 0; i < row.items; i++) {
+          for (let i = 0; i < row.itemCount; i++) {
             const key = `${row.id}-item-${i}`;
             qtys[key] = 1;
             selected[key] = true;
@@ -350,23 +998,27 @@ export default function ConsignmentNotePage() {
         action: () => fetchData(),
       },
     ],
-    [fetchData]
+    [fetchData, toast],
   );
 
-  // ---------- Tab counts ----------
+  // ---------- Tab counts (mirrors DO) ----------
   const tabCounts: Record<string, number> = {
-    all: cnRows.length,
-    pending: pendingCount,
-    dispatched: inTransitCount,
-    delivered: cnRows.filter((d) => d.status === "DELIVERED").length,
-    acknowledged: cnRows.filter((d) => d.status === "ACKNOWLEDGED").length,
+    planning: planningPOs.length,
+    pending_cn: pendingCNCount,
+    pending_dispatch: pendingDispatchCount,
+    dispatched: dispatchedCount + inTransitCount,
+    delivered: cnList.filter((c) => c.status === "DELIVERED").length,
+    acknowledged: cnList.filter((c) => c.status === "ACKNOWLEDGED").length,
   };
 
-  // ---------- Transfer Handlers ----------
+  // ---------- Pagination derivations ----------
+  const totalCNs = cnList.length;
+  const totalPages = Math.max(1, Math.ceil(totalCNs / PAGE_SIZE));
+
+  // ---------- Transfer Handlers (preserved from original) ----------
   const handleTransferToDO = async () => {
     if (!transferDORow) return;
     setTransferDOLoading(true);
-    // Simulate a short delay for UX inside an async event handler.
     // eslint-disable-next-line no-restricted-syntax -- UX pacing delay inside async event handler
     await new Promise((r) => setTimeout(r, 600));
     setTransferDOLoading(false);
@@ -393,7 +1045,7 @@ export default function ConsignmentNotePage() {
           customerName: transferCRRow.customerName,
           branchName: transferCRRow.branchName,
           items: Object.entries(crSelectedItems)
-            .filter(([, selected]) => selected)
+            .filter(([, sel]) => sel)
             .map(([key]) => ({ id: key, quantity: crReturnQtys[key] ?? 1 })),
           notes: "Return from " + transferCRRow.cnNo,
         }),
@@ -427,7 +1079,7 @@ export default function ConsignmentNotePage() {
           customerName: transferSIRow.customerName,
           invoiceNo: invNo,
           totalSen: transferSIRow.totalValueSen,
-          items: transferSIRow.items,
+          items: transferSIRow.itemCount,
         }),
       });
       if (!res.ok) throw new Error("Failed");
@@ -435,7 +1087,7 @@ export default function ConsignmentNotePage() {
       invalidateCachePrefix("/api/consignments");
       invalidateCachePrefix("/api/invoices");
       setTransferSIRow(null);
-      navigate("/sales"); // Navigate to invoices
+      navigate("/sales");
     } catch {
       toast.error("Failed to create Sales Invoice. Please try again.");
     } finally {
@@ -443,22 +1095,38 @@ export default function ConsignmentNotePage() {
     }
   };
 
-  // ---------- Summary pipeline ----------
-  const pipelineSteps = [
-    { label: "Pending", status: "PENDING", count: pendingCount },
-    { label: "Dispatched", status: "DISPATCHED", count: inTransitCount },
-    { label: "Delivered", status: "DELIVERED", count: cnRows.filter((d) => d.status === "DELIVERED").length },
-    { label: "Acknowledged", status: "ACKNOWLEDGED", count: cnRows.filter((d) => d.status === "ACKNOWLEDGED").length },
-  ];
+  // ---------- Export CSV ----------
+  const handleExportCSV = () => {
+    const headers = ["Dispatch Date", "CN No.", "CO Ref", "Customer", "Branch", "Items", "Total Value", "Status"];
+    const csvRows = filteredCNs.map((r) => [
+      r.dispatchDate ? formatDate(r.dispatchDate) : "",
+      r.cnNo,
+      r.coRef,
+      r.customerName,
+      r.branchName,
+      r.itemCount,
+      (r.totalValueSen / 100).toFixed(2),
+      STATUS_LABEL[r.status],
+    ]);
+    const csv = [headers, ...csvRows].map((row) => row.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `consignment-notes-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header — mirrors DO. New CN button is a passthrough toast for now;
+          create flow lives on the Pending CN tab via Create CN button. */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Notes</h1>
           <p className="text-xs text-[#6B7280]">
-            Track consignment dispatches and deliveries to branches
+            Manage consignment notes, branch dispatch, and acknowledgment tracking
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -466,104 +1134,77 @@ export default function ConsignmentNotePage() {
             <Download className="h-4 w-4" /> Export CSV
           </Button>
           <Button
-            variant="primary"
-            onClick={() => toast.info("New Consignment Note — coming soon")}
+            variant="outline"
+            onClick={() => fetchData()}
           >
-            <FileText className="h-4 w-4" /> New Consignment Note
+            <RefreshCw className="h-4 w-4" /> Refresh
           </Button>
         </div>
       </div>
 
-      {/* Summary Cards */}
+      {/* ====================================================== */}
+      {/* KPI Strip — 4 cards, mirrors DO. Labels per task spec:  */}
+      {/*   Pending CN · Dispatched · In Transit · Delivered MTD  */}
+      {/* ====================================================== */}
       <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-[#F0ECE9] p-2.5">
-              <Package className="h-5 w-5 text-[#6B5C32]" />
+            <div className="rounded-lg bg-[#FAEFCB] p-2.5">
+              <Package className="h-5 w-5 text-[#9C6F1E]" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-[#6B5C32]">{loading ? "-" : totalNotes}</p>
-              <p className="text-xs text-[#6B7280]">Total Notes</p>
+              <p className="text-2xl font-bold text-[#9C6F1E]">{loading ? "-" : pendingCNCount}</p>
+              <p className="text-xs text-[#6B7280]">Pending CN</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-amber-50 p-2.5">
-              <PackageCheck className="h-5 w-5 text-amber-600" />
+            <div className="rounded-lg bg-[#E0EDF0] p-2.5">
+              <Send className="h-5 w-5 text-[#3E6570]" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-amber-600">{loading ? "-" : pendingCount}</p>
-              <p className="text-xs text-[#6B7280]">Pending Dispatch</p>
+              <p className="text-2xl font-bold text-[#3E6570]">{loading ? "-" : dispatchedCount}</p>
+              <p className="text-xs text-[#6B7280]">Dispatched</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-blue-50 p-2.5">
-              <Truck className="h-5 w-5 text-blue-600" />
+            <div className="rounded-lg bg-[#F1E6F0] p-2.5">
+              <Truck className="h-5 w-5 text-[#6B4A6D]" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-blue-600">{loading ? "-" : inTransitCount}</p>
+              <p className="text-2xl font-bold text-[#6B4A6D]">{loading ? "-" : inTransitCount}</p>
               <p className="text-xs text-[#6B7280]">In Transit</p>
             </div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
-            <div className="rounded-lg bg-green-50 p-2.5">
-              <CheckCircle2 className="h-5 w-5 text-green-600" />
+            <div className="rounded-lg bg-[#EEF3E4] p-2.5">
+              <CheckCircle2 className="h-5 w-5 text-[#4F7C3A]" />
             </div>
             <div>
-              <p className="text-2xl font-bold text-green-600">{loading ? "-" : deliveredMTD}</p>
+              <p className="text-2xl font-bold text-[#4F7C3A]">{loading ? "-" : deliveredMTD}</p>
               <p className="text-xs text-[#6B7280]">Delivered (MTD)</p>
             </div>
           </CardContent>
         </Card>
       </div>
 
-      {/* Status Pipeline */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex items-center justify-between overflow-x-auto gap-2">
-            {pipelineSteps.map((s, i) => (
-              <div key={s.label} className="flex items-center gap-2">
-                <div
-                  className="text-center min-w-[80px] cursor-pointer"
-                  onClick={() => {
-                    const tabKey = s.status.toLowerCase();
-                    setActiveTab(activeTab === tabKey ? "all" : tabKey);
-                  }}
-                >
-                  <Badge variant="status" status={s.status}>
-                    {s.count}
-                  </Badge>
-                  <p
-                    className={`text-xs mt-1 ${
-                      activeTab === s.status.toLowerCase()
-                        ? "text-[#6B5C32] font-medium"
-                        : "text-[#6B7280]"
-                    }`}
-                  >
-                    {s.label}
-                  </p>
-                </div>
-                {i < pipelineSteps.length - 1 && (
-                  <ArrowRight className="h-4 w-4 text-[#D1CBC5] shrink-0" />
-                )}
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Tabs */}
+      {/* ============================================================ */}
+      {/* Tabs — 6-stage CN workflow, count badges per tab (mirrors DO). */}
+      {/* ============================================================ */}
       <div className="border-b border-[#E2DDD8]">
-        <nav className="flex gap-6 overflow-x-auto" aria-label="Tabs">
-          {TAB_FILTERS.map((tab) => (
+        <nav className="flex gap-4 overflow-x-auto" aria-label="Tabs">
+          {ALL_TABS.map((tab) => (
             <button
               key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
+              onClick={() => {
+                setActiveTab(tab.key);
+                setSelectedReadyPOs(new Set());
+              }}
               className={`flex items-center gap-2 pb-3 text-sm font-medium border-b-2 transition-colors cursor-pointer whitespace-nowrap ${
                 activeTab === tab.key
                   ? "border-[#6B5C32] text-[#6B5C32]"
@@ -585,88 +1226,139 @@ export default function ConsignmentNotePage() {
         </nav>
       </div>
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3">
-        <select
-          value={filterStatus}
-          onChange={(e) => setFilterStatus(e.target.value)}
-          className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20"
-        >
-          <option value="">All Statuses</option>
-          <option value="PENDING">Pending</option>
-          <option value="DISPATCHED">Dispatched</option>
-          <option value="DELIVERED">Delivered</option>
-          <option value="ACKNOWLEDGED">Acknowledged</option>
-        </select>
-        <Input
-          placeholder="Filter by customer..."
-          value={filterCustomer}
-          onChange={(e) => setFilterCustomer(e.target.value)}
-          className="h-9 w-48"
-        />
-        <Input
-          type="date"
-          value={filterDateFrom}
-          onChange={(e) => setFilterDateFrom(e.target.value)}
-          className="h-9 w-40"
-        />
-        <span className="text-sm text-[#6B7280]">to</span>
-        <Input
-          type="date"
-          value={filterDateTo}
-          onChange={(e) => setFilterDateTo(e.target.value)}
-          className="h-9 w-40"
-        />
-        {(filterStatus || filterCustomer || filterDateFrom || filterDateTo) && (
-          <Button
-            variant="outline"
-            onClick={() => {
-              setFilterStatus("");
-              setFilterCustomer("");
-              setFilterDateFrom("");
-              setFilterDateTo("");
-            }}
-          >
-            Clear Filters
-          </Button>
-        )}
-      </div>
+      {/* ============================================================ */}
+      {/* Tab Content                                                   */}
+      {/* ============================================================ */}
 
-      {/* DataGrid */}
-      <Card>
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2">
-              <FileText className="h-5 w-5 text-[#6B5C32]" /> Consignment Notes
-            </CardTitle>
-          </div>
-        </CardHeader>
-        <CardContent>
-          <DataGrid<ConsignmentNoteRow>
-            columns={columns}
-            data={filteredRows}
-            keyField="id"
-            loading={loading}
-            stickyHeader
-            maxHeight="calc(100vh - 280px)"
-            emptyMessage="No consignment notes found."
-            onDoubleClick={(row) => setDetailCN(row)}
-            contextMenuItems={getContextMenuItems}
-          />
-        </CardContent>
-      </Card>
+      {/* ---- Planning Tab (CO POs still in production) ---- */}
+      {activeTab === "planning" && (
+        <Card>
+          <CardContent>
+            <DataGrid<ReadyPORow>
+              columns={planningColumns}
+              data={planningPOs}
+              keyField="id"
+              loading={loading}
+              stickyHeader
+              maxHeight="calc(100vh - 280px)"
+              emptyMessage="No CO items in planning."
+              groupBy="customerState"
+            />
+          </CardContent>
+        </Card>
+      )}
 
-      {/* ---------- Detail Dialog (inline, fixed inset-0 z-50) ---------- */}
+      {/* ---- Pending CN Tab ---- */}
+      {/* Mirrors DO's "Production Complete — Ready for DO" panel.       */}
+      {/* Selecting POs and clicking Create CN POSTs one CN per customer. */}
+      {activeTab === "pending_cn" && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <PackageCheck className="h-5 w-5 text-[#6B5C32]" /> Production Complete — Ready for CN
+              </CardTitle>
+              {selectedReadyPOs.size > 0 && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  disabled={creatingCNFromPO}
+                  onClick={() => {
+                    const selected = readyPOs.filter((po) => selectedReadyPOs.has(po.id));
+                    openCreateCN(selected);
+                  }}
+                >
+                  {creatingCNFromPO ? (
+                    <><RefreshCw className="h-3.5 w-3.5 animate-spin" /> Creating...</>
+                  ) : (
+                    <><PackageCheck className="h-3.5 w-3.5" /> Create CN ({selectedReadyPOs.size})</>
+                  )}
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent>
+            <DataGrid<ReadyPORow>
+              columns={pendingCNColumns}
+              data={readyPOs}
+              keyField="id"
+              loading={loading}
+              stickyHeader
+              maxHeight="calc(100vh - 280px)"
+              emptyMessage="No CO items pending CN."
+              groupBy="customerState"
+              selectable
+              onSelectionChange={(rows) =>
+                setSelectedReadyPOs(new Set(rows.map((r) => r.id)))
+              }
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ---- CN-list tabs: Pending Dispatch / Dispatched / Delivered / Acknowledged ---- */}
+      {!PO_TABS.has(activeTab) && (
+        <Card>
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2">
+                <ClipboardList className="h-5 w-5 text-[#6B5C32]" /> Consignment Notes
+              </CardTitle>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <DataGrid<ConsignmentNoteRow>
+              columns={cnColumns}
+              data={filteredCNs}
+              keyField="id"
+              loading={loading}
+              stickyHeader
+              maxHeight="calc(100vh - 280px)"
+              emptyMessage="No consignment notes found."
+              onDoubleClick={(row) => setDetailCN(row)}
+              contextMenuItems={getContextMenuItems}
+            />
+
+            {/* Pagination footer — same shape as DO. */}
+            <div className="flex items-center justify-between border-t border-[#E2DDD8] pt-3 mt-3 text-sm text-[#6B7280]">
+              <span>
+                {totalCNs.toLocaleString()} consignment note{totalCNs === 1 ? "" : "s"}
+              </span>
+              <div className="flex items-center gap-3">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage(Math.max(1, page - 1))}
+                  disabled={page <= 1 || cnLoading}
+                >
+                  ← Prev
+                </Button>
+                <span className="tabular-nums text-[#1F1D1B]">
+                  Page {page} / {totalPages}
+                </span>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setPage(Math.min(totalPages, page + 1))}
+                  disabled={page >= totalPages || cnLoading}
+                >
+                  Next →
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* ---------- Detail Dialog ---------- */}
+      {/* Preserved from the original page — works as-is. */}
       {detailCN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40"
             onClick={() => setDetailCN(null)}
           />
-          {/* Panel */}
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            {/* Header */}
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">{detailCN.cnNo}</h2>
@@ -676,22 +1368,17 @@ export default function ConsignmentNotePage() {
                 onClick={() => setDetailCN(null)}
                 className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
               >
-                <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            {/* Body */}
             <div className="px-6 py-5 space-y-5">
-              {/* Status */}
               <div className="flex items-center gap-3">
-                <Badge variant="status" status={detailCN.status}>
+                <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-[#F0ECE9] text-[#6B5C32]">
                   {STATUS_LABEL[detailCN.status]}
-                </Badge>
+                </span>
               </div>
 
-              {/* Info Grid */}
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">CN Number</p>
@@ -711,7 +1398,7 @@ export default function ConsignmentNotePage() {
                 </div>
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
-                  <p className="font-medium">{detailCN.items}</p>
+                  <p className="font-medium">{detailCN.itemCount}</p>
                 </div>
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">Total Value</p>
@@ -731,79 +1418,6 @@ export default function ConsignmentNotePage() {
                 </div>
               </div>
 
-              {/* Tracking */}
-              <div className="border-t border-[#E2DDD8] pt-4">
-                <h3 className="text-sm font-semibold text-[#1F1D1B] mb-3">Tracking</h3>
-                <div className="space-y-3">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                        detailCN.status !== "PENDING" ? "bg-green-500" : "bg-amber-400"
-                      }`}
-                    >
-                      1
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">Pending</p>
-                      <p className="text-xs text-[#9CA3AF]">
-                        {detailCN.status === "PENDING" ? "Awaiting dispatch" : "Completed"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                        detailCN.dispatchDate ? "bg-green-500" : "bg-gray-300"
-                      }`}
-                    >
-                      2
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">Dispatched</p>
-                      <p className="text-xs text-[#9CA3AF]">
-                        {detailCN.dispatchDate
-                          ? formatDate(detailCN.dispatchDate)
-                          : "Pending dispatch"}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                        detailCN.deliveredDate ? "bg-green-500" : "bg-gray-300"
-                      }`}
-                    >
-                      3
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">Delivered</p>
-                      <p className="text-xs text-[#9CA3AF]">
-                        {detailCN.deliveredDate
-                          ? formatDate(detailCN.deliveredDate)
-                          : "Awaiting delivery"}
-                      </p>
-                    </div>
-                  </div>
-                  {detailCN.status === "ACKNOWLEDGED" && (
-                    <>
-                      <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold bg-purple-500">
-                          4
-                        </div>
-                        <div>
-                          <p className="text-sm font-medium">Acknowledged</p>
-                          <p className="text-xs text-[#9CA3AF]">Branch confirmed receipt</p>
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-
-              {/* Remarks */}
               {detailCN.remarks && (
                 <div className="border-t border-[#E2DDD8] pt-4">
                   <h3 className="text-sm font-semibold text-[#1F1D1B] mb-2">Remarks</h3>
@@ -812,7 +1426,6 @@ export default function ConsignmentNotePage() {
               )}
             </div>
 
-            {/* Footer Actions */}
             <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
               {(detailCN.status === "PENDING" || detailCN.status === "DISPATCHED") && (
                 <Button
@@ -830,7 +1443,7 @@ export default function ConsignmentNotePage() {
                 onClick={() => {
                   const qtys: Record<string, number> = {};
                   const selected: Record<string, boolean> = {};
-                  for (let i = 0; i < detailCN.items; i++) {
+                  for (let i = 0; i < detailCN.itemCount; i++) {
                     const key = `${detailCN.id}-item-${i}`;
                     qtys[key] = 1;
                     selected[key] = true;
@@ -851,12 +1464,11 @@ export default function ConsignmentNotePage() {
         </div>
       )}
 
-      {/* -------- Transfer to Delivery Order Dialog -------- */}
+      {/* -------- Transfer to Delivery Order Dialog (preserved) -------- */}
       {transferDORow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={() => setTransferDORow(null)} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            {/* Header */}
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Delivery Order</h2>
@@ -866,7 +1478,6 @@ export default function ConsignmentNotePage() {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            {/* Body */}
             <div className="px-6 py-5 space-y-4">
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
@@ -887,7 +1498,7 @@ export default function ConsignmentNotePage() {
                 </div>
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
-                  <p className="font-medium">{transferDORow.items} item(s)</p>
+                  <p className="font-medium">{transferDORow.itemCount} item(s)</p>
                 </div>
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">Total Value</p>
@@ -899,13 +1510,7 @@ export default function ConsignmentNotePage() {
                   This will create a Delivery Order for dispatching CN <strong>{transferDORow.cnNo}</strong> to <strong>{transferDORow.branchName}</strong>.
                 </p>
               </div>
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                <p className="text-sm text-blue-800">
-                  After the DO is created, you can track the dispatch from the Delivery Order page.
-                </p>
-              </div>
             </div>
-            {/* Footer */}
             <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
               <Button variant="outline" onClick={() => setTransferDORow(null)} disabled={transferDOLoading}>Cancel</Button>
               <Button variant="primary" onClick={handleTransferToDO} disabled={transferDOLoading}>
@@ -916,7 +1521,7 @@ export default function ConsignmentNotePage() {
         </div>
       )}
 
-      {/* -------- Transfer to Sales Invoice Dialog -------- */}
+      {/* -------- Transfer to Sales Invoice Dialog (preserved) -------- */}
       {transferSIRow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="bg-white rounded-xl shadow-xl w-[480px] overflow-hidden">
@@ -935,7 +1540,7 @@ export default function ConsignmentNotePage() {
                 <div><span className="text-gray-500">CO Ref:</span><p className="font-medium doc-number">{transferSIRow.coRef}</p></div>
                 <div><span className="text-gray-500">Customer:</span><p className="font-medium">{transferSIRow.customerName}</p></div>
                 <div><span className="text-gray-500">Branch:</span><p className="font-medium">{transferSIRow.branchName}</p></div>
-                <div><span className="text-gray-500">Items:</span><p className="font-medium">{transferSIRow.items}</p></div>
+                <div><span className="text-gray-500">Items:</span><p className="font-medium">{transferSIRow.itemCount}</p></div>
                 <div><span className="text-gray-500">Total Value:</span><p className="font-medium text-[#6B5C32]">{formatCurrency(transferSIRow.totalValueSen)}</p></div>
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
@@ -953,12 +1558,11 @@ export default function ConsignmentNotePage() {
         </div>
       )}
 
-      {/* -------- Transfer to Consignment Return Dialog -------- */}
+      {/* -------- Transfer to Consignment Return Dialog (preserved) -------- */}
       {transferCRRow && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/40" onClick={() => setTransferCRRow(null)} />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            {/* Header */}
             <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Consignment Return</h2>
@@ -968,7 +1572,6 @@ export default function ConsignmentNotePage() {
                 <X className="h-5 w-5" />
               </button>
             </div>
-            {/* Body */}
             <div className="px-6 py-5 space-y-4">
               <div className="grid grid-cols-2 gap-4 text-sm">
                 <div>
@@ -985,7 +1588,7 @@ export default function ConsignmentNotePage() {
                 </div>
                 <div>
                   <p className="text-[#9CA3AF] text-xs mb-0.5">Total Items</p>
-                  <p className="font-medium">{transferCRRow.items} item(s)</p>
+                  <p className="font-medium">{transferCRRow.itemCount} item(s)</p>
                 </div>
               </div>
               <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
@@ -993,7 +1596,6 @@ export default function ConsignmentNotePage() {
                   Select the items and quantities you want to return from this consignment note.
                 </p>
               </div>
-              {/* Items with checkboxes and quantity inputs */}
               <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
                 <table className="w-full text-sm">
                   <thead className="bg-[#FAF9F7]">
@@ -1004,7 +1606,7 @@ export default function ConsignmentNotePage() {
                     </tr>
                   </thead>
                   <tbody>
-                    {Array.from({ length: transferCRRow.items }, (_, i) => {
+                    {Array.from({ length: transferCRRow.itemCount }, (_, i) => {
                       const key = `${transferCRRow.id}-item-${i}`;
                       return (
                         <tr key={key} className={`border-t border-[#E2DDD8] ${!crSelectedItems[key] ? "opacity-50" : ""}`}>
@@ -1041,11 +1643,10 @@ export default function ConsignmentNotePage() {
               </div>
               <div className="flex justify-between text-sm px-1">
                 <span className="text-[#6B7280]">
-                  Selected: {Object.values(crSelectedItems).filter(Boolean).length} of {transferCRRow.items} items
+                  Selected: {Object.values(crSelectedItems).filter(Boolean).length} of {transferCRRow.itemCount} items
                 </span>
               </div>
             </div>
-            {/* Footer */}
             <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
               <Button variant="outline" onClick={() => setTransferCRRow(null)} disabled={transferCRLoading}>Cancel</Button>
               <Button variant="primary" onClick={handleTransferToCR} disabled={transferCRLoading}>

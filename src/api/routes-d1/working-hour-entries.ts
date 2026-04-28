@@ -192,22 +192,45 @@ app.get("/production-revenue", async (c) => {
   }
 
   // Single SQL: per_po CTE collapses UPHOLSTERY job_cards to one row per PO
-  // (recognition date = MAX completedDate), then we join out to PO/SO/SO line
-  // /product for qty/price/category/display fields. ORDER BY DESC so the rows
-  // array is already sorted for the frontend table.
+  // (recognition date = MAX completedDate of done JCs), then we join out to
+  // PO/SO/SO line/product for qty/price/category/display. ORDER BY DESC so
+  // the rows array is already sorted for the frontend table.
+  //
+  // Bug fix 2026-04-28: revenue was being recognized when *any* upholstery
+  // JC completed for a PO, not when ALL of them did. A bedframe with HB
+  // and Divan would book full revenue the moment Divan upholstery
+  // finished, even with HB still WAITING - so SO-2604-325 booked RM 520
+  // when only the Divan was done.
+  //
+  // Fix: GROUP BY across the PO's full upholstery JC set (no status
+  // filter in WHERE), then HAVING requires done_uph = total_uph - i.e.
+  // every upholstery JC must be COMPLETED or TRANSFERRED with a non-null
+  // completedDate. Recognition date is the MAX completedDate of the
+  // done JCs (which equals MAX overall once they are all done).
   const rowsRes = await c.var.DB
     .prepare(
       `WITH per_po AS (
          SELECT productionOrderId,
-                MAX(completedDate) AS unit_completed_at,
-                COUNT(*) AS uph_jc_count
+                COUNT(*) AS total_uph,
+                SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN 1 ELSE 0 END) AS done_uph,
+                MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) AS unit_completed_at
            FROM job_cards
           WHERE departmentCode = 'UPHOLSTERY'
-            AND status IN ('COMPLETED','TRANSFERRED')
-            AND completedDate IS NOT NULL
           GROUP BY productionOrderId
-         HAVING MAX(completedDate) >= ?
-            AND MAX(completedDate) <= ?
+         HAVING COUNT(*) > 0
+            AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN 1 ELSE 0 END) = COUNT(*)
+            AND MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) >= ?
+            AND MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) <= ?
        )
        SELECT po.id                AS poId,
               per_po.unit_completed_at AS completedAt,
@@ -448,18 +471,28 @@ app.get("/daily-breakdown", async (c) => {
   //    GROUP BY productionOrderId, recognition date = MAX(completedDate),
   //    revenue = unitPrice × po.quantity. Then aggregate again by date.
   //    With ?category set, narrow to products of that category.
+  //    Bug fix 2026-04-28: requires ALL upholstery JCs done (not just one)
+  //    - same fix as /production-revenue. See that endpoint for rationale.
   const prodValueRes = await c.var.DB
     .prepare(
       `WITH per_po AS (
          SELECT productionOrderId,
-                MAX(completedDate) AS unit_completed_at
+                MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) AS unit_completed_at
            FROM job_cards
           WHERE departmentCode = 'UPHOLSTERY'
-            AND status IN ('COMPLETED','TRANSFERRED')
-            AND completedDate IS NOT NULL
           GROUP BY productionOrderId
-         HAVING MAX(completedDate) >= ?
-            AND MAX(completedDate) <= ?
+         HAVING COUNT(*) > 0
+            AND SUM(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN 1 ELSE 0 END) = COUNT(*)
+            AND MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) >= ?
+            AND MAX(CASE WHEN status IN ('COMPLETED','TRANSFERRED')
+                              AND completedDate IS NOT NULL
+                         THEN completedDate END) <= ?
        )
        SELECT substr(per_po.unit_completed_at, 1, 10) AS d,
               SUM(COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)

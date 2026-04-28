@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Boxes, AlertTriangle, Package, Layers, Plus, X,
-  Search, Archive, Upload, Trash2,
+  Search, Archive, Upload, Trash2, Pencil,
 } from "lucide-react";
 import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-import-dialog";
 // NOTE: mock arrays were previously imported here and used as the page data
@@ -1509,6 +1509,10 @@ export default function InventoryPage() {
   // different column schemas / key columns / handlers).
   const [showBatchImportFG, setShowBatchImportFG] = useState(false);
   const [showBatchImportRM, setShowBatchImportRM] = useState(false);
+  // Batch EDIT (separate from import) - inline edit Item Group + UOM
+  // across many RMs in one move, mirroring the BOM Batch Edit Categories
+  // dialog. Added 2026-04-28 per user request.
+  const [showBatchEditRM, setShowBatchEditRM] = useState(false);
 
   // Template column schemas. ORDER determines column order in the Excel
   // template. The `code` / `itemCode` column is the match key — existing
@@ -2066,6 +2070,9 @@ export default function InventoryPage() {
                 <option key={g} value={g}>{g}</option>
               ))}
             </select>
+            <Button variant="outline" size="sm" onClick={() => setShowBatchEditRM(true)}>
+              <Pencil className="h-4 w-4" /> Batch Edit
+            </Button>
             <Button variant="outline" size="sm" onClick={() => setShowBatchImportRM(true)}>
               <Upload className="h-4 w-4" /> Batch Import
             </Button>
@@ -2622,6 +2629,493 @@ export default function InventoryPage() {
           isActive: r.isActive,
         }))}
       />
+      <BatchEditRMDialog
+        open={showBatchEditRM}
+        onClose={() => setShowBatchEditRM(false)}
+        rawMaterials={liveRawMaterials}
+        itemGroups={RM_ITEM_GROUPS}
+        onSaved={(updated) => {
+          setLiveRawMaterials(updated);
+          invalidateCachePrefix("/api/raw-materials");
+          invalidateCachePrefix("/api/inventory");
+        }}
+      />
+    </div>
+  );
+}
+
+// ---------- Batch Edit Raw Materials Dialog ----------
+//
+// Mirrors the BOM Batch Edit Categories UX: per-row inline editing for
+// the bulk-friendly fields (Item Group, Base UOM, Active) + multi-select
+// checkboxes + a "Bulk fill -> N -> [field/value]" helper for the "set
+// 100 to one value" path. Saves via PUT /api/raw-materials/:id one
+// request per dirty row; the page's RawMaterials state is patched
+// in-place on success so a refetch isn't required.
+
+const RM_UOM_OPTIONS = ["PCS", "MTR", "ROLL", "BOX", "CTN", "SET", "KG", "PAIR"];
+
+type RMEdit = {
+  itemGroup?: string;
+  baseUOM?: string;
+  isActive?: boolean;
+};
+
+function BatchEditRMDialog({
+  open,
+  onClose,
+  rawMaterials,
+  itemGroups,
+  onSaved,
+}: {
+  open: boolean;
+  onClose: () => void;
+  rawMaterials: RawMaterial[];
+  itemGroups: string[];
+  onSaved: (next: RawMaterial[]) => void;
+}) {
+  const { toast } = useToast();
+  const [search, setSearch] = useState("");
+  const [groupFilter, setGroupFilter] = useState<string>("ALL");
+  const [activeFilter, setActiveFilter] = useState<"ALL" | "ACTIVE" | "INACTIVE">("ALL");
+  // pendingByRm[id] = { itemGroup?, baseUOM?, isActive? }. Only edited
+  // fields are present; missing fields fall back to the row's current
+  // value when rendering / saving.
+  const [pendingByRm, setPendingByRm] = useState<Map<string, RMEdit>>(new Map());
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkField, setBulkField] = useState<"itemGroup" | "baseUOM" | "isActive">("itemGroup");
+  const [bulkValue, setBulkValue] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!open) return;
+    setSearch("");
+    setGroupFilter("ALL");
+    setActiveFilter("ALL");
+    setPendingByRm(new Map());
+    setSelectedIds(new Set());
+    setBulkField("itemGroup");
+    setBulkValue("");
+  }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const filtered = useMemo(() => {
+    return rawMaterials.filter((r) => {
+      if (groupFilter !== "ALL" && r.itemGroup !== groupFilter) return false;
+      if (activeFilter === "ACTIVE" && !r.isActive) return false;
+      if (activeFilter === "INACTIVE" && r.isActive) return false;
+      if (search.trim()) {
+        const q = search.toLowerCase();
+        if (!r.itemCode.toLowerCase().includes(q) && !r.description.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }, [rawMaterials, search, groupFilter, activeFilter]);
+
+  function getEffective(r: RawMaterial): { itemGroup: string; baseUOM: string; isActive: boolean } {
+    const p = pendingByRm.get(r.id);
+    return {
+      itemGroup: p?.itemGroup ?? r.itemGroup,
+      baseUOM: p?.baseUOM ?? r.baseUOM,
+      isActive: p?.isActive ?? r.isActive,
+    };
+  }
+
+  function setField(id: string, field: keyof RMEdit, value: string | boolean) {
+    const r = rawMaterials.find((rm) => rm.id === id);
+    if (!r) return;
+    setPendingByRm((prev) => {
+      const next = new Map(prev);
+      const cur = { ...(next.get(id) ?? {}) };
+      // If the new value matches the row's current value, drop the
+      // override; that way the dirty count stays honest.
+      const original =
+        field === "itemGroup" ? r.itemGroup :
+        field === "baseUOM" ? r.baseUOM :
+        r.isActive;
+      if (value === original) {
+        delete cur[field];
+      } else {
+        (cur as Record<string, unknown>)[field] = value;
+      }
+      if (Object.keys(cur).length === 0) next.delete(id);
+      else next.set(id, cur);
+      return next;
+    });
+  }
+
+  const allFilteredSelected = filtered.length > 0 && filtered.every((r) => selectedIds.has(r.id));
+  function toggleAllFiltered() {
+    if (allFilteredSelected) {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const r of filtered) next.delete(r.id);
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const r of filtered) next.add(r.id);
+        return next;
+      });
+    }
+  }
+  function toggleOne(id: string) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function handleBulkFill() {
+    if (bulkField !== "isActive" && !bulkValue) {
+      toast.warning("Pick a value first.");
+      return;
+    }
+    const targets = selectedIds.size > 0
+      ? filtered.filter((r) => selectedIds.has(r.id))
+      : filtered;
+    if (targets.length === 0) {
+      toast.warning("No rows to apply to.");
+      return;
+    }
+    const value: string | boolean =
+      bulkField === "isActive" ? bulkValue === "true" : bulkValue;
+    let touched = 0;
+    setPendingByRm((prev) => {
+      const next = new Map(prev);
+      for (const r of targets) {
+        const original =
+          bulkField === "itemGroup" ? r.itemGroup :
+          bulkField === "baseUOM" ? r.baseUOM :
+          r.isActive;
+        const cur = { ...(next.get(r.id) ?? {}) };
+        if (value === original) {
+          delete cur[bulkField];
+        } else {
+          (cur as Record<string, unknown>)[bulkField] = value;
+          touched++;
+        }
+        if (Object.keys(cur).length === 0) next.delete(r.id);
+        else next.set(r.id, cur);
+      }
+      return next;
+    });
+    const scope = selectedIds.size > 0 ? `${selectedIds.size} selected` : `${targets.length} visible`;
+    toast.success(`Queued ${touched}/${targets.length} (${scope}). Click Save to commit.`);
+  }
+
+  async function handleSave() {
+    if (pendingByRm.size === 0) {
+      toast.warning("No changes to save.");
+      return;
+    }
+    setSaving(true);
+    const failures: string[] = [];
+    const successes = new Map<string, RawMaterial>();
+    try {
+      for (const [id, edit] of pendingByRm.entries()) {
+        const r = rawMaterials.find((rm) => rm.id === id);
+        if (!r) continue;
+        const body = {
+          itemCode: r.itemCode,
+          description: r.description,
+          baseUOM: edit.baseUOM ?? r.baseUOM,
+          itemGroup: edit.itemGroup ?? r.itemGroup,
+          balanceQty: r.balanceQty,
+          isActive: edit.isActive ?? r.isActive,
+        };
+        try {
+          const res = await fetch(`/api/raw-materials/${encodeURIComponent(id)}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const json = (await res.json().catch(() => null)) as
+            | { success?: boolean; data?: RawMaterial; error?: string }
+            | null;
+          if (!res.ok || !json?.success) {
+            failures.push(r.itemCode);
+            continue;
+          }
+          successes.set(id, json.data ?? { ...r, ...body });
+        } catch {
+          failures.push(r.itemCode);
+        }
+      }
+      if (successes.size > 0) {
+        const next = rawMaterials.map((r) => successes.get(r.id) ?? r);
+        onSaved(next);
+      }
+      if (failures.length > 0) {
+        toast.warning(
+          `Saved ${successes.size}; ${failures.length} failed: ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? "..." : ""}`,
+        );
+      } else {
+        toast.success(`Saved ${successes.size} raw material${successes.size !== 1 ? "s" : ""}.`);
+      }
+      onClose();
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+      <div
+        className="bg-white rounded-xl shadow-2xl w-[1080px] max-w-[97vw] max-h-[92vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-6 py-4 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-bold text-[#111827]">Batch Edit Raw Materials</h2>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Inline edit Item Group / UOM / Active per row, or use Bulk fill to set many at once.
+          </p>
+        </div>
+
+        <div className="px-6 py-4 overflow-y-auto flex-1 space-y-3">
+          {/* Filters */}
+          <div className="flex gap-3 items-end flex-wrap">
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
+              <input
+                type="text"
+                placeholder="Filter by code / description..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              />
+            </div>
+            <div className="w-44">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Item Group</label>
+              <select
+                value={groupFilter}
+                onChange={(e) => setGroupFilter(e.target.value)}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              >
+                <option value="ALL">All Groups</option>
+                {itemGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+              </select>
+            </div>
+            <div className="w-36">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Status</label>
+              <select
+                value={activeFilter}
+                onChange={(e) => setActiveFilter(e.target.value as "ALL" | "ACTIVE" | "INACTIVE")}
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+              >
+                <option value="ALL">All</option>
+                <option value="ACTIVE">Active</option>
+                <option value="INACTIVE">Inactive</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Bulk fill */}
+          <div className="flex items-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Bulk fill: {selectedIds.size > 0 ? `${selectedIds.size} selected` : `all ${filtered.length} visible`} -&gt; ...
+              </label>
+              <div className="flex gap-2">
+                <select
+                  value={bulkField}
+                  onChange={(e) => { setBulkField(e.target.value as "itemGroup" | "baseUOM" | "isActive"); setBulkValue(""); }}
+                  className="w-32 border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
+                >
+                  <option value="itemGroup">Item Group</option>
+                  <option value="baseUOM">Base UOM</option>
+                  <option value="isActive">Active</option>
+                </select>
+                {bulkField === "itemGroup" && (
+                  <select
+                    value={bulkValue}
+                    onChange={(e) => setBulkValue(e.target.value)}
+                    className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick group...</option>
+                    {itemGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+                  </select>
+                )}
+                {bulkField === "baseUOM" && (
+                  <select
+                    value={bulkValue}
+                    onChange={(e) => setBulkValue(e.target.value)}
+                    className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick UOM...</option>
+                    {RM_UOM_OPTIONS.map((u) => <option key={u} value={u}>{u}</option>)}
+                  </select>
+                )}
+                {bulkField === "isActive" && (
+                  <select
+                    value={bulkValue}
+                    onChange={(e) => setBulkValue(e.target.value)}
+                    className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
+                  >
+                    <option value="">Pick status...</option>
+                    <option value="true">Active</option>
+                    <option value="false">Inactive</option>
+                  </select>
+                )}
+                <button
+                  onClick={handleBulkFill}
+                  disabled={bulkField !== "isActive" && !bulkValue}
+                  className="px-3 py-1.5 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  Fill
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 text-xs pb-1">
+              <button
+                onClick={toggleAllFiltered}
+                className="text-[#6B5C32] hover:underline font-medium whitespace-nowrap"
+              >
+                {allFilteredSelected ? `Deselect All ${filtered.length}` : `Select All ${filtered.length}`}
+              </button>
+              {selectedIds.size > 0 && (
+                <button
+                  onClick={() => setSelectedIds(new Set())}
+                  className="text-[#9A3A2D] hover:underline whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Header summary */}
+          <div className="text-xs text-gray-500">
+            {pendingByRm.size} dirty - {selectedIds.size} selected - Showing {filtered.length} of {rawMaterials.length}
+          </div>
+
+          {/* Table */}
+          <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
+            <div className="max-h-[55vh] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-[#FAF9F7] sticky top-0 z-10">
+                  <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
+                    <th className="px-3 py-2 font-medium w-8">
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleAllFiltered}
+                        className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                      />
+                    </th>
+                    <th className="px-3 py-2 font-medium">Item Code</th>
+                    <th className="px-3 py-2 font-medium">Description</th>
+                    <th className="px-3 py-2 font-medium w-40">Item Group</th>
+                    <th className="px-3 py-2 font-medium w-28">UOM</th>
+                    <th className="px-3 py-2 font-medium w-24 text-center">Active</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">
+                        No raw materials match the current filters.
+                      </td>
+                    </tr>
+                  )}
+                  {filtered.map((r) => {
+                    const eff = getEffective(r);
+                    const dirty = pendingByRm.has(r.id);
+                    const isSelected = selectedIds.has(r.id);
+                    return (
+                      <tr
+                        key={r.id}
+                        className={`border-t border-[#E2DDD8] ${
+                          dirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
+                        }`}
+                      >
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleOne(r.id)}
+                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                        </td>
+                        <td className="px-3 py-2 font-medium text-[#111827]">{r.itemCode}</td>
+                        <td className="px-3 py-2 text-gray-600">{r.description}</td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={eff.itemGroup}
+                            onChange={(e) => setField(r.id, "itemGroup", e.target.value)}
+                            className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] bg-white ${
+                              pendingByRm.get(r.id)?.itemGroup !== undefined ? "border-[#4F7C3A] font-semibold text-[#4F7C3A]" : "border-[#E2DDD8]"
+                            }`}
+                          >
+                            {!itemGroups.includes(eff.itemGroup) && eff.itemGroup && (
+                              <option value={eff.itemGroup}>{eff.itemGroup}</option>
+                            )}
+                            {itemGroups.map((g) => <option key={g} value={g}>{g}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={eff.baseUOM}
+                            onChange={(e) => setField(r.id, "baseUOM", e.target.value)}
+                            className={`w-full text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] bg-white ${
+                              pendingByRm.get(r.id)?.baseUOM !== undefined ? "border-[#4F7C3A] font-semibold text-[#4F7C3A]" : "border-[#E2DDD8]"
+                            }`}
+                          >
+                            {!RM_UOM_OPTIONS.includes(eff.baseUOM) && eff.baseUOM && (
+                              <option value={eff.baseUOM}>{eff.baseUOM}</option>
+                            )}
+                            {RM_UOM_OPTIONS.map((u) => <option key={u} value={u}>{u}</option>)}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 text-center">
+                          <input
+                            type="checkbox"
+                            checked={eff.isActive}
+                            onChange={(e) => setField(r.id, "isActive", e.target.checked)}
+                            className={`rounded border-gray-300 focus:ring-[#6B5C32] ${
+                              pendingByRm.get(r.id)?.isActive !== undefined ? "ring-2 ring-[#4F7C3A] text-[#4F7C3A]" : "text-[#6B5C32]"
+                            }`}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
+          <span className="text-xs text-gray-500">
+            {pendingByRm.size > 0
+              ? `Will save ${pendingByRm.size} row${pendingByRm.size !== 1 ? "s" : ""}`
+              : "Click each cell to edit, or use Bulk fill above."}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={pendingByRm.size === 0 || saving}
+              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {saving ? "Saving..." : `Save ${pendingByRm.size} Change${pendingByRm.size !== 1 ? "s" : ""}`}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

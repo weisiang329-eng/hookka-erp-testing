@@ -58,12 +58,19 @@ type RawMaterialOpt = {
   balanceQty: number;
   balanceQtyUom: string;
   unitCostSen?: number;
+  // Bug fix 2026-04-28: surface itemGroup so the Adjustments page can
+  // offer a category filter ("show only Wood items"), avoiding a
+  // 200-row flat dropdown the user had to scroll through.
+  itemGroup?: string;
 };
 type WipOpt = {
   id: string;
   code: string;
   type: string;
   stockQty: number;
+  // Latest dept the WIP completed at (e.g. FAB_CUT). Used as the WIP
+  // category filter on the Adjustments page.
+  completedBy?: string;
 };
 type FgBatchOpt = {
   id: string;
@@ -71,6 +78,8 @@ type FgBatchOpt = {
   productName: string;
   remainingQty: number;
   unitCostSen: number;
+  // Product category (BEDFRAME / SOFA / ACCESSORY) for the FG filter.
+  category?: string;
 };
 
 // ---- Per-row form state. One DraftRow per row in the table; the user
@@ -80,6 +89,11 @@ type DraftRow = {
   uid: string;
   type: AdjustmentType;
   itemId: string;
+  // Optional category filter for the Item dropdown: itemGroup for RM,
+  // department code for WIP, product category for FG. Empty string =
+  // show all items. Added 2026-04-28 because the flat 200-row Item
+  // dropdown was painful to navigate without grouping.
+  category: string;
   // direction toggle stays per-row so RM-IN, WIP-OUT can sit side by side
   direction: "IN" | "OUT";
   // strings while typing so empty-input doesn't snap to 0
@@ -107,6 +121,7 @@ function newDraftRow(): DraftRow {
     uid: `r-${Math.random().toString(36).slice(2, 9)}`,
     type: "RM",
     itemId: "",
+    category: "",
     direction: "OUT",
     qty: "",
     unitCost: "",
@@ -137,16 +152,32 @@ export default function StockAdjustmentsPage() {
   const [submitting, setSubmitting] = useState(false);
 
   // ---- always fetch all 3 lists so any row can switch type freely ----
+  // FG comes from /api/inventory's finishedProducts (the product master),
+  // not /api/inventory/fg-batches - that endpoint never existed and was
+  // returning 404 / empty, leaving the FG dropdown blank. Bug fix
+  // 2026-04-28 per user.
   const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>("/api/raw-materials");
   const { data: wipResp } = useCachedJson<{ data?: WipOpt[] }>("/api/inventory/wip");
-  const { data: fgResp } = useCachedJson<{ data?: FgBatchOpt[] }>("/api/inventory/fg-batches");
+  const { data: invResp } = useCachedJson<{
+    data?: { finishedProducts?: Array<{ id: string; code: string; name: string; category: string; stockQty?: number; basePriceSen?: number }> };
+  }>("/api/inventory");
   const { data: historyResp, refresh: refreshHistory } = useCachedJson<{
     data?: AdjustmentRow[];
   }>("/api/stock-adjustments");
 
   const rmList = useMemo(() => rmResp?.data ?? [], [rmResp]);
   const wipList = useMemo(() => wipResp?.data ?? [], [wipResp]);
-  const fgList = useMemo(() => fgResp?.data ?? [], [fgResp]);
+  const fgList: FgBatchOpt[] = useMemo(
+    () => (invResp?.data?.finishedProducts ?? []).map((p) => ({
+      id: p.id,
+      productCode: p.code,
+      productName: p.name,
+      remainingQty: p.stockQty ?? 0,
+      unitCostSen: p.basePriceSen ?? 0,
+      category: p.category,
+    })),
+    [invResp],
+  );
   const history = useMemo(() => historyResp?.data ?? [], [historyResp]);
 
   // ---- per-row mutators ----
@@ -195,8 +226,10 @@ export default function StockAdjustmentsPage() {
   }
 
   function onChangeType(uid: string, type: AdjustmentType) {
-    // type change invalidates the picked item — reset itemId + cost
-    patchRow(uid, { type, itemId: "", unitCost: "", status: "draft", errorMsg: undefined });
+    // type change invalidates the picked item + category - the category
+    // dropdown's options are scoped per type (RM=itemGroup, WIP=dept,
+    // FG=category) so a stale "Bedframe" doesn't carry over to a WIP row.
+    patchRow(uid, { type, itemId: "", category: "", unitCost: "", status: "draft", errorMsg: undefined });
   }
 
   // ---- derived per row ----
@@ -363,9 +396,10 @@ export default function StockAdjustmentsPage() {
               <tr className="border-b border-[#E2DDD8] text-left text-[10px] uppercase text-[#6B7280]">
                 <th className="py-1.5 px-1 w-[60px]">#</th>
                 <th className="py-1.5 px-1 w-[70px]">Type</th>
+                <th className="py-1.5 px-1 w-[130px]">Category</th>
                 <th className="py-1.5 px-1">Item</th>
                 <th className="py-1.5 px-1 w-[80px] text-right">On Hand</th>
-                <th className="py-1.5 px-1 w-[60px]">Dir</th>
+                <th className="py-1.5 px-1 w-[90px]">Dir</th>
                 <th className="py-1.5 px-1 w-[80px]">Qty</th>
                 <th className="py-1.5 px-1 w-[100px]">Unit Cost</th>
                 <th className="py-1.5 px-1 w-[110px]">Reason</th>
@@ -400,6 +434,30 @@ export default function StockAdjustmentsPage() {
                       </select>
                     </td>
                     <td className="py-1 px-1">
+                      {/* Category filter - scopes the Item dropdown.
+                          RM=itemGroup, WIP=completedBy dept, FG=category. */}
+                      <select
+                        value={row.category}
+                        onChange={(e) => patchRow(row.uid, { category: e.target.value, itemId: "" })}
+                        className={sel}
+                        disabled={submitting}
+                      >
+                        <option value="">All</option>
+                        {row.type === "RM" &&
+                          Array.from(new Set(rmList.map((r) => r.itemGroup).filter((g): g is string => !!g))).sort().map((g) => (
+                            <option key={g} value={g}>{g}</option>
+                          ))}
+                        {row.type === "WIP" &&
+                          Array.from(new Set(wipList.map((w) => w.completedBy ?? w.type).filter((g): g is string => !!g))).sort().map((g) => (
+                            <option key={g} value={g}>{g}</option>
+                          ))}
+                        {row.type === "FG" &&
+                          ["BEDFRAME", "SOFA", "ACCESSORY"].map((g) => (
+                            <option key={g} value={g}>{g[0] + g.slice(1).toLowerCase()}</option>
+                          ))}
+                      </select>
+                    </td>
+                    <td className="py-1 px-1">
                       <select
                         value={row.itemId}
                         onChange={(e) => onSelectItem(row.uid, e.target.value)}
@@ -408,23 +466,29 @@ export default function StockAdjustmentsPage() {
                       >
                         <option value="">Select…</option>
                         {row.type === "RM" &&
-                          rmList.map((r) => (
-                            <option key={r.id} value={r.id}>
-                              {r.itemCode} — {r.itemName}
-                            </option>
-                          ))}
+                          rmList
+                            .filter((r) => !row.category || r.itemGroup === row.category)
+                            .map((r) => (
+                              <option key={r.id} value={r.id}>
+                                {r.itemCode} — {r.itemName}
+                              </option>
+                            ))}
                         {row.type === "WIP" &&
-                          wipList.map((w) => (
-                            <option key={w.id} value={w.id}>
-                              {w.code} ({w.type})
-                            </option>
-                          ))}
+                          wipList
+                            .filter((w) => !row.category || (w.completedBy ?? w.type) === row.category)
+                            .map((w) => (
+                              <option key={w.id} value={w.id}>
+                                {w.code} ({w.type})
+                              </option>
+                            ))}
                         {row.type === "FG" &&
-                          fgList.map((f) => (
-                            <option key={f.id} value={f.id}>
-                              {f.productCode} — {f.productName}
-                            </option>
-                          ))}
+                          fgList
+                            .filter((f) => !row.category || f.category === row.category)
+                            .map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.productCode} — {f.productName}
+                              </option>
+                            ))}
                       </select>
                     </td>
                     <td className="py-1 px-1 text-right font-mono text-[11px] text-[#6B7280]">

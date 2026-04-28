@@ -218,6 +218,41 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0;
 }
 
+// Phase 1 — QC pending-inspections cron entry. CRON_SECRET-gated, idempotent
+// per (template_id, scheduled_slot_at). MUST be registered BEFORE
+// authMiddleware so the GitHub Actions runner can hit it without a user
+// session — the same pattern as /api/internal/refresh-mvs above. Runtime
+// logic lives in routes/qc-pending.ts; this handler is just the public
+// entry point that bypasses auth.
+app.post("/api/qc-pending/trigger", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[qc-pending/trigger] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { generatePendingForSlot, currentSlotIso } = await import(
+      "./routes/qc-pending"
+    );
+    const body = c.req.header("content-length")
+      ? await c.req.json().catch(() => ({}))
+      : {};
+    const slotIso =
+      body && typeof body === "object" && "slot" in body && typeof (body as Record<string, unknown>).slot === "string"
+        ? ((body as Record<string, unknown>).slot as string)
+        : currentSlotIso();
+    const result = await generatePendingForSlot(c.var.DB, slotIso);
+    return c.json({ ok: true, slotIso, ...result });
+  } catch (err) {
+    console.error("[qc-pending/trigger] error:", err);
+    return c.json({ ok: false, error: "trigger failed" }, 500);
+  }
+});
+
 // Global auth gate for /api/* — skips PUBLIC_PATHS (login/logout/health) and
 // PUBLIC_PREFIXES (worker-auth, worker, fg-units) handled inside the middleware.
 // MUST be registered BEFORE any route that touches business data.

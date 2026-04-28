@@ -1,10 +1,19 @@
 // ---------------------------------------------------------------------------
 // Stock Adjustments — manual qty corrections for RM / WIP / FG inventory.
 //
-// Form (top) creates a new adjustment; History (bottom) lists the last 500.
-// Each submit is a single POST to /api/stock-adjustments which atomically
-// posts inventory, audit, and cost-ledger entries. The submit button is
-// disabled until type / item / delta / reason are all filled.
+// Multi-row batch entry: operator adds N rows (one per item to adjust),
+// fills each in a single horizontal line, then clicks "Submit All". Each
+// row becomes one POST /api/stock-adjustments call (parallelised); the
+// page reports per-row success/failure so partial failures stay visible.
+//
+// Each adjustment is a 4-row atomic write on the backend:
+//   1. stock_adjustments         — the adjustment record (who / when / why)
+//   2. stock_movements           — audit-ledger entry (physical movement)
+//   3. cost_ledger               — financial impact (qty × unitCost, signed)
+//   4. UPDATE the parent item    — raw_materials / wip_items / fg_batches
+//
+// Per user 2026-04-28: form must support unlimited rows + compact per-row
+// layout (the prior single-form version made batch entry tedious).
 // ---------------------------------------------------------------------------
 import { useMemo, useState } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -15,13 +24,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/toast";
 import { formatCurrency } from "@/lib/utils";
 import { getCurrentUser } from "@/lib/auth";
-import {
-  Plus,
-  Minus,
-  TrendingUp,
-  TrendingDown,
-  History,
-} from "lucide-react";
+import { Plus, Trash2, History, Save } from "lucide-react";
 
 type AdjustmentType = "RM" | "WIP" | "FG";
 type AdjustmentReason =
@@ -70,26 +73,59 @@ type FgBatchOpt = {
   unitCostSen: number;
 };
 
-const REASON_OPTIONS: { value: AdjustmentReason; label: string; hint: string }[] = [
-  { value: "FOUND", label: "Found", hint: "Stock turned up that wasn't on the books" },
-  { value: "DAMAGED", label: "Damaged", hint: "Goods damaged in storage / handling" },
-  { value: "COUNT_CORRECTION", label: "Count Correction", hint: "Physical count differs from system" },
-  { value: "WRITE_OFF", label: "Write-Off", hint: "Removed from books — scrap, expired, lost" },
-  { value: "OTHER", label: "Other", hint: "Something else (explain in notes)" },
+// ---- Per-row form state. One DraftRow per row in the table; the user
+// adds as many as needed before clicking Submit All. ----
+type DraftRow = {
+  // local-only id so React keys stay stable as rows are added/removed
+  uid: string;
+  type: AdjustmentType;
+  itemId: string;
+  // direction toggle stays per-row so RM-IN, WIP-OUT can sit side by side
+  direction: "IN" | "OUT";
+  // strings while typing so empty-input doesn't snap to 0
+  qty: string;
+  unitCost: string;
+  reason: AdjustmentReason;
+  notes: string;
+  // submit-state per row so the user can see "Row 3 failed: not enough stock"
+  status: "draft" | "saving" | "saved" | "error";
+  errorMsg?: string;
+};
+
+const REASON_OPTIONS: { value: AdjustmentReason; label: string }[] = [
+  { value: "FOUND", label: "Found" },
+  { value: "DAMAGED", label: "Damaged" },
+  { value: "COUNT_CORRECTION", label: "Count Corr." },
+  { value: "WRITE_OFF", label: "Write-Off" },
+  { value: "OTHER", label: "Other" },
 ];
 
-const TYPE_TABS: { key: AdjustmentType; label: string }[] = [
-  { key: "RM", label: "Raw Material" },
-  { key: "WIP", label: "WIP" },
-  { key: "FG", label: "Finished Goods" },
-];
+const TYPE_OPTIONS: AdjustmentType[] = ["RM", "WIP", "FG"];
+
+function newDraftRow(): DraftRow {
+  return {
+    uid: `r-${Math.random().toString(36).slice(2, 9)}`,
+    type: "RM",
+    itemId: "",
+    direction: "OUT",
+    qty: "",
+    unitCost: "",
+    reason: "COUNT_CORRECTION",
+    notes: "",
+    status: "draft",
+  };
+}
 
 function dateLabel(iso: string): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleString("en-MY", {
-    year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit",
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
   });
 }
 
@@ -97,26 +133,13 @@ export default function StockAdjustmentsPage() {
   const { toast } = useToast();
   const user = getCurrentUser();
 
-  // ---- form state ----
-  const [type, setType] = useState<AdjustmentType>("RM");
-  const [itemId, setItemId] = useState("");
-  const [qtyDelta, setQtyDelta] = useState<string>("");
-  const [unitCostSen, setUnitCostSen] = useState<string>("");
-  const [reason, setReason] = useState<AdjustmentReason>("COUNT_CORRECTION");
-  const [notes, setNotes] = useState("");
-  const [direction, setDirection] = useState<"IN" | "OUT">("OUT");
+  const [rows, setRows] = useState<DraftRow[]>([newDraftRow()]);
   const [submitting, setSubmitting] = useState(false);
 
-  // ---- data ----
-  const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>(
-    type === "RM" ? "/api/raw-materials" : null,
-  );
-  const { data: wipResp } = useCachedJson<{ data?: WipOpt[] }>(
-    type === "WIP" ? "/api/inventory/wip" : null,
-  );
-  const { data: fgResp } = useCachedJson<{ data?: FgBatchOpt[] }>(
-    type === "FG" ? "/api/inventory/fg-batches" : null,
-  );
+  // ---- always fetch all 3 lists so any row can switch type freely ----
+  const { data: rmResp } = useCachedJson<{ data?: RawMaterialOpt[] }>("/api/raw-materials");
+  const { data: wipResp } = useCachedJson<{ data?: WipOpt[] }>("/api/inventory/wip");
+  const { data: fgResp } = useCachedJson<{ data?: FgBatchOpt[] }>("/api/inventory/fg-batches");
   const { data: historyResp, refresh: refreshHistory } = useCachedJson<{
     data?: AdjustmentRow[];
   }>("/api/stock-adjustments");
@@ -126,299 +149,424 @@ export default function StockAdjustmentsPage() {
   const fgList = useMemo(() => fgResp?.data ?? [], [fgResp]);
   const history = useMemo(() => historyResp?.data ?? [], [historyResp]);
 
-  // ---- derived: current qty + suggested unit cost for selected item ----
-  const selected = useMemo(() => {
-    if (!itemId) return null;
-    if (type === "RM") {
+  // ---- per-row mutators ----
+  function patchRow(uid: string, p: Partial<DraftRow>) {
+    setRows((prev) => prev.map((r) => (r.uid === uid ? { ...r, ...p } : r)));
+  }
+  function addRow() {
+    setRows((prev) => [...prev, newDraftRow()]);
+  }
+  function cloneRow(uid: string) {
+    setRows((prev) => {
+      const idx = prev.findIndex((r) => r.uid === uid);
+      if (idx < 0) return prev;
+      const clone: DraftRow = {
+        ...prev[idx],
+        uid: `r-${Math.random().toString(36).slice(2, 9)}`,
+        status: "draft",
+        errorMsg: undefined,
+      };
+      return [...prev.slice(0, idx + 1), clone, ...prev.slice(idx + 1)];
+    });
+  }
+  function removeRow(uid: string) {
+    setRows((prev) => (prev.length === 1 ? prev : prev.filter((r) => r.uid !== uid)));
+  }
+
+  // When the user picks an item, prefill unit cost from that item's record
+  // (saves a manual lookup for the common case).
+  function onSelectItem(uid: string, itemId: string) {
+    const row = rows.find((r) => r.uid === uid);
+    if (!row) return;
+    let suggestedCost = "";
+    if (row.type === "RM") {
       const r = rmList.find((x) => x.id === itemId);
-      return r ? {
-        code: r.itemCode, name: r.itemName, qty: r.balanceQty, uom: r.balanceQtyUom || "ea",
-        suggestedCost: r.unitCostSen ?? 0,
-      } : null;
+      if (r?.unitCostSen) suggestedCost = String(r.unitCostSen);
+    } else if (row.type === "FG") {
+      const f = fgList.find((x) => x.id === itemId);
+      if (f?.unitCostSen) suggestedCost = String(f.unitCostSen);
     }
-    if (type === "WIP") {
-      const w = wipList.find((x) => x.id === itemId);
-      return w ? {
-        code: w.code, name: w.type, qty: w.stockQty, uom: "pc", suggestedCost: 0,
-      } : null;
-    }
-    const f = fgList.find((x) => x.id === itemId);
-    return f ? {
-      code: f.productCode, name: f.productName, qty: f.remainingQty, uom: "unit",
-      suggestedCost: f.unitCostSen,
-    } : null;
-  }, [itemId, type, rmList, wipList, fgList]);
-
-  // Prefill unit cost when item changes
-  function onSelectItem(id: string) {
-    setItemId(id);
-    if (type === "RM") {
-      const r = rmList.find((x) => x.id === id);
-      if (r?.unitCostSen) setUnitCostSen(String(r.unitCostSen));
-    } else if (type === "FG") {
-      const f = fgList.find((x) => x.id === id);
-      if (f?.unitCostSen) setUnitCostSen(String(f.unitCostSen));
-    }
+    patchRow(uid, {
+      itemId,
+      unitCost: suggestedCost || row.unitCost,
+      status: "draft",
+      errorMsg: undefined,
+    });
   }
 
-  function onChangeType(t: AdjustmentType) {
-    setType(t);
-    setItemId("");
-    setUnitCostSen("");
+  function onChangeType(uid: string, type: AdjustmentType) {
+    // type change invalidates the picked item — reset itemId + cost
+    patchRow(uid, { type, itemId: "", unitCost: "", status: "draft", errorMsg: undefined });
   }
 
-  const qtyNum = Number(qtyDelta) || 0;
-  const signedDelta = direction === "IN" ? Math.abs(qtyNum) : -Math.abs(qtyNum);
-  const totalCostSen = Math.round(Math.abs(qtyNum) * (Number(unitCostSen) || 0));
+  // ---- derived per row ----
+  function rowSelected(row: DraftRow): {
+    code: string;
+    name: string;
+    qty: number;
+    uom: string;
+  } | null {
+    if (!row.itemId) return null;
+    if (row.type === "RM") {
+      const r = rmList.find((x) => x.id === row.itemId);
+      return r
+        ? { code: r.itemCode, name: r.itemName, qty: r.balanceQty, uom: r.balanceQtyUom || "ea" }
+        : null;
+    }
+    if (row.type === "WIP") {
+      const w = wipList.find((x) => x.id === row.itemId);
+      return w ? { code: w.code, name: w.type, qty: w.stockQty, uom: "pc" } : null;
+    }
+    const f = fgList.find((x) => x.id === row.itemId);
+    return f
+      ? { code: f.productCode, name: f.productName, qty: f.remainingQty, uom: "unit" }
+      : null;
+  }
 
-  const canSubmit =
-    !!itemId && qtyNum !== 0 && !!reason && !submitting;
+  function rowSignedDelta(row: DraftRow): number {
+    const n = Number(row.qty) || 0;
+    return row.direction === "IN" ? Math.abs(n) : -Math.abs(n);
+  }
+  function rowTotalCost(row: DraftRow): number {
+    const n = Number(row.qty) || 0;
+    return Math.round(Math.abs(n) * (Number(row.unitCost) || 0));
+  }
+  function rowReady(row: DraftRow): boolean {
+    return !!row.itemId && Number(row.qty) > 0 && !!row.reason;
+  }
 
-  async function handleSubmit() {
-    if (!canSubmit || !selected) return;
+  // ---- aggregate footer ----
+  const readyCount = rows.filter(rowReady).length;
+  const totalImpact = rows.reduce((acc, r) => {
+    if (!rowReady(r)) return acc;
+    const tc = rowTotalCost(r);
+    return acc + (r.direction === "IN" ? tc : -tc);
+  }, 0);
+
+  // ---- submit all ready rows in parallel; per-row state shows pass/fail ----
+  async function handleSubmitAll() {
+    const ready = rows.filter(rowReady);
+    if (ready.length === 0) {
+      toast.warning("No complete rows to submit. Fill item / qty / reason on at least one row.");
+      return;
+    }
     setSubmitting(true);
-    try {
-      const res = await fetch("/api/stock-adjustments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type,
-          itemId,
-          qtyDelta: signedDelta,
-          unitCostSen: Number(unitCostSen) || 0,
-          reason,
-          notes: notes || null,
-          adjustedBy: user?.id ?? null,
-          adjustedByName: user?.displayName ?? user?.email ?? null,
-        }),
+    setRows((prev) =>
+      prev.map((r) => (rowReady(r) ? { ...r, status: "saving" as const } : r)),
+    );
+    const results = await Promise.all(
+      ready.map(async (row) => {
+        const sel = rowSelected(row);
+        try {
+          const res = await fetch("/api/stock-adjustments", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: row.type,
+              itemId: row.itemId,
+              qtyDelta: rowSignedDelta(row),
+              unitCostSen: Number(row.unitCost) || 0,
+              reason: row.reason,
+              notes: row.notes || null,
+              adjustedBy: user?.id ?? null,
+              adjustedByName: user?.displayName ?? user?.email ?? null,
+            }),
+          });
+          const data = (await res.json()) as { success?: boolean; error?: string };
+          if (!res.ok || !data?.success) {
+            return { uid: row.uid, ok: false, msg: data?.error || `HTTP ${res.status}`, code: sel?.code };
+          }
+          return { uid: row.uid, ok: true, code: sel?.code };
+        } catch (e) {
+          return {
+            uid: row.uid,
+            ok: false,
+            msg: e instanceof Error ? e.message : "Network error",
+            code: sel?.code,
+          };
+        }
+      }),
+    );
+
+    // ---- mark per-row results, then drop the saved rows from the table
+    // and replace with a single fresh blank row (so the page is reusable
+    // immediately for the next batch). Failed rows STAY so the user can
+    // fix and retry.
+    const failedUids = new Set(results.filter((r) => !r.ok).map((r) => r.uid));
+    setRows((prev) => {
+      const surviving = prev.map((r) => {
+        if (failedUids.has(r.uid)) {
+          const fail = results.find((x) => x.uid === r.uid);
+          return { ...r, status: "error" as const, errorMsg: fail?.msg };
+        }
+        return r;
       });
-      const data = (await res.json()) as { success?: boolean; error?: string };
-      if (!res.ok || !data?.success) {
-        toast.error(data?.error || `HTTP ${res.status}`);
-        return;
-      }
-      toast.success(`Adjusted ${selected.code} by ${signedDelta > 0 ? "+" : ""}${signedDelta} ${selected.uom}`);
-      // Reset form (keep type so user can do batch adjustments)
-      setItemId("");
-      setQtyDelta("");
-      setUnitCostSen("");
-      setNotes("");
-      // Invalidate inventory caches so the underlying balances refresh
-      invalidateCachePrefix("/api/raw-materials");
-      invalidateCachePrefix("/api/inventory");
-      invalidateCachePrefix("/api/stock-adjustments");
-      refreshHistory();
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Network error");
-    } finally {
-      setSubmitting(false);
-    }
+      const remaining = surviving.filter((r) => !ready.some((rd) => rd.uid === r.uid && r.status !== "error"));
+      // If everything passed, leave one blank row; otherwise leave the failures.
+      if (remaining.length === 0) return [newDraftRow()];
+      return remaining;
+    });
+
+    setSubmitting(false);
+    const okCount = results.filter((r) => r.ok).length;
+    const failCount = results.length - okCount;
+    if (okCount && !failCount) toast.success(`Posted ${okCount} adjustment(s)`);
+    else if (okCount && failCount) toast.warning(`${okCount} posted · ${failCount} failed (fix the red rows)`);
+    else toast.error(`All ${failCount} row(s) failed`);
+
+    invalidateCachePrefix("/api/raw-materials");
+    invalidateCachePrefix("/api/inventory");
+    invalidateCachePrefix("/api/stock-adjustments");
+    refreshHistory();
   }
+
+  // ---- styling shorthands ----
+  const inp =
+    "w-full rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
+  const sel =
+    "w-full rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-bold text-[#1F1D1B]">Stock Adjustments</h1>
         <p className="text-xs text-[#6B7280]">
-          Correct on-hand quantities for RM / WIP / FG. Each adjustment is
-          recorded with reason, by-whom, and the cost impact on stock value.
+          Correct on-hand quantities for RM / WIP / FG. Add as many rows as
+          needed and submit them in one batch — each row posts its own
+          atomic stock + cost-ledger entry.
         </p>
       </div>
 
-      {/* ---------- Adjustment Form ---------- */}
+      {/* ---------- Multi-row Entry ---------- */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle>New Adjustment</CardTitle>
+          <div className="flex items-center justify-between">
+            <CardTitle>New Adjustments ({rows.length})</CardTitle>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={addRow} disabled={submitting}>
+                <Plus className="h-3.5 w-3.5" /> Add Row
+              </Button>
+              <Button
+                onClick={handleSubmitAll}
+                disabled={submitting || readyCount === 0}
+                className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+                size="sm"
+              >
+                <Save className="h-3.5 w-3.5" />
+                {submitting ? "Saving..." : `Submit All (${readyCount})`}
+              </Button>
+            </div>
+          </div>
         </CardHeader>
-        <CardContent className="space-y-4">
-          {/* Type tabs */}
-          <div className="flex border-b border-[#E2DDD8]">
-            {TYPE_TABS.map((t) => (
-              <button
-                key={t.key}
-                onClick={() => onChangeType(t.key)}
-                className={`px-4 py-2 text-sm font-medium border-b-2 -mb-[1px] transition-colors ${
-                  type === t.key
-                    ? "border-[#6B5C32] text-[#6B5C32]"
-                    : "border-transparent text-[#6B7280] hover:text-[#1F1D1B]"
-                }`}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+        <CardContent className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="border-b border-[#E2DDD8] text-left text-[10px] uppercase text-[#6B7280]">
+                <th className="py-1.5 px-1 w-[60px]">#</th>
+                <th className="py-1.5 px-1 w-[70px]">Type</th>
+                <th className="py-1.5 px-1">Item</th>
+                <th className="py-1.5 px-1 w-[80px] text-right">On Hand</th>
+                <th className="py-1.5 px-1 w-[60px]">Dir</th>
+                <th className="py-1.5 px-1 w-[80px]">Qty</th>
+                <th className="py-1.5 px-1 w-[100px]">Unit Cost</th>
+                <th className="py-1.5 px-1 w-[110px]">Reason</th>
+                <th className="py-1.5 px-1">Notes</th>
+                <th className="py-1.5 px-1 w-[90px] text-right">Impact</th>
+                <th className="py-1.5 px-1 w-[40px]"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row, idx) => {
+                const sel_ = rowSelected(row);
+                const impact = rowReady(row) ? rowTotalCost(row) : 0;
+                const isError = row.status === "error";
+                return (
+                  <tr
+                    key={row.uid}
+                    className={`border-b border-[#F0ECE9] ${isError ? "bg-[#FBF3F1]" : ""}`}
+                  >
+                    <td className="py-1 px-1 text-[10px] text-[#9CA3AF]">{idx + 1}</td>
+                    <td className="py-1 px-1">
+                      <select
+                        value={row.type}
+                        onChange={(e) =>
+                          onChangeType(row.uid, e.target.value as AdjustmentType)
+                        }
+                        className={sel}
+                        disabled={submitting}
+                      >
+                        {TYPE_OPTIONS.map((t) => (
+                          <option key={t} value={t}>{t}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-1 px-1">
+                      <select
+                        value={row.itemId}
+                        onChange={(e) => onSelectItem(row.uid, e.target.value)}
+                        className={sel}
+                        disabled={submitting}
+                      >
+                        <option value="">Select…</option>
+                        {row.type === "RM" &&
+                          rmList.map((r) => (
+                            <option key={r.id} value={r.id}>
+                              {r.itemCode} — {r.itemName}
+                            </option>
+                          ))}
+                        {row.type === "WIP" &&
+                          wipList.map((w) => (
+                            <option key={w.id} value={w.id}>
+                              {w.code} ({w.type})
+                            </option>
+                          ))}
+                        {row.type === "FG" &&
+                          fgList.map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.productCode} — {f.productName}
+                            </option>
+                          ))}
+                      </select>
+                    </td>
+                    <td className="py-1 px-1 text-right font-mono text-[11px] text-[#6B7280]">
+                      {sel_ ? `${sel_.qty} ${sel_.uom}` : "—"}
+                    </td>
+                    <td className="py-1 px-1">
+                      <select
+                        value={row.direction}
+                        onChange={(e) =>
+                          patchRow(row.uid, { direction: e.target.value as "IN" | "OUT" })
+                        }
+                        className={sel}
+                        disabled={submitting}
+                      >
+                        <option value="IN">+ In</option>
+                        <option value="OUT">− Out</option>
+                      </select>
+                    </td>
+                    <td className="py-1 px-1">
+                      <Input
+                        type="number"
+                        min="0"
+                        step="0.001"
+                        value={row.qty}
+                        onChange={(e) => patchRow(row.uid, { qty: e.target.value })}
+                        placeholder="0"
+                        className="h-7 text-xs px-2"
+                        disabled={submitting}
+                      />
+                    </td>
+                    <td className="py-1 px-1">
+                      <Input
+                        type="number"
+                        min="0"
+                        value={row.unitCost}
+                        onChange={(e) => patchRow(row.uid, { unitCost: e.target.value })}
+                        placeholder="sen"
+                        className="h-7 text-xs px-2"
+                        disabled={submitting}
+                      />
+                    </td>
+                    <td className="py-1 px-1">
+                      <select
+                        value={row.reason}
+                        onChange={(e) =>
+                          patchRow(row.uid, { reason: e.target.value as AdjustmentReason })
+                        }
+                        className={sel}
+                        disabled={submitting}
+                      >
+                        {REASON_OPTIONS.map((r) => (
+                          <option key={r.value} value={r.value}>{r.label}</option>
+                        ))}
+                      </select>
+                    </td>
+                    <td className="py-1 px-1">
+                      <Input
+                        type="text"
+                        value={row.notes}
+                        onChange={(e) => patchRow(row.uid, { notes: e.target.value })}
+                        placeholder="optional"
+                        className="h-7 text-xs px-2"
+                        disabled={submitting}
+                      />
+                    </td>
+                    <td
+                      className={`py-1 px-1 text-right font-mono text-[11px] ${
+                        row.direction === "IN" ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
+                      }`}
+                    >
+                      {rowReady(row)
+                        ? `${row.direction === "IN" ? "+" : "−"}${formatCurrency(impact)}`
+                        : ""}
+                    </td>
+                    <td className="py-1 px-1 text-right">
+                      <div className="flex items-center gap-1 justify-end">
+                        <button
+                          type="button"
+                          onClick={() => cloneRow(row.uid)}
+                          disabled={submitting}
+                          title="Duplicate row"
+                          className="text-[#9CA3AF] hover:text-[#1F1D1B]"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => removeRow(row.uid)}
+                          disabled={submitting || rows.length === 1}
+                          title="Remove row"
+                          className="text-[#9A3A2D] hover:text-[#7A2E24] disabled:text-[#E2DDD8]"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* Item picker */}
-            <div className="lg:col-span-2">
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Item *
-              </label>
-              <select
-                value={itemId}
-                onChange={(e) => onSelectItem(e.target.value)}
-                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-              >
-                <option value="">Select {type === "RM" ? "raw material" : type === "WIP" ? "WIP item" : "FG batch"}...</option>
-                {type === "RM" && rmList.map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.itemCode} — {r.itemName} (on hand: {r.balanceQty} {r.balanceQtyUom || "ea"})
-                  </option>
+          {/* Per-row error messages live below the table so failing rows
+              show their reason without bloating the row layout. */}
+          {rows.some((r) => r.status === "error") && (
+            <div className="mt-3 space-y-1">
+              {rows
+                .map((r, idx) => ({ r, idx }))
+                .filter(({ r }) => r.status === "error")
+                .map(({ r, idx }) => (
+                  <div
+                    key={r.uid}
+                    className="text-[11px] text-[#7A2E24] bg-[#FBF3F1] border border-[#E8B2A1] rounded px-3 py-1.5"
+                  >
+                    Row {idx + 1}: {r.errorMsg ?? "Failed"}
+                  </div>
                 ))}
-                {type === "WIP" && wipList.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.code} ({w.type}) — on hand: {w.stockQty}
-                  </option>
-                ))}
-                {type === "FG" && fgList.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.productCode} — {f.productName} (batch on hand: {f.remainingQty})
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Current qty display */}
-            {selected && (
-              <div>
-                <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                  Current On Hand
-                </label>
-                <div className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm">
-                  <span className="font-mono font-bold text-[#1F1D1B]">{selected.qty}</span>{" "}
-                  <span className="text-[#6B7280]">{selected.uom}</span>
-                </div>
-              </div>
-            )}
-
-            {/* Direction toggle */}
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Direction *
-              </label>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant={direction === "IN" ? "primary" : "outline"}
-                  size="sm"
-                  onClick={() => setDirection("IN")}
-                  className="flex-1"
-                >
-                  <Plus className="h-3.5 w-3.5" /> Add
-                </Button>
-                <Button
-                  type="button"
-                  variant={direction === "OUT" ? "primary" : "outline"}
-                  size="sm"
-                  onClick={() => setDirection("OUT")}
-                  className="flex-1"
-                >
-                  <Minus className="h-3.5 w-3.5" /> Subtract
-                </Button>
-              </div>
-            </div>
-
-            {/* Qty input */}
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Quantity *
-              </label>
-              <Input
-                type="number"
-                min="0"
-                step="0.001"
-                value={qtyDelta}
-                onChange={(e) => setQtyDelta(e.target.value)}
-                placeholder="0"
-              />
-            </div>
-
-            {/* Unit cost */}
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Unit Cost (sen) {direction === "OUT" && "—  used for write-off value"}
-              </label>
-              <Input
-                type="number"
-                min="0"
-                value={unitCostSen}
-                onChange={(e) => setUnitCostSen(e.target.value)}
-                placeholder="0"
-              />
-            </div>
-
-            {/* Reason */}
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Reason *
-              </label>
-              <select
-                value={reason}
-                onChange={(e) => setReason(e.target.value as AdjustmentReason)}
-                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-              >
-                {REASON_OPTIONS.map((r) => (
-                  <option key={r.value} value={r.value}>{r.label}</option>
-                ))}
-              </select>
-              <p className="text-xs text-[#9CA3AF] mt-1">
-                {REASON_OPTIONS.find((r) => r.value === reason)?.hint}
-              </p>
-            </div>
-
-            {/* Notes */}
-            <div className="lg:col-span-3">
-              <label className="block text-sm font-medium text-[#374151] mb-1.5">
-                Notes
-              </label>
-              <textarea
-                value={notes}
-                onChange={(e) => setNotes(e.target.value)}
-                rows={2}
-                className="w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
-                placeholder="Optional explanation..."
-              />
-            </div>
-          </div>
-
-          {/* Preview line */}
-          {selected && qtyNum > 0 && (
-            <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                {direction === "IN" ? (
-                  <TrendingUp className="h-4 w-4 text-[#4F7C3A]" />
-                ) : (
-                  <TrendingDown className="h-4 w-4 text-[#9A3A2D]" />
-                )}
-                <span className="text-[#6B7280]">After:</span>
-                <span className="font-mono font-bold text-[#1F1D1B]">
-                  {selected.qty + signedDelta} {selected.uom}
-                </span>
-                <span className="text-[#6B7280]">
-                  ({signedDelta > 0 ? "+" : ""}
-                  {signedDelta} from {selected.qty})
-                </span>
-              </div>
-              <div className="text-[#6B7280]">
-                Cost impact:{" "}
-                <span className="font-medium text-[#1F1D1B]">
-                  {direction === "IN" ? "+" : "−"}
-                  {formatCurrency(totalCostSen)}
-                </span>
-              </div>
             </div>
           )}
 
-          <div className="flex justify-end">
-            <Button
-              variant="primary"
-              onClick={handleSubmit}
-              disabled={!canSubmit}
-              className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
-            >
-              {submitting ? "Saving..." : "Submit Adjustment"}
-            </Button>
-          </div>
+          {/* Aggregate footer — total cost impact of all ready rows. */}
+          {readyCount > 0 && (
+            <div className="mt-3 flex items-center justify-end gap-4 text-xs text-[#6B7280] border-t border-[#E2DDD8] pt-2">
+              <span>
+                <span className="text-[#9CA3AF]">Ready: </span>
+                <span className="font-medium text-[#1F1D1B]">{readyCount}</span> /{" "}
+                {rows.length}
+              </span>
+              <span>
+                <span className="text-[#9CA3AF]">Net cost impact: </span>
+                <span
+                  className={`font-medium ${
+                    totalImpact >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"
+                  }`}
+                >
+                  {totalImpact >= 0 ? "+" : "−"}
+                  {formatCurrency(Math.abs(totalImpact))}
+                </span>
+              </span>
+            </div>
+          )}
         </CardContent>
       </Card>
 
@@ -429,16 +577,12 @@ export default function StockAdjustmentsPage() {
             <CardTitle className="flex items-center gap-2">
               <History className="h-4 w-4" /> Adjustment History
             </CardTitle>
-            <span className="text-xs text-[#6B7280]">
-              Last {history.length} entries
-            </span>
+            <span className="text-xs text-[#6B7280]">Last {history.length} entries</span>
           </div>
         </CardHeader>
         <CardContent>
           {history.length === 0 ? (
-            <p className="text-sm text-[#9CA3AF] py-8 text-center">
-              No adjustments yet.
-            </p>
+            <p className="text-sm text-[#9CA3AF] py-8 text-center">No adjustments yet.</p>
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
@@ -456,10 +600,7 @@ export default function StockAdjustmentsPage() {
                 </thead>
                 <tbody>
                   {history.map((row) => (
-                    <tr
-                      key={row.id}
-                      className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]"
-                    >
+                    <tr key={row.id} className="border-b border-[#F0ECE9] hover:bg-[#FAF9F7]">
                       <td className="py-2 px-2 whitespace-nowrap text-xs">
                         {dateLabel(row.adjustedAt)}
                       </td>
@@ -490,15 +631,14 @@ export default function StockAdjustmentsPage() {
                       </td>
                       <td className="py-2 px-2">
                         <Badge>
-                          {REASON_OPTIONS.find((r) => r.value === row.reason)?.label ?? row.reason}
+                          {REASON_OPTIONS.find((r) => r.value === row.reason)?.label ??
+                            row.reason}
                         </Badge>
                       </td>
                       <td className="py-2 px-2 text-xs text-[#6B7280]">
                         {row.adjustedByName || "—"}
                       </td>
-                      <td className="py-2 px-2 text-xs text-[#6B7280]">
-                        {row.notes || "—"}
-                      </td>
+                      <td className="py-2 px-2 text-xs text-[#6B7280]">{row.notes || "—"}</td>
                     </tr>
                   ))}
                 </tbody>

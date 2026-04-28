@@ -2,10 +2,12 @@
 // D1-backed auth route — login / logout / me / change-password.
 //
 // Session tokens are opaque UUIDs (crypto.randomUUID) stored in user_sessions
-// with a 30-day sliding window from issue time. The authMiddleware in
-// src/api/lib/auth-middleware.ts handles token verification for every
-// non-public /api/* request, so /me and /change-password can assume the
-// request is already authenticated by the time the handler runs.
+// with a 7-day fixed-at-issue lifetime that's slid forward by 7 days on every
+// authenticated request whose remaining lifetime drops below 24h (Sprint 4).
+// The authMiddleware in src/api/lib/auth-middleware.ts handles both token
+// verification and the sliding refresh for every non-public /api/* request,
+// so /me and /change-password can assume the request is already authenticated
+// by the time the handler runs.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -14,8 +16,14 @@ import { emitCounter } from "../lib/observability";
 
 const app = new Hono<Env>();
 
-// 30 days, in ms — tweak here, not in the schema.
-const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Sprint 4: dashboard session window dropped from 30 days to 7 days, BUT
+// the auth-middleware sliding-refresh extends expiresAt back to +7 days
+// on every authenticated request whose remaining lifetime is < 24h. Net
+// effect: an active user stays logged in indefinitely; an inactive user
+// is bounced after 7 days of no traffic. Matches the behaviour the
+// security review flagged (30-day fixed window was too forgiving for a
+// dashboard that controls money).
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 type UserRow = {
   id: string;

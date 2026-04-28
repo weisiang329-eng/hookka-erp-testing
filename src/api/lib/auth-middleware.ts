@@ -76,6 +76,16 @@ type SessionJoinRow = {
 // on the rare write side instead of 5x'ing read traffic to D1.
 const SESSION_CACHE_TTL_S = 300;
 
+// Sprint 4 — sliding session refresh.
+// The /login handler issues a 7-day expiry. authMiddleware (below) extends
+// that expiry by SESSION_TTL_MS whenever the remaining lifetime drops below
+// SLIDING_REFRESH_THRESHOLD_MS — gated by remaining-lifetime so we don't
+// fire a DB write on every request, only ~once per day per active user.
+// Net: an active user stays logged in indefinitely; an inactive user logs
+// out after 7 days.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SLIDING_REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day
+
 export async function sessionCacheKey(token: string): Promise<string> {
   const buf = await crypto.subtle.digest(
     "SHA-256",
@@ -196,9 +206,38 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
-  const now = new Date().toISOString();
-  if (row.expiresAt <= now) {
+  const nowMs = Date.now();
+  const expiresMs = new Date(row.expiresAt).getTime();
+  if (expiresMs <= nowMs) {
     return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+
+  // Sprint 4 — sliding session refresh.
+  // Gate the DB write by remaining-lifetime so an active user fires the
+  // UPDATE at most ~once per day, not on every request. After the push,
+  // expiresAt is now+SESSION_TTL_MS; the KV cache is invalidated so the
+  // next request reads the fresh row from Postgres (slight extra latency
+  // for that one request, but cheaper than wedging a stale expiry into
+  // every cached entry).
+  const remainingMs = expiresMs - nowMs;
+  if (remainingMs < SLIDING_REFRESH_THRESHOLD_MS) {
+    const newExpires = new Date(nowMs + SESSION_TTL_MS).toISOString();
+    // Fire-and-forget — extending a session is non-critical to the
+    // current request. If it fails the user just gets a normal expiry
+    // window and re-logs-in next time. waitUntil keeps the Worker alive
+    // long enough for the write to land without blocking the response.
+    c.executionCtx.waitUntil(
+      Promise.all([
+        c.var.DB.prepare(
+          "UPDATE user_sessions SET expiresAt = ? WHERE token = ?",
+        )
+          .bind(newExpires, token)
+          .run(),
+        invalidateSessionCache(kv, token),
+      ]).catch((err) => {
+        console.warn("[auth] sliding-refresh failed:", err);
+      }),
+    );
   }
 
   // Stash on ctx so downstream handlers can read via c.get('userId').

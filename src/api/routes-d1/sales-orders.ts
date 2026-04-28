@@ -2252,6 +2252,53 @@ app.put("/:id", async (c) => {
         (existing.status === "DRAFT" || existing.status === "PENDING") &&
         (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
 
+      // Pre-flight: block CANCELLED transition when any job_card under this
+      // SO's POs has a completedDate stamped. Stranded inventory would result
+      // if we cascaded CANCELLED through completed work — operators must
+      // first clear the completion dates or reassign those finished units to
+      // another order. Returns 409 Conflict (distinct from 4xx validation
+      // errors) so the frontend can render a specific blocked-cancel modal.
+      if (newStatus === "CANCELLED") {
+        const blockingRes = await c.var.DB
+          .prepare(
+            `SELECT jc.id, jc.completedDate, jc.departmentCode, jc.departmentName, po.poNo
+               FROM job_cards jc
+               JOIN production_orders po ON po.id = jc.productionOrderId
+              WHERE po.salesOrderId = ?
+                AND jc.completedDate IS NOT NULL
+                AND jc.completedDate <> ''
+                AND jc.status NOT IN ('CANCELLED')
+              ORDER BY jc.completedDate ASC
+              LIMIT 5`,
+          )
+          .bind(id)
+          .all<{
+            id: string;
+            completedDate: string;
+            departmentCode: string | null;
+            departmentName: string | null;
+            poNo: string;
+          }>();
+        const blocking = blockingRes.results ?? [];
+        if (blocking.length > 0) {
+          return c.json(
+            {
+              success: false,
+              error: "Cannot cancel: completed work blocks cancellation",
+              blockingItems: blocking.map((b) => ({
+                poNo: b.poNo,
+                departmentCode: b.departmentCode || "",
+                departmentName: b.departmentName || b.departmentCode || "Department",
+                completedDate: b.completedDate,
+              })),
+              reason:
+                "Clear completion dates or reassign these items to another order before cancelling.",
+            },
+            409,
+          );
+        }
+      }
+
       // Run cascade for ON_HOLD / CANCELLED transitions and for RESUME
       // (ON_HOLD → CONFIRMED / IN_PRODUCTION). cascadeSOStatusToPOs is a no-op
       // for any other transition, so calling it unconditionally is cheap.

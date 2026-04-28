@@ -186,6 +186,15 @@ export default function SalesOrderDetailPage() {
     incompleteProducts: Array<{ productCode: string; productName: string; reason: string }>;
   }>({ open: false, incompleteProducts: [] });
 
+  // Blocked-cancel modal — shown when PUT /:id (status=CANCELLED) returns 409
+  // because some job_card under this SO has a completedDate stamped. The
+  // server returns up to 5 blocking items so the operator can locate them
+  // on the Production page and clear/reassign before retrying the cancel.
+  const [cancelBlocked, setCancelBlocked] = useState<{
+    open: boolean;
+    items: Array<{ poNo: string; departmentCode: string; departmentName: string; completedDate: string }>;
+  }>({ open: false, items: [] });
+
   const fetchOrder = useCallback(() => {
     // Only this SO changed — per-id invalidation, not list prefix.
     if (id) invalidateCache(`/api/sales-orders/${id}`);
@@ -219,6 +228,23 @@ export default function SalesOrderDetailPage() {
     [customerResp],
   );
 
+  // Cancel-eligibility — reuses /edit-eligibility because the server-side
+  // dept_completed reason is the same lock condition that blocks cancel:
+  // any job_card with a completedDate stamped under this SO's POs strands
+  // inventory if the SO flips to CANCELLED. We surface the same lock here
+  // as a disabled Cancel button + tooltip BEFORE the user clicks; the
+  // backend 409 still hard-blocks on click as a defense-in-depth.
+  const { data: eligibilityResp } = useCachedJson<{
+    editable: boolean;
+    reason?: "status" | "production_window" | "dept_completed";
+    completedDept?: string;
+    completedAt?: string;
+  }>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
+  const cancelLocked = eligibilityResp?.reason === "dept_completed";
+  const cancelLockTooltip = cancelLocked
+    ? `Cannot cancel — ${eligibilityResp?.completedDept || "A department"} completed on ${formatDate(eligibilityResp?.completedAt || "")}`
+    : "";
+
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
     setUpdating(true);
@@ -242,6 +268,13 @@ export default function SalesOrderDetailPage() {
     if (!res.ok) {
       setUpdating(false);
       setModal(prev => ({ ...prev, open: false }));
+      // 409 Conflict from CANCELLED transition = completed work blocks cancel.
+      // Pop the dedicated blocked-cancel modal listing the offending items
+      // instead of a bare toast; the order remains in its current status.
+      if (res.status === 409 && Array.isArray(data?.blockingItems)) {
+        setCancelBlocked({ open: true, items: data.blockingItems });
+        return;
+      }
       toast.error(data?.error || `Failed to update status (HTTP ${res.status})`);
       return;
     }
@@ -455,6 +488,60 @@ export default function SalesOrderDetailPage() {
         </div>
       )}
 
+      {/* Blocked-Cancel Modal — shown on 409 from PUT /:id when any
+          job_card under this SO already has a completedDate stamped.
+          Operators must clear / reassign the completed work on the
+          Production page before this SO can be cancelled. */}
+      {cancelBlocked.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div className="fixed inset-0 bg-black/40" onClick={() => setCancelBlocked({ open: false, items: [] })} />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-[#9A3A2D]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Cannot cancel order — completed work in production</h3>
+              </div>
+              <button onClick={() => setCancelBlocked({ open: false, items: [] })} className="text-[#9CA3AF] hover:text-[#374151]"><X className="h-5 w-5" /></button>
+            </div>
+            <p className="text-sm text-[#374151]">
+              The following items have completion dates that block cancellation:
+            </p>
+            <ul className="space-y-1 text-sm bg-[#FBF3F1] border border-[#E8B2A1] rounded-md p-3 max-h-64 overflow-y-auto">
+              {cancelBlocked.items.map((b, i) => (
+                <li key={`${b.poNo}-${b.departmentCode}-${i}`} className="text-[#7A2E24]">
+                  <span className="font-mono">{b.poNo}</span>
+                  <span className="text-[#9A3A2D]"> &middot; {b.departmentName} &middot; </span>
+                  <span>{formatDate(b.completedDate)}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="text-xs text-[#6B7280]">
+              Clear these completion dates from the Production page first, OR reassign
+              the completed units to another order. Only then can this SO be cancelled.
+            </p>
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setCancelBlocked({ open: false, items: [] });
+                  navigate(`/production?soId=${encodeURIComponent(id || "")}`);
+                }}
+              >
+                Open Production Page
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => setCancelBlocked({ open: false, items: [] })}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Success Banner */}
       {confirmSuccess && (
         <div className="bg-[#EEF3E4] border border-[#C6DBA8] text-[#4F7C3A] px-4 py-3 rounded-lg flex items-center gap-3">
@@ -562,11 +649,15 @@ export default function SalesOrderDetailPage() {
               </Button>
             )}
 
-            {/* Cancel */}
+            {/* Cancel — disabled when any dept JC has a completedDate
+                (cancelLocked, derived from /edit-eligibility). The backend
+                also returns 409 if a stale client retries; both paths funnel
+                into the same blocked-cancel modal. */}
             {canCancel && (
               <Button
-                variant="outline" size="sm" disabled={updating}
+                variant="outline" size="sm" disabled={updating || cancelLocked}
                 className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                title={cancelLockTooltip || undefined}
                 onClick={() => openConfirm(
                   "Cancel Order",
                   "Are you sure you want to cancel this order? This action cannot be easily undone.",

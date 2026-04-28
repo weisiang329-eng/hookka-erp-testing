@@ -72,6 +72,7 @@
   "clockOut": "clock_out",
   "closedAt": "closed_at",
   "closingValue": "closing_value",
+  "cnId": "cn_id",
   "companyAddress": "company_address",
   "companyCO": "company_co",
   "companyCODate": "company_co_date",

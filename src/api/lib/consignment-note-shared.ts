@@ -508,6 +508,252 @@ export async function updateConsignmentNoteById(
     )
     .run();
 
+  // -------------------------------------------------------------------
+  // Phase-4 inventory cascade on dispatch (ACTIVE → PARTIALLY_SOLD,
+  // added 2026-04-28). Mirrors delivery-orders.ts ~lines 1346-1469 — see
+  // that block for the full rationale; the gist:
+  //   - This is the inventory boundary for CN. Until now the goods sat
+  //     in fg_units PENDING and showed Available in the Inventory page
+  //     even though dispatch had already been performed.
+  //   - Stamp fg_units with cnId + status='LOADED' + loadedAt so the
+  //     Inventory read path drops the unit from Available.
+  //   - Write a STOCK_OUT row per PO so the racking ledger reflects the
+  //     physical out-movement.
+  //   - Decrement wip_items.stockQty for any UPH job-card wipLabel on
+  //     these POs (BUG-2026-04-27-021 — the residual UPH ledger entry
+  //     stops being view-backed once the FG view drops the PO too).
+  //
+  // Idempotency guards:
+  //   - Outer gate `existing.status === ACTIVE && nextStatus ===
+  //     PARTIALLY_SOLD` means re-PATCHing PARTIALLY_SOLD with
+  //     status=PARTIALLY_SOLD doesn't re-run the cascade.
+  //   - WHERE clause requires `(cnId IS NULL OR cnId='')` so a CN that
+  //     already cascaded won't double-stamp; also `(doId IS NULL OR
+  //     doId='')` prevents stealing units that a DO already loaded.
+  //
+  // No db.batch() here — this helper has always run sequential
+  // .prepare(...).run() calls (matches the rest of the file's style),
+  // and introducing a batch would be a larger refactor.
+  // -------------------------------------------------------------------
+  const stampedOnDispatch =
+    existing.status === "ACTIVE" && nextStatus === "PARTIALLY_SOLD";
+  if (stampedOnDispatch) {
+    const itemRowsRes = await db
+      .prepare(
+        `SELECT productionOrderId FROM consignment_items
+           WHERE consignmentNoteId = ?`,
+      )
+      .bind(id)
+      .all<{ productionOrderId: string | null }>();
+    const itemPoIds = Array.from(
+      new Set(
+        (itemRowsRes.results ?? [])
+          .map((r) => r.productionOrderId)
+          .filter((s): s is string => !!s),
+      ),
+    );
+    if (itemPoIds.length > 0) {
+      const ph = itemPoIds.map(() => "?").join(",");
+      const poRowsRes = await db
+        .prepare(
+          `SELECT id, productCode, productName, quantity, rackingNumber
+             FROM production_orders WHERE id IN (${ph})`,
+        )
+        .bind(...itemPoIds)
+        .all<{
+          id: string;
+          productCode: string | null;
+          productName: string | null;
+          quantity: number | null;
+          rackingNumber: string | null;
+        }>();
+      const poRows = poRowsRes.results ?? [];
+      for (const po of poRows) {
+        await db
+          .prepare(
+            `UPDATE fg_units
+                SET cnId = ?, status = 'LOADED', loadedAt = ?
+              WHERE poId = ?
+                AND (doId IS NULL OR doId = '')
+                AND (cnId IS NULL OR cnId = '')`,
+          )
+          .bind(id, now, po.id)
+          .run();
+        await db
+          .prepare(
+            `INSERT INTO stock_movements (
+               id, type, rackLocationId, rackLabel, productionOrderId,
+               productCode, productName, quantity, reason, performedBy,
+               created_at
+             ) VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+          )
+          .bind(
+            `mov-${crypto.randomUUID().slice(0, 8)}`,
+            null,
+            po.rackingNumber ?? "",
+            po.id,
+            po.productCode ?? "",
+            po.productName ?? "",
+            Number(po.quantity) || 0,
+            `CN ${existing.noteNumber} dispatched`,
+            now,
+          )
+          .run();
+      }
+
+      // BUG-2026-04-27-021 (CN side): decrement wip_items.stockQty for
+      // every UPH wipLabel produced by these POs. Same reasoning as the
+      // DO branch — once the CN dispatch flips fg_units LOADED, the FG
+      // view drops the PO and the residual +qty on wip_items has no
+      // backing view, so we balance the books here. Idempotent via the
+      // stampedOnDispatch outer gate (ACTIVE → PARTIALLY_SOLD edge only).
+      const uphRowsRes = await db
+        .prepare(
+          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
+             WHERE productionOrderId IN (${ph})
+               AND departmentCode = 'UPHOLSTERY'
+               AND wipLabel IS NOT NULL
+               AND wipLabel != ''`,
+        )
+        .bind(...itemPoIds)
+        .all<{
+          productionOrderId: string;
+          wipLabel: string;
+          wipQty: number | null;
+        }>();
+      const uphRows = uphRowsRes.results ?? [];
+      const poById = new Map(poRows.map((p) => [p.id, p]));
+      for (const u of uphRows) {
+        const po = poById.get(u.productionOrderId);
+        if (!po) continue;
+        const dec = Number(u.wipQty) || Number(po.quantity) || 0;
+        if (dec === 0) continue;
+        await db
+          .prepare(
+            `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?`,
+          )
+          .bind(dec, u.wipLabel)
+          .run();
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Reversal cascade on PARTIALLY_SOLD → ACTIVE ("Reverse to Pending
+  // Dispatch" context-menu action). Mirrors delivery-orders.ts ~lines
+  // 1471-1577 — unstamp fg_units that this CN claimed, write a STOCK_IN
+  // counter-movement (audit history is append-only), and re-credit
+  // wip_items.stockQty symmetrically. Without this, units would stay
+  // wedged in 'LOADED' state with an obsolete cnId pointer and the
+  // warehouse view would double-count them after a reversal.
+  //
+  // Skipping FULLY_SOLD → DELIVERED parity from DO is intentional:
+  // consignment lifecycle differs ("delivered to branch" ≠ "sold to end
+  // customer"; the SOLD event is per-line via consignment_items.soldDate,
+  // not header-level). Only the ACTIVE↔PARTIALLY_SOLD boundary touches
+  // fg_units / stock_movements / wip_items.
+  // -------------------------------------------------------------------
+  const revertedToActive =
+    existing.status === "PARTIALLY_SOLD" && nextStatus === "ACTIVE";
+  if (revertedToActive) {
+    const stampedPosRes = await db
+      .prepare(`SELECT DISTINCT poId FROM fg_units WHERE cnId = ?`)
+      .bind(id)
+      .all<{ poId: string }>();
+    const stampedPoIds = (stampedPosRes.results ?? [])
+      .map((r) => r.poId)
+      .filter((s): s is string => !!s);
+    await db
+      .prepare(
+        `UPDATE fg_units
+            SET cnId = NULL, status = 'PENDING', loadedAt = NULL
+          WHERE cnId = ?`,
+      )
+      .bind(id)
+      .run();
+    for (const poId of stampedPoIds) {
+      const po = await db
+        .prepare(
+          `SELECT id, productCode, productName, quantity, rackingNumber
+             FROM production_orders WHERE id = ?`,
+        )
+        .bind(poId)
+        .first<{
+          id: string;
+          productCode: string | null;
+          productName: string | null;
+          quantity: number | null;
+          rackingNumber: string | null;
+        }>();
+      if (!po) continue;
+      await db
+        .prepare(
+          `INSERT INTO stock_movements (
+             id, type, rackLocationId, rackLabel, productionOrderId,
+             productCode, productName, quantity, reason, performedBy,
+             created_at
+           ) VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+        )
+        .bind(
+          `mov-${crypto.randomUUID().slice(0, 8)}`,
+          null,
+          po.rackingNumber ?? "",
+          po.id,
+          po.productCode ?? "",
+          po.productName ?? "",
+          Number(po.quantity) || 0,
+          `CN ${existing.noteNumber} reverted to Pending Dispatch`,
+          now,
+        )
+        .run();
+    }
+
+    // BUG-2026-04-27-021 (CN reverse): re-credit wip_items.stockQty for
+    // every UPH wipLabel produced by these POs. Symmetric inverse of the
+    // dispatch decrement above — gated on PARTIALLY_SOLD → ACTIVE so a
+    // CN that never reached PARTIALLY_SOLD never enters this branch.
+    if (stampedPoIds.length > 0) {
+      const ph = stampedPoIds.map(() => "?").join(",");
+      const reverseRes = await db
+        .prepare(
+          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
+             WHERE productionOrderId IN (${ph})
+               AND departmentCode = 'UPHOLSTERY'
+               AND wipLabel IS NOT NULL
+               AND wipLabel != ''`,
+        )
+        .bind(...stampedPoIds)
+        .all<{
+          productionOrderId: string;
+          wipLabel: string;
+          wipQty: number | null;
+        }>();
+      const reverseRows = reverseRes.results ?? [];
+      const poQtyByIdRes = await db
+        .prepare(
+          `SELECT id, quantity FROM production_orders WHERE id IN (${ph})`,
+        )
+        .bind(...stampedPoIds)
+        .all<{ id: string; quantity: number | null }>();
+      const poQtyById = new Map(
+        (poQtyByIdRes.results ?? []).map((r) => [r.id, r.quantity]),
+      );
+      for (const u of reverseRows) {
+        const inc =
+          Number(u.wipQty) ||
+          Number(poQtyById.get(u.productionOrderId)) ||
+          0;
+        if (inc === 0) continue;
+        await db
+          .prepare(
+            `UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`,
+          )
+          .bind(inc, u.wipLabel)
+          .run();
+      }
+    }
+  }
+
   // Items replace — if the caller sent items[], do a delete-and-reinsert
   // so add/remove/qty edits from the FE inline edit-mode persist. Mirrors
   // the simplest pattern used by DO's items refresh on PUT. Guarded to

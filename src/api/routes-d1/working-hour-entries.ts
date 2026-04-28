@@ -5,6 +5,7 @@
 //   GET    /api/working-hour-entries?date=YYYY-MM-DD
 //   GET    /api/working-hour-entries?workerId=...&from=YYYY-MM-DD&to=YYYY-MM-DD
 //   GET    /api/working-hour-entries/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//   GET    /api/working-hour-entries/daily-breakdown?from=YYYY-MM-DD&to=YYYY-MM-DD
 //   POST   /api/working-hour-entries                — create one entry
 //   POST   /api/working-hour-entries/bulk            — replace all entries for an attendance
 //   PUT    /api/working-hour-entries/:id             — update hours / category / notes
@@ -362,6 +363,125 @@ app.get("/summary", async (c) => {
 
   const data = Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
   return c.json({ success: true, data, total: data.length });
+});
+
+// ---------------------------------------------------------------------------
+// GET /daily-breakdown?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Per-day rollups for the Labor Cost vs Revenue tab's "Daily Breakdown" table.
+// Returns three date-keyed maps:
+//   - orderValueByDate:       sum of sales_orders.totalSen by companySODate
+//   - productionValueByDate:  sum of production-revenue per PO (price × qty)
+//                             keyed on the LAST UPHOLSTERY job_card's
+//                             completedDate — same dedup logic as the
+//                             /production-revenue endpoint above
+//   - unitsCompletedByDate:   COUNT of UPHOLSTERY job_cards with status
+//                             COMPLETED|TRANSFERRED whose completedDate is
+//                             in range
+//
+// Labor cost is intentionally NOT computed here: it depends on per-worker
+// basic salary + OT multiplier which are easier to keep in the frontend
+// (it already has them via the workers prop) and the per-worker pro-rata
+// OT split is already implemented there.
+//
+// Output values are in sen (raw integer, /100 in UI).
+// ---------------------------------------------------------------------------
+app.get("/daily-breakdown", async (c) => {
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  if (!from || !to) {
+    return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
+  }
+
+  // 1. Order value — sum sales_orders.totalSen grouped by companySODate.
+  //    Use companySODate (the date the SO was opened on the company side)
+  //    so the chart matches the Sales reports view. Skip rows with empty
+  //    companySODate (they get bucketed under "" and filtered out).
+  const orderValueRes = await c.var.DB
+    .prepare(
+      `SELECT companySODate AS d, SUM(totalSen) AS v
+         FROM sales_orders
+        WHERE companySODate IS NOT NULL
+          AND companySODate != ''
+          AND companySODate >= ?
+          AND companySODate <= ?
+        GROUP BY companySODate`,
+    )
+    .bind(from, to)
+    .all<{ d: string; v: number | string | null }>();
+
+  // 2. Production value — same per-PO recognition as /production-revenue.
+  //    GROUP BY productionOrderId, recognition date = MAX(completedDate),
+  //    revenue = unitPrice × po.quantity. Then aggregate again by date.
+  const prodValueRes = await c.var.DB
+    .prepare(
+      `WITH per_po AS (
+         SELECT productionOrderId,
+                MAX(completedDate) AS unit_completed_at
+           FROM job_cards
+          WHERE departmentCode = 'UPHOLSTERY'
+            AND status IN ('COMPLETED','TRANSFERRED')
+            AND completedDate IS NOT NULL
+          GROUP BY productionOrderId
+         HAVING MAX(completedDate) >= ?
+            AND MAX(completedDate) <= ?
+       )
+       SELECT substr(per_po.unit_completed_at, 1, 10) AS d,
+              SUM(COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)
+                  * MAX(1, COALESCE(po.quantity, 1))) AS v
+         FROM per_po
+         JOIN production_orders po ON po.id = per_po.productionOrderId
+         LEFT JOIN sales_order_items soi
+                ON soi.salesOrderId = po.salesOrderId
+               AND soi.lineNo = po.lineNo
+         LEFT JOIN products p ON p.id = po.productId
+        WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
+        GROUP BY substr(per_po.unit_completed_at, 1, 10)`,
+    )
+    .bind(from, to)
+    .all<{ d: string; v: number | string | null }>();
+
+  // 3. Units completed — count UPHOLSTERY job_cards completed in range.
+  //    Per spec, this is "count of UPHOLSTERY job-cards completed on
+  //    that day" — NOT a per-PO dedup, just a raw count of the cards.
+  const unitsRes = await c.var.DB
+    .prepare(
+      `SELECT completedDate AS d, COUNT(*) AS n
+         FROM job_cards
+        WHERE departmentCode = 'UPHOLSTERY'
+          AND status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate IS NOT NULL
+          AND completedDate >= ?
+          AND completedDate <= ?
+        GROUP BY completedDate`,
+    )
+    .bind(from, to)
+    .all<{ d: string; n: number | string | null }>();
+
+  const orderValueByDate: Record<string, number> = {};
+  for (const r of orderValueRes.results ?? []) {
+    if (!r.d) continue;
+    orderValueByDate[r.d] = Math.round(Number(r.v) || 0);
+  }
+  const productionValueByDate: Record<string, number> = {};
+  for (const r of prodValueRes.results ?? []) {
+    if (!r.d) continue;
+    productionValueByDate[r.d] = Math.round(Number(r.v) || 0);
+  }
+  const unitsCompletedByDate: Record<string, number> = {};
+  for (const r of unitsRes.results ?? []) {
+    if (!r.d) continue;
+    unitsCompletedByDate[r.d] = Number(r.n) || 0;
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      orderValueByDate,
+      productionValueByDate,
+      unitsCompletedByDate,
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------

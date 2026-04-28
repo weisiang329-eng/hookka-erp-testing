@@ -2447,6 +2447,66 @@ function workingDaysInMonth(period: string): number {
   return count;
 }
 
+// Effective working-days denominator for a custom date range. Used to derive
+// the per-worker hourly rate when the range isn't a single calendar month.
+// Algorithm: count Mon–Sat days inside [from, to], then scale up to a full
+// "month" (lastDay-of-from-month days) so the rate doesn't blow up for
+// short ranges (e.g. a 1-day range shouldn't give a worker 1 day's salary).
+// Falls back to 26 on unparseable input.
+function workingDaysInRange(from: string, to: string): number {
+  const fy = Number(from.slice(0, 4));
+  const fm = Number(from.slice(5, 7));
+  const fd = Number(from.slice(8, 10));
+  const ty = Number(to.slice(0, 4));
+  const tm = Number(to.slice(5, 7));
+  const td = Number(to.slice(8, 10));
+  if (!fy || !fm || !fd || !ty || !tm || !td) return 26;
+  // If single calendar month, defer to workingDaysInMonth so monthly results
+  // exactly match the existing logic.
+  if (fy === ty && fm === tm) {
+    const lastOfMonth = new Date(Date.UTC(fy, fm, 0)).getUTCDate();
+    if (fd === 1 && td === lastOfMonth) {
+      return workingDaysInMonth(`${fy}-${String(fm).padStart(2, "0")}`);
+    }
+  }
+  // Otherwise count actual Mon–Sat days in the range.
+  const start = new Date(Date.UTC(fy, fm - 1, fd));
+  const end = new Date(Date.UTC(ty, tm - 1, td));
+  if (end.getTime() < start.getTime()) return 26;
+  let count = 0;
+  for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+    const dow = new Date(t).getUTCDay();
+    if (dow !== 0) count++;
+  }
+  return Math.max(1, count);
+}
+
+// Iterate every yyyy-mm-dd day in [from, to] inclusive. Used by the Daily
+// Breakdown table so empty-zero days still render (operators want to see
+// "what was zero on which day", not have those days hidden).
+function eachDayInRange(from: string, to: string): string[] {
+  const fy = Number(from.slice(0, 4));
+  const fm = Number(from.slice(5, 7));
+  const fd = Number(from.slice(8, 10));
+  const ty = Number(to.slice(0, 4));
+  const tm = Number(to.slice(5, 7));
+  const td = Number(to.slice(8, 10));
+  if (!fy || !fm || !fd || !ty || !tm || !td) return [];
+  const start = Date.UTC(fy, fm - 1, fd);
+  const end = Date.UTC(ty, tm - 1, td);
+  if (end < start) return [];
+  // Hard cap at 366 days so a typo doesn't iterate decades.
+  const out: string[] = [];
+  for (let t = start, i = 0; t <= end && i < 366; t += 86400000, i++) {
+    const d = new Date(t);
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    out.push(`${y}-${m}-${dd}`);
+  }
+  return out;
+}
+
 // Inline panel — create / edit / delete departments. Lives under LaborCostTab
 // but operates on the same /api/departments source-of-truth that every dept
 // dropdown across the page reads from. New depts appear immediately in
@@ -2703,8 +2763,36 @@ function LaborCostTab({
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
   const [manageOpen, setManageOpen] = useState(false);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
+  // `period` keeps the existing month dropdown working as a quick-jump preset.
+  // When the user picks a month, we re-derive from/to. When they tweak the
+  // date inputs directly, `period` stays in sync only if their range matches
+  // an exact calendar month — otherwise it drops to "" (Custom).
   const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
-  const { from, to } = useMemo(() => periodToDateRange(period), [period]);
+  const initialRange = useMemo(
+    () => periodToDateRange(periodOptions[0]?.value ?? ""),
+    [periodOptions],
+  );
+  const [fromDate, setFromDate] = useState<string>(initialRange.from);
+  const [toDate, setToDate] = useState<string>(initialRange.to);
+  const from = fromDate;
+  const to = toDate;
+
+  const handlePeriodChange = useCallback((p: string) => {
+    setPeriod(p);
+    if (p) {
+      const r = periodToDateRange(p);
+      setFromDate(r.from);
+      setToDate(r.to);
+    }
+  }, []);
+  const handleFromChange = useCallback((v: string) => {
+    setFromDate(v);
+    setPeriod(""); // dropping to Custom — the dropdown shows "Custom range"
+  }, []);
+  const handleToChange = useCallback((v: string) => {
+    setToDate(v);
+    setPeriod("");
+  }, []);
 
   // Working hour entries for the selected month.
   const entriesUrl = useMemo(
@@ -2744,6 +2832,24 @@ function LaborCostTab({
     };
   }>(prodRevUrl);
 
+  // Per-day rollups for the Daily Breakdown table — order value (by
+  // companySODate), production value (by last-piece UPHOLSTERY completion
+  // date) and units completed (UPHOLSTERY job_card count). Labor cost is
+  // computed locally below from working_hour_entries since it depends on
+  // per-worker basic salary which we already have.
+  const dailyUrl = useMemo(
+    () => `/api/working-hour-entries/daily-breakdown?from=${from}&to=${to}`,
+    [from, to],
+  );
+  const { data: dailyResp, loading: dailyLoading } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      orderValueByDate?: Record<string, number>;
+      productionValueByDate?: Record<string, number>;
+      unitsCompletedByDate?: Record<string, number>;
+    };
+  }>(dailyUrl);
+
   const workersById = useMemo(() => {
     const m = new Map<string, Worker>();
     for (const w of workers) m.set(w.id, w);
@@ -2767,7 +2873,12 @@ function LaborCostTab({
     //    multiplied by otMultiplier (default 1.5×). OT premium does NOT
     //    fluctuate month-to-month — it's tied to a "standard" hourly rate
     //    so a worker doing OT in February doesn't get a windfall vs March.
-    const wdInMonth = workingDaysInMonth(period);
+    // When `period` is a single calendar month this matches the prior
+    // behaviour exactly. When the user picks a custom range the rate is
+    // derived from Mon-Sat days actually in the range — see workingDaysInRange.
+    const wdInMonth = period
+      ? workingDaysInMonth(period)
+      : workingDaysInRange(from, to);
 
     // Group by (departmentCode, category). Hours summed; cost = sum over each
     // entry of regular_hours × regular_rate + ot_hours × ot_base_rate × multiplier.
@@ -2843,7 +2954,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, allDepts, prodCodes]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -2863,7 +2974,71 @@ function LaborCostTab({
   }, [plResp]);
   const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
 
-  const loading = entriesLoading || plLoading;
+  // Daily Breakdown rows. Always emits one row per day in [from, to] —
+  // operators want zero-everything days visible (matches the user's reference
+  // Google Sheet behaviour), not silently skipped.
+  //
+  // Labor cost per day uses the SAME per-worker pro-rata OT logic as the
+  // per-dept rollup above: total each worker's hours-per-day → split into
+  // regular vs OT (>9h is OT) → cost = regularH × regularRate + otH × otBase
+  // × multiplier. We then attribute the worker's day-cost to the date column.
+  const dailyRows = useMemo(() => {
+    const days = eachDayInRange(from, to);
+    const ovd = (dailyResp?.success ? dailyResp.data?.orderValueByDate : null) ?? {};
+    const pvd = (dailyResp?.success ? dailyResp.data?.productionValueByDate : null) ?? {};
+    const ucd = (dailyResp?.success ? dailyResp.data?.unitsCompletedByDate : null) ?? {};
+
+    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
+    const wd = period
+      ? workingDaysInMonth(period)
+      : workingDaysInRange(from, to);
+
+    // Group entries by worker+date so the pro-rata OT split lines up with the
+    // dept rollup.
+    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
+    for (const e of entries) {
+      const k = `${e.workerId}|${e.date}`;
+      const arr = segsByWorkerDate.get(k) ?? [];
+      arr.push(e);
+      segsByWorkerDate.set(k, arr);
+    }
+    const laborByDate = new Map<string, number>();
+    for (const [k, segs] of segsByWorkerDate.entries()) {
+      const [workerId, date] = k.split("|");
+      const w = workersById.get(workerId);
+      if (!w || !w.basicSalarySen) continue;
+      const regularRateSen = w.basicSalarySen / wd / 9;
+      const otBaseRateSen = w.basicSalarySen / 26 / 9;
+      const otMult = w.otMultiplier ?? 1.5;
+      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const otTotalH = Math.max(0, totalH - 9);
+      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+      let dayCost = 0;
+      for (const e of segs) {
+        const hours = Number(e.hours) || 0;
+        const otH = hours * otShare;
+        const regularH = hours - otH;
+        dayCost += regularH * regularRateSen + otH * otBaseRateSen * otMult;
+      }
+      laborByDate.set(date, (laborByDate.get(date) ?? 0) + dayCost);
+    }
+
+    return days.map((d) => ({
+      date: d,
+      orderValueSen: Number(ovd[d]) || 0,
+      productionValueSen: Number(pvd[d]) || 0,
+      laborCostSen: Math.round(laborByDate.get(d) ?? 0),
+      unitsCompleted: Number(ucd[d]) || 0,
+    }));
+  }, [from, to, dailyResp, entriesResp, workersById, period]);
+
+  // Daily-breakdown summary strip ("PRODUCTION SALES (Upholstery Completions)"
+  // in the user's reference Google Sheet).
+  const dailyTotalUnits = dailyRows.reduce((s, r) => s + r.unitsCompleted, 0);
+  const dailyTotalProductionValue = dailyRows.reduce((s, r) => s + r.productionValueSen, 0);
+  const dailyTotalLaborCost = dailyRows.reduce((s, r) => s + r.laborCostSen, 0);
+
+  const loading = entriesLoading || plLoading || dailyLoading;
 
   return (
     <Card>
@@ -2872,7 +3047,7 @@ function LaborCostTab({
           <CardTitle className="flex items-center gap-2">
             <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Labor Cost vs Revenue
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button
               variant="outline"
               size="sm"
@@ -2882,11 +3057,29 @@ function LaborCostTab({
               <Users className="h-4 w-4" />
               {manageOpen ? "Close Manage Departments" : "Manage Departments"}
             </Button>
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-[#6B7280]">From</span>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => handleFromChange(e.target.value)}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+              <span className="text-[#6B7280]">To</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => handleToChange(e.target.value)}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            </div>
             <select
               value={period}
-              onChange={(e) => setPeriod(e.target.value)}
+              onChange={(e) => handlePeriodChange(e.target.value)}
               className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              title="Quick-jump to a calendar month"
             >
+              <option value="">Custom range</option>
               {periodOptions.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
@@ -3009,6 +3202,72 @@ function LaborCostTab({
                 )}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {/* Daily Breakdown — one row per day in [from, to]. Mirrors the
+            user's reference Google Sheet so operators can audit per-day
+            order intake / production completions / labor cost / units
+            shipped. Empty-zero days are still emitted so "what was zero
+            on which day" stays visible. */}
+        {!loading && (
+          <div className="mt-6">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-[#1F1D1B]">Daily Breakdown</h3>
+              <span className="text-xs text-[#6B7280]">
+                {dailyRows.length} day{dailyRows.length === 1 ? "" : "s"}
+                {" · "}
+                Units {dailyTotalUnits}
+                {" · "}
+                Production {formatCurrency(dailyTotalProductionValue)}
+                {" · "}
+                Labor {formatCurrency(dailyTotalLaborCost)}
+              </span>
+            </div>
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 z-10">
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Date</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Order Value (RM)</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Production Value (RM)</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost (RM)</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Units Completed</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {dailyRows.map((r) => (
+                    <tr
+                      key={r.date}
+                      className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
+                    >
+                      <td className="h-10 px-3 text-[#1F1D1B] tabular-nums">{formatDateDMY(r.date)}</td>
+                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                        {r.orderValueSen > 0 ? formatCurrency(r.orderValueSen) : <span className="text-[#9CA3AF]">0.00</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                        {r.productionValueSen > 0 ? formatCurrency(r.productionValueSen) : <span className="text-[#9CA3AF]">0.00</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right tabular-nums font-medium">
+                        {r.laborCostSen > 0 ? formatCurrency(r.laborCostSen) : <span className="text-[#9CA3AF]">0.00</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right tabular-nums">
+                        {r.unitsCompleted > 0
+                          ? <span className="font-medium text-[#1F1D1B]">{r.unitsCompleted}</span>
+                          : <span className="text-[#9CA3AF]">0</span>}
+                      </td>
+                    </tr>
+                  ))}
+                  {dailyRows.length === 0 && (
+                    <tr>
+                      <td colSpan={5} className="h-24 text-center text-[#9CA3AF]">
+                        No days in the selected range.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         )}
 

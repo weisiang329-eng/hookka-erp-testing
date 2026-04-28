@@ -147,31 +147,36 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 // ---------------------------------------------------------------------------
 // GET /production-revenue?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
-// "Production Revenue" — revenue is recognized the day each item completes
-// the UPHOLSTERY department (the final assembly stage that produces the FG
-// unit), not when its sales order was created. Drives the Labor Cost tab on
-// Employees so the cost-side (hours actually worked in the period) lines up
-// against revenue actually finished in the period.
+// "Production Revenue" — revenue is recognized the day each PHYSICAL UNIT
+// completes the UPHOLSTERY department, NOT per-job_card. A single product
+// unit (e.g. one CODY BEDFRAME) consists of multiple PIECES (HB, Divan,
+// Cushion, …) each tracked as its own job_card. Counting per-job_card means
+// the unit's catalog price gets scored 2-4× as each piece completes.
 //
-// Joins:
-//   job_cards.productionOrderId  → production_orders.id          (for SO link + qty fallback + product link)
-//   production_orders             → sales_order_items via (salesOrderId, lineNo)  (for actual unitPriceSen)
-//   production_orders.productId   → products.id                  (for category bucketing + price fallback)
+// Per spec: revenue recognizes ONCE per (productionOrderId, unitNo) — on the
+// date the LAST piece of that unit completes Upholstery. Source of truth is
+// the fg_units table, which has one row per (poId, unitNo, pieceNo) and
+// tracks `upholsteredAt` on each piece.
 //
-// Price column choice: sales_order_items.unitPriceSen wins because it's the
-// price the customer actually paid on that line (catalog basePriceSen would
-// miss promo/contract pricing). Falls back to products.basePriceSen, then
-// products.price1Sen, so an orphan PO without an SO line still scores
-// something instead of being silently 0.
+// Stage 1: aggregate fg_units → unit-level "completed" set (every piece for
+//          (poId, unitNo) has reached UPHOLSTERED+ status). Recognition date
+//          = max(upholsteredAt) across the unit's pieces.
+// Stage 2: join unit → production_order → sales_order_item / product for
+//          price + category bucketing.
 //
-// Qty column choice: COALESCE(jc.wipQty, po.quantity) — same convention as
-// delivery-orders.ts and inventory-wip.ts. Upholstery JCs typically have
-// wipQty = po.quantity (one FG unit per PO unit), but the COALESCE keeps us
-// honest if a JC was hand-edited.
+// Price COALESCE chain: sales_order_items.unitPriceSen → products.basePriceSen
+// → products.price1Sen → 0. SO line wins because it's the contract price the
+// customer actually pays (catalog price misses promo/contract pricing).
 //
-// Status set: COMPLETED + TRANSFERRED. D1 has no 'DONE' state — the schema
-// CHECK only allows WAITING / IN_PROGRESS / PAUSED / COMPLETED / TRANSFERRED
-// / BLOCKED.
+// Edge cases:
+//   - Pieces with NULL upholsteredAt are skipped (status alone isn't enough
+//     proof that Upholstery actually happened on a known date).
+//   - totalPieces NULL → treated as 1 via MAX(COALESCE(totalPieces, 1)).
+//   - Window filter is on max(upholsteredAt) so a unit straddling the
+//     boundary gets attributed to the date of its FINAL piece.
+//
+// Response also includes a `rows` array — one entry per recognized unit —
+// for the "Revenue Raw Data" audit table on the Labor Cost tab.
 // ---------------------------------------------------------------------------
 app.get("/production-revenue", async (c) => {
   const from = c.req.query("from");
@@ -180,43 +185,103 @@ app.get("/production-revenue", async (c) => {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
+  // Single SQL: per_unit CTE finds fully-upholstered units in the window,
+  // then we join out to PO/SO/product for price + category + display fields.
+  // ORDER BY unit_completed_at DESC so the rows array is already sorted for
+  // the frontend table.
   const rowsRes = await c.var.DB
     .prepare(
-      `SELECT p.category AS category,
-              SUM(
-                COALESCE(jc.wipQty, po.quantity, 0) *
-                COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)
-              ) AS revenueSen
-         FROM job_cards jc
-         JOIN production_orders po ON po.id = jc.productionOrderId
+      `WITH per_unit AS (
+         SELECT poId,
+                unitNo,
+                COUNT(*) AS pieces_done,
+                MAX(COALESCE(totalPieces, 1)) AS expected_pieces,
+                MAX(upholsteredAt) AS unit_completed_at
+           FROM fg_units
+          WHERE poId IS NOT NULL
+            AND unitNo IS NOT NULL
+            AND status IN ('UPHOLSTERED','PACKED','LOADED','DELIVERED')
+            AND upholsteredAt IS NOT NULL
+          GROUP BY poId, unitNo
+         HAVING COUNT(*) >= MAX(COALESCE(totalPieces, 1))
+            AND MAX(upholsteredAt) >= ?
+            AND MAX(upholsteredAt) <= ?
+       )
+       SELECT u.poId               AS poId,
+              u.unitNo             AS unitNo,
+              u.unit_completed_at  AS completedAt,
+              po.productCode       AS productCode,
+              po.productName       AS productName,
+              po.customerName      AS customerName,
+              po.salesOrderNo      AS soNo,
+              p.category           AS category,
+              COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0) AS unitPriceSen
+         FROM per_unit u
+         JOIN production_orders po ON po.id = u.poId
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
          LEFT JOIN products p ON p.id = po.productId
-        WHERE jc.departmentCode = 'UPHOLSTERY'
-          AND jc.status IN ('COMPLETED','TRANSFERRED')
-          AND jc.completedDate IS NOT NULL
-          AND jc.completedDate >= ?
-          AND jc.completedDate <= ?
-          AND p.category IN ('SOFA','BEDFRAME','ACCESSORY')
-        GROUP BY p.category`,
+        WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
+        ORDER BY u.unit_completed_at DESC`,
     )
     .bind(from, to)
-    .all<{ category: "SOFA" | "BEDFRAME" | "ACCESSORY"; revenueSen: number | string | null }>();
+    .all<{
+      poId: string;
+      unitNo: number;
+      completedAt: string;
+      productCode: string | null;
+      productName: string | null;
+      customerName: string | null;
+      soNo: string | null;
+      category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+      unitPriceSen: number | string | null;
+    }>();
 
-  const data: Record<"SOFA" | "BEDFRAME" | "ACCESSORY" | "totalSen", number> = {
+  const totals: Record<"SOFA" | "BEDFRAME" | "ACCESSORY", number> = {
     SOFA: 0,
     BEDFRAME: 0,
     ACCESSORY: 0,
-    totalSen: 0,
   };
+  // qty is always 1 — one fg_units row group == one physical unit.
+  const rows: Array<{
+    date: string;
+    productCode: string;
+    productName: string;
+    category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+    qty: number;
+    unitPriceSen: number;
+    totalPriceSen: number;
+    customerName: string;
+    soNo: string;
+  }> = [];
+
   for (const r of rowsRes.results ?? []) {
-    const v = typeof r.revenueSen === "number" ? r.revenueSen : Number(r.revenueSen) || 0;
-    if (r.category === "SOFA" || r.category === "BEDFRAME" || r.category === "ACCESSORY") {
-      data[r.category] = Math.round(v);
-    }
+    if (r.category !== "SOFA" && r.category !== "BEDFRAME" && r.category !== "ACCESSORY") continue;
+    const priceSen = Math.round(typeof r.unitPriceSen === "number" ? r.unitPriceSen : Number(r.unitPriceSen) || 0);
+    totals[r.category] += priceSen;
+    // completedAt may include time-of-day; the table only needs the date.
+    const date = (r.completedAt ?? "").slice(0, 10);
+    rows.push({
+      date,
+      productCode: r.productCode ?? "",
+      productName: r.productName ?? "",
+      category: r.category,
+      qty: 1,
+      unitPriceSen: priceSen,
+      totalPriceSen: priceSen,
+      customerName: r.customerName ?? "",
+      soNo: r.soNo ?? "",
+    });
   }
-  data.totalSen = data.SOFA + data.BEDFRAME + data.ACCESSORY;
+
+  const data = {
+    SOFA: totals.SOFA,
+    BEDFRAME: totals.BEDFRAME,
+    ACCESSORY: totals.ACCESSORY,
+    totalSen: totals.SOFA + totals.BEDFRAME + totals.ACCESSORY,
+    rows,
+  };
   return c.json({ success: true, data });
 });
 

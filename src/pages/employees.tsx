@@ -1977,12 +1977,19 @@ function EmployeeDetailTab({
     wipLabel: string;            // human-readable piece label (e.g. "5531 RIGHT ARM"); blank for ATT rows
     completedDate: string | null; // JC completion date (separate from `date` which is the entry date)
     deptCode: string;
-    minutes: number;             // total time = perUnit x qty; for ATT rows, just the recorded minutes
+    // The worker's CONTRIBUTION on this row - halved when both PICs are
+    // filled (shared with a partner). Sum of all rows' `minutes` matches
+    // the Total Production Hrs KPI exactly.
+    minutes: number;
+    // Total JC time before halving (perUnit x qty). Surfaced in tooltip
+    // when shared so the user can see "30m total, 15m to me".
+    totalMinutes?: number;
     perUnitMinutes?: number;     // BOM-defined per-unit time (JC rows only)
     qty?: number;                // wipQty (JC rows only)
     status: string;
     source: "ATT" | "JC";
     picSlot?: "PIC1" | "PIC2" | "";
+    hasBothPics?: boolean;       // shared with a partner -> minutes halved
   };
   const itemRows: ItemRow[] = useMemo(() => {
     const out: ItemRow[] = [];
@@ -2004,6 +2011,11 @@ function EmployeeDetailTab({
     }
     for (const jc of workerJcs) {
       if (!jc.completedDate) continue;
+      const totalJcMin = jc.productionTimeMinutes || 0;
+      // Worker's contribution = total / 2 when both PICs filled (shared);
+      // full minutes when solo. Mirrors the totalProdMinsJc reduce above
+      // so the per-row column sums to the Total Production Hrs KPI.
+      const myShare = jc.hasBothPics ? totalJcMin / 2 : totalJcMin;
       out.push({
         id: `jc-${jc.id}`,
         date: jc.completedDate,
@@ -2011,12 +2023,14 @@ function EmployeeDetailTab({
         wipLabel: jc.wipLabel || "",
         completedDate: jc.completedDate,
         deptCode: jc.departmentCode || "—",
-        minutes: jc.productionTimeMinutes || 0,
+        minutes: myShare,
+        totalMinutes: totalJcMin,
         perUnitMinutes: jc.perUnitMinutes,
         qty: jc.wipQty,
         status: jc.status,
         source: "JC",
         picSlot: jc.picSlot,
+        hasBothPics: jc.hasBothPics,
       });
     }
     out.sort((a, b) => b.date.localeCompare(a.date));
@@ -2105,23 +2119,32 @@ function EmployeeDetailTab({
       align: "right",
       sortable: true,
       render: (_v, row) => {
-        // For JC rows with qty > 1, surface the math (e.g. "15m x 2 = 30m")
-        // so the user can verify. For qty=1 or ATT rows, just the total.
-        const total = formatHours(row.minutes);
-        if (
-          row.source === "JC" &&
-          row.perUnitMinutes &&
-          row.qty &&
-          row.qty > 1 &&
-          row.perUnitMinutes > 0
-        ) {
-          return (
-            <span className="font-medium tabular-nums" title={`${row.perUnitMinutes}m x ${row.qty}`}>
-              {total}
-            </span>
-          );
+        // Show this WORKER's contribution (already halved server-side when
+        // both PICs filled). Sum of this column matches Total Production
+        // Hrs KPI. When shared, badge "shared" + tooltip exposes the full
+        // JC time so the user knows where the half came from.
+        const display = formatHours(row.minutes);
+        const tooltipParts: string[] = [];
+        if (row.source === "JC" && row.perUnitMinutes && row.qty && row.qty > 1) {
+          tooltipParts.push(`${row.perUnitMinutes}m x ${row.qty} = ${formatHours(row.totalMinutes ?? row.minutes)}`);
         }
-        return <span className="font-medium tabular-nums">{total}</span>;
+        if (row.hasBothPics) {
+          tooltipParts.push(`Shared with partner -> ${formatHours(row.minutes)}`);
+        }
+        const title = tooltipParts.join(" | ");
+        return (
+          <span className="inline-flex items-center gap-1.5 justify-end">
+            <span className="font-medium tabular-nums" title={title || undefined}>{display}</span>
+            {row.hasBothPics && (
+              <span
+                className="inline-flex items-center rounded-sm bg-[#FAEFCB] px-1 text-[9px] font-semibold text-[#9C6F1E]"
+                title={`Total ${formatHours(row.totalMinutes ?? row.minutes * 2)} shared with partner`}
+              >
+                ½
+              </span>
+            )}
+          </span>
+        );
       },
     },
     {

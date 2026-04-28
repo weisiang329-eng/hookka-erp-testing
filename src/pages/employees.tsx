@@ -3578,61 +3578,109 @@ function LaborCostTab({
             Loading labor cost data…
           </div>
         ) : (
-          <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
-                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const ratio = r.revenueSen > 0 ? (r.laborCostSen / r.revenueSen) * 100 : 0;
-                  const rowClass = r.isShortfall
-                    ? "bg-[#F9E1DA]/30 border-l-4 border-l-[#9A3A2D]"
-                    : r.isWarehousing
-                      ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
-                      : !r.isProduction
-                        ? "bg-[#F3F4F6]/40"
-                        : "";
-                  return (
-                    <tr key={r.id} className={`border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors ${rowClass}`}>
-                      <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
-                      <td className="h-10 px-3 text-[#4B5563]">
-                        {r.category ? r.category[0] + r.category.slice(1).toLowerCase() : <span className="text-[#9CA3AF]">—</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
-                      <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
-                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
-                        {r.isProduction && r.category ? formatCurrency(r.revenueSen) : <span className="text-[#9CA3AF]">n/a</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right tabular-nums">
-                        {r.isProduction && r.category && r.revenueSen > 0 ? (
-                          <span className={ratio > 30 ? "font-medium text-[#9A3A2D]" : ratio > 20 ? "font-medium text-[#9C6F1E]" : "font-medium text-[#4F7C3A]"}>
-                            {ratio.toFixed(1)}%
-                          </span>
-                        ) : (
-                          <span className="text-[#9CA3AF]">—</span>
-                        )}
+          <>
+            {/* Production rows - the part that earns revenue. Cost / Revenue
+                ratio + Category Revenue only make sense here. Non-production
+                rows live in the Overhead table below so they don't pollute
+                the production breakdown. */}
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.filter((r) => r.isProduction).map((r) => {
+                    const ratio = r.revenueSen > 0 ? (r.laborCostSen / r.revenueSen) * 100 : 0;
+                    return (
+                      <tr key={r.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                        <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
+                        <td className="h-10 px-3 text-[#4B5563]">
+                          {r.category ? r.category[0] + r.category.slice(1).toLowerCase() : <span className="text-[#9CA3AF]">—</span>}
+                        </td>
+                        <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
+                        <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
+                        <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                          {r.category ? formatCurrency(r.revenueSen) : <span className="text-[#9CA3AF]">n/a</span>}
+                        </td>
+                        <td className="h-10 px-3 text-right tabular-nums">
+                          {r.category && r.revenueSen > 0 ? (
+                            <span className={ratio > 30 ? "font-medium text-[#9A3A2D]" : ratio > 20 ? "font-medium text-[#9C6F1E]" : "font-medium text-[#4F7C3A]"}>
+                              {ratio.toFixed(1)}%
+                            </span>
+                          ) : (
+                            <span className="text-[#9CA3AF]">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {rows.filter((r) => r.isProduction).length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="h-24 text-center text-[#9CA3AF]">
+                        No production hours for this period.
                       </td>
                     </tr>
-                  );
-                })}
-                {rows.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="h-24 text-center text-[#9CA3AF]">
-                      No working hour entries for this period.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Overhead breakdown - non-production cost (Repair, Maintenance,
+                Warehousing, Production Shortfall). These don't have a
+                Category Revenue mapping so we drop the Cost / Revenue
+                columns; just show where the overhead dollars went. */}
+            {rows.some((r) => !r.isProduction && r.laborCostSen > 0) && (
+              <div className="mt-6">
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-sm font-semibold text-[#1F1D1B]">Overhead Breakdown</h3>
+                  <span className="text-xs text-[#6B7280]">
+                    Repair / Maintenance / Warehousing / Shortfall - not counted in Production Labor Cost
+                  </span>
+                </div>
+                <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                        <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                        <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
+                        <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
+                        <th className="h-10 px-3 text-left font-medium text-[#374151]">Bucket</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.filter((r) => !r.isProduction).map((r) => {
+                        const rowClass = r.isShortfall
+                          ? "bg-[#F9E1DA]/30 border-l-4 border-l-[#9A3A2D]"
+                          : r.isWarehousing
+                            ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
+                            : "bg-[#F3F4F6]/40";
+                        const bucketLabel = r.isShortfall
+                          ? "Idle (Shortfall)"
+                          : r.isWarehousing
+                            ? "Borrowed (Warehousing)"
+                            : "Overhead";
+                        return (
+                          <tr key={r.id} className={`border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors ${rowClass}`}>
+                            <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
+                            <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
+                            <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
+                            <td className="h-10 px-3 text-[#6B7280] text-xs">{bucketLabel}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* Revenue Raw Data — one row per (poId, unitNo) recognized in

@@ -16,6 +16,7 @@ import {
   clearLoginRateLimit,
   clientIp,
 } from "../lib/rate-limit";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -79,16 +80,37 @@ app.post("/login", async (c) => {
     // P6.3 — count failed logins. We deliberately do NOT include the email
     // in the metric blob (PII / brute-force enumeration) — just the count.
     emitCounter(c, "auth.login_fail", { resource: "unknown_email" });
+    // Sprint 2 task 5 — audit row on every failed login attempt. resourceId
+    // hashed-or-truncated email so we can spot brute-force patterns without
+    // dumping raw plaintext into the audit table.
+    await emitAudit(c, {
+      resource: "auth",
+      resourceId: email.trim().toLowerCase().slice(0, 64),
+      action: "login.fail",
+      after: { reason: "unknown_email" },
+    });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
   if (user.isActive !== 1) {
     emitCounter(c, "auth.login_fail", { resource: "account_disabled" });
+    await emitAudit(c, {
+      resource: "auth",
+      resourceId: user.id,
+      action: "login.fail",
+      after: { reason: "account_disabled" },
+    });
     return c.json({ success: false, error: "Account disabled" }, 403);
   }
 
   const ok = await verifyPassword(password, user.passwordHash);
   if (!ok) {
     emitCounter(c, "auth.login_fail", { resource: "bad_password" });
+    await emitAudit(c, {
+      resource: "auth",
+      resourceId: user.id,
+      action: "login.fail",
+      after: { reason: "bad_password" },
+    });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
 
@@ -125,6 +147,14 @@ app.post("/login", async (c) => {
   // Reset the rate-limit counter on successful login so today's attempts
   // don't carry over.
   c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+  // Sprint 2 task 5 — audit row for the successful login. We deliberately
+  // do NOT include the bearer token in the snapshot.
+  await emitAudit(c, {
+    resource: "auth",
+    resourceId: user.id,
+    action: "login",
+    after: { role: user.role, email: user.email },
+  });
 
   return c.json({
     success: true,
@@ -139,6 +169,10 @@ app.post("/login", async (c) => {
 // Idempotent: unknown/missing token → still ok.
 app.post("/logout", async (c) => {
   const token = bearerTokenFrom(c.req.raw);
+  // Capture userId BEFORE deletion so the audit row has a real actor id.
+  const userId = (c as unknown as { get: (k: string) => string | undefined }).get(
+    "userId",
+  );
   if (token) {
     const { invalidateSessionCache } = await import("../lib/auth-middleware");
     await Promise.all([
@@ -147,6 +181,15 @@ app.post("/logout", async (c) => {
         .run(),
       invalidateSessionCache(c.env.SESSION_CACHE, token),
     ]);
+    // Sprint 2 task 5 — emit audit on every logout call. Idempotent calls
+    // (no token, no session) skip the audit row entirely.
+    if (userId) {
+      await emitAudit(c, {
+        resource: "auth",
+        resourceId: userId,
+        action: "logout",
+      });
+    }
   }
   return c.json({ success: true });
 });
@@ -317,6 +360,15 @@ app.post("/change-password", async (c) => {
   await c.var.DB.prepare("UPDATE users SET passwordHash = ? WHERE id = ?")
     .bind(newHash, userId)
     .run();
+
+  // Sprint 2 task 5 — audit password change. Snapshot is bare (the new
+  // hash is sensitive and the old one is being rotated out), action label
+  // is enough for compliance.
+  await emitAudit(c, {
+    resource: "auth",
+    resourceId: userId,
+    action: "password-change",
+  });
 
   return c.json({ success: true });
 });

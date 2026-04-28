@@ -32,6 +32,7 @@ import {
   verifyState,
 } from "../lib/oauth-google";
 import { checkLoginRateLimit, clientIp } from "../lib/rate-limit";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -183,6 +184,25 @@ app.get("/google/callback", async (c) => {
       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
       .bind(now.toISOString(), linked.userId),
   ]);
+
+  // Sprint 2 task 5 — audit the OAuth link/login. We snapshot the linked
+  // userId + email so the journal shows which Google identity attached
+  // to which local user. The bearer token never goes in the audit row.
+  await emitAudit(c, {
+    resource: "auth-oauth",
+    resourceId: linked.userId,
+    action: "oauth.callback",
+    after: {
+      provider: "google",
+      email: claims.email,
+      // findOrLinkUser returns { created, linked }; surface both flags so
+      // the audit consumer can tell whether this was a brand-new user
+      // (`created`), a freshly-linked existing local user (`linked`), or a
+      // returning OAuth identity (`!created && !linked`).
+      created: linked.created,
+      linked: linked.linked,
+    },
+  });
 
   // Set cookie + redirect to next. The frontend reads the bearer token from
   // the cookie on first paint, then keeps it in memory for subsequent

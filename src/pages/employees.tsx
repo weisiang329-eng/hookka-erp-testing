@@ -3448,7 +3448,17 @@ function LaborCostTab({
     if (typeof rev.totalSen === "number") return rev.totalSen;
     return (Number(rev.SOFA) || 0) + (Number(rev.BEDFRAME) || 0) + (Number(rev.ACCESSORY) || 0);
   }, [plResp, categoryFilter]);
-  const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
+  // Cost / Revenue ratio uses production labor only - the overhead buckets
+  // (Warehousing borrow, Repair, Maintenance, Production Shortfall) are
+  // not productive cost so they shouldn't pull the ratio against Revenue.
+  // Bug fix 2026-04-28 per user: KPI was using totalLaborCostSen which
+  // included Maintenance / Repair / etc.
+  const overallRatio = totalRevenueSen > 0 ? (productionLaborCostSen / totalRevenueSen) * 100 : 0;
+  // Repair + Maintenance + other overhead = total - production - shortfall - warehousing
+  // Surfaced as a separate "Overhead" KPI so they're still visible but
+  // don't muddy the production-only headline.
+  const overheadLaborCostSen =
+    totalLaborCostSen - productionLaborCostSen - shortfallLaborCostSen - warehousingLaborCostSen;
 
   const loading = entriesLoading || plLoading;
 
@@ -3506,8 +3516,13 @@ function LaborCostTab({
         <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
           <Card>
             <CardContent className="p-3">
-              <p className="text-xs text-[#6B7280]">Total Labor Cost</p>
-              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen)}</p>
+              <p className="text-xs text-[#6B7280]">Production Labor Cost</p>
+              <p
+                className="text-lg font-bold text-[#1F1D1B]"
+                title={`Production-only (excl. Warehousing / Repair / Maintenance / Shortfall). Total incl. overhead = ${formatCurrency(totalLaborCostSen)}`}
+              >
+                {formatCurrency(productionLaborCostSen)}
+              </p>
             </CardContent>
           </Card>
           <Card>
@@ -3544,8 +3559,15 @@ function LaborCostTab({
 
         {/* Production-vs-overhead ratio note */}
         <div className="mb-3 text-xs text-[#6B7280]">
-          Production-only labor cost (excl. warehousing/repair/maint/shortfall):{" "}
-          <span className="font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</span>
+          Production Labor = production-dept work only (Fab Cut / Fab Sew / Wood Cut / Foam / Framing / Webbing / Upholstery / Packing).
+          {overheadLaborCostSen > 0 && (
+            <>
+              {" "}Overhead this period (Repair / Maintenance / etc.):{" "}
+              <span className="font-medium text-[#1F1D1B]">{formatCurrency(overheadLaborCostSen)}</span>
+              {" · "}
+            </>
+          )}
+          {" "}Total incl. overhead = {formatCurrency(totalLaborCostSen)}.
           {" · "}
           Revenue is recognized when items complete UPHOLSTERY (production-completion bucket); labor at the day work happens. Treat any
           single-month ratio as a leading indicator, not a closed P&amp;L.

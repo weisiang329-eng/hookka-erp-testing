@@ -3134,13 +3134,26 @@ function LaborCostTab({
             the period. Lets operators audit which physical units actually
             contributed to the revenue figure shown above. Per spec, each
             unit is recognized ONCE on the date its LAST piece (HB/Divan/
-            Cushion/…) completes UPHOLSTERY. */}
-        {!loading && (
+            Cushion/…) completes UPHOLSTERY. Filtered by the Category
+            dropdown so a Sofa filter strips Bedframe + Accessory rows
+            (and the unit count in the header). Same .trim().toUpperCase()
+            normalize as the per-dept rollup in case any pre-migration
+            row has a lower-case category. */}
+        {!loading && (() => {
+          const allRawRows = plResp?.data?.rows ?? [];
+          const filteredRawRows = categoryFilter
+            ? allRawRows.filter(
+                (rr) =>
+                  (typeof rr.category === "string" ? rr.category.trim().toUpperCase() : "") ===
+                  categoryFilter,
+              )
+            : allRawRows;
+          return (
           <div className="mt-6">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
               <span className="text-xs text-[#6B7280]">
-                {(plResp?.data?.rows?.length ?? 0)} unit{(plResp?.data?.rows?.length ?? 0) === 1 ? "" : "s"}
+                {filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"}
               </span>
             </div>
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
@@ -3158,7 +3171,7 @@ function LaborCostTab({
                   </tr>
                 </thead>
                 <tbody>
-                  {(plResp?.data?.rows ?? []).map((rr, idx) => (
+                  {filteredRawRows.map((rr, idx) => (
                     <tr
                       key={`${rr.date}-${rr.soNo}-${rr.productCode}-${idx}`}
                       className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
@@ -3190,7 +3203,7 @@ function LaborCostTab({
                       </td>
                     </tr>
                   ))}
-                  {(plResp?.data?.rows?.length ?? 0) === 0 && (
+                  {filteredRawRows.length === 0 && (
                     <tr>
                       <td colSpan={8} className="h-24 text-center text-[#9CA3AF]">
                         No production completions in this period.
@@ -3201,7 +3214,8 @@ function LaborCostTab({
               </table>
             </div>
           </div>
-        )}
+          );
+        })()}
       </CardContent>
     </Card>
   );

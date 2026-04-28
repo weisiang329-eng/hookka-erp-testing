@@ -1,0 +1,77 @@
+name: QC Pending Inspections — Daily Trigger
+
+# Hits POST /api/qc-pending/trigger twice a day (12:00 and 16:00 SGT) so the
+# inspector finds pre-generated PENDING qc_inspections rows when they sit
+# down to do their rounds. The endpoint is idempotent per (template_id,
+# scheduled_slot_at), so a re-fire is harmless.
+#
+# SGT = UTC+8, so 12:00 SGT = 04:00 UTC and 16:00 SGT = 08:00 UTC.
+#
+# Auth: the endpoint expects an x-cron-secret header. The shared secret
+# lives in repo secrets as CRON_SECRET and on Cloudflare Pages env as
+# CRON_SECRET (must match — set BOTH to the same value). The Pages worker
+# rejects with 503 if the env var is missing on the server side, and 403
+# if the header doesn't match.
+#
+# To bootstrap (one-time, when first enabling this workflow):
+#   1. Generate a strong random string (32+ chars).
+#   2. Set it as a repo secret:
+#        gh secret set CRON_SECRET --body "<value>"
+#   3. Set the same value on Cloudflare Pages:
+#        wrangler pages secret put CRON_SECRET --project-name hookka-erp-testing
+#      (or via the Pages dashboard → Settings → Environment variables)
+#   4. Re-deploy Pages so the new env var is live.
+on:
+  schedule:
+    - cron: '0 4 * * *'   # 12:00 SGT
+    - cron: '0 8 * * *'   # 16:00 SGT
+  # Also expose a manual trigger so the operator can fire on demand without
+  # editing the schedule (e.g., to backfill a missed slot).
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Optional slot ISO timestamp (e.g. 2026-04-29T04:00:00Z). Leave blank for current.'
+        required: false
+        type: string
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/qc-pending/trigger
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          # Manual run can override the slot; scheduled runs use the server's
+          # nearest-past 12:00 / 16:00 slot (computed in qc-pending route).
+          SLOT_INPUT: ${{ inputs.slot }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See workflow header for setup."
+            exit 1
+          fi
+
+          BODY='{}'
+          if [ -n "$SLOT_INPUT" ]; then
+            BODY="{\"slot\":\"$SLOT_INPUT\"}"
+          fi
+
+          # Capture both status code and body so a 4xx/5xx surfaces in the log
+          # instead of being silently masked.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 30 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data "$BODY" \
+            'https://hookka-erp-testing.pages.dev/api/qc-pending/trigger')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::trigger failed with HTTP $status"
+            exit 1
+          fi

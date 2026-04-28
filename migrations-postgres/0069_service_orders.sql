@@ -1,5 +1,8 @@
 -- ============================================================================
--- Migration 0067 — Service Orders (换货服务).
+-- Migration 0069 — Service Orders (换货服务).
+-- (Renumbered from 0067 — main moved while this PR was in flight.
+--  0066 = consignment_notes_dispatch_linkage, 0067 = stock_adjustments_adj_no,
+--  0068 = qc_module_phase1.)
 --
 -- BUSINESS MODEL:
 --   A Service Order is a customer-reported defect on an already-SHIPPED unit

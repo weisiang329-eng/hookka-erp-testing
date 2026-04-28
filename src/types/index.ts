@@ -940,6 +940,19 @@ export type ConsignmentOrder = {
   createdAt: string;
   updatedAt: string;
   items: ConsignmentOrderItem[];
+  // SO-compat shims — CO pages were forked from SO pages and reference these.
+  // CO has no customer-PO concept; values are always empty/undefined.
+  customerPO?: string;
+  customerPOId?: string;
+  customerPODate?: string;
+  customerSO?: string;
+  customerSOId?: string;
+  customerSODate?: string;
+  companySO?: string;
+  companySOId?: string;
+  companySODate?: string;
+  hookkaDeliveryOrder?: string;
+  preHoldStatus?: string;
 };
 
 // --- Goods In Transit ---

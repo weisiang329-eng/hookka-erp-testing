@@ -493,14 +493,16 @@ export function Sidebar() {
         collapsed ? "w-14" : "w-60"
       )}
     >
-      {/* Brand / Logo */}
-      <div className="flex h-14 items-center justify-between px-3 border-b border-white/10 shrink-0">
+      {/* Brand / Logo — h-16 header (taller than the rest of the sidebar
+          rows) gives the wide-aspect lockup more breathing room so the
+          HOOKKA letters and 合家 hanjis stay legible at sidebar width. */}
+      <div className="flex h-16 items-center justify-center px-3 border-b border-white/10 shrink-0">
         {!collapsed ? (
-          <Link to="/dashboard" className="flex items-center px-1">
+          <Link to="/dashboard" className="flex items-center justify-center w-full">
             <img
               src="/hookka-logo.png"
               alt="Hookka 合家"
-              className="h-7 w-auto"
+              className="h-10 w-auto max-w-full"
               style={{ filter: "brightness(0) invert(1)" }}
             />
           </Link>

@@ -18,12 +18,12 @@ Each entry below jumps to the first BUG with that category tag.
 Entries themselves stay newest-first.
 
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
-- `ui-frontend` (19) — [BUG-2026-04-26-004](#bug-2026-04-26-004-fix-strip-remaining-inline-m³-suffixes-full-system-uniform)
-- `production-orders` (17) — [BUG-2026-04-26-003](#bug-2026-04-26-003-upstream-sequence-lock-disabled)
+- `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
+- `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
 - `bom` (15) — [BUG-2026-04-27-010](#bug-2026-04-27-010-dept-pivot-editor-lists-draft-boms-as-duplicate-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
-- `inventory-cascade` (15) — [BUG-2026-04-27-021](#bug-2026-04-27-021-do-dispatch-left-wip_itemsstockqty-qty-forever)
-- `delivery-orders` (9) — [BUG-2026-04-27-022](#bug-2026-04-27-022-fixdo-customerid-fallback-to-first-pos-customername-for-multi-so-dos)
+- `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
+- `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
 - `data-migration` (5) — [BUG-2026-04-25-014](#bug-2026-04-25-014-fixd1-compat-ifnullcoalesce-bom-search-likeilike)
@@ -31,6 +31,264 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-04-29-005 — CN dispatch left fg_units / stock_movements / wip_items untouched (no inventory cascade)
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** inventory-cascade
+
+**Symptom (user-reported):** the user dispatched a Consignment Note
+(`ACTIVE → PARTIALLY_SOLD`, FE-labelled "Mark Dispatched") and the goods
+physically left the warehouse, but the Inventory page's Available count
+never dropped. The CN's `dispatchedAt` got stamped, the FE list moved
+the CN to the Dispatched tab, and that was it — `fg_units` rows for the
+CN's source POs stayed `PENDING`, no `STOCK_OUT` row was written into
+`stock_movements`, and `wip_items.stockQty` still carried the residual
+UPH ledger entry. Net effect: the CN was a black hole for inventory
+accounting.
+
+**Root cause:** `updateConsignmentNoteById` in
+`src/api/lib/consignment-note-shared.ts` was a status-+-timestamp-only
+helper. DO had a full cascade in
+`src/api/routes/delivery-orders.ts:1346-1577` for the symmetric event
+(`DRAFT → LOADED` and the reverse), but no equivalent existed on the CN
+helper — Mark Dispatched was wired straight to a status flip with no
+inventory awareness. The CN→PO→fg_units link couldn't be expressed
+either: `fg_units` had only a `doId` column, not a `cnId` column, so
+even if the cascade had been written it would have had nowhere to stamp
+the back-reference.
+
+**Fix:** Three changes in commit `fa1f3ee`:
+
+1. **Migration** `migrations-postgres/0077_fg_units_cn_link.sql` adds
+   `cnId TEXT` + `idx_fg_units_cn_id` to `fg_units`. Separate column
+   from `doId` — overloading would silently fan out wrong joins on
+   every report that filters fg_units by source document. A unit can
+   hold AT MOST one of `{doId, cnId}`; the cascade WHERE clauses
+   enforce that with `(doId IS NULL OR doId='') AND (cnId IS NULL OR
+   cnId='')`. Manual-apply via Supabase SQL Editor (D1 retired
+   2026-04-27).
+2. **Forward cascade** (`ACTIVE → PARTIALLY_SOLD`) in
+   `updateConsignmentNoteById`:
+   - `UPDATE fg_units SET cnId=?, status='LOADED', loadedAt=? WHERE poId=? AND (doId IS NULL OR doId='') AND (cnId IS NULL OR cnId='')` per source PO
+   - `INSERT stock_movements (STOCK_OUT, reason="CN <noteNumber> dispatched")` per PO
+   - `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?` for each UPH job_card wipLabel of those POs (mirrors BUG-2026-04-27-021's DO-side fix)
+3. **Reverse cascade** (`PARTIALLY_SOLD → ACTIVE`, the FE's "Reverse to
+   Pending Dispatch" action) is the symmetric inverse: clear cnId, flip
+   fg_units back to PENDING, write STOCK_IN, re-credit wip_items.
+
+`PARTIALLY_SOLD → FULLY_SOLD` (Mark Delivered) and `FULLY_SOLD → CLOSED`
+(Mark Acknowledged) intentionally do NOT trigger another fg_units flip
+— goods are already out of inventory after dispatch, and consignment
+delivery semantics differ from DO's (per-line `consignment_items.soldDate`
+instead of header-level `deliveredAt`).
+
+**Verification:** typecheck + eslint clean. Runtime verification deferred
+until user applies migration 0077 manually — until applied, the forward
+UPDATE throws "column cnId does not exist". Documented in commit body
++ migration header.
+
+---
+
+## BUG-2026-04-29-004 — CN Detail dialog vs DO Detail dialog: 9 layout / data gaps after first parity pass
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** ui-frontend
+
+**Symptom (user-reported, after commit `55f18c0` "CN Detail parity v1"):**
+the user opened a freshly-created CN whose row already had Provider /
+Vehicle / Driver populated, clicked Edit (Pencil icon), and the inline
+edit-mode opened with **Vehicle and Driver dropdowns blank** ("—
+Optional —"). The user had to re-pick them every time. Same applied to
+the **Mark Dispatched** dialog — the picker opened with all three
+dropdowns blank even though the CN already had transport set. The list
+row Status cell showed `RM 0.00` instead of the m³ total (DO shows
+`X.XX m³`).
+
+**Root cause:** Three independent gaps in
+`src/pages/consignment/note.tsx` from the v1 CN parity work:
+
+1. `enterEditMode` hardcoded `vehicleId: ""` and `driverPersonId: ""`.
+   The DO equivalent at `src/pages/delivery/index.tsx:1340` seeds
+   `vehicleId` from `row.vehicleId` and uses a
+   `pendingDriverNameToResolveRef` pattern to resolve the driver
+   PERSON id from `driverName` once the per-provider drivers list
+   loads.
+2. `mapCNToRow` didn't extract `vehicleId` from the API response.
+   `consignment-note-shared.ts:rowToConsignmentNote` returns it, the
+   FE just dropped it on the floor, so the row had no `vehicleId`
+   field for `enterEditMode` to seed from.
+3. The list Status cell render at line ~1690 used
+   `formatCurrency(row.totalValueSen)` instead of
+   `(row.totalM3 ?? 0).toFixed(2) + " m³"`. CN row didn't carry
+   `totalM3` either — DO computes it from
+   `delivery_orders.totalM3`; CN had no aggregate column, just per-line
+   `itemM3`.
+
+**Fix (commit `707e515`, 9 numbered gaps in commit body):**
+
+- Edit dialog Vehicle dropdown pre-selects from `row.vehicleId`; Driver
+  dropdown resolves PERSON id by name via `pendingDriverNameToResolveRef`
+  (DO pattern).
+- Mark Dispatched dialog (both context-menu + Detail-dialog footer)
+  routed through new `openDispatchDialog(row)` that pre-fills
+  Provider/Vehicle from row + stashes driver name for resolve-on-load.
+- List Status secondary line: `formatCurrency(totalValueSen)` →
+  `(totalM3).toFixed(2) + " m³"`.
+- `ConsignmentNoteRow` gains `vehicleId` and `totalM3`. `mapCNToRow`
+  now copies `vehicleId` from the API response and computes `totalM3`
+  from `productM3Map` (same source as items-table footer, so the two
+  totals always agree).
+- Detail dialog basics grid: `CN Number / CO Reference / Items` →
+  `CN Number / Total M³ / Items` (mirrors DO 1:1; CO Reference moved
+  to chip strip below).
+- Edit-mode basics grid: same swap, with live `editItems`-derived
+  Total M³ that updates as the operator adds/removes items.
+- Dispatch dialog Cancel/backdrop/X all clear the pending driver-name
+  ref to prevent name bleeding between sessions.
+- `cancelEditMode` clears `pendingDriverNameToResolveRef` (mirrors DO).
+
+**Verification:** typecheck + eslint clean. User testing confirmed
+pre-fill works after deploy.
+
+---
+
+## BUG-2026-04-29-003 — `updateConsignmentNoteById` silently dropped `sentDate` and `items[]` on PUT
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** delivery-orders
+
+**Symptom:** the new CN inline edit-mode (commit `6a21d18`) PUT all
+edited fields back through `/api/consignment-notes/:id`, but two of the
+four primary editable fields silently no-op'd: changing the Delivery
+Date had no effect, and adding / removing / re-quantifying items also
+had no effect. Operators saw their edits "save" (toast confirmed
+success) but on reload the persisted state was unchanged for those two
+fields. Other fields (provider / vehicle / driver / hub / notes)
+worked.
+
+**Root cause:** `updateConsignmentNoteById` in
+`src/api/lib/consignment-note-shared.ts` (the helper both
+`/api/consignment-notes` and `/api/consignments` route through) had no
+handling for `body.sentDate` — the `UPDATE consignment_notes` statement
+just didn't include the `sentDate = ?` column. The function also had
+no items-replace path at all: `consignment_items` rows were immutable
+through this endpoint.
+
+**Fix (commit `a28dcce`):**
+
+1. Add `sentDate` to the UPDATE SET clause. Optional in body — undefined
+   keeps the existing value, null clears, string overwrites. Mirrors
+   the same body-undefined→keep / body-null→clear semantics already in
+   place for `consignmentOrderId` / `hubId`.
+2. Items replace via delete-and-reinsert when `body.items` is an array
+   AND `existing.status === "ACTIVE" && nextStatus === "ACTIVE"`. The
+   status guard exists because `consignment_items` carry per-line
+   `soldDate` / `returnedDate` state once the CN crosses into
+   `PARTIALLY_SOLD` / `RETURNED` / `FULLY_SOLD` — wiping rows then
+   would lose committed sale/return history. Edit-mode is FE-gated to
+   PENDING (= ACTIVE backend) anyway, but the guard is a hard backstop
+   against future status drift. Stable ids: incoming `item.id` matching
+   `coni-*` is reused; fresh ids are minted only for newly-added items.
+
+**Verification:** typecheck + eslint clean. Manual: operator changed
+delivery date + added an item, reloaded, both persisted.
+
+---
+
+## BUG-2026-04-29-002 — CN Edit button routed to non-existent `/consignment/note/:id/edit` page (blank page on click)
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** opening a Consignment Note Detail dialog
+and clicking the Edit (Pencil) icon — or the footer "Edit" button —
+navigated to a blank page at `/consignment/note/<id>/edit`. The user
+saw a clean dashboard chrome with no content, no error toast, and no
+back path beyond the browser back button.
+
+**Root cause:** commit `55f18c0` (CN Detail dialog parity v1) added the
+Edit button with `onClick={() => navigate('/consignment/note/'+id+'/edit')}`,
+on the assumption that a standalone edit page existed. It didn't —
+`src/dashboard-routes.tsx` registered no such route. The router fell
+through to the dashboard 404 fallback, which renders empty.
+
+**Fix (commit `6a21d18`):** removed both `navigate(...)` calls and
+implemented inline edit-mode in the Detail dialog itself, mirroring DO's
+pattern at `src/pages/delivery/index.tsx:1340-1478`:
+
+- Added state: `editMode`, `editForm`, `editItems`, `editSaving`,
+  `editVehicles`, `editDrivers`, `editAddItemSearch`,
+  `editShowAddItemPanel`.
+- Added handlers: `enterEditMode`, `cancelEditMode`, `removeEditItem`,
+  `addReadyPOToEdit`, `addableEditPOs` memo, `saveEditCN`.
+- `useEffect` keyed on `editForm.providerId` refetches per-provider
+  vehicles + drivers, parallel to DO's `editDialogVehicles` /
+  `editDialogDrivers` effect.
+- Detail dialog body swaps read-only fields for inputs when
+  `editMode === true` — 3PL Provider / Vehicle / Driver / Hub pickers,
+  Delivery Date, Remarks. Items table gets a Trash2 remove column +
+  an Add Items panel restricted to same-customer Pending-CN POs.
+- Header swaps to "Edit Consignment Note" + adds an "Editing" chip;
+  Print/Document icons hidden in edit mode; Tracking timeline + Remarks
+  display hidden in edit mode.
+- Footer: Cancel + Save Changes (with `RefreshCw` spinner) when
+  editing; backdrop click is a no-op so unsaved changes don't drop.
+
+**Followup:** the v1 inline implementation introduced
+BUG-2026-04-29-003 (silent no-op on `sentDate` + `items[]`) and
+BUG-2026-04-29-004 (dialog seeding gaps). Both fixed same day.
+
+---
+
+## BUG-2026-04-29-001 — Production Sheet "SO ID" column blank for SOFA rows of CO-origin POs
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** production-orders
+
+**Symptom (user-reported):** in the Production page's per-department
+sheet (Fab Cut / Wood Cut / Upholstery / etc.), the "SO ID" column
+rendered blank for SOFA rows whose parent was a Consignment Order
+(rather than a Sales Order). Bedframe and Accessory rows from the same
+CO showed correctly (`CO-2604-001-01`). The Overview tab also worked.
+Only the dept sheets, only on SOFA, only for CO-origin POs.
+
+**Root cause:** `src/pages/production/index.tsx:1401`:
+
+```ts
+soId: (o.itemCategory === "SOFA" ? o.companySOId : o.poNo) || "",
+```
+
+For a CO-origin SOFA PO, `o.companySOId` is empty (the order is a CO,
+not an SO) and the parent doc id lives on `o.companyCOId`. The fall-
+through to `""` silently rendered a blank cell. The non-SOFA branch
+read `o.poNo`, which is the line-suffixed `CO-YYMM-NNN-NN` for both SO
+and CO POs, so bedframe / accessory worked.
+
+The display rule (sofa drops the line suffix because a sofa set spans
+multiple variant-POs and no single suffix belongs to the whole set) is
+correct — the bug was forgetting CO is also a valid parent doc class.
+
+**Fix:** SOFA branch now reads `companySOId || companyCOId`. Also
+widened `salesOrderNo` similarly so the row metadata exposes the parent
+doc id for both flows. `salesOrderId` stays SO-only — CO double-click
+navigation to `/consignment/order/:id` is a separate follow-up; for
+now CO rows become double-click no-ops on the SO ID column instead of
+routing to a `/sales/<co_id>` 404.
+
+Type drift caught while fixing: `src/lib/mock-data.ts` `ProductionOrder`
+got `consignmentOrderId?` + `companyCOId?` added (the API has been
+returning these since `f0936ea` / 2026-04-28's `rowToPO` fix, but the
+shared type didn't carry them, so TS was permissive instead of
+helpful). Followup hotfix `da9c7b6` discovered a second `ProductionOrder`
+type **shadowing** the import at `src/pages/production/index.tsx:26`
+that ALSO needed the same fields — the deploy of the first commit
+(`f35bcd5`) failed type-check on it.
+
+**Verification:** typecheck clean after both commits. Manual: dept
+sheets now show `CO-2604-002` for SOFA rows whose parent is CO-2604-002.
 
 ---
 

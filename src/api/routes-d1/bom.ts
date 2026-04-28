@@ -469,15 +469,49 @@ app.put("/templates/:id", async (c) => {
       patch.changeLog = body.changeLog;
     }
 
+    // Diagnostic surface: the response carries `debug` so the network tab
+    // shows exactly what the server tried to write. Once the BOM-edit
+    // persistence regression is verified fixed across all entry points
+    // (Edit BOM dialog, per-product save, BOM tree edits) this block can
+    // be deleted alongside the bulk-process-edit one above.
+    const debug: Record<string, unknown> = {
+      existingFound: existing != null,
+      keys: Object.keys(patch),
+    };
+
     if (existing) {
       const keys = Object.keys(patch);
       if (keys.length > 0) {
         const setClause = keys.map((k) => `${k} = ?`).join(", ");
-        await c.var.DB.prepare(
-          `UPDATE bom_templates SET ${setClause} WHERE id = ?`,
-        )
+        const sql = `UPDATE bom_templates SET ${setClause} WHERE id = ?`;
+        const updateResult = await c.var.DB.prepare(sql)
           .bind(...keys.map((k) => patch[k]), id)
           .run();
+        debug.sql = sql;
+        debug.updateMetaChanges = updateResult.meta?.changes;
+        // Surface a hard failure when the SET clause matched zero rows even
+        // though `existing` proved the row IS there. That state used to
+        // return `success: true` with stale data — the user-reported
+        // "PUT succeeds but DB unchanged" symptom that this fix targets.
+        if (
+          (updateResult.meta?.changes ?? 0) === 0 &&
+          keys.length > 0
+        ) {
+          console.error(
+            `[bom PUT /templates/:id] UPDATE matched 0 rows for id=${id} despite existing row — keys=${keys.join(",")}`,
+          );
+          return c.json(
+            {
+              success: false,
+              error:
+                "BOM template update affected 0 rows — row exists but UPDATE silently failed",
+              debug,
+            },
+            500,
+          );
+        }
+      } else {
+        debug.skippedUpdate = "no keys in patch";
       }
     } else {
       // INSERT path: row doesn't exist yet. Fill in required columns with
@@ -498,11 +532,12 @@ app.put("/templates/:id", async (c) => {
       }
       const cols = Object.keys(insertRow);
       const placeholders = cols.map(() => "?").join(", ");
-      await c.var.DB.prepare(
-        `INSERT INTO bom_templates (${cols.join(", ")}) VALUES (${placeholders})`,
-      )
+      const sql = `INSERT INTO bom_templates (${cols.join(", ")}) VALUES (${placeholders})`;
+      const insertResult = await c.var.DB.prepare(sql)
         .bind(...cols.map((k) => insertRow[k]))
         .run();
+      debug.sql = sql;
+      debug.insertMetaChanges = insertResult.meta?.changes;
     }
 
     const refreshed = await c.var.DB.prepare(
@@ -512,13 +547,27 @@ app.put("/templates/:id", async (c) => {
       .first<BOMTemplateRow>();
     if (!refreshed) {
       return c.json(
-        { success: false, error: "Failed to read back BOM template" },
+        { success: false, error: "Failed to read back BOM template", debug },
         500,
       );
     }
-    return c.json({ success: true, data: rowToTemplate(refreshed) });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+    return c.json({ success: true, data: rowToTemplate(refreshed), debug });
+  } catch (err) {
+    // Was bare `} catch {` returning 400 "Invalid request body" — masked
+    // every internal error (DB constraint, schema mismatch, SQL syntax)
+    // as if the client sent bad JSON. Mirrors the cleanup that commit
+    // 5bc2ace did for delivery-orders / sales-orders / etc.
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[bom PUT /templates/:id] id=${id} err=${message}`,
+    );
+    if (err instanceof SyntaxError) {
+      return c.json(
+        { success: false, error: "Invalid JSON in request body" },
+        400,
+      );
+    }
+    return c.json({ success: false, error: message }, 500);
   }
 });
 

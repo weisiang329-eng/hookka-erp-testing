@@ -29,6 +29,7 @@ import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { getOrgId } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -428,13 +429,25 @@ async function fetchInChunks<R>(
   return out;
 }
 
-async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
+async function fetchAllPOs(
+  db: D1Database,
+  orgId: string,
+): Promise<ProductionOrderOut[]> {
   const [pos, jcs, pics] = await Promise.all([
     db
-      .prepare("SELECT * FROM production_orders ORDER BY created_at DESC, id DESC")
+      .prepare(
+        "SELECT * FROM production_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
+      )
+      .bind(orgId)
       .all<ProductionOrderRow>(),
-    db.prepare("SELECT * FROM job_cards").all<JobCardRow>(),
-    db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    db
+      .prepare("SELECT * FROM job_cards WHERE orgId = ?")
+      .bind(orgId)
+      .all<JobCardRow>(),
+    db
+      .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+      .bind(orgId)
+      .all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
     rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -451,6 +464,7 @@ async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
 //   return POs with `jobCards: []`. Defaults to true for backward compat.
 async function fetchFilteredPOs(
   db: D1Database,
+  orgId: string,
   statuses: string[] | null,
   includeJobCards: boolean,
   includeArchive = false,
@@ -474,12 +488,14 @@ async function fetchFilteredPOs(
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
+  // Sprint 4: orgId is always the leading WHERE predicate. Status filter
+  // becomes an AND clause when present.
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(...(statuses as string[]))
-    : db.prepare(poSql);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]))
+    : db.prepare(poSql).bind(orgId);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -494,10 +510,12 @@ async function fetchFilteredPOs(
   // wipKey-grouped variant keeps the JC-row payload down (only loads
   // wipKeys that the active dept actually touches) while letting the
   // frontend picker find the full chain.
+  // Dept-narrowing: orgId scopes the inner subqueries too — otherwise the
+  // wipKey-grouped lookup could return JC ids from another tenant.
   const jcWhereDept = deptFilter
-    ? ` WHERE wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL)
-          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL))
-          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG')`
+    ? ` WHERE orgId = ? AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NOT NULL)
+          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NULL))
+          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG'))`
     : "";
 
   if (!includeJobCards) {
@@ -516,9 +534,10 @@ async function fetchFilteredPOs(
     if (deptFilter) {
       // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
       // payload bounded. Leave it untouched.
+      // Sprint 4: 7 bind slots = orgId outer + (orgId,dept) x 3 inner subqueries.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(deptFilter, deptFilter, deptFilter);
+        .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -547,7 +566,9 @@ async function fetchFilteredPOs(
       return poRows.map((p) => rowToMinimalPO(p, jcs));
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
-    const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
+    const jcStmt = db
+      .prepare(`SELECT * FROM ${jcSource} WHERE orgId = ?`)
+      .bind(orgId);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -560,11 +581,14 @@ async function fetchFilteredPOs(
   if (deptFilter) {
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(deptFilter, deptFilter, deptFilter);
+      .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
-      db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+      db
+        .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+        .bind(orgId)
+        .all<PiecePicRow>(),
     ]);
     return (pos.results ?? []).map((p) =>
       rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -602,11 +626,16 @@ async function fetchFilteredPOs(
     return poRows.map((p) => rowToPO(p, jcs, pics));
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
-  const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
+  const jcStmt = db
+    .prepare(`SELECT * FROM ${jcSource} WHERE orgId = ?`)
+    .bind(orgId);
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
     jcStmt.all<JobCardRow>(),
-    db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    db
+      .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+      .bind(orgId)
+      .all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
     rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -619,6 +648,7 @@ async function fetchFilteredPOs(
 // (not the whole table), which is the big win when the list is paginated.
 async function fetchPaginatedPOs(
   db: D1Database,
+  orgId: string,
   statuses: string[] | null,
   includeJobCards: boolean,
   page: number,
@@ -645,18 +675,18 @@ async function fetchPaginatedPOs(
     : "job_cards";
 
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE status IN (${statusPlaceholders})`
-    : `SELECT COUNT(*) AS n FROM ${poSource}`;
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})`
+    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?`;
   const pageSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
-    ? db.prepare(countSql).bind(...(statuses as string[]))
-    : db.prepare(countSql);
+    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]))
+    : db.prepare(countSql).bind(orgId);
   const pageStmt = hasFilter
-    ? db.prepare(pageSql).bind(...(statuses as string[]), limit, offset)
-    : db.prepare(pageSql).bind(limit, offset);
+    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), limit, offset)
+    : db.prepare(pageSql).bind(orgId, limit, offset);
 
   const [countRes, pageRes] = await Promise.all([
     countStmt.first<{ n: number }>(),
@@ -2147,9 +2177,12 @@ app.get("/", async (c) => {
       ? deptParamRaw.trim().toUpperCase()
       : null;
 
+  const orgId = getOrgId(c);
+
   if (!paginate) {
     const data = await fetchFilteredPOs(
       c.var.DB,
+      orgId,
       statuses,
       includeJobCards,
       includeArchive,
@@ -2164,6 +2197,7 @@ app.get("/", async (c) => {
   const limit = Math.min(500, Math.max(1, rawLimit));
   const { data, total } = await fetchPaginatedPOs(
     c.var.DB,
+    orgId,
     statuses,
     includeJobCards,
     page,
@@ -2180,7 +2214,7 @@ app.get("/", async (c) => {
 // Distinct WIPs that have appeared in any JobCard to date.
 // ---------------------------------------------------------------------------
 app.get("/historical-wips", async (c) => {
-  const all = await fetchAllPOs(c.var.DB);
+  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
   type H = {
     wipLabel: string;
     wipKey?: string;
@@ -2234,7 +2268,7 @@ app.get("/historical-wips", async (c) => {
 // GET /api/production-orders/historical-fgs
 // ---------------------------------------------------------------------------
 app.get("/historical-fgs", async (c) => {
-  const all = await fetchAllPOs(c.var.DB);
+  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
   type H = {
     sourcePoId: string;
     sourcePoNo: string;

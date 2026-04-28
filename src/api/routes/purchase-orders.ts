@@ -12,6 +12,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { notifySupplierPoSubmitted } from "../lib/email";
 import { emitAudit } from "../lib/audit";
 
@@ -158,13 +159,18 @@ app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — purchase-orders:read.
   const denied = await requirePermission(c, "purchase-orders", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const [pos, items] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT * FROM purchase_orders ORDER BY created_at DESC, id DESC",
-    ).all<PurchaseOrderRow>(),
+      "SELECT * FROM purchase_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
+    )
+      .bind(orgId)
+      .all<PurchaseOrderRow>(),
     c.var.DB.prepare(
-      "SELECT * FROM purchase_order_items",
-    ).all<PurchaseOrderItemRow>(),
+      "SELECT * FROM purchase_order_items WHERE orgId = ?",
+    )
+      .bind(orgId)
+      .all<PurchaseOrderItemRow>(),
   ]);
   const data = (pos.results ?? []).map((p) =>
     rowToPO(p, items.results ?? []),

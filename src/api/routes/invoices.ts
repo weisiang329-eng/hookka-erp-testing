@@ -20,6 +20,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { appendJournalEntries } from "../lib/journal-hash";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
@@ -324,8 +325,11 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
 
-  const where: string[] = [];
-  const params: unknown[] = [];
+  // Sprint 4: org_id is always the leading predicate so list endpoints
+  // can never leak across tenants regardless of optional filters.
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const params: unknown[] = [orgId];
   if (customerId) {
     where.push("customerId = ?");
     params.push(customerId);
@@ -334,7 +338,7 @@ app.get("/", async (c) => {
     where.push("status = ?");
     params.push(status);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const clause = `WHERE ${where.join(" AND ")}`;
 
   if (!paginate) {
     // 2026-04-26 prod 500 fix: cap the unbounded items + payments fetch
@@ -354,21 +358,21 @@ app.get("/", async (c) => {
         .prepare(
           customerId || status
             ? `SELECT i.* FROM invoice_items i
-                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
                  LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_items LIMIT ${ROWS_HARD_CAP}`,
+            : `SELECT * FROM invoice_items WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
         )
-        .bind(...params)
+        .bind(...(customerId || status ? params : [orgId]))
         .all<InvoiceItemRow>(),
       db
         .prepare(
           customerId || status
             ? `SELECT p.* FROM invoice_payments p
-                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
                  LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_payments LIMIT ${ROWS_HARD_CAP}`,
+            : `SELECT * FROM invoice_payments WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
         )
-        .bind(...params)
+        .bind(...(customerId || status ? params : [orgId]))
         .all<InvoicePaymentRow>(),
     ]);
 

@@ -16,6 +16,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { nextInvoiceNo } from "./invoices";
@@ -334,6 +335,7 @@ app.get("/", async (c) => {
   if (denied) return denied;
 
   const db = c.var.DB;
+  const orgId = getOrgId(c);
   const pageParam = c.req.query("page");
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
@@ -341,10 +343,12 @@ app.get("/", async (c) => {
   if (!paginate) {
     const [orders, items] = await Promise.all([
       db
-        .prepare("SELECT * FROM delivery_orders ORDER BY created_at DESC")
+        .prepare("SELECT * FROM delivery_orders WHERE orgId = ? ORDER BY created_at DESC")
+        .bind(orgId)
         .all<DeliveryOrderRow>(),
       db
-        .prepare("SELECT * FROM delivery_order_items")
+        .prepare("SELECT * FROM delivery_order_items WHERE orgId = ?")
+        .bind(orgId)
         .all<DeliveryOrderItemRow>(),
     ]);
     const itemRows = items.results ?? [];
@@ -363,12 +367,15 @@ app.get("/", async (c) => {
   const offset = (page - 1) * limit;
 
   const [countRes, pageRes] = await Promise.all([
-    db.prepare("SELECT COUNT(*) AS n FROM delivery_orders").first<{ n: number }>(),
+    db
+      .prepare("SELECT COUNT(*) AS n FROM delivery_orders WHERE orgId = ?")
+      .bind(orgId)
+      .first<{ n: number }>(),
     db
       .prepare(
-        "SELECT * FROM delivery_orders ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        "SELECT * FROM delivery_orders WHERE orgId = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
       )
-      .bind(limit, offset)
+      .bind(orgId, limit, offset)
       .all<DeliveryOrderRow>(),
   ]);
   const total = countRes?.n ?? 0;
@@ -380,9 +387,9 @@ app.get("/", async (c) => {
     const placeholders = ids.map(() => "?").join(",");
     const itemsRes = await db
       .prepare(
-        `SELECT * FROM delivery_order_items WHERE deliveryOrderId IN (${placeholders})`,
+        `SELECT * FROM delivery_order_items WHERE orgId = ? AND deliveryOrderId IN (${placeholders})`,
       )
-      .bind(...ids)
+      .bind(orgId, ...ids)
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
@@ -407,8 +414,12 @@ app.get("/stats", async (c) => {
   const denied = await requirePermission(c, "delivery-orders", "read");
   if (denied) return denied;
 
+  const orgId = getOrgId(c);
   const res = await c.var.DB
-    .prepare("SELECT status, COUNT(*) AS n FROM delivery_orders GROUP BY status")
+    .prepare(
+      "SELECT status, COUNT(*) AS n FROM delivery_orders WHERE orgId = ? GROUP BY status",
+    )
+    .bind(orgId)
     .all<{ status: string; n: number }>();
   const byStatus: Record<string, number> = {};
   let total = 0;

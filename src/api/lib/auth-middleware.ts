@@ -140,17 +140,17 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   // only registered under /api/* in worker.ts, but guard here too.
   if (!path.startsWith("/api/")) return next();
 
-  // Public endpoints (login/logout/health + worker portal + public tracking)
-  // bypass the auth check entirely.
-  if (isPublicPath(path, c.req.method)) return next();
+  const isPublic = isPublicPath(path, c.req.method);
 
   const authHeader = c.req.header("authorization") || "";
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
   if (!match) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
   const token = match[1].trim();
   if (!token) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
@@ -190,14 +190,17 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   }
 
   if (!row) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
   if (row.isActive !== 1) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
   const now = new Date().toISOString();
   if (row.expiresAt <= now) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 

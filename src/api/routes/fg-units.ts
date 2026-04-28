@@ -126,6 +126,38 @@ function rowToFGUnit(r: FGUnitRow) {
   return out;
 }
 
+// Public-safe shape for the QR /track page. Strips customer name/hub,
+// packer/upholsterer identity, and any field that could be used to harvest
+// PII by enumerating unit IDs. Keeps just the operational facts that a
+// customer scanning their own sticker needs to see: identity, product,
+// status, and the date stamps that show progress through the pipeline.
+function rowToFGUnitPublic(r: FGUnitRow) {
+  const out: Record<string, unknown> = {
+    id: r.id,
+    unitSerial: r.unitSerial,
+    shortCode: r.shortCode ?? "",
+    soNo: r.soNo ?? "",
+    soLineNo: r.soLineNo ?? 0,
+    poNo: r.poNo ?? "",
+    productCode: r.productCode ?? "",
+    productName: r.productName ?? "",
+    unitNo: r.unitNo ?? 1,
+    totalUnits: r.totalUnits ?? 1,
+    pieceNo: r.pieceNo ?? 1,
+    totalPieces: r.totalPieces ?? 1,
+    pieceName: r.pieceName ?? "",
+    mfdDate: r.mfdDate,
+    status: r.status,
+  };
+  // Date stamps are operational, not PII — they show the customer where the
+  // unit is in the pipeline. Worker IDs/names that did the work are PII.
+  if (r.packedAt) out.packedAt = r.packedAt;
+  if (r.loadedAt) out.loadedAt = r.loadedAt;
+  if (r.deliveredAt) out.deliveredAt = r.deliveredAt;
+  if (r.upholsteredAt) out.upholsteredAt = r.upholsteredAt;
+  return out;
+}
+
 function genFGUnitId(poId: string, unitNo: number, pieceNo: number): string {
   return `fgu-${poId}-${unitNo}-${pieceNo}-${crypto.randomUUID().slice(0, 8)}`;
 }
@@ -360,6 +392,11 @@ app.get("/", async (c) => {
 // GET /api/fg-units/:id — single unit
 // (must be registered AFTER /generate/:poId and /scan so more specific
 // routes match first — Hono picks in insertion order)
+//
+// Public-allowlisted for QR /track page. authMiddleware does soft-auth on
+// public routes: if a valid Bearer token is present, c.get('userId') is set;
+// otherwise it's undefined. We use that to decide between a stripped public
+// shape (no PII) and the full operational shape.
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const unit = await c.var.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
@@ -367,6 +404,10 @@ app.get("/:id", async (c) => {
     .first<FGUnitRow>();
   if (!unit) {
     return c.json({ success: false, error: "Unit not found" }, 404);
+  }
+  const userId = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  if (!userId) {
+    return c.json({ success: true, data: rowToFGUnitPublic(unit) });
   }
   return c.json({ success: true, data: rowToFGUnit(unit) });
 });

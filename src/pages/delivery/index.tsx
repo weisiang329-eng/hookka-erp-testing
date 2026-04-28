@@ -2865,14 +2865,27 @@ export default function DeliveryPage() {
                       />
                     </div>
                   </div>
-                  <div>
-                    <label className="text-xs text-[#6B7280] font-medium">Remarks</label>
-                    <input
-                      type="text"
-                      value={editForm.remarks}
-                      onChange={(e) => setEditForm((f) => ({ ...f, remarks: e.target.value }))}
-                      className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
-                    />
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs text-[#6B7280] font-medium">
+                        Delivery Date <span className="text-[#9CA3AF]">(planned)</span>
+                      </label>
+                      <input
+                        type="date"
+                        value={editForm.deliveryDate}
+                        onChange={(e) => setEditForm((f) => ({ ...f, deliveryDate: e.target.value }))}
+                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-[#6B7280] font-medium">Remarks</label>
+                      <input
+                        type="text"
+                        value={editForm.remarks}
+                        onChange={(e) => setEditForm((f) => ({ ...f, remarks: e.target.value }))}
+                        className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                      />
+                    </div>
                   </div>
                 </div>
               ) : (

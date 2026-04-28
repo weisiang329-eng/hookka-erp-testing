@@ -10,6 +10,13 @@
 //                                    (not attendance punches) still surface.
 //                                    Returns rows joined to production_orders
 //                                    so each entry carries productCode + poNo.
+//   GET /api/job-cards/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//                                    Per-worker production-time totals
+//                                    (productionTimeMinutes summed across
+//                                    completed JCs, halved when both PIC
+//                                    slots are filled). Backs the Production
+//                                    Time + Efficiency % columns on the
+//                                    Efficiency Overview tab.
 //   GET /api/job-cards/:id/events    Event audit log (newest first,
 //                                    paginated). Reads from the
 //                                    parallel write table created in
@@ -135,6 +142,82 @@ app.get("/", async (c) => {
   }));
 
   return c.json({ success: true, data });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/job-cards/summary?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Per-worker production-time totals across COMPLETED + TRANSFERRED job_cards
+// in the date range. Backs the "Production Time" + "Efficiency %" columns on
+// the Efficiency Overview tab so the page can compute Production / Working
+// without round-tripping every individual JC row.
+//
+// Halving rule: when a JC has BOTH pic1Id and pic2Id filled in, each worker
+// gets credited with productionTimeMinutes / 2. This matches the existing
+// "PIC2 = assist" convention used in EmployeeDetailTab and the Google Sheet
+// `populateDetailTable` logic. Solo JCs (only pic1Id) credit the full amount
+// to that worker.
+//
+// Implementation: single GROUP BY over a UNION ALL of (PIC1 contribution,
+// PIC2 contribution). Easier to type-check than a one-pass CASE pivot and
+// the row count is bounded by job_cards * 2.
+// ---------------------------------------------------------------------------
+type WorkerProdSummaryRow = {
+  workerId: string;
+  productionMinutes: number | string | null;
+  jcCount: number | string | null;
+};
+
+app.get("/summary", async (c) => {
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  if (!from || !to) {
+    return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
+  }
+
+  const sql = `
+    SELECT wid AS workerId,
+           SUM(contribMin) AS productionMinutes,
+           COUNT(*) AS jcCount
+      FROM (
+        SELECT pic1Id AS wid,
+               CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
+                    THEN productionTimeMinutes / 2.0
+                    ELSE productionTimeMinutes
+               END AS contribMin
+          FROM job_cards
+         WHERE pic1Id IS NOT NULL AND pic1Id != ''
+           AND status IN ('COMPLETED','TRANSFERRED')
+           AND completedDate IS NOT NULL
+           AND completedDate >= ? AND completedDate <= ?
+
+        UNION ALL
+
+        SELECT pic2Id AS wid,
+               productionTimeMinutes / 2.0 AS contribMin
+          FROM job_cards
+         WHERE pic2Id IS NOT NULL AND pic2Id != ''
+           AND pic1Id IS NOT NULL AND pic1Id != ''
+           AND status IN ('COMPLETED','TRANSFERRED')
+           AND completedDate IS NOT NULL
+           AND completedDate >= ? AND completedDate <= ?
+      ) sub
+     WHERE wid IS NOT NULL AND wid != ''
+     GROUP BY wid
+  `;
+
+  const res = await c.var.DB
+    .prepare(sql)
+    .bind(from, to, from, to)
+    .all<WorkerProdSummaryRow>();
+
+  const data = (res.results ?? []).map((r) => ({
+    workerId: r.workerId,
+    productionMinutes: Math.round(Number(r.productionMinutes) || 0),
+    jcCount: Number(r.jcCount) || 0,
+  }));
+
+  return c.json({ success: true, data, total: data.length });
 });
 
 // ---------------------------------------------------------------------------

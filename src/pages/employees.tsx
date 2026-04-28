@@ -1246,6 +1246,20 @@ function EfficiencyOverviewTab({
     [summaryResp]
   );
 
+  // Per-worker production-time aggregator — sum of job_cards.productionTimeMinutes
+  // halved when both PIC slots are filled. Lets us render the Production Time
+  // + Efficiency % columns alongside the existing working-hours pivot without
+  // pulling every JC row to the client.
+  const jcSummaryUrl = `/api/job-cards/summary?from=${dateFrom}&to=${dateTo}`;
+  const { data: jcSummaryResp } = useCachedJson<{ data?: { workerId: string; productionMinutes: number; jcCount: number }[] }>(jcSummaryUrl);
+  const prodMinsByWorker = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of jcSummaryResp?.data ?? []) {
+      m.set(r.workerId, r.productionMinutes || 0);
+    }
+    return m;
+  }, [jcSummaryResp]);
+
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   // Render order: production depts first (in `sequence` order), then
   // non-production. Stable secondary sort by code keeps undefined sequences
@@ -1308,6 +1322,51 @@ function EfficiencyOverviewTab({
           </span>
         ),
       },
+      // Production Time — per-worker JC contribution sum (already halved
+      // server-side when both PIC slots filled). Mirrors the Google Sheet
+      // HOURS DASHBOARD column between "Total" and "Efficient".
+      {
+        key: "productionMinutes",
+        label: "Production Time",
+        align: "right",
+        sortable: true,
+        render: (_value, row) => {
+          const mins = prodMinsByWorker.get(row.workerId) ?? 0;
+          if (mins <= 0) {
+            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          }
+          return (
+            <span className="tabular-nums text-[#1F1D1B]">{formatHours(mins)}</span>
+          );
+        },
+      },
+      // Efficiency % — Production / Total. Same green/amber/red thresholds
+      // the Employee Performance KPI card uses (≥85 green, ≥70 amber, else red).
+      {
+        key: "efficiencyPct",
+        label: "Efficiency %",
+        align: "right",
+        sortable: true,
+        render: (_value, row) => {
+          const totalMins = row.totalHours * 60;
+          if (totalMins <= 0) {
+            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          }
+          const prodMins = prodMinsByWorker.get(row.workerId) ?? 0;
+          const pct = (prodMins / totalMins) * 100;
+          const cls =
+            pct >= 85
+              ? "text-[#4F7C3A]"
+              : pct >= 70
+              ? "text-[#9C6F1E]"
+              : "text-[#9A3A2D]";
+          return (
+            <span className={`font-semibold tabular-nums ${cls}`}>
+              {pct.toFixed(1)}%
+            </span>
+          );
+        },
+      },
     ];
 
     for (const d of orderedDepts) {
@@ -1347,7 +1406,7 @@ function EfficiencyOverviewTab({
     });
 
     return cols;
-  }, [orderedDepts]);
+  }, [orderedDepts, prodMinsByWorker]);
 
   const contextMenuItems: ContextMenuItem[] = [
     {

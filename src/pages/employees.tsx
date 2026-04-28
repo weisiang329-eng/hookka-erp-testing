@@ -1468,6 +1468,323 @@ function EfficiencyOverviewTab({
   );
 }
 
+// ========== TAB: DEPARTMENT LABOR ==========
+//
+// Per-department roll-up of working_hour_entries for a date range. Same
+// math as the Labor Cost tab (pro-rata OT split per (worker x date),
+// regularRate using calendar working days, OT base anchored at /26/9 x
+// otMultiplier) - just collapses the category dimension so each dept is
+// one row. Numbers reconcile exactly with Labor Cost: sum of all rows
+// here for a category-unfiltered range = sum of all dept x category
+// rows on Labor Cost for the same range.
+
+type DepartmentLaborRow = {
+  deptCode: string;
+  deptName: string;
+  isProduction: boolean;
+  totalHours: number;
+  workerCount: number;
+  estCostSen: number;
+};
+
+function DepartmentLaborTab({
+  workers,
+  departments,
+  refreshDepartments,
+}: {
+  workers: Worker[];
+  departments: DepartmentLite[];
+  refreshDepartments: () => void;
+}) {
+  // Department CRUD - moved here from Labor Cost so departments live with
+  // the dept-cost view. Toggle reveals the existing DepartmentsManager
+  // component (create / edit / delete + worker-count guard).
+  const [manageOpen, setManageOpen] = useState(false);
+  // Same period model as Labor Cost: a Month dropdown is the quick-jump
+  // preset; the From/To inputs allow custom ranges. Dropdown -> sets
+  // dateFrom/dateTo to that month's bounds; touching the date inputs
+  // drops period back to "" (Custom range).
+  const periodOptions = useMemo(() => buildPeriodOptions(), []);
+  const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
+  const initialRange = useMemo(
+    () => periodToDateRange(periodOptions[0]?.value ?? ""),
+    [periodOptions],
+  );
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
+
+  const onPickPeriod = (p: string) => {
+    setPeriod(p);
+    if (p) {
+      const r = periodToDateRange(p);
+      setDateFrom(r.from);
+      setDateTo(r.to);
+    }
+  };
+  const onPickFrom = (v: string) => {
+    setDateFrom(v);
+    setPeriod("");
+  };
+  const onPickTo = (v: string) => {
+    setDateTo(v);
+    setPeriod("");
+  };
+
+  // Pull raw entries (same source as Labor Cost tab) so we can apply the
+  // pro-rata OT split per (worker x date). The /summary endpoint groups
+  // away the date dimension and would force an inaccurate flat hourly
+  // rate - using the raw rows keeps the math identical to Labor Cost.
+  const entriesUrl = `/api/working-hour-entries?from=${dateFrom}&to=${dateTo}`;
+  const { data: entriesResp, loading } = useCachedJson<{ data?: WorkingHourEntry[] }>(entriesUrl);
+  const entries: WorkingHourEntry[] = useMemo(
+    () => entriesResp?.data ?? [],
+    [entriesResp]
+  );
+
+  const workerById = useMemo(() => {
+    const m = new Map<string, Worker>();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
+
+  // Project onto the canonical departments list so non-production depts
+  // (R&D, Warehousing, ...) show up even when they have zero hours, and
+  // the row order matches Efficiency Overview (production first, in
+  // sequence order).
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  const orderedDepts = useMemo(() => {
+    const copy = [...allDepts];
+    copy.sort((a, b) => {
+      if (a.isProduction !== b.isProduction) return a.isProduction ? -1 : 1;
+      const sa = a.sequence ?? 999;
+      const sb = b.sequence ?? 999;
+      if (sa !== sb) return sa - sb;
+      return a.code.localeCompare(b.code);
+    });
+    return copy;
+  }, [allDepts]);
+
+  const rows: DepartmentLaborRow[] = useMemo(() => {
+    // Working-days denominator for the regular rate. Same branching as
+    // Labor Cost: when `period` is set, use workingDaysInMonth (full
+    // calendar month, Sundays excluded); otherwise fall to
+    // workingDaysInRange so custom ranges still get a sane denom.
+    const wdInMonth = period
+      ? workingDaysInMonth(period)
+      : workingDaysInRange(dateFrom, dateTo);
+
+    // Group raw entries by (worker, date) so we can apply OT pro-rata
+    // within each workday. Same shape as Labor Cost's segsByWorkerDate.
+    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
+    for (const e of entries) {
+      const k = `${e.workerId}|${e.date}`;
+      const arr = segsByWorkerDate.get(k) ?? [];
+      arr.push(e);
+      segsByWorkerDate.set(k, arr);
+    }
+
+    const acc = new Map<string, { totalHours: number; workerIds: Set<string>; costSen: number }>();
+
+    for (const [k, segs] of segsByWorkerDate.entries()) {
+      const [workerId] = k.split("|");
+      const w = workerById.get(workerId);
+      if (!w || !w.basicSalarySen) continue;
+      // Same rates as Labor Cost tab: regular rate uses calendar working
+      // days; OT base rate stays anchored at /26/9 so OT premium doesn't
+      // fluctuate month-to-month.
+      const regularRateSen = w.basicSalarySen / wdInMonth / 9;
+      const otBaseRateSen = w.basicSalarySen / 26 / 9;
+      const otMult = w.otMultiplier ?? 1.5;
+      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const otTotalH = Math.max(0, totalH - 9);
+      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+
+      for (const e of segs) {
+        const hours = Number(e.hours) || 0;
+        const otH = hours * otShare;
+        const regularH = hours - otH;
+        const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        let cell = acc.get(e.departmentCode);
+        if (!cell) {
+          cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+          acc.set(e.departmentCode, cell);
+        }
+        cell.totalHours += hours;
+        cell.workerIds.add(workerId);
+        cell.costSen += cost;
+      }
+    }
+
+    return orderedDepts.map((d) => {
+      const cell = acc.get(d.code);
+      return {
+        deptCode: d.code,
+        deptName: d.shortName || d.name,
+        isProduction: d.isProduction,
+        totalHours: cell?.totalHours ?? 0,
+        workerCount: cell?.workerIds.size ?? 0,
+        estCostSen: Math.round(cell?.costSen ?? 0),
+      };
+    });
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo]);
+
+  const totals = useMemo(() => {
+    return rows.reduce(
+      (a, r) => ({ hours: a.hours + r.totalHours, cost: a.cost + r.estCostSen, depts: a.depts + (r.totalHours > 0 ? 1 : 0) }),
+      { hours: 0, cost: 0, depts: 0 },
+    );
+  }, [rows]);
+
+  const columns: Column<DepartmentLaborRow>[] = [
+    {
+      key: "deptName",
+      label: "Department",
+      sortable: true,
+      render: (_v, row) => (
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-[#1F1D1B]">{row.deptName}</span>
+          {row.isProduction ? (
+            <span className="inline-flex items-center rounded bg-[#EEF3E4] px-1.5 py-0.5 text-[10px] font-medium text-[#4F7C3A]">
+              Prod
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded bg-[#FAEFCB] px-1.5 py-0.5 text-[10px] font-medium text-[#9C6F1E]">
+              Non-prod
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "totalHours",
+      label: "Total Hours",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.totalHours > 0 ? (
+          <span className="font-semibold tabular-nums text-[#1F1D1B]">
+            {row.totalHours.toFixed(1)}h
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "workerCount",
+      label: "Workers",
+      align: "center",
+      sortable: true,
+      render: (_v, row) =>
+        row.workerCount > 0 ? (
+          <span className="tabular-nums text-[#4B5563]">{row.workerCount}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "estCostSen",
+      label: "Estimated Labor Cost",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.estCostSen > 0 ? (
+          <span className="font-semibold tabular-nums text-[#1F1D1B]">
+            {formatRM(row.estCostSen)}
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <CardTitle className="flex items-center gap-2">
+            <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Department Labor
+          </CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManageOpen((v) => !v)}
+              title="Create / edit / delete departments"
+            >
+              <Users className="h-4 w-4" />
+              {manageOpen ? "Close Manage Departments" : "Manage Departments"}
+            </Button>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">Month</label>
+              <select
+                value={period}
+                onChange={(e) => onPickPeriod(e.target.value)}
+                className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+              >
+                <option value="">Custom range</option>
+                {periodOptions.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">From</label>
+              <Input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => onPickFrom(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">To</label>
+              <Input
+                type="date"
+                value={dateTo}
+                onChange={(e) => onPickTo(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {manageOpen && (
+          <DepartmentsManager
+            departments={allDepts}
+            refresh={refreshDepartments}
+          />
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Departments with activity</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">{totals.depts}</div>
+          </div>
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Total hours</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
+              {totals.hours.toFixed(1)}h
+            </div>
+          </div>
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Estimated labor cost</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
+              {formatRM(totals.cost)}
+            </div>
+          </div>
+        </div>
+        <DataGrid
+          columns={columns}
+          data={rows}
+          keyField="deptCode"
+          gridId="department-labor"
+          emptyMessage={loading ? "Loading..." : "No working hours in the selected date range."}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 // ========== TAB 4: EMPLOYEE DETAIL ==========
 
 type WorkerJobCardRow = {
@@ -2726,16 +3043,16 @@ function LaborCostTab({
   workers,
   departments,
   productionDeptCodes,
-  refreshDepartments,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
-  refreshDepartments: () => void;
 }) {
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
-  const [manageOpen, setManageOpen] = useState(false);
+  // Department CRUD lives on the Department Labor tab now (per user request -
+  // a "Department Cost" management view). Labor Cost just consumes the
+  // department list.
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
@@ -2962,15 +3279,6 @@ function LaborCostTab({
             <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Labor Cost vs Revenue
           </CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setManageOpen((v) => !v)}
-              title="Create / edit / delete departments"
-            >
-              <Users className="h-4 w-4" />
-              {manageOpen ? "Close Manage Departments" : "Manage Departments"}
-            </Button>
             <div className="flex items-center gap-1.5 text-xs">
               <span className="text-[#6B7280]">From</span>
               <input
@@ -3013,12 +3321,6 @@ function LaborCostTab({
         </div>
       </CardHeader>
       <CardContent>
-        {manageOpen && (
-          <DepartmentsManager
-            departments={allDepts}
-            refresh={refreshDepartments}
-          />
-        )}
         {/* KPI strip */}
         <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
           <Card>
@@ -3595,7 +3897,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "detail" | "payroll" | "leave";
+type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "payroll" | "leave";
 
 // Labor Cost tab is wedged between Working Hours and Payroll per spec — the
 // flow goes "what hours did people work" → "what did those hours cost vs the
@@ -3615,6 +3917,11 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     key: "efficiency",
     label: "Efficiency Overview",
     icon: <Activity className="h-4 w-4" />,
+  },
+  {
+    key: "department-labor",
+    label: "Department Labor",
+    icon: <DollarSign className="h-4 w-4" />,
   },
   {
     key: "detail",
@@ -3847,6 +4154,14 @@ export default function EmployeesPage() {
         />
       )}
 
+      {activeTab === "department-labor" && (
+        <DepartmentLaborTab
+          workers={workers}
+          departments={departments}
+          refreshDepartments={refreshDeptsHook}
+        />
+      )}
+
       {activeTab === "detail" && (
         <EmployeeDetailTab
           workers={workers}
@@ -3859,7 +4174,6 @@ export default function EmployeesPage() {
           workers={workers}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
-          refreshDepartments={refreshDeptsHook}
         />
       )}
 

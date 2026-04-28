@@ -25,6 +25,9 @@ import { useActiveTabDirty } from "@/contexts/tabs-context";
 
 type LineItem = {
   id?: string;
+  // Client-only stable id for React keys when `id` is absent. Stripped
+  // before save. Sprint 7.
+  _uid?: string;
   productId: string;
   productCode: string;
   productName: string;
@@ -153,7 +156,7 @@ export default function EditSalesOrderPage() {
   const [customerDeliveryDate, setCustomerDeliveryDate] = useState("");
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
-  const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
+  const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, unknown> | null>(getVariantsConfigSync());
   const [showSpecialOrdersIdx, setShowSpecialOrdersIdx] = useState<number | null>(null);
 
@@ -347,7 +350,7 @@ export default function EditSalesOrderPage() {
       })();
   }, [orderResp, id]);
 
-  const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
+  const addItem = () => setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
 
   const removeItem = (idx: number) => {
     if (items.length <= 1) return;
@@ -436,12 +439,19 @@ export default function EditSalesOrderPage() {
 
     setSaving(true);
     try {
+      // Strip the client-only `_uid` so the server contract is unchanged.
+      const itemsForServer = items.map((it) => {
+        const { _uid: _drop, ...rest } = it;
+        void _drop;
+        return rest;
+      });
       const res = await fetch(`/api/consignment-orders/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           customerId, customerPOId, customerCOId, reference,
-          companyCODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+          companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
+          items: itemsForServer,
           // Forward the admin-issued override token (if any). Single-use,
           // server consumes it atomically. See sales/edit.tsx for full notes.
           ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
@@ -630,7 +640,7 @@ export default function EditSalesOrderPage() {
         <CardContent className="space-y-4">
           {items.map((item, idx) => {
             return (
-              <div key={idx} className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
+              <div key={item.id ?? item._uid ?? idx} className="rounded-md border border-[#E2DDD8] p-4 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <span className="text-sm font-medium text-[#6B5C32]">Line {idx + 1}</span>

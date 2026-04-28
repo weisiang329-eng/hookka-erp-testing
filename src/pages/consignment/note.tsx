@@ -24,7 +24,7 @@
 //     the Pending-CN dedup is approximate (matches by customer + CO
 //     existence rather than per-PO linkage). Same caveat documented.
 // ---------------------------------------------------------------------------
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
 import { useToast } from "@/components/ui/toast";
@@ -80,15 +80,19 @@ type ConsignmentNoteRow = {
   branchName: string;     // CN destination branch — DO equiv: hubState/hubBranch
   itemCount: number;
   totalQty: number;
+  totalM3: number;          // sum of items[].itemM3 * items[].quantity — DO equivalent: row.totalM3
   totalValueSen: number;
   dispatchDate: string | null;
   deliveredDate: string | null;
   status: CNStatus;
-  // Transport fields — backend doesn't store these on CN today, but the
-  // columns are rendered (showing "—") so the layout matches DO and the
-  // schema can grow into them without UI changes. DO equivalents:
-  // driverId/driverName/vehicleNo.
-  driverId: string | null; // 3PL provider id (legacy column name) — for company lookup
+  // Transport fields — backend already stores these on CN as of migration 0066
+  // (consignment_notes.vehicleId / driverId / vehicleNo / vehicleType /
+  // driverName / driverPhone). We surface them on the row so the Edit dialog
+  // can pre-select the persisted vehicle and the Mark Dispatched dialog can
+  // pre-fill from existing data when re-dispatching. DO equivalents:
+  // row.driverId / row.vehicleId / row.driverName / row.vehicleNo.
+  driverId: string | null;   // 3PL provider id (legacy column name) — for company lookup
+  vehicleId: string | null;  // three_pl_vehicles.id — drives Edit dialog vehicle pre-select
   driverCompany: string;     // backend `driverContactPerson` — provider's company-level dispatcher contact (Company Contact)
   driverName: string;        // person on the trip (denormalized from three_pl_drivers.name)
   driverPhone: string;       // person on the trip — phone (denormalized from three_pl_drivers.phone)
@@ -269,6 +273,17 @@ function mapCNToRow(
   poToRackMap: Map<string, string>,
 ): ConsignmentNoteRow {
   const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
+  // totalM3 sums per-item volume × quantity, with per-unit volume joined
+  // from products.unitM3 (productM3Map). Mirrors DO's totalM3 (which the
+  // DO backend computes server-side); CN backend doesn't compute it, so we
+  // derive client-side using the same product master that feeds the items
+  // table footer (line 2824) — ensures the basics-grid Total M³ matches
+  // the items-table Total M³.
+  const totalM3 = (cn.items || []).reduce(
+    (s, it) =>
+      s + (productM3Map.get(it.productCode || "") || 0) * (it.quantity || 0),
+    0,
+  );
   // Prefer the new consignmentOrderId column (added by migration 0066);
   // fall back to noteNumber when it's null on legacy rows so the column
   // still renders something instead of blank.
@@ -282,6 +297,7 @@ function mapCNToRow(
     branchName: cn.branchName,
     itemCount: cn.items.length,
     totalQty,
+    totalM3,
     totalValueSen: cn.totalValue,
     // dispatchDate prefers the dispatchedAt timestamp (when status moved
     // to PARTIALLY_SOLD); falls back to sentDate (the CN creation date)
@@ -294,6 +310,11 @@ function mapCNToRow(
     // resolved from cn.driverId via the providers list at render time, with
     // driverName as fallback to keep legacy rows visible).
     driverId: cn.driverId ?? null,
+    // vehicleId — backend stores it as of migration 0066 (resolveTransport
+    // in consignment-note-shared.ts persists it). Surfacing it on the row
+    // lets the Edit dialog pre-select the saved vehicle (bug fix
+    // 2026-04-28: dropdown was opening blank even when a vehicle was set).
+    vehicleId: cn.vehicleId ?? null,
     driverCompany: cn.driverContactPerson || "",
     driverName: cn.driverName || "",
     driverPhone: cn.driverPhone || "",
@@ -410,6 +431,15 @@ export default function ConsignmentNotePage() {
   };
   const [dispatchVehicles, setDispatchVehicles] = useState<ThreePLVehicleShape[]>([]);
   const [dispatchDrivers, setDispatchDrivers] = useState<ThreePLDriverShape[]>([]);
+  // Same name-to-id resolve trick the edit-mode flow uses — see
+  // pendingDriverNameToResolveRef declaration above. The dispatch dialog
+  // pre-fills providerId/vehicleId from the CN row when reopening (e.g.
+  // after a Reverse to Pending Dispatch), and this ref lets it also
+  // pre-fill the driverPersonId by name once the per-provider drivers
+  // list resolves. Bug fix 2026-04-28: dispatch dialog opened with all
+  // three dropdowns blank even when the CN already had transport set
+  // from creation (CGN-2604-001 case).
+  const pendingDispatchDriverNameRef = useRef<string>("");
 
   // ----- Detail Edit mode (mirrors DO's inline edit-mode 1:1) -----
   // editMode swaps the read-only Detail dialog into mutable inputs without
@@ -434,6 +464,16 @@ export default function ConsignmentNotePage() {
   // lists. Same DO pattern (editDialogVehicles vs createDialogVehicles).
   const [editVehicles, setEditVehicles] = useState<ThreePLVehicleShape[]>([]);
   const [editDrivers, setEditDrivers] = useState<ThreePLDriverShape[]>([]);
+  // Edit-mode bug fix 2026-04-28: consignment_notes only persists driverId
+  // (PROVIDER company) + driverName (denormalized PERSON name) — the
+  // PERSON id is not in any column. Re-deriving it on Edit means we have
+  // to wait for the provider's three_pl_drivers list to load and match by
+  // name. This ref carries the pending name across the async fetch so the
+  // useEffect that watches editDrivers can finish the resolve. Cleared
+  // when match found or when the user closes the edit dialog. Mirrors
+  // DO's identical pendingDriverNameToResolveRef pattern at
+  // src/pages/delivery/index.tsx:409.
+  const pendingDriverNameToResolveRef = useRef<string>("");
   // Add Items panel — same toggle-then-search-then-click flow DO uses.
   const [editAddItemSearch, setEditAddItemSearch] = useState("");
   const [editShowAddItemPanel, setEditShowAddItemPanel] = useState(false);
@@ -653,7 +693,25 @@ export default function ConsignmentNotePage() {
       .then(([vRes, dRes]) => {
         if (cancelled) return;
         if (vRes?.success && Array.isArray(vRes.data)) setDispatchVehicles(vRes.data);
-        if (dRes?.success && Array.isArray(dRes.data)) setDispatchDrivers(dRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) {
+          setDispatchDrivers(dRes.data);
+          // Resolve PERSON id by name once the drivers list loads.
+          // Mirrors the edit-mode flow above — CN persists only the
+          // PERSON name (driverName), not the id, so we hydrate the
+          // dropdown by name match.
+          const wanted = pendingDispatchDriverNameRef.current.trim();
+          if (wanted) {
+            const match = dRes.data.find(
+              (d) => (d.name || "").trim() === wanted,
+            );
+            if (match) {
+              setDispatchForm((f) =>
+                f.driverPersonId ? f : { ...f, driverPersonId: match.id },
+              );
+            }
+            pendingDispatchDriverNameRef.current = "";
+          }
+        }
       })
       .catch(() => {
         /* swallow — same swallow pattern DO uses */
@@ -703,6 +761,8 @@ export default function ConsignmentNotePage() {
   // Edit dialog vehicle/driver picker scope — mirrors DO's
   // editDialogVehicles / editDialogDrivers effect 1:1. Refetches whenever
   // the user picks a different provider in the inline edit-mode form.
+  // Also resolves the PERSON id by name once the drivers list loads —
+  // see pendingDriverNameToResolveRef declaration above for rationale.
   /* eslint-disable react-hooks/set-state-in-effect -- mirror remote data into local state */
   useEffect(() => {
     const pid = editForm.providerId;
@@ -723,7 +783,26 @@ export default function ConsignmentNotePage() {
       .then(([vRes, dRes]) => {
         if (cancelled) return;
         if (vRes?.success && Array.isArray(vRes.data)) setEditVehicles(vRes.data);
-        if (dRes?.success && Array.isArray(dRes.data)) setEditDrivers(dRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) {
+          setEditDrivers(dRes.data);
+          // Resolve PERSON id by name match on Edit (mirrors DO 1:1).
+          // consignment_notes persists only the PERSON's name, not id;
+          // this is the only place we can hydrate the dropdown selection.
+          const wanted = pendingDriverNameToResolveRef.current.trim();
+          if (wanted) {
+            const match = dRes.data.find(
+              (d) => (d.name || "").trim() === wanted,
+            );
+            if (match) {
+              setEditForm((f) =>
+                f.driverPersonId ? f : { ...f, driverPersonId: match.id },
+              );
+            }
+            // One-shot — clear so a stale name doesn't bleed into the
+            // next edit session if the user opens Edit on a different CN.
+            pendingDriverNameToResolveRef.current = "";
+          }
+        }
       })
       .catch(() => {
         /* swallow — same swallow pattern DO uses */
@@ -1073,6 +1152,9 @@ export default function ConsignmentNotePage() {
         toast.success(`${dispatchDialog.cnNo} dispatched`);
         setDispatchDialog(null);
         setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
+        // Clear pending name resolution so the next dispatch dialog open
+        // (different CN) starts with a clean slate.
+        pendingDispatchDriverNameRef.current = "";
         fetchData();
       }
     } catch {
@@ -1087,13 +1169,31 @@ export default function ConsignmentNotePage() {
   // shown in the Detail dialog, then flips editMode=true so the same dialog
   // re-renders with mutable inputs. Mirrors src/pages/delivery/index.tsx
   // line ~1340 1:1 with the CN field-name swaps.
+  //
+  // Bug fix 2026-04-28 (BUG-1): dropdowns previously hardcoded
+  // vehicleId:"" / driverPersonId:"". Now we pre-select vehicleId from the
+  // row directly and stash driverName for resolve-by-name once the
+  // per-provider drivers list loads (DO's pendingDriverNameToResolveRef
+  // pattern at src/pages/delivery/index.tsx:1340).
   const enterEditMode = (row: ConsignmentNoteRow) => {
     // CN persists the PROVIDER company id under the legacy `driverId`
-    // column (same reuse trick DO does). Drive the picker off it directly.
-    const matchedProvider = providers.find((p) => p.id === row.driverId);
+    // column (same reuse trick DO does). Drive the picker off it directly,
+    // falling back to a name-match for legacy CNs where driverId is null
+    // but the company name was denormalized into driverName.
+    const matchedProvider =
+      providers.find((p) => p.id === row.driverId) ??
+      providers.find((p) => p.name === row.driverName);
+    // PERSON id is not stored on consignment_notes — only the PERSON name
+    // (driverName denormalize). Stash that name so the editDrivers fetch
+    // effect can resolve it back to a PERSON id once the drivers list
+    // loads. One-shot — cleared on first match or on cancelEditMode.
+    pendingDriverNameToResolveRef.current = row.driverName || "";
     setEditForm({
       providerId: matchedProvider?.id || "",
-      vehicleId: "",
+      // vehicleId is now persisted on the CN row (added 2026-04-28); pre-
+      // select directly so the Vehicle dropdown opens populated instead
+      // of "— Optional —".
+      vehicleId: row.vehicleId || "",
       driverPersonId: "",
       hubId: row.hubId || "",
       // CN's wire field for "planned dispatch date" is sentDate (mapped to
@@ -1112,7 +1212,34 @@ export default function ConsignmentNotePage() {
     setEditMode(false);
     setEditShowAddItemPanel(false);
     setEditAddItemSearch("");
+    // Clear stashed pending name so a stale value can't bleed into a
+    // subsequent edit session if the user opens Edit on a different CN.
+    pendingDriverNameToResolveRef.current = "";
   };
+
+  // ---------- Open Mark Dispatched dialog with pre-fill ----------
+  // Bug fix 2026-04-28 (BUG-2): the previous handlers wiped the form to
+  // empty strings on open, so a CN that already had Provider + Vehicle +
+  // Driver picked at create time (e.g. CGN-2604-001) showed all three
+  // dropdowns blank when the operator hit Mark Dispatched. Now we
+  // pre-fill from the row, mirroring the same row-derived seeding the
+  // edit-mode flow uses. driverPersonId is resolved by name once the
+  // per-provider drivers list loads — see pendingDispatchDriverNameRef.
+  const openDispatchDialog = useCallback(
+    (row: ConsignmentNoteRow) => {
+      const matchedProvider =
+        providers.find((p) => p.id === row.driverId) ??
+        providers.find((p) => p.name === row.driverName);
+      pendingDispatchDriverNameRef.current = row.driverName || "";
+      setDispatchForm({
+        providerId: matchedProvider?.id || "",
+        vehicleId: row.vehicleId || "",
+        driverPersonId: "",
+      });
+      setDispatchDialog(row);
+    },
+    [providers],
+  );
 
   const removeEditItem = (itemId: string) => {
     setEditItems((prev) => prev.filter((i) => i.id !== itemId));
@@ -1683,11 +1810,18 @@ export default function ConsignmentNotePage() {
         type: "status",
         width: "180px",
         sortable: true,
+        // Bug fix 2026-04-28 (BUG-3): the secondary line previously showed
+        // formatCurrency(totalValueSen) which read "RM 0.00" because the
+        // CN backend doesn't compute a unit price on consignment items
+        // today (consignment goods are priced at sale time, not dispatch
+        // time). DO's identical column shows "X items · X.XX m³" instead,
+        // which is the dispatch-stage info the operator actually needs.
+        // Mirroring DO 1:1 here.
         render: (_value, row) => (
           <div className="flex flex-col gap-0.5 text-xs leading-tight">
             <span className="font-medium">{STATUS_LABEL[row.status] ?? row.status}</span>
             <span className="text-[#9CA3AF] tabular-nums">
-              {row.itemCount} item{row.itemCount === 1 ? "" : "s"} · {formatCurrency(row.totalValueSen)}
+              {row.itemCount} item{row.itemCount === 1 ? "" : "s"} · {(row.totalM3 ?? 0).toFixed(2)} m³
             </span>
           </div>
         ),
@@ -1761,10 +1895,9 @@ export default function ConsignmentNotePage() {
         label: "Mark Dispatched",
         icon: <Send className="h-3.5 w-3.5" />,
         disabled: row.status !== "PENDING",
-        action: () => {
-          setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
-          setDispatchDialog(row);
-        },
+        // Pre-fills the dialog from the row's persisted Provider / Vehicle /
+        // Driver — see openDispatchDialog comment for rationale.
+        action: () => openDispatchDialog(row),
       },
       {
         label: "Mark Delivered",
@@ -1874,7 +2007,7 @@ export default function ConsignmentNotePage() {
         action: () => fetchData(),
       },
     ],
-    [fetchData, toast, reverseStatus, reverseToPendingCN],
+    [fetchData, toast, reverseStatus, reverseToPendingCN, openDispatchDialog],
   );
 
   // ---------- Tab counts (mirrors DO) ----------
@@ -2393,9 +2526,16 @@ export default function ConsignmentNotePage() {
                       <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
                       <p className="font-medium">{detailCN.customerName}</p>
                     </div>
+                    {/* Show live edit-items total M³ so the operator sees
+                        the volume update as they Add Items / Remove Items
+                        in the panel below. Mirrors DO's identical pattern. */}
                     <div>
-                      <p className="text-[#9CA3AF] text-xs mb-0.5">CO Reference</p>
-                      <p className="font-medium doc-number">{detailCN.coRef}</p>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
+                      <p className="font-medium">
+                        {editItems
+                          .reduce((s, i) => s + i.itemM3 * i.quantity, 0)
+                          .toFixed(2)}
+                      </p>
                     </div>
                   </div>
                   {/* Provider / Vehicle / Driver pickers — chained the same
@@ -2527,19 +2667,20 @@ export default function ConsignmentNotePage() {
                  independent blocks; Delivery Info pulls from the
                  customer's hub list. */
               <div className="space-y-4">
-                {/* CN Basics — three-cell grid aligning to DO's. We keep
-                    "CO Reference" instead of DO's "Total M³" because CN's
-                    parent document is the CO (whereas DO's parent doc is
-                    the SO, surfaced inline in items). m³ totals are visible
-                    in the Items table footer below. */}
+                {/* CN Basics — three-cell grid mirrors DO 1:1. Total M³
+                    aggregates cleanly across multi-line CNs (sum of
+                    items[].itemM3 * quantity, computed in mapCNToRow).
+                    The CO Reference moved out of the basics grid into the
+                    "Consignment Orders" chip strip below — same pattern DO
+                    uses for "Sales Orders". */}
                 <div className="grid grid-cols-3 gap-4 text-sm">
                   <div>
                     <p className="text-[#9CA3AF] text-xs mb-0.5">CN Number</p>
                     <p className="font-medium doc-number">{detailCN.cnNo}</p>
                   </div>
                   <div>
-                    <p className="text-[#9CA3AF] text-xs mb-0.5">CO Reference</p>
-                    <p className="font-medium doc-number">{detailCN.coRef}</p>
+                    <p className="text-[#9CA3AF] text-xs mb-0.5">Total M³</p>
+                    <p className="font-medium">{(detailCN.totalM3 ?? 0).toFixed(2)}</p>
                   </div>
                   <div>
                     <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
@@ -2983,12 +3124,16 @@ export default function ConsignmentNotePage() {
                         variant="primary"
                         onClick={() => {
                           // Open the Mark Dispatched dialog (3PL transport
-                          // picker). Same flow the context menu's Mark
-                          // Dispatched item triggers. Fresh-form-on-open
-                          // matches DO's pattern.
-                          setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
-                          setDispatchDialog(detailCN);
+                          // picker) with pre-fill from the CN row's
+                          // persisted Provider/Vehicle/Driver. Same flow
+                          // the context menu's Mark Dispatched item
+                          // triggers — both go through openDispatchDialog
+                          // so a CN created with transport already picked
+                          // doesn't lose those values when the operator
+                          // confirms dispatch.
+                          const row = detailCN;
                           setDetailCN(null);
+                          openDispatchDialog(row);
                         }}
                       >
                         <Send className="h-4 w-4" /> Mark Dispatched
@@ -3344,7 +3489,11 @@ export default function ConsignmentNotePage() {
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div
             className="absolute inset-0 bg-black/40"
-            onClick={() => !dispatchSaving && setDispatchDialog(null)}
+            onClick={() => {
+              if (dispatchSaving) return;
+              setDispatchDialog(null);
+              pendingDispatchDriverNameRef.current = "";
+            }}
           />
           <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 border border-[#E2DDD8]">
             <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
@@ -3355,7 +3504,11 @@ export default function ConsignmentNotePage() {
                 </p>
               </div>
               <button
-                onClick={() => !dispatchSaving && setDispatchDialog(null)}
+                onClick={() => {
+                  if (dispatchSaving) return;
+                  setDispatchDialog(null);
+                  pendingDispatchDriverNameRef.current = "";
+                }}
                 className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
               >
                 <X className="h-5 w-5" />
@@ -3451,7 +3604,10 @@ export default function ConsignmentNotePage() {
             <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
               <Button
                 variant="outline"
-                onClick={() => setDispatchDialog(null)}
+                onClick={() => {
+                  setDispatchDialog(null);
+                  pendingDispatchDriverNameRef.current = "";
+                }}
                 disabled={dispatchSaving}
               >
                 Cancel

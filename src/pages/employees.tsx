@@ -2819,6 +2819,9 @@ function LaborCostTab({
     () => `/api/working-hour-entries/production-revenue?from=${from}&to=${to}`,
     [from, to],
   );
+  // The backend `rows` array (one entry per recognized PO) is intentionally
+  // ignored on this tab - it backed the now-removed Revenue Raw Data audit
+  // table. Only the per-category totals are read here for KPIs/rollup.
   const { data: plResp, loading: plLoading } = useCachedJson<{
     success?: boolean;
     data?: {
@@ -2826,17 +2829,6 @@ function LaborCostTab({
       BEDFRAME?: number;
       ACCESSORY?: number;
       totalSen?: number;
-      rows?: Array<{
-        date: string;
-        productCode: string;
-        productName: string;
-        category: "SOFA" | "BEDFRAME" | "ACCESSORY";
-        qty: number;
-        unitPriceSen: number;
-        totalPriceSen: number;
-        customerName: string;
-        soNo: string;
-      }>;
     };
   }>(prodRevUrl);
 
@@ -2924,11 +2916,13 @@ function LaborCostTab({
         const otH = hours * otShare;
         const regularH = hours - otH;
         const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
-        const cat = (e.category || "") as Category;
+        // Defensive uppercase normalize so any pre-migration lower-case
+        // rows in working_hour_entries.category still compare correctly.
+        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
         // When a category filter is active, only count entries tagged with
         // that category. Non-production buckets (Warehousing/Shortfall etc.)
         // have empty cat and fall through into the "always-show" branch
-        // below — they are not category-tagged labor and stay visible so
+        // below - they are not category-tagged labor and stay visible so
         // operators don't lose sight of borrowed / idle hours.
         if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
         const bucketKey = `${e.departmentCode}|${cat}`;
@@ -3037,13 +3031,15 @@ function LaborCostTab({
       for (const e of segs) {
         const hours = Number(e.hours) || 0;
         // Pro-rata OT split is computed against TOTAL day hours regardless
-        // of filter — a 11h day is still a 9h regular + 2h OT day, that's
+        // of filter - a 11h day is still a 9h regular + 2h OT day, that's
         // a property of the worker's shift, not of the category. We then
         // skip the per-segment cost contribution if the segment's category
         // doesn't match the filter. Non-production segments (no category)
-        // are always skipped under a filter — they are accounted for in the
+        // are always skipped under a filter - they are accounted for in the
         // Borrowed/Idle KPI cards which intentionally don't filter.
-        const cat = (e.category || "") as Category;
+        // Defensive uppercase normalize so any pre-migration lower-case
+        // rows in working_hour_entries.category still compare correctly.
+        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
         if (categoryFilter && cat !== categoryFilter) continue;
         const otH = hours * otShare;
         const regularH = hours - otH;
@@ -3311,78 +3307,6 @@ function LaborCostTab({
           </div>
         )}
 
-        {/* Revenue Raw Data — one row per (poId, unitNo) recognized in
-            the period. Lets operators audit which physical units actually
-            contributed to the revenue figure shown above. Per spec, each
-            unit is recognized ONCE on the date its LAST piece (HB/Divan/
-            Cushion/…) completes UPHOLSTERY. */}
-        {!loading && (
-          <div className="mt-6">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
-              <span className="text-xs text-[#6B7280]">
-                {(plResp?.data?.rows?.length ?? 0)} unit{(plResp?.data?.rows?.length ?? 0) === 1 ? "" : "s"}
-              </span>
-            </div>
-            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 z-10">
-                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Date</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Product</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Customer</th>
-                    <th className="h-10 px-3 text-left font-medium text-[#374151]">SO</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Qty</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(plResp?.data?.rows ?? []).map((rr, idx) => (
-                    <tr
-                      key={`${rr.date}-${rr.soNo}-${rr.productCode}-${idx}`}
-                      className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
-                    >
-                      <td className="h-10 px-3 text-[#4B5563] tabular-nums">
-                        {rr.date ? formatDateDMY(rr.date) : <span className="text-[#9CA3AF]">—</span>}
-                      </td>
-                      <td className="h-10 px-3 text-[#1F1D1B]">
-                        <div className="font-medium">{rr.productCode || "—"}</div>
-                        {rr.productName && (
-                          <div className="text-xs text-[#6B7280]">{rr.productName}</div>
-                        )}
-                      </td>
-                      <td className="h-10 px-3 text-[#4B5563]">
-                        {rr.category ? rr.category[0] + rr.category.slice(1).toLowerCase() : "—"}
-                      </td>
-                      <td className="h-10 px-3 text-[#4B5563]">
-                        {rr.customerName || <span className="text-[#9CA3AF]">—</span>}
-                      </td>
-                      <td className="h-10 px-3 text-[#4B5563] tabular-nums">
-                        {rr.soNo || <span className="text-[#9CA3AF]">—</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right tabular-nums">{rr.qty}</td>
-                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
-                        {formatCurrency(rr.unitPriceSen)}
-                      </td>
-                      <td className="h-10 px-3 text-right font-medium tabular-nums">
-                        {formatCurrency(rr.totalPriceSen)}
-                      </td>
-                    </tr>
-                  ))}
-                  {(plResp?.data?.rows?.length ?? 0) === 0 && (
-                    <tr>
-                      <td colSpan={8} className="h-24 text-center text-[#9CA3AF]">
-                        No production completions in this period.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
       </CardContent>
     </Card>
   );

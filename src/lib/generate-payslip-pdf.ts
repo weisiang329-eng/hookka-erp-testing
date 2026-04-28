@@ -64,6 +64,7 @@ export function generatePayslipHTML(
 </head>
 <body>
   <div class="header">
+    <img src="/hookka-logo.png" alt="Hookka 合家" style="height: 40px; width: auto; margin-bottom: 8px;" />
     <h1>HOOKKA INDUSTRIES SDN BHD</h1>
     <p>Co. Reg: 202301XXXXXX (XXXXXXX-X) | Lot XX, Jalan Perindustrian, 81700 Pasir Gudang, Johor</p>
     <div class="title">PAYSLIP - ${periodLabel.toUpperCase()}</div>

@@ -163,22 +163,13 @@ export default function LoginPage() {
             }}
           >
             {/* Logo Row */}
-            <div className="flex items-center gap-3 mb-10">
-              <div
-                className="flex h-12 w-12 items-center justify-center rounded-lg"
-                style={{
-                  border: "1.5px solid rgba(107,92,50,.5)",
-                  backgroundColor: "rgba(107,92,50,.1)",
-                }}
-              >
-                <span className="text-lg font-bold text-white">H</span>
-              </div>
-              <span
-                className="text-white font-bold"
-                style={{ fontSize: "22px", letterSpacing: "3px" }}
-              >
-                HOOKKA
-              </span>
+            <div className="mb-10">
+              <img
+                src="/hookka-logo.png"
+                alt="Hookka 合家"
+                className="h-10 w-auto"
+                style={{ filter: "brightness(0) invert(1)" }}
+              />
             </div>
 
             {/* Title */}
@@ -385,33 +376,16 @@ export default function LoginPage() {
 
           {/* Center Content */}
           <div className="relative z-10 flex flex-col items-center text-center">
-            <div
-              className="relative mb-6"
-              style={{ width: "100px", height: "100px" }}
-            >
-              <div
-                className="absolute inset-0 flex items-center justify-center"
-                style={{
-                  border: "1.5px solid rgba(107,92,50,.4)",
-                  borderRadius: "16px",
-                  transform: "rotate(45deg)",
-                }}
-              >
-                <span
-                  className="font-bold text-white"
-                  style={{ fontSize: "42px", transform: "rotate(-45deg)" }}
-                >
-                  H
-                </span>
-              </div>
-            </div>
-
-            <h1
-              className="text-white mb-2"
-              style={{ fontSize: "42px", fontWeight: 900, letterSpacing: "6px" }}
-            >
-              HOOKKA
-            </h1>
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              className="mb-6"
+              style={{
+                height: "140px",
+                width: "auto",
+                filter: "brightness(0) invert(1)",
+              }}
+            />
 
             <p
               className="uppercase mb-6"

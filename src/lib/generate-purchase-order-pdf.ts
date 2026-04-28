@@ -1,6 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { PurchaseOrder } from "@/lib/mock-data";
+import { addHookkaLetterhead } from "@/lib/pdf-utils";
 
 function fmtCurrency(sen: number): string {
   return `RM ${(sen / 100).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -20,15 +21,18 @@ export function generatePurchaseOrderPdf(po: PurchaseOrder) {
   let y = margin;
 
   // --- Header ---
+  addHookkaLetterhead(doc, margin, 5, 10);
+  const textX = margin + 26;
+
   doc.setTextColor(0, 0, 0);
-  doc.setFontSize(18);
+  doc.setFontSize(12);
   doc.setFont("helvetica", "bold");
-  doc.text("HOOKKA INDUSTRIES SDN BHD", margin, 14);
+  doc.text("HOOKKA INDUSTRIES SDN BHD", textX, 14);
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text("Manufacturer of Premium Upholstered Furniture", margin, 20);
-  doc.text("Tel: +60X-XXXXXXX  |  Email: procurement@hookka.com.my", margin, 25);
+  doc.text("Manufacturer of Premium Upholstered Furniture", textX, 20);
+  doc.text("Tel: +60X-XXXXXXX  |  Email: procurement@hookka.com.my", textX, 25);
 
   // PO Title on right
   doc.setFontSize(14);

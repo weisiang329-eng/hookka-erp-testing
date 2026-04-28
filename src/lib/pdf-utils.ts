@@ -2,6 +2,21 @@
 // HOOKKA ERP - Shared PDF Utility Functions
 // ============================================================
 
+import type jsPDF from "jspdf";
+import logoDataUrl from "@/assets/hookka-logo.png?inline";
+
+const LOGO_ASPECT = 2038 / 907;
+
+export function addHookkaLetterhead(
+  doc: jsPDF,
+  x: number,
+  y: number,
+  height: number = 11,
+): void {
+  const width = height * LOGO_ASPECT;
+  doc.addImage(logoDataUrl, "PNG", x, y, width, height);
+}
+
 /**
  * Format sen amount as "1,234.56" (no RM prefix).
  */

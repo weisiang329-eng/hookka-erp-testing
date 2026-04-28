@@ -260,22 +260,13 @@ function Shell({ children }: { children: React.ReactNode }) {
             WebkitBackdropFilter: "blur(24px)",
           }}
         >
-          <div className="flex items-center gap-3 mb-10">
-            <div
-              className="flex h-12 w-12 items-center justify-center rounded-lg"
-              style={{
-                border: "1.5px solid rgba(107,92,50,.5)",
-                backgroundColor: "rgba(107,92,50,.1)",
-              }}
-            >
-              <span className="text-lg font-bold text-white">H</span>
-            </div>
-            <span
-              className="text-white font-bold"
-              style={{ fontSize: "22px", letterSpacing: "3px" }}
-            >
-              HOOKKA
-            </span>
+          <div className="mb-10">
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              className="h-10 w-auto"
+              style={{ filter: "brightness(0) invert(1)" }}
+            />
           </div>
           {children}
         </div>

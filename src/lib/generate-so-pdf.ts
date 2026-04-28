@@ -2,7 +2,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { SalesOrder, Customer } from "@/lib/mock-data";
 import { COMPANY } from "@/lib/constants";
-import { fmtCurrency as fmtRM, fmtDate, amountInWords } from "@/lib/pdf-utils";
+import { fmtCurrency as fmtRM, fmtDate, amountInWords, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 // ---------------------------------------------------------------------------
 // Company info (from constants)
@@ -27,27 +27,31 @@ export function generateSOPdf(order: SalesOrder, customer?: Customer | null) {
     || customer?.deliveryHubs?.[0];
 
   // ===== HEADER =====
+  // Logo (left of company text)
+  addHookkaLetterhead(doc, m, y - 2, 9);
+  const cx = m + 23;
+
   // Company name (left)
-  doc.setFontSize(13);
+  doc.setFontSize(10);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(0, 0, 0);
-  doc.text(CO.name, m, y + 5);
+  doc.text(CO.name, cx, y + 5);
 
   // Reg no
   doc.setFontSize(7);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text(`(${CO.regNo})`, m, y + 9);
+  doc.text(`(${CO.regNo})`, cx, y + 9);
 
   // Address lines
   doc.setFontSize(6.5);
   doc.setTextColor(100, 100, 100);
   let ay = y + 12.5;
   for (const line of CO.addressLines) {
-    doc.text(line, m, ay);
+    doc.text(line, cx, ay);
     ay += 3;
   }
-  doc.text(`Tel: ${CO.phone}  |  Email: ${CO.email}`, m, ay);
+  doc.text(`Tel: ${CO.phone}  |  Email: ${CO.email}`, cx, ay);
 
   // Title (right)
   doc.setFontSize(18);

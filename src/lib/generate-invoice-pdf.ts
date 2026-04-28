@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM as fmtCurrency, fmtDate, amountInWords } from "@/lib/pdf-utils";
+import { fmtRM as fmtCurrency, fmtDate, amountInWords, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function generateInvoicePdf(invoice: any) {
@@ -15,19 +15,22 @@ export function generateInvoicePdf(invoice: any) {
   const companyName = invoice.companyName || co.name;
 
   // =========================================================================
-  // 1. COMPANY HEADER
+  // 1. COMPANY HEADER (logo + legal text)
   // =========================================================================
+  addHookkaLetterhead(doc, margin, 5, 10);
+  const textX = margin + 26;
+
   doc.setTextColor(0, 0, 0);
-  doc.setFontSize(16);
+  doc.setFontSize(11);
   doc.setFont("helvetica", "bold");
-  doc.text(companyName, margin, 12);
+  doc.text(companyName, textX, 12);
 
   doc.setFontSize(7.5);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${co.regNo}`, margin, 17);
-  doc.text(co.address, margin, 22);
-  doc.text(`Tel: ${co.phone}`, margin, 27);
+  doc.text(`Reg No: ${co.regNo}`, textX, 17);
+  doc.text(co.address, textX, 22);
+  doc.text(`Tel: ${co.phone}`, textX, 27);
 
   // =========================================================================
   // 2. INVOICE TITLE (right side of header)

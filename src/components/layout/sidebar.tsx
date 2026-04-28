@@ -491,15 +491,17 @@ export function Sidebar() {
       {/* Brand / Logo */}
       <div className="flex h-14 items-center justify-between px-3 border-b border-white/10 shrink-0">
         {!collapsed ? (
-          <Link to="/dashboard" className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded bg-gradient-to-br from-[#8B7A52] to-[#6B5C32] flex items-center justify-center text-sm font-bold shrink-0">
-              H
-            </div>
-            <span className="text-[18px] font-[800] tracking-[2px]">HOOKKA</span>
+          <Link to="/dashboard" className="flex items-center px-1">
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              className="h-7 w-auto"
+              style={{ filter: "brightness(0) invert(1)" }}
+            />
           </Link>
         ) : (
           <Link to="/dashboard" className="mx-auto">
-            <div className="h-8 w-8 rounded bg-gradient-to-br from-[#8B7A52] to-[#6B5C32] flex items-center justify-center text-sm font-bold">
+            <div className="h-8 w-8 rounded bg-white/10 flex items-center justify-center text-sm font-[900] tracking-[1px]">
               H
             </div>
           </Link>

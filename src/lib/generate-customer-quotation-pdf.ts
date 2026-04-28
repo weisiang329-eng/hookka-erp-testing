@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM, fmtDate } from "@/lib/pdf-utils";
+import { fmtRM, fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 // Fixed seat-height set the sales team quotes against. Keep ordered
 // so columns line up the same way across every quotation (matches the
@@ -118,20 +118,22 @@ export default function generateCustomerQuotationPdf(args: QuotationArgs): jsPDF
   const today = new Date().toISOString();
 
   // =========================================================================
-  // 1. COMPANY HEADER — kept verbatim from the prior implementation
-  //    (mirrors generate-invoice-pdf.ts).
+  // 1. COMPANY HEADER (logo + legal text)
   // =========================================================================
+  addHookkaLetterhead(doc, margin, 5, 10);
+  const textX = margin + 26;
+
   doc.setTextColor(0, 0, 0);
-  doc.setFontSize(16);
+  doc.setFontSize(11);
   doc.setFont("helvetica", "bold");
-  doc.text(co.name, margin, 12);
+  doc.text(co.name, textX, 12);
 
   doc.setFontSize(7.5);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${co.regNo}`, margin, 17);
-  doc.text(co.address, margin, 22);
-  doc.text(`Tel: ${co.phone}`, margin, 27);
+  doc.text(`Reg No: ${co.regNo}`, textX, 17);
+  doc.text(co.address, textX, 22);
+  doc.text(`Tel: ${co.phone}`, textX, 27);
 
   // =========================================================================
   // 2. QUOTATION TITLE (right side)

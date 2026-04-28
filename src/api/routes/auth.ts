@@ -6,16 +6,63 @@
 // src/api/lib/auth-middleware.ts handles token verification for every
 // non-public /api/* request, so /me and /change-password can assume the
 // request is already authenticated by the time the handler runs.
+//
+// Sprint 7: dashboard logins now land the session token in a HttpOnly
+// `hookka_session` cookie instead of the JSON body. A second non-HttpOnly
+// `hookka_csrf` cookie holds a per-session CSRF token that the client must
+// echo via `X-CSRF-Token` on mutating requests (double-submit pattern,
+// enforced in auth-middleware.ts). The body still carries the public user
+// blob so the login page can render the welcome state without an extra
+// /me round-trip, but the token itself never touches localStorage.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
 import { emitCounter } from "../lib/observability";
+import {
+  SESSION_COOKIE,
+  CSRF_COOKIE,
+} from "../lib/auth-middleware";
 
 const app = new Hono<Env>();
 
 // 30 days, in ms — tweak here, not in the schema.
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_S = SESSION_TTL_MS / 1000;
+
+// Build the two Set-Cookie headers for a successful dashboard login.
+// - `hookka_session`: HttpOnly + Secure + SameSite=Strict so JS can't read
+//   the token and it never leaves a same-site context. This is the
+//   credential.
+// - `hookka_csrf`:   NOT HttpOnly so the api-client can read it and echo it
+//   in the X-CSRF-Token header (double-submit). Secure + SameSite=Strict to
+//   keep an attacker on a cross-origin page from reading or forging it.
+function sessionCookieHeader(token: string): string {
+  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
+function csrfCookieHeader(csrfToken: string): string {
+  return `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
+// Clear cookie variants — Max-Age=0 + empty value tells the browser to drop
+// the cookie immediately. Path/SameSite must mirror the originally-issued
+// cookie or the browser ignores the clear.
+const SESSION_CLEAR_COOKIE = `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+const CSRF_CLEAR_COOKIE = `${CSRF_COOKIE}=; Secure; SameSite=Strict; Path=/; Max-Age=0`;
+
+// Random URL-safe-ish CSRF token. crypto.randomUUID() is plenty of entropy
+// (122 bits) and is already used for session tokens — no need for a heavier
+// base64-of-random-bytes here.
+function newCsrfToken(): string {
+  return crypto.randomUUID();
+}
+
+// Set both cookies on the response (login / accept-invite / TOTP verify).
+// Hono lets us call header() twice with the same name — both Set-Cookie
+// lines land in the response.
+function issueSessionCookies(c: { header: (k: string, v: string, opts?: { append?: boolean }) => void }, sessionToken: string, csrfToken: string): void {
+  c.header("Set-Cookie", sessionCookieHeader(sessionToken), { append: true });
+  c.header("Set-Cookie", csrfCookieHeader(csrfToken), { append: true });
+}
 
 type UserRow = {
   id: string;
@@ -45,6 +92,26 @@ function bearerTokenFrom(req: Request): string | null {
   const auth = req.headers.get("authorization") || "";
   const m = auth.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : null;
+}
+
+// Resolve the dashboard session token from the request — cookie first
+// (Sprint 7 default), Authorization: Bearer fallback (legacy). Returns null
+// if neither present or empty.
+function sessionTokenFrom(req: Request): string | null {
+  const cookieHeader = req.headers.get("cookie");
+  if (cookieHeader) {
+    for (const part of cookieHeader.split(";")) {
+      const eq = part.indexOf("=");
+      if (eq < 0) continue;
+      if (part.slice(0, eq).trim() === SESSION_COOKIE) {
+        const v = part.slice(eq + 1).trim();
+        if (v) {
+          try { return decodeURIComponent(v); } catch { return v; }
+        }
+      }
+    }
+  }
+  return bearerTokenFrom(req);
 }
 
 // ----- POST /api/auth/login -----------------------------------------------
@@ -96,6 +163,7 @@ app.post("/login", async (c) => {
   }
 
   const token = crypto.randomUUID();
+  const csrfToken = newCsrfToken();
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_TTL_MS);
 
@@ -113,9 +181,14 @@ app.post("/login", async (c) => {
   // P6.3 — count successful logins for the dashboard.
   emitCounter(c, "auth.login_success", { resource: user.role });
 
+  // Sprint 7: token lives in the HttpOnly cookie; only the public user blob
+  // and the CSRF token come back in the JSON body. The CSRF token is also
+  // available via the non-HttpOnly cookie — we mirror it in the body so
+  // tests / curl users can grab it without parsing Set-Cookie.
+  issueSessionCookies(c, token, csrfToken);
   return c.json({
     success: true,
-    data: { token, user: publicUser(user) },
+    data: { user: publicUser(user), csrfToken },
   });
 });
 
@@ -124,8 +197,11 @@ app.post("/login", async (c) => {
 // stops working immediately (otherwise auth-middleware's KV cache would keep
 // the logged-out session alive for up to SESSION_CACHE_TTL_S).
 // Idempotent: unknown/missing token → still ok.
+//
+// Sprint 7: prefers the cookie token; on success clears both auth cookies
+// so the next request from this browser is fully unauthenticated.
 app.post("/logout", async (c) => {
-  const token = bearerTokenFrom(c.req.raw);
+  const token = sessionTokenFrom(c.req.raw);
   if (token) {
     const { invalidateSessionCache } = await import("../lib/auth-middleware");
     await Promise.all([
@@ -135,6 +211,10 @@ app.post("/logout", async (c) => {
       invalidateSessionCache(c.env.SESSION_CACHE, token),
     ]);
   }
+  // Clear cookies regardless — even if the token was missing/unknown the
+  // browser may still hold a stale pair.
+  c.header("Set-Cookie", SESSION_CLEAR_COOKIE, { append: true });
+  c.header("Set-Cookie", CSRF_CLEAR_COOKIE, { append: true });
   return c.json({ success: true });
 });
 
@@ -425,6 +505,7 @@ app.post("/accept-invite", async (c) => {
   const userId = `user-${crypto.randomUUID().slice(0, 8)}`;
   const passwordHash = await hashPassword(password);
   const sessionToken = crypto.randomUUID();
+  const csrfToken = newCsrfToken();
   const sessionExpires = new Date(
     Date.now() + SESSION_TTL_MS,
   ).toISOString();
@@ -451,16 +532,18 @@ app.post("/accept-invite", async (c) => {
     ).bind(sessionToken, userId, nowIso, sessionExpires),
   ]);
 
+  // Sprint 7: set both auth cookies; body returns user + csrfToken only.
+  issueSessionCookies(c, sessionToken, csrfToken);
   return c.json({
     success: true,
     data: {
-      token: sessionToken,
       user: {
         id: userId,
         email: invite.email,
         role: invite.role,
         displayName: resolvedDisplayName,
       },
+      csrfToken,
     },
   });
 });

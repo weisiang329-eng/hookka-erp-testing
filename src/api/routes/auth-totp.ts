@@ -39,11 +39,22 @@ import {
   hashRecoveryCode,
 } from "../lib/totp";
 import { verifyPassword } from "../lib/password";
+import { SESSION_COOKIE, CSRF_COOKIE } from "../lib/auth-middleware";
 
 const app = new Hono<Env>();
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_S = SESSION_TTL_MS / 1000;
 const TOTP_ISSUER = "Hookka Manufacturing ERP";
+
+// Mirrors helpers in routes/auth.ts — small duplication is fine; both paths
+// land at the same cookie shape.
+function sessionCookieHeader(token: string): string {
+  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
+function csrfCookieHeader(csrfToken: string): string {
+  return `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
 
 type UserRow = {
   id: string;
@@ -209,6 +220,7 @@ app.post("/login-verify", async (c) => {
 
   // Issue session — same shape as /api/auth/login.
   const sessionToken = crypto.randomUUID();
+  const csrfToken = crypto.randomUUID();
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_TTL_MS);
   await c.var.DB.batch([
@@ -222,16 +234,19 @@ app.post("/login-verify", async (c) => {
       .bind(now.toISOString(), userId),
   ]);
 
+  // Sprint 7: set the two auth cookies; body keeps user + csrfToken only.
+  c.header("Set-Cookie", sessionCookieHeader(sessionToken), { append: true });
+  c.header("Set-Cookie", csrfCookieHeader(csrfToken), { append: true });
   return c.json({
     success: true,
     data: {
-      token: sessionToken,
       user: {
         id: user.id,
         email: user.email,
         role: user.role,
         displayName: user.displayName ?? "",
       },
+      csrfToken,
     },
   });
 });

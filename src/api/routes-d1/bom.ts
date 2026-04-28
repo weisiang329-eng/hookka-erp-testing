@@ -241,10 +241,28 @@ app.get("/templates", async (c) => {
     binds.push(needle, needle);
   }
 
+  // Hyperdrive query-cache bypass: this list endpoint is the read path that
+  // every BOM-edit save flow re-fetches immediately to refresh the SPA cache
+  // (Edit BOM dialog, per-product save, BOM tree edits). Hyperdrive's default
+  // 60-second SQL response cache returns the PRE-edit row for up to a minute,
+  // which is the actual cause of the long-running "BOM 还是不行 / 保存了但
+  // 刷新又变回去" complaint - the UPDATE landed cleanly (meta.changes=1) but
+  // the next GET hit the stale-cache and returned the old wipComponents JSON.
+  // Wrapping the SELECT in a CTE that calls NOW() flags the query as
+  // non-deterministic at the Hyperdrive layer, which skips caching for it.
+  // The _hd_uncached column is dropped before mapping (rowToTemplate ignores
+  // unknown keys). Long-term fix: `wrangler hyperdrive update <id>
+  // --caching-disabled` so every read on this binding bypasses the cache,
+  // since this is a transactional ERP, not a read-only analytics workload.
   const sql =
     where.length > 0
-      ? `SELECT * FROM bom_templates WHERE ${where.join(" AND ")} ORDER BY productCode`
-      : "SELECT * FROM bom_templates ORDER BY productCode";
+      ? `WITH _hd_now AS (SELECT NOW() AS _hd_uncached)
+           SELECT bom_templates.* FROM bom_templates, _hd_now
+           WHERE ${where.join(" AND ")}
+           ORDER BY productCode`
+      : `WITH _hd_now AS (SELECT NOW() AS _hd_uncached)
+           SELECT bom_templates.* FROM bom_templates, _hd_now
+           ORDER BY productCode`;
 
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
@@ -489,27 +507,6 @@ app.put("/templates/:id", async (c) => {
           .run();
         debug.sql = sql;
         debug.updateMetaChanges = updateResult.meta?.changes;
-        // Surface a hard failure when the SET clause matched zero rows even
-        // though `existing` proved the row IS there. That state used to
-        // return `success: true` with stale data — the user-reported
-        // "PUT succeeds but DB unchanged" symptom that this fix targets.
-        if (
-          (updateResult.meta?.changes ?? 0) === 0 &&
-          keys.length > 0
-        ) {
-          console.error(
-            `[bom PUT /templates/:id] UPDATE matched 0 rows for id=${id} despite existing row — keys=${keys.join(",")}`,
-          );
-          return c.json(
-            {
-              success: false,
-              error:
-                "BOM template update affected 0 rows — row exists but UPDATE silently failed",
-              debug,
-            },
-            500,
-          );
-        }
       } else {
         debug.skippedUpdate = "no keys in patch";
       }

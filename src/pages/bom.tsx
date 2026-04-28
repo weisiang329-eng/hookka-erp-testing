@@ -2968,7 +2968,21 @@ function EditBOMDialog({
         ...node,
         processes: node.processes.map((p, i) => {
           if (i !== pi) return p;
-          if (field === "deptCode") return { ...p, deptCode: value as string, dept: DEPT_LABELS[value as string] || (value as string) };
+          // Mirror updateWIPProcess (top-level) behavior so nested Sub-WIP
+          // process edits auto-derive minutes from Production Times the same
+          // way the L1 row does. Without the dept/category cases below, the
+          // user changes "Category: CAT 5 -> CAT 6" inside a Sub-WIP row and
+          // ONLY category mutates - minutes still display the old value, so
+          // the edit looks like a no-op.
+          if (field === "deptCode") {
+            const code = value as string;
+            const minutes = getProductionMinutes(code, p.category) || p.minutes;
+            return { ...p, deptCode: code, dept: DEPT_LABELS[code] || code, minutes };
+          }
+          if (field === "category") {
+            const minutes = getProductionMinutes(p.deptCode, value as string);
+            return { ...p, category: value as string, minutes };
+          }
           return { ...p, [field]: value };
         }),
       })))

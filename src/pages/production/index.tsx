@@ -28,6 +28,12 @@ type ProductionOrder = {
   salesOrderId: string; salesOrderNo: string; lineNo: number;
   customerPOId: string; customerReference: string; customerName: string; customerState: string;
   companySOId: string;
+  // CO-origin POs (migration 0064): mutex with SO. When the parent doc is a
+  // Consignment Order, salesOrderId / companySOId are empty and these two
+  // fields carry the CO linkage. Used by the soId column fallback so SOFA
+  // rows from a CO display CO-YYMM-NNN instead of a blank cell.
+  consignmentOrderId?: string;
+  companyCOId?: string;
   productId: string; productCode: string; productName: string; itemCategory: "SOFA"|"BEDFRAME"|"ACCESSORY";
   sizeCode: string; sizeLabel: string; fabricCode: string; quantity: number;
   gapInches: number|null; divanHeightInches: number|null; legHeightInches: number|null;

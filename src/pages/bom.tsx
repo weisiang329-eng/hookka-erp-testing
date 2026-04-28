@@ -5211,8 +5211,8 @@ function BatchEditMaterialsDialog({
 
       await Promise.all(ops);
 
+      const cloneById = new Map(updatedClones.map((c) => [c.id, c] as const));
       if (updatedClones.length > 0) {
-        const cloneById = new Map(updatedClones.map((c) => [c.id, c] as const));
         const next = templates.map((t) => cloneById.get(t.id) || t);
         onTemplatesUpdated(next);
         invalidateCachePrefix("/api/bom");

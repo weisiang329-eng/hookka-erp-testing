@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -43,9 +44,12 @@ const ALLOWED_STATUS = ["AVAILABLE", "IN_USE", "MAINTENANCE"] as const;
 
 // GET /api/lorries
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM lorries ORDER BY name",
-  ).all<LorryRow>();
+    "SELECT * FROM lorries WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<LorryRow>();
   const data = (res.results ?? []).map(rowToLorry);
   return c.json({ success: true, data, total: data.length });
 });

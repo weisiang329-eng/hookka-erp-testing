@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -190,9 +191,14 @@ function boolToInt(v: unknown, fallback: 0 | 1): 0 | 1 {
 
 // GET /api/suppliers — list all suppliers + their materials
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const [suppliers, materials] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM suppliers ORDER BY code").all<SupplierRow>(),
-    c.var.DB.prepare("SELECT * FROM supplier_materials").all<SupplierMaterialRow>(),
+    c.var.DB.prepare("SELECT * FROM suppliers WHERE orgId = ? ORDER BY code")
+      .bind(orgId)
+      .all<SupplierRow>(),
+    c.var.DB.prepare("SELECT * FROM supplier_materials WHERE orgId = ?")
+      .bind(orgId)
+      .all<SupplierMaterialRow>(),
   ]);
   const data = (suppliers.results ?? []).map((s) =>
     rowToSupplier(s, materials.results ?? []),

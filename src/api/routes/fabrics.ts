@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -33,9 +34,12 @@ function rowToFabric(r: FabricRow) {
 
 // GET /api/fabrics — list all fabrics
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM fabrics ORDER BY code",
-  ).all<FabricRow>();
+    "SELECT * FROM fabrics WHERE orgId = ? ORDER BY code",
+  )
+    .bind(orgId)
+    .all<FabricRow>();
   const data = (res.results ?? []).map(rowToFabric);
   return c.json({ success: true, data });
 });

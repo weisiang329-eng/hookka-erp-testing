@@ -31,6 +31,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -115,7 +116,8 @@ app.get("/", async (c) => {
       jc.pic2Id          AS pic2Id
     FROM job_cards jc
     LEFT JOIN production_orders po ON po.id = jc.productionOrderId
-    WHERE (jc.pic1Id = ? OR jc.pic2Id = ?)
+    WHERE jc.orgId = ?
+      AND (jc.pic1Id = ? OR jc.pic2Id = ?)
       AND jc.status IN (${statusPlaceholders})
       AND jc.completedDate IS NOT NULL
       ${dateClause}
@@ -123,9 +125,10 @@ app.get("/", async (c) => {
     LIMIT 5000
   `;
 
+  const orgId = getOrgId(c);
   const res = await db
     .prepare(sql)
-    .bind(picId, picId, ...statuses, ...dateBinds)
+    .bind(orgId, picId, picId, ...statuses, ...dateBinds)
     .all<WorkerJcRow>();
 
   const rows = res.results ?? [];

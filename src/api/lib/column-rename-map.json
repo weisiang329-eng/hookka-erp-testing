@@ -626,6 +626,7 @@
   "rmId": "rm_id",
   "roleId": "role_id",
   "rootCauseCategory": "root_cause_category",
+  "rootCauseDetails": "root_cause_details",
   "rootCauseNotes": "root_cause_notes",
   "rowHash": "row_hash",
   "runDate": "run_date",

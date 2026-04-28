@@ -28,13 +28,14 @@ type SourceType = "SO" | "CO" | "EXTERNAL";
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type RootCauseCategory =
   | "PRODUCTION" | "DESIGN" | "MATERIAL" | "PROCESS"
-  | "CUSTOMER" | "TRANSPORT" | "OTHER";
+  | "CUSTOMER" | "TRANSPORT" | "SALES" | "PICKING" | "OTHER";
 type PreventionStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
 
 const VALID_SOURCE_TYPES: SourceType[] = ["SO", "CO", "EXTERNAL"];
 const VALID_STATUSES: CaseStatus[] = ["OPEN", "IN_PROGRESS", "CLOSED", "CANCELLED"];
 const VALID_ROOT_CAUSE: RootCauseCategory[] = [
-  "PRODUCTION", "DESIGN", "MATERIAL", "PROCESS", "CUSTOMER", "TRANSPORT", "OTHER",
+  "PRODUCTION", "DESIGN", "MATERIAL", "PROCESS",
+  "CUSTOMER", "TRANSPORT", "SALES", "PICKING", "OTHER",
 ];
 const VALID_PREVENTION_STATUS: PreventionStatus[] = [
   "PENDING", "IN_PROGRESS", "DONE", "NOT_NEEDED",
@@ -65,6 +66,7 @@ type ServiceCaseRow = {
   actionLog: string | null;
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string | null;
+  rootCauseDetails: string | null;
   preventionAction: string | null;
   preventionStatus: PreventionStatus | null;
   preventionOwner: string | null;
@@ -131,6 +133,19 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
       /* tolerate */
     }
   }
+  // root cause details: category-specific structured fields. See migration
+  // 0076 header for the per-category shape.
+  let rootCauseDetails: Record<string, unknown> = {};
+  if (row.rootCauseDetails) {
+    try {
+      const parsed = JSON.parse(row.rootCauseDetails);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rootCauseDetails = parsed as Record<string, unknown>;
+      }
+    } catch {
+      /* tolerate */
+    }
+  }
   return {
     id: row.id,
     caseNo: row.caseNo,
@@ -143,6 +158,7 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
     issueDescription: row.issueDescription ?? "",
     issuePhotos: photos,
     actionLog,
+    rootCauseDetails,
     rootCauseCategory: row.rootCauseCategory,
     rootCauseNotes: row.rootCauseNotes ?? "",
     preventionAction: row.preventionAction ?? "",
@@ -419,11 +435,19 @@ app.put("/:id", async (c) => {
           ? JSON.stringify(body.actionLog)
           : null;
 
+    // rootCauseDetails — JSON object with category-specific fields.
+    const rcDetailsJson =
+      body.rootCauseDetails === undefined
+        ? existing.rootCauseDetails
+        : body.rootCauseDetails === null
+          ? null
+          : JSON.stringify(body.rootCauseDetails);
+
     await c.var.DB
       .prepare(
         `UPDATE service_cases SET
            issueDescription = ?, issuePhotos = ?, notes = ?,
-           rootCauseCategory = ?, rootCauseNotes = ?,
+           rootCauseCategory = ?, rootCauseNotes = ?, rootCauseDetails = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
            externalRef = ?, actionLog = ?
          WHERE id = ?`,
@@ -440,6 +464,7 @@ app.put("/:id", async (c) => {
         body.rootCauseNotes !== undefined
           ? ((body.rootCauseNotes as string) ?? null)
           : existing.rootCauseNotes,
+        rcDetailsJson,
         body.preventionAction !== undefined
           ? ((body.preventionAction as string) ?? null)
           : existing.preventionAction,

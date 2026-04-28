@@ -1724,6 +1724,51 @@ export default function DeliveryPage() {
       { key: "doNo", label: "DO No.", type: "docno", width: "120px", sortable: true },
       { key: "customerName", label: "Customer", type: "text", sortable: true },
       {
+        key: "salesOrderNos",
+        label: "Sales Orders",
+        type: "text",
+        width: "180px",
+        sortable: true,
+        // Distinct SO numbers from items[]. A DO can span multiple SOs
+        // (e.g. one truck trip consolidating two orders for the same
+        // customer); shown comma-separated. Falls back to the DO's own
+        // salesOrderId for legacy rows that have no items[] populated.
+        render: (_value, row) => {
+          const sos = Array.from(
+            new Set(
+              (row.items || [])
+                .map((it) => it.salesOrderNo)
+                .filter((s): s is string => Boolean(s))
+            )
+          );
+          if (sos.length === 0) {
+            return <span className="text-[#9CA3AF]">{row.salesOrderId || "-"}</span>;
+          }
+          return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
+        },
+      },
+      {
+        key: "hubBranch",
+        label: "State",
+        type: "text",
+        width: "100px",
+        sortable: true,
+        // Distinct hub states across items[]. Today most DOs are single-state
+        // (the schema ties a DO to one hubId), so this usually renders one
+        // code; when items span multiple states we show both like "PG, KL".
+        render: (_value, row) => {
+          const states = Array.from(
+            new Set(
+              (row.items || [])
+                .map((it) => (it as DOItem & { hubState?: string }).hubState)
+                .filter((s): s is string => Boolean(s))
+            )
+          );
+          const display = states.length > 0 ? states.join(", ") : row.hubBranch;
+          return <span className="text-[#4B5563]">{display || "-"}</span>;
+        },
+      },
+      {
         key: "status",
         label: "Status",
         type: "status",

@@ -1535,6 +1535,8 @@ function EmployeeDetailTab({
     id: string;
     date: string;
     productCode: string;
+    wipLabel: string;            // human-readable piece label (e.g. "5531 RIGHT ARM"); blank for ATT rows
+    completedDate: string | null; // JC completion date (separate from `date` which is the entry date)
     deptCode: string;
     minutes: number;
     status: string;
@@ -1550,6 +1552,8 @@ function EmployeeDetailTab({
           id: `att-${r.id}-${i}`,
           date: r.date,
           productCode: b.productCode || "—",
+          wipLabel: "",
+          completedDate: null,
           deptCode: b.deptCode,
           minutes: b.minutes,
           status: r.status,
@@ -1562,7 +1566,9 @@ function EmployeeDetailTab({
       out.push({
         id: `jc-${jc.id}`,
         date: jc.completedDate,
-        productCode: jc.productCode || jc.wipLabel || jc.wipCode || "—",
+        productCode: jc.productCode || jc.wipCode || "—",
+        wipLabel: jc.wipLabel || "",
+        completedDate: jc.completedDate,
         deptCode: jc.departmentCode || "—",
         minutes: jc.productionTimeMinutes || 0,
         status: jc.status,
@@ -1586,16 +1592,31 @@ function EmployeeDetailTab({
       label: "Product / Item",
       sortable: true,
       render: (_v, row) => (
-        <span className="flex items-center gap-1.5">
-          <span className="font-medium text-[#1F1D1B]">{row.productCode}</span>
-          {row.source === "JC" && (
-            <span
-              className="inline-flex items-center rounded-sm bg-[#E0EDF0] px-1 text-[10px] font-semibold text-[#3E6570]"
-              title={`From job card${row.picSlot ? ` (${row.picSlot})` : ""}`}
-            >
-              JC
-            </span>
+        <div className="flex flex-col gap-0.5">
+          <span className="flex items-center gap-1.5">
+            <span className="font-medium text-[#1F1D1B]">{row.productCode}</span>
+            {row.source === "JC" && (
+              <span
+                className="inline-flex items-center rounded-sm bg-[#E0EDF0] px-1 text-[10px] font-semibold text-[#3E6570]"
+                title={`From job card${row.picSlot ? ` (${row.picSlot})` : ""}`}
+              >
+                JC
+              </span>
+            )}
+          </span>
+          {row.wipLabel && row.wipLabel !== row.productCode && (
+            <span className="text-[10px] text-[#6B7280]">{row.wipLabel}</span>
           )}
+        </div>
+      ),
+    },
+    {
+      key: "completedDate",
+      label: "Completion Date",
+      sortable: true,
+      render: (_v, row) => (
+        <span className="text-[#4B5563]">
+          {row.completedDate ? formatDateDMY(row.completedDate) : <span className="text-[#9CA3AF]">—</span>}
         </span>
       ),
     },

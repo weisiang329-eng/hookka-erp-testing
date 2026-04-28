@@ -48,7 +48,11 @@ import {
   X,
   ClipboardList,
   Plus,
+  Pencil,
+  Trash2,
+  ReceiptText,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 import type { ConsignmentNote, Customer } from "@/lib/mock-data";
 
 // ---------------------------------------------------------------------------
@@ -83,9 +87,18 @@ type ConsignmentNoteRow = {
   // schema can grow into them without UI changes. DO equivalents:
   // driverId/driverName/vehicleNo.
   driverId: string | null; // 3PL provider id (legacy column name) — for company lookup
-  driverCompany: string;
-  driverName: string;
+  driverCompany: string;     // backend `driverContactPerson` — provider's company-level dispatcher contact (Company Contact)
+  driverName: string;        // person on the trip (denormalized from three_pl_drivers.name)
+  driverPhone: string;       // person on the trip — phone (denormalized from three_pl_drivers.phone)
   vehicleNo: string;
+  vehicleType: string;       // truck type (denormalized from three_pl_vehicles.vehicleType)
+  // Destination hub. CN's `branchName` is just a free-text label; the real
+  // address / contact / phone live on the customer.deliveryHubs row keyed
+  // by hubId. The Detail dialog resolves these via the customer's
+  // deliveryHubs list (DO equivalent: detailDO.deliveryAddress / contactPerson /
+  // contactPhone are stored directly on the DO — CN doesn't denormalize
+  // them, hence the join here).
+  hubId: string | null;
   remarks: string;
   // Carry the full items array on the row so the Return + Convert dialogs
   // can address line items by their real DB id (consignment_items.id) when
@@ -101,11 +114,14 @@ type ConsignmentNoteRow = {
     id: string;
     productCode: string;
     productName: string;
-    sizeLabel: string;
+    sizeLabel: string;       // joined from products.sizeLabel via productSizeMap
+    fabricCode: string;      // joined from production_orders.fabricCode via poToFabricMap (only when CN was created from a PO)
+    rackingNumber: string;   // joined from production_orders.rackingNumber via poToRackMap
+    itemM3: number;          // joined from products.unitM3 via productM3Map (per-unit; *quantity for line total)
     quantity: number;
     unitPrice: number;
     productionOrderId: string | null;
-    consignmentOrderNo: string;
+    consignmentOrderNo: string; // joined from poToCoNoMap — the parent CO No (DO equiv: salesOrderNo)
   }>;
 };
 
@@ -245,7 +261,10 @@ type ConsignmentOrderApiShape = {
 function mapCNToRow(
   cn: ConsignmentNote,
   productSizeMap: Map<string, string>,
+  productM3Map: Map<string, number>,
   poToCoNoMap: Map<string, string>,
+  poToFabricMap: Map<string, string>,
+  poToRackMap: Map<string, string>,
 ): ConsignmentNoteRow {
   const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
   // Prefer the new consignmentOrderId column (added by migration 0066);
@@ -275,13 +294,25 @@ function mapCNToRow(
     driverId: cn.driverId ?? null,
     driverCompany: cn.driverContactPerson || "",
     driverName: cn.driverName || "",
+    driverPhone: cn.driverPhone || "",
     vehicleNo: cn.vehicleNo || "",
+    vehicleType: cn.vehicleType || "",
+    hubId: cn.hubId ?? null,
     remarks: cn.notes || "",
     items: (cn.items || []).map((it) => ({
       id: it.id,
       productCode: it.productCode || "",
       productName: it.productName || "",
       sizeLabel: productSizeMap.get(it.productCode || "") || "",
+      // Fabric + racking come from the linked PO (CN doesn't store them on
+      // consignment_items). DO does the same join — DO's items[].fabricCode
+      // is set during DO-from-PO creation. CN gets it via the PO lookup.
+      fabricCode:
+        (it.productionOrderId && poToFabricMap.get(it.productionOrderId)) || "",
+      rackingNumber:
+        (it.productionOrderId && poToRackMap.get(it.productionOrderId)) || "",
+      // Per-unit m³ from product master (mirrors DO's productM3Map join).
+      itemM3: productM3Map.get(it.productCode || "") || 0,
       quantity: it.quantity,
       unitPrice: it.unitPrice,
       productionOrderId: it.productionOrderId ?? null,
@@ -537,6 +568,36 @@ export default function ConsignmentNotePage() {
     return m;
   }, [poRaw]);
 
+  // Lookup: productionOrderId → fabricCode. Same join trick as poToCoNoMap
+  // — the CN Detail dialog's Items table needs a Fabric column to mirror
+  // DO's, but consignment_items doesn't store fabricCode (DO carries it on
+  // delivery_order_items because DO-from-PO creation copies it). For CN, we
+  // resolve it from the linked PO at render time.
+  const poToFabricMap = useMemo(() => {
+    const m = new Map<string, string>();
+    const arr = poRaw?.success ? poRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const po of arr) {
+        if (po?.id) m.set(po.id, po.fabricCode || "");
+      }
+    }
+    return m;
+  }, [poRaw]);
+
+  // Lookup: productionOrderId → rackingNumber. Same rationale as
+  // poToFabricMap — Detail dialog Items table needs a Rack column. The PO
+  // carries the racking assignment after upholstery completion.
+  const poToRackMap = useMemo(() => {
+    const m = new Map<string, string>();
+    const arr = poRaw?.success ? poRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const po of arr) {
+        if (po?.id) m.set(po.id, po.rackingNumber || "");
+      }
+    }
+    return m;
+  }, [poRaw]);
+
   // Fetch per-provider vehicles + drivers when the dispatch dialog's
   // provider picker changes. Mirrors DO's createDialogVehicles /
   // createDialogDrivers effect — same /api/three-pl-vehicles and
@@ -622,7 +683,14 @@ export default function ConsignmentNotePage() {
     if (cnRaw?.success && Array.isArray(cnRaw.data)) {
       setCnList(
         (cnRaw.data as ConsignmentNote[]).map((cn) =>
-          mapCNToRow(cn, productSizeMap, poToCoNoMap),
+          mapCNToRow(
+            cn,
+            productSizeMap,
+            productM3Map,
+            poToCoNoMap,
+            poToFabricMap,
+            poToRackMap,
+          ),
         ),
       );
     }
@@ -736,7 +804,7 @@ export default function ConsignmentNotePage() {
         .map(mapPO);
       setReadyPOs(ready);
     }
-  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap]);
+  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap, poToFabricMap, poToRackMap]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- Filtered data (CN-list tabs only) ----------
@@ -1964,71 +2032,466 @@ export default function ConsignmentNotePage() {
         </Card>
       )}
 
-      {/* ---------- Detail Dialog ---------- */}
-      {/* Preserved from the original page — works as-is. */}
+      {/* ---------- Detail Dialog (DO-parity rebuild 2026-04-28) ----------
+          User complaint: CN Detail was a sparse 2-col grid while DO Detail
+          is a fully-fledged 3-section layout (Provider / Vehicle / Driver +
+          Delivery Info + Items table + Tracking timeline). Per the new
+          rule "going forward, CN UI decisions just match DO 1:1", this
+          block mirrors src/pages/delivery/index.tsx's detailDO modal
+          1:1, with these field substitutions:
+            DO field                  →  CN field
+            -------------------------    -------------------------
+            doNo                      →  cnNo
+            customerName              →  customerName
+            hubBranch (state code)    →  branchName
+            driverId / driverName     →  driverId (provider id) / driverName (person)
+            driverContactPerson       →  driverCompany (Company Contact label)
+            driverPhone               →  driverPhone
+            vehicleNo / vehicleType   →  vehicleNo / vehicleType
+            deliveryAddress (on row)  →  resolved from customersData[].deliveryHubs[hubId].address
+            contactPerson  (on row)   →  resolved from deliveryHubs[hubId].contactName
+            contactPhone   (on row)   →  resolved from deliveryHubs[hubId].phone
+            items[].salesOrderNo      →  items[].consignmentOrderNo
+            items[].poNo              →  items[].productionOrderId (rendered as CN line id)
+            items[].fabricCode/Rack   →  joined from PO via poToFabricMap/poToRackMap
+            dispatchDate (timeline)   →  dispatchDate
+            receivedDate              →  deliveredDate (for "Delivered" step)
+            INVOICED status step      →  ACKNOWLEDGED status step (CN's 4th step)
+
+          Footer buttons mirror DO's status-conditional render:
+            PENDING (DRAFT eq.)       →  Edit + Mark Dispatched
+            DISPATCHED / IN_TRANSIT   →  Mark Delivered
+            DELIVERED                 →  Mark Acknowledged + Convert to Sales Invoice
+            ACKNOWLEDGED              →  Close only
+          (Edit + Delete iconography only show on PENDING — same gate DO uses
+           on its DRAFT-only Pencil/Trash2 buttons.) */}
       {detailCN && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
           <div
             className="absolute inset-0 bg-black/40"
             onClick={() => setDetailCN(null)}
           />
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
+          {/* Panel — widened to max-w-3xl to match DO's panel width since the
+              new sections need the horizontal real estate. */}
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
+            {/* Header — icons row mirrors DO: Edit / Delete (PENDING only) +
+                Print + Document (link to parent CO) + Close. */}
+            <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl z-10">
               <div>
                 <h2 className="text-lg font-bold text-[#1F1D1B]">{detailCN.cnNo}</h2>
                 <p className="text-xs text-[#6B7280]">Consignment Note Detail</p>
               </div>
-              <button
-                onClick={() => setDetailCN(null)}
-                className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              <div className="flex items-center gap-2">
+                {/* Edit + Delete only on PENDING (DO equivalent: DRAFT only).
+                    Edit is intentionally a stub for now — CN doesn't have a
+                    full inline edit-mode like DO yet. We surface the icon
+                    so the layout matches; clicking it routes to the
+                    standalone /consignment/note/:id/edit page. */}
+                {detailCN.status === "PENDING" && (
+                  <>
+                    <button
+                      onClick={() => navigate(`/consignment/note/${detailCN.id}/edit`)}
+                      className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B5C32] hover:text-[#1F1D1B] transition-colors"
+                      title="Edit CN"
+                    >
+                      <Pencil className="h-4 w-4" />
+                    </button>
+                    {/* Delete CN — only on PENDING. Same destructive-action
+                        guard DO uses on its Trash2 button. Reuses the
+                        reverseToPendingCN handler which already prompts +
+                        DELETEs via /api/consignments/:id. */}
+                    <button
+                      onClick={() => {
+                        const row = detailCN;
+                        setDetailCN(null);
+                        reverseToPendingCN(row);
+                      }}
+                      className="rounded-md p-1.5 hover:bg-rose-50 text-rose-600 hover:text-rose-800 transition-colors"
+                      title="Delete CN (Pending Dispatch only)"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  </>
+                )}
+                {/* Print — always available (DO equivalent: triggerPrint).
+                    CN print is still a TODO; surface the toast so operators
+                    know we know. */}
+                <button
+                  onClick={() => toast.info(`Printing CN: ${detailCN.cnNo} — coming soon`)}
+                  className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
+                  title="Print CN"
+                >
+                  <Printer className="h-4 w-4" />
+                </button>
+                {/* Document — drill through to parent CO detail page (DO
+                    equivalent: triggerPrint("packing-list") icon, but we
+                    repurpose it here as "go to source doc" since CN doesn't
+                    have a separate packing list yet). */}
+                <button
+                  onClick={() => navigate(`/consignment/${detailCN.consignmentId}`)}
+                  className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
+                  title="Open parent Consignment Order"
+                >
+                  <FileText className="h-4 w-4" />
+                </button>
+                <button
+                  onClick={() => setDetailCN(null)}
+                  className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
+                  title="Close"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
             </div>
 
+            {/* Body */}
             <div className="px-6 py-5 space-y-5">
+              {/* Status badge — uses Badge variant=status so the color
+                  scheme matches the rest of the app (DO uses identical). */}
               <div className="flex items-center gap-3">
-                <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold bg-[#F0ECE9] text-[#6B5C32]">
+                <Badge variant="status" status={detailCN.status}>
                   {STATUS_LABEL[detailCN.status]}
-                </span>
+                </Badge>
               </div>
 
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">CN Number</p>
-                  <p className="font-medium doc-number">{detailCN.cnNo}</p>
+              {/* Three-section layout (mirrors DO's redesigned 2026-04-27
+                  Detail dialog). Header carries CN basics that aggregate
+                  cleanly; Provider / Vehicle / Driver are independent
+                  blocks; Delivery Info pulls from the customer's hub list. */}
+              <div className="space-y-4">
+                {/* CN Basics — three-cell grid aligning to DO's. We keep
+                    "CO Reference" instead of DO's "Total M³" because CN's
+                    parent document is the CO (whereas DO's parent doc is
+                    the SO, surfaced inline in items). m³ totals are visible
+                    in the Items table footer below. */}
+                <div className="grid grid-cols-3 gap-4 text-sm">
+                  <div>
+                    <p className="text-[#9CA3AF] text-xs mb-0.5">CN Number</p>
+                    <p className="font-medium doc-number">{detailCN.cnNo}</p>
+                  </div>
+                  <div>
+                    <p className="text-[#9CA3AF] text-xs mb-0.5">CO Reference</p>
+                    <p className="font-medium doc-number">{detailCN.coRef}</p>
+                  </div>
+                  <div>
+                    <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
+                    <p className="font-medium">{detailCN.items.length}</p>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">CO Reference</p>
-                  <p className="font-medium doc-number">{detailCN.coRef}</p>
+
+                {/* Consignment Orders covered — comma-separated dedup of
+                    items[].consignmentOrderNo. Direct mirror of DO's
+                    "Sales Orders" chip strip. Empty for legacy CNs whose
+                    items don't carry productionOrderId. */}
+                {(() => {
+                  const cos = Array.from(
+                    new Set(
+                      detailCN.items
+                        .map((it) => it.consignmentOrderNo)
+                        .filter((s) => !!s),
+                    ),
+                  );
+                  if (cos.length === 0) return null;
+                  return (
+                    <div className="text-sm">
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Consignment Orders</p>
+                      <p className="font-medium doc-number">{cos.join(", ")}</p>
+                    </div>
+                  );
+                })()}
+
+                {/* 3PL Provider — company-level info. Provider name resolves
+                    from cn.driverId via the providers list (driverId is the
+                    legacy column name; it actually holds the providerId
+                    post-3PL refactor, same as DO). Falls back to driverName
+                    for legacy rows. driverCompany maps to backend's
+                    driverContactPerson — the dispatcher contact at the 3PL
+                    company (NOT the recipient at the destination, which
+                    sits in the Delivery Info block below). */}
+                <div className="border-t border-[#E2DDD8] pt-3">
+                  <p className="text-xs text-[#6B7280] font-medium mb-2">Provider</p>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
+                      <p className="font-medium">
+                        {(() => {
+                          const p = providers.find((pr) => pr.id === detailCN.driverId);
+                          return p?.name || detailCN.driverName || "-";
+                        })()}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Company Contact</p>
+                      <p className="font-medium">{detailCN.driverCompany || "-"}</p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
-                  <p className="font-medium">{detailCN.customerName}</p>
+
+                {/* Vehicle — plate + type. Both denormalized into the CN
+                    row at dispatch time (resolveTransport in
+                    consignment-note-shared.ts). Falls back to "-" for CNs
+                    that haven't been dispatched yet. */}
+                <div className="border-t border-[#E2DDD8] pt-3">
+                  <p className="text-xs text-[#6B7280] font-medium mb-2">Vehicle</p>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Plate No.</p>
+                      <p className="font-medium doc-number">{detailCN.vehicleNo || "-"}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Type</p>
+                      <p className="font-medium">{detailCN.vehicleType || "-"}</p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Branch</p>
-                  <p className="font-medium">{detailCN.branchName}</p>
+
+                {/* Driver — actual person + their phone (NOT the company
+                    dispatcher). Both denormalized at dispatch time from
+                    three_pl_drivers via resolveTransport. */}
+                <div className="border-t border-[#E2DDD8] pt-3">
+                  <p className="text-xs text-[#6B7280] font-medium mb-2">Driver</p>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Name</p>
+                      <p className="font-medium">{detailCN.driverName || "-"}</p>
+                    </div>
+                    <div>
+                      <p className="text-[#9CA3AF] text-xs mb-0.5">Driver Contact</p>
+                      <p className="font-medium doc-number">{detailCN.driverPhone || "-"}</p>
+                    </div>
+                  </div>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
-                  <p className="font-medium">{detailCN.itemCount}</p>
+
+                {/* Delivery Info — Customer + destination address + recipient
+                    contact. CN doesn't denormalize address/contact onto the
+                    consignment_notes row (DO does), so we resolve these at
+                    render time by walking the customer's deliveryHubs[] and
+                    matching on cn.hubId. Falls back to "-" if hubId is null
+                    or the customer/hub isn't loaded yet. The customer's
+                    deliveryHubs[] comes from /api/customers (already cached
+                    in customersData for the Create CN dialog's hub picker). */}
+                <div className="border-t border-[#E2DDD8] pt-3">
+                  <p className="text-xs text-[#6B7280] font-medium mb-2">Delivery Info</p>
+                  {(() => {
+                    // hubLookup: walk the customer's hub list to find the
+                    // matching hub. Returns the address / contactName /
+                    // phone we'll display. If hubId is null (CN created
+                    // pre-2026-04-28 before hub linkage was wired), all
+                    // three fields render "-".
+                    const cust = customersData.find((c) => c.id === detailCN.customerId);
+                    const hub = cust?.deliveryHubs?.find((h) => h.id === detailCN.hubId);
+                    const address = hub?.address || "";
+                    const recipName = hub?.contactName || "";
+                    const recipPhone = hub?.phone || "";
+                    return (
+                      <div className="grid grid-cols-1 gap-3 text-sm">
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
+                          <p className="font-medium">{detailCN.customerName || "-"}</p>
+                        </div>
+                        <div>
+                          <p className="text-[#9CA3AF] text-xs mb-0.5">Delivery Address</p>
+                          <p className="font-medium text-xs">{address || "-"}</p>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Contact</p>
+                            <p className="font-medium">{recipName || "-"}</p>
+                          </div>
+                          <div>
+                            <p className="text-[#9CA3AF] text-xs mb-0.5">Recipient Phone</p>
+                            <p className="font-medium doc-number">{recipPhone || "-"}</p>
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
+                            <p className="font-medium">
+                              {detailCN.dispatchDate ? formatDate(detailCN.dispatchDate) : "-"}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-[#9CA3AF] text-xs mb-0.5">Delivered Date</p>
+                            <p className="font-medium">
+                              {detailCN.deliveredDate ? formatDate(detailCN.deliveredDate) : "-"}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Total Value</p>
-                  <p className="font-medium">{formatCurrency(detailCN.totalValueSen)}</p>
+              </div>
+
+              {/* Items Table — column-by-column mirror of DO's items table
+                  with SO→CO swaps:
+                    SO No.       → CO No.       (items[].consignmentOrderNo)
+                    SO ID        → CO ID        (items[].productionOrderId — the PO id)
+                    Product Code → Product Code (items[].productCode)
+                    Product Name → Product Name (items[].productName)
+                    Size         → Size         (items[].sizeLabel — joined from products)
+                    Fabric       → Fabric       (items[].fabricCode — joined from PO)
+                    Qty          → Qty          (items[].quantity)
+                    M³           → M³           (items[].itemM3 * quantity)
+                    Rack         → Rack         (items[].rackingNumber — joined from PO) */}
+              <div className="border-t border-[#E2DDD8] pt-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-sm font-semibold text-[#1F1D1B]">
+                    Items ({detailCN.items.length})
+                  </h3>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Dispatch Date</p>
-                  <p className="font-medium">
-                    {detailCN.dispatchDate ? formatDate(detailCN.dispatchDate) : "-"}
-                  </p>
+
+                <div className="overflow-x-auto border border-[#E2DDD8] rounded-lg">
+                  <table className="w-full text-sm">
+                    <thead className="bg-[#FAF9F7] text-[#6B7280]">
+                      <tr>
+                        <th className="text-left px-3 py-2 font-medium text-xs">#</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">CO No.</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">CO ID</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">Product Code</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">Product Name</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">Size</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">Fabric</th>
+                        <th className="text-right px-3 py-2 font-medium text-xs">Qty</th>
+                        <th className="text-right px-3 py-2 font-medium text-xs">M³</th>
+                        <th className="text-left px-3 py-2 font-medium text-xs">Rack</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailCN.items.map((item, idx) => (
+                        <tr key={item.id} className="border-t border-[#E2DDD8]">
+                          <td className="px-3 py-1.5 text-[#9CA3AF] text-xs">{idx + 1}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.consignmentOrderNo || "-"}</td>
+                          {/* CO ID column shows the linked PO id since one
+                              CN line = one PO. Operators wanted the visible
+                              PO link for traceability — same role as DO's
+                              "SO ID" (which actually shows po.poNo there).
+                              For CN we surface the productionOrderId. */}
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.productionOrderId || "-"}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B5C32]">{item.productCode}</td>
+                          <td className="px-3 py-1.5">{item.productName}</td>
+                          <td className="px-3 py-1.5 text-[#6B7280]">{item.sizeLabel || "-"}</td>
+                          <td className="px-3 py-1.5 text-[#6B7280]">{item.fabricCode || "-"}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{item.quantity}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums">{(item.itemM3 * item.quantity).toFixed(2)}</td>
+                          <td className="px-3 py-1.5 font-mono text-xs text-[#6B7280]">{item.rackingNumber || "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                    <tfoot className="bg-[#FAF9F7]">
+                      <tr className="border-t border-[#E2DDD8] font-medium">
+                        <td colSpan={7} className="px-3 py-1.5 text-right text-xs text-[#6B7280]">Total</td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {detailCN.items.reduce((s, i) => s + i.quantity, 0)}
+                        </td>
+                        <td className="px-3 py-1.5 text-right tabular-nums">
+                          {detailCN.items.reduce((s, i) => s + i.itemM3 * i.quantity, 0).toFixed(2)}
+                        </td>
+                        <td></td>
+                      </tr>
+                    </tfoot>
+                  </table>
                 </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Delivered Date</p>
-                  <p className="font-medium">
-                    {detailCN.deliveredDate ? formatDate(detailCN.deliveredDate) : "-"}
-                  </p>
+              </div>
+
+              {/* Tracking Timeline — 4 steps (DO has 3; CN's extra step is
+                  Acknowledged, the branch-receipt confirmation that DO
+                  doesn't have because DOs flow into invoices instead).
+                  Step coloring: green = done, slate = active/in-progress,
+                  gray = waiting. Mirrors DO's identical color scheme. */}
+              <div className="border-t border-[#E2DDD8] pt-4">
+                <h3 className="text-sm font-semibold text-[#1F1D1B] mb-3">Tracking</h3>
+                <div className="space-y-3">
+                  {/* Step 1: Dispatched. Done when dispatchDate is set
+                      (status moved past PENDING). */}
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                        detailCN.dispatchDate ? "bg-[#4F7C3A]" : "bg-gray-300"
+                      }`}
+                    >
+                      1
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">Dispatched</p>
+                      <p className="text-xs text-[#9CA3AF]">
+                        {detailCN.dispatchDate
+                          ? formatDate(detailCN.dispatchDate)
+                          : "Pending dispatch"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
+                  {/* Step 2: In Transit. Active (slate) when status === IN_TRANSIT
+                      or DISPATCHED; done (green) once deliveredDate is set. */}
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                        detailCN.status === "IN_TRANSIT" || detailCN.status === "DISPATCHED"
+                          ? detailCN.deliveredDate
+                            ? "bg-[#4F7C3A]"
+                            : "bg-[#3E6570]"
+                          : detailCN.deliveredDate
+                          ? "bg-[#4F7C3A]"
+                          : "bg-gray-300"
+                      }`}
+                    >
+                      2
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">In Transit</p>
+                      <p className="text-xs text-[#9CA3AF]">
+                        {detailCN.status === "DISPATCHED" || detailCN.status === "IN_TRANSIT"
+                          ? "Currently in transit"
+                          : detailCN.deliveredDate
+                          ? "Completed"
+                          : "Waiting"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
+                  {/* Step 3: Delivered. Done when deliveredDate is set
+                      (status === DELIVERED or ACKNOWLEDGED). */}
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                        detailCN.deliveredDate ? "bg-[#4F7C3A]" : "bg-gray-300"
+                      }`}
+                    >
+                      3
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">Delivered</p>
+                      <p className="text-xs text-[#9CA3AF]">
+                        {detailCN.deliveredDate
+                          ? formatDate(detailCN.deliveredDate)
+                          : "Awaiting delivery"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
+                  {/* Step 4: Acknowledged — CN-only step. Done when status
+                      === ACKNOWLEDGED (backend CLOSED). DO doesn't have
+                      this step (DO's terminal state is INVOICED, which
+                      DO renders as a 4th step on its own side). */}
+                  <div className="flex items-center gap-3">
+                    <div
+                      className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
+                        detailCN.status === "ACKNOWLEDGED" ? "bg-[#6B4A6D]" : "bg-gray-300"
+                      }`}
+                    >
+                      4
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">Acknowledged</p>
+                      <p className="text-xs text-[#9CA3AF]">
+                        {detailCN.status === "ACKNOWLEDGED"
+                          ? "Branch confirmed receipt"
+                          : "Awaiting branch acknowledgement"}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               </div>
 
@@ -2040,27 +2503,110 @@ export default function ConsignmentNotePage() {
               )}
             </div>
 
+            {/* Footer Actions — status-conditional, mirrors DO's pattern.
+                PENDING:       Edit + Mark Dispatched + Close
+                DISPATCHED/IT: Mark Delivered + Close
+                DELIVERED:     Mark Acknowledged + Convert to Sales Invoice + Close
+                ACKNOWLEDGED:  Close only
+                Note: "Transfer to Return" is intentionally dropped from
+                here per the task brief — it's a context-menu item on the
+                list, not a Detail-dialog footer button (DO doesn't put
+                returns in its detail footer either). */}
             <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
-              {/* CN-to-DO removed 2026-04-28: consignment goods are at the
-                  customer; DO is for SO-origin dispatches. */}
-              <Button
-                variant="outline"
-                onClick={() => {
-                  // Real consignment_items.id keys (post-2026-04-28 wiring).
-                  const qtys: Record<string, number> = {};
-                  const selected: Record<string, boolean> = {};
-                  for (const it of detailCN.items) {
-                    qtys[it.id] = it.quantity;
-                    selected[it.id] = true;
-                  }
-                  setCrReturnQtys(qtys);
-                  setCrSelectedItems(selected);
-                  setDetailCN(null);
-                  setTransferCRRow(detailCN);
-                }}
-              >
-                <RotateCcw className="h-4 w-4" /> Transfer to Return
-              </Button>
+              {detailCN.status === "PENDING" && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={() => navigate(`/consignment/note/${detailCN.id}/edit`)}
+                  >
+                    <Pencil className="h-4 w-4" /> Edit
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      // Open the Mark Dispatched dialog (3PL transport
+                      // picker). Same flow the context menu's Mark
+                      // Dispatched item triggers. Fresh-form-on-open
+                      // matches DO's pattern.
+                      setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
+                      setDispatchDialog(detailCN);
+                      setDetailCN(null);
+                    }}
+                  >
+                    <Send className="h-4 w-4" /> Mark Dispatched
+                  </Button>
+                </>
+              )}
+              {(detailCN.status === "DISPATCHED" || detailCN.status === "IN_TRANSIT") && (
+                <Button
+                  variant="primary"
+                  onClick={async () => {
+                    // PATCH-by-id (the same shape the context menu's
+                    // "Mark Delivered" uses). Backend flips status →
+                    // FULLY_SOLD and stamps deliveredAt automatically.
+                    try {
+                      const res = await fetch("/api/consignment-notes", {
+                        method: "PATCH",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ id: detailCN.id, status: "FULLY_SOLD" }),
+                      });
+                      if (!res.ok) {
+                        toast.error("Failed to mark delivered");
+                      } else {
+                        toast.success(`${detailCN.cnNo} marked delivered`);
+                        setDetailCN(null);
+                        fetchData();
+                      }
+                    } catch {
+                      toast.error("Failed to mark delivered");
+                    }
+                  }}
+                >
+                  <CheckCircle2 className="h-4 w-4" /> Mark Delivered
+                </Button>
+              )}
+              {detailCN.status === "DELIVERED" && (
+                <>
+                  <Button
+                    variant="outline"
+                    onClick={async () => {
+                      // PATCH-by-id, status → CLOSED. Backend stamps
+                      // acknowledgedAt automatically.
+                      try {
+                        const res = await fetch("/api/consignment-notes", {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ id: detailCN.id, status: "CLOSED" }),
+                        });
+                        if (!res.ok) {
+                          toast.error("Failed to mark acknowledged");
+                        } else {
+                          toast.success(`${detailCN.cnNo} acknowledged`);
+                          setDetailCN(null);
+                          fetchData();
+                        }
+                      } catch {
+                        toast.error("Failed to mark acknowledged");
+                      }
+                    }}
+                  >
+                    <PackageCheck className="h-4 w-4" /> Mark Acknowledged
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      // Convert to Sales Invoice — opens the existing
+                      // transferSI dialog. Same flow the context menu's
+                      // "Transfer to Sales Invoice" uses.
+                      const row = detailCN;
+                      setDetailCN(null);
+                      setTransferSIRow(row);
+                    }}
+                  >
+                    <ReceiptText className="h-4 w-4" /> Convert to Sales Invoice
+                  </Button>
+                </>
+              )}
               <Button variant="outline" onClick={() => setDetailCN(null)}>
                 Close
               </Button>

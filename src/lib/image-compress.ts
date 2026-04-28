@@ -153,7 +153,6 @@ export async function compressImage(
       // Fall through to legacy on any unexpected OffscreenCanvas failure
       // (some Android WebView builds expose the API but throw on
       // convertToBlob for HEIC inputs).
-      // eslint-disable-next-line no-console
       console.warn("[compressImage] off-thread path failed, falling back:", err);
     }
   }

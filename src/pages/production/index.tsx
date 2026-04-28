@@ -9,6 +9,7 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
 
 // ----- types -----
@@ -2303,44 +2304,36 @@ export default function ProductionPage({
   // Once the batch container is rendered, fire the print dialog. Small
   // timeout lets React paint the hidden container first; QR images are
   // external URLs but that's OK — the dialog waits for them to load.
-  // TODO P4.3-followup: migrate to useTimeout(fn, jobCardStickers.length === 0 ? null : 300).
-  // Skipped in P4.3 because this file carries 6 pre-existing
-  // react-hooks/set-state-in-effect errors that block lint-staged on
-  // commit; once those land their own follow-up, this migration is a
-  // one-liner. See docs/UPGRADE-CONTROL-BOARD.md.
-  useEffect(() => {
-    if (jobCardStickers.length === 0) return;
-    // eslint-disable-next-line no-restricted-syntax -- P4.3-followup, see TODO above
-    const t = setTimeout(() => {
+  // P4.3 final: replaced raw setTimeout-in-effect with useTimeout, which
+  // pauses on document.hidden and auto-clears on unmount. The inner
+  // post-print cleanup is intentionally still raw — it fires from inside
+  // the print() callback, not from a React lifecycle, so the hook would
+  // need an extra state pair to express it.
+  useTimeout(
+    () => {
       window.print();
       // Clear after print dialog closes. onafterprint isn't universally
       // reliable; a follow-up timeout keeps state clean either way.
       // eslint-disable-next-line no-restricted-syntax -- one-shot post-print state cleanup, fires from print callback
       setTimeout(() => setJobCardStickers([]), 500);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [jobCardStickers]);
+    },
+    jobCardStickers.length === 0 ? null : 300,
+  );
 
-  // TODO P4.3-followup: migrate to useTimeout — see the JC sticker effect
-  // above for the same rationale.
-  /* eslint-disable react-hooks/set-state-in-effect -- print-fired-from-effect: same P4.3-followup migration as above */
-  useEffect(() => {
-    if (!fgPrintRequested) return;
-    if (fgStickers.length === 0) {
-      setFgPrintRequested(false);
-      return;
-    }
-    // eslint-disable-next-line no-restricted-syntax -- P4.3-followup, see TODO above
-    const t = setTimeout(() => {
+  useTimeout(
+    () => {
+      if (fgStickers.length === 0) {
+        setFgPrintRequested(false);
+        return;
+      }
       window.print();
       // Don't clear fgStickers here anymore — the on-screen preview on UPH/
       // PACK tabs depends on that state. Reset just the print-requested flag.
       // eslint-disable-next-line no-restricted-syntax -- one-shot post-print state cleanup, fires from print callback
       setTimeout(() => setFgPrintRequested(false), 500);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [fgStickers, fgPrintRequested]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+    },
+    fgPrintRequested ? 300 : null,
+  );
 
   // Print the current filtered schedule as an A4 landscape listing. Opens
   // a new window populated with inline HTML + @page size:A4 landscape so

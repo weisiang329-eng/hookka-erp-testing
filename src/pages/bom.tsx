@@ -551,265 +551,6 @@ function getEffectiveMasterTemplateForProduct(product: Product): MasterTemplate 
 // effect can remove any stale cache on first mount. No more reads / writes.
 const BOM_TEMPLATES_KEY = "hookka-bom-templates-v2";
 
-// ---------- Bulk BOM CSV (Export / Import) ----------
-// Flattens every BOM (L1 + nested WIPs) into a single CSV the user can
-// edit in Excel. Each row is either a PROCESS or a MATERIAL.
-//
-// Columns:
-//   ProductCode, WipPath, WipCode, WipType, Kind, Index,
-//   Dept, Category, Minutes, MatCode, MatName, Qty, Unit, AutoDetect
-//
-// Match key on re-import: ProductCode + WipPath + Kind + Index.
-//   - WipPath "" means the L1 (Finished Good) row
-//   - WipPath "0" is the first top-level WIP, "0/1" is its second child, etc.
-//   - Index is the row position within the matching processes[] or materials[]
-//
-// Editable on re-import: Dept, Category, Minutes, MatCode, MatName, Qty,
-// Unit, AutoDetect. Adding/removing rows is NOT supported — the structure
-// must stay the same so the match keys still line up.
-// Header order: presentation columns (Tree/Level/ProductName/WipName) come
-// first so the file reads top-to-bottom in Excel as a tree. The importer
-// looks up columns by name, so reordering / adding columns is safe — it
-// only cares that ProductCode, WipPath, Kind, Index, and the editable
-// fields still exist with their exact original names.
-const BOM_CSV_HEADER = [
-  "Tree", "Level", "ProductCode", "ProductName", "WipName",
-  "WipPath", "WipCode", "WipType", "Kind", "Index",
-  "Dept", "Category", "Minutes", "MatCode", "MatName", "Qty", "Unit", "AutoDetect",
-];
-
-function csvEscape(value: unknown): string {
-  const s = value == null ? "" : String(value);
-  if (s.includes(",") || s.includes('"') || s.includes("\n") || s.includes("\r")) {
-    return '"' + s.replace(/"/g, '""') + '"';
-  }
-  return s;
-}
-
-// RFC4180-ish CSV parser that honours quoted fields and escaped quotes.
-function parseCSV(text: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let i = 0;
-  let inQuotes = false;
-  while (i < text.length) {
-    const ch = text[i];
-    if (inQuotes) {
-      if (ch === '"') {
-        if (text[i + 1] === '"') { cell += '"'; i += 2; continue; }
-        inQuotes = false; i++; continue;
-      }
-      cell += ch; i++; continue;
-    }
-    if (ch === '"') { inQuotes = true; i++; continue; }
-    if (ch === ",") { row.push(cell); cell = ""; i++; continue; }
-    if (ch === "\r") { i++; continue; }
-    if (ch === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; i++; continue; }
-    cell += ch; i++;
-  }
-  if (cell.length > 0 || row.length > 0) { row.push(cell); rows.push(row); }
-  return rows.filter((r) => r.length > 0 && !(r.length === 1 && r[0] === ""));
-}
-
-function exportBOMsCSV(templates: BOMTemplate[]) {
-  const rows: string[][] = [BOM_CSV_HEADER];
-
-  // Sort templates alphabetically by product code so re-exports diff cleanly.
-  const sorted = [...templates].sort((a, b) =>
-    (a.productCode || "").localeCompare(b.productCode || "")
-  );
-
-  // Build a tree-style label: 2 spaces per level + "└─ <wipCode>" for nested
-  // WIPs, or "📦 <productCode>" for the FG (L1) row. Pure spaces (no tabs)
-  // so Excel doesn't collapse them. Empty wipCode falls back to wipType.
-  const fgTree = (productCode: string) => `📦 ${productCode}`;
-  const wipTree = (depth: number, wipLabel: string) =>
-    " ".repeat(depth * 2) + "└─ " + wipLabel;
-  const levelLabel = (depth: number) => (depth === 0 ? "FG" : `L${depth + 1}`);
-
-  for (let ti = 0; ti < sorted.length; ti++) {
-    const t = sorted[ti];
-    const productName = t.baseModel || "";
-    const fgTreeStr = fgTree(t.productCode);
-
-    // L1 processes (FG)
-    t.l1Processes.forEach((p, i) => {
-      rows.push([
-        fgTreeStr, "FG", t.productCode, productName, "",
-        "", "L1", "FG", "PROCESS", String(i),
-        p.deptCode, p.category, String(p.minutes),
-        "", "", "", "", "",
-      ]);
-    });
-    // L1 materials (FG)
-    (t.l1Materials || []).forEach((m, i) => {
-      rows.push([
-        fgTreeStr, "FG", t.productCode, productName, "",
-        "", "L1", "FG", "MATERIAL", String(i),
-        "", "", "",
-        m.code || "", m.name || "", String(m.qty), m.unit || "", m.autoDetect || "",
-      ]);
-    });
-
-    // Recursive walk over WIPs (depth-first). Depth 1 = L2 (first WIP layer
-    // under the FG); depth 2 = L3; etc.
-    const walk = (wips: WIPComponent[], parentPath: string, depth: number) => {
-      wips.forEach((w, idx) => {
-        const path = parentPath ? `${parentPath}/${idx}` : String(idx);
-        const wipCode = w.wipCode || "";
-        const wipName = wipCode || (w.wipType ? WIP_TYPE_LABELS[w.wipType]?.label || w.wipType : "");
-        const treeStr = wipTree(depth, wipName || w.wipType || "WIP");
-        const lvl = levelLabel(depth);
-
-        w.processes.forEach((p, i) => {
-          rows.push([
-            treeStr, lvl, t.productCode, productName, wipName,
-            path, wipCode, w.wipType, "PROCESS", String(i),
-            p.deptCode, p.category, String(p.minutes),
-            "", "", "", "", "",
-          ]);
-        });
-        (w.materials || []).forEach((m, i) => {
-          rows.push([
-            treeStr, lvl, t.productCode, productName, wipName,
-            path, wipCode, w.wipType, "MATERIAL", String(i),
-            "", "", "",
-            m.code || "", m.name || "", String(m.qty), m.unit || "", m.autoDetect || "",
-          ]);
-        });
-        if (w.children && w.children.length > 0) walk(w.children, path, depth + 1);
-      });
-    };
-    walk(t.wipComponents, "", 1);
-
-    // Blank separator row between products (not after the last one). The
-    // importer guards against fully-blank rows by checking Kind === "" and
-    // skipping silently — see applyBOMsCSV below.
-    if (ti < sorted.length - 1) {
-      rows.push(new Array(BOM_CSV_HEADER.length).fill(""));
-    }
-  }
-  const csv = rows.map((r) => r.map(csvEscape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = `bom-export-${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
-// Walks templates and produces a fresh copy with the CSV rows applied.
-// Returns { updated, missed } where missed are rows whose match key didn't
-// resolve (e.g. typo'd product code or path).
-function applyBOMsCSV(
-  templates: BOMTemplate[],
-  csvText: string,
-  rawMaterials: RawMaterialOption[],
-): { updated: BOMTemplate[]; matched: number; missed: number } {
-  const rows = parseCSV(csvText);
-  if (rows.length < 2) return { updated: templates, matched: 0, missed: 0 };
-  const header = rows[0].map((s) => s.trim());
-  const colIdx: Record<string, number> = {};
-  BOM_CSV_HEADER.forEach((h) => { colIdx[h] = header.indexOf(h); });
-
-  // Index raw materials by code so we can re-link names/units when only the
-  // code changes.
-  const rmByCode: Record<string, RawMaterialOption> = {};
-  for (const rm of rawMaterials) rmByCode[rm.itemCode] = rm;
-
-  // Deep clone templates so we never mutate the caller's state in place.
-  const updated: BOMTemplate[] = JSON.parse(JSON.stringify(templates));
-  const byCode: Record<string, BOMTemplate> = {};
-  for (const t of updated) byCode[t.productCode] = t;
-
-  // Helper: walk a WIP path like "0/1/2" inside wipComponents.
-  const resolveWipNode = (tpl: BOMTemplate, path: string): WIPComponent | null => {
-    if (!path) return null;
-    const parts = path.split("/").map((p) => parseInt(p, 10)).filter((n) => !isNaN(n));
-    let node: WIPComponent | undefined = tpl.wipComponents[parts[0]];
-    for (let i = 1; i < parts.length; i++) {
-      if (!node || !node.children) return null;
-      node = node.children[parts[i]];
-    }
-    return node || null;
-  };
-
-  let matched = 0;
-  let missed = 0;
-  for (let r = 1; r < rows.length; r++) {
-    const row = rows[r];
-    const productCode = row[colIdx.ProductCode]?.trim();
-    const wipPath = row[colIdx.WipPath]?.trim() || "";
-    const kind = row[colIdx.Kind]?.trim();
-    const index = parseInt(row[colIdx.Index] || "0", 10);
-    // Skip presentation-only rows (blank separators between products, or
-    // future HEADER section rows). These have no Kind and shouldn't count
-    // against the missed total.
-    if (!kind || kind === "HEADER") continue;
-    const tpl = byCode[productCode];
-    if (!tpl) { missed++; continue; }
-
-    // Resolve the parent (L1 of template, or a WIP node) and its target
-    // processes/materials array.
-    let processes: BOMProcess[] | null = null;
-    let materials: WIPMaterial[] | null = null;
-    if (wipPath === "") {
-      processes = tpl.l1Processes;
-      if (!tpl.l1Materials) tpl.l1Materials = [];
-      materials = tpl.l1Materials;
-    } else {
-      const node = resolveWipNode(tpl, wipPath);
-      if (!node) { missed++; continue; }
-      processes = node.processes;
-      if (!node.materials) node.materials = [];
-      materials = node.materials;
-    }
-
-    if (kind === "PROCESS" && processes && processes[index]) {
-      const dept = row[colIdx.Dept]?.trim();
-      const category = row[colIdx.Category]?.trim();
-      const minutesRaw = row[colIdx.Minutes]?.trim();
-      const minutes = minutesRaw === "" ? processes[index].minutes : parseInt(minutesRaw || "0", 10);
-      processes[index] = {
-        ...processes[index],
-        deptCode: dept || processes[index].deptCode,
-        dept: DEPT_LABELS[dept] || processes[index].dept,
-        category: category || processes[index].category,
-        minutes: isNaN(minutes) ? processes[index].minutes : minutes,
-      };
-      matched++;
-    } else if (kind === "MATERIAL" && materials && materials[index]) {
-      const code = row[colIdx.MatCode]?.trim();
-      const name = row[colIdx.MatName]?.trim();
-      const qtyRaw = row[colIdx.Qty]?.trim();
-      const qty = qtyRaw === "" ? materials[index].qty : parseFloat(qtyRaw || "0");
-      const unit = row[colIdx.Unit]?.trim();
-      const autoDetectRaw = row[colIdx.AutoDetect]?.trim();
-      const autoDetect = autoDetectRaw === "FABRIC" || autoDetectRaw === "LEG" ? autoDetectRaw : undefined;
-      // If the user re-pointed the row at a different inventory code,
-      // re-link the description/unit from the catalogue.
-      const linked = code ? rmByCode[code] : undefined;
-      materials[index] = {
-        ...materials[index],
-        code: code ?? materials[index].code,
-        name: linked ? linked.description : (name || materials[index].name),
-        qty: isNaN(qty) ? materials[index].qty : qty,
-        unit: linked ? linked.baseUOM : (unit || materials[index].unit),
-        inventoryCode: linked ? linked.itemCode : materials[index].inventoryCode,
-        autoDetect,
-      };
-      matched++;
-    } else {
-      missed++;
-    }
-  }
-
-  return { updated, matched, missed };
-}
 
 // ---------- Routing Pill ----------
 function RoutingPill({ process }: { process: BOMProcess }) {
@@ -5249,6 +4990,12 @@ function DeptPivotCategoryDialog({
   const [modelFilter, setModelFilter] = useState<string>("");
   const [branchFilter, setBranchFilter] = useState<string>("");
   const [saving, setSaving] = useState(false);
+  // Multi-select for bulk-apply. Lets the user pick many rows and smash
+  // them all to the same category in one move (matches the Batch Edit
+  // dialog's UX). Selection is keyed by rowKey, independent of the
+  // inline edit state in `rows`.
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [bulkFillCat, setBulkFillCat] = useState("");
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
   // upstream template/products list changes (e.g. after a save).
@@ -5265,6 +5012,8 @@ function DeptPivotCategoryDialog({
     setSearch("");
     setModelFilter("");
     setBranchFilter("");
+    setSelectedKeys(new Set());
+    setBulkFillCat("");
   }, [open, deptCode, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -5314,6 +5063,58 @@ function DeptPivotCategoryDialog({
         return { ...r, category: newCat, minutes: newMinutes };
       }),
     );
+  }
+
+  // Multi-select helpers
+  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
+  function toggleAllFiltered() {
+    if (allFilteredSelected) {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.delete(r.rowKey);
+        return next;
+      });
+    } else {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.add(r.rowKey);
+        return next;
+      });
+    }
+  }
+  function toggleOne(rowKey: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+  }
+
+  // Bulk-fill: writes bulkFillCat into every targeted row's category +
+  // auto-fills minutes from the dept x category matrix. Targets are
+  // selected rows when there is selection, otherwise all visible rows.
+  function handleBulkFill() {
+    if (!bulkFillCat) {
+      toast.warning("Pick a category first.");
+      return;
+    }
+    const targetKeys = selectedKeys.size > 0
+      ? new Set(filteredRows.filter((r) => selectedKeys.has(r.rowKey)).map((r) => r.rowKey))
+      : new Set(filteredRows.map((r) => r.rowKey));
+    if (targetKeys.size === 0) {
+      toast.warning("No rows to apply to.");
+      return;
+    }
+    const newMinutes = getProductionMinutes(deptCode, bulkFillCat);
+    setRows((prev) =>
+      prev.map((r) => {
+        if (!targetKeys.has(r.rowKey)) return r;
+        return { ...r, category: bulkFillCat, minutes: newMinutes };
+      }),
+    );
+    const scope = selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `${targetKeys.size} visible`;
+    toast.success(`Filled ${targetKeys.size} row${targetKeys.size !== 1 ? "s" : ""} -> ${bulkFillCat} (${scope}). Click Save 0 to commit.`.replace("Save 0", `Save`));
   }
 
   async function handleSave() {
@@ -5475,7 +5276,53 @@ function DeptPivotCategoryDialog({
               </select>
             </div>
             <div className="text-xs text-gray-500 pb-2">
-              {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty
+              {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty · {selectedKeys.size} selected
+            </div>
+          </div>
+
+          {/* Bulk fill bar - apply one category to many rows in one click. */}
+          <div className="flex items-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
+            <div className="flex-1">
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Bulk fill: {selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `all ${filteredRows.length} visible`} -&gt; ...
+              </label>
+              <div className="flex gap-2">
+                <select
+                  value={bulkFillCat}
+                  onChange={(e) => setBulkFillCat(e.target.value)}
+                  className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:border-[#6B5C32]"
+                >
+                  <option value="">Pick category...</option>
+                  {categoryOptions.map((c) => {
+                    const m = getProductionMinutes(deptCode, c);
+                    const label = m > 0 ? `${c} (${m} min)` : c;
+                    return <option key={c} value={c}>{label}</option>;
+                  })}
+                </select>
+                <button
+                  onClick={handleBulkFill}
+                  disabled={!bulkFillCat}
+                  className="px-3 py-1.5 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  Fill
+                </button>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 text-xs pb-1">
+              <button
+                onClick={toggleAllFiltered}
+                className="text-[#6B5C32] hover:underline font-medium whitespace-nowrap"
+              >
+                {allFilteredSelected ? `Deselect All ${filteredRows.length}` : `Select All ${filteredRows.length}`}
+              </button>
+              {selectedKeys.size > 0 && (
+                <button
+                  onClick={() => setSelectedKeys(new Set())}
+                  className="text-[#9A3A2D] hover:underline whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
 
@@ -5485,6 +5332,15 @@ function DeptPivotCategoryDialog({
               <table className="w-full text-sm">
                 <thead className="bg-[#FAF9F7] sticky top-0 z-10">
                   <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
+                    <th className="px-3 py-2 font-medium w-8">
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleAllFiltered}
+                        className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                        title={allFilteredSelected ? "Deselect all visible" : "Select all visible"}
+                      />
+                    </th>
                     <th className="px-3 py-2 font-medium">Model</th>
                     <th className="px-3 py-2 font-medium">Branch / Code</th>
                     <th className="px-3 py-2 font-medium">Process</th>
@@ -5495,7 +5351,7 @@ function DeptPivotCategoryDialog({
                 <tbody>
                   {filteredRows.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="px-3 py-8 text-center text-gray-400">
+                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">
                         {rows.length === 0
                           ? `No process rows on any BOM touch ${DEPT_LABELS[deptCode]}.`
                           : "No rows match the search."}
@@ -5504,11 +5360,22 @@ function DeptPivotCategoryDialog({
                   )}
                   {filteredRows.map((r) => {
                     const dirty = r.category !== r.initialCategory;
+                    const isSelected = selectedKeys.has(r.rowKey);
                     return (
                       <tr
                         key={r.rowKey}
-                        className={`border-t border-[#E2DDD8] ${dirty ? "bg-[#FAEFCB]/40" : "hover:bg-[#FAF9F7]"}`}
+                        className={`border-t border-[#E2DDD8] ${
+                          dirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
+                        }`}
                       >
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleOne(r.rowKey)}
+                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                        </td>
                         <td className="px-3 py-2">
                           <div className="font-medium text-[#111827]">{r.productCode}</div>
                           <div className="text-[10px] text-gray-400">{r.baseModel}</div>
@@ -5536,7 +5403,7 @@ function DeptPivotCategoryDialog({
                             value={r.category}
                             onChange={(e) => handleCategoryChange(r.rowKey, e.target.value)}
                             className={`w-full border rounded px-2 py-1 text-xs focus:outline-none focus:border-[#6B5C32] ${
-                              dirty ? "border-[#9C6F1E] bg-white" : "border-[#E2DDD8] bg-white"
+                              dirty ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] bg-white"
                             }`}
                           >
                             {/* If the current value isn't in the canonical list (legacy data),
@@ -5593,7 +5460,6 @@ function DeptPivotCategoryDialog({
 // ---------- Main Page ----------
 export default function BOMManagementPage() {
   const { toast } = useToast();
-  const bomCsvInputRef = React.useRef<HTMLInputElement | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [templates, setTemplates] = useState<BOMTemplate[]>([]);
   const [rawMaterials, setRawMaterials] = useState<RawMaterialOption[]>([]);
@@ -5700,86 +5566,6 @@ export default function BOMManagementPage() {
         if (rj?.success) setTemplates(rj.data as BOMTemplate[]);
       } catch { /* ignore */ }
     }
-  }
-
-  // Bulk BOM CSV — flat export of every BOM's processes and materials so
-  // the user can edit Categories and Raw Materials in Excel and re-import.
-  function handleExportBOMsCSV() {
-    if (templates.length === 0) {
-      toast.warning("No BOMs to export.");
-      return;
-    }
-    exportBOMsCSV(templates);
-  }
-
-  function handleImportBOMsCSV(file: File) {
-    const reader = new FileReader();
-    reader.onload = () => {
-      void (async () => {
-        const text = String(reader.result || "");
-        const result = applyBOMsCSV(templates, text, rawMaterials);
-        setTemplates(result.updated);
-
-        // applyBOMsCSV is pure - it returns a new array but doesn't tell us
-        // which templates changed. Diff by stringify against the original
-        // list (templates is keyed by id) so we only PUT rows the CSV
-        // actually touched. Without this the import lived in React state
-        // only and silently disappeared on reload.
-        const beforeById: Record<string, string> = {};
-        for (const t of templates) beforeById[t.id] = JSON.stringify(t);
-        const changed = result.updated.filter(
-          (t) => beforeById[t.id] !== JSON.stringify(t),
-        );
-
-        if (changed.length === 0) {
-          toast.success(
-            `Import complete - Updated: ${result.matched}, Skipped: ${result.missed}`,
-          );
-          return;
-        }
-
-        const writes = await Promise.allSettled(
-          changed.map(async (t) => {
-            const res = await fetch(
-              `/api/bom/templates/${encodeURIComponent(t.id)}`,
-              {
-                method: "PUT",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(t),
-              },
-            );
-            const json = (await res.json().catch(() => null)) as {
-              success?: boolean;
-              error?: string;
-            } | null;
-            if (!res.ok || !json?.success) {
-              throw new Error(json?.error || `HTTP ${res.status}`);
-            }
-            return t.productCode;
-          }),
-        );
-        const failed = writes
-          .map((w, i) => (w.status === "rejected" ? changed[i].productCode : null))
-          .filter((x): x is string => x !== null);
-
-        if (failed.length > 0) {
-          // Keep in-memory state so the user can retry via manual save.
-          toast.error(
-            `Import persisted partially - ${failed.length} BOM(s) failed: ${failed.join(", ")}`,
-          );
-          return;
-        }
-
-        // All writes succeeded - invalidate caches so subsequent reads hit
-        // fresh data, matching what handleBOMEdited does on a single edit.
-        invalidateCachePrefix("/api/bom");
-        invalidateCachePrefix("/api/products");
-        toast.success(
-          `Import complete - ${changed.length} BOMs persisted (Updated: ${result.matched}, Skipped: ${result.missed})`,
-        );
-      })();
-    };
-    reader.readAsText(file);
   }
 
   // Master templates only auto-push to bedframes during the initial setup
@@ -5907,37 +5693,9 @@ export default function BOMManagementPage() {
               )}
             </button>
           )}
-          <input
-            ref={bomCsvInputRef}
-            type="file"
-            accept=".csv,text/csv"
-            className="hidden"
-            onChange={(e) => {
-              const f = e.target.files?.[0];
-              if (f) handleImportBOMsCSV(f);
-              e.target.value = "";
-            }}
-          />
-          <button
-            onClick={handleExportBOMsCSV}
-            title="Export every BOM as a flat CSV (edit categories / raw materials in Excel)"
-            className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
-          >
-            <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5m0 0l5-5m-5 5V4" />
-            </svg>
-            Export BOMs
-          </button>
-          <button
-            onClick={() => bomCsvInputRef.current?.click()}
-            title="Import an edited BOM CSV — matched by ProductCode + WipPath + Kind + Index"
-            className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
-          >
-            <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M17 8l-5-5m0 0L7 8m5-5v12" />
-            </svg>
-            Import BOMs
-          </button>
+          {/* Export / Import BOM CSV buttons removed 2026-04-28 per user
+              request - inline editors (Batch Edit Categories + Dept-Pivot
+              Editor) cover the spreadsheet round-trip use case directly. */}
           <button
             onClick={() => setShowBatchEditCat(true)}
             title="Batch edit production categories across multiple BOM templates"

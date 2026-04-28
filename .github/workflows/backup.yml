@@ -1,0 +1,111 @@
+name: Daily Postgres Backup -> R2
+
+# Sprint 4 — DR scaffold finish. Runs pg_dump -Fc against Supabase prod and
+# uploads the .dump file to r2://hookka-files/backups/. 18:00 UTC = 02:00 SGT
+# (UTC+8) — the same window as the in-Worker logical-dump cron, intentionally
+# overlapping so we have BOTH formats per night until WAL shipping replaces
+# the daily floor.
+#
+# Required GitHub repo secrets (all must be set before the schedule fires):
+#   SUPABASE_PROD_URL  — full pooler connection string (postgres://...)
+#                        Get it from Supabase dashboard -> Project Settings ->
+#                        Database -> "Connection pooling" mode, transaction
+#                        pooler. Must include `?sslmode=require`.
+#   R2_ACCESS_KEY_ID   — Cloudflare R2 API token with Object Read & Write
+#                        scoped to the hookka-files bucket.
+#   R2_SECRET_ACCESS_KEY — pair to the access key above.
+#   R2_ENDPOINT        — e.g. https://<accountId>.r2.cloudflarestorage.com
+#                        (the s3-compatible endpoint, NOT the public bucket
+#                        URL). Get from R2 dashboard -> Manage API Tokens.
+#
+# Manual trigger via workflow_dispatch — useful for ad-hoc snapshots before
+# a risky migration. Retention: object lifecycle on R2 keeps the last 90
+# days; we don't prune from the workflow itself (R2 lifecycle rules handle
+# it, see docs/DR-RUNBOOK.md).
+on:
+  schedule:
+    - cron: '0 18 * * *'   # 02:00 SGT daily
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Install postgresql-client-16
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16 awscli
+
+      - name: Verify required secrets are set
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_PROD_URL }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+        run: |
+          missing=()
+          [ -z "$DATABASE_URL" ] && missing+=("SUPABASE_PROD_URL")
+          [ -z "$R2_ACCESS_KEY_ID" ] && missing+=("R2_ACCESS_KEY_ID")
+          [ -z "$R2_SECRET_ACCESS_KEY" ] && missing+=("R2_SECRET_ACCESS_KEY")
+          [ -z "$R2_ENDPOINT" ] && missing+=("R2_ENDPOINT")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            echo "See .github/workflows/backup.yml header for setup instructions."
+            exit 1
+          fi
+
+      - name: pg_dump -> .dump (custom format, compressed)
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_PROD_URL }}
+        run: |
+          STAMP=$(date -u +%Y-%m-%d)
+          # -Fc: custom format (parallel-restore-able via pg_restore --jobs)
+          # -Z 9: max zlib compression on the dump itself
+          # --no-owner --no-acl: portable across recovery projects
+          pg_dump -Fc -Z 9 --no-owner --no-acl \
+            "$DATABASE_URL" \
+            > "backup-$STAMP.dump"
+          ls -lh "backup-$STAMP.dump"
+          echo "BACKUP_FILE=backup-$STAMP.dump" >> $GITHUB_ENV
+          echo "BACKUP_STAMP=$STAMP" >> $GITHUB_ENV
+
+      - name: Upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          # R2 only supports the auto region in the S3 API.
+          AWS_DEFAULT_REGION: auto
+        run: |
+          aws s3 cp \
+            "$BACKUP_FILE" \
+            "s3://hookka-files/backups/supabase/$BACKUP_FILE" \
+            --endpoint-url "$R2_ENDPOINT"
+
+      - name: Verify upload (size > 1KB)
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          AWS_DEFAULT_REGION: auto
+        run: |
+          # Sentinel sanity check: a successful pg_dump on the current
+          # dataset is at minimum a few MB. If we uploaded a near-empty
+          # file the dump silently truncated and the backup is useless.
+          size=$(aws s3api head-object \
+            --bucket hookka-files \
+            --key "backups/supabase/$BACKUP_FILE" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --query 'ContentLength' \
+            --output text)
+          echo "Uploaded size: $size bytes"
+          if [ "$size" -lt 1024 ]; then
+            echo "::error::Backup size $size bytes < 1KB threshold — likely a silent pg_dump failure"
+            exit 1
+          fi
+
+      - name: Print recovery hint
+        run: |
+          echo "Daily backup uploaded: s3://hookka-files/backups/supabase/$BACKUP_FILE"
+          echo "To restore, see docs/DR-RUNBOOK.md (Recovery procedure)."

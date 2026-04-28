@@ -75,7 +75,8 @@ const VALID_STATUSES: Status[] = [
 // validator. Mode is checked at the call site — REPRODUCE goes to
 // IN_PRODUCTION, STOCK_SWAP goes to RESERVED, REPAIR goes to IN_REPAIR;
 // each mode has its own one-step path out of OPEN.
-const STATUS_TRANSITIONS: Record<Status, Status[]> = {
+// Adjacency for kind='RESOLUTION' (the rework/swap/repair flow).
+const STATUS_TRANSITIONS_RESOLUTION: Record<Status, Status[]> = {
   OPEN: ["IN_PRODUCTION", "RESERVED", "IN_REPAIR", "CANCELLED"],
   IN_PRODUCTION: ["READY_TO_SHIP", "CANCELLED"],
   RESERVED: ["READY_TO_SHIP", "CANCELLED"],
@@ -86,18 +87,68 @@ const STATUS_TRANSITIONS: Record<Status, Status[]> = {
   CANCELLED: [],
 };
 
+// Adjacency for kind='RECORD' (Service Case — log only). No production /
+// reservation / shipping states; the case is open until the operator marks
+// it CLOSED, optionally CANCELLED if it was logged in error.
+const STATUS_TRANSITIONS_RECORD: Record<Status, Status[]> = {
+  OPEN: ["CLOSED", "CANCELLED"],
+  IN_PRODUCTION: [],
+  RESERVED: [],
+  IN_REPAIR: [],
+  READY_TO_SHIP: [],
+  DELIVERED: [],
+  CLOSED: [],
+  CANCELLED: [],
+};
+
+function statusTransitionsFor(kind: ServiceKind | null | undefined) {
+  return kind === "RECORD" ? STATUS_TRANSITIONS_RECORD : STATUS_TRANSITIONS_RESOLUTION;
+}
+
+type ServiceKind = "RESOLUTION" | "RECORD";
+type SourceType = "SO" | "CO" | "EXTERNAL";
+type RootCauseCategory =
+  | "PRODUCTION"
+  | "DESIGN"
+  | "MATERIAL"
+  | "PROCESS"
+  | "CUSTOMER"
+  | "TRANSPORT"
+  | "OTHER";
+type PreventionStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
+
+const VALID_KINDS: ServiceKind[] = ["RESOLUTION", "RECORD"];
+const VALID_SOURCE_TYPES: SourceType[] = ["SO", "CO", "EXTERNAL"];
+const VALID_ROOT_CAUSE: RootCauseCategory[] = [
+  "PRODUCTION", "DESIGN", "MATERIAL", "PROCESS", "CUSTOMER", "TRANSPORT", "OTHER",
+];
+const VALID_PREVENTION_STATUS: PreventionStatus[] = [
+  "PENDING", "IN_PROGRESS", "DONE", "NOT_NEEDED",
+];
+
 type ServiceOrderRow = {
   id: string;
   serviceOrderNo: string;
-  sourceType: "SO" | "CO";
-  sourceId: string;
+  // 0073: kind discriminates Service Case (RECORD) from Service Order (RESOLUTION)
+  kind: ServiceKind;
+  // 0073: 'EXTERNAL' added for old / paper orders not in the ERP
+  sourceType: SourceType;
+  // 0073: nullable for EXTERNAL
+  sourceId: string | null;
   sourceNo: string | null;
   customerId: string;
   customerName: string;
-  mode: Mode;
+  // Nullable since 0072 — case can be opened with mode TBD
+  mode: Mode | null;
   status: Status;
   issueDescription: string | null;
   issuePhotos: string | null;
+  // 0073: root-cause + prevention loop
+  rootCauseCategory: RootCauseCategory | null;
+  rootCauseNotes: string | null;
+  preventionAction: string | null;
+  preventionStatus: PreventionStatus | null;
+  preventionOwner: string | null;
   createdBy: string | null;
   createdByName: string | null;
   createdAt: string | null;
@@ -184,8 +235,9 @@ function rowToApi(
   return {
     id: row.id,
     serviceOrderNo: row.serviceOrderNo,
+    kind: row.kind ?? "RESOLUTION",
     sourceType: row.sourceType,
-    sourceId: row.sourceId,
+    sourceId: row.sourceId ?? "",
     sourceNo: row.sourceNo ?? "",
     customerId: row.customerId,
     customerName: row.customerName,
@@ -193,6 +245,11 @@ function rowToApi(
     status: row.status,
     issueDescription: row.issueDescription ?? "",
     issuePhotos: photos,
+    rootCauseCategory: row.rootCauseCategory,
+    rootCauseNotes: row.rootCauseNotes ?? "",
+    preventionAction: row.preventionAction ?? "",
+    preventionStatus: row.preventionStatus ?? "PENDING",
+    preventionOwner: row.preventionOwner ?? "",
     createdBy: row.createdBy ?? "",
     createdByName: row.createdByName ?? "",
     createdAt: row.createdAt ?? "",
@@ -406,54 +463,110 @@ app.post("/", async (c) => {
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
 
-    // ---- validate mode/sourceType ----
-    const sourceType = body.sourceType as string;
-    if (sourceType !== "SO" && sourceType !== "CO") {
+    // ---- validate kind / sourceType / mode ----
+    const kind = (body.kind as ServiceKind | undefined) ?? "RESOLUTION";
+    if (!VALID_KINDS.includes(kind)) {
       return c.json(
-        { success: false, error: "sourceType must be 'SO' or 'CO'" },
+        { success: false, error: "kind must be 'RESOLUTION' or 'RECORD'" },
         400,
       );
     }
+
+    const sourceType = body.sourceType as string;
+    if (!VALID_SOURCE_TYPES.includes(sourceType as SourceType)) {
+      return c.json(
+        { success: false, error: "sourceType must be 'SO', 'CO', or 'EXTERNAL'" },
+        400,
+      );
+    }
+
     // mode is OPTIONAL at create-time (per design 2026-04-28: open the case
     // immediately when the customer reports the defect; pick the resolution
     // mode later via PUT /:id/mode). null/undefined → status='OPEN', no
     // side-effects. If a mode IS supplied, it must be valid.
-    const mode = (body.mode as Mode | null | undefined) ?? null;
+    //
+    // For kind=RECORD: mode MUST stay null. A "record-only" service has no
+    // resolution flow (no rework / swap / repair), it's just a logged event.
+    let mode = (body.mode as Mode | null | undefined) ?? null;
+    if (kind === "RECORD" && mode !== null) {
+      // Don't 400 — silently coerce to null. Frontend hides the picker for
+      // RECORD anyway, so a non-null mode here is a stale state, not a user
+      // intent we should honour.
+      mode = null;
+    }
     if (mode !== null && !VALID_MODES.includes(mode)) {
       return c.json(
         { success: false, error: "mode must be REPRODUCE, STOCK_SWAP, REPAIR, or null" },
         400,
       );
     }
-    const sourceId = body.sourceId as string;
-    if (!sourceId) {
-      return c.json({ success: false, error: "sourceId is required" }, 400);
-    }
 
-    // ---- validate source order EXISTS and is SHIPPED ----
-    const source = await loadSourceOrder(c.var.DB, sourceType, sourceId);
-    if (!source) {
-      return c.json(
-        { success: false, error: `Source ${sourceType} ${sourceId} not found` },
-        404,
-      );
-    }
-    const shippedSet =
-      sourceType === "SO" ? SHIPPED_STATUSES_SO : SHIPPED_STATUSES_CO;
-    if (!shippedSet.includes(source.status)) {
-      return c.json(
-        {
-          success: false,
-          error: `Source order is in ${source.status} status. Only shipped orders (status in ${shippedSet.join(",")}) can have a Service Order created.`,
-        },
-        409,
-      );
+    // ---- source ----
+    // For SO/CO we still validate the order exists and is shipped. For
+    // EXTERNAL we trust the operator to type customerName + a free-text
+    // reference (no DB to verify against).
+    type Source = {
+      id: string;
+      customerId: string;
+      customerName: string;
+      customerState: string | null;
+      companyOrderId: string | null;
+      status: string;
+      items: Array<{ id: string; productId: string | null; productCode: string | null; productName: string | null; quantity: number }>;
+    };
+    let source: Source;
+    let sourceId: string | null = (body.sourceId as string) || null;
+
+    if (sourceType === "EXTERNAL") {
+      const customerName = String(body.customerName ?? "").trim();
+      if (!customerName) {
+        return c.json(
+          { success: false, error: "customerName is required for EXTERNAL source" },
+          400,
+        );
+      }
+      sourceId = null;
+      source = {
+        id: "external",
+        customerId: (body.customerId as string) || "",
+        customerName,
+        customerState: (body.customerState as string) || null,
+        companyOrderId: (body.externalRef as string) || null,
+        status: "EXTERNAL",
+        items: [], // not used for EXTERNAL — operator types lines by hand
+      };
+    } else {
+      if (!sourceId) {
+        return c.json({ success: false, error: "sourceId is required for SO/CO" }, 400);
+      }
+      const loaded = await loadSourceOrder(c.var.DB, sourceType as "SO" | "CO", sourceId);
+      if (!loaded) {
+        return c.json(
+          { success: false, error: `Source ${sourceType} ${sourceId} not found` },
+          404,
+        );
+      }
+      const shippedSet =
+        sourceType === "SO" ? SHIPPED_STATUSES_SO : SHIPPED_STATUSES_CO;
+      if (!shippedSet.includes(loaded.status)) {
+        return c.json(
+          {
+            success: false,
+            error: `Source order is in ${loaded.status} status. Only shipped orders (status in ${shippedSet.join(",")}) can have a Service Order created.`,
+          },
+          409,
+        );
+      }
+      source = loaded as Source;
     }
 
     const rawLines = Array.isArray(body.lines) ? body.lines : [];
-    if (rawLines.length === 0) {
+    // RECORD allows zero lines (e.g., complaint logged without a specific
+    // product). RESOLUTION still requires at least one — the resolution
+    // mode wouldn't have anything to operate on otherwise.
+    if (kind === "RESOLUTION" && rawLines.length === 0) {
       return c.json(
-        { success: false, error: "At least one line is required" },
+        { success: false, error: "At least one line is required for resolution-kind service orders" },
         400,
       );
     }
@@ -584,15 +697,28 @@ app.post("/", async (c) => {
       ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
       : null;
 
+    const rcCategory = body.rootCauseCategory as RootCauseCategory | null | undefined;
+    if (rcCategory && !VALID_ROOT_CAUSE.includes(rcCategory)) {
+      return c.json({ success: false, error: "rootCauseCategory invalid" }, 400);
+    }
+    const pStatus =
+      (body.preventionStatus as PreventionStatus | undefined) ?? "PENDING";
+    if (!VALID_PREVENTION_STATUS.includes(pStatus)) {
+      return c.json({ success: false, error: "preventionStatus invalid" }, 400);
+    }
+
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO service_orders (id, serviceOrderNo, sourceType, sourceId,
+        `INSERT INTO service_orders (id, serviceOrderNo, kind, sourceType, sourceId,
            sourceNo, customerId, customerName, mode, status, issueDescription,
-           issuePhotos, createdBy, createdByName, created_at, closedAt, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+           issuePhotos, rootCauseCategory, rootCauseNotes, preventionAction,
+           preventionStatus, preventionOwner, createdBy, createdByName,
+           created_at, closedAt, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       ).bind(
         id,
         serviceOrderNo,
+        kind,
         sourceType,
         sourceId,
         source.companyOrderId,
@@ -602,6 +728,11 @@ app.post("/", async (c) => {
         initialStatus,
         (body.issueDescription as string) ?? null,
         photosJson,
+        rcCategory ?? null,
+        (body.rootCauseNotes as string) ?? null,
+        (body.preventionAction as string) ?? null,
+        pStatus,
+        (body.preventionOwner as string) ?? null,
         (body.createdBy as string) ?? null,
         (body.createdByName as string) ?? null,
         nowIso,
@@ -698,9 +829,30 @@ app.put("/:id", async (c) => {
           ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
           : null;
 
+    // RCA / prevention fields are editable here too (PUT /:id is the
+    // generic metadata edit endpoint). Each one is COALESCE-style: if
+    // body.field is undefined we keep the existing value; if it's
+    // explicitly null/empty we accept the clear.
+    const rcCategoryNext =
+      body.rootCauseCategory === undefined
+        ? existing.rootCauseCategory
+        : ((body.rootCauseCategory as RootCauseCategory | null) ?? null);
+    if (rcCategoryNext != null && !VALID_ROOT_CAUSE.includes(rcCategoryNext)) {
+      return c.json({ success: false, error: "rootCauseCategory invalid" }, 400);
+    }
+    const pStatusNext =
+      body.preventionStatus === undefined
+        ? (existing.preventionStatus ?? "PENDING")
+        : (body.preventionStatus as PreventionStatus);
+    if (!VALID_PREVENTION_STATUS.includes(pStatusNext)) {
+      return c.json({ success: false, error: "preventionStatus invalid" }, 400);
+    }
+
     await c.var.DB.prepare(
       `UPDATE service_orders SET
-         issueDescription = ?, issuePhotos = ?, notes = ?
+         issueDescription = ?, issuePhotos = ?, notes = ?,
+         rootCauseCategory = ?, rootCauseNotes = ?,
+         preventionAction = ?, preventionStatus = ?, preventionOwner = ?
        WHERE id = ?`,
     )
       .bind(
@@ -711,6 +863,17 @@ app.put("/:id", async (c) => {
         body.notes !== undefined
           ? ((body.notes as string) ?? null)
           : existing.notes,
+        rcCategoryNext,
+        body.rootCauseNotes !== undefined
+          ? ((body.rootCauseNotes as string) ?? null)
+          : existing.rootCauseNotes,
+        body.preventionAction !== undefined
+          ? ((body.preventionAction as string) ?? null)
+          : existing.preventionAction,
+        pStatusNext,
+        body.preventionOwner !== undefined
+          ? ((body.preventionOwner as string) ?? null)
+          : existing.preventionOwner,
         id,
       )
       .run();
@@ -784,7 +947,7 @@ app.put("/:id/status", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Service order not found" }, 404);
     }
-    const allowed = STATUS_TRANSITIONS[existing.status] ?? [];
+    const allowed = statusTransitionsFor(existing.kind)[existing.status] ?? [];
     if (!allowed.includes(next)) {
       return c.json(
         {
@@ -901,6 +1064,16 @@ app.put("/:id/mode", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Service order not found" }, 404);
     }
+    // RECORD-kind cases never have a resolution mode — they're log-only.
+    if (existing.kind === "RECORD") {
+      return c.json(
+        {
+          success: false,
+          error: "RECORD-kind service has no resolution mode. Switch kind first or open a new RESOLUTION case.",
+        },
+        409,
+      );
+    }
     if (existing.mode != null) {
       return c.json(
         {
@@ -920,15 +1093,23 @@ app.put("/:id/mode", async (c) => {
       );
     }
 
-    // Reload the source order — needed to look up customer details when
-    // spawning POs (REPRODUCE).
-    const source = await loadSourceOrder(
-      c.var.DB,
-      existing.sourceType as "SO" | "CO",
-      existing.sourceId,
-    );
-    if (!source) {
-      return c.json({ success: false, error: "Source order vanished" }, 404);
+    // For SO/CO sources we reload the original order to get customer details
+    // when spawning POs. EXTERNAL sources hold the customer name directly on
+    // the service_orders row, so no source lookup is needed.
+    const isExternal = existing.sourceType === "EXTERNAL";
+    let sourceCustomerName = existing.customerName;
+    let sourceCustomerState: string | null = null;
+    if (!isExternal) {
+      const source = await loadSourceOrder(
+        c.var.DB,
+        existing.sourceType as "SO" | "CO",
+        existing.sourceId ?? "",
+      );
+      if (!source) {
+        return c.json({ success: false, error: "Source order vanished" }, 404);
+      }
+      sourceCustomerName = source.customerName;
+      sourceCustomerState = source.customerState ?? null;
     }
 
     const linesRes = await c.var.DB
@@ -963,8 +1144,8 @@ app.put("/:id/mode", async (c) => {
               poNo,
               id,
               idx + 1,
-              source.customerName,
-              source.customerState ?? "",
+              sourceCustomerName,
+              sourceCustomerState ?? "",
               ln.productId ?? "",
               ln.productCode ?? "",
               ln.productName ?? "",

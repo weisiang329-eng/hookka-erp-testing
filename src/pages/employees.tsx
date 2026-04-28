@@ -1285,18 +1285,39 @@ function EfficiencyOverviewTab({
   }, [workers]);
 
   type EffRow = WorkerHoursSummary & { employeeName: string; empNo: string };
+  // Build the row list from the UNION of {workers in working_hour_entries
+  // summary} and {workers with completed JCs}. Without the JC-only branch,
+  // a worker who got marked PIC on a JC but never had hours entered on
+  // the flat Working Hours grid was invisible here even though they had
+  // production time - reported by user 2026-04-28.
   const rows: EffRow[] = useMemo(() => {
-    return summary
-      .map((s) => {
-        const w = workerById.get(s.workerId);
-        return {
-          ...s,
-          employeeName: w?.name ?? s.workerId,
-          empNo: w?.empNo ?? "",
-        };
-      })
-      .sort((a, b) => b.totalHours - a.totalHours);
-  }, [summary, workerById]);
+    const byWorker = new Map<string, EffRow>();
+    for (const s of summary) {
+      const w = workerById.get(s.workerId);
+      byWorker.set(s.workerId, {
+        ...s,
+        employeeName: w?.name ?? s.workerId,
+        empNo: w?.empNo ?? "",
+      });
+    }
+    // Stub rows for JC-only workers (no working hour entries in range).
+    // totalHours stays 0 and byDept stays empty so the dept columns just
+    // render as em-dash; Production Time / Efficiency % populate via
+    // prodMinsByWorker which already has them.
+    for (const [wid] of prodMinsByWorker) {
+      if (byWorker.has(wid)) continue;
+      const w = workerById.get(wid);
+      byWorker.set(wid, {
+        workerId: wid,
+        totalHours: 0,
+        byDept: {},
+        daysWithEntries: 0,
+        employeeName: w?.name ?? wid,
+        empNo: w?.empNo ?? "",
+      });
+    }
+    return Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
+  }, [summary, workerById, prodMinsByWorker]);
 
   const columns: Column<EffRow>[] = useMemo(() => {
     const cols: Column<EffRow>[] = [
@@ -1316,11 +1337,14 @@ function EfficiencyOverviewTab({
         label: "Total",
         align: "right",
         sortable: true,
-        render: (_value, row) => (
-          <span className="font-semibold tabular-nums text-[#1F1D1B]">
-            {row.totalHours.toFixed(1)}h
-          </span>
-        ),
+        render: (_value, row) =>
+          row.totalHours > 0 ? (
+            <span className="font-semibold tabular-nums text-[#1F1D1B]">
+              {row.totalHours.toFixed(1)}h
+            </span>
+          ) : (
+            <span className="text-[#D1D5DB] tabular-nums">—</span>
+          ),
       },
       // Production Time — per-worker JC contribution sum (already halved
       // server-side when both PIC slots filled). Mirrors the Google Sheet

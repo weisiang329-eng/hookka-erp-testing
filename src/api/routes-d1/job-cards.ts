@@ -58,6 +58,7 @@ type WorkerJcRow = {
   departmentCode: string | null;
   wipCode: string | null;
   wipLabel: string | null;
+  wipQty: number | null;
   completedDate: string | null;
   productionTimeMinutes: number;
   status: string;
@@ -106,6 +107,7 @@ app.get("/", async (c) => {
       jc.departmentCode  AS departmentCode,
       jc.wipCode         AS wipCode,
       jc.wipLabel        AS wipLabel,
+      jc.wipQty          AS wipQty,
       jc.completedDate   AS completedDate,
       jc.productionTimeMinutes AS productionTimeMinutes,
       jc.status          AS status,
@@ -130,6 +132,15 @@ app.get("/", async (c) => {
   const data = rows.map((r) => {
     const pic1Filled = !!(r.pic1Id && r.pic1Id !== "");
     const pic2Filled = !!(r.pic2Id && r.pic2Id !== "");
+    // job_cards.productionTimeMinutes is per-unit; wipQty is the JC's
+    // unit count (e.g. a bedframe Divan WIP for a 2-unit PO has wipQty=2).
+    // The "actual production time" = perUnit x wipQty, which is what the
+    // worker actually spent and what should appear in Daily Breakdown +
+    // be summed for Total Production Hrs. Bug fix 2026-04-28: was
+    // returning per-unit, so a 15-min/unit JC with qty=2 looked like 15
+    // min instead of 30.
+    const wipQty = Math.max(1, Number(r.wipQty) || 1);
+    const perUnitMin = r.productionTimeMinutes ?? 0;
     return {
       id: r.id,
       productionOrderId: r.productionOrderId,
@@ -138,8 +149,10 @@ app.get("/", async (c) => {
       departmentCode: r.departmentCode ?? "",
       wipCode: r.wipCode ?? "",
       wipLabel: r.wipLabel ?? "",
+      wipQty,
       completedDate: r.completedDate,
-      productionTimeMinutes: r.productionTimeMinutes ?? 0,
+      productionTimeMinutes: perUnitMin * wipQty,
+      perUnitMinutes: perUnitMin,
       status: r.status,
       picSlot: r.pic1Id === picId ? "PIC1" : r.pic2Id === picId ? "PIC2" : "",
       // hasBothPics tells the FE whether to halve this worker's contribution
@@ -200,6 +213,11 @@ app.get("/summary", async (c) => {
   // pic1) was invisible to /summary entirely. Now PIC2 stands alone and
   // solo-PIC2 contributes the full minutes, matching how /api/job-cards
   // already returns the row.
+  // Bug fix 2026-04-28: productionTimeMinutes is per-unit; multiply by
+  // wipQty (max(1, ...) so a missing wipQty still counts as 1 unit) to
+  // get the actual time the worker spent. A 15-min/unit JC with qty=2
+  // = 30 min real time; previously we summed per-unit values so PIC's
+  // production minutes were under-counted whenever wipQty > 1.
   const sql = `
     SELECT wid AS worker_id,
            SUM(contrib_min) AS production_minutes,
@@ -207,8 +225,8 @@ app.get("/summary", async (c) => {
       FROM (
         SELECT pic1Id AS wid,
                CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
-                    THEN productionTimeMinutes / 2.0
-                    ELSE productionTimeMinutes
+                    THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
+                    ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
                END AS contrib_min
           FROM job_cards
          WHERE pic1Id IS NOT NULL AND pic1Id != ''
@@ -220,8 +238,8 @@ app.get("/summary", async (c) => {
 
         SELECT pic2Id AS wid,
                CASE WHEN pic1Id IS NOT NULL AND pic1Id != ''
-                    THEN productionTimeMinutes / 2.0
-                    ELSE productionTimeMinutes
+                    THEN (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1))) / 2.0
+                    ELSE (productionTimeMinutes * GREATEST(1, COALESCE(wipQty, 1)))
                END AS contrib_min
           FROM job_cards
          WHERE pic2Id IS NOT NULL AND pic2Id != ''

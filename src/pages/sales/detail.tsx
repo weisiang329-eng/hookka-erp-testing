@@ -434,7 +434,21 @@ export default function SalesOrderDetailPage() {
   // lock-guard's `isStatusOnly` check on the backend).
   const lockReason = orderResp?.lockReason ?? null;
   const isLocked = !!lockReason;
-  const canEdit = ["DRAFT", "CONFIRMED"].includes(order.status) && !isLocked;
+  // canEdit honors the server-side /edit-eligibility verdict for in-flight
+  // statuses. Bug fix 2026-04-28: previously the FE hardcoded ["DRAFT",
+  // "CONFIRMED"] which silently dropped Edit for every IN_PRODUCTION SO -
+  // since the state machine was changed to land Create Order at
+  // IN_PRODUCTION directly (skipping CONFIRMED), every newly created SO
+  // could never be edited. The eligibility endpoint already returns the
+  // right answer (false when production_window > 2 days OR any dept
+  // completed). Trust it for IN_PRODUCTION; DRAFT bypasses since there's
+  // nothing to lock yet.
+  const eligibilityEditable = eligibilityResp?.editable ?? true;
+  const canEdit =
+    !isLocked &&
+    (order.status === "DRAFT" ||
+      order.status === "CONFIRMED" ||
+      (order.status === "IN_PRODUCTION" && eligibilityEditable));
   const canCancel = ["DRAFT", "CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const canHold = ["CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const isOnHold = order.status === "ON_HOLD";

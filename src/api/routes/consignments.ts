@@ -1,98 +1,30 @@
 // ---------------------------------------------------------------------------
 // D1-backed Consignments route.
 //
-// Uses consignment_notes + consignment_items tables (both in 0001_init.sql).
-// Shares the same underlying table as routes/consignment-notes.ts; this
-// file mirrors the old /api/consignments surface (validates customer exists,
-// returns nested `items` array, supports DELETE-with-data response).
+// Uses consignment_notes + consignment_items tables (both in 0001_init.sql,
+// extended by 0066 with the dispatch + linkage columns). Shares the
+// underlying tables with routes/consignment-notes.ts; this file mirrors
+// the old /api/consignments surface (validates customer exists, returns
+// nested `items` array, supports DELETE-with-data response, full
+// CRUD-by-:id).
+//
+// Row mapping + carrier resolution lives in api/lib/consignment-note-shared.ts
+// so this file and consignment-notes.ts stay in lock-step.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import {
+  type ConsignmentNoteRow,
+  type ConsignmentItemRow,
+  rowToConsignmentNote,
+  genNoteId,
+  genItemId,
+  nextConsignmentNoteNumber,
+  resolveTransport,
+  updateConsignmentNoteById,
+} from "../lib/consignment-note-shared";
 
 const app = new Hono<Env>();
-
-type NoteRow = {
-  id: string;
-  noteNumber: string;
-  type: string | null;
-  customerId: string;
-  customerName: string | null;
-  branchName: string | null;
-  sentDate: string | null;
-  status: string | null;
-  totalValue: number;
-  notes: string | null;
-};
-
-type ItemRow = {
-  id: string;
-  consignmentNoteId: string;
-  productId: string | null;
-  productName: string | null;
-  productCode: string | null;
-  quantity: number;
-  unitPrice: number;
-  status: string | null;
-  soldDate: string | null;
-  returnedDate: string | null;
-};
-
-function rowToNote(row: NoteRow, items: ItemRow[] = []) {
-  return {
-    id: row.id,
-    noteNumber: row.noteNumber,
-    type: row.type ?? "OUT",
-    customerId: row.customerId,
-    customerName: row.customerName ?? "",
-    branchName: row.branchName ?? "",
-    sentDate: row.sentDate ?? "",
-    status: row.status ?? "ACTIVE",
-    totalValue: row.totalValue,
-    notes: row.notes ?? "",
-    items: items
-      .filter((it) => it.consignmentNoteId === row.id)
-      .map((it) => ({
-        id: it.id,
-        productId: it.productId ?? "",
-        productName: it.productName ?? "",
-        productCode: it.productCode ?? "",
-        quantity: it.quantity,
-        unitPrice: it.unitPrice,
-        status: it.status ?? "AT_BRANCH",
-        soldDate: it.soldDate,
-        returnedDate: it.returnedDate,
-      })),
-  };
-}
-
-function genId(prefix: string): string {
-  return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-async function nextConsignmentNumber(
-  db: D1Database,
-  now: Date,
-): Promise<string> {
-  // CGN-YYMM-NNN. Per user 2026-04-28 numbering decision: Credit Note
-  // owns the CN- prefix (financial standard); Consignment Note moves
-  // to CGN- to avoid the collision. Existing CON-* numbers stay valid
-  // forever - the LIKE ? lookup is scoped to the new prefix so the
-  // old + new co-exist without clashing.
-  const yy = String(now.getFullYear()).slice(-2);
-  const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const prefix = `CGN-${yy}${mm}-`;
-  const res = await db
-    .prepare(
-      "SELECT noteNumber FROM consignment_notes WHERE noteNumber LIKE ? ORDER BY noteNumber DESC LIMIT 1",
-    )
-    .bind(`${prefix}%`)
-    .first<{ noteNumber: string }>();
-  if (!res) return `${prefix}001`;
-  const tail = res.noteNumber.replace(prefix, "");
-  const seq = parseInt(tail, 10);
-  if (!Number.isFinite(seq)) return `${prefix}001`;
-  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
-}
 
 // GET /api/consignments
 app.get("/", async (c) => {
@@ -112,16 +44,29 @@ app.get("/", async (c) => {
   const [notesRes, itemsRes] = await Promise.all([
     c.var.DB.prepare(`SELECT * FROM consignment_notes ${where}`)
       .bind(...params)
-      .all<NoteRow>(),
-    c.var.DB.prepare("SELECT * FROM consignment_items").all<ItemRow>(),
+      .all<ConsignmentNoteRow>(),
+    c.var.DB.prepare("SELECT * FROM consignment_items").all<ConsignmentItemRow>(),
   ]);
   const data = (notesRes.results ?? []).map((r) =>
-    rowToNote(r, itemsRes.results ?? []),
+    rowToConsignmentNote(r, itemsRes.results ?? []),
   );
   return c.json({ success: true, data, total: data.length });
 });
 
-// POST /api/consignments — creates note + items atomically, validates customer
+// POST /api/consignments — creates note + items atomically, validates customer.
+//
+// Body shape (all fields optional unless noted):
+//   customerId (REQUIRED), customerName?, branchName?, type?, sentDate?, notes?
+//   hubId?                       — delivery_hubs row, drives branchName fallback
+//   consignmentOrderId?          — parent CO id (FK to consignment_orders)
+//   providerId? / driverId? / vehicleId?
+//                                — 3PL refactor lookup (see resolveTransport)
+//   driverName? driverPhone? driverContactPerson? vehicleNo? vehicleType?
+//                                — explicit overrides for the resolved values
+//   productionOrderIds?: string[]
+//                                — when provided, INSERT one consignment_items
+//                                  row per PO with production_order_id set.
+//   items?: Array<{...}>         — explicit items array (legacy callers).
 app.post("/", async (c) => {
   try {
     const body = await c.req.json();
@@ -135,25 +80,81 @@ app.post("/", async (c) => {
     }
 
     const now = new Date();
-    const noteNumber = await nextConsignmentNumber(c.var.DB, now);
-    const id = genId("con");
+    const noteNumber = await nextConsignmentNoteNumber(c.var.DB, now);
+    const id = genNoteId();
 
-    const rawItems = Array.isArray(body.items) ? body.items : [];
-    const itemRows: ItemRow[] = rawItems.map(
-      (it: Record<string, unknown>) => ({
-        id: genId("coni"),
-        consignmentNoteId: id,
+    // Resolve hub → branchName fallback.
+    let resolvedBranchName =
+      (body.branchName as string | undefined) ?? customer.name;
+    const hubId = (body.hubId as string | undefined) ?? null;
+    if (hubId) {
+      const hub = await c.var.DB.prepare(
+        "SELECT id, shortName FROM delivery_hubs WHERE id = ?",
+      )
+        .bind(hubId)
+        .first<{ id: string; shortName: string | null }>();
+      if (hub && body.branchName === undefined) {
+        resolvedBranchName = hub.shortName ?? customer.name;
+      }
+    }
+
+    // Carrier resolution.
+    const transport = await resolveTransport(c.var.DB, body);
+
+    // Items source preference: productionOrderIds > body.items.
+    const productionOrderIds: string[] = Array.isArray(body.productionOrderIds)
+      ? (body.productionOrderIds as unknown[]).filter(
+          (x): x is string => typeof x === "string" && x.length > 0,
+        )
+      : [];
+
+    type ItemSeed = {
+      id: string;
+      productId: string;
+      productName: string;
+      productCode: string;
+      quantity: number;
+      unitPrice: number;
+      productionOrderId: string | null;
+    };
+    let itemSeeds: ItemSeed[] = [];
+
+    if (productionOrderIds.length > 0) {
+      const ph = productionOrderIds.map(() => "?").join(",");
+      const poRes = await c.var.DB.prepare(
+        `SELECT id, productCode, productName, quantity
+           FROM production_orders WHERE id IN (${ph})`,
+      )
+        .bind(...productionOrderIds)
+        .all<{
+          id: string;
+          productCode: string | null;
+          productName: string | null;
+          quantity: number | null;
+        }>();
+      itemSeeds = (poRes.results ?? []).map((po) => ({
+        id: genItemId(),
+        productId: "",
+        productName: po.productName ?? "",
+        productCode: po.productCode ?? "",
+        quantity: Number(po.quantity) || 1,
+        unitPrice: 0,
+        productionOrderId: po.id,
+      }));
+    } else {
+      const rawItems = Array.isArray(body.items) ? body.items : [];
+      itemSeeds = rawItems.map((it: Record<string, unknown>) => ({
+        id: genItemId(),
         productId: (it.productId as string) ?? "",
         productName: (it.productName as string) ?? "",
         productCode: (it.productCode as string) ?? "",
         quantity: Number(it.quantity) || 1,
         unitPrice: Number(it.unitPrice) || 0,
-        status: "AT_BRANCH",
-        soldDate: null,
-        returnedDate: null,
-      }),
-    );
-    const totalValue = itemRows.reduce(
+        productionOrderId: (it.productionOrderId as string | null) ?? null,
+      }));
+    }
+
+    const totalValue = itemSeeds.reduce(
       (sum, it) => sum + it.unitPrice * it.quantity,
       0,
     );
@@ -161,55 +162,92 @@ app.post("/", async (c) => {
     const stmts: D1PreparedStatement[] = [];
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO consignment_notes (id, noteNumber, type, customerId, customerName,
-           branchName, sentDate, status, totalValue, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO consignment_notes (
+           id, noteNumber, type, customerId, customerName, branchName,
+           sentDate, status, totalValue, notes,
+           driverId, driverName, driverContactPerson, driverPhone,
+           vehicleId, vehicleNo, vehicleType,
+           dispatchedAt, deliveredAt, acknowledgedAt,
+           consignmentOrderId, hubId
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                   ?, ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?, ?,
+                   ?, ?)`,
       ).bind(
         id,
         noteNumber,
         body.type ?? "OUT",
         customer.id,
         customer.name,
-        body.branchName ?? customer.name,
+        resolvedBranchName,
         body.sentDate ?? now.toISOString().split("T")[0],
         "ACTIVE",
         totalValue,
         body.notes ?? "",
+        // Carrier — driverId stores the PROVIDER company id (DO convention).
+        transport.providerId,
+        transport.driverName,
+        transport.driverContactPerson,
+        transport.driverPhone,
+        transport.vehicleId,
+        transport.vehicleNo,
+        transport.vehicleType,
+        // Lifecycle timestamps null on create.
+        null,
+        null,
+        null,
+        // Linkage
+        (body.consignmentOrderId as string | null) ?? null,
+        hubId,
       ),
     );
-    for (const it of itemRows) {
+    for (const it of itemSeeds) {
       stmts.push(
         c.var.DB.prepare(
-          `INSERT INTO consignment_items (id, consignmentNoteId, productId, productName,
-             productCode, quantity, unitPrice, status, soldDate, returnedDate)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO consignment_items (
+             id, consignmentNoteId, productId, productName, productCode,
+             quantity, unitPrice, status, soldDate, returnedDate,
+             productionOrderId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           it.id,
-          it.consignmentNoteId,
+          id,
           it.productId,
           it.productName,
           it.productCode,
           it.quantity,
           it.unitPrice,
-          it.status,
-          it.soldDate,
-          it.returnedDate,
+          "AT_BRANCH",
+          null,
+          null,
+          it.productionOrderId,
         ),
       );
     }
     await c.var.DB.batch(stmts);
 
-    const created = await c.var.DB.prepare(
-      "SELECT * FROM consignment_notes WHERE id = ?",
-    )
-      .bind(id)
-      .first<NoteRow>();
+    const [created, items] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
+        .bind(id)
+        .first<ConsignmentNoteRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
+      )
+        .bind(id)
+        .all<ConsignmentItemRow>(),
+    ]);
     if (!created) {
       return c.json({ success: false, error: "Failed to create consignment" }, 500);
     }
-    return c.json({ success: true, data: rowToNote(created, itemRows) }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+    return c.json(
+      { success: true, data: rowToConsignmentNote(created, items.results ?? []) },
+      201,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/consignments] failed:", msg);
+    return c.json({ success: false, error: msg || "Invalid request body" }, 400);
   }
 });
 
@@ -219,23 +257,27 @@ app.get("/:id", async (c) => {
   const [row, items] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
       .bind(id)
-      .first<NoteRow>(),
+      .first<ConsignmentNoteRow>(),
     c.var.DB.prepare(
       "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
     )
       .bind(id)
-      .all<ItemRow>(),
+      .all<ConsignmentItemRow>(),
   ]);
   if (!row) {
     return c.json({ success: false, error: "Consignment not found" }, 404);
   }
   return c.json({
     success: true,
-    data: rowToNote(row, items.results ?? []),
+    data: rowToConsignmentNote(row, items.results ?? []),
   });
 });
 
-// PUT /api/consignments/:id
+// PUT /api/consignments/:id — supports status transitions (with auto
+// timestamp stamping), driver/vehicle/hub re-resolution, items
+// replacement, and the legacy notes/branchName updates. Delegates the
+// non-items merge to updateConsignmentNoteById so this and
+// /api/consignment-notes share the same lifecycle logic.
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   try {
@@ -243,19 +285,17 @@ app.put("/:id", async (c) => {
       "SELECT * FROM consignment_notes WHERE id = ?",
     )
       .bind(id)
-      .first<NoteRow>();
+      .first<ConsignmentNoteRow>();
     if (!existing) {
       return c.json({ success: false, error: "Consignment not found" }, 404);
     }
-    const body = await c.req.json();
-    const merged = {
-      status: body.status ?? existing.status,
-      notes: body.notes ?? existing.notes ?? "",
-      branchName: body.branchName ?? existing.branchName ?? "",
-      totalValue: existing.totalValue,
-    };
+    const body = (await c.req.json()) as Record<string, unknown>;
 
-    // If items provided, replace them and recompute totalValue
+    // If items provided, replace them and recompute totalValue. We do
+    // this before delegating to updateConsignmentNoteById so the helper
+    // sees the post-replace state if a future iteration of it reads
+    // totalValue.
+    let nextTotalValue = existing.totalValue;
     if (Array.isArray(body.items)) {
       const stmts: D1PreparedStatement[] = [];
       stmts.push(
@@ -270,11 +310,13 @@ app.put("/:id", async (c) => {
         total += qty * price;
         stmts.push(
           c.var.DB.prepare(
-            `INSERT INTO consignment_items (id, consignmentNoteId, productId, productName,
-               productCode, quantity, unitPrice, status, soldDate, returnedDate)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            `INSERT INTO consignment_items (
+               id, consignmentNoteId, productId, productName, productCode,
+               quantity, unitPrice, status, soldDate, returnedDate,
+               productionOrderId
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
-            (it.id as string) ?? genId("coni"),
+            (it.id as string) ?? genItemId(),
             id,
             (it.productId as string) ?? "",
             (it.productName as string) ?? "",
@@ -284,41 +326,30 @@ app.put("/:id", async (c) => {
             (it.status as string) ?? "AT_BRANCH",
             (it.soldDate as string | null) ?? null,
             (it.returnedDate as string | null) ?? null,
+            (it.productionOrderId as string | null) ?? null,
           ),
         );
       }
-      merged.totalValue = total;
+      nextTotalValue = total;
       await c.var.DB.batch(stmts);
+
+      // Persist totalValue separately — updateConsignmentNoteById doesn't
+      // own this column. Bind value before delegating to the helper so the
+      // status/lifecycle update doesn't clobber it (it doesn't touch
+      // totalValue, but we keep the order explicit).
+      await c.var.DB
+        .prepare("UPDATE consignment_notes SET totalValue = ? WHERE id = ?")
+        .bind(nextTotalValue, id)
+        .run();
     }
 
-    await c.var.DB.prepare(
-      "UPDATE consignment_notes SET status = ?, notes = ?, branchName = ?, totalValue = ? WHERE id = ?",
-    )
-      .bind(
-        merged.status,
-        merged.notes,
-        merged.branchName,
-        merged.totalValue,
-        id,
-      )
-      .run();
-
-    const [updated, items] = await Promise.all([
-      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
-        .bind(id)
-        .first<NoteRow>(),
-      c.var.DB.prepare(
-        "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
-      )
-        .bind(id)
-        .all<ItemRow>(),
-    ]);
-    if (!updated) {
+    const res = await updateConsignmentNoteById(c.var.DB, id, body);
+    if (!res.ok) {
       return c.json({ success: false, error: "Consignment not found" }, 404);
     }
     return c.json({
       success: true,
-      data: rowToNote(updated, items.results ?? []),
+      data: rowToConsignmentNote(res.note, res.items),
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -332,7 +363,7 @@ app.delete("/:id", async (c) => {
     "SELECT * FROM consignment_notes WHERE id = ?",
   )
     .bind(id)
-    .first<NoteRow>();
+    .first<ConsignmentNoteRow>();
   if (!existing) {
     return c.json({ success: false, error: "Consignment not found" }, 404);
   }

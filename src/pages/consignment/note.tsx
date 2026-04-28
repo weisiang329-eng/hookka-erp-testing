@@ -222,28 +222,29 @@ type ConsignmentOrderApiShape = {
 
 function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
   const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
-  // Backend currently stores noteNumber as both the CN identifier AND
-  // the closest thing to a CO ref (legacy CN had no separate CO concept).
-  // When the schema grows a real consignmentOrderId column we'll prefer
-  // that; until then, use noteNumber for both fields so the column
-  // renders something rather than blank.
+  // Prefer the new consignmentOrderId column (added by migration 0066);
+  // fall back to noteNumber when it's null on legacy rows so the column
+  // still renders something instead of blank.
   return {
     id: cn.id,
     cnNo: cn.noteNumber,
-    coRef: cn.noteNumber,
-    consignmentId: cn.id,
+    coRef: cn.consignmentOrderId || cn.noteNumber,
+    consignmentId: cn.consignmentOrderId || cn.id,
     customerId: cn.customerId,
     customerName: cn.customerName,
     branchName: cn.branchName,
     itemCount: cn.items.length,
     totalQty,
     totalValueSen: cn.totalValue,
-    dispatchDate: cn.sentDate || null,
-    deliveredDate: null, // not tracked in legacy schema
+    // dispatchDate prefers the dispatchedAt timestamp (when status moved
+    // to PARTIALLY_SOLD); falls back to sentDate (the CN creation date)
+    // for legacy rows where the timestamp is null.
+    dispatchDate: cn.dispatchedAt || cn.sentDate || null,
+    deliveredDate: cn.deliveredAt || null,
     status: cnStatusFromBackend(cn.status),
-    driverCompany: "",
-    driverName: "",
-    vehicleNo: "",
+    driverCompany: cn.driverContactPerson || "",
+    driverName: cn.driverName || "",
+    vehicleNo: cn.vehicleNo || "",
     remarks: cn.notes || "",
   };
 }
@@ -367,17 +368,32 @@ export default function ConsignmentNotePage() {
         }
       }
 
-      // CN dedup approximation: backend doesn't link CN ↔ PO ↔ CO yet,
-      // so we can't filter "PO is on a non-cancelled CN" the way DO
-      // does for DOs. Best-effort fallback: dedup by customer match on
-      // any CN with status PENDING/DISPATCHED — coarse but better than
-      // nothing. Documented as a follow-up: add productionOrderId or
-      // consignmentOrderId column to consignment_notes.
-      const cnLinkedCustomers = new Set<string>();
+      // CN dedup (precise as of migration 0066): walk every CN's items
+      // array and collect productionOrderId for any CN that's not
+      // CANCELLED. Mirrors DO's exact pattern (linkedPOIds set built from
+      // delivery_order_items.productionOrderId). Excludes CLOSED so a
+      // PO that already shipped + acknowledged doesn't permanently
+      // hide. Falls back to per-customer dedup on legacy CNs that
+      // pre-date 0066 (productionOrderId is null on those rows).
+      const cnLinkedPOIds = new Set<string>();
+      const cnLinkedCustomersLegacy = new Set<string>();
       if (cnRaw?.success && Array.isArray(cnRaw.data)) {
         for (const cn of cnRaw.data as ConsignmentNote[]) {
-          if (cn.status === "ACTIVE" || cn.status === "PARTIALLY_SOLD") {
-            cnLinkedCustomers.add(cn.customerId);
+          if (cn.status === "CLOSED") continue;
+          let foundPoLink = false;
+          for (const item of cn.items) {
+            if (item.productionOrderId) {
+              cnLinkedPOIds.add(item.productionOrderId);
+              foundPoLink = true;
+            }
+          }
+          // Legacy CN (pre-0066) — items have no productionOrderId, so
+          // fall back to per-customer dedup so its POs still hide.
+          if (
+            !foundPoLink &&
+            (cn.status === "ACTIVE" || cn.status === "PARTIALLY_SOLD")
+          ) {
+            cnLinkedCustomersLegacy.add(cn.customerId);
           }
         }
       }
@@ -439,7 +455,11 @@ export default function ConsignmentNotePage() {
           if (uphCards.length === 0) return false;
           return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
         })
-        .filter((po) => !cnLinkedCustomers.has(po.customerId || ""))
+        .filter(
+          (po) =>
+            !cnLinkedPOIds.has(po.id) &&
+            !cnLinkedCustomersLegacy.has(po.customerId || ""),
+        )
         .map(mapPO);
       setReadyPOs(ready);
     }
@@ -507,20 +527,21 @@ export default function ConsignmentNotePage() {
         let okCount = 0;
         for (const [, group] of byCustomer.entries()) {
           const first = group[0];
+          // Send productionOrderIds so the backend writes
+          // consignment_items.productionOrderId for each PO. The
+          // Pending-CN dedup on the next refresh hides the same POs
+          // immediately (precise per-PO dedup since migration 0066).
+          // Also sends consignmentOrderId so the CO column on the
+          // CN list picks it up directly.
           const body = {
             type: "OUT",
             customerId: first.customerId,
             customerName: first.customerName,
             branchName: first.customerState || "Branch",
             sentDate: new Date().toISOString().split("T")[0],
+            consignmentOrderId: first.consignmentOrderId || null,
             notes: `Auto-created from CO ${first.consignmentOrderNo} on Pending CN dispatch`,
-            items: group.map((po) => ({
-              productId: "",
-              productName: po.productName,
-              productCode: po.productCode,
-              quantity: po.quantity,
-              unitPrice: 0, // CN unit price not tracked at PO level — future: pull from CO line items
-            })),
+            productionOrderIds: group.map((po) => po.id),
           };
           const res = await fetch("/api/consignment-notes", {
             method: "POST",

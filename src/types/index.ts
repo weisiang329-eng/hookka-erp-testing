@@ -855,6 +855,8 @@ export type ConsignmentItem = {
   status: ConsignmentItemStatus;
   soldDate: string | null;
   returnedDate: string | null;
+  // Per-line PO link (migration 0066).
+  productionOrderId?: string | null;
 };
 
 export type ConsignmentNote = {
@@ -869,6 +871,22 @@ export type ConsignmentNote = {
   status: "ACTIVE" | "PARTIALLY_SOLD" | "FULLY_SOLD" | "RETURNED" | "CLOSED";
   totalValue: number;
   notes: string;
+  // Carrier metadata (migration 0066). Mirrors DeliveryOrder fields.
+  driverId?: string | null;
+  driverName?: string;
+  driverContactPerson?: string;
+  driverPhone?: string;
+  vehicleId?: string | null;
+  vehicleNo?: string;
+  vehicleType?: string;
+  // Lifecycle timestamps (migration 0066). Stamped server-side on
+  // status transitions PARTIALLY_SOLD / FULLY_SOLD / CLOSED.
+  dispatchedAt?: string | null;
+  deliveredAt?: string | null;
+  acknowledgedAt?: string | null;
+  // Linkage (migration 0066).
+  consignmentOrderId?: string | null;
+  hubId?: string | null;
 };
 
 // --- Consignment Order (parallel to SalesOrder) ---

@@ -259,4 +259,170 @@ support.
 
 ---
 
-*Last updated 2026-04-25.*
+## Pre-launch Restore Drill — Step-by-Step Checklist
+
+> **Status:** TO BE EXECUTED BEFORE LAUNCH. The procedure below is what
+> the operator MUST run end-to-end before flipping the production switch
+> on. Numbers in the closing summary (RTO actual, last-write-preserved
+> timestamp) are placeholders until the first dry run lands them.
+>
+> Run the drill once with the operator and a dev pair, then again solo
+> 30 days later — that's how we prove the runbook stays current under
+> staff turnover.
+
+### Required GitHub repo secrets (set BEFORE the daily backup ever fires)
+
+| Secret name           | Where to get it                                                | Notes                                  |
+| --------------------- | -------------------------------------------------------------- | -------------------------------------- |
+| `SUPABASE_PROD_URL`   | Supabase dashboard → Project Settings → Database → Pooler URL  | Must include `?sslmode=require`        |
+| `R2_ACCESS_KEY_ID`    | Cloudflare R2 → Manage R2 API Tokens → Create token            | Scope: Object Read & Write, hookka-files only |
+| `R2_SECRET_ACCESS_KEY`| Same dialog as above (one-time reveal)                         | Store in 1Password "ops-vault"         |
+| `R2_ENDPOINT`         | Cloudflare R2 → bucket details → S3-compatible endpoint URL    | Format: `https://<acct>.r2.cloudflarestorage.com` |
+| `CRON_SECRET`         | Generate via `openssl rand -hex 32` once; mirror to CF Pages   | Required by qc-cron.yml + future MV-refresh worker |
+
+`gh secret set <NAME> --body "<value>"` for each.
+
+### Drill steps (target end-to-end ≤ 4 hours; record actual)
+
+1. **Provision a fresh Supabase project (15 min).**
+   - Dashboard → New project → name `hookka-erp-recovery-YYYY-MM-DD`,
+     pro plan, region `ap-southeast-1`, database password from 1Password.
+   - Copy the pooler connection string. Set `RECOVERY_DATABASE_URL` in
+     your local shell — DO NOT commit it.
+
+2. **Pull the latest backup from R2 (5 min).**
+   ```bash
+   export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
+   export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
+   export AWS_DEFAULT_REGION=auto
+
+   LATEST=$(aws s3 ls s3://hookka-files/backups/supabase/ \
+     --endpoint-url "$R2_ENDPOINT" \
+     | grep '\.dump$' | sort | tail -1 | awk '{print $4}')
+   echo "Restoring from: $LATEST"
+
+   aws s3 cp "s3://hookka-files/backups/supabase/$LATEST" \
+     ./recovery.dump --endpoint-url "$R2_ENDPOINT"
+   ```
+   Verify the local file is ≥ 1 MB (a silent pg_dump truncation slips
+   past the workflow's 1 KB sentinel only when the dataset is tiny).
+
+3. **Restore via `pg_restore` (45-90 min on current dataset).**
+   ```bash
+   pg_restore --verbose --no-owner --no-acl --jobs=4 \
+     --dbname="$RECOVERY_DATABASE_URL" \
+     ./recovery.dump
+   ```
+   Expected non-fatal warnings: "role 'postgres' does not exist" — the
+   `--no-owner` flag handles ownership remapping. ANY other error
+   means the dump itself was bad; abort and investigate before
+   continuing.
+
+4. **Verify migration version (5 min).**
+   ```bash
+   DATABASE_URL=$RECOVERY_DATABASE_URL \
+     node scripts/check-schema-applied.mjs
+   ```
+   Expected output: lists every applied migration. If HEAD migrations
+   landed AFTER the dump timestamp, run:
+   ```bash
+   DATABASE_URL=$RECOVERY_DATABASE_URL \
+     node scripts/apply-postgres-migrations.mjs
+   ```
+   to bring the recovery DB up to head.
+
+5. **Sentinel SQL — row counts on critical tables.**
+   Run against BOTH the recovery DB and a known-good production
+   snapshot (use `psql "$DATABASE_URL"` for prod, `psql
+   "$RECOVERY_DATABASE_URL"` for recovery). The numbers should match
+   within the writes-since-last-backup tolerance.
+
+   ```sql
+   SELECT 'sales_orders'      AS t, COUNT(*) FROM sales_orders
+   UNION ALL SELECT 'production_orders', COUNT(*) FROM production_orders
+   UNION ALL SELECT 'job_cards',         COUNT(*) FROM job_cards
+   UNION ALL SELECT 'invoices',          COUNT(*) FROM invoices
+   UNION ALL SELECT 'customers',         COUNT(*) FROM customers
+   UNION ALL SELECT 'fg_units',          COUNT(*) FROM fg_units
+   UNION ALL SELECT 'audit_events',      COUNT(*) FROM audit_events;
+   ```
+   Record both result sets in the drill log.
+
+6. **Ledger hash chain integrity (5 min).**
+   ```bash
+   DATABASE_URL=$RECOVERY_DATABASE_URL \
+     node scripts/verify-journal-hash-chain.mjs
+   ```
+   Must report 0 broken hashes. If it doesn't, the dump captured a
+   write mid-transaction — escalate.
+
+7. **Time the whole drill.**
+   - Note the wall-clock from step 1 → step 6 completion.
+   - Record three numbers in this runbook (replace the placeholders
+     under "Recorded RTO/RPO" below):
+     - **Actual RTO** = drill duration (Step 1 start → Step 6 pass)
+     - **Last preserved write timestamp** = the `MAX(updated_at)` from
+       sales_orders + invoices in the recovery DB
+     - **Actual RPO** = current time at start of drill MINUS last
+       preserved write timestamp
+
+8. **Tear down (5 min).**
+   - Suspend the recovery Supabase project (don't delete — keep it for
+     30 days as a known-good snapshot).
+   - Wipe the local `recovery.dump`.
+   - Post the drill summary in #ops-incidents.
+
+### Recorded RTO/RPO
+
+| Drill date | Actual RTO | Actual RPO | Tested by | Notes                        |
+| ---------- | ---------- | ---------- | --------- | ---------------------------- |
+| _TBD pre-launch_ | _TBD_  | _TBD_      | _TBD_     | First drill, must-pass       |
+| _90 days later_  | _TBD_  | _TBD_      | _TBD_     | Solo re-run (no pair)        |
+
+When this table has a row with `Actual RTO ≤ 4h` AND `Actual RPO ≤ 24h`
+(or 1h once hourly cron is enabled), the DR posture is verified. Until
+then, treat the launch as gated on it.
+
+---
+
+## Supabase Point-in-Time Recovery (PITR)
+
+> **Status:** MUST be enabled in the Supabase dashboard BEFORE the
+> launch checklist closes. PITR is independent of (and complementary
+> to) the R2 dumps in this runbook — Supabase Pro plan provides up to
+> 7 days of WAL retention so you can roll the prod project back to any
+> second within that window without losing the dump-bridge writes.
+>
+> The R2 dumps are the disaster-recovery floor (the Cloudflare account
+> dies, Supabase dies, or the cron is broken — we still have an
+> off-account copy). PITR is the day-to-day "oops, that migration
+> truncated a column" undo button.
+
+### Enable / verify checklist
+
+- [ ] Supabase dashboard → Project Settings → **Add-ons** → enable
+      **Point in Time Recovery**. Pro-plan upgrade required if the
+      project is on the free tier.
+- [ ] Choose **7-day WAL retention** (the default Pro tier; bump to
+      14 if storage budget allows).
+- [ ] Verify by going to **Database → Backups → Point in Time
+      Recovery** — the panel should show "Available recovery window:
+      now − 7 days". Take a screenshot, paste into the drill log.
+- [ ] Document the on-call procedure: WHO clicks the PITR button, WHO
+      authorizes the rollback, what the cutoff for "use PITR vs
+      reverse the bad write manually" is.
+
+### How PITR vs R2 dumps relate
+
+| Failure mode                              | Use PITR              | Use R2 dump           |
+| ----------------------------------------- | --------------------- | --------------------- |
+| Bad migration / dropped column / typo'd UPDATE | Yes (within 7 days) | No (overkill — 24h granularity) |
+| Supabase project hard-deleted / billing lapse | No (data is gone)  | Yes (off-account copy) |
+| Cloudflare account compromise → R2 wipe    | Yes (Supabase intact) | No (R2 is gone too)  |
+| > 7-day-old data corruption notice         | No (out of window)    | Yes (90-day R2 retention) |
+
+The two layers cover each other's failure modes; both are required.
+
+---
+
+*Last updated Sprint 4 (2026-04-29).*

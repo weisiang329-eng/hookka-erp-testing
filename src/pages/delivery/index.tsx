@@ -76,7 +76,8 @@ type DeliveryOrderRow = {
   salesOrderId: string;
   customerId: string;
   customerName: string;
-  hubBranch: string;    // customerState
+  hubBranch: string;    // customerState (legacy fallback — kept for old DOs that have customerState set but no hubId)
+  hubState: string;     // delivery_hubs.state resolved via hubId on the API; preferred display in the State column when present
   itemCount: number;    // number of items in this DO
   totalM3: number;
   items: DOItem[];      // all items for detail view
@@ -138,6 +139,7 @@ function mapDOToRow(d: DeliveryOrder): DeliveryOrderRow {
     customerId: d.customerId || "",
     customerName: d.customerName || "",
     hubBranch: d.customerState || "",
+    hubState: ((d as Record<string, unknown>).hubState as string) || "",
     itemCount: items.length,
     totalM3: d.totalM3 ?? 0,
     items,
@@ -1770,6 +1772,10 @@ export default function DeliveryPage() {
         // Distinct hub states across items[]. Today most DOs are single-state
         // (the schema ties a DO to one hubId), so this usually renders one
         // code; when items span multiple states we show both like "PG, KL".
+        // Fallback chain when items[] doesn't carry per-item hubState: prefer
+        // row.hubState (resolved server-side via delivery_hubs.state on hubId)
+        // over the legacy hubBranch (which mirrors customerState — frequently
+        // NULL on production rows even when hubId is set).
         render: (_value, row) => {
           const states = Array.from(
             new Set(
@@ -1778,7 +1784,8 @@ export default function DeliveryPage() {
                 .filter((s): s is string => Boolean(s))
             )
           );
-          const display = states.length > 0 ? states.join(", ") : row.hubBranch;
+          const display =
+            states.length > 0 ? states.join(", ") : row.hubState || row.hubBranch;
           return <span className="text-[#4B5563]">{display || "-"}</span>;
         },
       },

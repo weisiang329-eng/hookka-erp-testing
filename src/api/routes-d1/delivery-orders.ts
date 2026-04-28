@@ -133,6 +133,30 @@ function rowToItem(
   };
 }
 
+// Loads { hubId → state } for the given hub ids. Used by the list path
+// to surface the hub's state on each row even when delivery_orders.customerState
+// is NULL (operator created the DO without typing a state but did pick a hub).
+// Frontend prefers hubState over customerState in the State column fallback chain.
+async function loadHubStateMap(
+  db: D1Database,
+  hubIds: Array<string | null | undefined>,
+): Promise<Map<string, string>> {
+  const ids = Array.from(
+    new Set(hubIds.filter((h): h is string => !!h)),
+  );
+  if (ids.length === 0) return new Map();
+  const ph = ids.map(() => "?").join(",");
+  const res = await db
+    .prepare(`SELECT id, state FROM delivery_hubs WHERE id IN (${ph})`)
+    .bind(...ids)
+    .all<{ id: string; state: string | null }>();
+  const map = new Map<string, string>();
+  for (const r of res.results ?? []) {
+    if (r.state) map.set(r.id, r.state);
+  }
+  return map;
+}
+
 // Loads { productCode → unitM3 } for the given codes. Used by every DO
 // read path so legacy items (itemM3=0) get backfilled on the fly.
 async function loadProductM3Map(
@@ -159,9 +183,17 @@ function rowToOrder(
   row: DeliveryOrderRow,
   items: DeliveryOrderItemRow[] = [],
   productM3Map?: Map<string, number>,
+  hubStateMap?: Map<string, string>,
 ) {
   const pod = parseJson<Record<string, unknown> | null>(row.proofOfDelivery, null);
   const fgUnitIds = parseJson<string[]>(row.fgUnitIds, []);
+  // hubState is the state code stored on delivery_hubs.state (resolved via hubId).
+  // Kept separate from customerState — they're semantically different (the customer's
+  // billing state vs the destination hub's geographic state). Frontend's State column
+  // falls back hubState → customerState → "-" so a DO with a hub but no customerState
+  // still shows the right state.
+  const hubState =
+    hubStateMap && row.hubId ? hubStateMap.get(row.hubId) ?? "" : "";
   const base: Record<string, unknown> = {
     id: row.id,
     doNo: row.doNo,
@@ -172,6 +204,7 @@ function rowToOrder(
     customerPOId: row.customerPOId ?? "",
     customerName: row.customerName,
     customerState: row.customerState ?? "",
+    hubState,
     deliveryAddress: row.deliveryAddress ?? "",
     contactPerson: row.contactPerson ?? "",
     contactPhone: row.contactPhone ?? "",
@@ -280,8 +313,11 @@ async function fetchOrderWithItems(db: D1Database, id: string) {
   ]);
   if (!order) return null;
   const items = itemsRes.results ?? [];
-  const m3Map = await loadProductM3Map(db, items.map((i) => i.productCode));
-  return rowToOrder(order, items, m3Map);
+  const [m3Map, hubStateMap] = await Promise.all([
+    loadProductM3Map(db, items.map((i) => i.productCode)),
+    loadHubStateMap(db, [order.hubId]),
+  ]);
+  return rowToOrder(order, items, m3Map, hubStateMap);
 }
 
 // GET /api/delivery-orders — list all, nested items
@@ -316,10 +352,12 @@ app.get("/", async (c) => {
         .all<DeliveryOrderItemRow>(),
     ]);
     const itemRows = items.results ?? [];
-    const m3Map = await loadProductM3Map(db, itemRows.map((i) => i.productCode));
-    const data = (orders.results ?? []).map((o) =>
-      rowToOrder(o, itemRows, m3Map),
-    );
+    const orderRows = orders.results ?? [];
+    const [m3Map, hubStateMap] = await Promise.all([
+      loadProductM3Map(db, itemRows.map((i) => i.productCode)),
+      loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+    ]);
+    const data = orderRows.map((o) => rowToOrder(o, itemRows, m3Map, hubStateMap));
     return c.json({ success: true, data, total: data.length });
   }
 
@@ -352,8 +390,11 @@ app.get("/", async (c) => {
       .all<DeliveryOrderItemRow>();
     items = itemsRes.results ?? [];
   }
-  const m3Map = await loadProductM3Map(db, items.map((i) => i.productCode));
-  const data = orderRows.map((o) => rowToOrder(o, items, m3Map));
+  const [m3Map, hubStateMap] = await Promise.all([
+    loadProductM3Map(db, items.map((i) => i.productCode)),
+    loadHubStateMap(db, orderRows.map((o) => o.hubId)),
+  ]);
+  const data = orderRows.map((o) => rowToOrder(o, items, m3Map, hubStateMap));
   return c.json({ success: true, data, page, limit, total });
 });
 

@@ -148,19 +148,27 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 // GET /production-revenue?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
 // "Production Revenue" — revenue is recognized the day each PHYSICAL UNIT
-// completes the UPHOLSTERY department, NOT per-job_card. A single product
-// unit (e.g. one CODY BEDFRAME) consists of multiple PIECES (HB, Divan,
-// Cushion, …) each tracked as its own job_card. Counting per-job_card means
-// the unit's catalog price gets scored 2-4× as each piece completes.
+// completes production, NOT per-job_card. A single product unit (e.g. one
+// CODY BEDFRAME) consists of multiple PIECES (HB, Divan, Cushion, …) each
+// tracked as its own job_card. Counting per-job_card means the unit's
+// catalog price gets scored 2-4× as each piece completes.
 //
 // Per spec: revenue recognizes ONCE per (productionOrderId, unitNo) — on the
-// date the LAST piece of that unit completes Upholstery. Source of truth is
+// date the LAST piece of that unit finishes production. Source of truth is
 // the fg_units table, which has one row per (poId, unitNo, pieceNo) and
-// tracks `upholsteredAt` on each piece.
+// tracks `upholsteredAt` / `packedAt` on each piece.
+//
+// Completion timestamp uses COALESCE(upholsteredAt, packedAt). Operators
+// frequently jump straight from prior stages to PACKED, skipping a separate
+// UPHOLSTERED stamp — packedAt then carries the same semantic ("the day
+// the last piece of this unit completed production") because you cannot
+// pack a unit until upholstery is physically done. Filtering on
+// upholsteredAt alone returned RM 0 against real production data even
+// when 31 units were genuinely PACKED.
 //
 // Stage 1: aggregate fg_units → unit-level "completed" set (every piece for
 //          (poId, unitNo) has reached UPHOLSTERED+ status). Recognition date
-//          = max(upholsteredAt) across the unit's pieces.
+//          = max(COALESCE(upholsteredAt, packedAt)) across the unit's pieces.
 // Stage 2: join unit → production_order → sales_order_item / product for
 //          price + category bucketing.
 //
@@ -169,11 +177,12 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 // customer actually pays (catalog price misses promo/contract pricing).
 //
 // Edge cases:
-//   - Pieces with NULL upholsteredAt are skipped (status alone isn't enough
-//     proof that Upholstery actually happened on a known date).
+//   - Pieces with both upholsteredAt AND packedAt NULL are skipped (status
+//     alone isn't enough proof that production actually completed on a
+//     known date).
 //   - totalPieces NULL → treated as 1 via MAX(COALESCE(totalPieces, 1)).
-//   - Window filter is on max(upholsteredAt) so a unit straddling the
-//     boundary gets attributed to the date of its FINAL piece.
+//   - Window filter is on max(COALESCE(upholsteredAt, packedAt)) so a unit
+//     straddling the boundary gets attributed to the date of its FINAL piece.
 //
 // Response also includes a `rows` array — one entry per recognized unit —
 // for the "Revenue Raw Data" audit table on the Labor Cost tab.
@@ -196,16 +205,16 @@ app.get("/production-revenue", async (c) => {
                 unitNo,
                 COUNT(*) AS pieces_done,
                 MAX(COALESCE(totalPieces, 1)) AS expected_pieces,
-                MAX(upholsteredAt) AS unit_completed_at
+                MAX(COALESCE(upholsteredAt, packedAt)) AS unit_completed_at
            FROM fg_units
           WHERE poId IS NOT NULL
             AND unitNo IS NOT NULL
             AND status IN ('UPHOLSTERED','PACKED','LOADED','DELIVERED')
-            AND upholsteredAt IS NOT NULL
+            AND COALESCE(upholsteredAt, packedAt) IS NOT NULL
           GROUP BY poId, unitNo
          HAVING COUNT(*) >= MAX(COALESCE(totalPieces, 1))
-            AND MAX(upholsteredAt) >= ?
-            AND MAX(upholsteredAt) <= ?
+            AND MAX(COALESCE(upholsteredAt, packedAt)) >= ?
+            AND MAX(COALESCE(upholsteredAt, packedAt)) <= ?
        )
        SELECT u.poId               AS poId,
               u.unitNo             AS unitNo,

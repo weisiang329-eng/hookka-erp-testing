@@ -1512,6 +1512,12 @@ function DepartmentLaborTab({
   );
   const [dateFrom, setDateFrom] = useState(initialRange.from);
   const [dateTo, setDateTo] = useState(initialRange.to);
+  // Category filter mirrors Labor Cost: when set, only entries tagged with
+  // that product category count toward dept totals. Non-production buckets
+  // (Warehousing / Repair / Maintenance / Production Shortfall) carry an
+  // empty category and ALWAYS show through so borrowed / idle hours stay
+  // visible regardless of filter.
+  const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
 
   const onPickPeriod = (p: string) => {
     setPeriod(p);
@@ -1604,6 +1610,11 @@ function DepartmentLaborTab({
         const otH = hours * otShare;
         const regularH = hours - otH;
         const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        // Same branch as Labor Cost: when a category filter is on, only
+        // count entries tagged with that category; entries with empty
+        // category (non-production depts) always pass through.
+        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as "" | "SOFA" | "BEDFRAME" | "ACCESSORY";
+        if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
         let cell = acc.get(e.departmentCode);
         if (!cell) {
           cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
@@ -1626,7 +1637,7 @@ function DepartmentLaborTab({
         estCostSen: Math.round(cell?.costSen ?? 0),
       };
     });
-  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo]);
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter]);
 
   const totals = useMemo(() => {
     return rows.reduce(
@@ -1744,6 +1755,20 @@ function DepartmentLaborTab({
                 onChange={(e) => onPickTo(e.target.value)}
                 className="w-36 h-8 text-xs"
               />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">Category</label>
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value as "" | "SOFA" | "BEDFRAME" | "ACCESSORY")}
+                className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                title="Slice every dept's hours / cost by item category"
+              >
+                <option value="">All categories</option>
+                <option value="SOFA">Sofa</option>
+                <option value="BEDFRAME">Bedframe</option>
+                <option value="ACCESSORY">Accessory</option>
+              </select>
             </div>
           </div>
         </div>

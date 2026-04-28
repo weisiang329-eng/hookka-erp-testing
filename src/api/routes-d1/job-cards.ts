@@ -175,16 +175,24 @@ app.get("/summary", async (c) => {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
+  // Aliases use snake_case so Postgres preserves them (unquoted identifiers
+  // get folded to lowercase, breaking JS reads on camelCase aliases like
+  // productionMinutes -> productionminutes which postgres.js cannot restore).
+  // The driver's transform.column.from layer converts snake_case back to
+  // camelCase for us (worker_id -> workerId, production_minutes ->
+  // productionMinutes, jc_count -> jcCount). Bug fix 2026-04-28: this
+  // endpoint silently returned 0 productionMinutes for every worker because
+  // r.productionMinutes was undefined.
   const sql = `
-    SELECT wid AS workerId,
-           SUM(contribMin) AS productionMinutes,
-           COUNT(*) AS jcCount
+    SELECT wid AS worker_id,
+           SUM(contrib_min) AS production_minutes,
+           COUNT(*) AS jc_count
       FROM (
         SELECT pic1Id AS wid,
                CASE WHEN pic2Id IS NOT NULL AND pic2Id != ''
                     THEN productionTimeMinutes / 2.0
                     ELSE productionTimeMinutes
-               END AS contribMin
+               END AS contrib_min
           FROM job_cards
          WHERE pic1Id IS NOT NULL AND pic1Id != ''
            AND status IN ('COMPLETED','TRANSFERRED')
@@ -194,7 +202,7 @@ app.get("/summary", async (c) => {
         UNION ALL
 
         SELECT pic2Id AS wid,
-               productionTimeMinutes / 2.0 AS contribMin
+               productionTimeMinutes / 2.0 AS contrib_min
           FROM job_cards
          WHERE pic2Id IS NOT NULL AND pic2Id != ''
            AND pic1Id IS NOT NULL AND pic1Id != ''

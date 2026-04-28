@@ -312,12 +312,17 @@ app.get("/summary", async (c) => {
   // One query per (worker, dept) bucket — totals are derived in JS by
   // summing across each worker's bucket rows. distinct(date) per worker
   // gives the daysWithEntries count without a second round trip.
+  // SELECT aliases use snake_case so Postgres preserves them through the
+  // unquoted-identifier lowercase fold; postgres.js's transform.column.from
+  // restores them to camelCase on the way back. Without the snake_case
+  // hint, `AS dayCount` would return as `daycount` and r.dayCount would be
+  // undefined.
   const rowsRes = await c.var.DB
     .prepare(
       `SELECT workerId,
               departmentCode,
               SUM(hours) AS hours,
-              COUNT(DISTINCT date) AS dayCount
+              COUNT(DISTINCT date) AS day_count
          FROM working_hour_entries
         WHERE date >= ? AND date <= ?
         GROUP BY workerId, departmentCode`,
@@ -331,7 +336,7 @@ app.get("/summary", async (c) => {
   // double-count). Second tiny query keeps the math honest.
   const daysRes = await c.var.DB
     .prepare(
-      `SELECT workerId, COUNT(DISTINCT date) AS dayCount
+      `SELECT workerId, COUNT(DISTINCT date) AS day_count
          FROM working_hour_entries
         WHERE date >= ? AND date <= ?
         GROUP BY workerId`,

@@ -9,7 +9,12 @@ import {
   ArrowLeft, Trash2, Download, Edit, Copy,
   CheckCircle2, Truck, FileText, XCircle, PauseCircle, PlayCircle, X,
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
+  Wrench,
 } from "lucide-react";
+// Phase 3 — Service Orders. Opens a modal pre-filled with this SO's
+// header info so the user can spawn a 换货服务 directly from the SO
+// detail page when a customer reports a defect.
+import { CreateServiceOrderModal } from "@/pages/service-orders";
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
@@ -170,6 +175,8 @@ export default function SalesOrderDetailPage() {
   const [updating, setUpdating] = useState(false);
   const [confirmSuccess, setConfirmSuccess] = useState<string | null>(null);
   const [showOverrides, setShowOverrides] = useState(false);
+  // Phase 3 — opens the Service Order create modal pre-filled with this SO.
+  const [serviceModalOpen, setServiceModalOpen] = useState(false);
 
   // Confirmation modal state
   const [modal, setModal] = useState<{
@@ -679,12 +686,38 @@ export default function SalesOrderDetailPage() {
               </Button>
             )}
 
+            {/* Phase 3 — Service Order: only shipped (or beyond) orders can
+                trigger a customer-defect claim. Backend re-validates. */}
+            {["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"].includes(order.status) && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setServiceModalOpen(true)}
+                title="Open a 换货服务 (Service Order) for a customer-reported defect"
+              >
+                <Wrench className="h-4 w-4" /> Convert to Service Order
+              </Button>
+            )}
+
             {["SHIPPED", "INVOICED", "CLOSED", "CANCELLED"].includes(order.status) && (
-              <span className="text-sm text-[#9CA3AF]">No actions available for this status.</span>
+              <span className="text-sm text-[#9CA3AF]">No further status actions for this state.</span>
             )}
           </div>
         </CardContent>
       </Card>
+
+      {serviceModalOpen && (
+        <CreateServiceOrderModal
+          presetSourceType="SO"
+          presetSourceId={order.id}
+          onClose={() => setServiceModalOpen(false)}
+          onCreated={(svcId) => {
+            setServiceModalOpen(false);
+            toast.success("Service order created");
+            navigate(`/service-orders/${svcId}`);
+          }}
+        />
+      )}
 
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">
         <Card className="lg:col-span-2">

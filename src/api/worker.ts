@@ -369,6 +369,7 @@ import qcPending from "./routes/qc-pending";
 import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
 import scanPo from "./routes/scan-po";
+import serviceOrders from "./routes/service-orders";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -494,6 +495,10 @@ app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);
 app.route("/api/scan-po", scanPo);
+// Phase 3 — Service Orders (换货服务): customer-reported defects on shipped
+// SOs/COs. Three resolution modes (REPRODUCE / STOCK_SWAP / REPAIR); see
+// routes/service-orders.ts for the full flow.
+app.route("/api/service-orders", serviceOrders);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

@@ -38,6 +38,12 @@ import {
   type CreatedProductionOrder,
 } from "./_shared/production-builder";
 import { checkSalesOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import {
+  consumeEditLockOverrideToken,
+  createEditLockOverride,
+  lookupActorDisplayName,
+  MIN_OVERRIDE_REASON_LEN,
+} from "../lib/edit-lock-override";
 
 const app = new Hono<Env>();
 
@@ -1192,6 +1198,250 @@ app.get("/:id/edit-eligibility", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/sales-orders/:id/override-edit-lock — admin escape hatch for the
+// Rule-3 production_window edit lock.
+//
+// Per user 2026-04-28: when the eligibility endpoint returns
+// editable=false / reason="production_window" (i.e. the earliest JC's
+// dueDate is within 2 calendar days of today), SUPER_ADMIN / ADMIN should
+// be able to override the lock with a written reason. Everyone else stays
+// locked. Each override is audit-trailed: a row in edit_lock_overrides AND
+// an EDIT_LOCK_OVERRIDDEN entry in so_status_changes (so the existing
+// <StatusTimeline /> on the SO detail page surfaces it without extra API
+// wiring).
+//
+// SECURITY MODEL — why ADMIN can override Rule 3 but not Rule 2:
+//   * Rule 1 (status not in DRAFT/CONFIRMED/IN_PRODUCTION): a CANCELLED /
+//     SHIPPED / etc. SO has no live editing semantic — there's nothing
+//     to mutate. Override would be meaningless.
+//   * Rule 2 (any JC has completedDate): real production OUTPUT exists.
+//     Editing items would orphan finished WIP, which is irreversible.
+//     No reason text can undo a physical commitment, so this stays a
+//     hard lock for everyone including SUPER_ADMIN.
+//   * Rule 3 (production_window): a *soft* schedule-drift guard — no
+//     output yet, just a "we're inside the 2-day cutoff so material
+//     orders may drift" warning. The admin overriding is explicitly
+//     accepting that schedule risk. The reason text + actor + timestamp
+//     are persisted so the team can review later if drift actually hits.
+//
+// Returns: { success: true, overrideToken, expiresAt } on success.
+// The FE forwards `overrideToken` on the next PUT /:id body to bypass
+// the production_window check (only — Rules 1 & 2 still re-check).
+//
+// Registered BEFORE /:id and other dynamic routes so Hono's trie picks
+// the right handler.
+// ---------------------------------------------------------------------------
+app.post("/:id/override-edit-lock", async (c) => {
+  const id = c.req.param("id");
+
+  // Role gate. The auth-middleware stamps `userRole` on the context.
+  // SUPER_ADMIN / ADMIN are the only roles that can grant this override —
+  // a regular OPERATOR / VIEWER cannot bypass even with a reason. We do the
+  // check directly off c.get('userRole') instead of requirePermission()
+  // because no granular sales-orders:override-edit-lock permission exists
+  // yet; this is intentionally a role-level escape hatch.
+  const role = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userRole")?.toUpperCase();
+  if (role !== "SUPER_ADMIN" && role !== "ADMIN") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Forbidden — only SUPER_ADMIN or ADMIN can override the edit lock.",
+      },
+      403,
+    );
+  }
+
+  // Body validation. The reason is required + non-trivial: anything under
+  // 5 chars is almost certainly a smashed-keyboard placeholder ("x", "asdf")
+  // and useless for the audit review later.
+  let body: { reason?: unknown };
+  try {
+    body = (await c.req.json()) as { reason?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const reasonRaw = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (reasonRaw.length < MIN_OVERRIDE_REASON_LEN) {
+    return c.json(
+      {
+        success: false,
+        error: `Reason is required (minimum ${MIN_OVERRIDE_REASON_LEN} characters after trimming).`,
+      },
+      400,
+    );
+  }
+
+  // Re-run the same eligibility logic the GET endpoint uses. We MUST verify
+  // Rule 3 actually fires right now, and Rules 1+2 are clear — otherwise
+  // the override is either unnecessary (already editable) or invalid (a
+  // hard-locked order). Fetching status + earliest completed JC + earliest
+  // scheduled JC dueDate in parallel mirrors the eligibility GET above.
+  const so = await c.var.DB
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; status: string }>();
+  if (!so) {
+    return c.json({ success: false, error: "Order not found" }, 404);
+  }
+
+  // Rule 1: status must be DRAFT / CONFIRMED / IN_PRODUCTION. Override
+  // cannot resurrect a CANCELLED / SHIPPED order.
+  if (
+    so.status !== "DRAFT" &&
+    so.status !== "CONFIRMED" &&
+    so.status !== "IN_PRODUCTION"
+  ) {
+    return c.json(
+      {
+        success: false,
+        error: `Cannot override — order is in status ${so.status}, which is not editable regardless of override.`,
+      },
+      400,
+    );
+  }
+
+  // For DRAFT / CONFIRMED there's no production yet, so no Rule-3 lock
+  // could even fire — the override is unnecessary. Reject so the FE
+  // surfaces "edit normally" instead of writing junk audit rows.
+  if (so.status === "DRAFT" || so.status === "CONFIRMED") {
+    return c.json(
+      {
+        success: false,
+        error: "No override needed — this order is already editable.",
+      },
+      400,
+    );
+  }
+
+  const [completedRes, earliestDueRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT jc.completedDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.completedDate IS NOT NULL
+            AND jc.completedDate <> ''
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ completedDate: string | null }>(),
+    c.var.DB
+      .prepare(
+        `SELECT jc.dueDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.dueDate IS NOT NULL
+            AND jc.dueDate <> ''
+          ORDER BY jc.dueDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ dueDate: string | null }>(),
+  ]);
+
+  // Rule 2: any dept stamped a completion → hard lock, no override allowed.
+  // This is the "real production output exists" guard. See block comment at
+  // the top of this endpoint for why ADMIN cannot override this.
+  if (completedRes && completedRes.completedDate) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Cannot override — production output already exists (a department has stamped completion). Editing would orphan finished WIP. This lock cannot be bypassed.",
+      },
+      400,
+    );
+  }
+
+  // Rule 3: production_window must currently be active for the override
+  // to be meaningful. If the earliest JC dueDate is > today + 2 days the
+  // SO is already editable normally — return 400 so the FE doesn't write
+  // junk audit rows for a no-op override.
+  const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
+  let productionWindowActive = false;
+  if (earliestDue.length === 10) {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    if (earliestDue <= cutoffStr) productionWindowActive = true;
+  }
+  if (!productionWindowActive) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "No override needed — the order is not currently within the 2-day production-window lock.",
+      },
+      400,
+    );
+  }
+
+  // All checks pass — mint the token, write the audit-trail rows.
+  const actorUserId = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userId") ?? null;
+  const actorUserName = await lookupActorDisplayName(c.var.DB, actorUserId);
+
+  const created = await createEditLockOverride(c.var.DB, {
+    orderType: "SO",
+    orderId: id,
+    reason: reasonRaw,
+    actorUserId,
+    actorUserName,
+    actorRole: role,
+  });
+
+  // Mirror the override into so_status_changes so the existing
+  // <StatusTimeline /> on the SO detail page picks it up automatically.
+  // We re-use the same fromStatus/toStatus columns: the override doesn't
+  // actually transition status, so we stamp both with the current status
+  // and flag the row via notes prefix "EDIT_LOCK_OVERRIDDEN: <reason>".
+  // The FE formats anything starting with EDIT_LOCK_OVERRIDDEN: with a
+  // distinct "Override" badge instead of the default "Status Change".
+  const noteTag = `EDIT_LOCK_OVERRIDDEN: ${reasonRaw}`;
+  await c.var.DB
+    .prepare(
+      `INSERT INTO so_status_changes
+         (id, soId, fromStatus, toStatus, changedBy, timestamp, notes, autoActions)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(
+      genStatusId(),
+      id,
+      so.status,
+      so.status,
+      actorUserName ?? actorUserId ?? "Admin",
+      new Date().toISOString(),
+      noteTag,
+      JSON.stringify([
+        `Override token issued (60 min TTL). earliestJcDueDate=${earliestDue}.`,
+      ]),
+    )
+    .run();
+
+  // Audit emit — first-class entry in audit_events too, so the global
+  // audit log catches this even if status-history is later refactored.
+  await emitAudit(c, {
+    resource: "sales-orders",
+    resourceId: id,
+    action: "override-edit-lock",
+    before: { editable: false, reason: "production_window", earliestJcDueDate: earliestDue },
+    after: { overrideToken: created.token, expiresAt: created.expiresAt, reason: reasonRaw },
+  });
+
+  return c.json({
+    success: true,
+    overrideToken: created.token,
+    expiresAt: created.expiresAt,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/sales-orders — create a new SO + items atomically
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
@@ -1821,6 +2071,131 @@ app.put("/:id", async (c) => {
       !body.hookkaExpectedDD;
     if (lockMsg && !isStatusOnly) {
       return c.json(lockedResponse(lockMsg), 403);
+    }
+
+    // ---------------------------------------------------------------------
+    // Edit-eligibility re-check (defense-in-depth, mirrors the
+    // /:id/edit-eligibility GET endpoint logic). Rule 1 is implicit in the
+    // existing status-transition validator further down. Rule 2
+    // (dept_completed) and Rule 3 (production_window) get explicit checks
+    // here so a malicious / stale FE can't bypass them by hitting PUT
+    // directly. Status-only edits skip BOTH checks (an admin closing or
+    // cancelling shouldn't be blocked by these).
+    //
+    // overrideToken bypass: SUPER_ADMIN / ADMIN can mint a one-shot token
+    // via POST /:id/override-edit-lock and forward it on this PUT body to
+    // skip Rule 3 ONLY. Rules 1 and 2 are NOT bypassable — they protect
+    // committed production output and state-machine validity, which no
+    // amount of admin override can safely waive.
+    // ---------------------------------------------------------------------
+    if (
+      !isStatusOnly &&
+      (existing.status === "IN_PRODUCTION" ||
+        existing.status === "CONFIRMED")
+    ) {
+      // Pull earliest completed JC + earliest scheduled JC dueDate in one
+      // round-trip — same query shape as the eligibility GET handler.
+      const [completedRes, earliestDueRes] = await Promise.all([
+        c.var.DB
+          .prepare(
+            `SELECT jc.completedDate, jc.departmentName, jc.departmentCode
+               FROM job_cards jc
+               JOIN production_orders po ON po.id = jc.productionOrderId
+              WHERE po.salesOrderId = ?
+                AND jc.completedDate IS NOT NULL
+                AND jc.completedDate <> ''
+              LIMIT 1`,
+          )
+          .bind(id)
+          .first<{
+            completedDate: string | null;
+            departmentName: string | null;
+            departmentCode: string | null;
+          }>(),
+        c.var.DB
+          .prepare(
+            `SELECT jc.dueDate
+               FROM job_cards jc
+               JOIN production_orders po ON po.id = jc.productionOrderId
+              WHERE po.salesOrderId = ?
+                AND jc.dueDate IS NOT NULL
+                AND jc.dueDate <> ''
+              ORDER BY jc.dueDate ASC
+              LIMIT 1`,
+          )
+          .bind(id)
+          .first<{ dueDate: string | null }>(),
+      ]);
+
+      // Rule 2 — dept_completed. NOT bypassable by overrideToken: real
+      // production output exists, editing items would orphan finished WIP.
+      if (completedRes && completedRes.completedDate) {
+        const dept =
+          completedRes.departmentName ||
+          completedRes.departmentCode ||
+          "A department";
+        return c.json(
+          {
+            success: false,
+            error: `Cannot edit — ${dept} has completed work on this order. Editing items would orphan finished WIP.`,
+            reason: "dept_completed",
+          },
+          403,
+        );
+      }
+
+      // Rule 3 — production_window. Bypassable via a valid overrideToken.
+      const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
+      if (earliestDue.length === 10) {
+        const cutoff = new Date();
+        cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+        const cutoffStr = cutoff.toISOString().slice(0, 10);
+        if (earliestDue <= cutoffStr) {
+          const overrideToken =
+            typeof body.overrideToken === "string" ? body.overrideToken : "";
+          if (!overrideToken) {
+            return c.json(
+              {
+                success: false,
+                error: `Cannot edit — first production step is due ${earliestDue} (within the 2-day cutoff ${cutoffStr}). An ADMIN override is required.`,
+                reason: "production_window",
+                earliestJcDueDate: earliestDue,
+                cutoffDate: cutoffStr,
+              },
+              403,
+            );
+          }
+          // Verify + atomically consume the token. Rejects on wrong order
+          // / expired / already-used / not-found — each maps to a distinct
+          // 403 error message so the FE can show the operator what went
+          // wrong (token expired → "request a new override", etc.).
+          const consumed = await consumeEditLockOverrideToken(
+            c.var.DB,
+            overrideToken,
+            "SO",
+            id,
+          );
+          if (!consumed.ok) {
+            const detail =
+              consumed.reason === "expired"
+                ? "Override token has expired (60 min TTL). Request a new override."
+                : consumed.reason === "already_used"
+                  ? "Override token has already been used. Request a new override."
+                  : consumed.reason === "wrong_order"
+                    ? "Override token does not match this order."
+                    : "Override token not found.";
+            return c.json(
+              {
+                success: false,
+                error: detail,
+                reason: "override_invalid",
+              },
+              403,
+            );
+          }
+          // Token consumed — fall through to the normal PUT flow.
+        }
+      }
     }
     const now = new Date().toISOString();
 

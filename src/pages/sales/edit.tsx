@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -141,7 +141,17 @@ function formatLockDate(iso: string | undefined): string {
 export default function EditSalesOrderPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
+  // Override token forwarded from the SO detail page when an admin
+  // overrode the Rule-3 production_window lock. Survives a single
+  // navigation through router state, NOT through query params or
+  // localStorage — refresh / back-button correctly drops the token so a
+  // stale FE cannot replay it. Also captured as a local const so the
+  // dirty-state callback closure doesn't re-read on every keystroke.
+  const overrideTokenFromState =
+    (location.state as { overrideToken?: string } | null)?.overrideToken ??
+    null;
   const otherEditors = usePresence("sales_order", id, Boolean(id));
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
@@ -456,6 +466,12 @@ export default function EditSalesOrderPage() {
         body: JSON.stringify({
           customerId, customerPOId, customerSOId, reference,
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+          // Forward the admin-issued override token (if any). The backend
+          // PUT verifies + atomically consumes it, then skips the Rule-3
+          // production_window pre-flight. Token is NOT included on
+          // refresh/back-navigation because location.state resets — that's
+          // the desired behavior (single-use semantics).
+          ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };

@@ -19,6 +19,7 @@ import { generateSOPdf } from "@/lib/generate-so-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { getCurrentUser } from "@/lib/auth";
 import type { SalesOrder, SOStatus, Customer } from "@/lib/mock-data";
 
 type LinkedPO = {
@@ -112,6 +113,21 @@ function ConfirmModal({
   );
 }
 
+// EDIT_LOCK_OVERRIDDEN rows are shoehorned into so_status_changes (because
+// CO has no status-changes table and we want both modules to share the same
+// FE shape). The backend marks these by prefixing the notes column with
+// "EDIT_LOCK_OVERRIDDEN: ". The UI strips that prefix and renders a distinct
+// "Override" badge instead of the default fromStatus → toStatus arrow, so
+// operators can spot at a glance which timeline rows are admin escape-hatch
+// invocations vs regular status transitions.
+const OVERRIDE_NOTE_PREFIX = "EDIT_LOCK_OVERRIDDEN: ";
+function isOverrideRow(c: StatusChange): boolean {
+  return typeof c.notes === "string" && c.notes.startsWith(OVERRIDE_NOTE_PREFIX);
+}
+function overrideReason(c: StatusChange): string {
+  return c.notes.slice(OVERRIDE_NOTE_PREFIX.length);
+}
+
 // --- Status Timeline Component ---
 function StatusTimeline({ history }: { history: StatusChange[] }) {
   if (history.length === 0) return null;
@@ -130,37 +146,60 @@ function StatusTimeline({ history }: { history: StatusChange[] }) {
       </CardHeader>
       <CardContent>
         <div className="relative">
-          {sorted.map((change, i) => (
-            <div key={change.id} className="flex gap-4 pb-4 last:pb-0">
-              {/* Timeline connector */}
-              <div className="flex flex-col items-center">
-                <div className={`w-3 h-3 rounded-full border-2 ${
-                  i === sorted.length - 1 ? "border-[#6B5C32] bg-[#6B5C32]" : "border-[#C6DBA8] bg-[#4F7C3A]"
-                }`} />
-                {i < sorted.length - 1 && <div className="w-0.5 flex-1 bg-[#E2DDD8] mt-1" />}
-              </div>
-              {/* Content */}
-              <div className="flex-1 pb-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <Badge variant="status" status={change.fromStatus} />
-                  <span className="text-xs text-[#9CA3AF]">-&gt;</span>
-                  <Badge variant="status" status={change.toStatus} />
-                  <span className="text-xs text-[#9CA3AF] ml-auto">{formatDateTime(change.timestamp)}</span>
+          {sorted.map((change, i) => {
+            const override = isOverrideRow(change);
+            return (
+              <div key={change.id} className="flex gap-4 pb-4 last:pb-0">
+                {/* Timeline connector — override rows render an amber dot
+                    so they're visually distinct from green status hops. */}
+                <div className="flex flex-col items-center">
+                  <div className={`w-3 h-3 rounded-full border-2 ${
+                    override
+                      ? "border-[#B8860B] bg-[#D4A017]"
+                      : i === sorted.length - 1
+                        ? "border-[#6B5C32] bg-[#6B5C32]"
+                        : "border-[#C6DBA8] bg-[#4F7C3A]"
+                  }`} />
+                  {i < sorted.length - 1 && <div className="w-0.5 flex-1 bg-[#E2DDD8] mt-1" />}
                 </div>
-                <p className="text-xs text-[#6B7280] mt-1">by {change.changedBy}</p>
-                {change.notes && <p className="text-xs text-[#4B5563] mt-0.5">{change.notes}</p>}
-                {change.autoActions.length > 0 && (
-                  <div className="mt-1 flex flex-wrap gap-1">
-                    {change.autoActions.map((action, j) => (
-                      <span key={j} className="text-xs bg-[#E0EDF0] text-[#3E6570] px-2 py-0.5 rounded">
-                        {action}
+                {/* Content */}
+                <div className="flex-1 pb-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {override ? (
+                      <span className="text-xs font-medium px-2 py-0.5 rounded bg-[#FBF1D6] text-[#8A6D1B] border border-[#E8D38A]">
+                        Override
                       </span>
-                    ))}
+                    ) : (
+                      <>
+                        <Badge variant="status" status={change.fromStatus} />
+                        <span className="text-xs text-[#9CA3AF]">-&gt;</span>
+                        <Badge variant="status" status={change.toStatus} />
+                      </>
+                    )}
+                    <span className="text-xs text-[#9CA3AF] ml-auto">{formatDateTime(change.timestamp)}</span>
                   </div>
-                )}
+                  <p className="text-xs text-[#6B7280] mt-1">by {change.changedBy}</p>
+                  {/* For override rows the "reason" is the meaningful payload
+                      (notes is just the OVERRIDE: prefix + reason). Render it
+                      stripped of the prefix so the operator sees plain text. */}
+                  {change.notes && (
+                    <p className="text-xs text-[#4B5563] mt-0.5">
+                      {override ? overrideReason(change) : change.notes}
+                    </p>
+                  )}
+                  {change.autoActions.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {change.autoActions.map((action, j) => (
+                        <span key={j} className="text-xs bg-[#E0EDF0] text-[#3E6570] px-2 py-0.5 rounded">
+                          {action}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </CardContent>
     </Card>
@@ -242,16 +281,99 @@ export default function SalesOrderDetailPage() {
   // inventory if the SO flips to CANCELLED. We surface the same lock here
   // as a disabled Cancel button + tooltip BEFORE the user clicks; the
   // backend 409 still hard-blocks on click as a defense-in-depth.
-  const { data: eligibilityResp } = useCachedJson<{
+  const { data: eligibilityResp, refresh: refreshEligibility } = useCachedJson<{
     editable: boolean;
     reason?: "status" | "production_window" | "dept_completed";
     completedDept?: string;
     completedAt?: string;
+    // Rule-3 fields: only present when reason="production_window".
+    earliestJcDueDate?: string;
+    cutoffDate?: string;
   }>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
   const cancelLocked = eligibilityResp?.reason === "dept_completed";
   const cancelLockTooltip = cancelLocked
     ? `Cannot cancel — ${eligibilityResp?.completedDept || "A department"} completed on ${formatDate(eligibilityResp?.completedAt || "")}`
     : "";
+  const productionWindowLocked = eligibilityResp?.reason === "production_window";
+
+  // Override-Lock modal state. Only ADMIN / SUPER_ADMIN see the trigger
+  // button — the role gate is below near `canOverride`. The modal collects a
+  // mandatory reason (>= 5 chars after trim, matched server-side), POSTs
+  // /override-edit-lock, then navigates to /sales/:id/edit with the returned
+  // overrideToken in router state so the edit page can forward it on PUT.
+  const authUser = getCurrentUser();
+  const userRole = (authUser?.role || "").toUpperCase();
+  const canOverride =
+    productionWindowLocked &&
+    (userRole === "ADMIN" || userRole === "SUPER_ADMIN");
+  const [overrideModal, setOverrideModal] = useState<{
+    open: boolean;
+    reason: string;
+    submitting: boolean;
+    error: string | null;
+  }>({ open: false, reason: "", submitting: false, error: null });
+
+  const submitOverride = useCallback(async () => {
+    if (!id) return;
+    const reason = overrideModal.reason.trim();
+    if (reason.length < 5) {
+      setOverrideModal((prev) => ({
+        ...prev,
+        error: "Please enter a reason of at least 5 characters.",
+      }));
+      return;
+    }
+    setOverrideModal((prev) => ({ ...prev, submitting: true, error: null }));
+    try {
+      const res = await fetch(
+        `/api/sales-orders/${id}/override-edit-lock`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        overrideToken?: string;
+        expiresAt?: string;
+      };
+      if (!res.ok || !data.success || !data.overrideToken) {
+        setOverrideModal((prev) => ({
+          ...prev,
+          submitting: false,
+          error: data.error || `Failed (HTTP ${res.status})`,
+        }));
+        return;
+      }
+      // Refresh eligibility cache so the SO timeline reflects the audit
+      // row immediately on return from edit. Not strictly necessary for
+      // navigation correctness but avoids stale "still locked" hints.
+      if (id) invalidateCache(`/api/sales-orders/${id}`);
+      refreshEligibility();
+      setOverrideModal({
+        open: false,
+        reason: "",
+        submitting: false,
+        error: null,
+      });
+      toast.success("Override granted — opening edit page.");
+      // Pass the token via location.state. Survives a single navigation,
+      // which is exactly the lifetime we want — refresh / back-button
+      // doesn't accidentally re-use a token. The edit page reads it via
+      // useLocation() and forwards on the PUT body.
+      navigate(`/sales/${id}/edit`, {
+        state: { overrideToken: data.overrideToken, overrideReason: reason },
+      });
+    } catch (e) {
+      setOverrideModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: e instanceof Error ? e.message : "Network error",
+      }));
+    }
+  }, [id, overrideModal.reason, navigate, toast, refreshEligibility]);
 
   const updateStatus = useCallback(async (newStatus: SOStatus) => {
     if (!order) return;
@@ -605,11 +727,129 @@ export default function SalesOrderDetailPage() {
           {canEdit && (
             <Button variant="outline" size="sm" onClick={() => navigate(`/sales/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
           )}
+          {/* Rule-3 production_window lock surface. Non-admins see a
+              disabled "Edit (locked)" with a tooltip explaining the cutoff;
+              ADMIN / SUPER_ADMIN see the same disabled chip PLUS an amber
+              "Override Lock" button that opens the reason-capture modal. */}
+          {!canEdit && productionWindowLocked && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled
+                title={
+                  eligibilityResp?.earliestJcDueDate && eligibilityResp?.cutoffDate
+                    ? `Locked — first JC dueDate ${eligibilityResp.earliestJcDueDate} is within the 2-day cutoff (${eligibilityResp.cutoffDate}).`
+                    : "Locked — within production window."
+                }
+              >
+                <Edit className="h-4 w-4" /> Edit (locked)
+              </Button>
+              {canOverride && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-[#8A6D1B] border-[#E8D38A] hover:bg-[#FBF1D6]"
+                  onClick={() =>
+                    setOverrideModal({
+                      open: true,
+                      reason: "",
+                      submitting: false,
+                      error: null,
+                    })
+                  }
+                >
+                  <AlertTriangle className="h-4 w-4" /> Override Lock
+                </Button>
+              )}
+            </>
+          )}
           {order.status === "DRAFT" && (
             <Button variant="outline" size="sm" className="text-[#9A3A2D] hover:text-[#7A2E24]" onClick={deleteOrder}><Trash2 className="h-4 w-4" /> Delete</Button>
           )}
         </div>
       </div>
+
+      {/* Override-Lock Modal — admin-only escape hatch for Rule 3 (the
+          production_window soft-lock). Required reason text is captured
+          here, sent to POST /:id/override-edit-lock, the returned token
+          is forwarded to the edit page via router state. */}
+      {overrideModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="fixed inset-0 bg-black/40"
+            onClick={() => {
+              if (!overrideModal.submitting) {
+                setOverrideModal({ open: false, reason: "", submitting: false, error: null });
+              }
+            }}
+          />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-[#B8860B]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Override Edit Lock</h3>
+              </div>
+              <button
+                onClick={() =>
+                  !overrideModal.submitting &&
+                  setOverrideModal({ open: false, reason: "", submitting: false, error: null })
+                }
+                className="text-[#9CA3AF] hover:text-[#374151]"
+                disabled={overrideModal.submitting}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-sm text-[#374151]">
+              Earliest JC dueDate is{" "}
+              <span className="font-mono">{eligibilityResp?.earliestJcDueDate || "—"}</span>
+              , within the 2-day cutoff (
+              <span className="font-mono">{eligibilityResp?.cutoffDate || "—"}</span>
+              ). Editing past this point may cause material orders or cutting
+              plans to drift out of sync with live job cards. Reason for
+              override:
+            </p>
+            <textarea
+              value={overrideModal.reason}
+              onChange={(e) =>
+                setOverrideModal((prev) => ({
+                  ...prev,
+                  reason: e.target.value,
+                  error: null,
+                }))
+              }
+              placeholder="Explain why this edit is necessary (min 5 chars)..."
+              className="w-full min-h-[100px] rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#B8860B] focus:border-transparent"
+              disabled={overrideModal.submitting}
+            />
+            {overrideModal.error && (
+              <p className="text-sm text-[#9A3A2D]">{overrideModal.error}</p>
+            )}
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setOverrideModal({ open: false, reason: "", submitting: false, error: null })
+                }
+                disabled={overrideModal.submitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={submitOverride}
+                disabled={overrideModal.submitting || overrideModal.reason.trim().length < 5}
+                className="bg-[#B8860B] hover:bg-[#8A6D1B] text-white"
+              >
+                {overrideModal.submitting ? "Submitting..." : "Override and Edit"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Status Action Buttons */}
       <Card>

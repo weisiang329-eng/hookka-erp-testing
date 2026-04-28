@@ -18,6 +18,7 @@ import { generateCOPdf } from "@/lib/generate-co-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { getCurrentUser } from "@/lib/auth";
 import type { Customer } from "@/lib/mock-data";
 import type { ConsignmentOrder as SalesOrder, COStatus as SOStatus } from "@/types";
 
@@ -194,6 +195,35 @@ export default function SalesOrderDetailPage() {
     incompleteProducts: Array<{ productCode: string; productName: string; reason: string }>;
   }>({ open: false, incompleteProducts: [] });
 
+  // Edit-eligibility hook — drives the Rule-3 production_window UI on CO
+  // detail. Same shape as the SO detail page; the backend GET endpoint
+  // returns identical fields (editable, reason, earliestJcDueDate,
+  // cutoffDate, completedDept, completedAt).
+  const { data: eligibilityResp, refresh: refreshEligibility } = useCachedJson<{
+    editable: boolean;
+    reason?: "status" | "production_window" | "dept_completed";
+    completedDept?: string;
+    completedAt?: string;
+    earliestJcDueDate?: string;
+    cutoffDate?: string;
+  }>(id ? `/api/consignment-orders/${id}/edit-eligibility` : null);
+  const productionWindowLocked = eligibilityResp?.reason === "production_window";
+
+  // Override-Lock modal state. ADMIN / SUPER_ADMIN only — see SO detail
+  // page for the full security-model rationale (Rule 3 is a *soft* guard,
+  // hence overridable; Rule 2 stays a hard lock for everyone).
+  const authUser = getCurrentUser();
+  const userRole = (authUser?.role || "").toUpperCase();
+  const canOverride =
+    productionWindowLocked &&
+    (userRole === "ADMIN" || userRole === "SUPER_ADMIN");
+  const [overrideModal, setOverrideModal] = useState<{
+    open: boolean;
+    reason: string;
+    submitting: boolean;
+    error: string | null;
+  }>({ open: false, reason: "", submitting: false, error: null });
+
   const fetchOrder = useCallback(() => {
     // Only this SO changed — per-id invalidation, not list prefix.
     if (id) invalidateCache(`/api/consignment-orders/${id}`);
@@ -343,6 +373,64 @@ export default function SalesOrderDetailPage() {
     setModal({ open: true, title, message, confirmLabel, confirmVariant, action });
   };
 
+  // POST /override-edit-lock for the CO. Same flow as the SO detail page:
+  // mint a 60-min token, navigate to /consignment/:id/edit with the token
+  // in router state so the edit page can forward it on the PUT body.
+  const submitOverride = useCallback(async () => {
+    if (!id) return;
+    const reason = overrideModal.reason.trim();
+    if (reason.length < 5) {
+      setOverrideModal((prev) => ({
+        ...prev,
+        error: "Please enter a reason of at least 5 characters.",
+      }));
+      return;
+    }
+    setOverrideModal((prev) => ({ ...prev, submitting: true, error: null }));
+    try {
+      const res = await fetch(
+        `/api/consignment-orders/${id}/override-edit-lock`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason }),
+        },
+      );
+      const data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        overrideToken?: string;
+        expiresAt?: string;
+      };
+      if (!res.ok || !data.success || !data.overrideToken) {
+        setOverrideModal((prev) => ({
+          ...prev,
+          submitting: false,
+          error: data.error || `Failed (HTTP ${res.status})`,
+        }));
+        return;
+      }
+      if (id) invalidateCache(`/api/consignment-orders/${id}`);
+      refreshEligibility();
+      setOverrideModal({
+        open: false,
+        reason: "",
+        submitting: false,
+        error: null,
+      });
+      toast.success("Override granted — opening edit page.");
+      navigate(`/consignment/${id}/edit`, {
+        state: { overrideToken: data.overrideToken, overrideReason: reason },
+      });
+    } catch (e) {
+      setOverrideModal((prev) => ({
+        ...prev,
+        submitting: false,
+        error: e instanceof Error ? e.message : "Network error",
+      }));
+    }
+  }, [id, overrideModal.reason, navigate, toast, refreshEligibility]);
+
   const deleteOrder = async () => {
     if (!confirm("Delete this order?")) return;
     await fetch(`/api/consignment-orders/${id}`, { method: "DELETE" });
@@ -399,7 +487,17 @@ export default function SalesOrderDetailPage() {
   // a downstream PO is COMPLETED OR a Consignment Note already exists.
   const lockReason = orderResp?.lockReason ?? null;
   const isLocked = !!lockReason;
-  const canEdit = ["DRAFT", "CONFIRMED"].includes(order.status) && !isLocked;
+  // canEdit now honors the server-side /edit-eligibility verdict for
+  // IN_PRODUCTION orders (parity with SO detail page bug-fix
+  // 2026-04-28): the SO state machine lands new orders directly at
+  // IN_PRODUCTION, and the eligibility GET already returns false when
+  // production_window or dept_completed fires. Trust it.
+  const eligibilityEditable = eligibilityResp?.editable ?? true;
+  const canEdit =
+    !isLocked &&
+    (order.status === "DRAFT" ||
+      order.status === "CONFIRMED" ||
+      (order.status === "IN_PRODUCTION" && eligibilityEditable));
   const canCancel = ["DRAFT", "CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const canHold = ["CONFIRMED", "IN_PRODUCTION"].includes(order.status);
   const isOnHold = order.status === "ON_HOLD";
@@ -502,11 +600,129 @@ export default function SalesOrderDetailPage() {
           {canEdit && (
             <Button variant="outline" size="sm" onClick={() => navigate(`/consignment/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>
           )}
+          {/* Rule-3 production_window lock — non-admins see disabled
+              "Edit (locked)"; ADMIN / SUPER_ADMIN see an additional amber
+              "Override Lock" button. Mirrors the SO detail page exactly. */}
+          {!canEdit && productionWindowLocked && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled
+                title={
+                  eligibilityResp?.earliestJcDueDate && eligibilityResp?.cutoffDate
+                    ? `Locked — first JC dueDate ${eligibilityResp.earliestJcDueDate} is within the 2-day cutoff (${eligibilityResp.cutoffDate}).`
+                    : "Locked — within production window."
+                }
+              >
+                <Edit className="h-4 w-4" /> Edit (locked)
+              </Button>
+              {canOverride && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-[#8A6D1B] border-[#E8D38A] hover:bg-[#FBF1D6]"
+                  onClick={() =>
+                    setOverrideModal({
+                      open: true,
+                      reason: "",
+                      submitting: false,
+                      error: null,
+                    })
+                  }
+                >
+                  <AlertTriangle className="h-4 w-4" /> Override Lock
+                </Button>
+              )}
+            </>
+          )}
           {order.status === "DRAFT" && (
             <Button variant="outline" size="sm" className="text-[#9A3A2D] hover:text-[#7A2E24]" onClick={deleteOrder}><Trash2 className="h-4 w-4" /> Delete</Button>
           )}
         </div>
       </div>
+
+      {/* Override-Lock Modal — admin-only escape hatch for Rule 3
+          (production_window soft-lock). Reason text is captured here, sent
+          to POST /:id/override-edit-lock, the returned token is forwarded
+          to the edit page via router state. See SO detail page for the
+          full security-model rationale. */}
+      {overrideModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="fixed inset-0 bg-black/40"
+            onClick={() => {
+              if (!overrideModal.submitting) {
+                setOverrideModal({ open: false, reason: "", submitting: false, error: null });
+              }
+            }}
+          />
+          <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-lg mx-4 p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-[#B8860B]" />
+                <h3 className="text-lg font-semibold text-[#1F1D1B]">Override Edit Lock</h3>
+              </div>
+              <button
+                onClick={() =>
+                  !overrideModal.submitting &&
+                  setOverrideModal({ open: false, reason: "", submitting: false, error: null })
+                }
+                className="text-[#9CA3AF] hover:text-[#374151]"
+                disabled={overrideModal.submitting}
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <p className="text-sm text-[#374151]">
+              Earliest JC dueDate is{" "}
+              <span className="font-mono">{eligibilityResp?.earliestJcDueDate || "—"}</span>
+              , within the 2-day cutoff (
+              <span className="font-mono">{eligibilityResp?.cutoffDate || "—"}</span>
+              ). Editing past this point may cause material orders or cutting
+              plans to drift out of sync with live job cards. Reason for
+              override:
+            </p>
+            <textarea
+              value={overrideModal.reason}
+              onChange={(e) =>
+                setOverrideModal((prev) => ({
+                  ...prev,
+                  reason: e.target.value,
+                  error: null,
+                }))
+              }
+              placeholder="Explain why this edit is necessary (min 5 chars)..."
+              className="w-full min-h-[100px] rounded-md border border-[#E2DDD8] px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#B8860B] focus:border-transparent"
+              disabled={overrideModal.submitting}
+            />
+            {overrideModal.error && (
+              <p className="text-sm text-[#9A3A2D]">{overrideModal.error}</p>
+            )}
+            <div className="flex justify-end gap-3">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  setOverrideModal({ open: false, reason: "", submitting: false, error: null })
+                }
+                disabled={overrideModal.submitting}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={submitOverride}
+                disabled={overrideModal.submitting || overrideModal.reason.trim().length < 5}
+                className="bg-[#B8860B] hover:bg-[#8A6D1B] text-white"
+              >
+                {overrideModal.submitting ? "Submitting..." : "Override and Edit"}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Status Action Buttons */}
       <Card>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo } from "react";
 import { useToast } from "@/components/ui/toast";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -125,7 +125,15 @@ const EDITABLE_STATUSES = ["DRAFT", "CONFIRMED"];
 export default function EditSalesOrderPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
+  // Override token forwarded from the CO detail page when an admin
+  // overrode the Rule-3 production_window lock. Same pattern as
+  // src/pages/sales/edit.tsx — see the comment there for the
+  // single-navigation lifetime rationale.
+  const overrideTokenFromState =
+    (location.state as { overrideToken?: string } | null)?.overrideToken ??
+    null;
   const otherEditors = usePresence("sales_order", id, Boolean(id));
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
@@ -434,6 +442,9 @@ export default function EditSalesOrderPage() {
         body: JSON.stringify({
           customerId, customerPOId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+          // Forward the admin-issued override token (if any). Single-use,
+          // server consumes it atomically. See sales/edit.tsx for full notes.
+          ...(overrideTokenFromState ? { overrideToken: overrideTokenFromState } : {}),
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string };

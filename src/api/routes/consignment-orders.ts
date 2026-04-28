@@ -22,6 +22,13 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { emitAudit } from "../lib/audit";
+import {
+  consumeEditLockOverrideToken,
+  createEditLockOverride,
+  lookupActorDisplayName,
+  MIN_OVERRIDE_REASON_LEN,
+} from "../lib/edit-lock-override";
 
 const app = new Hono<Env>();
 
@@ -531,6 +538,187 @@ app.get("/:id/edit-eligibility", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/consignment-orders/:id/override-edit-lock — CO-parity twin of
+// the SO endpoint. See routes/sales-orders.ts for the full security-model
+// rationale (admin can override Rule 3 production_window because it is a
+// soft schedule-drift guard with no committed output yet; admin CANNOT
+// override Rule 2 dept_completed because real WIP exists).
+//
+// Differences from the SO version:
+//   * No so_status_changes mirror — CO has no status-changes table yet
+//     (TODO at line ~411 of this file). The override row in
+//     edit_lock_overrides + the audit_events emit is the full audit trail
+//     until that table lands.
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.post("/:id/override-edit-lock", async (c) => {
+  const id = c.req.param("id");
+
+  const role = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userRole")?.toUpperCase();
+  if (role !== "SUPER_ADMIN" && role !== "ADMIN") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Forbidden — only SUPER_ADMIN or ADMIN can override the edit lock.",
+      },
+      403,
+    );
+  }
+
+  let body: { reason?: unknown };
+  try {
+    body = (await c.req.json()) as { reason?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const reasonRaw = typeof body.reason === "string" ? body.reason.trim() : "";
+  if (reasonRaw.length < MIN_OVERRIDE_REASON_LEN) {
+    return c.json(
+      {
+        success: false,
+        error: `Reason is required (minimum ${MIN_OVERRIDE_REASON_LEN} characters after trimming).`,
+      },
+      400,
+    );
+  }
+
+  const co = await c.var.DB
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; status: string }>();
+  if (!co) {
+    return c.json(
+      { success: false, error: "Consignment order not found" },
+      404,
+    );
+  }
+
+  // Rule 1
+  if (
+    co.status !== "DRAFT" &&
+    co.status !== "CONFIRMED" &&
+    co.status !== "IN_PRODUCTION"
+  ) {
+    return c.json(
+      {
+        success: false,
+        error: `Cannot override — order is in status ${co.status}, which is not editable regardless of override.`,
+      },
+      400,
+    );
+  }
+  if (co.status === "DRAFT" || co.status === "CONFIRMED") {
+    return c.json(
+      {
+        success: false,
+        error: "No override needed — this order is already editable.",
+      },
+      400,
+    );
+  }
+
+  const [completedRes, earliestDueRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT jc.completedDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.consignmentOrderId = ?
+            AND jc.completedDate IS NOT NULL
+            AND jc.completedDate <> ''
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ completedDate: string | null }>(),
+    c.var.DB
+      .prepare(
+        `SELECT jc.dueDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.consignmentOrderId = ?
+            AND jc.dueDate IS NOT NULL
+            AND jc.dueDate <> ''
+          ORDER BY jc.dueDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ dueDate: string | null }>(),
+  ]);
+
+  // Rule 2 — NOT bypassable.
+  if (completedRes && completedRes.completedDate) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Cannot override — production output already exists (a department has stamped completion). Editing would orphan finished WIP. This lock cannot be bypassed.",
+      },
+      400,
+    );
+  }
+
+  // Rule 3 must currently be active for the override to be meaningful.
+  const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
+  let productionWindowActive = false;
+  if (earliestDue.length === 10) {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    if (earliestDue <= cutoffStr) productionWindowActive = true;
+  }
+  if (!productionWindowActive) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "No override needed — the order is not currently within the 2-day production-window lock.",
+      },
+      400,
+    );
+  }
+
+  const actorUserId = (
+    c as unknown as { get: (k: string) => string | undefined }
+  ).get("userId") ?? null;
+  const actorUserName = await lookupActorDisplayName(c.var.DB, actorUserId);
+
+  const created = await createEditLockOverride(c.var.DB, {
+    orderType: "CO",
+    orderId: id,
+    reason: reasonRaw,
+    actorUserId,
+    actorUserName,
+    actorRole: role,
+  });
+
+  await emitAudit(c, {
+    resource: "consignment-orders",
+    resourceId: id,
+    action: "override-edit-lock",
+    before: {
+      editable: false,
+      reason: "production_window",
+      earliestJcDueDate: earliestDue,
+    },
+    after: {
+      overrideToken: created.token,
+      expiresAt: created.expiresAt,
+      reason: reasonRaw,
+    },
+  });
+
+  return c.json({
+    success: true,
+    overrideToken: created.token,
+    expiresAt: created.expiresAt,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/consignment-orders/:id
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
@@ -690,6 +878,116 @@ app.put("/:id", async (c) => {
       const lockMsg = await checkConsignmentOrderLocked(c.var.DB, id);
       if (lockMsg) {
         return c.json(lockedResponse(lockMsg), 403);
+      }
+
+      // ---------------------------------------------------------------
+      // Edit-eligibility re-check (defense-in-depth, mirrors the GET
+      // /:id/edit-eligibility logic). Same model as sales-orders.ts:
+      // Rule 2 (dept_completed) is hard — override cannot bypass; Rule
+      // 3 (production_window) is bypassable via a one-shot
+      // overrideToken minted by SUPER_ADMIN/ADMIN. See SO PUT block
+      // for the full rationale comment.
+      // ---------------------------------------------------------------
+      if (
+        existing.status === "IN_PRODUCTION" ||
+        existing.status === "CONFIRMED"
+      ) {
+        const [completedRes, earliestDueRes] = await Promise.all([
+          c.var.DB
+            .prepare(
+              `SELECT jc.completedDate, jc.departmentName, jc.departmentCode
+                 FROM job_cards jc
+                 JOIN production_orders po ON po.id = jc.productionOrderId
+                WHERE po.consignmentOrderId = ?
+                  AND jc.completedDate IS NOT NULL
+                  AND jc.completedDate <> ''
+                LIMIT 1`,
+            )
+            .bind(id)
+            .first<{
+              completedDate: string | null;
+              departmentName: string | null;
+              departmentCode: string | null;
+            }>(),
+          c.var.DB
+            .prepare(
+              `SELECT jc.dueDate
+                 FROM job_cards jc
+                 JOIN production_orders po ON po.id = jc.productionOrderId
+                WHERE po.consignmentOrderId = ?
+                  AND jc.dueDate IS NOT NULL
+                  AND jc.dueDate <> ''
+                ORDER BY jc.dueDate ASC
+                LIMIT 1`,
+            )
+            .bind(id)
+            .first<{ dueDate: string | null }>(),
+        ]);
+
+        if (completedRes && completedRes.completedDate) {
+          const dept =
+            completedRes.departmentName ||
+            completedRes.departmentCode ||
+            "A department";
+          return c.json(
+            {
+              success: false,
+              error: `Cannot edit — ${dept} has completed work on this order. Editing items would orphan finished WIP.`,
+              reason: "dept_completed",
+            },
+            403,
+          );
+        }
+
+        const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
+        if (earliestDue.length === 10) {
+          const cutoff = new Date();
+          cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+          const cutoffStr = cutoff.toISOString().slice(0, 10);
+          if (earliestDue <= cutoffStr) {
+            const overrideToken =
+              typeof body.overrideToken === "string"
+                ? body.overrideToken
+                : "";
+            if (!overrideToken) {
+              return c.json(
+                {
+                  success: false,
+                  error: `Cannot edit — first production step is due ${earliestDue} (within the 2-day cutoff ${cutoffStr}). An ADMIN override is required.`,
+                  reason: "production_window",
+                  earliestJcDueDate: earliestDue,
+                  cutoffDate: cutoffStr,
+                },
+                403,
+              );
+            }
+            const consumed = await consumeEditLockOverrideToken(
+              c.var.DB,
+              overrideToken,
+              "CO",
+              id,
+            );
+            if (!consumed.ok) {
+              const detail =
+                consumed.reason === "expired"
+                  ? "Override token has expired (60 min TTL). Request a new override."
+                  : consumed.reason === "already_used"
+                    ? "Override token has already been used. Request a new override."
+                    : consumed.reason === "wrong_order"
+                      ? "Override token does not match this order."
+                      : "Override token not found.";
+              return c.json(
+                {
+                  success: false,
+                  error: detail,
+                  reason: "override_invalid",
+                },
+                403,
+              );
+            }
+            // Token consumed — fall through to the normal PUT flow.
+          }
+        }
       }
     }
 

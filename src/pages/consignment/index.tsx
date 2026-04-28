@@ -483,15 +483,15 @@ export default function SalesPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-[#1F1D1B]">Sales Orders</h1>
-          <p className="text-xs text-[#6B7280]">Manage customer orders from creation to delivery</p>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Consignment Orders</h1>
+          <p className="text-xs text-[#6B7280]">Manage consignment orders from creation to delivery</p>
         </div>
         <div className="flex items-center gap-2">
           <Button variant="outline" onClick={() => setScanPOOpen(true)}>
             <ScanLine className="h-4 w-4" /> Scan PO
           </Button>
           <Button variant="primary" onClick={() => navigate("/consignment/create")}>
-            <Plus className="h-4 w-4" /> New Sales Order
+            <Plus className="h-4 w-4" /> New Consignment Order
           </Button>
         </div>
       </div>
@@ -648,7 +648,7 @@ export default function SalesPage() {
       <Card>
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
-            <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> Sales Orders</CardTitle>
+            <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> Consignment Orders</CardTitle>
             <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
               <button
                 onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
@@ -1103,7 +1103,7 @@ export default function SalesPage() {
         open={scanPOOpen}
         onClose={() => setScanPOOpen(false)}
         onCreated={(soIds) => {
-          toast.success(`Created ${soIds.length} Sales Order(s) from PO scan`);
+          toast.success(`Created ${soIds.length} Consignment Order(s) from PO scan`);
           fetchAll();
         }}
       />

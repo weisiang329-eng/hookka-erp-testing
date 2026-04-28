@@ -349,8 +349,13 @@ app.post("/", async (c) => {
       );
     }
     return c.json({ success: true, data: rowToCO(created, itemRows) }, 201);
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    // Surface the real failure — DB constraint violations, missing FKs,
+    // bad item category, etc. were silently masked as "Invalid request
+    // body" before, which made debugging from the UI impossible.
+    console.error("[POST /api/consignment-orders] failed:", err);
+    const message = err instanceof Error ? err.message : "Invalid request body";
+    return c.json({ success: false, error: message }, 400);
   }
 });
 
@@ -684,8 +689,10 @@ app.put("/:id", async (c) => {
       success: true,
       data: rowToCO(updated, items.results ?? []),
     });
-  } catch {
-    return c.json({ success: false, error: "Invalid request body" }, 400);
+  } catch (err) {
+    console.error("[PUT /api/consignment-orders/:id] failed:", err);
+    const message = err instanceof Error ? err.message : "Invalid request body";
+    return c.json({ success: false, error: message }, 400);
   }
 });
 

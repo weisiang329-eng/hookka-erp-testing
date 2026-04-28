@@ -57,8 +57,11 @@ jobs:
 
           # Capture both status code and body so a 4xx/5xx surfaces in the log
           # instead of being silently masked.
+          # 60s timeout: a warm Pages worker responds in ~2-3s, but a cold
+          # start during Hyperdrive's first SQL round-trip can stretch to
+          # 30s+. Better to wait than fire-and-forget.
           response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
-            --max-time 30 \
+            --max-time 60 \
             --request POST \
             --header "Content-Type: application/json" \
             --header "x-cron-secret: $CRON_SECRET" \

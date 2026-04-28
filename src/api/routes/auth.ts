@@ -11,6 +11,11 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPassword, verifyPassword } from "../lib/password";
 import { emitCounter } from "../lib/observability";
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+  clientIp,
+} from "../lib/rate-limit";
 
 const app = new Hono<Env>();
 
@@ -59,6 +64,11 @@ app.post("/login", async (c) => {
       400,
     );
   }
+
+  // Brute-force throttle — 10 attempts / 15 min keyed on email + ip.
+  const rlKey = `${email.trim().toLowerCase()}:${clientIp(c)}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
 
   const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE LOWER(email) = LOWER(?) LIMIT 1",
@@ -112,6 +122,9 @@ app.post("/login", async (c) => {
 
   // P6.3 — count successful logins for the dashboard.
   emitCounter(c, "auth.login_success", { resource: user.role });
+  // Reset the rate-limit counter on successful login so today's attempts
+  // don't carry over.
+  c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
 
   return c.json({
     success: true,

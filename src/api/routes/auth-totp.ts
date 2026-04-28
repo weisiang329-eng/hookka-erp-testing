@@ -39,6 +39,10 @@ import {
   hashRecoveryCode,
 } from "../lib/totp";
 import { verifyPassword } from "../lib/password";
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+} from "../lib/rate-limit";
 
 const app = new Hono<Env>();
 
@@ -167,6 +171,13 @@ app.post("/login-verify", async (c) => {
     );
   }
 
+  // Brute-force throttle — 10 attempts / 15 min keyed on userId. The TOTP
+  // search-space is only 10^6 so a 1000-attempts/sec script would brute the
+  // window in <1s without this gate.
+  const rlKey = `totp:${userId}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
+
   const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE id = ?",
   )
@@ -221,6 +232,9 @@ app.post("/login-verify", async (c) => {
       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
       .bind(now.toISOString(), userId),
   ]);
+
+  // Reset the rate-limit counter on success.
+  c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
 
   return c.json({
     success: true,

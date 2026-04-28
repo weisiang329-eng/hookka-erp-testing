@@ -31,6 +31,7 @@ import {
   signState,
   verifyState,
 } from "../lib/oauth-google";
+import { checkLoginRateLimit, clientIp } from "../lib/rate-limit";
 
 const app = new Hono<Env>();
 
@@ -114,6 +115,13 @@ app.get("/google/callback", async (c) => {
       400,
     );
   }
+
+  // Brute-force throttle — 10 callback attempts / 15 min keyed on IP.
+  // Prevents an attacker from hammering the callback with replay attempts
+  // or trying to enumerate state nonces.
+  const rlDenied = await checkLoginRateLimit(c, `oauth:${clientIp(c)}`);
+  if (rlDenied) return rlDenied;
+
   if (!env.JWT_SECRET || !env.OAUTH_GOOGLE_REDIRECT_URI) {
     return c.json(
       { success: false, error: "OAuth not configured" },

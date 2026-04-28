@@ -728,10 +728,19 @@ function CreateSalesOrderPage() {
     // returns a body the JSON parse still accepts, so without checking
     // res.ok the "success" branch could fire on an error response and the
     // user would navigate to a detail page for a SO that was never created.
+    // Sprint 3 #4 — idempotency. A network blip on submit could leave the
+    // user uncertain whether the SO was created. Send a UUID so a retry
+    // returns the cached response instead of creating a duplicate. Same
+    // key reused for the chained /confirm call so a retry of the whole
+    // flow short-circuits both POSTs.
+    const idemKey = crypto.randomUUID();
     try {
       const res = await fetch("/api/sales-orders", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": idemKey,
+        },
         body: JSON.stringify({
           customerId, customerPOId, customerSOId, reference,
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
@@ -761,7 +770,10 @@ function CreateSalesOrderPage() {
         setPendingStatus("CONFIRMING");
         const confirmRes = await fetch(`/api/sales-orders/${newId}/confirm`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": `${idemKey}-confirm`,
+          },
           body: JSON.stringify({ changedBy: "Admin" }),
         });
         const confirmData = (await confirmRes.json().catch(() => ({}))) as {

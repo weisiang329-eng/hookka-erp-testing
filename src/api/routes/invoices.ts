@@ -26,6 +26,7 @@ import {
 } from "../lib/audit";
 import { buildJournalEntryStatements } from "../lib/journal-hash";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 
 const app = new Hono<Env>();
 
@@ -450,6 +451,13 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
+  // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
+  // produces two distinct invoice rows today (the only guard is DO status
+  // = DELIVERED, which the first request flips to INVOICED — but the
+  // window between read and write is wide). Wrap so a duplicate retry
+  // returns the cached response instead.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "invoices", idemKey, async () => {
   try {
     const body = await c.req.json();
     const deliveryOrderId: string | undefined = body.deliveryOrderId;
@@ -622,6 +630,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating invoice" }, 500);
   }
+  });
 });
 
 // GET /api/invoices/:id — single

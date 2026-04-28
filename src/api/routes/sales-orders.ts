@@ -44,6 +44,7 @@ import {
   lookupActorDisplayName,
   MIN_OVERRIDE_REASON_LEN,
 } from "../lib/edit-lock-override";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 
 const app = new Hono<Env>();
 
@@ -1449,6 +1450,12 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "create");
   if (denied) return denied;
 
+  // Sprint 3 #4 — idempotency. If the client sends an `Idempotency-Key`
+  // header, the handler is wrapped so a duplicate retry returns the
+  // cached response instead of creating a duplicate SO. Requests without
+  // a key run unwrapped (no-op).
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "sales-orders", idemKey, async () => {
   try {
     const body = await c.req.json();
 
@@ -1746,6 +1753,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating sales order" }, 500);
   }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1769,6 +1777,17 @@ app.post("/:id/confirm", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "confirm");
   if (denied) return denied;
 
+  // Sprint 3 #4 — idempotency. Confirm is mutating (writes
+  // production_orders, cascades job_cards). Wrap so a duplicate retry
+  // returns the cached response instead of running the cascade twice.
+  // The path id is folded into the resource so two different SOs can
+  // share the same client-generated key without colliding.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(
+    c,
+    `sales-orders:confirm:${c.req.param("id")}`,
+    idemKey,
+    async () => {
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM sales_orders WHERE id = ?",
@@ -1965,6 +1984,8 @@ app.post("/:id/confirm", async (c) => {
       ? `Order confirmed. ${productionOrders.length} existing production order(s) reused.`
       : `Order confirmed. ${productionOrders.length} production order(s) created.`,
   });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

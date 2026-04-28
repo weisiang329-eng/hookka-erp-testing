@@ -2776,6 +2776,14 @@ function LaborCostTab({
   const [toDate, setToDate] = useState<string>(initialRange.to);
   const from = fromDate;
   const to = toDate;
+  // Optional category slice ("" = All). When non-empty, EVERY metric on this
+  // tab — KPI cards, per-dept rollup, Daily Breakdown — narrows to just the
+  // chosen product category so an operator can answer "what did
+  // {Sofa|Bedframe|Accessory} cost / earn / produce on this date range".
+  // Borrowed (Warehousing) and Idle (Shortfall) are NOT category-tagged
+  // labor — they show their per-period totals regardless of filter so
+  // operators don't lose sight of them.
+  const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
 
   const handlePeriodChange = useCallback((p: string) => {
     setPeriod(p);
@@ -2838,8 +2846,8 @@ function LaborCostTab({
   // computed locally below from working_hour_entries since it depends on
   // per-worker basic salary which we already have.
   const dailyUrl = useMemo(
-    () => `/api/working-hour-entries/daily-breakdown?from=${from}&to=${to}`,
-    [from, to],
+    () => `/api/working-hour-entries/daily-breakdown?from=${from}&to=${to}${categoryFilter ? `&category=${categoryFilter}` : ""}`,
+    [from, to, categoryFilter],
   );
   const { data: dailyResp, loading: dailyLoading } = useCachedJson<{
     success?: boolean;
@@ -2917,6 +2925,12 @@ function LaborCostTab({
         const regularH = hours - otH;
         const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
         const cat = (e.category || "") as Category;
+        // When a category filter is active, only count entries tagged with
+        // that category. Non-production buckets (Warehousing/Shortfall etc.)
+        // have empty cat and fall through into the "always-show" branch
+        // below — they are not category-tagged labor and stay visible so
+        // operators don't lose sight of borrowed / idle hours.
+        if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
         const bucketKey = `${e.departmentCode}|${cat}`;
         const cur = buckets.get(bucketKey) ?? { hours: 0, laborCostSen: 0 };
         cur.hours += hours;
@@ -2954,7 +2968,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -2969,9 +2983,15 @@ function LaborCostTab({
     .reduce((s, r) => s + r.laborCostSen, 0);
   const totalRevenueSen = useMemo(() => {
     const rev = plResp?.success ? plResp.data ?? {} : {};
+    // With a category filter, narrow Total Revenue to that bucket only.
+    // production-revenue already returns per-category totals, so we just
+    // pick the matching slice instead of summing all three.
+    if (categoryFilter) {
+      return Number(rev[categoryFilter]) || 0;
+    }
     if (typeof rev.totalSen === "number") return rev.totalSen;
     return (Number(rev.SOFA) || 0) + (Number(rev.BEDFRAME) || 0) + (Number(rev.ACCESSORY) || 0);
-  }, [plResp]);
+  }, [plResp, categoryFilter]);
   const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
 
   // Daily Breakdown rows. Always emits one row per day in [from, to] —
@@ -3016,6 +3036,15 @@ function LaborCostTab({
       let dayCost = 0;
       for (const e of segs) {
         const hours = Number(e.hours) || 0;
+        // Pro-rata OT split is computed against TOTAL day hours regardless
+        // of filter — a 11h day is still a 9h regular + 2h OT day, that's
+        // a property of the worker's shift, not of the category. We then
+        // skip the per-segment cost contribution if the segment's category
+        // doesn't match the filter. Non-production segments (no category)
+        // are always skipped under a filter — they are accounted for in the
+        // Borrowed/Idle KPI cards which intentionally don't filter.
+        const cat = (e.category || "") as Category;
+        if (categoryFilter && cat !== categoryFilter) continue;
         const otH = hours * otShare;
         const regularH = hours - otH;
         dayCost += regularH * regularRateSen + otH * otBaseRateSen * otMult;
@@ -3030,7 +3059,7 @@ function LaborCostTab({
       laborCostSen: Math.round(laborByDate.get(d) ?? 0),
       unitsCompleted: Number(ucd[d]) || 0,
     }));
-  }, [from, to, dailyResp, entriesResp, workersById, period]);
+  }, [from, to, dailyResp, entriesResp, workersById, period, categoryFilter]);
 
   // Daily-breakdown summary strip ("PRODUCTION SALES (Upholstery Completions)"
   // in the user's reference Google Sheet).
@@ -3083,6 +3112,17 @@ function LaborCostTab({
               {periodOptions.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
+            </select>
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value as "" | "SOFA" | "BEDFRAME" | "ACCESSORY")}
+              className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              title="Slice every metric on this tab by item category"
+            >
+              <option value="">All categories</option>
+              <option value="SOFA">Sofa</option>
+              <option value="BEDFRAME">Bedframe</option>
+              <option value="ACCESSORY">Accessory</option>
             </select>
           </div>
         </div>

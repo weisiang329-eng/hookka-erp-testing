@@ -366,11 +366,13 @@ app.get("/summary", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /daily-breakdown?from=YYYY-MM-DD&to=YYYY-MM-DD
+// GET /daily-breakdown?from=YYYY-MM-DD&to=YYYY-MM-DD[&category=SOFA|BEDFRAME|ACCESSORY]
 //
 // Per-day rollups for the Labor Cost vs Revenue tab's "Daily Breakdown" table.
 // Returns three date-keyed maps:
 //   - orderValueByDate:       sum of sales_orders.totalSen by companySODate
+//                             (when ?category is set, narrows to SO line items
+//                             whose product category matches)
 //   - productionValueByDate:  sum of production-revenue per PO (price × qty)
 //                             keyed on the LAST UPHOLSTERY job_card's
 //                             completedDate — same dedup logic as the
@@ -379,40 +381,68 @@ app.get("/summary", async (c) => {
 //                             COMPLETED|TRANSFERRED whose completedDate is
 //                             in range
 //
+// Optional ?category= filter scopes everything to a single product category.
+// When absent → unfiltered (all categories) — current behavior.
+//
 // Labor cost is intentionally NOT computed here: it depends on per-worker
 // basic salary + OT multiplier which are easier to keep in the frontend
 // (it already has them via the workers prop) and the per-worker pro-rata
-// OT split is already implemented there.
+// OT split is already implemented there. The frontend filters labor cost
+// by entry.category against the same ?category param.
 //
 // Output values are in sen (raw integer, /100 in UI).
 // ---------------------------------------------------------------------------
 app.get("/daily-breakdown", async (c) => {
   const from = c.req.query("from");
   const to = c.req.query("to");
+  const rawCat = (c.req.query("category") ?? "").trim().toUpperCase();
+  const category = VALID_CATEGORIES.has(rawCat) ? rawCat : "";
   if (!from || !to) {
     return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
   }
 
   // 1. Order value — sum sales_orders.totalSen grouped by companySODate.
   //    Use companySODate (the date the SO was opened on the company side)
-  //    so the chart matches the Sales reports view. Skip rows with empty
-  //    companySODate (they get bucketed under "" and filtered out).
-  const orderValueRes = await c.var.DB
-    .prepare(
-      `SELECT companySODate AS d, SUM(totalSen) AS v
-         FROM sales_orders
-        WHERE companySODate IS NOT NULL
-          AND companySODate != ''
-          AND companySODate >= ?
-          AND companySODate <= ?
-        GROUP BY companySODate`,
-    )
-    .bind(from, to)
-    .all<{ d: string; v: number | string | null }>();
+  //    so the chart matches the Sales reports view.
+  //    With ?category set: drop the parent-SO total approach (which would
+  //    over-count mixed-category SOs) and instead sum sales_order_items.
+  //    lineTotalSen WHERE soi.itemCategory = ?, bucketed by the parent SO's
+  //    companySODate. Uses sales_order_items.itemCategory directly — both
+  //    `sales_order_items` and `products` carry the column, but the SO line
+  //    is what was actually sold (and is the canonical source for the sale).
+  const orderValueRes = category
+    ? await c.var.DB
+        .prepare(
+          `SELECT so.companySODate AS d,
+                  SUM(COALESCE(soi.lineTotalSen, 0)) AS v
+             FROM sales_order_items soi
+             JOIN sales_orders so ON so.id = soi.salesOrderId
+            WHERE so.companySODate IS NOT NULL
+              AND so.companySODate != ''
+              AND so.companySODate >= ?
+              AND so.companySODate <= ?
+              AND soi.itemCategory = ?
+            GROUP BY so.companySODate`,
+        )
+        .bind(from, to, category)
+        .all<{ d: string; v: number | string | null }>()
+    : await c.var.DB
+        .prepare(
+          `SELECT companySODate AS d, SUM(totalSen) AS v
+             FROM sales_orders
+            WHERE companySODate IS NOT NULL
+              AND companySODate != ''
+              AND companySODate >= ?
+              AND companySODate <= ?
+            GROUP BY companySODate`,
+        )
+        .bind(from, to)
+        .all<{ d: string; v: number | string | null }>();
 
   // 2. Production value — same per-PO recognition as /production-revenue.
   //    GROUP BY productionOrderId, recognition date = MAX(completedDate),
   //    revenue = unitPrice × po.quantity. Then aggregate again by date.
+  //    With ?category set, narrow to products of that category.
   const prodValueRes = await c.var.DB
     .prepare(
       `WITH per_po AS (
@@ -436,26 +466,30 @@ app.get("/daily-breakdown", async (c) => {
                AND soi.lineNo = po.lineNo
          LEFT JOIN products p ON p.id = po.productId
         WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
+          ${category ? "AND p.category = ?" : ""}
         GROUP BY substr(per_po.unit_completed_at, 1, 10)`,
     )
-    .bind(from, to)
+    .bind(...(category ? [from, to, category] : [from, to]))
     .all<{ d: string; v: number | string | null }>();
 
   // 3. Units completed — count UPHOLSTERY job_cards completed in range.
   //    Per spec, this is "count of UPHOLSTERY job-cards completed on
   //    that day" — NOT a per-PO dedup, just a raw count of the cards.
+  //    With ?category set, filter via the parent PO's itemCategory column.
   const unitsRes = await c.var.DB
     .prepare(
-      `SELECT completedDate AS d, COUNT(*) AS n
-         FROM job_cards
-        WHERE departmentCode = 'UPHOLSTERY'
-          AND status IN ('COMPLETED','TRANSFERRED')
-          AND completedDate IS NOT NULL
-          AND completedDate >= ?
-          AND completedDate <= ?
-        GROUP BY completedDate`,
+      `SELECT jc.completedDate AS d, COUNT(*) AS n
+         FROM job_cards jc
+         ${category ? "JOIN production_orders po ON po.id = jc.productionOrderId" : ""}
+        WHERE jc.departmentCode = 'UPHOLSTERY'
+          AND jc.status IN ('COMPLETED','TRANSFERRED')
+          AND jc.completedDate IS NOT NULL
+          AND jc.completedDate >= ?
+          AND jc.completedDate <= ?
+          ${category ? "AND po.itemCategory = ?" : ""}
+        GROUP BY jc.completedDate`,
     )
-    .bind(from, to)
+    .bind(...(category ? [from, to, category] : [from, to]))
     .all<{ d: string; n: number | string | null }>();
 
   const orderValueByDate: Record<string, number> = {};

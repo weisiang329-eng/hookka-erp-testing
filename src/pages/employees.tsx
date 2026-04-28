@@ -1276,6 +1276,16 @@ function EfficiencyOverviewTab({
     return copy;
   }, [allDepts]);
 
+  // Set of dept codes that count toward Efficiency % denominator. Per user
+  // 2026-04-28: only time spent in PRODUCTION depts should count - hours
+  // logged to Warehousing / Repair / Maintenance / Production Shortfall
+  // are not "available production time" and shouldn't drag down the ratio.
+  const productionDeptCodes = useMemo(() => {
+    const s = new Set<string>();
+    for (const d of allDepts) if (d.isProduction) s.add(d.code);
+    return s;
+  }, [allDepts]);
+
   // Workers without any entries in the period are NOT in the summary
   // response — join client-side to enrich names, drop unknown ids.
   const workerById = useMemo(() => {
@@ -1364,15 +1374,23 @@ function EfficiencyOverviewTab({
           );
         },
       },
-      // Efficiency % — Production / Total. Same green/amber/red thresholds
-      // the Employee Performance KPI card uses (≥85 green, ≥70 amber, else red).
+      // Efficiency % — Production output / Production-dept hours. Same
+      // green/amber/red thresholds the Employee Performance KPI card uses
+      // (>=85 green, >=70 amber, else red). Bug fix 2026-04-28: denominator
+      // used to be row.totalHours (ALL depts), so a worker who spent 5h in
+      // Warehousing + 4h in Upholstery had their efficiency divided by 9h
+      // - now only the 4h Upholstery counts (production-dept time only).
       {
         key: "efficiencyPct",
         label: "Efficiency %",
         align: "right",
         sortable: true,
         render: (_value, row) => {
-          const totalMins = row.totalHours * 60;
+          const prodHours = Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+            0,
+          );
+          const totalMins = prodHours * 60;
           if (totalMins <= 0) {
             return <span className="text-[#D1D5DB] tabular-nums">—</span>;
           }
@@ -1385,7 +1403,10 @@ function EfficiencyOverviewTab({
               ? "text-[#9C6F1E]"
               : "text-[#9A3A2D]";
           return (
-            <span className={`font-semibold tabular-nums ${cls}`}>
+            <span
+              className={`font-semibold tabular-nums ${cls}`}
+              title={`${formatHours(prodMins)} production / ${prodHours.toFixed(1)}h in production depts`}
+            >
               {pct.toFixed(1)}%
             </span>
           );
@@ -1430,7 +1451,7 @@ function EfficiencyOverviewTab({
     });
 
     return cols;
-  }, [orderedDepts, prodMinsByWorker]);
+  }, [orderedDepts, prodMinsByWorker, productionDeptCodes]);
 
   const contextMenuItems: ContextMenuItem[] = [
     {
@@ -1862,10 +1883,23 @@ type WorkerJobCardRow = {
 function EmployeeDetailTab({
   workers,
   allAttendance,
+  departments,
 }: {
   workers: Worker[];
   allAttendance: AttendanceRecord[];
+  departments: DepartmentLite[];
 }) {
+  // Production dept codes for the Avg Efficiency denominator. Per user
+  // 2026-04-28: only time spent in PRODUCTION depts counts as "available
+  // for production" - hours in Warehousing / Repair / Maintenance get
+  // excluded so the ratio doesn't dilute. Falls back to the seed set if
+  // /api/departments hasn't loaded yet so the KPI doesn't flash 0%.
+  const productionDeptCodes = useMemo(() => {
+    if (departments.length === 0) return PRODUCTION_DEPT_CODES;
+    const s = new Set<string>();
+    for (const d of departments) if (d.isProduction) s.add(d.code);
+    return s;
+  }, [departments]);
   const { toast } = useToast();
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(
     workers[0]?.id || ""
@@ -1924,9 +1958,21 @@ function EmployeeDetailTab({
   );
 
   // Total working hours from the new entries source. Sum decimal hours,
-  // convert to minutes once for downstream math (efficiency ratio, etc).
+  // convert to minutes once. KPI display shows ALL hours (incl. non-prod
+  // like Warehousing) - that's the user's "Total Working Hrs" headline.
   const totalWorkMins = Math.round(
     workerEntries.reduce((s, e) => s + (e.hours || 0), 0) * 60
+  );
+  // Avg Efficiency denominator: PRODUCTION-DEPT-ONLY hours. Time spent in
+  // Warehousing / Repair / Maintenance / Production Shortfall is real
+  // working time but not "available production capacity" - including it
+  // would unfairly drag efficiency ratios down. Bug fix 2026-04-28.
+  const productionWorkMins = Math.round(
+    workerEntries.reduce(
+      (s, e) =>
+        productionDeptCodes.has(e.departmentCode) ? s + (e.hours || 0) : s,
+      0,
+    ) * 60,
   );
   const totalProdMinsAttendance = empRecords.reduce(
     (s, r) => s + r.productionTimeMinutes,
@@ -1950,9 +1996,12 @@ function EmployeeDetailTab({
   // production minutes the JC + attendance pair tracks. Mixing them would
   // make Production Hrs > Working Hrs in the common new-grid case.
   const totalProdMins = totalProdMinsAttendance + totalProdMinsJc;
+  // Avg Efficiency denominator = production-dept hours only (see
+  // productionWorkMins comment above). When the worker has zero hours
+  // in any production dept, ratio stays null so the KPI shows em-dash.
   const avgEff =
-    totalWorkMins > 0
-      ? ((totalProdMins / totalWorkMins) * 100).toFixed(1)
+    productionWorkMins > 0
+      ? ((totalProdMins / productionWorkMins) * 100).toFixed(1)
       : null;
   const totalOT = empRecords.reduce((s, r) => s + r.overtimeMinutes, 0);
   // Days Present — distinct dates the worker has any working_hour_entries
@@ -4298,6 +4347,7 @@ export default function EmployeesPage() {
         <EmployeeDetailTab
           workers={workers}
           allAttendance={allAttendance}
+          departments={departments}
         />
       )}
 

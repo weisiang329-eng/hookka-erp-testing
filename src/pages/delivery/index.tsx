@@ -1861,7 +1861,7 @@ export default function DeliveryPage() {
       // Lorry plate from the picked vehicle (three_pl_vehicles).
       {
         key: "vehicleNo",
-        label: "Lorry Plate",
+        label: "Vehicle",
         type: "text",
         width: "110px",
         sortable: true,
@@ -2383,7 +2383,7 @@ export default function DeliveryPage() {
               {/* Vehicle / Lorry — optional. Per-vehicle rate overrides
                   the company rate when computing Est. Delivery Cost. */}
               <div>
-                <label className="text-xs text-[#6B7280] font-medium">Vehicle / Lorry</label>
+                <label className="text-xs text-[#6B7280] font-medium">Vehicle</label>
                 <select
                   value={createDOForm.vehicleId}
                   onChange={(e) => setCreateDOForm((f) => ({ ...f, vehicleId: e.target.value }))}
@@ -2796,7 +2796,7 @@ export default function DeliveryPage() {
                       />
                     </div>
                     <div>
-                      <label className="text-xs text-[#6B7280] font-medium">Vehicle / Lorry</label>
+                      <label className="text-xs text-[#6B7280] font-medium">Vehicle</label>
                       <select
                         value={editForm.vehicleId}
                         onChange={(e) => setEditForm((f) => ({ ...f, vehicleId: e.target.value }))}

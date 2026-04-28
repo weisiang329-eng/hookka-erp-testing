@@ -81,6 +81,7 @@ type ConsignmentNoteRow = {
   // columns are rendered (showing "—") so the layout matches DO and the
   // schema can grow into them without UI changes. DO equivalents:
   // driverId/driverName/vehicleNo.
+  driverId: string | null; // 3PL provider id (legacy column name) — for company lookup
   driverCompany: string;
   driverName: string;
   vehicleNo: string;
@@ -90,13 +91,20 @@ type ConsignmentNoteRow = {
   // POSTing to /:id/return or /:id/convert-to-invoice. Synthesizing fake
   // ids client-side broke the new return endpoint's validation, so we
   // surface the canonical ids here.
+  //
+  // sizeLabel + salesOrderNo / poNo are joined client-side via
+  // productSizeMap and poToSoMap so the bottom DataGrid can render the
+  // same Product Code / Size / Sales Order columns DO does (BUG-2026-04-28
+  // user complaint #2: CN row only showed "1 item" with no product detail).
   items: Array<{
     id: string;
     productCode: string;
     productName: string;
+    sizeLabel: string;
     quantity: number;
     unitPrice: number;
     productionOrderId: string | null;
+    consignmentOrderNo: string;
   }>;
 };
 
@@ -233,7 +241,11 @@ type ConsignmentOrderApiShape = {
 // Equivalent to DO's mapDOToRow.
 // ---------------------------------------------------------------------------
 
-function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
+function mapCNToRow(
+  cn: ConsignmentNote,
+  productSizeMap: Map<string, string>,
+  poToCoNoMap: Map<string, string>,
+): ConsignmentNoteRow {
   const totalQty = cn.items.reduce((s, i) => s + i.quantity, 0);
   // Prefer the new consignmentOrderId column (added by migration 0066);
   // fall back to noteNumber when it's null on legacy rows so the column
@@ -255,6 +267,11 @@ function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
     dispatchDate: cn.dispatchedAt || cn.sentDate || null,
     deliveredDate: cn.deliveredAt || null,
     status: cnStatusFromBackend(cn.status),
+    // Display the 3PL company name (driverContactPerson holds the dispatcher
+    // contact, but for the Transport Co. column we want the company itself —
+    // resolved from cn.driverId via the providers list at render time, with
+    // driverName as fallback to keep legacy rows visible).
+    driverId: cn.driverId ?? null,
     driverCompany: cn.driverContactPerson || "",
     driverName: cn.driverName || "",
     vehicleNo: cn.vehicleNo || "",
@@ -263,9 +280,15 @@ function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
       id: it.id,
       productCode: it.productCode || "",
       productName: it.productName || "",
+      sizeLabel: productSizeMap.get(it.productCode || "") || "",
       quantity: it.quantity,
       unitPrice: it.unitPrice,
       productionOrderId: it.productionOrderId ?? null,
+      // Look up the parent CO number from the linked PO (mirrors DO's
+      // items[].salesOrderNo lookup pattern). Falls back to the CN's
+      // own coRef if the PO row hasn't been pulled yet.
+      consignmentOrderNo:
+        (it.productionOrderId && poToCoNoMap.get(it.productionOrderId)) || "",
     })),
   };
 }
@@ -316,6 +339,39 @@ export default function ConsignmentNotePage() {
   const [editingDDId, setEditingDDId] = useState<string | null>(null);
   const [editingDDValue, setEditingDDValue] = useState("");
 
+  // ----- Mark-Dispatched dialog (mirrors DO's Create-DO 3PL section) -----
+  // Opens when the operator picks "Mark Dispatched" from the context menu
+  // on a Pending Dispatch CN row. Same provider → vehicle → driver chain
+  // DO uses; on confirm, PUTs /api/consignment-notes/:id with the picked
+  // ids + status:'PARTIALLY_SOLD'. Backend (resolveTransport in
+  // consignment-note-shared.ts) re-resolves driver/vehicle metadata from
+  // the picked rows and stamps dispatchedAt automatically.
+  const [dispatchDialog, setDispatchDialog] = useState<ConsignmentNoteRow | null>(null);
+  const [dispatchForm, setDispatchForm] = useState({
+    providerId: "",
+    vehicleId: "",
+    driverPersonId: "",
+  });
+  const [dispatchSaving, setDispatchSaving] = useState(false);
+
+  // Per-provider vehicle + driver-person caches for the dispatch dialog.
+  // Loaded lazily when the provider id changes — same pattern DO uses for
+  // its createDialogVehicles / createDialogDrivers state.
+  type ThreePLVehicleShape = {
+    id: string;
+    plateNo: string;
+    vehicleType?: string;
+    status: "ACTIVE" | "INACTIVE";
+  };
+  type ThreePLDriverShape = {
+    id: string;
+    name: string;
+    phone?: string;
+    status: "ACTIVE" | "INACTIVE";
+  };
+  const [dispatchVehicles, setDispatchVehicles] = useState<ThreePLVehicleShape[]>([]);
+  const [dispatchDrivers, setDispatchDrivers] = useState<ThreePLDriverShape[]>([]);
+
   // ---------- Pagination ----------
   // Same rationale as DO: 200 page size keeps daily working set on page 1.
   const PAGE_SIZE = 200;
@@ -338,9 +394,36 @@ export default function ConsignmentNotePage() {
   const { data: coOrdersRaw, loading: coOrdersLoading, refresh: refreshCOs } =
     useCachedJson<{ success?: boolean; data?: ConsignmentOrderApiShape[] }>("/api/consignment-orders");
 
-  // Product master for per-unit m³ — same source DO uses.
+  // Product master for per-unit m³ + sizeLabel — same source DO uses. The
+  // sizeLabel join lets the CN row surface "5FT" / "Q" next to each item's
+  // product code, mirroring DO's per-row product info columns.
   const { data: prodRaw, loading: prodLoading, refresh: refreshProducts } =
-    useCachedJson<{ success?: boolean; data?: { code: string; unitM3: number }[] }>("/api/products");
+    useCachedJson<{
+      success?: boolean;
+      data?: { code: string; unitM3: number; sizeLabel?: string }[];
+    }>("/api/products");
+
+  // 3PL providers — same /api/drivers endpoint DO uses to resolve the
+  // Transport Co. column from driverId. Loaded once and cached so the
+  // Mark Dispatched dialog can populate its provider picker without an
+  // extra fetch.
+  type ThreePLProviderShape = {
+    id: string;
+    name: string;
+    contactPerson?: string;
+    status: "ACTIVE" | "INACTIVE";
+  };
+  const { data: providersRaw } = useCachedJson<{
+    success?: boolean;
+    data?: ThreePLProviderShape[];
+  }>("/api/drivers");
+  const providers = useMemo<ThreePLProviderShape[]>(
+    () =>
+      providersRaw?.success && Array.isArray(providersRaw.data)
+        ? providersRaw.data
+        : [],
+    [providersRaw],
+  );
 
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/consignment-notes");
@@ -365,15 +448,90 @@ export default function ConsignmentNotePage() {
     return m;
   }, [prodRaw]);
 
+  // Lookup: productCode → sizeLabel. Used by mapCNToRow to stamp each CN
+  // item with its product's display size (e.g. "5FT", "Q") so the bottom
+  // DataGrid can show product detail per the user's complaint that CN rows
+  // only said "1 item" without surfacing the actual product info.
+  const productSizeMap = useMemo(() => {
+    const m = new Map<string, string>();
+    const arr = prodRaw?.success ? prodRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const p of arr) {
+        if (p?.code) m.set(p.code, p.sizeLabel || "");
+      }
+    }
+    return m;
+  }, [prodRaw]);
+
+  // Lookup: productionOrderId → companyCOId. Mirrors DO's items[].salesOrderNo
+  // join (DO walks the PO list to find the parent SO number for each
+  // delivery_order_items.productionOrderId). Same trick on the CN side: each
+  // consignment_items.productionOrderId resolves to the parent CO's
+  // companyCOId so the bottom grid can show the SO/CO column even when the
+  // CN itself was created from multiple POs.
+  const poToCoNoMap = useMemo(() => {
+    const m = new Map<string, string>();
+    const arr = poRaw?.success ? poRaw.data : null;
+    if (Array.isArray(arr)) {
+      for (const po of arr) {
+        if (po?.id) m.set(po.id, po.companyCOId || "");
+      }
+    }
+    return m;
+  }, [poRaw]);
+
+  // Fetch per-provider vehicles + drivers when the dispatch dialog's
+  // provider picker changes. Mirrors DO's createDialogVehicles /
+  // createDialogDrivers effect — same /api/three-pl-vehicles and
+  // /api/three-pl-drivers endpoints, scoped by ?providerId=. Empty
+  // providerId clears both lists so the dropdowns disable until a
+  // provider is picked.
+  /* eslint-disable react-hooks/set-state-in-effect -- mirror remote data into local state */
+  useEffect(() => {
+    const pid = dispatchForm.providerId;
+    if (!pid) {
+      setDispatchVehicles([]);
+      setDispatchDrivers([]);
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      fetch(`/api/three-pl-vehicles?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLVehicleShape[] }>,
+      ),
+      fetch(`/api/three-pl-drivers?providerId=${pid}`).then(
+        (r) => r.json() as Promise<{ success?: boolean; data?: ThreePLDriverShape[] }>,
+      ),
+    ])
+      .then(([vRes, dRes]) => {
+        if (cancelled) return;
+        if (vRes?.success && Array.isArray(vRes.data)) setDispatchVehicles(vRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) setDispatchDrivers(dRes.data);
+      })
+      .catch(() => {
+        /* swallow — same swallow pattern DO uses */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [dispatchForm.providerId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   // Mirror SWR data → local state. Same eslint suppression as DO.
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR data into mutable local state for optimistic UI */
   useEffect(() => {
     const anyLoading = cnLoading || poLoading || coOrdersLoading || prodLoading;
     setLoading(anyLoading);
 
-    // Map CN rows
+    // Map CN rows. productSizeMap + poToCoNoMap are lookup tables built
+    // above; mapCNToRow stamps each item with its sizeLabel + parent CO
+    // number so the bottom DataGrid can render product detail columns.
     if (cnRaw?.success && Array.isArray(cnRaw.data)) {
-      setCnList((cnRaw.data as ConsignmentNote[]).map(mapCNToRow));
+      setCnList(
+        (cnRaw.data as ConsignmentNote[]).map((cn) =>
+          mapCNToRow(cn, productSizeMap, poToCoNoMap),
+        ),
+      );
     }
 
     // Build PO-based tab data (Planning + Pending CN)
@@ -485,7 +643,7 @@ export default function ConsignmentNotePage() {
         .map(mapPO);
       setReadyPOs(ready);
     }
-  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map]);
+  }, [cnRaw, poRaw, coOrdersRaw, cnLoading, poLoading, coOrdersLoading, prodLoading, productM3Map, productSizeMap, poToCoNoMap]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ---------- Filtered data (CN-list tabs only) ----------
@@ -583,6 +741,111 @@ export default function ConsignmentNotePage() {
         setCreatingCNFromPO(false);
         setSelectedReadyPOs(new Set());
         fetchData();
+      }
+    },
+    [fetchData, toast],
+  );
+
+  // ---------- Mark Dispatched — confirm handler ----------
+  // Wired to the Mark Dispatched dialog's Confirm button. PUT-by-id with
+  // the picked transport ids + status:'PARTIALLY_SOLD'. Backend
+  // resolveTransport (consignment-note-shared.ts) re-resolves the company
+  // name + driver-person name + vehicle plate from the picked rows and
+  // stamps dispatchedAt automatically. Mirrors the CN-side equivalent of
+  // DO's status='LOADED' transition.
+  const confirmDispatch = useCallback(async () => {
+    if (!dispatchDialog) return;
+    setDispatchSaving(true);
+    try {
+      const res = await fetch(`/api/consignment-notes/${dispatchDialog.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          status: "PARTIALLY_SOLD",
+          // Send providerId / vehicleId / driverId on the body shape
+          // resolveTransport expects. Empty string → null so the helper
+          // treats unpicked fields as "unset" rather than overwriting
+          // existing data with empty strings.
+          providerId: dispatchForm.providerId || null,
+          vehicleId: dispatchForm.vehicleId || null,
+          driverId: dispatchForm.driverPersonId || null,
+        }),
+      });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        toast.error(body.error || "Failed to mark dispatched");
+      } else {
+        toast.success(`${dispatchDialog.cnNo} dispatched`);
+        setDispatchDialog(null);
+        setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
+        fetchData();
+      }
+    } catch {
+      toast.error("Failed to mark dispatched");
+    } finally {
+      setDispatchSaving(false);
+    }
+  }, [dispatchDialog, dispatchForm, fetchData, toast]);
+
+  // ---------- Reverse status helpers ----------
+  // Used by the "Reverse to Pending Dispatch" / "Reverse to Dispatched"
+  // context-menu items. Backend (updateConsignmentNoteById) auto-nulls the
+  // matching lifecycle timestamp when the new status is earlier in the
+  // lifecycle than the old one — relies on STATUS_RANK in
+  // consignment-note-shared.ts. We do NOT send `clearTimestamps:true`
+  // because that wipes ALL three timestamps; for a half-step reverse
+  // (e.g. CLOSED → FULLY_SOLD = "Reverse to Delivered") the deliveredAt
+  // timestamp should stay intact since the row is still delivered.
+  const reverseStatus = useCallback(
+    async (row: ConsignmentNoteRow, toStatus: string, label: string) => {
+      try {
+        const res = await fetch(`/api/consignment-notes/${row.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: toStatus }),
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          toast.error(body.error || `Failed to reverse to ${label}`);
+        } else {
+          toast.success(`${row.cnNo} reversed to ${label}`);
+          fetchData();
+        }
+      } catch {
+        toast.error(`Failed to reverse to ${label}`);
+      }
+    },
+    [fetchData, toast],
+  );
+
+  // "Reverse to Pending CN" deletes the CN entirely (cleaner than a
+  // CANCELLED ghost row — the underlying POs go back into the Pending CN
+  // dedup pool automatically because the CN dedup walks live CNs). Hits
+  // the legacy DELETE /api/consignments/:id endpoint (the consignments.ts
+  // route — consignment-notes.ts has no DELETE today). Confirms before
+  // destructive action so the operator can back out.
+  const reverseToPendingCN = useCallback(
+    async (row: ConsignmentNoteRow) => {
+      if (
+        !confirm(
+          `Delete ${row.cnNo} and return its POs to Pending CN? This cannot be undone.`,
+        )
+      ) {
+        return;
+      }
+      try {
+        const res = await fetch(`/api/consignments/${row.id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) {
+          const body = (await res.json().catch(() => ({}))) as { error?: string };
+          toast.error(body.error || "Failed to delete CN");
+        } else {
+          toast.success(`${row.cnNo} deleted — POs returned to Pending CN`);
+          fetchData();
+        }
+      } catch {
+        toast.error("Failed to delete CN");
       }
     },
     [fetchData, toast],
@@ -862,18 +1125,107 @@ export default function ConsignmentNotePage() {
         type: "text",
         width: "180px",
         sortable: true,
+        // Mirrors DO's Sales Orders column: collect the distinct
+        // companyCOId values from the items array (each consignment_items
+        // row carries productionOrderId → joined to CO via poToCoNoMap).
+        // Falls back to row.coRef when items have no PO link (legacy CN
+        // rows pre-migration 0066).
+        render: (_value, row) => {
+          const cos = Array.from(
+            new Set(
+              (row.items || [])
+                .map((it) => it.consignmentOrderNo)
+                .filter((s): s is string => Boolean(s)),
+            ),
+          );
+          if (cos.length === 0) {
+            return (
+              <button
+                type="button"
+                className="doc-number text-[#6B5C32] hover:underline"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  navigate(`/consignment/${row.consignmentId}`);
+                }}
+                title="Open parent Consignment Order"
+              >
+                {row.coRef}
+              </button>
+            );
+          }
+          return (
+            <button
+              type="button"
+              className="doc-number text-[#6B5C32] hover:underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                navigate(`/consignment/${row.consignmentId}`);
+              }}
+              title="Open parent Consignment Order"
+            >
+              {cos.join(", ")}
+            </button>
+          );
+        },
+      },
+      // Product Code — first item's code, with "+N more" badge when the CN
+      // spans multiple lines. Mirrors DO's per-row product info treatment
+      // (DO surfaces this via the items array on the detail panel; CN
+      // surfaces a summary directly in the row per user request 2026-04-28).
+      {
+        key: "_productCode",
+        label: "Product Code",
+        type: "text",
+        width: "150px",
+        sortable: false,
+        render: (_value, row) => {
+          if (row.items.length === 0) {
+            return <span className="text-[#9CA3AF]">—</span>;
+          }
+          const first = row.items[0];
+          return (
+            <span className="text-[#1F1D1B]">
+              <span className="doc-number">{first.productCode || "—"}</span>
+              {row.items.length > 1 && (
+                <span className="text-[#9C6F1E] text-xs ml-1">
+                  +{row.items.length - 1} more
+                </span>
+              )}
+            </span>
+          );
+        },
+      },
+      // Size — sourced via productSizeMap from /api/products. Same "first
+      // item + N-more" treatment as Product Code.
+      {
+        key: "_sizeLabel",
+        label: "Size",
+        type: "text",
+        width: "80px",
+        sortable: false,
+        render: (_value, row) => {
+          if (row.items.length === 0) {
+            return <span className="text-[#9CA3AF]">—</span>;
+          }
+          return (
+            <span className="text-[#4B5563]">
+              {row.items[0].sizeLabel || <span className="text-[#9CA3AF]">—</span>}
+            </span>
+          );
+        },
+      },
+      // Qty — sum of every item's quantity (a CN with two lines of 3 + 2
+      // shows "5"). Operator wanted a top-level qty number visible without
+      // opening detail.
+      {
+        key: "totalQty",
+        label: "Qty",
+        type: "number",
+        width: "60px",
+        align: "right",
+        sortable: true,
         render: (_value, row) => (
-          <button
-            type="button"
-            className="doc-number text-[#6B5C32] hover:underline"
-            onClick={(e) => {
-              e.stopPropagation();
-              navigate(`/consignment/${row.consignmentId}`);
-            }}
-            title="Open parent Consignment Order"
-          >
-            {row.coRef}
-          </button>
+          <span className="tabular-nums text-[#1F1D1B]">{row.totalQty}</span>
         ),
       },
       {
@@ -891,17 +1243,25 @@ export default function ConsignmentNotePage() {
           </div>
         ),
       },
-      // Transport columns — placeholders until backend grows the fields.
-      // Same column widths as DO so the two grids visually align.
+      // Transport Co. = the 3PL provider COMPANY. Resolves
+      // consignment_notes.driverId (legacy column name; holds providerId
+      // post-3PL refactor) against the cached providers list. Mirrors
+      // DO's identical column 1:1 — same lookup, same fallback.
       {
-        key: "driverCompany",
+        key: "driverId",
         label: "Transport Co.",
         type: "text",
         width: "180px",
         sortable: true,
-        render: (_value, row) => (
-          <span className="text-[#1F1D1B]">{row.driverCompany || <span className="text-[#9CA3AF]">—</span>}</span>
-        ),
+        render: (_value, row) => {
+          const company = providers.find((p) => p.id === row.driverId)?.name;
+          const display = company || row.driverCompany || "";
+          return (
+            <span className="text-[#1F1D1B]">
+              {display || <span className="text-[#9CA3AF]">—</span>}
+            </span>
+          );
+        },
       },
       {
         key: "driverName",
@@ -924,7 +1284,7 @@ export default function ConsignmentNotePage() {
         ),
       },
     ],
-    [navigate],
+    [navigate, providers],
   );
 
   // ---------- Context menu for CN rows ----------
@@ -941,28 +1301,20 @@ export default function ConsignmentNotePage() {
         action: () => toast.info(`Printing CN: ${row.cnNo} — coming soon`),
       },
       { label: "", separator: true, action: () => {} },
-      // Mark Dispatched — flips ACTIVE → PARTIALLY_SOLD on the backend
-      // (which we re-skin as PENDING → DISPATCHED in the UI). Same
-      // transition the DO board offers as DRAFT → LOADED.
+      // Mark Dispatched — opens a dialog that mirrors DO's Create-DO 3PL
+      // section (Provider company → Vehicle → Driver person). On confirm,
+      // PUTs the picked transport ids + status:'PARTIALLY_SOLD' so the
+      // backend's resolveTransport denormalizes everything into the CN
+      // row. Bug fix 2026-04-28: previously this just flipped status with
+      // no transport pick, leaving the CN row showing "—" for Transport
+      // Co. / Driver / Vehicle indefinitely.
       {
         label: "Mark Dispatched",
         icon: <Send className="h-3.5 w-3.5" />,
         disabled: row.status !== "PENDING",
-        action: async () => {
-          try {
-            const res = await fetch("/api/consignment-notes", {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ id: row.id, status: "PARTIALLY_SOLD" }),
-            });
-            if (!res.ok) {
-              toast.error("Failed to mark dispatched");
-            } else {
-              fetchData();
-            }
-          } catch {
-            toast.error("Failed to mark dispatched");
-          }
+        action: () => {
+          setDispatchForm({ providerId: "", vehicleId: "", driverPersonId: "" });
+          setDispatchDialog(row);
         },
       },
       {
@@ -1008,6 +1360,39 @@ export default function ConsignmentNotePage() {
         },
       },
       { label: "", separator: true, action: () => {} },
+      // ---- Reverse actions (mirrors DO's "Reverse to Pending Dispatch") ----
+      // Each reverse PUT just sends the new status — the backend infers
+      // the timestamp wipe from STATUS_RANK in consignment-note-shared.ts
+      // (any timestamp at-or-after the new rank gets nulled, so a half-
+      // step reverse like CLOSED → FULLY_SOLD only clears acknowledgedAt
+      // and leaves deliveredAt intact). clearTimestamps:true is reserved
+      // for explicit "wipe everything" backfill, which the operator
+      // never wants from a context-menu reverse.
+      {
+        label: "Reverse to Pending CN",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        disabled: row.status !== "PENDING",
+        action: () => reverseToPendingCN(row),
+      },
+      {
+        label: "Reverse to Pending Dispatch",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        disabled: row.status !== "DISPATCHED" && row.status !== "IN_TRANSIT",
+        action: () => reverseStatus(row, "ACTIVE", "Pending Dispatch"),
+      },
+      {
+        label: "Reverse to Dispatched",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        disabled: row.status !== "DELIVERED",
+        action: () => reverseStatus(row, "PARTIALLY_SOLD", "Dispatched"),
+      },
+      {
+        label: "Reverse to Delivered",
+        icon: <RotateCcw className="h-3.5 w-3.5" />,
+        disabled: row.status !== "ACKNOWLEDGED",
+        action: () => reverseStatus(row, "FULLY_SOLD", "Delivered"),
+      },
+      { label: "", separator: true, action: () => {} },
       // CN-to-DO removed 2026-04-28 — consignment goods are at the customer
       // already; DO is for SO-origin dispatches and doesn't apply.
       {
@@ -1040,7 +1425,7 @@ export default function ConsignmentNotePage() {
         action: () => fetchData(),
       },
     ],
-    [fetchData, toast],
+    [fetchData, toast, reverseStatus, reverseToPendingCN],
   );
 
   // ---------- Tab counts (mirrors DO) ----------
@@ -1522,6 +1907,147 @@ export default function ConsignmentNotePage() {
 
       {/* Transfer-to-Delivery-Order dialog removed 2026-04-28: consignment
           goods are at the customer's branch already; DO doesn't apply. */}
+
+      {/* -------- Mark Dispatched Dialog -------- */}
+      {/* Mirrors the 3PL section of DO's Create-DO dialog 1:1. Three pickers
+          (Provider company → Vehicle → Driver person) chained so vehicle +
+          driver lists scope to the picked provider. On confirm, PUTs the
+          picked ids onto the CN row + flips status='PARTIALLY_SOLD'. */}
+      {dispatchDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => !dispatchSaving && setDispatchDialog(null)}
+          />
+          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-md mx-4 border border-[#E2DDD8]">
+            <div className="px-6 py-4 border-b border-[#E2DDD8] flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold text-[#1F1D1B]">Mark Dispatched</h2>
+                <p className="text-xs text-[#6B7280]">
+                  Pick transport for {dispatchDialog.cnNo} · {dispatchDialog.customerName}
+                </p>
+              </div>
+              <button
+                onClick={() => !dispatchSaving && setDispatchDialog(null)}
+                className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-6 py-5 space-y-4">
+              {/* 3PL Provider — picks the company; vehicle + driver pickers
+                  below filter to that provider's three_pl_vehicles +
+                  three_pl_drivers rows respectively. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">3PL Provider</label>
+                <select
+                  value={dispatchForm.providerId}
+                  onChange={(e) =>
+                    // Reset vehicle + driver picks when provider changes —
+                    // their option lists are scoped to the chosen company.
+                    setDispatchForm((f) => ({
+                      ...f,
+                      providerId: e.target.value,
+                      vehicleId: "",
+                      driverPersonId: "",
+                    }))
+                  }
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32]"
+                >
+                  <option value="">— Select 3PL Provider —</option>
+                  {providers
+                    .filter((p) => p.status === "ACTIVE")
+                    .map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Vehicle — optional; scoped to provider via dispatchVehicles. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Vehicle</label>
+                <select
+                  value={dispatchForm.vehicleId}
+                  onChange={(e) =>
+                    setDispatchForm((f) => ({ ...f, vehicleId: e.target.value }))
+                  }
+                  disabled={!dispatchForm.providerId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {dispatchForm.providerId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {dispatchVehicles
+                    .filter((v) => v.status === "ACTIVE")
+                    .map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.plateNo}
+                        {v.vehicleType ? ` — ${v.vehicleType}` : ""}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              {/* Driver person — optional; scoped to provider via dispatchDrivers. */}
+              <div>
+                <label className="text-xs text-[#6B7280] font-medium">Driver</label>
+                <select
+                  value={dispatchForm.driverPersonId}
+                  onChange={(e) =>
+                    setDispatchForm((f) => ({ ...f, driverPersonId: e.target.value }))
+                  }
+                  disabled={!dispatchForm.providerId}
+                  className="mt-1 w-full h-9 px-3 rounded-md border border-[#E2DDD8] text-sm focus:outline-none focus:border-[#6B5C32] disabled:bg-[#F9F7F5] disabled:text-[#999]"
+                >
+                  <option value="">
+                    {dispatchForm.providerId ? "— Optional —" : "Pick provider first"}
+                  </option>
+                  {dispatchDrivers
+                    .filter((d) => d.status === "ACTIVE")
+                    .map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                        {d.phone ? ` — ${d.phone}` : ""}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <p className="text-xs text-[#9CA3AF] pt-1">
+                Provider is optional — leaving everything blank still flips the CN to
+                Dispatched, but the Transport Co. / Driver / Vehicle columns will stay
+                empty until edited.
+              </p>
+            </div>
+            <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-end gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setDispatchDialog(null)}
+                disabled={dispatchSaving}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                onClick={confirmDispatch}
+                disabled={dispatchSaving}
+              >
+                {dispatchSaving ? (
+                  <>
+                    <RefreshCw className="h-4 w-4 animate-spin" /> Dispatching...
+                  </>
+                ) : (
+                  <>
+                    <Send className="h-4 w-4" /> Mark Dispatched
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* -------- Transfer to Sales Invoice Dialog (preserved) -------- */}
       {transferSIRow && (

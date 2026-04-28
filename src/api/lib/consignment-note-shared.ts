@@ -315,11 +315,38 @@ export async function resolveHubState(
 //   PARTIALLY_SOLD → FULLY_SOLD      (Mark Delivered)     — stamps deliveredAt
 //   FULLY_SOLD     → CLOSED          (Mark Acknowledged)  — stamps acknowledgedAt
 //
+// Reverse transitions (added 2026-04-28 for the DO-parity reverse-action
+// context menu items on the CN page):
+//
+//   PARTIALLY_SOLD → ACTIVE          (Reverse to Pending Dispatch) — nulls dispatchedAt
+//   FULLY_SOLD     → PARTIALLY_SOLD  (Reverse to Dispatched)        — nulls deliveredAt
+//   CLOSED         → FULLY_SOLD      (Reverse to Delivered)         — nulls acknowledgedAt
+//
+// Auto-null logic: when the new status is strictly EARLIER in the lifecycle
+// than the existing one (per STATUS_RANK below), every timestamp at-or-after
+// the new rank is cleared. Callers can also force a wipe by passing
+// `clearTimestamps: true` on the body, which nulls all three timestamps
+// regardless of rank — useful for backfill / corrections.
+//
 // Timestamps are auto-stamped server-side so the FE only needs to send
-// `{ status }`. Existing timestamps are preserved (idempotent: writing the
-// same status twice doesn't overwrite the first stamp). Callers can
-// override explicitly via body.{dispatchedAt,deliveredAt,acknowledgedAt}.
+// `{ status }`. Existing timestamps are preserved on the FORWARD path
+// (idempotent: writing the same status twice doesn't overwrite the first
+// stamp). Callers can override explicitly via
+// body.{dispatchedAt,deliveredAt,acknowledgedAt} to set a specific value.
 // ---------------------------------------------------------------------------
+
+// Lifecycle rank for the legacy CN status enum. Used to detect reverse
+// transitions in updateConsignmentNoteById so the matching timestamp gets
+// nulled instead of the stale value lingering. RETURNED is treated as
+// PARTIALLY_SOLD's rank since it's reachable from PARTIALLY_SOLD/FULLY_SOLD
+// via the return endpoint and shouldn't pin a forward timestamp.
+const STATUS_RANK: Record<string, number> = {
+  ACTIVE: 0,
+  PARTIALLY_SOLD: 1,
+  RETURNED: 1,
+  FULLY_SOLD: 2,
+  CLOSED: 3,
+};
 export type UpdateCNResult =
   | { ok: true; note: ConsignmentNoteRow; items: ConsignmentItemRow[] }
   | { ok: false; reason: "not_found" };
@@ -341,14 +368,39 @@ export async function updateConsignmentNoteById(
       ? body.status
       : existing.status;
 
-  // Auto-stamp lifecycle timestamps (idempotent).
+  // Auto-stamp lifecycle timestamps (idempotent on forward transitions).
   let dispatchedAt = existing.dispatchedAt;
   let deliveredAt = existing.deliveredAt;
   let acknowledgedAt = existing.acknowledgedAt;
   if (nextStatus === "PARTIALLY_SOLD" && !dispatchedAt) dispatchedAt = now;
   if (nextStatus === "FULLY_SOLD" && !deliveredAt) deliveredAt = now;
   if (nextStatus === "CLOSED" && !acknowledgedAt) acknowledgedAt = now;
-  // Allow explicit override (backfill / correction).
+
+  // Reverse-transition timestamp wipe. When the new status sits earlier in
+  // the lifecycle than what's stored (e.g. user reverses CLOSED → FULLY_SOLD
+  // or PARTIALLY_SOLD → ACTIVE), every timestamp whose stage is at-or-after
+  // the new rank gets nulled out — otherwise the row keeps stale "delivered
+  // 5 days ago" data after the operator already moved it back.
+  const prevRank = STATUS_RANK[existing.status ?? ""] ?? 0;
+  const nextRank = STATUS_RANK[nextStatus ?? ""] ?? 0;
+  if (typeof body.status === "string" && nextRank < prevRank) {
+    if (nextRank < STATUS_RANK.PARTIALLY_SOLD) dispatchedAt = null;
+    if (nextRank < STATUS_RANK.FULLY_SOLD) deliveredAt = null;
+    if (nextRank < STATUS_RANK.CLOSED) acknowledgedAt = null;
+  }
+
+  // Force-wipe escape hatch: clearTimestamps:true on the body nulls all
+  // three lifecycle timestamps regardless of rank. Used by the reverse
+  // context-menu actions on the CN page when the FE wants the wipe to be
+  // explicit rather than rely on rank inference.
+  if (body.clearTimestamps === true) {
+    dispatchedAt = null;
+    deliveredAt = null;
+    acknowledgedAt = null;
+  }
+
+  // Allow explicit override (backfill / correction). Wins over both the
+  // auto-stamp and the reverse-wipe paths above.
   if (body.dispatchedAt !== undefined) {
     dispatchedAt = (body.dispatchedAt as string | null) ?? null;
   }

@@ -265,6 +265,18 @@ app.use("/api/*", authMiddleware);
 // to 'hookka').
 app.use("/api/*", tenantMiddleware);
 
+// Sprint 4 — translate OrgIdRequiredError thrown by getOrgId / withOrgScope
+// into a 401 instead of a 500. Any tenant-scoped route handler that runs
+// without a resolved orgId on the context (auth bypassed somehow, or
+// tenantMiddleware crashed) now fails closed.
+app.onError((err, c) => {
+  if (err && (err as { name?: string }).name === "OrgIdRequiredError") {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+  console.error("[worker.onError]", err);
+  return c.json({ success: false, error: "Internal server error" }, 500);
+});
+
 // ---------------------------------------------------------------------------
 // Auth-gated routes (registered AFTER authMiddleware)
 // ---------------------------------------------------------------------------

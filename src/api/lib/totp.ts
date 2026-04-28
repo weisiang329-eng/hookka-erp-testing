@@ -239,7 +239,7 @@ export async function verifyTotp(
 export function enrollUrl(
   email: string,
   secretBase32: string,
-  issuer: string = "Hookka ERP",
+  issuer: string = "Hookka Manufacturing ERP",
 ): string {
   const issuerEnc = encodeURIComponent(issuer);
   const labelEnc = encodeURIComponent(`${issuer}:${email}`);

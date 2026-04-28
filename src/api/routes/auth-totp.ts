@@ -43,7 +43,7 @@ import { verifyPassword } from "../lib/password";
 const app = new Hono<Env>();
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const TOTP_ISSUER = "Hookka ERP";
+const TOTP_ISSUER = "Hookka Manufacturing ERP";
 
 type UserRow = {
   id: string;

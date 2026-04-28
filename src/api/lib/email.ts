@@ -61,7 +61,7 @@ export async function notifySupplierPoSubmitted(
     return { ok: false, error: "RESEND_API_KEY not configured" };
   }
   const from =
-    env.RESEND_FROM_EMAIL || "Hookka ERP <noreply@houzscentury.com>";
+    env.RESEND_FROM_EMAIL || "Hookka Manufacturing ERP <noreply@houzscentury.com>";
   const tpl = supplierPoEmailTemplate({
     poNo: args.poNo,
     supplierName: args.supplierName,

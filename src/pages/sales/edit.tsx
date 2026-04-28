@@ -119,7 +119,24 @@ function generateSofaWIPs(item: LineItem): { code: string; type: string; qty: nu
   return wips;
 }
 
-const EDITABLE_STATUSES = ["DRAFT", "CONFIRMED"];
+type EditEligibility = {
+  success?: boolean;
+  editable: boolean;
+  reason?: "status" | "production_window" | "dept_completed";
+  status?: string;
+  earliestStartDate?: string;
+  cutoffDate?: string;
+  completedDept?: string;
+  completedAt?: string;
+};
+
+/** Format an ISO date (YYYY-MM-DD or full timestamp) as "27 Apr 2026". */
+function formatLockDate(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso.length === 10 ? `${iso}T00:00:00Z` : iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+}
 
 export default function EditSalesOrderPage() {
   const { id } = useParams();
@@ -262,8 +279,14 @@ export default function EditSalesOrderPage() {
     });
   };
 
-  // Load existing order
+  // Load existing order + edit-eligibility verdict in parallel. The
+  // eligibility check is a thin SQL-only endpoint that aggregates earliest
+  // PO start + any-completed-JC across the SO's POs so the page doesn't
+  // need to refetch the (much heavier) production-orders payload.
+  // lockReason comes back on /:id and surfaces the cascade-lock reason
+  // (e.g. "PO X is COMPLETED") so the page can disable Save + show banner.
   const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/sales-orders/${id}` : null);
+  const { data: eligibilityResp } = useCachedJson<EditEligibility>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
   useEffect(() => {
     const d = orderResp;
     if (!d) {
@@ -465,7 +488,36 @@ export default function EditSalesOrderPage() {
     </div>
   );
 
-  if (!EDITABLE_STATUSES.includes(order.status)) {
+  // Lock decision: prefer the eligibility endpoint (handles IN_PRODUCTION's
+  // 2-day-window + any-completed-dept rules). While the eligibility request
+  // is in flight, fall back to the cheap status-only check so the page
+  // doesn't briefly flash the form for a clearly-locked order. Once the
+  // verdict lands we use it verbatim — including the trigger values
+  // (earliest start date, completed dept) for the human-readable reason.
+  const eligibility: EditEligibility | null = eligibilityResp ?? null;
+  const fallbackEditable =
+    order.status === "DRAFT" || order.status === "CONFIRMED" || order.status === "IN_PRODUCTION";
+  const isEditable = eligibility ? eligibility.editable : fallbackEditable;
+
+  if (!isEditable) {
+    // Build the reason copy. We always include both the rule that triggered
+    // and the concrete trigger value so the user knows what to do next
+    // (cancel that completion, or wait/contact ops).
+    let reasonText: string;
+    let ruleText: string;
+    if (eligibility?.reason === "dept_completed") {
+      reasonText = `${eligibility.completedDept || "A department"} already has a completion date (${formatLockDate(eligibility.completedAt)}).`;
+      ruleText = "Once any department stamps completion, the order is locked.";
+    } else if (eligibility?.reason === "production_window") {
+      reasonText = `Production starts on ${formatLockDate(eligibility.earliestStartDate)}, which is within the 2-day cutoff.`;
+      ruleText = `Edits must be made before ${formatLockDate(eligibility.cutoffDate)}.`;
+    } else {
+      // status mismatch (or no eligibility data yet — fall back to status copy)
+      const status = eligibility?.status || order.status;
+      reasonText = `Order status is ${status}.`;
+      ruleText =
+        "Only DRAFT, CONFIRMED, and IN_PRODUCTION (within 2 days of start, no completed depts) can be edited.";
+    }
     return (
       <div className="space-y-6">
         <div className="flex items-center gap-4">
@@ -478,15 +530,17 @@ export default function EditSalesOrderPage() {
         </div>
         <Card>
           <CardContent className="p-8">
-            <div className="flex flex-col items-center justify-center gap-4 text-center">
+            <div className="flex flex-col items-center justify-center gap-4 text-center max-w-xl mx-auto">
               <div className="h-12 w-12 rounded-full bg-[#FAEFCB] flex items-center justify-center">
                 <AlertTriangle className="h-6 w-6 text-[#9C6F1E]" />
               </div>
               <h2 className="text-lg font-semibold text-[#1F1D1B]">Cannot Edit Order</h2>
-              <p className="text-[#6B7280]">
-                This order is currently <Badge variant="status" status={order.status} /> and cannot be edited.
-                Only orders in <span className="font-medium">Draft</span> or <span className="font-medium">Confirmed</span> status can be modified.
-              </p>
+              <div className="space-y-2">
+                <p className="text-[#374151]">
+                  This order is locked because: <span className="font-medium">{reasonText}</span>
+                </p>
+                <p className="text-sm text-[#6B7280]">{ruleText}</p>
+              </div>
               <Button variant="primary" onClick={() => navigate(`/sales/${id}`)}>
                 Back to Order Details
               </Button>

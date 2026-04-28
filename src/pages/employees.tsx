@@ -1276,6 +1276,16 @@ function EfficiencyOverviewTab({
     return copy;
   }, [allDepts]);
 
+  // Set of dept codes that count toward Efficiency % denominator. Per user
+  // 2026-04-28: only time spent in PRODUCTION depts should count - hours
+  // logged to Warehousing / Repair / Maintenance / Production Shortfall
+  // are not "available production time" and shouldn't drag down the ratio.
+  const productionDeptCodes = useMemo(() => {
+    const s = new Set<string>();
+    for (const d of allDepts) if (d.isProduction) s.add(d.code);
+    return s;
+  }, [allDepts]);
+
   // Workers without any entries in the period are NOT in the summary
   // response — join client-side to enrich names, drop unknown ids.
   const workerById = useMemo(() => {
@@ -1285,18 +1295,39 @@ function EfficiencyOverviewTab({
   }, [workers]);
 
   type EffRow = WorkerHoursSummary & { employeeName: string; empNo: string };
+  // Build the row list from the UNION of {workers in working_hour_entries
+  // summary} and {workers with completed JCs}. Without the JC-only branch,
+  // a worker who got marked PIC on a JC but never had hours entered on
+  // the flat Working Hours grid was invisible here even though they had
+  // production time - reported by user 2026-04-28.
   const rows: EffRow[] = useMemo(() => {
-    return summary
-      .map((s) => {
-        const w = workerById.get(s.workerId);
-        return {
-          ...s,
-          employeeName: w?.name ?? s.workerId,
-          empNo: w?.empNo ?? "",
-        };
-      })
-      .sort((a, b) => b.totalHours - a.totalHours);
-  }, [summary, workerById]);
+    const byWorker = new Map<string, EffRow>();
+    for (const s of summary) {
+      const w = workerById.get(s.workerId);
+      byWorker.set(s.workerId, {
+        ...s,
+        employeeName: w?.name ?? s.workerId,
+        empNo: w?.empNo ?? "",
+      });
+    }
+    // Stub rows for JC-only workers (no working hour entries in range).
+    // totalHours stays 0 and byDept stays empty so the dept columns just
+    // render as em-dash; Production Time / Efficiency % populate via
+    // prodMinsByWorker which already has them.
+    for (const [wid] of prodMinsByWorker) {
+      if (byWorker.has(wid)) continue;
+      const w = workerById.get(wid);
+      byWorker.set(wid, {
+        workerId: wid,
+        totalHours: 0,
+        byDept: {},
+        daysWithEntries: 0,
+        employeeName: w?.name ?? wid,
+        empNo: w?.empNo ?? "",
+      });
+    }
+    return Array.from(byWorker.values()).sort((a, b) => b.totalHours - a.totalHours);
+  }, [summary, workerById, prodMinsByWorker]);
 
   const columns: Column<EffRow>[] = useMemo(() => {
     const cols: Column<EffRow>[] = [
@@ -1316,11 +1347,14 @@ function EfficiencyOverviewTab({
         label: "Total",
         align: "right",
         sortable: true,
-        render: (_value, row) => (
-          <span className="font-semibold tabular-nums text-[#1F1D1B]">
-            {row.totalHours.toFixed(1)}h
-          </span>
-        ),
+        render: (_value, row) =>
+          row.totalHours > 0 ? (
+            <span className="font-semibold tabular-nums text-[#1F1D1B]">
+              {row.totalHours.toFixed(1)}h
+            </span>
+          ) : (
+            <span className="text-[#D1D5DB] tabular-nums">—</span>
+          ),
       },
       // Production Time — per-worker JC contribution sum (already halved
       // server-side when both PIC slots filled). Mirrors the Google Sheet
@@ -1340,15 +1374,23 @@ function EfficiencyOverviewTab({
           );
         },
       },
-      // Efficiency % — Production / Total. Same green/amber/red thresholds
-      // the Employee Performance KPI card uses (≥85 green, ≥70 amber, else red).
+      // Efficiency % — Production output / Production-dept hours. Same
+      // green/amber/red thresholds the Employee Performance KPI card uses
+      // (>=85 green, >=70 amber, else red). Bug fix 2026-04-28: denominator
+      // used to be row.totalHours (ALL depts), so a worker who spent 5h in
+      // Warehousing + 4h in Upholstery had their efficiency divided by 9h
+      // - now only the 4h Upholstery counts (production-dept time only).
       {
         key: "efficiencyPct",
         label: "Efficiency %",
         align: "right",
         sortable: true,
         render: (_value, row) => {
-          const totalMins = row.totalHours * 60;
+          const prodHours = Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+            0,
+          );
+          const totalMins = prodHours * 60;
           if (totalMins <= 0) {
             return <span className="text-[#D1D5DB] tabular-nums">—</span>;
           }
@@ -1361,7 +1403,10 @@ function EfficiencyOverviewTab({
               ? "text-[#9C6F1E]"
               : "text-[#9A3A2D]";
           return (
-            <span className={`font-semibold tabular-nums ${cls}`}>
+            <span
+              className={`font-semibold tabular-nums ${cls}`}
+              title={`${formatHours(prodMins)} production / ${prodHours.toFixed(1)}h in production depts`}
+            >
               {pct.toFixed(1)}%
             </span>
           );
@@ -1406,7 +1451,7 @@ function EfficiencyOverviewTab({
     });
 
     return cols;
-  }, [orderedDepts, prodMinsByWorker]);
+  }, [orderedDepts, prodMinsByWorker, productionDeptCodes]);
 
   const contextMenuItems: ContextMenuItem[] = [
     {
@@ -1468,6 +1513,348 @@ function EfficiencyOverviewTab({
   );
 }
 
+// ========== TAB: DEPARTMENT LABOR ==========
+//
+// Per-department roll-up of working_hour_entries for a date range. Same
+// math as the Labor Cost tab (pro-rata OT split per (worker x date),
+// regularRate using calendar working days, OT base anchored at /26/9 x
+// otMultiplier) - just collapses the category dimension so each dept is
+// one row. Numbers reconcile exactly with Labor Cost: sum of all rows
+// here for a category-unfiltered range = sum of all dept x category
+// rows on Labor Cost for the same range.
+
+type DepartmentLaborRow = {
+  deptCode: string;
+  deptName: string;
+  isProduction: boolean;
+  totalHours: number;
+  workerCount: number;
+  estCostSen: number;
+};
+
+function DepartmentLaborTab({
+  workers,
+  departments,
+  refreshDepartments,
+}: {
+  workers: Worker[];
+  departments: DepartmentLite[];
+  refreshDepartments: () => void;
+}) {
+  // Department CRUD - moved here from Labor Cost so departments live with
+  // the dept-cost view. Toggle reveals the existing DepartmentsManager
+  // component (create / edit / delete + worker-count guard).
+  const [manageOpen, setManageOpen] = useState(false);
+  // Same period model as Labor Cost: a Month dropdown is the quick-jump
+  // preset; the From/To inputs allow custom ranges. Dropdown -> sets
+  // dateFrom/dateTo to that month's bounds; touching the date inputs
+  // drops period back to "" (Custom range).
+  const periodOptions = useMemo(() => buildPeriodOptions(), []);
+  const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
+  const initialRange = useMemo(
+    () => periodToDateRange(periodOptions[0]?.value ?? ""),
+    [periodOptions],
+  );
+  const [dateFrom, setDateFrom] = useState(initialRange.from);
+  const [dateTo, setDateTo] = useState(initialRange.to);
+  // Category filter mirrors Labor Cost: when set, only entries tagged with
+  // that product category count toward dept totals. Non-production buckets
+  // (Warehousing / Repair / Maintenance / Production Shortfall) carry an
+  // empty category and ALWAYS show through so borrowed / idle hours stay
+  // visible regardless of filter.
+  const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
+
+  const onPickPeriod = (p: string) => {
+    setPeriod(p);
+    if (p) {
+      const r = periodToDateRange(p);
+      setDateFrom(r.from);
+      setDateTo(r.to);
+    }
+  };
+  const onPickFrom = (v: string) => {
+    setDateFrom(v);
+    setPeriod("");
+  };
+  const onPickTo = (v: string) => {
+    setDateTo(v);
+    setPeriod("");
+  };
+
+  // Pull raw entries (same source as Labor Cost tab) so we can apply the
+  // pro-rata OT split per (worker x date). The /summary endpoint groups
+  // away the date dimension and would force an inaccurate flat hourly
+  // rate - using the raw rows keeps the math identical to Labor Cost.
+  const entriesUrl = `/api/working-hour-entries?from=${dateFrom}&to=${dateTo}`;
+  const { data: entriesResp, loading } = useCachedJson<{ data?: WorkingHourEntry[] }>(entriesUrl);
+  const entries: WorkingHourEntry[] = useMemo(
+    () => entriesResp?.data ?? [],
+    [entriesResp]
+  );
+
+  const workerById = useMemo(() => {
+    const m = new Map<string, Worker>();
+    for (const w of workers) m.set(w.id, w);
+    return m;
+  }, [workers]);
+
+  // Project onto the canonical departments list so non-production depts
+  // (R&D, Warehousing, ...) show up even when they have zero hours, and
+  // the row order matches Efficiency Overview (production first, in
+  // sequence order).
+  const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
+  const orderedDepts = useMemo(() => {
+    const copy = [...allDepts];
+    copy.sort((a, b) => {
+      if (a.isProduction !== b.isProduction) return a.isProduction ? -1 : 1;
+      const sa = a.sequence ?? 999;
+      const sb = b.sequence ?? 999;
+      if (sa !== sb) return sa - sb;
+      return a.code.localeCompare(b.code);
+    });
+    return copy;
+  }, [allDepts]);
+
+  const rows: DepartmentLaborRow[] = useMemo(() => {
+    // Working-days denominator for the regular rate. Same branching as
+    // Labor Cost: when `period` is set, use workingDaysInMonth (full
+    // calendar month, Sundays excluded); otherwise fall to
+    // workingDaysInRange so custom ranges still get a sane denom.
+    const wdInMonth = period
+      ? workingDaysInMonth(period)
+      : workingDaysInRange(dateFrom, dateTo);
+
+    // Group raw entries by (worker, date) so we can apply OT pro-rata
+    // within each workday. Same shape as Labor Cost's segsByWorkerDate.
+    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
+    for (const e of entries) {
+      const k = `${e.workerId}|${e.date}`;
+      const arr = segsByWorkerDate.get(k) ?? [];
+      arr.push(e);
+      segsByWorkerDate.set(k, arr);
+    }
+
+    const acc = new Map<string, { totalHours: number; workerIds: Set<string>; costSen: number }>();
+
+    for (const [k, segs] of segsByWorkerDate.entries()) {
+      const [workerId] = k.split("|");
+      const w = workerById.get(workerId);
+      if (!w || !w.basicSalarySen) continue;
+      // Same rates as Labor Cost tab: regular rate uses calendar working
+      // days; OT base rate stays anchored at /26/9 so OT premium doesn't
+      // fluctuate month-to-month.
+      const regularRateSen = w.basicSalarySen / wdInMonth / 9;
+      const otBaseRateSen = w.basicSalarySen / 26 / 9;
+      const otMult = w.otMultiplier ?? 1.5;
+      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
+      const otTotalH = Math.max(0, totalH - 9);
+      const otShare = totalH > 0 ? otTotalH / totalH : 0;
+
+      for (const e of segs) {
+        const hours = Number(e.hours) || 0;
+        const otH = hours * otShare;
+        const regularH = hours - otH;
+        const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
+        // Same branch as Labor Cost: when a category filter is on, only
+        // count entries tagged with that category; entries with empty
+        // category (non-production depts) always pass through.
+        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as "" | "SOFA" | "BEDFRAME" | "ACCESSORY";
+        if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
+        let cell = acc.get(e.departmentCode);
+        if (!cell) {
+          cell = { totalHours: 0, workerIds: new Set(), costSen: 0 };
+          acc.set(e.departmentCode, cell);
+        }
+        cell.totalHours += hours;
+        cell.workerIds.add(workerId);
+        cell.costSen += cost;
+      }
+    }
+
+    return orderedDepts.map((d) => {
+      const cell = acc.get(d.code);
+      return {
+        deptCode: d.code,
+        deptName: d.shortName || d.name,
+        isProduction: d.isProduction,
+        totalHours: cell?.totalHours ?? 0,
+        workerCount: cell?.workerIds.size ?? 0,
+        estCostSen: Math.round(cell?.costSen ?? 0),
+      };
+    });
+  }, [entries, workerById, orderedDepts, period, dateFrom, dateTo, categoryFilter]);
+
+  const totals = useMemo(() => {
+    return rows.reduce(
+      (a, r) => ({ hours: a.hours + r.totalHours, cost: a.cost + r.estCostSen, depts: a.depts + (r.totalHours > 0 ? 1 : 0) }),
+      { hours: 0, cost: 0, depts: 0 },
+    );
+  }, [rows]);
+
+  const columns: Column<DepartmentLaborRow>[] = [
+    {
+      key: "deptName",
+      label: "Department",
+      sortable: true,
+      render: (_v, row) => (
+        <div className="flex items-center gap-2">
+          <span className="font-medium text-[#1F1D1B]">{row.deptName}</span>
+          {row.isProduction ? (
+            <span className="inline-flex items-center rounded bg-[#EEF3E4] px-1.5 py-0.5 text-[10px] font-medium text-[#4F7C3A]">
+              Prod
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded bg-[#FAEFCB] px-1.5 py-0.5 text-[10px] font-medium text-[#9C6F1E]">
+              Non-prod
+            </span>
+          )}
+        </div>
+      ),
+    },
+    {
+      key: "totalHours",
+      label: "Total Hours",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.totalHours > 0 ? (
+          <span className="font-semibold tabular-nums text-[#1F1D1B]">
+            {row.totalHours.toFixed(1)}h
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "workerCount",
+      label: "Workers",
+      align: "center",
+      sortable: true,
+      render: (_v, row) =>
+        row.workerCount > 0 ? (
+          <span className="tabular-nums text-[#4B5563]">{row.workerCount}</span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "estCostSen",
+      label: "Estimated Labor Cost",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.estCostSen > 0 ? (
+          <span className="font-semibold tabular-nums text-[#1F1D1B]">
+            {formatRM(row.estCostSen)}
+          </span>
+        ) : (
+          <span className="text-[#D1D5DB] tabular-nums">—</span>
+        ),
+    },
+  ];
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <CardTitle className="flex items-center gap-2">
+            <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Department Labor
+          </CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setManageOpen((v) => !v)}
+              title="Create / edit / delete departments"
+            >
+              <Users className="h-4 w-4" />
+              {manageOpen ? "Close Manage Departments" : "Manage Departments"}
+            </Button>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">Month</label>
+              <select
+                value={period}
+                onChange={(e) => onPickPeriod(e.target.value)}
+                className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+              >
+                <option value="">Custom range</option>
+                {periodOptions.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">From</label>
+              <Input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => onPickFrom(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">To</label>
+              <Input
+                type="date"
+                value={dateTo}
+                onChange={(e) => onPickTo(e.target.value)}
+                className="w-36 h-8 text-xs"
+              />
+            </div>
+            <div className="flex items-center gap-1.5">
+              <label className="text-xs text-[#6B7280]">Category</label>
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value as "" | "SOFA" | "BEDFRAME" | "ACCESSORY")}
+                className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                title="Slice every dept's hours / cost by item category"
+              >
+                <option value="">All categories</option>
+                <option value="SOFA">Sofa</option>
+                <option value="BEDFRAME">Bedframe</option>
+                <option value="ACCESSORY">Accessory</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {manageOpen && (
+          <DepartmentsManager
+            departments={allDepts}
+            refresh={refreshDepartments}
+          />
+        )}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Departments with activity</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">{totals.depts}</div>
+          </div>
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Total hours</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
+              {totals.hours.toFixed(1)}h
+            </div>
+          </div>
+          <div className="rounded-lg border border-[#E2DDD8] bg-[#FAF9F7] p-3">
+            <div className="text-xs text-[#6B7280]">Estimated labor cost</div>
+            <div className="mt-1 text-lg font-semibold text-[#1F1D1B]">
+              {formatRM(totals.cost)}
+            </div>
+          </div>
+        </div>
+        <DataGrid
+          columns={columns}
+          data={rows}
+          keyField="deptCode"
+          gridId="department-labor"
+          emptyMessage={loading ? "Loading..." : "No working hours in the selected date range."}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
 // ========== TAB 4: EMPLOYEE DETAIL ==========
 
 type WorkerJobCardRow = {
@@ -1478,19 +1865,41 @@ type WorkerJobCardRow = {
   departmentCode: string;
   wipCode: string;
   wipLabel: string;
+  wipQty?: number;
   completedDate: string | null;
+  // productionTimeMinutes = perUnit x wipQty (the actual time the worker
+  // spent on this JC). perUnitMinutes is the BOM-defined per-unit value
+  // alongside it so the Daily Breakdown can show "15 min x 2 = 30 min".
   productionTimeMinutes: number;
+  perUnitMinutes?: number;
   status: string;
   picSlot: "PIC1" | "PIC2" | "";
+  // True when both PIC1 and PIC2 are filled on this JC. Halve the
+  // worker's contribution to total Production Hrs only in that case;
+  // a solo PIC (either slot, no partner) gets the full minutes.
+  hasBothPics?: boolean;
 };
 
 function EmployeeDetailTab({
   workers,
   allAttendance,
+  departments,
 }: {
   workers: Worker[];
   allAttendance: AttendanceRecord[];
+  departments: DepartmentLite[];
 }) {
+  // Production dept codes for the Avg Efficiency denominator. Per user
+  // 2026-04-28: only time spent in PRODUCTION depts counts as "available
+  // for production" - hours in Warehousing / Repair / Maintenance get
+  // excluded so the ratio doesn't dilute. Falls back to the seed set if
+  // /api/departments hasn't loaded yet so the KPI doesn't flash 0%.
+  const productionDeptCodes = useMemo(() => {
+    if (departments.length === 0) return PRODUCTION_DEPT_CODES;
+    const s = new Set<string>();
+    for (const d of departments) if (d.isProduction) s.add(d.code);
+    return s;
+  }, [departments]);
   const { toast } = useToast();
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(
     workers[0]?.id || ""
@@ -1549,20 +1958,37 @@ function EmployeeDetailTab({
   );
 
   // Total working hours from the new entries source. Sum decimal hours,
-  // convert to minutes once for downstream math (efficiency ratio, etc).
+  // convert to minutes once. KPI display shows ALL hours (incl. non-prod
+  // like Warehousing) - that's the user's "Total Working Hrs" headline.
   const totalWorkMins = Math.round(
     workerEntries.reduce((s, e) => s + (e.hours || 0), 0) * 60
+  );
+  // Avg Efficiency denominator: PRODUCTION-DEPT-ONLY hours. Time spent in
+  // Warehousing / Repair / Maintenance / Production Shortfall is real
+  // working time but not "available production capacity" - including it
+  // would unfairly drag efficiency ratios down. Bug fix 2026-04-28.
+  const productionWorkMins = Math.round(
+    workerEntries.reduce(
+      (s, e) =>
+        productionDeptCodes.has(e.departmentCode) ? s + (e.hours || 0) : s,
+      0,
+    ) * 60,
   );
   const totalProdMinsAttendance = empRecords.reduce(
     (s, r) => s + r.productionTimeMinutes,
     0
   );
-  // Job-card production minutes — halve PIC2 contribution to match the
-  // existing convention used elsewhere (PIC2 is "assist", not solo work).
+  // Job-card production minutes - halve only when BOTH PIC slots are
+  // filled (worker shared the JC with a partner). Solo PIC (either slot,
+  // no partner) gets the full minutes. Bug fix 2026-04-28: previously
+  // the rule was "PIC2 always halves", which (a) double-counted when
+  // both slots were filled (PIC1 got full + PIC2 got half = 1.5x total)
+  // and (b) under-counted solo PIC2 (got half instead of full). Backend
+  // /api/job-cards now exposes hasBothPics for this exact decision.
   const totalProdMinsJc = useMemo(() => {
     return workerJcs.reduce((s, r) => {
       const m = r.productionTimeMinutes || 0;
-      return s + (r.picSlot === "PIC2" ? m / 2 : m);
+      return s + (r.hasBothPics ? m / 2 : m);
     }, 0);
   }, [workerJcs]);
   // Production Hrs stays attendance + JC: working_hour_entries records
@@ -1570,9 +1996,12 @@ function EmployeeDetailTab({
   // production minutes the JC + attendance pair tracks. Mixing them would
   // make Production Hrs > Working Hrs in the common new-grid case.
   const totalProdMins = totalProdMinsAttendance + totalProdMinsJc;
+  // Avg Efficiency denominator = production-dept hours only (see
+  // productionWorkMins comment above). When the worker has zero hours
+  // in any production dept, ratio stays null so the KPI shows em-dash.
   const avgEff =
-    totalWorkMins > 0
-      ? ((totalProdMins / totalWorkMins) * 100).toFixed(1)
+    productionWorkMins > 0
+      ? ((totalProdMins / productionWorkMins) * 100).toFixed(1)
       : null;
   const totalOT = empRecords.reduce((s, r) => s + r.overtimeMinutes, 0);
   // Days Present — distinct dates the worker has any working_hour_entries
@@ -1597,10 +2026,19 @@ function EmployeeDetailTab({
     wipLabel: string;            // human-readable piece label (e.g. "5531 RIGHT ARM"); blank for ATT rows
     completedDate: string | null; // JC completion date (separate from `date` which is the entry date)
     deptCode: string;
+    // The worker's CONTRIBUTION on this row - halved when both PICs are
+    // filled (shared with a partner). Sum of all rows' `minutes` matches
+    // the Total Production Hrs KPI exactly.
     minutes: number;
+    // Total JC time before halving (perUnit x qty). Surfaced in tooltip
+    // when shared so the user can see "30m total, 15m to me".
+    totalMinutes?: number;
+    perUnitMinutes?: number;     // BOM-defined per-unit time (JC rows only)
+    qty?: number;                // wipQty (JC rows only)
     status: string;
     source: "ATT" | "JC";
     picSlot?: "PIC1" | "PIC2" | "";
+    hasBothPics?: boolean;       // shared with a partner -> minutes halved
   };
   const itemRows: ItemRow[] = useMemo(() => {
     const out: ItemRow[] = [];
@@ -1622,6 +2060,11 @@ function EmployeeDetailTab({
     }
     for (const jc of workerJcs) {
       if (!jc.completedDate) continue;
+      const totalJcMin = jc.productionTimeMinutes || 0;
+      // Worker's contribution = total / 2 when both PICs filled (shared);
+      // full minutes when solo. Mirrors the totalProdMinsJc reduce above
+      // so the per-row column sums to the Total Production Hrs KPI.
+      const myShare = jc.hasBothPics ? totalJcMin / 2 : totalJcMin;
       out.push({
         id: `jc-${jc.id}`,
         date: jc.completedDate,
@@ -1629,10 +2072,14 @@ function EmployeeDetailTab({
         wipLabel: jc.wipLabel || "",
         completedDate: jc.completedDate,
         deptCode: jc.departmentCode || "—",
-        minutes: jc.productionTimeMinutes || 0,
+        minutes: myShare,
+        totalMinutes: totalJcMin,
+        perUnitMinutes: jc.perUnitMinutes,
+        qty: jc.wipQty,
         status: jc.status,
         source: "JC",
         picSlot: jc.picSlot,
+        hasBothPics: jc.hasBothPics,
       });
     }
     out.sort((a, b) => b.date.localeCompare(a.date));
@@ -1690,13 +2137,64 @@ function EmployeeDetailTab({
       ),
     },
     {
+      key: "qty",
+      label: "Qty",
+      align: "center",
+      sortable: true,
+      render: (_v, row) =>
+        row.qty && row.qty > 0 ? (
+          <span className="tabular-nums text-[#1F1D1B]">{row.qty}</span>
+        ) : (
+          <span className="text-[#9CA3AF] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "perUnitMinutes",
+      label: "WIP Time",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.perUnitMinutes && row.perUnitMinutes > 0 ? (
+          <span className="tabular-nums text-[#4B5563]" title="Per-unit production time from BOM">
+            {formatHours(row.perUnitMinutes)}
+          </span>
+        ) : (
+          <span className="text-[#9CA3AF] tabular-nums">—</span>
+        ),
+    },
+    {
       key: "minutes",
       label: "Production Time",
       align: "right",
       sortable: true,
-      render: (_v, row) => (
-        <span className="font-medium tabular-nums">{formatHours(row.minutes)}</span>
-      ),
+      render: (_v, row) => {
+        // Show this WORKER's contribution (already halved server-side when
+        // both PICs filled). Sum of this column matches Total Production
+        // Hrs KPI. When shared, badge "shared" + tooltip exposes the full
+        // JC time so the user knows where the half came from.
+        const display = formatHours(row.minutes);
+        const tooltipParts: string[] = [];
+        if (row.source === "JC" && row.perUnitMinutes && row.qty && row.qty > 1) {
+          tooltipParts.push(`${row.perUnitMinutes}m x ${row.qty} = ${formatHours(row.totalMinutes ?? row.minutes)}`);
+        }
+        if (row.hasBothPics) {
+          tooltipParts.push(`Shared with partner -> ${formatHours(row.minutes)}`);
+        }
+        const title = tooltipParts.join(" | ");
+        return (
+          <span className="inline-flex items-center gap-1.5 justify-end">
+            <span className="font-medium tabular-nums" title={title || undefined}>{display}</span>
+            {row.hasBothPics && (
+              <span
+                className="inline-flex items-center rounded-sm bg-[#FAEFCB] px-1 text-[9px] font-semibold text-[#9C6F1E]"
+                title={`Total ${formatHours(row.totalMinutes ?? row.minutes * 2)} shared with partner`}
+              >
+                ½
+              </span>
+            )}
+          </span>
+        );
+      },
     },
     {
       key: "status",
@@ -1818,7 +2316,7 @@ function EmployeeDetailTab({
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold">
-              {(totalWorkMins / 60).toFixed(1)}h
+              {totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}
             </p>
             <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
             {jcCount > 0 && (
@@ -1829,12 +2327,12 @@ function EmployeeDetailTab({
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold">
-              {(totalProdMins / 60).toFixed(1)}h
+              {totalProdMins > 0 ? formatHours(totalProdMins) : "-"}
             </p>
             <p className="text-xs text-[#6B7280]">Total Production Hrs</p>
             {totalProdMinsJc > 0 && (
               <p className="mt-0.5 text-[10px] text-[#3E6570]">
-                {(totalProdMinsAttendance / 60).toFixed(1)}h att + {(totalProdMinsJc / 60).toFixed(1)}h jc
+                {formatHours(totalProdMinsAttendance) === "-" ? "0h" : formatHours(totalProdMinsAttendance)} att + {formatHours(totalProdMinsJc)} jc
               </p>
             )}
           </CardContent>
@@ -2447,6 +2945,40 @@ function workingDaysInMonth(period: string): number {
   return count;
 }
 
+// Effective working-days denominator for a custom date range. Used to derive
+// the per-worker hourly rate when the range isn't a single calendar month.
+// Algorithm: count Mon–Sat days inside [from, to], then scale up to a full
+// "month" (lastDay-of-from-month days) so the rate doesn't blow up for
+// short ranges (e.g. a 1-day range shouldn't give a worker 1 day's salary).
+// Falls back to 26 on unparseable input.
+function workingDaysInRange(from: string, to: string): number {
+  const fy = Number(from.slice(0, 4));
+  const fm = Number(from.slice(5, 7));
+  const fd = Number(from.slice(8, 10));
+  const ty = Number(to.slice(0, 4));
+  const tm = Number(to.slice(5, 7));
+  const td = Number(to.slice(8, 10));
+  if (!fy || !fm || !fd || !ty || !tm || !td) return 26;
+  // If single calendar month, defer to workingDaysInMonth so monthly results
+  // exactly match the existing logic.
+  if (fy === ty && fm === tm) {
+    const lastOfMonth = new Date(Date.UTC(fy, fm, 0)).getUTCDate();
+    if (fd === 1 && td === lastOfMonth) {
+      return workingDaysInMonth(`${fy}-${String(fm).padStart(2, "0")}`);
+    }
+  }
+  // Otherwise count actual Mon–Sat days in the range.
+  const start = new Date(Date.UTC(fy, fm - 1, fd));
+  const end = new Date(Date.UTC(ty, tm - 1, td));
+  if (end.getTime() < start.getTime()) return 26;
+  let count = 0;
+  for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
+    const dow = new Date(t).getUTCDay();
+    if (dow !== 0) count++;
+  }
+  return Math.max(1, count);
+}
+
 // Inline panel — create / edit / delete departments. Lives under LaborCostTab
 // but operates on the same /api/departments source-of-truth that every dept
 // dropdown across the page reads from. New depts appear immediately in
@@ -2692,19 +3224,55 @@ function LaborCostTab({
   workers,
   departments,
   productionDeptCodes,
-  refreshDepartments,
 }: {
   workers: Worker[];
   departments: DepartmentLite[];
   productionDeptCodes: Set<string>;
-  refreshDepartments: () => void;
 }) {
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
-  const [manageOpen, setManageOpen] = useState(false);
+  // Department CRUD lives on the Department Labor tab now (per user request -
+  // a "Department Cost" management view). Labor Cost just consumes the
+  // department list.
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
+  // `period` keeps the existing month dropdown working as a quick-jump preset.
+  // When the user picks a month, we re-derive from/to. When they tweak the
+  // date inputs directly, `period` stays in sync only if their range matches
+  // an exact calendar month — otherwise it drops to "" (Custom).
   const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
-  const { from, to } = useMemo(() => periodToDateRange(period), [period]);
+  const initialRange = useMemo(
+    () => periodToDateRange(periodOptions[0]?.value ?? ""),
+    [periodOptions],
+  );
+  const [fromDate, setFromDate] = useState<string>(initialRange.from);
+  const [toDate, setToDate] = useState<string>(initialRange.to);
+  const from = fromDate;
+  const to = toDate;
+  // Optional category slice ("" = All). When non-empty, EVERY metric on this
+  // tab — KPI cards, per-dept rollup — narrows to just the chosen product
+  // category so an operator can answer "what did
+  // {Sofa|Bedframe|Accessory} cost / earn / produce on this date range".
+  // Borrowed (Warehousing) and Idle (Shortfall) are NOT category-tagged
+  // labor — they show their per-period totals regardless of filter so
+  // operators don't lose sight of them.
+  const [categoryFilter, setCategoryFilter] = useState<"" | "SOFA" | "BEDFRAME" | "ACCESSORY">("");
+
+  const handlePeriodChange = useCallback((p: string) => {
+    setPeriod(p);
+    if (p) {
+      const r = periodToDateRange(p);
+      setFromDate(r.from);
+      setToDate(r.to);
+    }
+  }, []);
+  const handleFromChange = useCallback((v: string) => {
+    setFromDate(v);
+    setPeriod(""); // dropping to Custom — the dropdown shows "Custom range"
+  }, []);
+  const handleToChange = useCallback((v: string) => {
+    setToDate(v);
+    setPeriod("");
+  }, []);
 
   // Working hour entries for the selected month.
   const entriesUrl = useMemo(
@@ -2767,7 +3335,12 @@ function LaborCostTab({
     //    multiplied by otMultiplier (default 1.5×). OT premium does NOT
     //    fluctuate month-to-month — it's tied to a "standard" hourly rate
     //    so a worker doing OT in February doesn't get a windfall vs March.
-    const wdInMonth = workingDaysInMonth(period);
+    // When `period` is a single calendar month this matches the prior
+    // behaviour exactly. When the user picks a custom range the rate is
+    // derived from Mon-Sat days actually in the range — see workingDaysInRange.
+    const wdInMonth = period
+      ? workingDaysInMonth(period)
+      : workingDaysInRange(from, to);
 
     // Group by (departmentCode, category). Hours summed; cost = sum over each
     // entry of regular_hours × regular_rate + ot_hours × ot_base_rate × multiplier.
@@ -2805,7 +3378,15 @@ function LaborCostTab({
         const otH = hours * otShare;
         const regularH = hours - otH;
         const cost = regularH * regularRateSen + otH * otBaseRateSen * otMult;
-        const cat = (e.category || "") as Category;
+        // Defensive uppercase normalize so any pre-migration lower-case
+        // rows in working_hour_entries.category still compare correctly.
+        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
+        // When a category filter is active, only count entries tagged with
+        // that category. Non-production buckets (Warehousing/Shortfall etc.)
+        // have empty cat and fall through into the "always-show" branch
+        // below - they are not category-tagged labor and stay visible so
+        // operators don't lose sight of borrowed / idle hours.
+        if (categoryFilter && cat !== categoryFilter && cat !== "") continue;
         const bucketKey = `${e.departmentCode}|${cat}`;
         const cur = buckets.get(bucketKey) ?? { hours: 0, laborCostSen: 0 };
         cur.hours += hours;
@@ -2843,7 +3424,7 @@ function LaborCostTab({
       return (catOrder[a.category] ?? 99) - (catOrder[b.category] ?? 99);
     });
     return out;
-  }, [entriesResp, plResp, workersById, period, allDepts, prodCodes]);
+  }, [entriesResp, plResp, workersById, period, from, to, allDepts, prodCodes, categoryFilter]);
 
   // KPIs across the full table.
   const totalLaborCostSen = rows.reduce((s, r) => s + r.laborCostSen, 0);
@@ -2858,10 +3439,26 @@ function LaborCostTab({
     .reduce((s, r) => s + r.laborCostSen, 0);
   const totalRevenueSen = useMemo(() => {
     const rev = plResp?.success ? plResp.data ?? {} : {};
+    // With a category filter, narrow Total Revenue to that bucket only.
+    // production-revenue already returns per-category totals, so we just
+    // pick the matching slice instead of summing all three.
+    if (categoryFilter) {
+      return Number(rev[categoryFilter]) || 0;
+    }
     if (typeof rev.totalSen === "number") return rev.totalSen;
     return (Number(rev.SOFA) || 0) + (Number(rev.BEDFRAME) || 0) + (Number(rev.ACCESSORY) || 0);
-  }, [plResp]);
-  const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
+  }, [plResp, categoryFilter]);
+  // Cost / Revenue ratio uses production labor only - the overhead buckets
+  // (Warehousing borrow, Repair, Maintenance, Production Shortfall) are
+  // not productive cost so they shouldn't pull the ratio against Revenue.
+  // Bug fix 2026-04-28 per user: KPI was using totalLaborCostSen which
+  // included Maintenance / Repair / etc.
+  const overallRatio = totalRevenueSen > 0 ? (productionLaborCostSen / totalRevenueSen) * 100 : 0;
+  // Repair + Maintenance + other overhead = total - production - shortfall - warehousing
+  // Surfaced as a separate "Overhead" KPI so they're still visible but
+  // don't muddy the production-only headline.
+  const overheadLaborCostSen =
+    totalLaborCostSen - productionLaborCostSen - shortfallLaborCostSen - warehousingLaborCostSen;
 
   const loading = entriesLoading || plLoading;
 
@@ -2872,41 +3469,60 @@ function LaborCostTab({
           <CardTitle className="flex items-center gap-2">
             <DollarSign className="h-5 w-5 text-[#6B5C32]" /> Labor Cost vs Revenue
           </CardTitle>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setManageOpen((v) => !v)}
-              title="Create / edit / delete departments"
-            >
-              <Users className="h-4 w-4" />
-              {manageOpen ? "Close Manage Departments" : "Manage Departments"}
-            </Button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <div className="flex items-center gap-1.5 text-xs">
+              <span className="text-[#6B7280]">From</span>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => handleFromChange(e.target.value)}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+              <span className="text-[#6B7280]">To</span>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => handleToChange(e.target.value)}
+                className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            </div>
             <select
               value={period}
-              onChange={(e) => setPeriod(e.target.value)}
+              onChange={(e) => handlePeriodChange(e.target.value)}
               className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              title="Quick-jump to a calendar month"
             >
+              <option value="">Custom range</option>
               {periodOptions.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
+            </select>
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value as "" | "SOFA" | "BEDFRAME" | "ACCESSORY")}
+              className="h-9 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              title="Slice every metric on this tab by item category"
+            >
+              <option value="">All categories</option>
+              <option value="SOFA">Sofa</option>
+              <option value="BEDFRAME">Bedframe</option>
+              <option value="ACCESSORY">Accessory</option>
             </select>
           </div>
         </div>
       </CardHeader>
       <CardContent>
-        {manageOpen && (
-          <DepartmentsManager
-            departments={allDepts}
-            refresh={refreshDepartments}
-          />
-        )}
         {/* KPI strip */}
         <div className="grid gap-3 grid-cols-2 md:grid-cols-5 mb-4">
           <Card>
             <CardContent className="p-3">
-              <p className="text-xs text-[#6B7280]">Total Labor Cost</p>
-              <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(totalLaborCostSen)}</p>
+              <p className="text-xs text-[#6B7280]">Production Labor Cost</p>
+              <p
+                className="text-lg font-bold text-[#1F1D1B]"
+                title={`Production-only (excl. Warehousing / Repair / Maintenance / Shortfall). Total incl. overhead = ${formatCurrency(totalLaborCostSen)}`}
+              >
+                {formatCurrency(productionLaborCostSen)}
+              </p>
             </CardContent>
           </Card>
           <Card>
@@ -2943,8 +3559,15 @@ function LaborCostTab({
 
         {/* Production-vs-overhead ratio note */}
         <div className="mb-3 text-xs text-[#6B7280]">
-          Production-only labor cost (excl. warehousing/repair/maint/shortfall):{" "}
-          <span className="font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</span>
+          Production Labor = production-dept work only (Fab Cut / Fab Sew / Wood Cut / Foam / Framing / Webbing / Upholstery / Packing).
+          {overheadLaborCostSen > 0 && (
+            <>
+              {" "}Overhead this period (Repair / Maintenance / etc.):{" "}
+              <span className="font-medium text-[#1F1D1B]">{formatCurrency(overheadLaborCostSen)}</span>
+              {" · "}
+            </>
+          )}
+          {" "}Total incl. overhead = {formatCurrency(totalLaborCostSen)}.
           {" · "}
           Revenue is recognized when items complete UPHOLSTERY (production-completion bucket); labor at the day work happens. Treat any
           single-month ratio as a leading indicator, not a closed P&amp;L.
@@ -3016,13 +3639,26 @@ function LaborCostTab({
             the period. Lets operators audit which physical units actually
             contributed to the revenue figure shown above. Per spec, each
             unit is recognized ONCE on the date its LAST piece (HB/Divan/
-            Cushion/…) completes UPHOLSTERY. */}
-        {!loading && (
+            Cushion/…) completes UPHOLSTERY. Filtered by the Category
+            dropdown so a Sofa filter strips Bedframe + Accessory rows
+            (and the unit count in the header). Same .trim().toUpperCase()
+            normalize as the per-dept rollup in case any pre-migration
+            row has a lower-case category. */}
+        {!loading && (() => {
+          const allRawRows = plResp?.data?.rows ?? [];
+          const filteredRawRows = categoryFilter
+            ? allRawRows.filter(
+                (rr) =>
+                  (typeof rr.category === "string" ? rr.category.trim().toUpperCase() : "") ===
+                  categoryFilter,
+              )
+            : allRawRows;
+          return (
           <div className="mt-6">
             <div className="mb-2 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
               <span className="text-xs text-[#6B7280]">
-                {(plResp?.data?.rows?.length ?? 0)} unit{(plResp?.data?.rows?.length ?? 0) === 1 ? "" : "s"}
+                {filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"}
               </span>
             </div>
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
@@ -3040,7 +3676,7 @@ function LaborCostTab({
                   </tr>
                 </thead>
                 <tbody>
-                  {(plResp?.data?.rows ?? []).map((rr, idx) => (
+                  {filteredRawRows.map((rr, idx) => (
                     <tr
                       key={`${rr.date}-${rr.soNo}-${rr.productCode}-${idx}`}
                       className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
@@ -3072,7 +3708,7 @@ function LaborCostTab({
                       </td>
                     </tr>
                   ))}
-                  {(plResp?.data?.rows?.length ?? 0) === 0 && (
+                  {filteredRawRows.length === 0 && (
                     <tr>
                       <td colSpan={8} className="h-24 text-center text-[#9CA3AF]">
                         No production completions in this period.
@@ -3083,7 +3719,8 @@ function LaborCostTab({
               </table>
             </div>
           </div>
-        )}
+          );
+        })()}
       </CardContent>
     </Card>
   );
@@ -3463,7 +4100,7 @@ function LeaveManagementTab({ workers }: { workers: Worker[] }) {
 
 // ========== MAIN PAGE ==========
 
-type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "detail" | "payroll" | "leave";
+type TabKey = "working-hours" | "labor-cost" | "employee-master" | "efficiency" | "department-labor" | "detail" | "payroll" | "leave";
 
 // Labor Cost tab is wedged between Working Hours and Payroll per spec — the
 // flow goes "what hours did people work" → "what did those hours cost vs the
@@ -3483,6 +4120,11 @@ const TABS: { key: TabKey; label: string; icon: React.ReactNode }[] = [
     key: "efficiency",
     label: "Efficiency Overview",
     icon: <Activity className="h-4 w-4" />,
+  },
+  {
+    key: "department-labor",
+    label: "Department Labor",
+    icon: <DollarSign className="h-4 w-4" />,
   },
   {
     key: "detail",
@@ -3715,10 +4357,19 @@ export default function EmployeesPage() {
         />
       )}
 
+      {activeTab === "department-labor" && (
+        <DepartmentLaborTab
+          workers={workers}
+          departments={departments}
+          refreshDepartments={refreshDeptsHook}
+        />
+      )}
+
       {activeTab === "detail" && (
         <EmployeeDetailTab
           workers={workers}
           allAttendance={allAttendance}
+          departments={departments}
         />
       )}
 
@@ -3727,7 +4378,6 @@ export default function EmployeesPage() {
           workers={workers}
           departments={departments}
           productionDeptCodes={productionDeptCodes}
-          refreshDepartments={refreshDeptsHook}
         />
       )}
 

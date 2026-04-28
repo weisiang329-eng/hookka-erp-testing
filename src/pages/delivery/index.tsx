@@ -394,6 +394,14 @@ export default function DeliveryPage() {
   const [createDialogDrivers, setCreateDialogDrivers] = useState<ThreePLDriverPerson[]>([]);
   const [editDialogVehicles, setEditDialogVehicles] = useState<ThreePLVehicle[]>([]);
   const [editDialogDrivers, setEditDialogDrivers] = useState<ThreePLDriverPerson[]>([]);
+  // Edit-mode bug fix: delivery_orders only persists driverId (PROVIDER company)
+  // + driverName (denormalized PERSON name) - the PERSON id is not in any
+  // column. Re-deriving it on Edit means we have to wait for the provider's
+  // three_pl_drivers list to load and match by name. This ref carries the
+  // pending name across the async fetch so the useEffect that watches
+  // editDialogDrivers can finish the resolve. Cleared when match found or
+  // when the user closes the edit dialog.
+  const pendingDriverNameToResolveRef = useRef<string>("");
 
   // ----- Customer hub lookup -----
   const [customersData, setCustomersData] = useState<Customer[]>([]);
@@ -838,7 +846,27 @@ export default function DeliveryPage() {
       .then(([vRes, dRes]) => {
         if (cancelled) return;
         if (vRes?.success && Array.isArray(vRes.data)) setEditDialogVehicles(vRes.data);
-        if (dRes?.success && Array.isArray(dRes.data)) setEditDialogDrivers(dRes.data);
+        if (dRes?.success && Array.isArray(dRes.data)) {
+          setEditDialogDrivers(dRes.data);
+          // Resolve PERSON id by name match on Edit. Bug fix 2026-04-28:
+          // delivery_orders only persists the PERSON's name (denormalized
+          // into driverName). Without this, the Edit dialog's Driver
+          // dropdown opened blank even when the DO had a saved person.
+          const wanted = pendingDriverNameToResolveRef.current.trim();
+          if (wanted) {
+            const match = dRes.data.find(
+              (d) => (d.name || "").trim() === wanted,
+            );
+            if (match) {
+              setEditForm((f) =>
+                f.driverPersonId ? f : { ...f, driverPersonId: match.id },
+              );
+            }
+            // One-shot - clear so a stale name doesn't bleed into the next
+            // edit session if the user opens Edit on a different DO.
+            pendingDriverNameToResolveRef.current = "";
+          }
+        }
       })
       .catch(() => {
         /* swallow */
@@ -1305,6 +1333,11 @@ export default function DeliveryPage() {
     const matchedProvider =
       providers.find((p) => p.id === row.driverId) ??
       providers.find((p) => p.name === row.driverName);
+    // PERSON id is not stored on delivery_orders - we only persist the
+    // PERSON name (driverName denormalize). Stash that name so the
+    // editDialogDrivers fetch effect can resolve it back to a PERSON id
+    // once the provider's drivers list loads.
+    pendingDriverNameToResolveRef.current = row.driverName || "";
     setEditForm({
       driverId: matchedProvider?.id || "",
       vehicleId: row.vehicleId || "",
@@ -1326,6 +1359,7 @@ export default function DeliveryPage() {
     setEditMode(false);
     setShowAddItemPanel(false);
     setAddItemSearch("");
+    pendingDriverNameToResolveRef.current = "";
   };
 
   const removeEditItem = (itemId: string) => {
@@ -1842,20 +1876,39 @@ export default function DeliveryPage() {
           </div>
         ),
       },
-      // driverName is the legacy 3PL provider COMPANY name (not a person —
-      // see migration 0014 + the 3PL multi-driver refactor). Relabeled
-      // "Transport Co." so it isn't mistaken for the actual driver person.
-      { key: "driverName", label: "Transport Co.", type: "text", width: "150px", sortable: true },
-      // The actual driver person — denormalized into driverContactPerson
-      // on POST/PUT (added by the 3PL refactor). Falls back to em-dash.
+      // Transport Co. = the 3PL provider COMPANY (e.g. "Express Logistics
+      // Sdn Bhd"). delivery_orders.driverId column holds the provider's id
+      // (legacy column name, kept post-3PL refactor) - look up the actual
+      // company name from the providers list. Bug fix 2026-04-28: was
+      // reading row.driverName which is the picked DRIVER PERSON's name
+      // (e.g. "Abu"), so the column was showing the driver in the
+      // company column.
       {
-        key: "driverContactPerson",
+        key: "driverId",
+        label: "Transport Co.",
+        type: "text",
+        width: "180px",
+        sortable: true,
+        render: (_value, row) => {
+          const company = providers.find((p) => p.id === row.driverId)?.name ?? row.driverId;
+          return (
+            <span className="text-[#1F1D1B]">{company || <span className="text-[#9CA3AF]">—</span>}</span>
+          );
+        },
+      },
+      // Driver = the actual person who's driving (e.g. "Abu"). Stored in
+      // delivery_orders.driverName column (denormalized PERSON name on
+      // POST/PUT). NOT driverContactPerson - that's the provider's
+      // company contact (e.g. "Mr Lee"), which has nothing to do with
+      // who's driving the truck.
+      {
+        key: "driverName",
         label: "Driver",
         type: "text",
         width: "120px",
         sortable: true,
         render: (_value, row) => (
-          <span className="text-[#4B5563]">{row.driverContactPerson || <span className="text-[#9CA3AF]">—</span>}</span>
+          <span className="text-[#4B5563]">{row.driverName || <span className="text-[#9CA3AF]">—</span>}</span>
         ),
       },
       // Lorry plate from the picked vehicle (three_pl_vehicles).
@@ -1870,7 +1923,7 @@ export default function DeliveryPage() {
         ),
       },
     ],
-    [selectedIds]
+    [selectedIds, providers]
   );
 
   // ---------- Context menu ----------
@@ -2959,7 +3012,7 @@ export default function DeliveryPage() {
                         </p>
                       </div>
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Company Contact</p>
                         <p className="font-medium">{detailDO.driverContactPerson || "-"}</p>
                       </div>
                     </div>
@@ -2987,7 +3040,7 @@ export default function DeliveryPage() {
                         <p className="font-medium">{detailDO.driverName || "-"}</p>
                       </div>
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Phone</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Driver Contact</p>
                         <p className="font-medium doc-number">{detailDO.driverPhone || "-"}</p>
                       </div>
                     </div>

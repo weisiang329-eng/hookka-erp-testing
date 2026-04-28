@@ -190,7 +190,7 @@ function CreateSalesOrderPage() {
   const fabricTrackings: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
   const [saving, setSaving] = useState(false);
   const [isClone, setIsClone] = useState(false);
-  const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED">("DRAFT");
+  const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED" | "CONFIRMING">("DRAFT");
   // BOM-incomplete error modal — shown when /confirm returns 422. soId is set
   // so the "Open SO as Draft" button can navigate to the newly-created SO.
   const [bomError, setBomError] = useState<{
@@ -738,7 +738,7 @@ function CreateSalesOrderPage() {
           status,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string } };
+      const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string; companySOId?: string } };
 
       if (!res.ok || !data.success) {
         setSaving(false);
@@ -748,13 +748,17 @@ function CreateSalesOrderPage() {
       invalidateCachePrefix("/api/sales-orders");
       invalidateCachePrefix("/api/production-orders");
       const newId = data.data?.id;
+      const newSoNumber = data.data?.companySOId || "";
 
-      // POST / always persists as DRAFT. If the user clicked "Create"
+      // POST / always persists as DRAFT. If the user clicked "Create Order"
       // (CONFIRMED branch), immediately fire /confirm to run the BOM
-      // guard + PO cascade. A 422 here leaves the SO as DRAFT on the
-      // server — we surface the BOM-incomplete modal and keep the user
-      // on the new SO's detail page.
+      // guard + PO cascade -> the server lands the SO at IN_PRODUCTION.
+      // A 422 here leaves the SO as DRAFT on the server — we surface the
+      // BOM-incomplete modal and keep the user on the new SO's detail page.
       if (status === "CONFIRMED" && newId) {
+        // Switch loading copy from "Creating..." to "Confirming..." so the
+        // user sees both phases of the chained call.
+        setPendingStatus("CONFIRMING");
         const confirmRes = await fetch(`/api/sales-orders/${newId}/confirm`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -771,7 +775,11 @@ function CreateSalesOrderPage() {
           return;
         }
         if (!confirmRes.ok || !confirmData.success) {
-          toast.error(confirmData.error || `Order created as DRAFT but confirm failed (HTTP ${confirmRes.status})`);
+          // POST succeeded so a DRAFT exists, but confirm failed (non-BOM
+          // reason). Tell the user explicitly that the order is saved as
+          // a draft and let them retry confirm from the list/detail page.
+          const reason = confirmData.error || `HTTP ${confirmRes.status}`;
+          toast.warning(`Order saved as draft - confirm manually from list. Reason: ${reason}`);
           navigate(`/sales/${newId}`);
           return;
         }
@@ -781,6 +789,11 @@ function CreateSalesOrderPage() {
         // starts fresh. Failure paths (DRAFT-only saves, BOM-incomplete) keep
         // the draft alive in case the user wants to retry.
         clearFormDraft(draftKey);
+        toast.success(
+          newSoNumber
+            ? `Order created and in production: ${newSoNumber}`
+            : "Order created and in production",
+        );
         navigate(`/sales/${newId}`);
         return;
       }
@@ -790,11 +803,14 @@ function CreateSalesOrderPage() {
         // Saved as DRAFT — also clear the draft since the form is now
         // persisted server-side under a real SO id.
         clearFormDraft(draftKey);
+        toast.success(
+          newSoNumber ? `Draft saved: ${newSoNumber}` : "Draft saved",
+        );
         navigate(`/sales/${newId}`);
       }
     } catch (e) {
       setSaving(false);
-      toast.error(e instanceof Error ? e.message : "Network error — order not saved");
+      toast.error(e instanceof Error ? e.message : "Network error - order not saved");
     }
   };
 
@@ -902,7 +918,11 @@ function CreateSalesOrderPage() {
           className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
         >
           <Save className="h-4 w-4" />
-          {saving && pendingStatus === "CONFIRMED" ? "Creating..." : "Create"}
+          {saving && pendingStatus === "CONFIRMING"
+            ? "Confirming..."
+            : saving && pendingStatus === "CONFIRMED"
+              ? "Creating..."
+              : "Create Order"}
         </Button>
       </div>
 
@@ -1002,7 +1022,7 @@ function CreateSalesOrderPage() {
             <hr className="border-[#E2DDD8]" />
             <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Subtotal</span><span className="font-medium amount">{formatCurrency(subtotal)}</span></div>
             <div className="flex justify-between text-lg font-bold"><span>Total</span><span className="text-[#6B5C32]">{formatCurrency(subtotal)}</span></div>
-            <div className="text-xs text-[#9CA3AF]">Status will be set to {pendingStatus === "CONFIRMED" ? "CONFIRMED" : "DRAFT"}</div>
+            <div className="text-xs text-[#9CA3AF]">Status will be set to {pendingStatus === "DRAFT" ? "DRAFT" : "IN_PRODUCTION"}</div>
           </CardContent>
         </Card>
       </div>

@@ -204,14 +204,30 @@ app.post("/", async (c) => {
   try {
     const body = await c.req.json();
 
-    // Validate customer exists
+    // Validate customer exists. Customers table has no `state` column -
+    // state lives on delivery_hubs (each customer has many hubs across
+    // different states). Bug fix 2026-04-28: SELECT ... state ... was
+    // throwing 'column "state" does not exist' on Postgres. Resolve the
+    // hub's state below from delivery_hubs instead.
     const customer = await c.var.DB.prepare(
-      "SELECT id, name, state FROM customers WHERE id = ?",
+      "SELECT id, name FROM customers WHERE id = ?",
     )
       .bind(body.customerId)
-      .first<{ id: string; name: string; state: string | null }>();
+      .first<{ id: string; name: string }>();
     if (!customer) {
       return c.json({ success: false, error: "Customer not found" }, 400);
+    }
+    // Pull state from the chosen delivery hub so customerState on the
+    // consignment row reflects WHERE this CO is being delivered, not a
+    // single customer-level state. Empty string when no hub picked yet.
+    let customerState: string | null = null;
+    const hubId = (body.hubId as string) ?? null;
+    if (hubId) {
+      const hub = await c.var.DB
+        .prepare("SELECT state FROM delivery_hubs WHERE id = ?")
+        .bind(hubId)
+        .first<{ state: string | null }>();
+      customerState = hub?.state ?? null;
     }
 
     const now = new Date();
@@ -279,7 +295,7 @@ app.post("/", async (c) => {
         (body.reference as string) ?? null,
         customer.id,
         customer.name,
-        customer.state ?? null,
+        customerState,
         (body.hubId as string) ?? null,
         (body.hubName as string) ?? null,
         companyCOId,

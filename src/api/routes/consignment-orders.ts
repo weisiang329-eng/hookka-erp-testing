@@ -416,6 +416,134 @@ app.get("/status-changes", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/consignment-orders/:id/edit-eligibility — CO-parity twin of the
+// SO endpoint at routes/sales-orders.ts. Same rule set:
+//   (a) status must be DRAFT / CONFIRMED / IN_PRODUCTION (anything later is
+//       fully locked)
+//   (b) IN_PRODUCTION is editable only when:
+//         · earliest PO start date ≥ today + 2 days, AND
+//         · no job_card under any of the CO's POs has a completedDate stamped
+//
+// Either guard tripping locks the order; the response carries the trigger
+// values (earliest start date, completed dept name + date) so the UI can
+// surface a precise reason rather than a generic "cannot edit".
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/:id/edit-eligibility", async (c) => {
+  const id = c.req.param("id");
+  const co = await c.var.DB
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; status: string }>();
+  if (!co) {
+    return c.json({ success: false, error: "Consignment order not found" }, 404);
+  }
+
+  // Cutoff = today + 2 calendar days, compared as YYYY-MM-DD strings so we
+  // don't accidentally drag a timezone offset into what is meant to be a
+  // calendar-day comparison.
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  // Rule 1: status must be one of DRAFT / CONFIRMED / IN_PRODUCTION.
+  if (
+    co.status !== "DRAFT" &&
+    co.status !== "CONFIRMED" &&
+    co.status !== "IN_PRODUCTION"
+  ) {
+    return c.json({
+      success: true,
+      editable: false,
+      reason: "status",
+      status: co.status,
+      cutoffDate: cutoffStr,
+    });
+  }
+
+  // DRAFT/CONFIRMED short-circuit — no production to inspect.
+  if (co.status === "DRAFT" || co.status === "CONFIRMED") {
+    return c.json({
+      success: true,
+      editable: true,
+      status: co.status,
+      cutoffDate: cutoffStr,
+    });
+  }
+
+  // IN_PRODUCTION — pull the CO's POs + their job-cards in one round trip.
+  const [posRes, jcRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT id, startDate, targetEndDate
+           FROM production_orders
+          WHERE consignmentOrderId = ?`,
+      )
+      .bind(id)
+      .all<{ id: string; startDate: string | null; targetEndDate: string | null }>(),
+    c.var.DB
+      .prepare(
+        `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.consignmentOrderId = ?
+            AND jc.completedDate IS NOT NULL
+            AND jc.completedDate <> ''
+          ORDER BY jc.completedDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{
+        departmentName: string | null;
+        departmentCode: string | null;
+        completedDate: string | null;
+      }>(),
+  ]);
+
+  // Rule 2b: any dept stamped a completion → fully locked, regardless of dates.
+  if (jcRes && jcRes.completedDate) {
+    return c.json({
+      success: true,
+      editable: false,
+      reason: "dept_completed",
+      status: co.status,
+      cutoffDate: cutoffStr,
+      completedDept: jcRes.departmentName || jcRes.departmentCode || "A department",
+      completedAt: jcRes.completedDate,
+    });
+  }
+
+  // Rule 2a: earliest production start (per-PO startDate) must be ≥ cutoff.
+  // We treat empty/null start dates as "not yet started" so they don't
+  // accidentally lock the CO; only POs with a real ISO date contribute.
+  const startDates = (posRes.results ?? [])
+    .map((p) => (p.startDate || "").slice(0, 10))
+    .filter((d) => d.length === 10);
+  if (startDates.length > 0) {
+    const earliest = startDates.reduce((min, d) => (d < min ? d : min), startDates[0]);
+    if (earliest < cutoffStr) {
+      return c.json({
+        success: true,
+        editable: false,
+        reason: "production_window",
+        status: co.status,
+        earliestStartDate: earliest,
+        cutoffDate: cutoffStr,
+      });
+    }
+  }
+
+  // IN_PRODUCTION but neither guard tripped — editable.
+  return c.json({
+    success: true,
+    editable: true,
+    status: co.status,
+    cutoffDate: cutoffStr,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/consignment-orders/:id
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
@@ -575,6 +703,62 @@ app.put("/:id", async (c) => {
       const lockMsg = await checkConsignmentOrderLocked(c.var.DB, id);
       if (lockMsg) {
         return c.json(lockedResponse(lockMsg), 403);
+      }
+    }
+
+    // Pre-flight: block CANCELLED transition when any job_card under this
+    // CO's POs has a completedDate stamped. CO-parity twin of the SO Cancel
+    // block in routes/sales-orders.ts — stranded inventory would result if
+    // we cascaded CANCELLED through completed work, so operators must first
+    // clear the completion dates or reassign those finished units to another
+    // order. Returns 409 Conflict (distinct from 4xx validation errors) so
+    // the frontend can render a specific blocked-cancel modal.
+    if (body.status === "CANCELLED" && existing.status !== "CANCELLED") {
+      const blockingRes = await c.var.DB
+        .prepare(
+          `SELECT jc.id, jc.completedDate, jc.departmentCode, jc.departmentName, po.poNo
+             FROM job_cards jc
+             JOIN production_orders po ON po.id = jc.productionOrderId
+            WHERE po.consignmentOrderId = ?
+              AND jc.completedDate IS NOT NULL
+              AND jc.completedDate <> ''
+              AND jc.status NOT IN ('CANCELLED')
+            ORDER BY jc.completedDate ASC
+            LIMIT 5`,
+        )
+        .bind(id)
+        .all<{
+          id: string;
+          completedDate: string;
+          departmentCode: string | null;
+          departmentName: string | null;
+          poNo: string;
+        }>();
+      const blocking = blockingRes.results ?? [];
+      if (blocking.length > 0) {
+        const lockedDepts = Array.from(
+          new Set(
+            blocking
+              .map((b) => b.departmentCode || b.departmentName || "")
+              .filter((d) => d.length > 0),
+          ),
+        );
+        return c.json(
+          {
+            success: false,
+            error: "Cannot cancel — production has completed work",
+            lockedDepts,
+            blockingItems: blocking.map((b) => ({
+              poNo: b.poNo,
+              departmentCode: b.departmentCode || "",
+              departmentName: b.departmentName || b.departmentCode || "Department",
+              completedDate: b.completedDate,
+            })),
+            reason:
+              "Clear completion dates or reassign these items to another order before cancelling.",
+          },
+          409,
+        );
       }
     }
 

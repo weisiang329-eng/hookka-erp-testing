@@ -1399,6 +1399,93 @@ async function cascadeUpholsteryToSO(
 }
 
 // ---------------------------------------------------------------------------
+// CO-parity twin of cascadeUpholsteryToSO. POs originating from a CO carry
+// consignmentOrderId set + salesOrderId NULL, so this branch no-ops on
+// SO-sourced POs and the SO branch no-ops on CO-sourced POs — both cascades
+// run unconditionally from the JC-update site, exactly one fires per PO.
+//
+// Forward path: every sibling CO PO has all UPH JCs COMPLETED/TRANSFERRED →
+// CO flips to READY_TO_SHIP and stockedIn=1 is stamped on each fully-UPH PO.
+// Rollback path: any UPH JC drops back to non-DONE while CO is at
+// READY_TO_SHIP → CO drops back to IN_PRODUCTION (same "any confirm = in
+// production" semantics as the SO twin). No status_changes audit row yet —
+// consignment_order_status_changes table is still TODO (see /status-changes
+// stub in routes/consignment-orders.ts).
+// ---------------------------------------------------------------------------
+async function cascadeUpholsteryToCO(
+  db: D1Database,
+  poId: string,
+): Promise<void> {
+  const po = await db
+    .prepare("SELECT * FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<ProductionOrderRow>();
+  if (!po || !po.consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(po.consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+
+  const siblings = await db
+    .prepare("SELECT * FROM production_orders WHERE consignmentOrderId = ?")
+    .bind(co.id)
+    .all<ProductionOrderRow>();
+  const siblingPOs = siblings.results ?? [];
+  if (siblingPOs.length === 0) return;
+
+  // Load all upholstery job cards for siblings in one go.
+  const sibIds = siblingPOs.map((p) => p.id);
+  const placeholders = sibIds.map(() => "?").join(",");
+  const uphRes = await db
+    .prepare(
+      `SELECT * FROM job_cards WHERE departmentCode = 'UPHOLSTERY' AND productionOrderId IN (${placeholders})`,
+    )
+    .bind(...sibIds)
+    .all<JobCardRow>();
+  const uphJcs = uphRes.results ?? [];
+  if (uphJcs.length === 0) return;
+
+  const everyUphDone = siblingPOs.every((p) => {
+    const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+    if (mine.length === 0) return true;
+    return mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+  });
+
+  const now = new Date().toISOString();
+  if (everyUphDone) {
+    for (const p of siblingPOs) {
+      const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+      if (
+        mine.length > 0 &&
+        mine.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED")
+      ) {
+        await db
+          .prepare("UPDATE production_orders SET stockedIn = 1 WHERE id = ?")
+          .bind(p.id)
+          .run();
+      }
+    }
+    if (co.status !== "READY_TO_SHIP") {
+      await db
+        .prepare(
+          "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, co.id)
+        .run();
+    }
+  } else if (co.status === "READY_TO_SHIP") {
+    // Mirror the SO twin: rollback drops back to IN_PRODUCTION.
+    await db
+      .prepare(
+        "UPDATE consignment_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
+      )
+      .bind(now, co.id)
+      .run();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // BUG-2026-04-27-020: rollback companion to cascadeUpholsteryToSO.
 //
 // `cascadeUpholsteryToSO` (the forward path) bumps the SO to READY_TO_SHIP
@@ -1538,6 +1625,38 @@ async function cascadePoCompletionToSO(
         "UPDATE sales_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
       )
       .bind(new Date().toISOString(), salesOrderId)
+      .run();
+  }
+}
+
+// CO-parity twin of cascadePoCompletionToSO. CO inherits the same production
+// pipeline through the shared `createProductionOrdersForOrder` helper — POs
+// originating from a CO carry consignmentOrderId set + salesOrderId NULL, so
+// the same "all sibling POs COMPLETED → parent flips to READY_TO_SHIP" rule
+// applies. Both cascades are invoked from the same PO-completion sites; one
+// no-ops on null FK while the other fires.
+async function cascadePoCompletionToCO(
+  db: D1Database,
+  consignmentOrderId: string | null,
+): Promise<void> {
+  if (!consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+  const siblings = await db
+    .prepare("SELECT status FROM production_orders WHERE consignmentOrderId = ?")
+    .bind(consignmentOrderId)
+    .all<{ status: string }>();
+  const sibList = siblings.results ?? [];
+  const allDone = sibList.length > 0 && sibList.every((p) => p.status === "COMPLETED");
+  if (allDone && co.status !== "READY_TO_SHIP") {
+    await db
+      .prepare(
+        "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+      )
+      .bind(new Date().toISOString(), consignmentOrderId)
       .run();
   }
 }
@@ -1893,11 +2012,37 @@ async function applyPoUpdate(
         err: err instanceof Error ? err.message : String(err),
       });
     }
+    // CO-parity twin — POs from a CO carry consignmentOrderId set instead of
+    // salesOrderId, so the SO branch above no-oped. Same try/catch contract:
+    // a cascade failure must not void the JC + PO scalar UPDATEs that
+    // already committed.
+    if (existing.consignmentOrderId) {
+      try {
+        await cascadePoCompletionToCO(db, existing.consignmentOrderId);
+      } catch (err) {
+        console.error("[cascadePoCompletionToCO] cascade failed", {
+          poId: id,
+          coId: existing.consignmentOrderId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
   try {
     await cascadeUpholsteryToSO(db, id);
   } catch (err) {
     console.error("[cascadeUpholsteryToSO] cascade failed", {
+      poId: id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  // CO-parity twin — internally short-circuits on SO-sourced POs (and vice
+  // versa for the SO twin). Wrapped separately so a failure in one twin
+  // doesn't strand the other.
+  try {
+    await cascadeUpholsteryToCO(db, id);
+  } catch (err) {
+    console.error("[cascadeUpholsteryToCO] cascade failed", {
       poId: id,
       err: err instanceof Error ? err.message : String(err),
     });
@@ -2941,12 +3086,16 @@ app.post("/:id/scan-complete", async (c) => {
 
   if (allDone) {
     // Auto-generate FG units + fg_batches row on PO completion. Runs BEFORE
-    // the SO cascade so SO progression sees the freshly created inventory.
+    // the SO/CO cascade so order progression sees the freshly created inventory.
     // Idempotent — safe on re-entry.
     await postProductionOrderCompletion(db, target.po.id);
     await cascadePoCompletionToSO(db, target.po.salesOrderId);
+    // CO-parity twin — fires on POs whose parent is a CO (consignmentOrderId
+    // set, salesOrderId NULL). The SO call above no-ops in that case.
+    await cascadePoCompletionToCO(db, target.po.consignmentOrderId);
   }
   await cascadeUpholsteryToSO(db, target.po.id);
+  await cascadeUpholsteryToCO(db, target.po.id);
 
   const freshPo = await fetchPO(db, target.po.id);
   const jcOut = freshPo?.jobCards.find((j) => j.id === target.jc.id);

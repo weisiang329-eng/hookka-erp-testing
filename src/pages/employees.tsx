@@ -3234,6 +3234,13 @@ function LaborCostTab({
   // Department CRUD lives on the Department Labor tab now (per user request -
   // a "Department Cost" management view). Labor Cost just consumes the
   // department list.
+  // Collapse state for the three tables - by default Production stays open
+  // (the headline view), Overhead + Revenue Raw Data collapse so the
+  // page doesn't scroll forever. Persisted across renders only; resets
+  // when the tab unmounts.
+  const [showProduction, setShowProduction] = useState(true);
+  const [showOverhead, setShowOverhead] = useState(false);
+  const [showRevenueRaw, setShowRevenueRaw] = useState(false);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
@@ -3578,61 +3585,133 @@ function LaborCostTab({
             Loading labor cost data…
           </div>
         ) : (
-          <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
-                  <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
-                  <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((r) => {
-                  const ratio = r.revenueSen > 0 ? (r.laborCostSen / r.revenueSen) * 100 : 0;
-                  const rowClass = r.isShortfall
-                    ? "bg-[#F9E1DA]/30 border-l-4 border-l-[#9A3A2D]"
-                    : r.isWarehousing
-                      ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
-                      : !r.isProduction
-                        ? "bg-[#F3F4F6]/40"
-                        : "";
-                  return (
-                    <tr key={r.id} className={`border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors ${rowClass}`}>
-                      <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
-                      <td className="h-10 px-3 text-[#4B5563]">
-                        {r.category ? r.category[0] + r.category.slice(1).toLowerCase() : <span className="text-[#9CA3AF]">—</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
-                      <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
-                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
-                        {r.isProduction && r.category ? formatCurrency(r.revenueSen) : <span className="text-[#9CA3AF]">n/a</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right tabular-nums">
-                        {r.isProduction && r.category && r.revenueSen > 0 ? (
-                          <span className={ratio > 30 ? "font-medium text-[#9A3A2D]" : ratio > 20 ? "font-medium text-[#9C6F1E]" : "font-medium text-[#4F7C3A]"}>
-                            {ratio.toFixed(1)}%
-                          </span>
-                        ) : (
-                          <span className="text-[#9CA3AF]">—</span>
-                        )}
+          <>
+            {/* Production rows - the part that earns revenue. Cost / Revenue
+                ratio + Category Revenue only make sense here. Non-production
+                rows live in the Overhead table below so they don't pollute
+                the production breakdown. */}
+            <button
+              type="button"
+              onClick={() => setShowProduction((v) => !v)}
+              className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+            >
+              <span className="flex items-center gap-2">
+                {showProduction ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Production Breakdown
+                <span className="text-xs font-normal text-[#6B7280]">
+                  ({rows.filter((r) => r.isProduction).length} dept{rows.filter((r) => r.isProduction).length === 1 ? "" : "s"} - {formatCurrency(productionLaborCostSen)})
+                </span>
+              </span>
+            </button>
+            {showProduction && (
+            <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.filter((r) => r.isProduction).map((r) => {
+                    const ratio = r.revenueSen > 0 ? (r.laborCostSen / r.revenueSen) * 100 : 0;
+                    return (
+                      <tr key={r.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                        <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
+                        <td className="h-10 px-3 text-[#4B5563]">
+                          {r.category ? r.category[0] + r.category.slice(1).toLowerCase() : <span className="text-[#9CA3AF]">—</span>}
+                        </td>
+                        <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
+                        <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
+                        <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
+                          {r.category ? formatCurrency(r.revenueSen) : <span className="text-[#9CA3AF]">n/a</span>}
+                        </td>
+                        <td className="h-10 px-3 text-right tabular-nums">
+                          {r.category && r.revenueSen > 0 ? (
+                            <span className={ratio > 30 ? "font-medium text-[#9A3A2D]" : ratio > 20 ? "font-medium text-[#9C6F1E]" : "font-medium text-[#4F7C3A]"}>
+                              {ratio.toFixed(1)}%
+                            </span>
+                          ) : (
+                            <span className="text-[#9CA3AF]">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {rows.filter((r) => r.isProduction).length === 0 && (
+                    <tr>
+                      <td colSpan={6} className="h-24 text-center text-[#9CA3AF]">
+                        No production hours for this period.
                       </td>
                     </tr>
-                  );
-                })}
-                {rows.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="h-24 text-center text-[#9CA3AF]">
-                      No working hour entries for this period.
-                    </td>
-                  </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            )}
+
+            {/* Overhead breakdown - non-production cost (Repair, Maintenance,
+                Warehousing, Production Shortfall). These don't have a
+                Category Revenue mapping so we drop the Cost / Revenue
+                columns; just show where the overhead dollars went. */}
+            {rows.some((r) => !r.isProduction && r.laborCostSen > 0) && (
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowOverhead((v) => !v)}
+                  className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+                >
+                  <span className="flex items-center gap-2">
+                    {showOverhead ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    Overhead Breakdown
+                    <span className="text-xs font-normal text-[#6B7280]">
+                      ({rows.filter((r) => !r.isProduction).length} - {formatCurrency(overheadLaborCostSen + warehousingLaborCostSen + shortfallLaborCostSen)} - not in Production Labor Cost)
+                    </span>
+                  </span>
+                </button>
+                {showOverhead && (
+                <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                        <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
+                        <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
+                        <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
+                        <th className="h-10 px-3 text-left font-medium text-[#374151]">Bucket</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.filter((r) => !r.isProduction).map((r) => {
+                        const rowClass = r.isShortfall
+                          ? "bg-[#F9E1DA]/30 border-l-4 border-l-[#9A3A2D]"
+                          : r.isWarehousing
+                            ? "bg-[#FAEFCB]/40 border-l-4 border-l-[#9C6F1E]"
+                            : "bg-[#F3F4F6]/40";
+                        const bucketLabel = r.isShortfall
+                          ? "Idle (Shortfall)"
+                          : r.isWarehousing
+                            ? "Borrowed (Warehousing)"
+                            : "Overhead";
+                        return (
+                          <tr key={r.id} className={`border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors ${rowClass}`}>
+                            <td className="h-10 px-3 font-medium text-[#1F1D1B]">{r.departmentName}</td>
+                            <td className="h-10 px-3 text-right font-medium tabular-nums">{r.hours.toFixed(1)}h</td>
+                            <td className="h-10 px-3 text-right font-medium tabular-nums">{formatCurrency(r.laborCostSen)}</td>
+                            <td className="h-10 px-3 text-[#6B7280] text-xs">{bucketLabel}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
                 )}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            )}
+          </>
         )}
 
         {/* Revenue Raw Data — one row per (poId, unitNo) recognized in
@@ -3654,13 +3733,21 @@ function LaborCostTab({
               )
             : allRawRows;
           return (
-          <div className="mt-6">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
-              <span className="text-xs text-[#6B7280]">
-                {filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"}
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => setShowRevenueRaw((v) => !v)}
+              className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+            >
+              <span className="flex items-center gap-2">
+                {showRevenueRaw ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Revenue Raw Data
+                <span className="text-xs font-normal text-[#6B7280]">
+                  ({filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"})
+                </span>
               </span>
-            </div>
+            </button>
+            {showRevenueRaw && (
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10">
@@ -3718,6 +3805,7 @@ function LaborCostTab({
                 </tbody>
               </table>
             </div>
+            )}
           </div>
           );
         })()}

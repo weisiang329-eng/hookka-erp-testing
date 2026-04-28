@@ -3234,6 +3234,13 @@ function LaborCostTab({
   // Department CRUD lives on the Department Labor tab now (per user request -
   // a "Department Cost" management view). Labor Cost just consumes the
   // department list.
+  // Collapse state for the three tables - by default Production stays open
+  // (the headline view), Overhead + Revenue Raw Data collapse so the
+  // page doesn't scroll forever. Persisted across renders only; resets
+  // when the tab unmounts.
+  const [showProduction, setShowProduction] = useState(true);
+  const [showOverhead, setShowOverhead] = useState(false);
+  const [showRevenueRaw, setShowRevenueRaw] = useState(false);
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
@@ -3583,6 +3590,20 @@ function LaborCostTab({
                 ratio + Category Revenue only make sense here. Non-production
                 rows live in the Overhead table below so they don't pollute
                 the production breakdown. */}
+            <button
+              type="button"
+              onClick={() => setShowProduction((v) => !v)}
+              className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+            >
+              <span className="flex items-center gap-2">
+                {showProduction ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Production Breakdown
+                <span className="text-xs font-normal text-[#6B7280]">
+                  ({rows.filter((r) => r.isProduction).length} dept{rows.filter((r) => r.isProduction).length === 1 ? "" : "s"} - {formatCurrency(productionLaborCostSen)})
+                </span>
+              </span>
+            </button>
+            {showProduction && (
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
@@ -3631,19 +3652,28 @@ function LaborCostTab({
                 </tbody>
               </table>
             </div>
+            )}
 
             {/* Overhead breakdown - non-production cost (Repair, Maintenance,
                 Warehousing, Production Shortfall). These don't have a
                 Category Revenue mapping so we drop the Cost / Revenue
                 columns; just show where the overhead dollars went. */}
             {rows.some((r) => !r.isProduction && r.laborCostSen > 0) && (
-              <div className="mt-6">
-                <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-semibold text-[#1F1D1B]">Overhead Breakdown</h3>
-                  <span className="text-xs text-[#6B7280]">
-                    Repair / Maintenance / Warehousing / Shortfall - not counted in Production Labor Cost
+              <div className="mt-4">
+                <button
+                  type="button"
+                  onClick={() => setShowOverhead((v) => !v)}
+                  className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+                >
+                  <span className="flex items-center gap-2">
+                    {showOverhead ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    Overhead Breakdown
+                    <span className="text-xs font-normal text-[#6B7280]">
+                      ({rows.filter((r) => !r.isProduction).length} - {formatCurrency(overheadLaborCostSen + warehousingLaborCostSen + shortfallLaborCostSen)} - not in Production Labor Cost)
+                    </span>
                   </span>
-                </div>
+                </button>
+                {showOverhead && (
                 <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
@@ -3678,6 +3708,7 @@ function LaborCostTab({
                     </tbody>
                   </table>
                 </div>
+                )}
               </div>
             )}
           </>
@@ -3702,13 +3733,21 @@ function LaborCostTab({
               )
             : allRawRows;
           return (
-          <div className="mt-6">
-            <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
-              <span className="text-xs text-[#6B7280]">
-                {filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"}
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={() => setShowRevenueRaw((v) => !v)}
+              className="mb-2 flex w-full items-center justify-between rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm font-semibold text-[#1F1D1B] hover:bg-[#F0ECE9]"
+            >
+              <span className="flex items-center gap-2">
+                {showRevenueRaw ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                Revenue Raw Data
+                <span className="text-xs font-normal text-[#6B7280]">
+                  ({filteredRawRows.length} unit{filteredRawRows.length === 1 ? "" : "s"})
+                </span>
               </span>
-            </div>
+            </button>
+            {showRevenueRaw && (
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 z-10">
@@ -3766,6 +3805,7 @@ function LaborCostTab({
                 </tbody>
               </table>
             </div>
+            )}
           </div>
           );
         })()}

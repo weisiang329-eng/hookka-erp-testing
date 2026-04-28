@@ -22,7 +22,7 @@ type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
 type RootCauseCategory =
   | "PRODUCTION" | "DESIGN" | "MATERIAL" | "PROCESS"
-  | "CUSTOMER" | "TRANSPORT" | "OTHER";
+  | "CUSTOMER" | "TRANSPORT" | "SALES" | "PICKING" | "OTHER";
 type PreventionStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
 type Mode = "REPRODUCE" | "STOCK_SWAP" | "REPAIR";
 
@@ -33,6 +33,44 @@ type ActionLogEntry = {
   createdAt?: string;
   createdByName?: string;
 };
+
+// Per-category structured details. Each category has its own shape; the
+// frontend renders different sub-form fields based on the chosen category.
+// Persisted as JSON on service_cases.root_cause_details (migration 0076).
+type RootCauseDetails = Record<string, unknown>;
+
+const ROOT_CAUSE_LABELS: Record<string, string> = {
+  PRODUCTION: "Production / workmanship",
+  DESIGN: "Design / R&D",
+  MATERIAL: "Material / supplier",
+  PROCESS: "Process / SOP gap",
+  CUSTOMER: "Customer (not our fault)",
+  TRANSPORT: "Transport / 3PL",
+  SALES: "Sales / order-taking error",
+  PICKING: "Picking / packing error",
+  OTHER: "Other",
+};
+
+// 8 production-line departments (from src/lib/mock-data.ts seed). Hardcoded
+// here because the dept master is mock-data, not a /api/* endpoint, and
+// these don't change often. WAREHOUSING / REPAIR / MAINTENANCE / etc.
+// non-production depts are appended for the PROCESS / PICKING categories.
+const PRODUCTION_DEPTS = [
+  { code: "FAB_CUT", name: "Fabric Cutting" },
+  { code: "FAB_SEW", name: "Fabric Sewing" },
+  { code: "WOOD_CUT", name: "Wood Cutting" },
+  { code: "FOAM", name: "Foam" },
+  { code: "FRAMING", name: "Framing" },
+  { code: "WEBBING", name: "Webbing" },
+  { code: "UPHOLSTERY", name: "Upholstery" },
+  { code: "PACKING", name: "Packing" },
+];
+const ALL_DEPTS = [
+  ...PRODUCTION_DEPTS,
+  { code: "WAREHOUSING", name: "Warehousing" },
+  { code: "REPAIR", name: "Repair" },
+  { code: "MAINTENANCE", name: "Maintenance" },
+];
 
 type ServiceCaseDetail = {
   id: string;
@@ -52,6 +90,7 @@ type ServiceCaseDetail = {
   // case detail just OPENS the prevention task.
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string;
+  rootCauseDetails: RootCauseDetails;
   preventionAction: string;
   preventionStatus: PreventionStatus;
   preventionOwner: string;
@@ -88,15 +127,9 @@ const STATUS_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
   CANCELLED: [],
 };
 
-const ROOT_CAUSE_LABELS: Record<string, string> = {
-  PRODUCTION: "Production / workmanship",
-  DESIGN: "Design / R&D",
-  MATERIAL: "Material / supplier",
-  PROCESS: "Process / SOP gap",
-  CUSTOMER: "Customer (not our fault)",
-  TRANSPORT: "Transport / 3PL",
-  OTHER: "Other",
-};
+// ROOT_CAUSE_LABELS now defined at the top of the file (next to the type
+// definitions) since it's referenced by the dynamic CategoryDetailsForm
+// component too — keep it co-located with the data sources.
 
 // PREVENTION_STATUS_COLOR removed 2026-04-28 — status pill no longer
 // shown on the case detail; tracking moves to a future Prevention Tracker
@@ -255,26 +288,13 @@ export default function ServiceCaseDetailPage() {
           refresh();
         }}
       />
-      {caseDetail.issuePhotos.length > 0 && (
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Photos</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {caseDetail.issuePhotos.map((p, i) => (
-                <a key={i} href={p} target="_blank" rel="noopener noreferrer">
-                  <img
-                    src={p}
-                    alt={`Photo ${i + 1}`}
-                    className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
-                  />
-                </a>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <PhotosPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
 
       {/* Service-agent action log — chronological entries the agent logs
           over the case's lifetime (called customer, scheduled inspection,
@@ -397,6 +417,7 @@ function RootCausePanel({
 }) {
   const { toast } = useToast();
   const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
+  const [details, setDetails] = useState<RootCauseDetails>(caseDetail.rootCauseDetails ?? {});
   const [action, setAction] = useState(caseDetail.preventionAction);
   // status no longer edited from this panel — see Prevention Tracker portal.
   const [owner, setOwner] = useState(caseDetail.preventionOwner);
@@ -426,12 +447,17 @@ function RootCausePanel({
         <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3">
-        {/* Category — drives reporting / categorisation of recurrence. */}
+        {/* Category — drives reporting / categorisation of recurrence.
+            Changing the category resets the details JSON since the per-
+            category fields are different shapes. */}
         <select
           value={category}
           onChange={(e) => {
-            setCategory(e.target.value);
-            save({ rootCauseCategory: e.target.value || null });
+            const next = e.target.value;
+            setCategory(next);
+            // Reset details when category changes — old fields don't apply.
+            setDetails({});
+            save({ rootCauseCategory: next || null, rootCauseDetails: {} });
           }}
           disabled={saving}
           className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
@@ -441,6 +467,21 @@ function RootCausePanel({
             <option key={v} value={v}>{t}</option>
           ))}
         </select>
+
+        {/* Per-category structured detail fields. Renders different inputs
+            based on the category — depts for PRODUCTION, supplier+RM for
+            MATERIAL, 3PL company for TRANSPORT, etc. */}
+        {category && (
+          <CategoryDetailsForm
+            category={category as RootCauseCategory}
+            value={details}
+            onChange={(next) => {
+              setDetails(next);
+            }}
+            onPersist={(next) => save({ rootCauseDetails: next })}
+            disabled={saving}
+          />
+        )}
         {/* rootCauseNotes textarea removed 2026-04-28 — duplicate of Issue
             Description (the 5W story lives there now). */}
         <textarea
@@ -536,6 +577,534 @@ function IssueDescriptionPanel({
           ].join("\n")}
           className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm font-mono"
         />
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===========================================================================
+// CategoryDetailsForm — per-category structured second-level inputs.
+// ===========================================================================
+// Renders different fields based on the selected root_cause_category. All
+// data sources are fetched lazily here so the rest of the case detail page
+// doesn't pay the cost when no category is set.
+//
+// onChange fires on every keystroke / select change (so the field shows
+// the latest value); onPersist fires on blur of free-text inputs and on
+// every dropdown change (so saved state matches what the user sees).
+function CategoryDetailsForm({
+  category,
+  value,
+  onChange,
+  onPersist,
+  disabled,
+}: {
+  category: RootCauseCategory;
+  value: RootCauseDetails;
+  onChange: (next: RootCauseDetails) => void;
+  onPersist: (next: RootCauseDetails) => void;
+  disabled?: boolean;
+}) {
+  // Lazy fetches — only the active category's data source is loaded.
+  const { data: prodResp } = useCachedJson<{ data?: Array<{ id: string; code: string; name: string }> }>(
+    category === "DESIGN" ? "/api/products" : null,
+  );
+  const { data: rmResp } = useCachedJson<{
+    data?: Array<{ id: string; itemCode: string; itemName: string; itemGroup?: string }>;
+  }>(category === "MATERIAL" ? "/api/raw-materials" : null);
+  const { data: supplierResp } = useCachedJson<{ data?: Array<{ id: string; name: string }> }>(
+    category === "MATERIAL" ? "/api/suppliers" : null,
+  );
+  const { data: vehResp } = useCachedJson<{
+    data?: Array<{ id: string; companyName?: string; threePlCompany?: string }>;
+  }>(category === "TRANSPORT" ? "/api/three-pl-vehicles" : null);
+
+  const products = prodResp?.data ?? [];
+  const rawMaterials = rmResp?.data ?? [];
+  const suppliers = supplierResp?.data ?? [];
+  // Distinct 3PL company names from the vehicle list (the vehicle row is
+  // keyed by company; same company may have multiple lorries).
+  const threePlCompanies = useMemo(() => {
+    const set = new Set<string>();
+    for (const v of vehResp?.data ?? []) {
+      const name = v.companyName || v.threePlCompany || "";
+      if (name) set.add(name);
+    }
+    return Array.from(set).sort();
+  }, [vehResp]);
+
+  function patch(partial: RootCauseDetails) {
+    const next = { ...value, ...partial };
+    onChange(next);
+    onPersist(next);
+  }
+  function patchOnly(partial: RootCauseDetails) {
+    onChange({ ...value, ...partial });
+  }
+  function persistAll() {
+    onPersist(value);
+  }
+
+  switch (category) {
+    case "PRODUCTION":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.departmentCode as string) ?? ""}
+            onChange={(e) => {
+              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
+              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Department — pick one</option>
+            {PRODUCTION_DEPTS.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
+            ))}
+          </select>
+          <Input
+            type="text"
+            value={(value.where as string) ?? ""}
+            onChange={(e) => patchOnly({ where: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Where in the process? (e.g. left armrest sewing, leg joinery)"
+            className="h-8 text-xs"
+          />
+          <Input
+            type="text"
+            value={(value.workerName as string) ?? ""}
+            onChange={(e) => patchOnly({ workerName: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Worker / PIC name (optional)"
+            className="h-8 text-xs"
+          />
+        </div>
+      );
+
+    case "DESIGN":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.productId as string) ?? ""}
+            onChange={(e) => {
+              const p = products.find((x) => x.id === e.target.value);
+              patch({
+                productId: e.target.value || null,
+                productCode: p?.code ?? null,
+                productName: p?.name ?? null,
+              });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Product — pick one</option>
+            {products.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.code} — {p.name}
+              </option>
+            ))}
+          </select>
+          <Input
+            type="text"
+            value={(value.component as string) ?? ""}
+            onChange={(e) => patchOnly({ component: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Which component / part? (e.g. armrest, headboard slats, divan support)"
+            className="h-8 text-xs"
+          />
+          <Input
+            type="text"
+            value={(value.suggestedFix as string) ?? ""}
+            onChange={(e) => patchOnly({ suggestedFix: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Suggested fix (one line, optional)"
+            className="h-8 text-xs"
+          />
+        </div>
+      );
+
+    case "MATERIAL":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.rawMaterialId as string) ?? ""}
+            onChange={(e) => {
+              const rm = rawMaterials.find((x) => x.id === e.target.value);
+              patch({
+                rawMaterialId: e.target.value || null,
+                rawMaterialCode: rm?.itemCode ?? null,
+                itemGroup: rm?.itemGroup ?? null,
+              });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Raw material — pick one</option>
+            {rawMaterials.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.itemCode} — {r.itemName}
+              </option>
+            ))}
+          </select>
+          <select
+            value={(value.itemGroup as string) ?? ""}
+            onChange={(e) => patch({ itemGroup: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Item group (auto-filled when RM picked, override if needed)</option>
+            <option value="FABRIC">Fabric</option>
+            <option value="FOAM">Foam</option>
+            <option value="WOOD">Wood / timber</option>
+            <option value="HARDWARE">Hardware (mechanism / screws / springs)</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <select
+            value={(value.supplierId as string) ?? ""}
+            onChange={(e) => {
+              const s = suppliers.find((x) => x.id === e.target.value);
+              patch({ supplierId: e.target.value || null, supplierName: s?.name ?? null });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Supplier — pick one</option>
+            {suppliers.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <Input
+            type="text"
+            value={(value.grnRef as string) ?? ""}
+            onChange={(e) => patchOnly({ grnRef: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="GRN # / receipt batch (optional)"
+            className="h-8 text-xs"
+          />
+        </div>
+      );
+
+    case "PROCESS":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.departmentCode as string) ?? ""}
+            onChange={(e) => {
+              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
+              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Department — pick one</option>
+            {ALL_DEPTS.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
+            ))}
+          </select>
+          <Input
+            type="text"
+            value={(value.sopName as string) ?? ""}
+            onChange={(e) => patchOnly({ sopName: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="SOP name (e.g. 'pre-shipment dust-cover check')"
+            className="h-8 text-xs"
+          />
+          <select
+            value={(value.gapType as string) ?? ""}
+            onChange={(e) => patch({ gapType: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Gap type — pick one</option>
+            <option value="MISSING">Missing — no SOP yet</option>
+            <option value="OUTDATED">Outdated — SOP exists but is wrong</option>
+            <option value="NOT_ENFORCED">Not enforced — SOP exists but skipped</option>
+          </select>
+        </div>
+      );
+
+    case "CUSTOMER":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.subReason as string) ?? ""}
+            onChange={(e) => patch({ subReason: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Sub-reason — pick one</option>
+            <option value="MISUSE">Misuse</option>
+            <option value="WRONG_MEASUREMENT">Wrong measurement (door / space)</option>
+            <option value="PET_DAMAGE">Pet damage</option>
+            <option value="WRONG_CLEANING">Wrong cleaning chemical</option>
+            <option value="BUYER_REMORSE">Buyer's remorse / change of mind</option>
+            <option value="WRONG_SETUP">Wrong setup at home</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <p className="text-[10px] text-[#9CA3AF]">
+            Specific details belong in the Issue Description above (5W). This sub-reason is for
+            reporting / category roll-ups.
+          </p>
+        </div>
+      );
+
+    case "TRANSPORT":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.threePlCompany as string) ?? ""}
+            onChange={(e) => patch({ threePlCompany: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">3PL Company — pick one</option>
+            {threePlCompanies.map((c) => (
+              <option key={c} value={c}>{c}</option>
+            ))}
+          </select>
+          <select
+            value={(value.damageType as string) ?? ""}
+            onChange={(e) => patch({ damageType: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Damage / issue type — pick one</option>
+            <option value="DROPPED">Dropped during loading / unloading</option>
+            <option value="SCRAPED">Scraped against wall / floor</option>
+            <option value="WATER">Water damage (no tarp / open truck)</option>
+            <option value="WRONG_ROUTE">Wrong route / address</option>
+            <option value="LATE">Late delivery</option>
+            <option value="OTHER">Other</option>
+          </select>
+          <Input
+            type="text"
+            value={(value.doNo as string) ?? ""}
+            onChange={(e) => patchOnly({ doNo: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="DO# (optional, helps reconcile to a specific delivery)"
+            className="h-8 text-xs"
+          />
+          <Input
+            type="text"
+            value={(value.driverName as string) ?? ""}
+            onChange={(e) => patchOnly({ driverName: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Driver name (optional)"
+            className="h-8 text-xs"
+          />
+        </div>
+      );
+
+    case "SALES":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <Input
+            type="text"
+            value={(value.salesPerson as string) ?? ""}
+            onChange={(e) => patchOnly({ salesPerson: e.target.value })}
+            onBlur={persistAll}
+            disabled={disabled}
+            placeholder="Sales person name"
+            className="h-8 text-xs"
+          />
+          <select
+            value={(value.errorType as string) ?? ""}
+            onChange={(e) => patch({ errorType: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">What was wrong on the order? — pick one</option>
+            <option value="SIZE">Size / dimensions</option>
+            <option value="COLOR">Colour</option>
+            <option value="FABRIC">Fabric / material spec</option>
+            <option value="HEIGHT">Leg / divan height</option>
+            <option value="PRICE">Price / discount</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+      );
+
+    case "PICKING":
+      return (
+        <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          <select
+            value={(value.departmentCode as string) ?? ""}
+            onChange={(e) => {
+              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
+              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Department — pick one</option>
+            <option value="PACKING">Packing</option>
+            <option value="WAREHOUSING">Warehousing</option>
+          </select>
+          <select
+            value={(value.missingItem as string) ?? ""}
+            onChange={(e) => patch({ missingItem: e.target.value || null })}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">What was missing / wrong? — pick one</option>
+            <option value="LEGS">Legs</option>
+            <option value="HARDWARE">Hardware bag (screws / wrench)</option>
+            <option value="MANUAL">Assembly manual</option>
+            <option value="ACCESSORY">Accessory (cushion, throw, etc.)</option>
+            <option value="WRONG_PRODUCT">Wrong product shipped</option>
+            <option value="OTHER">Other</option>
+          </select>
+        </div>
+      );
+
+    case "OTHER":
+      return (
+        <p className="text-[10px] text-[#9CA3AF] rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          No structured fields for "Other". The Issue Description above (5W) carries the detail.
+        </p>
+      );
+
+    default:
+      return null;
+  }
+}
+
+// ===========================================================================
+// PhotosPanel — view + add + remove photos on a case after creation.
+// ===========================================================================
+// Always rendered (even when zero photos) so the operator can see where to
+// upload more photos that came in via WhatsApp / customer follow-up. Same
+// resize-to-base64 pipeline as the create modal.
+function PhotosPanel({
+  caseDetail,
+  onSaved,
+}: {
+  caseDetail: ServiceCaseDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+
+  async function persist(next: string[]) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issuePhotos: next }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function resizeImageToBase64(file: File, maxDim = 1280): Promise<string> {
+    const dataUrl = await new Promise<string>((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result as string);
+      r.onerror = rej;
+      r.readAsDataURL(file);
+    });
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = dataUrl;
+    });
+    const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.round(img.width * ratio);
+    const h = Math.round(img.height * ratio);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  }
+
+  async function handleAdd(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const added: string[] = [];
+    for (const f of Array.from(files)) {
+      try {
+        added.push(await resizeImageToBase64(f));
+      } catch {
+        toast.error(`Couldn't read ${f.name}`);
+      }
+    }
+    if (added.length === 0) return;
+    void persist([...caseDetail.issuePhotos, ...added]);
+  }
+
+  function handleRemove(idx: number) {
+    void persist(caseDetail.issuePhotos.filter((_, i) => i !== idx));
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">Photos ({caseDetail.issuePhotos.length})</CardTitle>
+        <label className="inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs">
+          <Plus className="h-3.5 w-3.5" />
+          {caseDetail.issuePhotos.length === 0 ? "Add photos" : "Add more photos"}
+          <input
+            type="file"
+            accept="image/*"
+            multiple
+            disabled={saving}
+            onChange={(e) => {
+              handleAdd(e.target.files);
+              e.target.value = "";
+            }}
+            className="hidden"
+          />
+        </label>
+      </CardHeader>
+      <CardContent>
+        {caseDetail.issuePhotos.length === 0 ? (
+          <p className="text-xs text-[#9CA3AF]">
+            No photos yet. Click "Add photos" to attach customer-supplied images
+            of the issue. They'll show as thumbnails — click any to open full-size.
+          </p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {caseDetail.issuePhotos.map((p, i) => (
+              <div key={i} className="relative group">
+                <a href={p} target="_blank" rel="noopener noreferrer">
+                  <img
+                    src={p}
+                    alt={`Photo ${i + 1}`}
+                    className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
+                  />
+                </a>
+                <button
+                  type="button"
+                  onClick={() => handleRemove(i)}
+                  disabled={saving}
+                  className="absolute -top-1 -right-1 rounded-full bg-white border border-[#E2DDD8] p-0.5 text-[#9A3A2D] hover:text-[#7A2E24] shadow-sm"
+                  title="Remove"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -743,9 +1312,13 @@ function SpawnServiceOrderModal({
           if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
           return true;
         });
+  // Mode must be picked at spawn time — the "Decide later" option was
+  // dropped from the picker because it doesn't make sense once you've
+  // chosen to spawn an order.
+  const canSubmit = linesOk && mode !== null;
 
   async function handleSubmit() {
-    if (!linesOk) return;
+    if (!canSubmit) return;
     setSubmitting(true);
     try {
       let lines: Array<Record<string, unknown>> = [];
@@ -810,20 +1383,22 @@ function SpawnServiceOrderModal({
             and root cause stay on the case (this order is just the resolution work).
           </p>
 
-          {/* Mode */}
+          {/* Mode — required at spawn time. "Decide later" only makes sense
+              at the CASE level (case stays open without an order); by the
+              time you're spawning the order itself, you've decided how
+              you're going to resolve. */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">Resolution Mode</label>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               {(
                 [
-                  { v: null, t: "Decide later", d: "Spawn now, pick mode after follow-up" },
                   { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },
                   { v: "STOCK_SWAP", t: "Stock Swap", d: "Pull from FG, ship now" },
                   { v: "REPAIR", t: "Repair", d: "Customer returns; we fix" },
                 ] as const
               ).map((m) => (
                 <button
-                  key={m.v ?? "later"}
+                  key={m.v}
                   type="button"
                   onClick={() => setMode(m.v)}
                   className={`text-left rounded border p-3 text-xs ${
@@ -993,7 +1568,7 @@ function SpawnServiceOrderModal({
             variant="primary"
             size="sm"
             onClick={handleSubmit}
-            disabled={!linesOk || submitting}
+            disabled={!canSubmit || submitting}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
             {submitting ? "Spawning…" : "Spawn Order"}

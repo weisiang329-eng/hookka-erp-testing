@@ -39,6 +39,7 @@ import {
   Shirt,
   Route,
   DollarSign,
+  Scale,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -116,6 +117,7 @@ const navigationGroups: NavGroup[] = [
       { name: "Inventory", href: "/inventory", icon: Package },
       { name: "Fabrics", href: "/inventory/fabrics", icon: Shirt },
       { name: "Stock Value", href: "/inventory/stock-value", icon: Calculator },
+      { name: "Stock Adjustments", href: "/inventory/adjustments", icon: Scale },
       { name: "Warehouse", href: "/warehouse", icon: Warehouse },
     ],
   },
@@ -421,8 +423,11 @@ export function Sidebar() {
     if (href === "/inventory/fabrics") {
       return pathname === "/inventory/fabrics" || pathname.startsWith("/inventory/fabrics/");
     }
+    if (href === "/inventory/adjustments") {
+      return pathname === "/inventory/adjustments" || pathname.startsWith("/inventory/adjustments/");
+    }
     if (href === "/inventory") {
-      return pathname === "/inventory" || (pathname.startsWith("/inventory/") && !pathname.startsWith("/inventory/stock-value") && !pathname.startsWith("/inventory/fabrics"));
+      return pathname === "/inventory" || (pathname.startsWith("/inventory/") && !pathname.startsWith("/inventory/stock-value") && !pathname.startsWith("/inventory/fabrics") && !pathname.startsWith("/inventory/adjustments"));
     }
     if (href === "/accounting/cash-flow") {
       return pathname === "/accounting/cash-flow" || pathname.startsWith("/accounting/cash-flow/");

@@ -198,6 +198,35 @@ app.post("/api/internal/refresh-mvs", async (c) => {
   }
 });
 
+// Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
+// /api/internal/refresh-mvs above. The cron workflow at
+// .github/workflows/process-email-outbox.yml hits this every 5 min; the
+// handler reads pending rows from outbox_emails, calls Resend for each,
+// and marks status. 3 retries with exponential backoff before FAILED.
+// Runtime logic lives in src/api/lib/email-outbox.ts (processOutbox).
+app.post("/api/internal/process-email-outbox", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[process-email-outbox] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { processOutbox } = await import("./lib/email-outbox");
+    const result = await processOutbox(
+      c.var.DB,
+      c.env as unknown as { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string },
+    );
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("[process-email-outbox] error:", e);
+    return c.json({ ok: false, error: "drain failed" }, 500);
+  }
+});
+
 /**
  * Constant-time string equality.  Hashes both sides before comparing so the
  * comparison time depends only on the hash output length, never on the

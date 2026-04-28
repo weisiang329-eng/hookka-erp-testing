@@ -13,7 +13,8 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
-import { notifySupplierPoSubmitted } from "../lib/email";
+import { supplierPoEmailTemplate } from "../lib/email";
+import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -543,12 +544,11 @@ app.put("/:id", async (c) => {
 
     await c.var.DB.batch(statements);
 
-    // Fire-and-forget supplier notification on the DRAFT/etc → SUBMITTED
-    // transition. Wired to Resend 2026-04-26: looks up the supplier's
-    // email and sends a templated PO notification. Failures (no email on
-    // file, RESEND_API_KEY missing, network error) are logged only and
-    // never roll back the PO update — a missed email is not worse than a
-    // missed PO save.
+    // Sprint 4: enqueue supplier notification on the DRAFT/etc → SUBMITTED
+    // transition. The cron drain (.github/workflows/process-email-outbox.yml)
+    // is what actually contacts Resend, so a Resend outage doesn't backpressure
+    // the PO submit. Failures (no email on file, INSERT failure) are logged
+    // only and never roll back the PO update.
     if (body.status === "SUBMITTED" && existing.status !== "SUBMITTED") {
       try {
         const supplierRow = await c.var.DB.prepare(
@@ -556,19 +556,22 @@ app.put("/:id", async (c) => {
         )
           .bind(merged.supplierId)
           .first<{ email: string | null }>();
-        await notifySupplierPoSubmitted(
-          c.env as unknown as {
-            RESEND_API_KEY?: string;
-            RESEND_FROM_EMAIL?: string;
-            APP_URL?: string;
-          },
-          supplierRow?.email ?? null,
-          {
+        if (supplierRow?.email) {
+          const tpl = supplierPoEmailTemplate({
             poNo: existing.poNo,
             supplierName: merged.supplierName,
-            supplierId: merged.supplierId,
-          },
-        );
+          });
+          await enqueueEmail(c, {
+            to: supplierRow.email,
+            subject: tpl.subject,
+            html: tpl.html,
+            text: tpl.text,
+          });
+        } else {
+          console.log(
+            `[purchase-orders] PO ${existing.poNo}: skipped — supplier ${merged.supplierName} (${merged.supplierId}) has no email on file`,
+          );
+        }
       } catch (err) {
         console.warn(
           "[purchase-orders] supplier notification failed",

@@ -37,7 +37,7 @@ try {
 
 // ---- Tiny in-memory SQLite-ish stub ----------------------------------------
 //
-// Just enough surface to back worker_pins / worker_sessions / workers reads.
+// Just enough surface to back worker_pins / worker_tokens / workers reads.
 // Routes the SQL through a small pattern-match dispatch table; not a real
 // SQL engine. Keeps the test's assertions on observable behavior, not on
 // query string formatting.
@@ -77,11 +77,11 @@ function makeDb({ workers: workerSeed = [] } = {}) {
         if (/FROM worker_pins WHERE workerId = \?/.test(s)) {
           return pins.get(bound[0]) || null;
         }
-        // SELECT ... FROM worker_sessions WHERE token = ? AND expiresAt > ?
-        if (/FROM worker_sessions WHERE token = \? AND expiresAt >/i.test(s)) {
+        // SELECT workerId FROM worker_tokens WHERE token = ?  (auth middleware)
+        // SELECT * FROM worker_tokens WHERE token = ?          (/me handler)
+        if (/FROM worker_tokens WHERE token = \?/i.test(s)) {
           const row = sessions.get(bound[0]);
           if (!row) return null;
-          if (row.expiresAt <= bound[1]) return null;
           // Tests expect both shapes — full row OR { workerId } subset.
           return row;
         }
@@ -114,26 +114,19 @@ function makeDb({ workers: workerSeed = [] } = {}) {
           }
           return { success: true };
         }
-        // INSERT INTO worker_sessions (token, workerId, createdAt, expiresAt, lastSeenAt)
-        if (/INSERT INTO worker_sessions/i.test(s)) {
-          const [token, workerId, createdAt, expiresAt, lastSeenAt] = bound;
-          sessions.set(token, { token, workerId, createdAt, expiresAt, lastSeenAt });
+        // INSERT INTO worker_tokens (token, workerId, issuedAt) VALUES (?, ?, ?)
+        if (/INSERT INTO worker_tokens/i.test(s)) {
+          const [token, workerId, issuedAt] = bound;
+          sessions.set(token, { token, workerId, issuedAt });
           return { success: true };
         }
-        // UPDATE worker_sessions SET lastSeenAt = ? WHERE token = ?
-        if (/UPDATE worker_sessions SET lastSeenAt/i.test(s)) {
-          const [lastSeenAt, token] = bound;
-          const row = sessions.get(token);
-          if (row) row.lastSeenAt = lastSeenAt;
-          return { success: true };
-        }
-        // DELETE FROM worker_sessions WHERE token = ?
-        if (/DELETE FROM worker_sessions WHERE token = \?/i.test(s)) {
+        // DELETE FROM worker_tokens WHERE token = ?
+        if (/DELETE FROM worker_tokens WHERE token = \?/i.test(s)) {
           sessions.delete(bound[0]);
           return { success: true };
         }
-        // DELETE FROM worker_sessions WHERE workerId = ?
-        if (/DELETE FROM worker_sessions WHERE workerId = \?/i.test(s)) {
+        // DELETE FROM worker_tokens WHERE workerId = ?
+        if (/DELETE FROM worker_tokens WHERE workerId = \?/i.test(s)) {
           const wId = bound[0];
           for (const t of [...sessions.keys()]) {
             if (sessions.get(t).workerId === wId) sessions.delete(t);

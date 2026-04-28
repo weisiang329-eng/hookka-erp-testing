@@ -1876,20 +1876,39 @@ export default function DeliveryPage() {
           </div>
         ),
       },
-      // driverName is the legacy 3PL provider COMPANY name (not a person —
-      // see migration 0014 + the 3PL multi-driver refactor). Relabeled
-      // "Transport Co." so it isn't mistaken for the actual driver person.
-      { key: "driverName", label: "Transport Co.", type: "text", width: "150px", sortable: true },
-      // The actual driver person — denormalized into driverContactPerson
-      // on POST/PUT (added by the 3PL refactor). Falls back to em-dash.
+      // Transport Co. = the 3PL provider COMPANY (e.g. "Express Logistics
+      // Sdn Bhd"). delivery_orders.driverId column holds the provider's id
+      // (legacy column name, kept post-3PL refactor) - look up the actual
+      // company name from the providers list. Bug fix 2026-04-28: was
+      // reading row.driverName which is the picked DRIVER PERSON's name
+      // (e.g. "Abu"), so the column was showing the driver in the
+      // company column.
       {
-        key: "driverContactPerson",
+        key: "driverId",
+        label: "Transport Co.",
+        type: "text",
+        width: "180px",
+        sortable: true,
+        render: (_value, row) => {
+          const company = providers.find((p) => p.id === row.driverId)?.name ?? row.driverId;
+          return (
+            <span className="text-[#1F1D1B]">{company || <span className="text-[#9CA3AF]">—</span>}</span>
+          );
+        },
+      },
+      // Driver = the actual person who's driving (e.g. "Abu"). Stored in
+      // delivery_orders.driverName column (denormalized PERSON name on
+      // POST/PUT). NOT driverContactPerson - that's the provider's
+      // company contact (e.g. "Mr Lee"), which has nothing to do with
+      // who's driving the truck.
+      {
+        key: "driverName",
         label: "Driver",
         type: "text",
         width: "120px",
         sortable: true,
         render: (_value, row) => (
-          <span className="text-[#4B5563]">{row.driverContactPerson || <span className="text-[#9CA3AF]">—</span>}</span>
+          <span className="text-[#4B5563]">{row.driverName || <span className="text-[#9CA3AF]">—</span>}</span>
         ),
       },
       // Lorry plate from the picked vehicle (three_pl_vehicles).
@@ -1904,7 +1923,7 @@ export default function DeliveryPage() {
         ),
       },
     ],
-    [selectedIds]
+    [selectedIds, providers]
   );
 
   // ---------- Context menu ----------

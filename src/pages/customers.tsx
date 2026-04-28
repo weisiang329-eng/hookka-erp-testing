@@ -7,7 +7,8 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { Customer } from "@/types";
-import generateCustomerQuotationPdf from "@/lib/generate-customer-quotation-pdf";
+// generateCustomerQuotationPdf is dynamic-imported at the click handler so
+// the 1MB jspdf vendor chunk only ships when the user actually exports.
 import {
   Plus,
   Building2,
@@ -350,9 +351,10 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   // modal) to fill in sizeCode/unitM3/fabricUsage/productionTimeMinutes — the
   // customer_products response only coalesces price columns, so these SKU
   // master fields come from the global product record.
-  const handleExportQuotation = () => {
+  const handleExportQuotation = async () => {
     const defaultHub = customer.deliveryHubs?.find((h) => h.isDefault) ?? customer.deliveryHubs?.[0];
     const productByCode = new Map(allProducts.map((p) => [p.code, p]));
+    const { default: generateCustomerQuotationPdf } = await import("@/lib/generate-customer-quotation-pdf");
     const doc = generateCustomerQuotationPdf({
       customer: {
         name: customer.name,

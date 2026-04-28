@@ -22,7 +22,8 @@ import {
   Clock,
   Users,
 } from "lucide-react";
-import { generateInvoicePdf } from "@/lib/generate-invoice-pdf";
+// generateInvoicePdf is dynamic-imported at the click handler so the
+// 1MB jspdf vendor chunk only ships when the user actually downloads.
 import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -210,7 +211,11 @@ export default function InvoiceDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => invoice && generateInvoicePdf(invoice)}
+            onClick={async () => {
+              if (!invoice) return;
+              const { generateInvoicePdf } = await import("@/lib/generate-invoice-pdf");
+              generateInvoicePdf(invoice);
+            }}
           >
             <Download className="h-4 w-4" /> PDF
           </Button>

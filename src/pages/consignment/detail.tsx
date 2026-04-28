@@ -15,7 +15,8 @@ import {
 // spawn 0+ Service Orders for the rework/swap/repair flow. presetSourceType
 // pinned to 'CO' here.
 import { CreateServiceCaseModal } from "@/pages/service-cases";
-import { generateCOPdf } from "@/lib/generate-co-pdf";
+// generateCOPdf is dynamic-imported at the click handler so the 1MB jspdf
+// vendor chunk only ships when the user actually prints.
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -596,7 +597,11 @@ export default function SalesOrderDetailPage() {
           <p className="text-xs text-[#6B7280]">{order.customerName} &middot; {order.customerState}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap justify-end">
-          <Button variant="outline" size="sm" onClick={() => order && generateCOPdf(order, customer)}><Download className="h-4 w-4" /> PDF</Button>
+          <Button variant="outline" size="sm" onClick={async () => {
+            if (!order) return;
+            const { generateCOPdf } = await import("@/lib/generate-co-pdf");
+            generateCOPdf(order, customer);
+          }}><Download className="h-4 w-4" /> PDF</Button>
           <Button variant="outline" size="sm" onClick={handleClone}><Copy className="h-4 w-4" /> Clone</Button>
           {canEdit && (
             <Button variant="outline" size="sm" onClick={() => navigate(`/consignment/${id}/edit`)}><Edit className="h-4 w-4" /> Edit</Button>

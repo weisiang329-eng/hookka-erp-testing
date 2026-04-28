@@ -14,7 +14,8 @@ import {
   FileText, Download, Filter, AlertTriangle,
   Eye, Pencil, Printer, RefreshCw,
 } from "lucide-react";
-import { generatePurchaseOrderPdf } from "@/lib/generate-purchase-order-pdf";
+// generatePurchaseOrderPdf is dynamic-imported at the click handler so the
+// 1MB jspdf vendor chunk only ships when the user actually prints a PO.
 
 
 
@@ -581,7 +582,10 @@ export default function ProcurementPage() {
       {
         label: "Print / Preview",
         icon: <Printer className="h-3.5 w-3.5" />,
-        action: () => generatePurchaseOrderPdf(row),
+        action: async () => {
+          const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
+          generatePurchaseOrderPdf(row);
+        },
       },
       { label: "", separator: true, action: () => {} },
       {

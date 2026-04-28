@@ -3,8 +3,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { generatePurchaseOrderPdf } from "@/lib/generate-purchase-order-pdf";
-import { generateGRNPdf } from "@/lib/generate-grn-pdf";
+// PDF generators dynamic-imported at click handlers so the 1MB jspdf
+// vendor chunk only ships when the user actually downloads.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { PurchaseOrder } from "@/types";
 import {
@@ -125,11 +125,17 @@ export default function PurchaseOrderDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => generatePurchaseOrderPdf(po)}>
+          <Button variant="outline" onClick={async () => {
+            const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
+            generatePurchaseOrderPdf(po);
+          }}>
             <Download className="h-4 w-4" /> Download PDF
           </Button>
           {canPrintGRN && (
-            <Button variant="outline" onClick={() => generateGRNPdf(po)}>
+            <Button variant="outline" onClick={async () => {
+              const { generateGRNPdf } = await import("@/lib/generate-grn-pdf");
+              generateGRNPdf(po);
+            }}>
               <Printer className="h-4 w-4" /> Print GRN
             </Button>
           )}

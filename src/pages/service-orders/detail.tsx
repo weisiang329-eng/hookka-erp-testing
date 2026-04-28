@@ -39,7 +39,9 @@ type ServiceOrderDetail = {
   sourceNo: string;
   customerId: string;
   customerName: string;
-  mode: "REPRODUCE" | "STOCK_SWAP" | "REPAIR";
+  // Nullable: the operator can open the case immediately and pick the
+  // resolution mode later via PUT /:id/mode.
+  mode: "REPRODUCE" | "STOCK_SWAP" | "REPAIR" | null;
   status: Status;
   issueDescription: string;
   issuePhotos: string[];
@@ -231,7 +233,13 @@ export default function ServiceOrderDetailPage() {
             >
               {order.status}
             </span>
-            <Badge>{order.mode}</Badge>
+            {order.mode ? (
+              <Badge>{order.mode}</Badge>
+            ) : (
+              <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-[#F4EFE3] text-[#6B5C32] border border-[#E2DDD8]">
+                Mode pending
+              </span>
+            )}
           </div>
           <p className="text-xs text-[#6B7280] mt-1">
             Customer: <span className="font-medium">{order.customerName}</span>{" "}
@@ -304,6 +312,22 @@ export default function ServiceOrderDetailPage() {
       </div>
 
       {/* Issue description */}
+      {/* Mode-pending banner — shown only while the operator hasn't picked a
+          resolution mode yet. Acts as the deferred-decision call to action. */}
+      {!order.mode && order.status === "OPEN" && (
+        <SetModePanel
+          svcId={order.id}
+          lines={order.lines}
+          fgList={fgList}
+          onChanged={() => {
+            invalidateCachePrefix("/api/service-orders");
+            invalidateCachePrefix("/api/production-orders");
+            invalidateCachePrefix("/api/inventory");
+            refresh();
+          }}
+        />
+      )}
+
       {(order.issueDescription || order.issuePhotos.length > 0) && (
         <Card>
           <CardHeader className="pb-2">
@@ -784,5 +808,153 @@ function LogReturnModal({
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SetModePanel — deferred-decision UI for picking the resolution mode AFTER
+// the case was opened. Mirrors the create-modal's mode picker and (for
+// STOCK_SWAP) the per-line FG batch picker. Calls PUT /:id/mode which is
+// the backend entry point that actually applies the side effects (spawns
+// PO for REPRODUCE, decrements fg_batches for STOCK_SWAP).
+// ---------------------------------------------------------------------------
+function SetModePanel({
+  svcId,
+  lines,
+  fgList,
+  onChanged,
+}: {
+  svcId: string;
+  lines: ServiceOrderDetail["lines"];
+  fgList: FgPickerOpt[];
+  onChanged: () => void;
+}) {
+  const { toast } = useToast();
+  const [mode, setMode] = useState<"REPRODUCE" | "STOCK_SWAP" | "REPAIR" | "">("");
+  const [lineFgBatches, setLineFgBatches] = useState<Record<string, string>>({});
+  const [submitting, setSubmitting] = useState(false);
+
+  function setLineFgBatch(lineId: string, fgBatchId: string) {
+    setLineFgBatches((prev) => ({ ...prev, [lineId]: fgBatchId }));
+  }
+
+  const canSubmit =
+    mode !== "" &&
+    (mode !== "STOCK_SWAP" ||
+      lines.every((l) => !!lineFgBatches[l.id]));
+
+  async function commitMode() {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    try {
+      const res = await fetch(`/api/service-orders/${svcId}/mode`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode,
+          ...(mode === "STOCK_SWAP" ? { lineFgBatches } : {}),
+        }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      toast.success(`Mode set to ${mode}`);
+      onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <Card className="border-[#E8D8B2] bg-[#FAF7F0]">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <PackageOpen className="h-4 w-4 text-[#6B5C32]" />
+          Pick Resolution Mode
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <p className="text-xs text-[#6B7280]">
+          You opened this case for follow-up; pick how you want to resolve it
+          when you're ready. This is the same decision as the create form's
+          mode picker — it applies side effects (open PO / reserve FG) once you
+          confirm.
+        </p>
+        <div className="grid grid-cols-3 gap-2">
+          {(
+            [
+              { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },
+              { v: "STOCK_SWAP", t: "Stock Swap", d: "Pull from FG, ship now" },
+              { v: "REPAIR", t: "Repair", d: "Customer returns; we fix" },
+            ] as const
+          ).map((m) => (
+            <button
+              key={m.v}
+              type="button"
+              onClick={() => setMode(m.v)}
+              className={`text-left rounded border p-3 text-xs ${
+                mode === m.v
+                  ? "border-[#6B5C32] bg-[#F4EFE3]"
+                  : "border-[#E2DDD8] bg-white hover:bg-[#FAF9F7]"
+              }`}
+            >
+              <div className="font-medium text-[#1F1D1B]">{m.t}</div>
+              <div className="text-[10px] text-[#6B7280]">{m.d}</div>
+            </button>
+          ))}
+        </div>
+
+        {mode === "STOCK_SWAP" && (
+          <div className="rounded border border-[#E2DDD8] bg-white p-2">
+            <div className="text-xs text-[#6B7280] mb-1">
+              Pick an FG batch to reserve for each affected item
+            </div>
+            <table className="w-full text-xs">
+              <tbody>
+                {lines.map((l) => (
+                  <tr key={l.id} className="border-t border-[#F0ECE9] first:border-0">
+                    <td className="py-1 px-1">
+                      <span className="font-mono">{l.productCode}</span>
+                      <span className="text-[#9CA3AF]"> ({l.qty})</span>
+                    </td>
+                    <td className="py-1 px-1">
+                      <select
+                        value={lineFgBatches[l.id] ?? ""}
+                        onChange={(e) => setLineFgBatch(l.id, e.target.value)}
+                        className="w-full rounded border border-[#E2DDD8] bg-white px-1.5 py-1 text-[11px]"
+                      >
+                        <option value="">Select FG…</option>
+                        {fgList
+                          .filter((f) => f.id === l.productId || !l.productId)
+                          .map((f) => (
+                            <option key={f.id} value={f.id}>
+                              {f.code} ({f.stockQty ?? 0} on hand)
+                            </option>
+                          ))}
+                      </select>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={commitMode}
+            disabled={!canSubmit || submitting}
+            className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
+          >
+            {submitting ? "Setting…" : "Set Mode"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
   );
 }

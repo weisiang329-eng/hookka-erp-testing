@@ -1,0 +1,21 @@
+-- ============================================================================
+-- Migration 0072 — Service Orders: make `mode` nullable
+--
+-- Per design discussion 2026-04-28: the user wants to OPEN a Service Order
+-- case immediately when a customer reports a defect, and DECIDE the
+-- resolution mode (REPRODUCE / STOCK_SWAP / REPAIR) later as a follow-up.
+-- Forcing the operator to pick a mode at creation time blocks them from
+-- logging the case quickly when the customer is on the phone.
+--
+-- Lifecycle change:
+--   • mode = NULL              → status = 'OPEN' (no side effects)
+--   • PUT /:id/mode is the new entry point. It validates the mode value,
+--     applies the same side effects the POST handler used to do
+--     (REPRODUCE → spawn PO; STOCK_SWAP → reserve fg_batches qty),
+--     and advances status accordingly.
+--
+-- Postgres CHECK constraints already accept NULL implicitly (only non-null
+-- values are validated against the IN list), so dropping NOT NULL is the
+-- only schema change needed.
+-- ============================================================================
+ALTER TABLE service_orders ALTER COLUMN mode DROP NOT NULL;

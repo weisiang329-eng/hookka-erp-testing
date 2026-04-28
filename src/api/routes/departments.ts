@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -80,6 +81,8 @@ app.get("/", async (c) => {
 
 // POST /api/departments — create a new dept.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "departments", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const {
@@ -182,6 +185,8 @@ app.post("/", async (c) => {
 // from the whitelist because it's the soft FK in workers.departmentCode and
 // historical rows; renaming would silently desynchronize joins.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "departments", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -298,6 +303,8 @@ app.put("/:id", async (c) => {
 // `active` column and the row count is small enough that hard deletes are
 // fine once the FK check passes.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "departments", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM departments WHERE id = ?",

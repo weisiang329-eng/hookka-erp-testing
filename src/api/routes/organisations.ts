@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -84,6 +85,8 @@ app.get("/", async (c) => {
 //   { organisation: {id, ...} } — update a single organisation row
 //   { interCompanyConfig: ... } — update the singleton config row
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "organisations", "update");
+  if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
 
   if (body.orgId) {

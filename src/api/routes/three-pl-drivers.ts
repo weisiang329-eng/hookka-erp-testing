@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -67,6 +68,8 @@ app.get("/", async (c) => {
 
 // POST /api/three-pl-drivers
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "drivers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const providerId =
@@ -135,6 +138,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/three-pl-drivers/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "drivers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -190,6 +195,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/three-pl-drivers/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "drivers", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM three_pl_drivers WHERE id = ?",

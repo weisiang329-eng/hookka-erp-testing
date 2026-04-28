@@ -1055,6 +1055,8 @@ app.get("/stats", async (c) => {
 // any PO that already has at least one job_cards row.
 // ---------------------------------------------------------------------------
 app.post("/backfill-job-cards", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
   const db = c.var.DB;
   const empties = await db
     .prepare(
@@ -2045,6 +2047,8 @@ app.get("/:id", async (c) => {
 // PUT /api/sales-orders/:id — update SO, status transitions, replace items
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -2781,6 +2785,8 @@ app.put("/:id", async (c) => {
 // DELETE /api/sales-orders/:id — cascades to items via FK
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT id FROM sales_orders WHERE id = ?",

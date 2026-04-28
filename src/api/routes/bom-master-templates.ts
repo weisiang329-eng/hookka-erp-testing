@@ -12,6 +12,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { emitAudit } from "../lib/audit";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -98,6 +99,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/bom-master-templates/:id — upsert
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "bom-master-templates", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   let body: TemplateBody;
   try {
@@ -174,6 +177,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/bom-master-templates/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "bom-master-templates", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   await c.var.DB.prepare("DELETE FROM bom_master_templates WHERE id = ?")
     .bind(id)
@@ -183,6 +188,8 @@ app.delete("/:id", async (c) => {
 
 // PUT /api/bom-master-templates — bulk replace (used by migrate-from-localStorage)
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "bom-master-templates", "update");
+  if (denied) return denied;
   let body: { templates?: TemplateBody[]; replaceAll?: boolean };
   try {
     body = (await c.req.json()) as typeof body;

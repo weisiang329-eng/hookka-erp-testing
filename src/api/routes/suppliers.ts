@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -202,6 +203,8 @@ app.get("/", async (c) => {
 
 // POST /api/suppliers — create supplier + child materials atomically
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code, name } = body;
@@ -331,6 +334,8 @@ app.get("/:id", async (c) => {
 // PUT /api/suppliers/:id — update supplier scalar fields, replace materials if
 // body.materials is supplied. DELETE + re-INSERT as one batch for atomicity.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")
     .bind(id)
@@ -511,6 +516,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/suppliers/:id — FK cascade removes supplier_materials too
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const [existing, matsRes] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM suppliers WHERE id = ?")

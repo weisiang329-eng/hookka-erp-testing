@@ -29,6 +29,7 @@ import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -2279,6 +2280,8 @@ app.get("/historical-fgs", async (c) => {
 // and creates a new PO linked to it.
 // ---------------------------------------------------------------------------
 app.post("/stock", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const body = await c.req.json().catch(() => ({}));
   const type = body?.type as "WIP" | "FG" | undefined;
@@ -2588,6 +2591,8 @@ app.post("/stock", async (c) => {
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const scannedId = c.req.param("id");
   const scannedPo = await db
@@ -3145,11 +3150,19 @@ app.get("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // PUT /api/production-orders/:id
 // ---------------------------------------------------------------------------
-app.put("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 // ---------------------------------------------------------------------------
 // PATCH /api/production-orders/:id — alias for PUT
 // ---------------------------------------------------------------------------
-app.patch("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.patch("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 export default app;

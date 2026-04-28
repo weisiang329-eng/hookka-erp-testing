@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -117,6 +118,8 @@ app.get("/", async (c) => {
 
 // POST /api/bom — create BOM version
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const {
@@ -273,6 +276,8 @@ app.get("/templates", async (c) => {
 
 // POST /api/bom/templates — create single template
 app.post("/templates", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { productCode, baseModel, category, l1Processes, wipComponents } =
@@ -346,6 +351,8 @@ app.post("/templates", async (c) => {
 // PUT /api/bom/templates — bulk replace. DELETE ALL + INSERT ALL in one D1
 // batch (single transaction). Matches the old splice(0, length, ...sanitized).
 app.put("/templates", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const incoming: unknown = body?.templates;
@@ -451,6 +458,8 @@ app.put("/templates", async (c) => {
 // where a template is constructed locally with `id: bom-${Date.now()}` and
 // then saved via PUT — there is no prior POST to /templates.
 app.put("/templates/:id", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_templates WHERE id = ?",
@@ -596,6 +605,8 @@ app.put("/templates/:id", async (c) => {
 //
 // Response: { success: true, updated: N, failed: [{templateId, error}] }
 app.post("/templates/bulk-process-edit", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const incoming: unknown = body?.edits;
@@ -769,6 +780,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/bom/:id — update BOM version (shallow merge over existing)
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_versions WHERE id = ?",

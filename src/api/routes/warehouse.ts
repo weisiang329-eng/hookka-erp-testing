@@ -14,6 +14,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -221,6 +222,8 @@ app.get("/", async (c) => {
 
 // POST /api/warehouse — append one item to a rack location's items list
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "warehouse", "create");
+  if (denied) return denied;
   try {
     const body = (await c.req.json()) as {
       rackLocationId: string;
@@ -326,6 +329,8 @@ app.get("/movements", async (c) => {
 
 // POST /api/warehouse/movements — append a stock movement record
 app.post("/movements", async (c) => {
+  const denied = await requirePermission(c, "warehouse", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const {
@@ -401,6 +406,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/warehouse/:id — replace items list and/or reserved flag
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "warehouse", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM rack_locations WHERE id = ?",
@@ -468,6 +475,8 @@ app.put("/:id", async (c) => {
 // DELETE /api/warehouse/:id — remove all items OR just one by ?productCode=...
 // Returns both the updated location and the previous state for undo/UI diff.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "warehouse", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM rack_locations WHERE id = ?",

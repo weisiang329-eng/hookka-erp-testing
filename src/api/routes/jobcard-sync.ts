@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   breakBomIntoWips,
   type BomVariantContext,
@@ -204,6 +205,8 @@ function chunk<T>(arr: T[], n: number): T[][] {
 // POST /api/production/sync-jobcards-from-bom
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "job-cards", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const poIdParam = c.req.query("poId");
 

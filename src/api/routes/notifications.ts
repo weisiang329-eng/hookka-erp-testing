@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -65,6 +66,8 @@ app.get("/", async (c) => {
 
 // PUT /api/notifications — mark ids as read
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "notifications", "update");
+  if (denied) return denied;
   let body: unknown;
   try {
     body = await c.req.json();

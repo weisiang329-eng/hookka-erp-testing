@@ -25,6 +25,7 @@ import {
 } from "../lib/consignment-note-shared";
 import { nextInvoiceNo } from "./invoices";
 import { emitAudit } from "../lib/audit";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -75,6 +76,8 @@ app.get("/", async (c) => {
 //                                  Used as a fallback when productionOrderIds
 //                                  isn't passed.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const now = new Date();
@@ -306,6 +309,8 @@ app.post("/", async (c) => {
 // out explicitly ("legacy CN whose source PO is deleted").
 // ---------------------------------------------------------------------------
 app.post("/:id/return", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as {
@@ -582,6 +587,8 @@ app.post("/:id/return", async (c) => {
 //   7. Marks every consignment_items row status='SOLD' + soldDate=now.
 // ---------------------------------------------------------------------------
 app.post("/:id/convert-to-invoice", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -785,6 +792,8 @@ app.post("/:id/convert-to-invoice", async (c) => {
 // hub merge semantics. Both this PATCH and the PUT /:id alias delegate
 // to that helper so the two paths stay identical.
 app.patch("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     if (!body.id || typeof body.id !== "string") {
@@ -810,6 +819,8 @@ app.patch("/", async (c) => {
 // param. FE alias so the CN page's row-action menu can use REST-style
 // `/api/consignment-notes/{id}` instead of the body-id PATCH.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as Record<string, unknown>;

@@ -17,6 +17,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -140,6 +141,8 @@ app.get("/:id", async (c) => {
 // ---- POST /api/qc-templates ---------------------------------------------
 // Body: { name, deptCode, deptName?, itemCategory, stage, notes?, items: [{itemName, criteria?, severity, isMandatory?}] }
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const name = String(body.name ?? "").trim();
@@ -218,6 +221,8 @@ app.post("/", async (c) => {
 // ---- PUT /api/qc-templates/:id ------------------------------------------
 // Replaces items wholesale if `items` array is provided.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB
@@ -304,6 +309,8 @@ app.put("/:id", async (c) => {
 // Soft-delete by default (sets active=0). Pass ?hard=1 to hard-delete; that
 // only succeeds if no qc_inspections row references this template.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const hard = c.req.query("hard") === "1";
   const existing = await c.var.DB

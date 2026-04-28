@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -60,6 +61,8 @@ function genId(): string {
 // This endpoint exists for direct edits from the Fabric Master tab, but does
 // NOT mirror back into raw_materials (that would be a loop). Use sparingly.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "fabrics", "create");
+  if (denied) return denied;
   let body: FabricBody;
   try {
     body = (await c.req.json()) as FabricBody;
@@ -108,6 +111,8 @@ app.post("/", async (c) => {
 
 // PUT /api/fabrics/:id — partial update (name/category/priceSen/sohMeters/reorderLevel).
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "fabrics", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)
@@ -157,6 +162,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/fabrics/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "fabrics", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
     .bind(id)

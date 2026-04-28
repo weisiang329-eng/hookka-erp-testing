@@ -23,6 +23,7 @@ import type { Env } from "../worker";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import { checkConsignmentOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { emitAudit } from "../lib/audit";
+import { requirePermission } from "../lib/rbac";
 import {
   consumeEditLockOverrideToken,
   createEditLockOverride,
@@ -214,6 +215,8 @@ app.get("/", async (c) => {
 // to either endpoint.
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "consignments", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
 
@@ -553,6 +556,8 @@ app.get("/:id/edit-eligibility", async (c) => {
 // Registered BEFORE /:id so Hono's trie picks the right handler.
 // ---------------------------------------------------------------------------
 app.post("/:id/override-edit-lock", async (c) => {
+  const denied = await requirePermission(c, "consignments", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
 
   const role = (
@@ -758,6 +763,8 @@ app.get("/:id", async (c) => {
 // existing PO set without duplicating.
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
+  const denied = await requirePermission(c, "consignments", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
 
   const [orderRow, itemsRes] = await Promise.all([
@@ -851,6 +858,8 @@ app.post("/:id/confirm", async (c) => {
 // caller wants to flip DRAFT → ON_HOLD or similar, not rewrite the order).
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -1191,6 +1200,8 @@ app.put("/:id", async (c) => {
 // DELETE /api/consignment-orders/:id (only DRAFT)
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignments", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT status FROM consignment_orders WHERE id = ?",

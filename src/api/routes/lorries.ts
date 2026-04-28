@@ -6,6 +6,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -52,6 +53,8 @@ app.get("/", async (c) => {
 
 // POST /api/lorries
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "lorries", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -94,6 +97,8 @@ app.post("/", async (c) => {
 
 // PUT /api/lorries — legacy body-only update
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "lorries", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { id } = body;
@@ -160,6 +165,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/lorries/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -216,6 +223,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/lorries/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM lorries WHERE id = ?")
     .bind(id)

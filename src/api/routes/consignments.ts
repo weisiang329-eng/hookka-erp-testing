@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   type ConsignmentNoteRow,
   type ConsignmentItemRow,
@@ -68,6 +69,8 @@ app.get("/", async (c) => {
 //                                  row per PO with production_order_id set.
 //   items?: Array<{...}>         — explicit items array (legacy callers).
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "consignments", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const customer = await c.var.DB.prepare(
@@ -279,6 +282,8 @@ app.get("/:id", async (c) => {
 // non-items merge to updateConsignmentNoteById so this and
 // /api/consignment-notes share the same lifecycle logic.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -358,6 +363,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/consignments/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignments", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM consignment_notes WHERE id = ?",

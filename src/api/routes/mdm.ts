@@ -25,6 +25,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import { runMdmDetectionPass } from "../lib/mdm-detect";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -195,6 +196,8 @@ async function resolveRow(
 // actually distinct). Body may include { notes: string } for audit context.
 // ---------------------------------------------------------------------------
 app.post("/review-queue/:id/dismiss", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   return resolveRow(c, id, "DISMISSED");
 });
@@ -207,6 +210,8 @@ app.post("/review-queue/:id/dismiss", async (c) => {
 // include { notes: string } describing which row was kept.
 // ---------------------------------------------------------------------------
 app.post("/review-queue/:id/merge", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   return resolveRow(c, id, "MERGED");
 });
@@ -225,6 +230,8 @@ app.post("/review-queue/:id/merge", async (c) => {
 // manual override.
 // ---------------------------------------------------------------------------
 app.post("/detection/run", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   try {
     const stats = await runMdmDetectionPass(c.var.DB, orgId);

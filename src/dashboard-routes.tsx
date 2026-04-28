@@ -85,6 +85,10 @@ const MRP = lazy(() => import('./pages/planning/mrp'))
 // Quality
 const Quality = lazy(() => import('./pages/quality'))
 
+// Service Orders (换货服务) — customer-reported defects on shipped units.
+const ServiceOrders = lazy(() => import('./pages/service-orders'))
+const ServiceOrderDetail = lazy(() => import('./pages/service-orders/detail'))
+
 // R&D
 const RD = lazy(() => import('./pages/rd'))
 const RDDetail = lazy(() => import('./pages/rd/detail'))
@@ -293,6 +297,10 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // Quality
   { path: '/quality', element: <S><Quality /></S> },
+
+  // Service Orders (换货服务) — Phase 3.
+  { path: '/service-orders', element: <S><ServiceOrders /></S> },
+  { path: '/service-orders/:id', element: <S><ServiceOrderDetail /></S> },
 
   // R&D
   { path: '/rd', element: <S><RD /></S> },

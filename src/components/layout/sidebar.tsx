@@ -143,6 +143,10 @@ const navigationGroups: NavGroup[] = [
     label: "QUALITY",
     items: [
       { name: "QC / Quality", href: "/quality", icon: ShieldCheck },
+      // Phase 3 — Service Orders (换货服务): customer-reported defects on
+      // already-shipped SOs/COs. Distinct from the QC inspection module
+      // (Phase 1) which is internal-pre-ship; this one is post-ship.
+      { name: "Service Orders", href: "/service-orders", icon: Wrench },
     ],
   },
   {

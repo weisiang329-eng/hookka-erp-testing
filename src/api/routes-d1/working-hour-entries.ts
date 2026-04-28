@@ -145,6 +145,82 @@ function validateEntry(input: EntryInput): { ok: true; data: { departmentCode: s
 }
 
 // ---------------------------------------------------------------------------
+// GET /production-revenue?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// "Production Revenue" — revenue is recognized the day each item completes
+// the UPHOLSTERY department (the final assembly stage that produces the FG
+// unit), not when its sales order was created. Drives the Labor Cost tab on
+// Employees so the cost-side (hours actually worked in the period) lines up
+// against revenue actually finished in the period.
+//
+// Joins:
+//   job_cards.productionOrderId  → production_orders.id          (for SO link + qty fallback + product link)
+//   production_orders             → sales_order_items via (salesOrderId, lineNo)  (for actual unitPriceSen)
+//   production_orders.productId   → products.id                  (for category bucketing + price fallback)
+//
+// Price column choice: sales_order_items.unitPriceSen wins because it's the
+// price the customer actually paid on that line (catalog basePriceSen would
+// miss promo/contract pricing). Falls back to products.basePriceSen, then
+// products.price1Sen, so an orphan PO without an SO line still scores
+// something instead of being silently 0.
+//
+// Qty column choice: COALESCE(jc.wipQty, po.quantity) — same convention as
+// delivery-orders.ts and inventory-wip.ts. Upholstery JCs typically have
+// wipQty = po.quantity (one FG unit per PO unit), but the COALESCE keeps us
+// honest if a JC was hand-edited.
+//
+// Status set: COMPLETED + TRANSFERRED. D1 has no 'DONE' state — the schema
+// CHECK only allows WAITING / IN_PROGRESS / PAUSED / COMPLETED / TRANSFERRED
+// / BLOCKED.
+// ---------------------------------------------------------------------------
+app.get("/production-revenue", async (c) => {
+  const from = c.req.query("from");
+  const to = c.req.query("to");
+  if (!from || !to) {
+    return c.json({ success: false, error: "Provide from + to (YYYY-MM-DD)" }, 400);
+  }
+
+  const rowsRes = await c.var.DB
+    .prepare(
+      `SELECT p.category AS category,
+              SUM(
+                COALESCE(jc.wipQty, po.quantity, 0) *
+                COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)
+              ) AS revenueSen
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+         LEFT JOIN sales_order_items soi
+                ON soi.salesOrderId = po.salesOrderId
+               AND soi.lineNo = po.lineNo
+         LEFT JOIN products p ON p.id = po.productId
+        WHERE jc.departmentCode = 'UPHOLSTERY'
+          AND jc.status IN ('COMPLETED','TRANSFERRED')
+          AND jc.completedDate IS NOT NULL
+          AND jc.completedDate >= ?
+          AND jc.completedDate <= ?
+          AND p.category IN ('SOFA','BEDFRAME','ACCESSORY')
+        GROUP BY p.category`,
+    )
+    .bind(from, to)
+    .all<{ category: "SOFA" | "BEDFRAME" | "ACCESSORY"; revenueSen: number | string | null }>();
+
+  const data: Record<"SOFA" | "BEDFRAME" | "ACCESSORY" | "totalSen", number> = {
+    SOFA: 0,
+    BEDFRAME: 0,
+    ACCESSORY: 0,
+    totalSen: 0,
+  };
+  for (const r of rowsRes.results ?? []) {
+    const v = typeof r.revenueSen === "number" ? r.revenueSen : Number(r.revenueSen) || 0;
+    if (r.category === "SOFA" || r.category === "BEDFRAME" || r.category === "ACCESSORY") {
+      data[r.category] = Math.round(v);
+    }
+  }
+  data.totalSen = data.SOFA + data.BEDFRAME + data.ACCESSORY;
+  return c.json({ success: true, data });
+});
+
+// ---------------------------------------------------------------------------
 // GET /summary?from=YYYY-MM-DD&to=YYYY-MM-DD
 //
 // Per-worker totals + per-(worker × dept) breakdown for the date range.

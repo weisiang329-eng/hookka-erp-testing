@@ -2317,8 +2317,11 @@ function PayrollTab({ workers: _workers }: { workers: Worker[] }) {
 // Per (department × category) labor cost vs same-period category revenue.
 // Cost is computed in the browser by summing working_hour_entries.hours
 // scaled by each worker's hourly rate (basicSalarySen ÷ 26 ÷ 9, with OT
-// hours above 9/day getting × otMultiplier). Revenue comes from the existing
-// /api/accounting/pl endpoint, which buckets revenue by product category.
+// hours above 9/day getting × otMultiplier). Revenue is "Production Revenue"
+// from /api/working-hour-entries/production-revenue — recognized the day
+// each item completes UPHOLSTERY (the final assembly stage), not at SO
+// creation. This lines revenue up against the period the labor was actually
+// burned, instead of months earlier when the SO was first opened.
 //
 // Production Shortfall + Warehousing rows are visually highlighted as the
 // "burning money" buckets. Per spec, Production Shortfall is shown ONLY at
@@ -2654,12 +2657,17 @@ function LaborCostTab({
     data?: WorkingHourEntry[];
   }>(entriesUrl);
 
-  // Same-period revenue, bucketed by product category.
-  const plUrl = useMemo(() => `/api/accounting/pl?period=${period}`, [period]);
+  // Same-period revenue, bucketed by product category. "Production Revenue"
+  // is realized the day each item completes UPHOLSTERY, not at SO creation —
+  // see /api/working-hour-entries/production-revenue.
+  const prodRevUrl = useMemo(
+    () => `/api/working-hour-entries/production-revenue?from=${from}&to=${to}`,
+    [from, to],
+  );
   const { data: plResp, loading: plLoading } = useCachedJson<{
     success?: boolean;
-    data?: { revenueByProduct?: Record<string, number> };
-  }>(plUrl);
+    data?: { SOFA?: number; BEDFRAME?: number; ACCESSORY?: number; totalSen?: number };
+  }>(prodRevUrl);
 
   const workersById = useMemo(() => {
     const m = new Map<string, Worker>();
@@ -2669,7 +2677,12 @@ function LaborCostTab({
 
   const rows: LaborCostRow[] = useMemo(() => {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
-    const revenueByCategory = (plResp?.success ? plResp.data?.revenueByProduct ?? {} : {}) as Record<string, number>;
+    const revData = plResp?.success ? plResp.data ?? {} : {};
+    const revenueByCategory: Record<string, number> = {
+      SOFA: Number(revData.SOFA) || 0,
+      BEDFRAME: Number(revData.BEDFRAME) || 0,
+      ACCESSORY: Number(revData.ACCESSORY) || 0,
+    };
 
     // Two rates per worker, intentionally asymmetric:
     //  - Regular hourly rate uses calendar-based working days for the
@@ -2769,8 +2782,9 @@ function LaborCostTab({
     .filter((r) => r.isWarehousing)
     .reduce((s, r) => s + r.laborCostSen, 0);
   const totalRevenueSen = useMemo(() => {
-    const rev = (plResp?.success ? plResp.data?.revenueByProduct ?? {} : {}) as Record<string, number>;
-    return Object.values(rev).reduce((s, v) => s + (Number(v) || 0), 0);
+    const rev = plResp?.success ? plResp.data ?? {} : {};
+    if (typeof rev.totalSen === "number") return rev.totalSen;
+    return (Number(rev.SOFA) || 0) + (Number(rev.BEDFRAME) || 0) + (Number(rev.ACCESSORY) || 0);
   }, [plResp]);
   const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
 
@@ -2857,7 +2871,7 @@ function LaborCostTab({
           Production-only labor cost (excl. warehousing/repair/maint/shortfall):{" "}
           <span className="font-medium text-[#1F1D1B]">{formatCurrency(productionLaborCostSen)}</span>
           {" · "}
-          Revenue is recognized at sales-order creation (same-month bucket); labor at the day work happens. Treat any
+          Revenue is recognized when items complete UPHOLSTERY (production-completion bucket); labor at the day work happens. Treat any
           single-month ratio as a leading indicator, not a closed P&amp;L.
         </div>
 

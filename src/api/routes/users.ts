@@ -338,8 +338,8 @@ async function sendInviteEmail(
   const baseUrl = (env.APP_URL || "").replace(/\/$/, "");
   const inviteUrl = `${baseUrl}/invite/${invite.token}`;
   const tpl = inviteEmailTemplate({
-    appName: "Hookka ERP",
-    inviterName: inviterName || "A Hookka ERP admin",
+    appName: "Hookka Manufacturing ERP",
+    inviterName: inviterName || "A Hookka Manufacturing ERP admin",
     inviteUrl,
     expiresInHours: INVITE_TTL_HOURS,
   });

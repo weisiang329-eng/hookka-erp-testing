@@ -133,13 +133,13 @@ app.get('/health', (c) => c.json({ status: 'ok', timestamp: new Date().toISOStri
 
 const port = Number(process.env.API_PORT) || 3001;
 
-console.log(`Hookka ERP API server starting on port ${port}...`);
+console.log(`Hookka Manufacturing ERP API server starting on port ${port}...`);
 
 serve({
   fetch: app.fetch,
   port,
 });
 
-console.log(`Hookka ERP API server running at http://localhost:${port}`);
+console.log(`Hookka Manufacturing ERP API server running at http://localhost:${port}`);
 
 export default app;

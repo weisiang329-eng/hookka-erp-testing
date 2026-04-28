@@ -2584,7 +2584,7 @@ export default function ProductionPage({
   </div>
   ${filterLine}
   ${body}
-  <div class="footer">Hookka ERP — Production Schedule · Printed ${today}</div>
+  <div class="footer">Hookka Manufacturing ERP — Production Schedule · Printed ${today}</div>
   <script>setTimeout(function(){ window.print(); }, 300);</${''}script>
 </body>
 </html>`;
@@ -2881,7 +2881,7 @@ export default function ProductionPage({
   </div>
   ${filterLine}
   ${body}
-  <div class="footer">Hookka ERP — Production Schedule (Total Listing) · Merged from ${sourceCount} source rows into ${mergedCount} unique items · Total qty across all items: ${totalQty} · Printed ${today}</div>
+  <div class="footer">Hookka Manufacturing ERP — Production Schedule (Total Listing) · Merged from ${sourceCount} source rows into ${mergedCount} unique items · Total qty across all items: ${totalQty} · Printed ${today}</div>
   <script>setTimeout(function(){ window.print(); }, 300);</${''}script>
 </body>
 </html>`;

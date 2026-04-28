@@ -1080,7 +1080,7 @@ function buildBOMPrintDoc(template: BOMTemplate, product: Product): string {
 
   ${wips}
 
-  <div class="footer">Hookka ERP · Confidential — for internal &amp; partner use only</div>
+  <div class="footer">Hookka Manufacturing ERP · Confidential — for internal &amp; partner use only</div>
   <script>setTimeout(function(){ window.focus(); }, 100);</script>
 </body>
 </html>`;

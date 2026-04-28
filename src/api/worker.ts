@@ -364,6 +364,8 @@ import productionLeadtimes from "./routes/production-leadtimes";
 import jobcardSync from "./routes/jobcard-sync";
 import promiseDate from "./routes/promise-date";
 import qcInspections from "./routes/qc-inspections";
+import qcTemplates from "./routes/qc-templates";
+import qcPending from "./routes/qc-pending";
 import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
 import scanPo from "./routes/scan-po";
@@ -481,6 +483,13 @@ app.route("/api/production/leadtimes", productionLeadtimes);
 // migrations/0027, 0029 (sofa UPH/PKG backfill).
 app.route("/api/production/sync-jobcards-from-bom", jobcardSync);
 app.route("/api/promise-date", promiseDate);
+// Phase 1 — QC module rebuild (2026-04-28). qc-templates manages checklist
+// definitions; qc-pending owns the time-triggered slot lifecycle (PENDING →
+// IN_PROGRESS → COMPLETED|SKIPPED) plus the cron entry + manual generate.
+// MUST come before /api/qc-inspections so the more-specific subapps win
+// route matching even though they share the qc- prefix.
+app.route("/api/qc-templates", qcTemplates);
+app.route("/api/qc-pending", qcPending);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);

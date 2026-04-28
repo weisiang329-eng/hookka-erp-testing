@@ -25,6 +25,19 @@ type InspectionRow = {
   notes: string | null;
   inspectionDate: string | null;
   createdAt: string | null;
+  // Phase-1 columns (added in 0066). Null on legacy rows.
+  templateId: string | null;
+  templateSnapshot: string | null;
+  stage: string | null;
+  itemCategory: string | null;
+  subjectType: string | null;
+  subjectId: string | null;
+  subjectLabel: string | null;
+  triggerType: string | null;
+  scheduledSlotAt: string | null;
+  status: string | null;
+  skipReason: string | null;
+  completedAt: string | null;
 };
 
 type DefectRow = {
@@ -36,7 +49,24 @@ type DefectRow = {
   actionTaken: string | null;
 };
 
-function rowToInspection(row: InspectionRow, defects: DefectRow[] = []) {
+type InspectionItemRow = {
+  id: string;
+  inspectionId: string;
+  sequence: number;
+  itemName: string;
+  criteria: string | null;
+  severity: string | null;
+  isMandatory: number;
+  result: string | null;
+  notes: string | null;
+  photoUrl: string | null;
+};
+
+function rowToInspection(
+  row: InspectionRow,
+  defects: DefectRow[] = [],
+  items: InspectionItemRow[] = [],
+) {
   return {
     id: row.id,
     inspectionNo: row.inspectionNo,
@@ -52,6 +82,19 @@ function rowToInspection(row: InspectionRow, defects: DefectRow[] = []) {
     notes: row.notes ?? "",
     inspectionDate: row.inspectionDate ?? "",
     createdAt: row.createdAt ?? "",
+    // Phase 1 fields (null on legacy rows)
+    templateId: row.templateId ?? "",
+    templateSnapshot: row.templateSnapshot ? safeParseJson(row.templateSnapshot) : null,
+    stage: row.stage,
+    itemCategory: row.itemCategory,
+    subjectType: row.subjectType,
+    subjectId: row.subjectId ?? "",
+    subjectLabel: row.subjectLabel ?? "",
+    triggerType: row.triggerType ?? "",
+    scheduledSlotAt: row.scheduledSlotAt ?? "",
+    status: row.status ?? "",
+    skipReason: row.skipReason ?? "",
+    completedAt: row.completedAt ?? "",
     defects: defects
       .filter((d) => d.qcInspectionId === row.id)
       .map((d) => ({
@@ -61,7 +104,29 @@ function rowToInspection(row: InspectionRow, defects: DefectRow[] = []) {
         description: d.description ?? "",
         actionTaken: d.actionTaken ?? "ACCEPT",
       })),
+    items: items
+      .filter((i) => i.inspectionId === row.id)
+      .sort((a, b) => a.sequence - b.sequence)
+      .map((i) => ({
+        id: i.id,
+        sequence: i.sequence,
+        itemName: i.itemName,
+        criteria: i.criteria ?? "",
+        severity: i.severity ?? "MAJOR",
+        isMandatory: i.isMandatory === 1,
+        result: i.result,
+        notes: i.notes ?? "",
+        photoUrl: i.photoUrl ?? "",
+      })),
   };
+}
+
+function safeParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
+  }
 }
 
 function genId(prefix: string): string {
@@ -81,11 +146,21 @@ async function getNextQCNo(db: D1Database): Promise<string> {
 }
 
 // GET /api/qc-inspections
+//
+// Returns COMPLETED + SKIPPED inspections by default (the "history" view —
+// the new Phase-1 page calls this for the History tab). Pass ?status=ALL to
+// also include PENDING / IN_PROGRESS rows. The legacy quality.tsx page used
+// this same endpoint for its inspections table; the new shape adds `items`,
+// `templateSnapshot`, `stage`, `subject*` etc. — which are null on legacy
+// rows, so the old UI keeps working.
 app.get("/", async (c) => {
   const department = c.req.query("department");
   const result = c.req.query("result");
   const dateFrom = c.req.query("dateFrom");
   const dateTo = c.req.query("dateTo");
+  const stage = c.req.query("stage");
+  const itemCategory = c.req.query("itemCategory");
+  const status = c.req.query("status");
 
   const clauses: string[] = [];
   const params: (string | number)[] = [];
@@ -105,17 +180,45 @@ app.get("/", async (c) => {
     clauses.push("inspectionDate <= ?");
     params.push(dateTo);
   }
+  if (stage) {
+    clauses.push("stage = ?");
+    params.push(stage);
+  }
+  if (itemCategory) {
+    clauses.push("itemCategory = ?");
+    params.push(itemCategory);
+  }
+  // Default = history view: completed + skipped + legacy rows (status NULL).
+  // Pass ?status=ALL to opt out, or ?status=PENDING etc. to override.
+  if (!status) {
+    clauses.push("(status IN ('COMPLETED','SKIPPED') OR status IS NULL)");
+  } else if (status !== "ALL") {
+    clauses.push("status = ?");
+    params.push(status);
+  }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
-  const sql = `SELECT * FROM qc_inspections ${where} ORDER BY created_at DESC`;
+  const sql = `SELECT * FROM qc_inspections ${where} ORDER BY created_at DESC LIMIT 500`;
 
-  const [inspRes, defRes] = await Promise.all([
-    c.var.DB.prepare(sql)
-      .bind(...params)
-      .all<InspectionRow>(),
-    c.var.DB.prepare("SELECT * FROM qc_defects").all<DefectRow>(),
+  const inspRes = await c.var.DB.prepare(sql).bind(...params).all<InspectionRow>();
+  const inspections = inspRes.results ?? [];
+  const ids = inspections.map((i) => i.id);
+
+  const [defRes, itemRes] = await Promise.all([
+    ids.length
+      ? c.var.DB
+          .prepare(`SELECT * FROM qc_defects WHERE qcInspectionId IN (${ids.map(() => "?").join(",")})`)
+          .bind(...ids)
+          .all<DefectRow>()
+      : Promise.resolve({ results: [] as DefectRow[] }),
+    ids.length
+      ? c.var.DB
+          .prepare(`SELECT * FROM qc_inspection_items WHERE inspectionId IN (${ids.map(() => "?").join(",")})`)
+          .bind(...ids)
+          .all<InspectionItemRow>()
+      : Promise.resolve({ results: [] as InspectionItemRow[] }),
   ]);
-  const data = (inspRes.results ?? []).map((r) =>
-    rowToInspection(r, defRes.results ?? []),
+  const data = inspections.map((r) =>
+    rowToInspection(r, defRes.results ?? [], itemRes.results ?? []),
   );
   return c.json({ success: true, data, total: data.length });
 });
@@ -202,20 +305,23 @@ app.post("/", async (c) => {
 // GET /api/qc-inspections/:id
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const [row, defs] = await Promise.all([
+  const [row, defs, items] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
       .bind(id)
       .first<InspectionRow>(),
     c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
       .bind(id)
       .all<DefectRow>(),
+    c.var.DB.prepare("SELECT * FROM qc_inspection_items WHERE inspectionId = ? ORDER BY sequence")
+      .bind(id)
+      .all<InspectionItemRow>(),
   ]);
   if (!row) {
     return c.json({ success: false, error: "QC inspection not found" }, 404);
   }
   return c.json({
     success: true,
-    data: rowToInspection(row, defs.results ?? []),
+    data: rowToInspection(row, defs.results ?? [], items.results ?? []),
   });
 });
 

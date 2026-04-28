@@ -2,7 +2,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
 import { COMPANY } from "@/lib/constants";
-import { fmtDate } from "@/lib/pdf-utils";
+import { fmtDate, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 // ---------------------------------------------------------------------------
 // Delivery Order PDF
@@ -17,15 +17,18 @@ export function generateDOPdf(order: DeliveryOrder) {
   const co = COMPANY.HOOKKA;
 
   // --- Header ---
+  addHookkaLetterhead(doc, margin, 5, 10);
+  const textX = margin + 26;
+
   doc.setTextColor(0, 0, 0);
-  doc.setFontSize(18);
+  doc.setFontSize(12);
   doc.setFont("helvetica", "bold");
-  doc.text(co.name, margin, 14);
+  doc.text(co.name, textX, 14);
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text("Manufacturer of Premium Upholstered Furniture", margin, 20);
-  doc.text(`Tel: ${co.phone}  |  Email: ${co.email}`, margin, 25);
+  doc.text("Manufacturer of Premium Upholstered Furniture", textX, 20);
+  doc.text(`Tel: ${co.phone}  |  Email: ${co.email}`, textX, 25);
 
   // DO Number on right
   doc.setFontSize(14);

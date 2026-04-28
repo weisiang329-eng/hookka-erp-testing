@@ -30,18 +30,18 @@ import {
 // ---------------------------------------------------------------------------
 const routes = [
   {
-    file: "src/api/routes-d1/sales-orders.ts",
+    file: "src/api/routes/sales-orders.ts",
     required: [
       ["sales-orders", "create"],
       ["sales-orders", "confirm"],
     ],
   },
   {
-    file: "src/api/routes-d1/payments.ts",
+    file: "src/api/routes/payments.ts",
     required: [["payments", "create"]],
   },
   {
-    file: "src/api/routes-d1/delivery-orders.ts",
+    file: "src/api/routes/delivery-orders.ts",
     required: [
       ["delivery-orders", "read"],
       ["delivery-orders", "create"],

@@ -1,74 +1,213 @@
 // ---------------------------------------------------------------------------
-// Cost ledger API
+// D1-backed cost-ledger route.
 //
-// Exposes the in-memory FIFO cost ledger (entries, batches, rollups). All
-// entries are appended by grn.ts (RM_RECEIPT), production-orders.ts
-// (RM_ISSUE, LABOR_POSTED, FG_COMPLETED), and delivery-orders.ts
-// (FG_DELIVERED). This route is read-only — writes happen side-effectually
-// from the triggering business routes, so the ledger stays audit-ordered.
+// Mirrors src/api/routes/cost-ledger.ts — read-only views over cost_ledger,
+// rm_batches, and fg_batches tables. All writes happen side-effectually in
+// the triggering business routes (GRN, production_orders, delivery_orders)
+// so the ledger stays append-only.
 //
 // Endpoints
-//   GET /api/cost-ledger                → all entries
-//   GET /api/cost-ledger?itemType=FG&itemId=prod-42
-//   GET /api/cost-ledger?refType=DELIVERY_ORDER&refId=do-123
-//   GET /api/cost-ledger/rm-batches     → all RMBatch layers (optionally ?rmId=…)
-//   GET /api/cost-ledger/fg-batches     → all FGBatch layers (optionally ?productId=…)
-//   GET /api/cost-ledger/summary        → quick dashboard numbers
+//   GET /api/cost-ledger                → all entries (+ filters)
+//   GET /api/cost-ledger/rm-batches     → RMBatch layers (+ rmId filter)
+//   GET /api/cost-ledger/fg-batches     → FGBatch layers (+ productId / productionOrderId filter)
+//   GET /api/cost-ledger/summary        → dashboard rollup (on-hand values, COGS)
+//
+// Schema-note: D1 stores `rm_batches.createdAt` / `fg_batches.createdAt`
+// (snake_case); the in-memory type exposes `createdAt` (camelCase). The
+// row->API mappers handle the rename.
 // ---------------------------------------------------------------------------
-import { Hono } from 'hono';
-import {
-  costLedger,
-  rmBatches,
-  fgBatches,
-} from '../../lib/mock-data';
-import {
-  laborRateForDate,
-  totalBatchValueSen,
-} from '../../lib/costing';
+import { Hono } from "hono";
+import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { laborRateForDate } from "../../lib/costing";
 
-const app = new Hono();
+const app = new Hono<Env>();
 
-app.get('/', (c) => {
-  const itemType = c.req.query('itemType');
-  const itemId = c.req.query('itemId');
-  const refType = c.req.query('refType');
-  const refId = c.req.query('refId');
-  const type = c.req.query('type');
+type CostLedgerRow = {
+  id: string;
+  date: string;
+  type: string;
+  itemType: string;
+  itemId: string;
+  batchId: string | null;
+  qty: number;
+  direction: string;
+  unitCostSen: number;
+  totalCostSen: number;
+  refType: string | null;
+  refId: string | null;
+  notes: string | null;
+};
 
-  let rows = costLedger;
-  if (itemType) rows = rows.filter((r) => r.itemType === itemType);
-  if (itemId) rows = rows.filter((r) => r.itemId === itemId);
-  if (refType) rows = rows.filter((r) => r.refType === refType);
-  if (refId) rows = rows.filter((r) => r.refId === refId);
-  if (type) rows = rows.filter((r) => r.type === type);
+type RMBatchRow = {
+  id: string;
+  rmId: string;
+  source: string;
+  sourceRefId: string | null;
+  receivedDate: string;
+  originalQty: number;
+  remainingQty: number;
+  unitCostSen: number;
+  createdAt: string | null;
+  notes: string | null;
+};
 
-  return c.json({
-    success: true,
-    data: rows,
-    total: rows.length,
-  });
-});
+type FGBatchRow = {
+  id: string;
+  productId: string;
+  productionOrderId: string | null;
+  completedDate: string;
+  originalQty: number;
+  remainingQty: number;
+  unitCostSen: number;
+  materialCostSen: number;
+  laborCostSen: number;
+  overheadCostSen: number;
+  createdAt: string | null;
+};
 
-app.get('/rm-batches', (c) => {
-  const rmId = c.req.query('rmId');
-  const rows = rmId ? rmBatches.filter((b) => b.rmId === rmId) : rmBatches;
-  return c.json({
-    success: true,
-    data: rows,
-    total: rows.length,
-    totalValueSen: totalBatchValueSen(rows),
-  });
-});
+function rowToLedgerEntry(r: CostLedgerRow) {
+  return {
+    id: r.id,
+    date: r.date,
+    type: r.type,
+    itemType: r.itemType,
+    itemId: r.itemId,
+    batchId: r.batchId ?? undefined,
+    qty: r.qty,
+    direction: r.direction,
+    unitCostSen: r.unitCostSen,
+    totalCostSen: r.totalCostSen,
+    refType: r.refType ?? undefined,
+    refId: r.refId ?? undefined,
+    notes: r.notes ?? undefined,
+  };
+}
 
-app.get('/fg-batches', (c) => {
-  const productId = c.req.query('productId');
-  const productionOrderId = c.req.query('productionOrderId');
-  let rows = fgBatches;
-  if (productId) rows = rows.filter((b) => b.productId === productId);
-  if (productionOrderId) {
-    rows = rows.filter((b) => b.productionOrderId === productionOrderId);
+function rowToRMBatch(r: RMBatchRow) {
+  return {
+    id: r.id,
+    rmId: r.rmId,
+    source: r.source,
+    sourceRefId: r.sourceRefId ?? undefined,
+    receivedDate: r.receivedDate,
+    originalQty: r.originalQty,
+    remainingQty: r.remainingQty,
+    unitCostSen: r.unitCostSen,
+    createdAt: r.createdAt ?? "",
+    notes: r.notes ?? undefined,
+  };
+}
+
+function rowToFGBatch(r: FGBatchRow) {
+  return {
+    id: r.id,
+    productId: r.productId,
+    productionOrderId: r.productionOrderId ?? "",
+    completedDate: r.completedDate,
+    originalQty: r.originalQty,
+    remainingQty: r.remainingQty,
+    unitCostSen: r.unitCostSen,
+    materialCostSen: r.materialCostSen,
+    laborCostSen: r.laborCostSen,
+    overheadCostSen: r.overheadCostSen,
+    createdAt: r.createdAt ?? "",
+  };
+}
+
+// GET /api/cost-ledger — list entries with optional filters
+app.get("/", async (c) => {
+  // RBAC gate (P3.3-followup) — cost-ledger:read.
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
+  const itemType = c.req.query("itemType");
+  const itemId = c.req.query("itemId");
+  const refType = c.req.query("refType");
+  const refId = c.req.query("refId");
+  const type = c.req.query("type");
+
+  const clauses: string[] = [];
+  const binds: unknown[] = [];
+  if (itemType) {
+    clauses.push("itemType = ?");
+    binds.push(itemType);
   }
-  const onHandValueSen = rows.reduce(
+  if (itemId) {
+    clauses.push("itemId = ?");
+    binds.push(itemId);
+  }
+  if (refType) {
+    clauses.push("refType = ?");
+    binds.push(refType);
+  }
+  if (refId) {
+    clauses.push("refId = ?");
+    binds.push(refId);
+  }
+  if (type) {
+    clauses.push("type = ?");
+    binds.push(type);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const sql = `SELECT * FROM cost_ledger ${where} ORDER BY date ASC, id ASC`;
+
+  const res = await c.var.DB.prepare(sql)
+    .bind(...binds)
+    .all<CostLedgerRow>();
+  const rows = (res.results ?? []).map(rowToLedgerEntry);
+  return c.json({ success: true, data: rows, total: rows.length });
+});
+
+// GET /api/cost-ledger/rm-batches — RM batch layers with on-hand value
+app.get("/rm-batches", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
+  const rmId = c.req.query("rmId");
+  const sql = rmId
+    ? "SELECT * FROM rm_batches WHERE rmId = ? ORDER BY receivedDate ASC, id ASC"
+    : "SELECT * FROM rm_batches ORDER BY receivedDate ASC, id ASC";
+  const res = rmId
+    ? await c.var.DB.prepare(sql).bind(rmId).all<RMBatchRow>()
+    : await c.var.DB.prepare(sql).all<RMBatchRow>();
+  const rawRows = res.results ?? [];
+  const rows = rawRows.map(rowToRMBatch);
+  const totalValueSen = rawRows.reduce(
+    (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
+    0,
+  );
+  return c.json({
+    success: true,
+    data: rows,
+    total: rows.length,
+    totalValueSen,
+  });
+});
+
+// GET /api/cost-ledger/fg-batches — FG batch layers with on-hand value
+app.get("/fg-batches", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
+  const productId = c.req.query("productId");
+  const productionOrderId = c.req.query("productionOrderId");
+  const clauses: string[] = [];
+  const binds: unknown[] = [];
+  if (productId) {
+    clauses.push("productId = ?");
+    binds.push(productId);
+  }
+  if (productionOrderId) {
+    clauses.push("productionOrderId = ?");
+    binds.push(productionOrderId);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const sql = `SELECT * FROM fg_batches ${where} ORDER BY completedDate ASC, id ASC`;
+
+  const res = await c.var.DB.prepare(sql)
+    .bind(...binds)
+    .all<FGBatchRow>();
+  const rawRows = res.results ?? [];
+  const rows = rawRows.map(rowToFGBatch);
+  const onHandValueSen = rawRows.reduce(
     (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
     0,
   );
@@ -80,32 +219,45 @@ app.get('/fg-batches', (c) => {
   });
 });
 
-app.get('/summary', (c) => {
-  const now = new Date();
-  const rmOnHandSen = totalBatchValueSen(rmBatches);
-  const fgOnHandSen = fgBatches.reduce(
+// GET /api/cost-ledger/summary — dashboard rollup
+app.get("/summary", async (c) => {
+  const denied = await requirePermission(c, "cost-ledger", "read");
+  if (denied) return denied;
+  const [rmRes, fgRes, ledgerRes] = await Promise.all([
+    c.var.DB.prepare(
+      "SELECT remainingQty, unitCostSen FROM rm_batches",
+    ).all<{ remainingQty: number; unitCostSen: number }>(),
+    c.var.DB.prepare(
+      "SELECT remainingQty, unitCostSen FROM fg_batches",
+    ).all<{ remainingQty: number; unitCostSen: number }>(),
+    c.var.DB.prepare(
+      "SELECT date, type, totalCostSen FROM cost_ledger",
+    ).all<{ date: string; type: string; totalCostSen: number }>(),
+  ]);
+
+  const rmOnHandSen = (rmRes.results ?? []).reduce(
     (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
     0,
   );
-  const cogsThisMonthSen = costLedger
-    .filter((e) => e.type === 'FG_DELIVERED')
-    .filter((e) => {
-      const d = new Date(e.date);
-      return (
-        d.getFullYear() === now.getFullYear() &&
-        d.getMonth() === now.getMonth()
-      );
-    })
+  const fgOnHandSen = (fgRes.results ?? []).reduce(
+    (s, b) => s + Math.max(0, b.remainingQty) * b.unitCostSen,
+    0,
+  );
+
+  const now = new Date();
+  const entries = ledgerRes.results ?? [];
+  const inMonth = (iso: string) => {
+    const d = new Date(iso);
+    return (
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth()
+    );
+  };
+  const cogsThisMonthSen = entries
+    .filter((e) => e.type === "FG_DELIVERED" && inMonth(e.date))
     .reduce((s, e) => s + e.totalCostSen, 0);
-  const laborPostedThisMonthSen = costLedger
-    .filter((e) => e.type === 'LABOR_POSTED')
-    .filter((e) => {
-      const d = new Date(e.date);
-      return (
-        d.getFullYear() === now.getFullYear() &&
-        d.getMonth() === now.getMonth()
-      );
-    })
+  const laborPostedThisMonthSen = entries
+    .filter((e) => e.type === "LABOR_POSTED" && inMonth(e.date))
     .reduce((s, e) => s + e.totalCostSen, 0);
 
   return c.json({
@@ -115,7 +267,7 @@ app.get('/summary', (c) => {
       laborRatePerMinuteSen: laborRateForDate(now),
       rmOnHandSen,
       fgOnHandSen,
-      totalLedgerEntries: costLedger.length,
+      totalLedgerEntries: entries.length,
       cogsThisMonthSen,
       laborPostedThisMonthSen,
     },

@@ -1,94 +1,262 @@
-import { Hono } from 'hono';
-import { attendanceRecords, workers, departments, generateId } from '../../lib/mock-data';
-import type { AttendanceRecord, AttendanceStatus } from '../../lib/mock-data';
+// ---------------------------------------------------------------------------
+// D1-backed attendance route.
+//
+// Mirrors the old src/api/routes/attendance.ts shape:
+//   GET  /api/attendance?date=YYYY-MM-DD  → list records (optionally by date)
+//   POST /api/attendance                   → CLOCK_IN / CLOCK_OUT
+//
+// `deptBreakdown` is stored as JSON in the DB and parsed back into an array
+// in the response so the frontend can render per-department minutes.
+// ---------------------------------------------------------------------------
+import { Hono } from "hono";
+import type { Env } from "../worker";
 
-const app = new Hono();
+const app = new Hono<Env>();
 
-// GET /api/attendance?date=2026-04-13
-app.get('/', (c) => {
-  const date = c.req.query('date');
-  let filtered = attendanceRecords;
-  if (date) {
-    filtered = attendanceRecords.filter((r) => r.date === date);
+type AttendanceRow = {
+  id: string;
+  employeeId: string;
+  employeeName: string;
+  departmentCode: string;
+  departmentName: string;
+  date: string;
+  clockIn: string | null;
+  clockOut: string | null;
+  status: string;
+  workingMinutes: number;
+  productionTimeMinutes: number;
+  efficiencyPct: number;
+  overtimeMinutes: number;
+  deptBreakdown: string;
+  notes: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type WorkerRow = {
+  id: string;
+  name: string;
+  departmentId: string | null;
+  departmentCode: string | null;
+  workingHoursPerDay: number | null;
+};
+
+type DepartmentRow = {
+  id: string;
+  shortName: string;
+};
+
+function parseDeptBreakdown(raw: string): Array<{
+  deptCode: string;
+  minutes: number;
+  productCode: string;
+}> {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
   }
-  return c.json({ success: true, data: filtered, total: filtered.length });
+}
+
+function rowToAttendance(r: AttendanceRow) {
+  return {
+    id: r.id,
+    employeeId: r.employeeId,
+    employeeName: r.employeeName,
+    departmentCode: r.departmentCode,
+    departmentName: r.departmentName,
+    date: r.date,
+    clockIn: r.clockIn,
+    clockOut: r.clockOut,
+    status: r.status,
+    workingMinutes: r.workingMinutes,
+    productionTimeMinutes: r.productionTimeMinutes,
+    efficiencyPct: r.efficiencyPct,
+    overtimeMinutes: r.overtimeMinutes,
+    deptBreakdown: parseDeptBreakdown(r.deptBreakdown),
+    notes: r.notes,
+  };
+}
+
+function genId(): string {
+  return `att-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/attendance?date=YYYY-MM-DD
+// ---------------------------------------------------------------------------
+app.get("/", async (c) => {
+  const date = c.req.query("date");
+  const stmt = date
+    ? c.var.DB.prepare(
+        "SELECT * FROM attendance_records WHERE date = ? ORDER BY employeeId",
+      ).bind(date)
+    : c.var.DB.prepare(
+        "SELECT * FROM attendance_records ORDER BY date DESC, employeeId",
+      );
+  const res = await stmt.all<AttendanceRow>();
+  const data = (res.results ?? []).map(rowToAttendance);
+  return c.json({ success: true, data, total: data.length });
 });
 
-// POST /api/attendance
-app.post('/', async (c) => {
-  const body = await c.req.json();
+// ---------------------------------------------------------------------------
+// POST /api/attendance — CLOCK_IN | CLOCK_OUT
+// ---------------------------------------------------------------------------
+app.post("/", async (c) => {
+  try {
+    const body = await c.req.json();
 
-  const worker = workers.find((w) => w.id === body.employeeId);
-  if (!worker) {
-    return c.json({ success: false, error: 'Worker not found' }, 400);
-  }
-
-  const date = body.date || new Date().toISOString().split('T')[0];
-  const now = new Date();
-  const time =
-    body.time ||
-    `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
-
-  const record = attendanceRecords.find(
-    (r) => r.employeeId === body.employeeId && r.date === date
-  );
-
-  if (body.action === 'CLOCK_IN') {
-    if (record) {
-      record.clockIn = time;
-      record.status = 'PRESENT';
-      return c.json({ success: true, data: record });
+    const worker = await c.var.DB.prepare(
+      "SELECT id, name, departmentId, departmentCode, workingHoursPerDay FROM workers WHERE id = ?",
+    )
+      .bind(body.employeeId)
+      .first<WorkerRow>();
+    if (!worker) {
+      return c.json({ success: false, error: "Worker not found" }, 400);
     }
 
-    const dept = departments.find((d) => d.id === worker.departmentId);
+    const date = body.date || new Date().toISOString().split("T")[0];
+    const now = new Date();
+    const time =
+      body.time ||
+      `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-    const newRecord: AttendanceRecord = {
-      id: generateId(),
-      employeeId: worker.id,
-      employeeName: worker.name,
-      departmentCode: worker.departmentCode,
-      departmentName: dept?.shortName || '',
-      date,
-      clockIn: time,
-      clockOut: null,
-      status: 'PRESENT' as AttendanceStatus,
-      workingMinutes: 0,
-      productionTimeMinutes: 0,
-      efficiencyPct: 0,
-      overtimeMinutes: 0,
-      deptBreakdown: [{ deptCode: worker.departmentCode, minutes: 0, productCode: '' }],
-      notes: '',
-    };
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM attendance_records WHERE employeeId = ? AND date = ?",
+    )
+      .bind(worker.id, date)
+      .first<AttendanceRow>();
 
-    attendanceRecords.push(newRecord);
-    return c.json({ success: true, data: newRecord }, 201);
-  }
+    if (body.action === "CLOCK_IN") {
+      if (existing) {
+        // Update the clock-in time on an existing row.
+        await c.var.DB.prepare(
+          `UPDATE attendance_records
+             SET clockIn = ?, status = 'PRESENT',
+                 updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+           WHERE id = ?`,
+        )
+          .bind(time, existing.id)
+          .run();
+        const row = await c.var.DB.prepare(
+          "SELECT * FROM attendance_records WHERE id = ?",
+        )
+          .bind(existing.id)
+          .first<AttendanceRow>();
+        return c.json({ success: true, data: rowToAttendance(row!) });
+      }
 
-  if (body.action === 'CLOCK_OUT') {
-    if (!record) {
-      return c.json({ success: false, error: 'No clock-in record found for this date' }, 400);
+      const dept = worker.departmentId
+        ? await c.var.DB.prepare(
+            "SELECT id, shortName FROM departments WHERE id = ?",
+          )
+            .bind(worker.departmentId)
+            .first<DepartmentRow>()
+        : null;
+
+      const id = genId();
+      const deptBreakdown = JSON.stringify([
+        {
+          deptCode: worker.departmentCode ?? "",
+          minutes: 0,
+          productCode: "",
+        },
+      ]);
+      await c.var.DB.prepare(
+        `INSERT INTO attendance_records (
+           id, employeeId, employeeName, departmentCode, departmentName,
+           date, clockIn, clockOut, status, workingMinutes, productionTimeMinutes,
+           efficiencyPct, overtimeMinutes, deptBreakdown, notes
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 'PRESENT', 0, 0, 0, 0, ?, '')`,
+      )
+        .bind(
+          id,
+          worker.id,
+          worker.name,
+          worker.departmentCode ?? "",
+          dept?.shortName ?? "",
+          date,
+          time,
+          deptBreakdown,
+        )
+        .run();
+
+      const row = await c.var.DB.prepare(
+        "SELECT * FROM attendance_records WHERE id = ?",
+      )
+        .bind(id)
+        .first<AttendanceRow>();
+      return c.json({ success: true, data: rowToAttendance(row!) }, 201);
     }
 
-    record.clockOut = time;
+    if (body.action === "CLOCK_OUT") {
+      if (!existing) {
+        return c.json(
+          { success: false, error: "No clock-in record found for this date" },
+          400,
+        );
+      }
 
-    if (record.clockIn) {
-      const [inH, inM] = record.clockIn.split(':').map(Number);
-      const [outH, outM] = time.split(':').map(Number);
-      const totalMinutes = outH * 60 + outM - (inH * 60 + inM);
-      record.workingMinutes = Math.max(0, totalMinutes);
-      record.productionTimeMinutes = Math.max(0, Math.round(totalMinutes * 0.85));
-      const standardMinutes = (worker.workingHoursPerDay || 9) * 60;
-      record.efficiencyPct = Math.round((record.productionTimeMinutes / standardMinutes) * 100);
-      record.overtimeMinutes = Math.max(0, totalMinutes - standardMinutes);
-      record.deptBreakdown = [
-        { deptCode: worker.departmentCode, minutes: record.productionTimeMinutes, productCode: '' },
-      ];
+      const clockIn = existing.clockIn;
+      let workingMinutes = 0;
+      let productionTimeMinutes = 0;
+      let efficiencyPct = 0;
+      let overtimeMinutes = 0;
+      let deptBreakdown = existing.deptBreakdown;
+
+      if (clockIn) {
+        const [inH, inM] = clockIn.split(":").map(Number);
+        const [outH, outM] = time.split(":").map(Number);
+        const total = outH * 60 + outM - (inH * 60 + inM);
+        workingMinutes = Math.max(0, total);
+        productionTimeMinutes = Math.max(0, Math.round(total * 0.85));
+        const standardMinutes = (worker.workingHoursPerDay ?? 9) * 60;
+        efficiencyPct = Math.round((productionTimeMinutes / standardMinutes) * 100);
+        overtimeMinutes = Math.max(0, total - standardMinutes);
+        deptBreakdown = JSON.stringify([
+          {
+            deptCode: worker.departmentCode ?? "",
+            minutes: productionTimeMinutes,
+            productCode: "",
+          },
+        ]);
+      }
+
+      await c.var.DB.prepare(
+        `UPDATE attendance_records
+           SET clockOut = ?, workingMinutes = ?, productionTimeMinutes = ?,
+               efficiencyPct = ?, overtimeMinutes = ?, deptBreakdown = ?,
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?`,
+      )
+        .bind(
+          time,
+          workingMinutes,
+          productionTimeMinutes,
+          efficiencyPct,
+          overtimeMinutes,
+          deptBreakdown,
+          existing.id,
+        )
+        .run();
+
+      const row = await c.var.DB.prepare(
+        "SELECT * FROM attendance_records WHERE id = ?",
+      )
+        .bind(existing.id)
+        .first<AttendanceRow>();
+      return c.json({ success: true, data: rowToAttendance(row!) });
     }
 
-    return c.json({ success: true, data: record });
+    return c.json(
+      { success: false, error: "Invalid action. Use CLOCK_IN or CLOCK_OUT" },
+      400,
+    );
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
   }
-
-  return c.json({ success: false, error: 'Invalid action. Use CLOCK_IN or CLOCK_OUT' }, 400);
 });
 
 export default app;

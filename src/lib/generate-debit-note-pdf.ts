@@ -1,7 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import { COMPANY } from "@/lib/constants";
-import { fmtRM as fmtCurrency, fmtDate, amountInWords } from "@/lib/pdf-utils";
+import { fmtRM as fmtCurrency, fmtDate, amountInWords, addHookkaLetterhead } from "@/lib/pdf-utils";
 
 const COMPANY_NAME = COMPANY.HOOKKA.name;
 const COMPANY_REG = COMPANY.HOOKKA.regNo;
@@ -21,21 +21,24 @@ export function generateDebitNotePdf(data: any) {
   const margin = 15;
   let y = margin;
 
-  // --- Company Header ---
-  doc.setFontSize(16);
+  // --- Company Header (logo + legal text) ---
+  addHookkaLetterhead(doc, margin, y - 10, 10);
+  const textX = margin + 26;
+
+  doc.setFontSize(11);
   doc.setFont("helvetica", "bold");
   doc.setTextColor(31, 29, 27);
-  doc.text(COMPANY_NAME, margin, y);
+  doc.text(COMPANY_NAME, textX, y);
   y += 5;
 
   doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text(`Reg No: ${COMPANY_REG}`, margin, y);
+  doc.text(`Reg No: ${COMPANY_REG}`, textX, y);
   y += 4;
-  doc.text(COMPANY_ADDRESS, margin, y, { maxWidth: pageW / 2 - 10 });
+  doc.text(COMPANY_ADDRESS, textX, y, { maxWidth: pageW / 2 - 10 });
   y += 8;
-  doc.text(`Tel: ${COMPANY_TEL}  |  Fax: ${COMPANY_FAX}`, margin, y);
+  doc.text(`Tel: ${COMPANY_TEL}  |  Fax: ${COMPANY_FAX}`, textX, y);
   y += 2;
 
   // Title

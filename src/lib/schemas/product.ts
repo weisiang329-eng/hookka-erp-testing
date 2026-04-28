@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Product schemas. Mirror src/api/routes-d1/products.ts rowToProduct output.
+// Product schemas. Mirror src/api/routes/products.ts rowToProduct output.
 // Loose passthrough so the SPA's pages/products page sees extra fields too.
 // ---------------------------------------------------------------------------
 import { z } from "zod";

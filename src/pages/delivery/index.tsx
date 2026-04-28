@@ -46,7 +46,7 @@ const InvoiceMutationSchema = mutationWithData(InvoiceSchema);
 // ---------------------------------------------------------------------------
 
 // Status enum mirrors the backend's VALID_TRANSITIONS exactly
-// (src/api/routes-d1/delivery-orders.ts:25-30). The vestigial "PENDING"
+// (src/api/routes/delivery-orders.ts:25-30). The vestigial "PENDING"
 // and "DISPATCHED" labels were dropped 2026-04-26 — backend never had
 // either: PENDING was unreachable code, and "DISPATCHED" was a UI alias
 // for "LOADED" that drifted into a separate type member, masking the
@@ -1034,7 +1034,7 @@ export default function DeliveryPage() {
       draft: byStatus.DRAFT ?? 0,
       // The "Dispatched" UI label maps to the LOADED DB status. The DO state
       // machine writes LOADED when a DRAFT is dispatched (see VALID_TRANSITIONS
-      // in src/api/routes-d1/delivery-orders.ts) — there is no DISPATCHED
+      // in src/api/routes/delivery-orders.ts) — there is no DISPATCHED
       // bucket on the server side. Reading byStatus.DISPATCHED would always
       // return 0 and the card would silently misreport the dashboard.
       dispatched: byStatus.LOADED ?? 0,

@@ -1,111 +1,330 @@
-import { Hono } from 'hono';
-import { qcInspections, generateId, getNextQCNo } from '../../lib/mock-data';
-import type { QCInspection, QCDefect } from '../../lib/mock-data';
+// ---------------------------------------------------------------------------
+// D1-backed QC Inspections route.
+//
+// Uses qc_inspections + qc_defects tables (already in 0001_init.sql).
+// Schema stores `created_at` snake; API returns `createdAt` camel.
+// Defects join nested under each inspection — matches the old mock shape.
+// ---------------------------------------------------------------------------
+import { Hono } from "hono";
+import type { Env } from "../worker";
 
-const app = new Hono();
+const app = new Hono<Env>();
+
+type InspectionRow = {
+  id: string;
+  inspectionNo: string;
+  productionOrderId: string | null;
+  poNo: string | null;
+  productCode: string | null;
+  productName: string | null;
+  customerName: string | null;
+  department: string | null;
+  inspectorId: string | null;
+  inspectorName: string | null;
+  result: string | null;
+  notes: string | null;
+  inspectionDate: string | null;
+  createdAt: string | null;
+};
+
+type DefectRow = {
+  id: string;
+  qcInspectionId: string;
+  type: string | null;
+  severity: string | null;
+  description: string | null;
+  actionTaken: string | null;
+};
+
+function rowToInspection(row: InspectionRow, defects: DefectRow[] = []) {
+  return {
+    id: row.id,
+    inspectionNo: row.inspectionNo,
+    productionOrderId: row.productionOrderId ?? "",
+    poNo: row.poNo ?? "",
+    productCode: row.productCode ?? "",
+    productName: row.productName ?? "",
+    customerName: row.customerName ?? "",
+    department: row.department ?? "UPHOLSTERY",
+    inspectorId: row.inspectorId ?? "",
+    inspectorName: row.inspectorName ?? "",
+    result: row.result ?? "PASS",
+    notes: row.notes ?? "",
+    inspectionDate: row.inspectionDate ?? "",
+    createdAt: row.createdAt ?? "",
+    defects: defects
+      .filter((d) => d.qcInspectionId === row.id)
+      .map((d) => ({
+        id: d.id,
+        type: d.type ?? "OTHER",
+        severity: d.severity ?? "MINOR",
+        description: d.description ?? "",
+        actionTaken: d.actionTaken ?? "ACCEPT",
+      })),
+  };
+}
+
+function genId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+async function getNextQCNo(db: D1Database): Promise<string> {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const prefix = `QC-${yymm}-`;
+  const res = await db
+    .prepare("SELECT COUNT(*) as n FROM qc_inspections WHERE inspectionNo LIKE ?")
+    .bind(`${prefix}%`)
+    .first<{ n: number }>();
+  const seq = (res?.n ?? 0) + 1;
+  return `${prefix}${String(seq).padStart(3, "0")}`;
+}
 
 // GET /api/qc-inspections
-app.get('/', (c) => {
-  const department = c.req.query('department');
-  const result = c.req.query('result');
-  const dateFrom = c.req.query('dateFrom');
-  const dateTo = c.req.query('dateTo');
+app.get("/", async (c) => {
+  const department = c.req.query("department");
+  const result = c.req.query("result");
+  const dateFrom = c.req.query("dateFrom");
+  const dateTo = c.req.query("dateTo");
 
-  let filtered = [...qcInspections];
-  if (department) filtered = filtered.filter((i) => i.department === department);
-  if (result) filtered = filtered.filter((i) => i.result === result);
-  if (dateFrom) filtered = filtered.filter((i) => i.inspectionDate >= dateFrom);
-  if (dateTo) filtered = filtered.filter((i) => i.inspectionDate <= dateTo);
+  const clauses: string[] = [];
+  const params: (string | number)[] = [];
+  if (department) {
+    clauses.push("department = ?");
+    params.push(department);
+  }
+  if (result) {
+    clauses.push("result = ?");
+    params.push(result);
+  }
+  if (dateFrom) {
+    clauses.push("inspectionDate >= ?");
+    params.push(dateFrom);
+  }
+  if (dateTo) {
+    clauses.push("inspectionDate <= ?");
+    params.push(dateTo);
+  }
+  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const sql = `SELECT * FROM qc_inspections ${where} ORDER BY created_at DESC`;
 
-  filtered.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  return c.json({ success: true, data: filtered, total: filtered.length });
+  const [inspRes, defRes] = await Promise.all([
+    c.var.DB.prepare(sql)
+      .bind(...params)
+      .all<InspectionRow>(),
+    c.var.DB.prepare("SELECT * FROM qc_defects").all<DefectRow>(),
+  ]);
+  const data = (inspRes.results ?? []).map((r) =>
+    rowToInspection(r, defRes.results ?? []),
+  );
+  return c.json({ success: true, data, total: data.length });
 });
 
 // POST /api/qc-inspections
-app.post('/', async (c) => {
-  const body = await c.req.json();
+app.post("/", async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = genId("qc");
+    const inspectionNo = await getNextQCNo(c.var.DB);
+    const createdAt = new Date().toISOString();
+    const inspectionDate =
+      body.inspectionDate || new Date().toISOString().split("T")[0];
 
-  const defects: QCDefect[] = (body.defects || []).map((d: Partial<QCDefect>) => ({
-    id: generateId(),
-    type: d.type || 'OTHER',
-    severity: d.severity || 'MINOR',
-    description: d.description || '',
-    actionTaken: d.actionTaken || 'ACCEPT',
-  }));
+    await c.var.DB.prepare(
+      `INSERT INTO qc_inspections (id, inspectionNo, productionOrderId, poNo, productCode,
+         productName, customerName, department, inspectorId, inspectorName, result,
+         notes, inspectionDate, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        id,
+        inspectionNo,
+        body.productionOrderId ?? "",
+        body.poNo ?? "",
+        body.productCode ?? "",
+        body.productName ?? "",
+        body.customerName ?? "",
+        body.department ?? "UPHOLSTERY",
+        body.inspectorId ?? "",
+        body.inspectorName ?? "QA Manager",
+        body.result ?? "PASS",
+        body.notes ?? "",
+        inspectionDate,
+        createdAt,
+      )
+      .run();
 
-  const newInspection: QCInspection = {
-    id: generateId(),
-    inspectionNo: getNextQCNo(),
-    productionOrderId: body.productionOrderId || '',
-    poNo: body.poNo || '',
-    productCode: body.productCode || '',
-    productName: body.productName || '',
-    customerName: body.customerName || '',
-    department: body.department || 'UPHOLSTERY',
-    inspectorId: body.inspectorId || '',
-    inspectorName: body.inspectorName || 'QA Manager',
-    result: body.result || 'PASS',
-    defects,
-    notes: body.notes || '',
-    inspectionDate: body.inspectionDate || new Date().toISOString().split('T')[0],
-    createdAt: new Date().toISOString(),
-  };
+    const defectRows: DefectRow[] = [];
+    const defects = Array.isArray(body.defects) ? body.defects : [];
+    if (defects.length) {
+      const stmts = defects.map((d: Record<string, unknown>) => {
+        const did = genId("qcd");
+        const row: DefectRow = {
+          id: did,
+          qcInspectionId: id,
+          type: (d.type as string) ?? "OTHER",
+          severity: (d.severity as string) ?? "MINOR",
+          description: (d.description as string) ?? "",
+          actionTaken: (d.actionTaken as string) ?? "ACCEPT",
+        };
+        defectRows.push(row);
+        return c.var.DB.prepare(
+          "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
+        ).bind(
+          row.id,
+          row.qcInspectionId,
+          row.type,
+          row.severity,
+          row.description,
+          row.actionTaken,
+        );
+      });
+      await c.var.DB.batch(stmts);
+    }
 
-  qcInspections.unshift(newInspection);
-  return c.json({ success: true, data: newInspection }, 201);
+    const created = await c.var.DB.prepare(
+      "SELECT * FROM qc_inspections WHERE id = ?",
+    )
+      .bind(id)
+      .first<InspectionRow>();
+    if (!created) {
+      return c.json({ success: false, error: "Failed to create inspection" }, 500);
+    }
+    return c.json(
+      { success: true, data: rowToInspection(created, defectRows) },
+      201,
+    );
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
 });
 
 // GET /api/qc-inspections/:id
-app.get('/:id', (c) => {
-  const id = c.req.param('id');
-  const inspection = qcInspections.find((i) => i.id === id);
-  if (!inspection) return c.json({ success: false, error: 'QC inspection not found' }, 404);
-  return c.json({ success: true, data: inspection });
+app.get("/:id", async (c) => {
+  const id = c.req.param("id");
+  const [row, defs] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+      .bind(id)
+      .first<InspectionRow>(),
+    c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+      .bind(id)
+      .all<DefectRow>(),
+  ]);
+  if (!row) {
+    return c.json({ success: false, error: "QC inspection not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToInspection(row, defs.results ?? []),
+  });
 });
 
 // PUT /api/qc-inspections/:id
-app.put('/:id', async (c) => {
-  const id = c.req.param('id');
-  const idx = qcInspections.findIndex((i) => i.id === id);
-  if (idx === -1) return c.json({ success: false, error: 'QC inspection not found' }, 404);
+app.put("/:id", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const existing = await c.var.DB.prepare(
+      "SELECT * FROM qc_inspections WHERE id = ?",
+    )
+      .bind(id)
+      .first<InspectionRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "QC inspection not found" }, 404);
+    }
+    const body = await c.req.json();
+    const merged = {
+      result: body.result ?? existing.result,
+      notes: body.notes ?? existing.notes ?? "",
+      department: body.department ?? existing.department,
+    };
+    await c.var.DB.prepare(
+      "UPDATE qc_inspections SET result = ?, notes = ?, department = ? WHERE id = ?",
+    )
+      .bind(merged.result, merged.notes, merged.department, id)
+      .run();
 
-  const body = await c.req.json();
-  const inspection = qcInspections[idx];
+    // Defects replace on full array
+    if (Array.isArray(body.defects)) {
+      await c.var.DB.prepare(
+        "DELETE FROM qc_defects WHERE qcInspectionId = ?",
+      )
+        .bind(id)
+        .run();
+      if (body.defects.length) {
+        const stmts = body.defects.map((d: Record<string, unknown>) =>
+          c.var.DB.prepare(
+            "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
+          ).bind(
+            (d.id as string) || genId("qcd"),
+            id,
+            (d.type as string) ?? "OTHER",
+            (d.severity as string) ?? "MINOR",
+            (d.description as string) ?? "",
+            (d.actionTaken as string) ?? "ACCEPT",
+          ),
+        );
+        await c.var.DB.batch(stmts);
+      }
+    }
 
-  if (body.result !== undefined) inspection.result = body.result;
-  if (body.notes !== undefined) inspection.notes = body.notes;
-  if (body.department !== undefined) inspection.department = body.department;
-  if (body.defects !== undefined) {
-    inspection.defects = body.defects.map((d: Partial<QCDefect>) => ({
-      id: d.id || generateId(),
-      type: d.type || 'OTHER',
-      severity: d.severity || 'MINOR',
-      description: d.description || '',
-      actionTaken: d.actionTaken || 'ACCEPT',
-    }));
-  }
-  if (body.addDefect) {
-    inspection.defects.push({
-      id: generateId(),
-      type: body.addDefect.type || 'OTHER',
-      severity: body.addDefect.severity || 'MINOR',
-      description: body.addDefect.description || '',
-      actionTaken: body.addDefect.actionTaken || 'ACCEPT',
+    if (body.addDefect) {
+      const d = body.addDefect as Record<string, unknown>;
+      await c.var.DB.prepare(
+        "INSERT INTO qc_defects (id, qcInspectionId, type, severity, description, actionTaken) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+        .bind(
+          genId("qcd"),
+          id,
+          (d.type as string) ?? "OTHER",
+          (d.severity as string) ?? "MINOR",
+          (d.description as string) ?? "",
+          (d.actionTaken as string) ?? "ACCEPT",
+        )
+        .run();
+    }
+
+    const [updated, defs] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+        .bind(id)
+        .first<InspectionRow>(),
+      c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+        .bind(id)
+        .all<DefectRow>(),
+    ]);
+    if (!updated) {
+      return c.json({ success: false, error: "QC inspection not found" }, 404);
+    }
+    return c.json({
+      success: true,
+      data: rowToInspection(updated, defs.results ?? []),
     });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
   }
-
-  qcInspections[idx] = inspection;
-  return c.json({ success: true, data: inspection });
 });
 
 // DELETE /api/qc-inspections/:id
-app.delete('/:id', (c) => {
-  const id = c.req.param('id');
-  const idx = qcInspections.findIndex((i) => i.id === id);
-  if (idx === -1) return c.json({ success: false, error: 'QC inspection not found' }, 404);
-  const removed = qcInspections.splice(idx, 1)[0];
-  return c.json({ success: true, data: removed });
+app.delete("/:id", async (c) => {
+  const id = c.req.param("id");
+  const [row, defs] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM qc_inspections WHERE id = ?")
+      .bind(id)
+      .first<InspectionRow>(),
+    c.var.DB.prepare("SELECT * FROM qc_defects WHERE qcInspectionId = ?")
+      .bind(id)
+      .all<DefectRow>(),
+  ]);
+  if (!row) {
+    return c.json({ success: false, error: "QC inspection not found" }, 404);
+  }
+  await c.var.DB.prepare("DELETE FROM qc_inspections WHERE id = ?")
+    .bind(id)
+    .run();
+  // qc_defects cascades via FK
+  return c.json({
+    success: true,
+    data: rowToInspection(row, defs.results ?? []),
+  });
 });
 
 export default app;

@@ -60,6 +60,7 @@ const ProcurementPricing = lazy(() => import('./pages/procurement/pricing'))
 const Inventory = lazy(() => import('./pages/inventory'))
 const Fabrics = lazy(() => import('./pages/inventory/fabrics'))
 const StockValue = lazy(() => import('./pages/inventory/stock-value'))
+const StockAdjustments = lazy(() => import('./pages/inventory/adjustments'))
 
 // BOM
 const BOM = lazy(() => import('./pages/bom'))
@@ -105,6 +106,7 @@ const AdminHealth = lazy(() => import('./pages/admin/health'))
 const Consignment = lazy(() => import('./pages/consignment'))
 const ConsignmentDetail = lazy(() => import('./pages/consignment/detail'))
 const ConsignmentCreate = lazy(() => import('./pages/consignment/create'))
+const ConsignmentEdit = lazy(() => import('./pages/consignment/edit'))
 const ConsignmentNote = lazy(() => import('./pages/consignment/note'))
 const ConsignmentReturn = lazy(() => import('./pages/consignment/return'))
 
@@ -252,6 +254,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/inventory', element: <S><Inventory /></S> },
   { path: '/inventory/fabrics', element: <S><Fabrics /></S> },
   { path: '/inventory/stock-value', element: <S><StockValue /></S> },
+  { path: '/inventory/adjustments', element: <S><StockAdjustments /></S> },
 
   // BOM
   { path: '/bom', element: <S><BOM /></S> },
@@ -329,6 +332,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/consignment', element: <S><Consignment /></S> },
   { path: '/consignment/:id', element: <S><ConsignmentDetail /></S> },
   { path: '/consignment/create', element: <S><ConsignmentCreate /></S> },
+  { path: '/consignment/:id/edit', element: <S><ConsignmentEdit /></S> },
   { path: '/consignment/note', element: <S><ConsignmentNote /></S> },
   { path: '/consignment/return', element: <S><ConsignmentReturn /></S> },
 

@@ -40,7 +40,7 @@ interface LedgerEntryRow extends LedgerEntryInput {
   actorUserId: string | null;
 }
 
-// We accept a D1Database (or the d1-compat shim that conforms to the
+// We accept a D1Database (or the supabase-compat shim that conforms to the
 // same surface — both expose prepare()/bind()/first()/batch() with
 // identical signatures, so the D1 type alias is sufficient).
 type DbLike = D1Database;

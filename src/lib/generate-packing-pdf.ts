@@ -1,6 +1,7 @@
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { DeliveryOrder } from "@/lib/mock-data";
+import { addHookkaLetterhead } from "@/lib/pdf-utils";
 
 function fmtDate(iso: string): string {
   if (!iso) return "-";
@@ -19,14 +20,17 @@ export function generatePackingListPdf(order: DeliveryOrder) {
   let y = margin;
 
   // --- Header (compact) ---
+  addHookkaLetterhead(doc, margin, 6, 8);
+  const textX = margin + 21;
+
   doc.setTextColor(0, 0, 0);
-  doc.setFontSize(16);
+  doc.setFontSize(13);
   doc.setFont("helvetica", "bold");
-  doc.text("PACKING LIST", margin, 12);
-  doc.setFontSize(9);
+  doc.text("PACKING LIST", textX, 12);
+  doc.setFontSize(8);
   doc.setFont("helvetica", "normal");
   doc.setTextColor(80, 80, 80);
-  doc.text("HOOKKA INDUSTRIES SDN BHD", margin, 18);
+  doc.text("HOOKKA INDUSTRIES SDN BHD", textX, 17);
 
   // DO reference on right
   doc.setFontSize(12);

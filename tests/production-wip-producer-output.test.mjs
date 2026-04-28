@@ -26,7 +26,7 @@ import { resolve } from 'node:path';
 
 const SRC = resolve(
   process.cwd(),
-  'src/api/routes-d1/production-orders.ts',
+  'src/api/routes/production-orders.ts',
 );
 
 function read() {

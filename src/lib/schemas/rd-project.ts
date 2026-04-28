@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// R&D project schemas. Mirror src/api/routes-d1/rd-projects.ts rowToProject.
+// R&D project schemas. Mirror src/api/routes/rd-projects.ts rowToProject.
 // Many fields are JSON-parsed from TEXT columns and the SPA introspects them
 // freely, so these are loose unknown[] arrays with passthrough.
 // ---------------------------------------------------------------------------

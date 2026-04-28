@@ -39,6 +39,7 @@ import {
   Shirt,
   Route,
   DollarSign,
+  Scale,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -116,6 +117,7 @@ const navigationGroups: NavGroup[] = [
       { name: "Inventory", href: "/inventory", icon: Package },
       { name: "Fabrics", href: "/inventory/fabrics", icon: Shirt },
       { name: "Stock Value", href: "/inventory/stock-value", icon: Calculator },
+      { name: "Stock Adjustments", href: "/inventory/adjustments", icon: Scale },
       { name: "Warehouse", href: "/warehouse", icon: Warehouse },
     ],
   },
@@ -421,8 +423,11 @@ export function Sidebar() {
     if (href === "/inventory/fabrics") {
       return pathname === "/inventory/fabrics" || pathname.startsWith("/inventory/fabrics/");
     }
+    if (href === "/inventory/adjustments") {
+      return pathname === "/inventory/adjustments" || pathname.startsWith("/inventory/adjustments/");
+    }
     if (href === "/inventory") {
-      return pathname === "/inventory" || (pathname.startsWith("/inventory/") && !pathname.startsWith("/inventory/stock-value") && !pathname.startsWith("/inventory/fabrics"));
+      return pathname === "/inventory" || (pathname.startsWith("/inventory/") && !pathname.startsWith("/inventory/stock-value") && !pathname.startsWith("/inventory/fabrics") && !pathname.startsWith("/inventory/adjustments"));
     }
     if (href === "/accounting/cash-flow") {
       return pathname === "/accounting/cash-flow" || pathname.startsWith("/accounting/cash-flow/");
@@ -491,15 +496,17 @@ export function Sidebar() {
       {/* Brand / Logo */}
       <div className="flex h-14 items-center justify-between px-3 border-b border-white/10 shrink-0">
         {!collapsed ? (
-          <Link to="/dashboard" className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded bg-gradient-to-br from-[#8B7A52] to-[#6B5C32] flex items-center justify-center text-sm font-bold shrink-0">
-              H
-            </div>
-            <span className="text-[18px] font-[800] tracking-[2px]">HOOKKA</span>
+          <Link to="/dashboard" className="flex items-center px-1">
+            <img
+              src="/hookka-logo.png"
+              alt="Hookka 合家"
+              className="h-7 w-auto"
+              style={{ filter: "brightness(0) invert(1)" }}
+            />
           </Link>
         ) : (
           <Link to="/dashboard" className="mx-auto">
-            <div className="h-8 w-8 rounded bg-gradient-to-br from-[#8B7A52] to-[#6B5C32] flex items-center justify-center text-sm font-bold">
+            <div className="h-8 w-8 rounded bg-white/10 flex items-center justify-center text-sm font-[900] tracking-[1px]">
               H
             </div>
           </Link>

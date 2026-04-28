@@ -102,6 +102,11 @@ const PrintDO = forwardRef<HTMLDivElement, PrintDOProps>(({ data, mode }, ref) =
 
       {/* Company Header */}
       <div style={{ textAlign: "center", marginBottom: "8mm", borderBottom: "2px solid #000", paddingBottom: "4mm" }}>
+        <img
+          src="/hookka-logo.png"
+          alt="Hookka 合家"
+          style={{ height: "16mm", width: "auto", display: "inline-block", marginBottom: "3mm" }}
+        />
         <h1 style={{ fontSize: "18px", fontWeight: "bold", margin: "0 0 2px 0" }}>HOOKKA INDUSTRIES SDN BHD</h1>
         <p style={{ fontSize: "9px", margin: "0", color: "#333" }}>
           Lot 7585, Jalan Perindustrian Bukit Minyak 7, Taman Perindustrian Bukit Minyak, 14100 Simpang Ampat, Penang

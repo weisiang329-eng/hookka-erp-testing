@@ -17,6 +17,7 @@ import {
 } from "@/lib/mock-data";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { useActiveTabDirty } from "@/contexts/tabs-context";
@@ -282,7 +283,9 @@ export default function EditSalesOrderPage() {
   // eligibility check is a thin SQL-only endpoint that aggregates earliest
   // PO start + any-completed-JC across the SO's POs so the page doesn't
   // need to refetch the (much heavier) production-orders payload.
-  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder }>(id ? `/api/sales-orders/${id}` : null);
+  // lockReason comes back on /:id and surfaces the cascade-lock reason
+  // (e.g. "PO X is COMPLETED") so the page can disable Save + show banner.
+  const { data: orderResp } = useCachedJson<{ success?: boolean; data?: SalesOrder; lockReason?: string | null }>(id ? `/api/sales-orders/${id}` : null);
   const { data: eligibilityResp } = useCachedJson<EditEligibility>(id ? `/api/sales-orders/${id}/edit-eligibility` : null);
   useEffect(() => {
     const d = orderResp;
@@ -550,8 +553,16 @@ export default function EditSalesOrderPage() {
 
   const selectedCustomer = customers.find(c => c.id === customerId);
 
+  // Cascade lock — disable Save when the SO has a downstream PO COMPLETED
+  // (or any other lock the backend reports). Also forbid handleSubmit by
+  // setting the disabled flag; the backend re-validates regardless.
+  const lockReason = orderResp?.lockReason ?? null;
+  const isLocked = !!lockReason;
+
   return (
     <div className="space-y-6">
+      <LockBanner reason={lockReason} />
+
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" onClick={() => navigate(`/sales/${id}`)}>
           <ArrowLeft className="h-5 w-5" />
@@ -561,7 +572,12 @@ export default function EditSalesOrderPage() {
           <p className="text-xs text-[#6B7280]">Modify sales order details and line items</p>
         </div>
         <Button variant="outline" onClick={() => navigate(`/sales/${id}`)}>Cancel</Button>
-        <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+        <Button
+          variant="primary"
+          onClick={handleSubmit}
+          disabled={saving || isLocked}
+          title={isLocked ? lockReason ?? undefined : undefined}
+        >
           <Save className="h-4 w-4" />
           {saving ? "Saving..." : "Save Changes"}
         </Button>

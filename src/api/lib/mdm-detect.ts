@@ -296,7 +296,7 @@ export async function detectSupplierDuplicates(
 // Convenience: detect + insert.  Idempotent — UNIQUE (resourceType,
 // primaryId, candidateId) on mdm_review_queue means re-running just skips
 // the conflict.  We use INSERT ... ON CONFLICT DO NOTHING (Postgres) since
-// SQLite-style INSERT OR IGNORE is rewritten by d1-compat.
+// SQLite-style INSERT OR IGNORE is rewritten by supabase-compat.
 // ---------------------------------------------------------------------------
 
 function genId(): string {

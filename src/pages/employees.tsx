@@ -1824,6 +1824,10 @@ type WorkerJobCardRow = {
   productionTimeMinutes: number;
   status: string;
   picSlot: "PIC1" | "PIC2" | "";
+  // True when both PIC1 and PIC2 are filled on this JC. Halve the
+  // worker's contribution to total Production Hrs only in that case;
+  // a solo PIC (either slot, no partner) gets the full minutes.
+  hasBothPics?: boolean;
 };
 
 function EmployeeDetailTab({
@@ -1899,12 +1903,17 @@ function EmployeeDetailTab({
     (s, r) => s + r.productionTimeMinutes,
     0
   );
-  // Job-card production minutes — halve PIC2 contribution to match the
-  // existing convention used elsewhere (PIC2 is "assist", not solo work).
+  // Job-card production minutes - halve only when BOTH PIC slots are
+  // filled (worker shared the JC with a partner). Solo PIC (either slot,
+  // no partner) gets the full minutes. Bug fix 2026-04-28: previously
+  // the rule was "PIC2 always halves", which (a) double-counted when
+  // both slots were filled (PIC1 got full + PIC2 got half = 1.5x total)
+  // and (b) under-counted solo PIC2 (got half instead of full). Backend
+  // /api/job-cards now exposes hasBothPics for this exact decision.
   const totalProdMinsJc = useMemo(() => {
     return workerJcs.reduce((s, r) => {
       const m = r.productionTimeMinutes || 0;
-      return s + (r.picSlot === "PIC2" ? m / 2 : m);
+      return s + (r.hasBothPics ? m / 2 : m);
     }, 0);
   }, [workerJcs]);
   // Production Hrs stays attendance + JC: working_hour_entries records

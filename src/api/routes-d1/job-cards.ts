@@ -127,19 +127,28 @@ app.get("/", async (c) => {
     .all<WorkerJcRow>();
 
   const rows = res.results ?? [];
-  const data = rows.map((r) => ({
-    id: r.id,
-    productionOrderId: r.productionOrderId,
-    poNo: r.poNo ?? "",
-    productCode: r.productCode ?? "",
-    departmentCode: r.departmentCode ?? "",
-    wipCode: r.wipCode ?? "",
-    wipLabel: r.wipLabel ?? "",
-    completedDate: r.completedDate,
-    productionTimeMinutes: r.productionTimeMinutes ?? 0,
-    status: r.status,
-    picSlot: r.pic1Id === picId ? "PIC1" : r.pic2Id === picId ? "PIC2" : "",
-  }));
+  const data = rows.map((r) => {
+    const pic1Filled = !!(r.pic1Id && r.pic1Id !== "");
+    const pic2Filled = !!(r.pic2Id && r.pic2Id !== "");
+    return {
+      id: r.id,
+      productionOrderId: r.productionOrderId,
+      poNo: r.poNo ?? "",
+      productCode: r.productCode ?? "",
+      departmentCode: r.departmentCode ?? "",
+      wipCode: r.wipCode ?? "",
+      wipLabel: r.wipLabel ?? "",
+      completedDate: r.completedDate,
+      productionTimeMinutes: r.productionTimeMinutes ?? 0,
+      status: r.status,
+      picSlot: r.pic1Id === picId ? "PIC1" : r.pic2Id === picId ? "PIC2" : "",
+      // hasBothPics tells the FE whether to halve this worker's contribution
+      // when summing per-employee production minutes. When BOTH PIC slots
+      // are filled the worker shares the JC with a partner -> half each;
+      // when only one slot is filled (solo), full minutes go to that one.
+      hasBothPics: pic1Filled && pic2Filled,
+    };
+  });
 
   return c.json({ success: true, data });
 });
@@ -183,6 +192,14 @@ app.get("/summary", async (c) => {
   // productionMinutes, jc_count -> jcCount). Bug fix 2026-04-28: this
   // endpoint silently returned 0 productionMinutes for every worker because
   // r.productionMinutes was undefined.
+  // PIC contribution rule (mirrored on FE):
+  //   - Both slots filled  -> each worker gets productionTimeMinutes / 2
+  //   - Only one slot filled (solo) -> that worker gets full minutes
+  // Bug fix 2026-04-28: previously the PIC2 branch required pic1Id IS NOT
+  // NULL too, so a JC where the operator put the worker only in pic2 (no
+  // pic1) was invisible to /summary entirely. Now PIC2 stands alone and
+  // solo-PIC2 contributes the full minutes, matching how /api/job-cards
+  // already returns the row.
   const sql = `
     SELECT wid AS worker_id,
            SUM(contrib_min) AS production_minutes,
@@ -202,10 +219,12 @@ app.get("/summary", async (c) => {
         UNION ALL
 
         SELECT pic2Id AS wid,
-               productionTimeMinutes / 2.0 AS contrib_min
+               CASE WHEN pic1Id IS NOT NULL AND pic1Id != ''
+                    THEN productionTimeMinutes / 2.0
+                    ELSE productionTimeMinutes
+               END AS contrib_min
           FROM job_cards
          WHERE pic2Id IS NOT NULL AND pic2Id != ''
-           AND pic1Id IS NOT NULL AND pic1Id != ''
            AND status IN ('COMPLETED','TRANSFERRED')
            AND completedDate IS NOT NULL
            AND completedDate >= ? AND completedDate <= ?

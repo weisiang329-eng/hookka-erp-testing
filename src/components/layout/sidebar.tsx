@@ -143,10 +143,12 @@ const navigationGroups: NavGroup[] = [
     label: "QUALITY",
     items: [
       { name: "QC / Quality", href: "/quality", icon: ShieldCheck },
-      // Phase 3 — Service Orders (换货服务): customer-reported defects on
-      // already-shipped SOs/COs. Distinct from the QC inspection module
-      // (Phase 1) which is internal-pre-ship; this one is post-ship.
-      { name: "Service Orders", href: "/service-orders", icon: Wrench },
+      // Service Cases (parent) — every customer-facing service interaction
+      // logs here. A case may spawn 0+ Service Orders (the heavy
+      // rework/swap/repair flow) under it. Refactored from sibling-table to
+      // parent-child in migration 0074. Distinct from the QC inspection
+      // module (Phase 1) which is internal-pre-ship; this one is post-ship.
+      { name: "Service Cases", href: "/service-cases", icon: Wrench },
     ],
   },
   {

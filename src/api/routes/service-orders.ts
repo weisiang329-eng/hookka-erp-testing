@@ -75,8 +75,7 @@ const VALID_STATUSES: Status[] = [
 // validator. Mode is checked at the call site — REPRODUCE goes to
 // IN_PRODUCTION, STOCK_SWAP goes to RESERVED, REPAIR goes to IN_REPAIR;
 // each mode has its own one-step path out of OPEN.
-// Adjacency for kind='RESOLUTION' (the rework/swap/repair flow).
-const STATUS_TRANSITIONS_RESOLUTION: Record<Status, Status[]> = {
+const STATUS_TRANSITIONS: Record<Status, Status[]> = {
   OPEN: ["IN_PRODUCTION", "RESERVED", "IN_REPAIR", "CANCELLED"],
   IN_PRODUCTION: ["READY_TO_SHIP", "CANCELLED"],
   RESERVED: ["READY_TO_SHIP", "CANCELLED"],
@@ -87,68 +86,25 @@ const STATUS_TRANSITIONS_RESOLUTION: Record<Status, Status[]> = {
   CANCELLED: [],
 };
 
-// Adjacency for kind='RECORD' (Service Case — log only). No production /
-// reservation / shipping states; the case is open until the operator marks
-// it CLOSED, optionally CANCELLED if it was logged in error.
-const STATUS_TRANSITIONS_RECORD: Record<Status, Status[]> = {
-  OPEN: ["CLOSED", "CANCELLED"],
-  IN_PRODUCTION: [],
-  RESERVED: [],
-  IN_REPAIR: [],
-  READY_TO_SHIP: [],
-  DELIVERED: [],
-  CLOSED: [],
-  CANCELLED: [],
-};
-
-function statusTransitionsFor(kind: ServiceKind | null | undefined) {
-  return kind === "RECORD" ? STATUS_TRANSITIONS_RECORD : STATUS_TRANSITIONS_RESOLUTION;
-}
-
-type ServiceKind = "RESOLUTION" | "RECORD";
 type SourceType = "SO" | "CO" | "EXTERNAL";
-type RootCauseCategory =
-  | "PRODUCTION"
-  | "DESIGN"
-  | "MATERIAL"
-  | "PROCESS"
-  | "CUSTOMER"
-  | "TRANSPORT"
-  | "OTHER";
-type PreventionStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
-
-const VALID_KINDS: ServiceKind[] = ["RESOLUTION", "RECORD"];
-const VALID_SOURCE_TYPES: SourceType[] = ["SO", "CO", "EXTERNAL"];
-const VALID_ROOT_CAUSE: RootCauseCategory[] = [
-  "PRODUCTION", "DESIGN", "MATERIAL", "PROCESS", "CUSTOMER", "TRANSPORT", "OTHER",
-];
-const VALID_PREVENTION_STATUS: PreventionStatus[] = [
-  "PENDING", "IN_PROGRESS", "DONE", "NOT_NEEDED",
-];
 
 type ServiceOrderRow = {
   id: string;
   serviceOrderNo: string;
-  // 0073: kind discriminates Service Case (RECORD) from Service Order (RESOLUTION)
-  kind: ServiceKind;
-  // 0073: 'EXTERNAL' added for old / paper orders not in the ERP
+  // 0074: parent service_cases.id (NOT NULL). All case-level fields
+  // (issue, photos, RCA, prevention, customer) live on the case, not
+  // duplicated here.
+  caseId: string;
+  // Source order — denormalised from the parent case for convenience.
+  // SO/CO/EXTERNAL.
   sourceType: SourceType;
-  // 0073: nullable for EXTERNAL
   sourceId: string | null;
   sourceNo: string | null;
   customerId: string;
   customerName: string;
-  // Nullable since 0072 — case can be opened with mode TBD
+  // Nullable since 0072 — order can start mode-less ("Decide later")
   mode: Mode | null;
   status: Status;
-  issueDescription: string | null;
-  issuePhotos: string | null;
-  // 0073: root-cause + prevention loop
-  rootCauseCategory: RootCauseCategory | null;
-  rootCauseNotes: string | null;
-  preventionAction: string | null;
-  preventionStatus: PreventionStatus | null;
-  preventionOwner: string | null;
   createdBy: string | null;
   createdByName: string | null;
   createdAt: string | null;
@@ -223,19 +179,10 @@ function rowToApi(
   lines: ServiceOrderLineRow[],
   returns: ServiceOrderReturnRow[],
 ) {
-  let photos: string[] = [];
-  if (row.issuePhotos) {
-    try {
-      const parsed = JSON.parse(row.issuePhotos);
-      if (Array.isArray(parsed)) photos = parsed.map(String);
-    } catch {
-      // malformed photos JSON — ignore silently, the form lets users fix
-    }
-  }
   return {
     id: row.id,
     serviceOrderNo: row.serviceOrderNo,
-    kind: row.kind ?? "RESOLUTION",
+    caseId: row.caseId,
     sourceType: row.sourceType,
     sourceId: row.sourceId ?? "",
     sourceNo: row.sourceNo ?? "",
@@ -243,13 +190,6 @@ function rowToApi(
     customerName: row.customerName,
     mode: row.mode,
     status: row.status,
-    issueDescription: row.issueDescription ?? "",
-    issuePhotos: photos,
-    rootCauseCategory: row.rootCauseCategory,
-    rootCauseNotes: row.rootCauseNotes ?? "",
-    preventionAction: row.preventionAction ?? "",
-    preventionStatus: row.preventionStatus ?? "PENDING",
-    preventionOwner: row.preventionOwner ?? "",
     createdBy: row.createdBy ?? "",
     createdByName: row.createdByName ?? "",
     createdAt: row.createdAt ?? "",
@@ -427,73 +367,72 @@ app.get("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /api/service-orders — create.
+// POST /api/service-orders — spawn a service order from a parent case.
+//
+// Per migration 0074: every service order belongs to a parent service_case.
+// The case carries the customer + issue + photos + RCA fields; the order
+// carries only resolution-specific data (mode, lines, returns).
 //
 // Body: {
-//   sourceType: 'SO'|'CO',
-//   sourceId: string,
-//   mode: 'REPRODUCE'|'STOCK_SWAP'|'REPAIR',
-//   issueDescription?: string,
-//   issuePhotos?: string[],
+//   caseId: string,                          // REQUIRED — parent case id
+//   mode?: 'REPRODUCE'|'STOCK_SWAP'|'REPAIR' | null,
 //   notes?: string,
 //   createdBy?: string, createdByName?: string,
 //   lines: [{
-//     sourceLineId?: string,        // sales_order_items.id / co item id
+//     sourceLineId?: string,
 //     productId?: string, productCode?: string, productName?: string,
 //     qty: number,
 //     issueSummary?: string,
-//     // Mode B only: which fg_batch to swap.
-//     resolutionFgBatchId?: string,
+//     resolutionFgBatchId?: string,         // STOCK_SWAP only
 //   }],
 // }
 //
 // Side effects per mode:
-//   REPRODUCE — for each line, INSERT a production_orders row with
-//               service_order_id set + cost_category='REPAIR'. Status
-//               flips to IN_PRODUCTION.
-//   STOCK_SWAP — for each line, validate the fg_batch exists and has
-//                remaining_qty >= line.qty, then UPDATE remaining_qty.
-//                Status flips to RESERVED.
-//   REPAIR     — no side effects beyond the SVC + lines rows. The user
-//                will record returns via POST /:id/returns later.
-//                Status stays OPEN until a return is logged, then the
-//                user manually advances to IN_REPAIR.
+//   REPRODUCE  — INSERT production_orders rows (cost_category='REPAIR'),
+//                status flips to IN_PRODUCTION.
+//   STOCK_SWAP — decrement fg_batches.remainingQty, status flips to RESERVED.
+//   REPAIR     — no side effects beyond the SVC + lines rows; status stays
+//                OPEN until a return is logged.
+//   null       — "Decide later"; no side effects, status stays OPEN.
+//                Pick mode later via PUT /:id/mode.
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
 
-    // ---- validate kind / sourceType / mode ----
-    const kind = (body.kind as ServiceKind | undefined) ?? "RESOLUTION";
-    if (!VALID_KINDS.includes(kind)) {
+    const caseId = String(body.caseId ?? "").trim();
+    if (!caseId) {
+      return c.json({ success: false, error: "caseId is required" }, 400);
+    }
+
+    // Load the parent case for source / customer info.
+    type CaseRow = {
+      id: string;
+      sourceType: SourceType;
+      sourceId: string | null;
+      sourceNo: string | null;
+      customerId: string | null;
+      customerName: string;
+      customerState: string | null;
+      status: string;
+    };
+    const caseRow = await c.var.DB
+      .prepare(
+        "SELECT id, sourceType, sourceId, sourceNo, customerId, customerName, customerState, status FROM service_cases WHERE id = ?",
+      )
+      .bind(caseId)
+      .first<CaseRow>();
+    if (!caseRow) {
+      return c.json({ success: false, error: `Service case ${caseId} not found` }, 404);
+    }
+    if (caseRow.status === "CANCELLED" || caseRow.status === "CLOSED") {
       return c.json(
-        { success: false, error: "kind must be 'RESOLUTION' or 'RECORD'" },
-        400,
+        { success: false, error: `Cannot spawn an order on a ${caseRow.status} case. Reopen the case first.` },
+        409,
       );
     }
 
-    const sourceType = body.sourceType as string;
-    if (!VALID_SOURCE_TYPES.includes(sourceType as SourceType)) {
-      return c.json(
-        { success: false, error: "sourceType must be 'SO', 'CO', or 'EXTERNAL'" },
-        400,
-      );
-    }
-
-    // mode is OPTIONAL at create-time (per design 2026-04-28: open the case
-    // immediately when the customer reports the defect; pick the resolution
-    // mode later via PUT /:id/mode). null/undefined → status='OPEN', no
-    // side-effects. If a mode IS supplied, it must be valid.
-    //
-    // For kind=RECORD: mode MUST stay null. A "record-only" service has no
-    // resolution flow (no rework / swap / repair), it's just a logged event.
-    let mode = (body.mode as Mode | null | undefined) ?? null;
-    if (kind === "RECORD" && mode !== null) {
-      // Don't 400 — silently coerce to null. Frontend hides the picker for
-      // RECORD anyway, so a non-null mode here is a stale state, not a user
-      // intent we should honour.
-      mode = null;
-    }
+    const mode = (body.mode as Mode | null | undefined) ?? null;
     if (mode !== null && !VALID_MODES.includes(mode)) {
       return c.json(
         { success: false, error: "mode must be REPRODUCE, STOCK_SWAP, REPAIR, or null" },
@@ -501,10 +440,9 @@ app.post("/", async (c) => {
       );
     }
 
-    // ---- source ----
-    // For SO/CO we still validate the order exists and is shipped. For
-    // EXTERNAL we trust the operator to type customerName + a free-text
-    // reference (no DB to verify against).
+    // For SO/CO: re-validate the source order is still shipped (user could
+    // have spawned an order weeks after opening the case; meanwhile the SO
+    // could have been cancelled). EXTERNAL skips the check entirely.
     type Source = {
       id: string;
       customerId: string;
@@ -515,44 +453,41 @@ app.post("/", async (c) => {
       items: Array<{ id: string; productId: string | null; productCode: string | null; productName: string | null; quantity: number }>;
     };
     let source: Source;
-    let sourceId: string | null = (body.sourceId as string) || null;
-
-    if (sourceType === "EXTERNAL") {
-      const customerName = String(body.customerName ?? "").trim();
-      if (!customerName) {
+    if (caseRow.sourceType === "EXTERNAL") {
+      source = {
+        id: "external",
+        customerId: caseRow.customerId ?? "",
+        customerName: caseRow.customerName,
+        customerState: caseRow.customerState,
+        companyOrderId: null,
+        status: "EXTERNAL",
+        items: [],
+      };
+    } else {
+      if (!caseRow.sourceId) {
         return c.json(
-          { success: false, error: "customerName is required for EXTERNAL source" },
+          { success: false, error: "Parent case has no sourceId — fix the case first" },
           400,
         );
       }
-      sourceId = null;
-      source = {
-        id: "external",
-        customerId: (body.customerId as string) || "",
-        customerName,
-        customerState: (body.customerState as string) || null,
-        companyOrderId: (body.externalRef as string) || null,
-        status: "EXTERNAL",
-        items: [], // not used for EXTERNAL — operator types lines by hand
-      };
-    } else {
-      if (!sourceId) {
-        return c.json({ success: false, error: "sourceId is required for SO/CO" }, 400);
-      }
-      const loaded = await loadSourceOrder(c.var.DB, sourceType as "SO" | "CO", sourceId);
+      const loaded = await loadSourceOrder(
+        c.var.DB,
+        caseRow.sourceType as "SO" | "CO",
+        caseRow.sourceId,
+      );
       if (!loaded) {
         return c.json(
-          { success: false, error: `Source ${sourceType} ${sourceId} not found` },
+          { success: false, error: `Source ${caseRow.sourceType} ${caseRow.sourceId} not found` },
           404,
         );
       }
       const shippedSet =
-        sourceType === "SO" ? SHIPPED_STATUSES_SO : SHIPPED_STATUSES_CO;
+        caseRow.sourceType === "SO" ? SHIPPED_STATUSES_SO : SHIPPED_STATUSES_CO;
       if (!shippedSet.includes(loaded.status)) {
         return c.json(
           {
             success: false,
-            error: `Source order is in ${loaded.status} status. Only shipped orders (status in ${shippedSet.join(",")}) can have a Service Order created.`,
+            error: `Source order is in ${loaded.status} status. Only shipped orders can have a service order spawned.`,
           },
           409,
         );
@@ -560,13 +495,13 @@ app.post("/", async (c) => {
       source = loaded as Source;
     }
 
+    const sourceType: SourceType = caseRow.sourceType;
+    const sourceId = caseRow.sourceId;
+
     const rawLines = Array.isArray(body.lines) ? body.lines : [];
-    // RECORD allows zero lines (e.g., complaint logged without a specific
-    // product). RESOLUTION still requires at least one — the resolution
-    // mode wouldn't have anything to operate on otherwise.
-    if (kind === "RESOLUTION" && rawLines.length === 0) {
+    if (rawLines.length === 0) {
       return c.json(
-        { success: false, error: "At least one line is required for resolution-kind service orders" },
+        { success: false, error: "At least one line is required" },
         400,
       );
     }
@@ -693,32 +628,17 @@ app.post("/", async (c) => {
 
     // ---- assemble all writes ----
     const stmts: D1PreparedStatement[] = [];
-    const photosJson = Array.isArray(body.issuePhotos)
-      ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
-      : null;
-
-    const rcCategory = body.rootCauseCategory as RootCauseCategory | null | undefined;
-    if (rcCategory && !VALID_ROOT_CAUSE.includes(rcCategory)) {
-      return c.json({ success: false, error: "rootCauseCategory invalid" }, 400);
-    }
-    const pStatus =
-      (body.preventionStatus as PreventionStatus | undefined) ?? "PENDING";
-    if (!VALID_PREVENTION_STATUS.includes(pStatus)) {
-      return c.json({ success: false, error: "preventionStatus invalid" }, 400);
-    }
 
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO service_orders (id, serviceOrderNo, kind, sourceType, sourceId,
-           sourceNo, customerId, customerName, mode, status, issueDescription,
-           issuePhotos, rootCauseCategory, rootCauseNotes, preventionAction,
-           preventionStatus, preventionOwner, createdBy, createdByName,
-           created_at, closedAt, notes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+        `INSERT INTO service_orders (id, serviceOrderNo, caseId, sourceType, sourceId,
+           sourceNo, customerId, customerName, mode, status,
+           createdBy, createdByName, created_at, closedAt, notes)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
       ).bind(
         id,
         serviceOrderNo,
-        kind,
+        caseId,
         sourceType,
         sourceId,
         source.companyOrderId,
@@ -726,18 +646,21 @@ app.post("/", async (c) => {
         source.customerName,
         mode,
         initialStatus,
-        (body.issueDescription as string) ?? null,
-        photosJson,
-        rcCategory ?? null,
-        (body.rootCauseNotes as string) ?? null,
-        (body.preventionAction as string) ?? null,
-        pStatus,
-        (body.preventionOwner as string) ?? null,
         (body.createdBy as string) ?? null,
         (body.createdByName as string) ?? null,
         nowIso,
         (body.notes as string) ?? null,
       ),
+    );
+
+    // The case status moves to IN_PROGRESS the moment a child order spawns
+    // (only if it was OPEN — don't downgrade a CLOSED/CANCELLED case).
+    stmts.push(
+      c.var.DB
+        .prepare(
+          "UPDATE service_cases SET status = 'IN_PROGRESS' WHERE id = ? AND status = 'OPEN'",
+        )
+        .bind(caseId),
     );
 
     for (const l of lineRows) {
@@ -805,9 +728,12 @@ app.post("/", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// PUT /api/service-orders/:id — edit metadata (issue_description, notes).
-// Status changes go through the dedicated /:id/status endpoint to keep the
-// transition validator in one place.
+// PUT /api/service-orders/:id — edit order-level metadata (notes only now).
+//
+// Issue / photos / RCA / prevention all moved to the parent service_case in
+// migration 0074 — edit those via PUT /api/service-cases/:caseId. The order
+// is purely the resolution-action row; only `notes` is order-specific.
+// Status changes go through PUT /:id/status; mode changes through /:id/mode.
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
@@ -822,58 +748,12 @@ app.put("/:id", async (c) => {
     }
     const body = (await c.req.json()) as Record<string, unknown>;
 
-    const photosJson =
-      body.issuePhotos === undefined
-        ? existing.issuePhotos
-        : Array.isArray(body.issuePhotos)
-          ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
-          : null;
-
-    // RCA / prevention fields are editable here too (PUT /:id is the
-    // generic metadata edit endpoint). Each one is COALESCE-style: if
-    // body.field is undefined we keep the existing value; if it's
-    // explicitly null/empty we accept the clear.
-    const rcCategoryNext =
-      body.rootCauseCategory === undefined
-        ? existing.rootCauseCategory
-        : ((body.rootCauseCategory as RootCauseCategory | null) ?? null);
-    if (rcCategoryNext != null && !VALID_ROOT_CAUSE.includes(rcCategoryNext)) {
-      return c.json({ success: false, error: "rootCauseCategory invalid" }, 400);
-    }
-    const pStatusNext =
-      body.preventionStatus === undefined
-        ? (existing.preventionStatus ?? "PENDING")
-        : (body.preventionStatus as PreventionStatus);
-    if (!VALID_PREVENTION_STATUS.includes(pStatusNext)) {
-      return c.json({ success: false, error: "preventionStatus invalid" }, 400);
-    }
-
-    await c.var.DB.prepare(
-      `UPDATE service_orders SET
-         issueDescription = ?, issuePhotos = ?, notes = ?,
-         rootCauseCategory = ?, rootCauseNotes = ?,
-         preventionAction = ?, preventionStatus = ?, preventionOwner = ?
-       WHERE id = ?`,
-    )
+    await c.var.DB
+      .prepare("UPDATE service_orders SET notes = ? WHERE id = ?")
       .bind(
-        body.issueDescription !== undefined
-          ? ((body.issueDescription as string) ?? null)
-          : existing.issueDescription,
-        photosJson,
         body.notes !== undefined
           ? ((body.notes as string) ?? null)
           : existing.notes,
-        rcCategoryNext,
-        body.rootCauseNotes !== undefined
-          ? ((body.rootCauseNotes as string) ?? null)
-          : existing.rootCauseNotes,
-        body.preventionAction !== undefined
-          ? ((body.preventionAction as string) ?? null)
-          : existing.preventionAction,
-        pStatusNext,
-        body.preventionOwner !== undefined
-          ? ((body.preventionOwner as string) ?? null)
-          : existing.preventionOwner,
         id,
       )
       .run();
@@ -947,7 +827,7 @@ app.put("/:id/status", async (c) => {
     if (!existing) {
       return c.json({ success: false, error: "Service order not found" }, 404);
     }
-    const allowed = statusTransitionsFor(existing.kind)[existing.status] ?? [];
+    const allowed = STATUS_TRANSITIONS[existing.status] ?? [];
     if (!allowed.includes(next)) {
       return c.json(
         {
@@ -1063,16 +943,6 @@ app.put("/:id/mode", async (c) => {
       .first<ServiceOrderRow>();
     if (!existing) {
       return c.json({ success: false, error: "Service order not found" }, 404);
-    }
-    // RECORD-kind cases never have a resolution mode — they're log-only.
-    if (existing.kind === "RECORD") {
-      return c.json(
-        {
-          success: false,
-          error: "RECORD-kind service has no resolution mode. Switch kind first or open a new RESOLUTION case.",
-        },
-        409,
-      );
     }
     if (existing.mode != null) {
       return c.json(

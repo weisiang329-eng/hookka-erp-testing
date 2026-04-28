@@ -18,8 +18,8 @@
 //   const list = await fetchJson("/api/forecasts", arrayOrEnvelope(Forecast));
 // ---------------------------------------------------------------------------
 import { z } from "zod";
-import { getAuthToken } from "./auth";
 import { buildTraceparent } from "./trace";
+import { readCsrfCookie } from "./csrf";
 
 export class FetchJsonError extends Error {
   public readonly status: number;
@@ -46,11 +46,17 @@ export class FetchJsonError extends Error {
 type FetchJsonInit = Omit<RequestInit, "body" | "headers"> & {
   body?: unknown;
   headers?: Record<string, string>;
-  /** Skip attaching the bearer token even if one exists. */
+  /**
+   * @deprecated Sprint 7 moved auth to a HttpOnly cookie that the browser
+   * attaches automatically — there is no token to skip. Kept on the type so
+   * existing call sites compile; the value is ignored.
+   */
   noAuth?: boolean;
   /** Request timeout in ms (defaults to 15000). */
   timeoutMs?: number;
 };
+
+const CSRF_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 /**
  * Fetch + JSON-parse + schema-validate in one call. Always returns the parsed
@@ -71,9 +77,15 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
     traceparent: buildTraceparent(),
     ...(restInit.headers ?? {}),
   };
-  if (!restInit.noAuth) {
-    const token = getAuthToken();
-    if (token) headers.authorization = `Bearer ${token}`;
+  // Sprint 7: dashboard auth lives in a HttpOnly cookie the browser attaches
+  // automatically with `credentials: 'include'`. For mutating methods we
+  // also echo the CSRF cookie value into X-CSRF-Token (double-submit pattern
+  // — server enforces match in auth-middleware.ts). Caller-supplied
+  // X-CSRF-Token wins so tests can pass an explicit value.
+  const method = (restInit.method || "GET").toUpperCase();
+  if (CSRF_METHODS.has(method) && !headers["x-csrf-token"]) {
+    const csrf = readCsrfCookie();
+    if (csrf) headers["x-csrf-token"] = csrf;
   }
 
   const ctrl = new AbortController();
@@ -88,6 +100,11 @@ export async function fetchJson<TSchema extends z.ZodTypeAny>(
   try {
     res = await fetch(url, {
       ...restInit,
+      // Sprint 7: ensure the session + CSRF cookies travel with every API
+      // request. Same-origin defaults to `same-origin`, but being explicit
+      // also makes things work behind a Pages-functions custom domain
+      // where the API origin sometimes differs.
+      credentials: restInit.credentials ?? "include",
       signal: ctrl.signal,
       headers,
       body:

@@ -5,6 +5,10 @@
 //   1. GET /api/auth/invite/:token → show form prefilled from invite
 //   2. POST /api/auth/accept-invite → setAuth() + redirect to /
 //
+// Sprint 7: same cookie + CSRF migration as /login. The accept-invite
+// response sets the HttpOnly session cookie and a non-HttpOnly CSRF cookie
+// directly on this response; the body returns { user, csrfToken }.
+//
 // Matches the visual language of /login (same dark panel + orbit frame).
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
@@ -23,7 +27,7 @@ type InviteLookupResponse =
   | { success: false; error?: string };
 
 type AcceptResponse =
-  | { success: true; data: { token: string; user: AuthUser } }
+  | { success: true; data: { user: AuthUser; csrfToken: string } }
   | { success: false; error?: string };
 
 export default function InviteAcceptPage() {
@@ -86,6 +90,8 @@ export default function InviteAcceptPage() {
       const res = await fetch("/api/auth/accept-invite", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // Cookies are set by the server on this response — see /login.
+        credentials: "include",
         body: JSON.stringify({
           token,
           password,
@@ -100,7 +106,10 @@ export default function InviteAcceptPage() {
         );
         return;
       }
-      setAuth(json.data);
+      // Sprint 7: only persist the public user blob; the session token is
+      // in the HttpOnly cookie set by the server, the CSRF token is read
+      // off its non-HttpOnly cookie sibling.
+      setAuth({ user: json.data.user });
       navigate("/", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error.");

@@ -201,23 +201,12 @@ function notifyHydrateListeners() {
   }
 }
 
+// Sprint 7: dashboard auth lives in a HttpOnly cookie auto-attached by the
+// browser via api-client's `credentials: 'include'` shim, and CSRF is
+// injected there too. This local helper used to fish a Bearer token out of
+// localStorage; now it just returns the JSON content-type.
 function authHeaders(): HeadersInit {
-  const raw =
-    typeof window !== "undefined"
-      ? localStorage.getItem("hookka_auth")
-      : null;
-  if (!raw) return { "content-type": "application/json" };
-  try {
-    const parsed = JSON.parse(raw) as { token?: string };
-    return parsed.token
-      ? {
-          "content-type": "application/json",
-          authorization: `Bearer ${parsed.token}`,
-        }
-      : { "content-type": "application/json" };
-  } catch {
-    return { "content-type": "application/json" };
-  }
+  return { "content-type": "application/json" };
 }
 
 async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {

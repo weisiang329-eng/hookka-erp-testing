@@ -1,9 +1,20 @@
 // ---------------------------------------------------------------------------
 // Auth client-side helpers.
 //
-// The token + public user blob are stored in localStorage under
-// `hookka_auth` as a single JSON object. Everything that touches auth state
-// should go through these helpers so the shape is enforced in one place.
+// Sprint 7: the session token now lives in a HttpOnly `hookka_session`
+// cookie set by the server on login (see src/api/routes/auth.ts) — JS can
+// no longer read it. localStorage still holds the *public* user blob
+// ({id,email,role,displayName}) under `hookka_auth` so the UI can render
+// the welcome state, sidebar avatar, etc., without a /me round-trip on
+// every page load. Per-user UI state snapshotting (tabs, datagrid columns)
+// continues to work the same way.
+//
+// `getAuthToken()` is kept as a no-op shim that always returns null —
+// callers that used to inject `Authorization: Bearer` should rely on the
+// browser auto-attaching the cookie via `credentials: 'include'`. The shim
+// avoids a sweeping rename across kv-config / use-presence / fetch-json /
+// api-client; once those are confirmed CSRF-safe in a follow-up sweep the
+// shim can be deleted.
 // ---------------------------------------------------------------------------
 
 export type AuthUser = {
@@ -13,8 +24,8 @@ export type AuthUser = {
   displayName: string;
 };
 
+// Persisted blob shape — Sprint 7 dropped the `token` field.
 type AuthBlob = {
-  token: string;
   user: AuthUser;
 };
 
@@ -24,17 +35,27 @@ function readBlob(): AuthBlob | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as AuthBlob;
-    if (!parsed || typeof parsed.token !== "string" || !parsed.user) return null;
-    return parsed;
+    const parsed = JSON.parse(raw) as Partial<AuthBlob & { token: unknown }>;
+    if (!parsed || !parsed.user || typeof parsed.user !== "object") return null;
+    // Old blobs from before Sprint 7 had a `token` field; tolerate them by
+    // returning just the user — the cookie (if any) supplies the credential
+    // now. If the cookie is also gone, the next /api/* call 401s and the
+    // api-client redirects to /login, prompting a fresh sign-in that lands
+    // a Sprint-7 cookie pair.
+    return { user: parsed.user as AuthUser };
   } catch {
     return null;
   }
 }
 
+/**
+ * @deprecated Sprint 7. Returns null. The session token now lives in a
+ * HttpOnly cookie that JS cannot read; callers should rely on the browser
+ * auto-attaching it (see api-client.ts using `credentials: 'include'`).
+ * Kept so existing call sites compile while we migrate them off.
+ */
 export function getAuthToken(): string | null {
-  const blob = readBlob();
-  return blob ? blob.token : null;
+  return null;
 }
 
 export function getCurrentUser(): AuthUser | null {
@@ -42,22 +63,23 @@ export function getCurrentUser(): AuthUser | null {
   return blob ? blob.user : null;
 }
 
-export function setAuth(data: { token: string; user: AuthUser }): void {
+export function setAuth(data: { user: AuthUser }): void {
   // If an OTHER user's session is lingering, snapshot+wipe it first so we
   // never mix state across accounts. Then restore the incoming user's own
   // snapshot (if they've signed in on this browser before).
+  const blob: AuthBlob = { user: data.user };
   try {
     const current = getCurrentUser();
     if (current?.id && current.id !== data.user.id) {
       snapshotFor(current.id);
       wipeLiveUserKeys();
     }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(blob));
     restoreFor(data.user.id);
   } catch {
-    // Even if state juggling fails, make sure the token blob lands so the
-    // user can still use the app.
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    // Even if state juggling fails, make sure the user blob lands so the
+    // sidebar/topbar can render correctly.
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(blob));
   }
 }
 
@@ -136,5 +158,9 @@ export function clearAuth(): void {
 }
 
 export function isAuthenticated(): boolean {
-  return getAuthToken() !== null;
+  // The user blob is set in lockstep with the cookie at login time, so it's
+  // a reliable client-side proxy for "do we believe we're authed?".  If the
+  // server-side cookie is in fact gone or expired, the next /api/* call
+  // 401s and the api-client redirects to /login.
+  return getCurrentUser() !== null;
 }

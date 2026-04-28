@@ -14,8 +14,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
+import { compressImage } from "@/lib/image-compress";
 import {
-  ArrowLeft, CheckCircle2, XCircle, Plus, X, Wrench, AlertCircle,
+  ArrowLeft, CheckCircle2, XCircle, Plus, X, Wrench, AlertCircle, Loader2,
 } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
@@ -993,6 +994,8 @@ function PhotosPanel({
 }) {
   const { toast } = useToast();
   const [saving, setSaving] = useState(false);
+  // Per-batch upload progress for the off-main-thread compressor — null when idle.
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   async function persist(next: string[]) {
     setSaving(true);
@@ -1012,40 +1015,26 @@ function PhotosPanel({
     }
   }
 
-  async function resizeImageToBase64(file: File, maxDim = 1280): Promise<string> {
-    const dataUrl = await new Promise<string>((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result as string);
-      r.onerror = rej;
-      r.readAsDataURL(file);
-    });
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = rej;
-      i.src = dataUrl;
-    });
-    const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
-    const w = Math.round(img.width * ratio);
-    const h = Math.round(img.height * ratio);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  }
+  // Image compression delegated to @/lib/image-compress (off-main-thread on
+  // browsers that support OffscreenCanvas, fallback elsewhere).
 
   async function handleAdd(files: FileList | null) {
     if (!files || files.length === 0) return;
+    const list = Array.from(files);
+    setUploadProgress({ done: 0, total: list.length });
     const added: string[] = [];
-    for (const f of Array.from(files)) {
-      try {
-        added.push(await resizeImageToBase64(f));
-      } catch {
-        toast.error(`Couldn't read ${f.name}`);
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        try {
+          added.push(await compressImage(f, { maxDim: 1280, quality: 0.85 }));
+        } catch {
+          toast.error(`Couldn't read ${f.name}`);
+        }
+        setUploadProgress({ done: i + 1, total: list.length });
       }
+    } finally {
+      setUploadProgress(null);
     }
     if (added.length === 0) return;
     void persist([...caseDetail.issuePhotos, ...added]);
@@ -1076,6 +1065,12 @@ function PhotosPanel({
         </label>
       </CardHeader>
       <CardContent>
+        {uploadProgress && (
+          <div className="mb-2 inline-flex items-center gap-2 rounded-md bg-[#FAF9F7] border border-[#E2DDD8] px-3 py-1.5 text-xs text-[#6B7280]">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Compressing photos {Math.min(uploadProgress.done + 1, uploadProgress.total)} / {uploadProgress.total}...
+          </div>
+        )}
         {caseDetail.issuePhotos.length === 0 ? (
           <p className="text-xs text-[#9CA3AF]">
             No photos yet. Click "Add photos" to attach customer-supplied images

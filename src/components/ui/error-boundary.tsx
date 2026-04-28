@@ -119,7 +119,7 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
           <h1 className="text-[22px] font-[800] tracking-[-0.5px] text-[#1F1D1B] mb-1">
             Something went wrong
           </h1>
-          <p className="text-sm text-[#5A5550]">出错了</p>
+          <p className="text-sm text-[#5A5550]">An error occurred</p>
           <p className="text-sm text-[#6B7280] mt-3 leading-relaxed">
             An unexpected error occurred. You can try again or go back to the
             dashboard.

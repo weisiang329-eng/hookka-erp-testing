@@ -1034,6 +1034,13 @@ const rmColumns: Column<RawMaterial>[] = [
     render: (_v, row) => <span className="doc-number font-medium">{row.itemCode}</span>,
   },
   {
+    key: "description",
+    label: "Description",
+    render: (_v, row) => (
+      <span className="text-[#1F1D1B] text-sm">{row.description || <span className="text-[#9CA3AF] italic">—</span>}</span>
+    ),
+  },
+  {
     key: "balanceQty",
     label: "Stock Qty",
     align: "right",

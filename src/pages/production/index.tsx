@@ -28,6 +28,12 @@ type ProductionOrder = {
   salesOrderId: string; salesOrderNo: string; lineNo: number;
   customerPOId: string; customerReference: string; customerName: string; customerState: string;
   companySOId: string;
+  // CO-origin POs (migration 0064): mutex with SO. When the parent doc is a
+  // Consignment Order, salesOrderId / companySOId are empty and these two
+  // fields carry the CO linkage. Used by the soId column fallback so SOFA
+  // rows from a CO display CO-YYMM-NNN instead of a blank cell.
+  consignmentOrderId?: string;
+  companyCOId?: string;
   productId: string; productCode: string; productName: string; itemCategory: "SOFA"|"BEDFRAME"|"ACCESSORY";
   sizeCode: string; sizeLabel: string; fabricCode: string; quantity: number;
   gapInches: number|null; divanHeightInches: number|null; legHeightInches: number|null;
@@ -1398,9 +1404,21 @@ export default function ProductionPage({
           //           suffix genuinely identifies one physical piece.
           // Applies to every dept tab — soId is computed once at row
           // construction and consumed by all dept render paths uniformly.
-          soId: (o.itemCategory === "SOFA" ? o.companySOId : o.poNo) || "",
-          salesOrderNo: o.companySOId || "",   // parent SO (not unique per line)
-          salesOrderId: o.salesOrderId || "",  // SO PK for double-click navigation
+          //
+          // CO-origin POs (migration 0064): companySOId is empty and the
+          // parent doc id lives on companyCOId. Fall back so SOFA rows
+          // from a CO display CO-YYMM-NNN instead of a blank cell. The
+          // BF/ACC branch already works because o.poNo is line-suffixed
+          // for both SO and CO POs (CO-2604-001-01 etc.).
+          soId: (o.itemCategory === "SOFA"
+                  ? (o.companySOId || o.companyCOId)
+                  : o.poNo) || "",
+          salesOrderNo: o.companySOId || o.companyCOId || "",   // parent doc (SO or CO), not unique per line
+          // SO PK only — CO rows leave this empty so double-click handlers
+          // (which navigate to /sales/:id) become no-ops on CO rows
+          // instead of routing to a 404. CO-aware double-click is a
+          // separate follow-up.
+          salesOrderId: o.salesOrderId || "",
           customerPOId: o.customerPOId || "",
           customerRef: o.customerReference || "",
           customerName: o.customerName || "",

@@ -11,9 +11,10 @@ import {
   Factory, Clock, DollarSign, AlertTriangle, ChevronDown, ChevronUp,
   Wrench,
 } from "lucide-react";
-// Phase 3 — Service Order modal (换货服务). Same component as the SO
-// detail uses; presetSourceType pinned to 'CO'.
-import { CreateServiceOrderModal } from "@/pages/service-orders";
+// 0074 refactor: top-level entry is now Service Cases (parent). Cases can
+// spawn 0+ Service Orders for the rework/swap/repair flow. presetSourceType
+// pinned to 'CO' here.
+import { CreateServiceCaseModal } from "@/pages/service-cases";
 import { generateCOPdf } from "@/lib/generate-co-pdf";
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
 import { LockBanner } from "@/components/ui/lock-banner";
@@ -818,9 +819,9 @@ export default function SalesOrderDetailPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => setServiceModalOpen(true)}
-                title="Open a 换货服务 (Service Order) for a customer-reported defect"
+                title="Log a Service Case for a customer issue / complaint"
               >
-                <Wrench className="h-4 w-4" /> Convert to Service Order
+                <Wrench className="h-4 w-4" /> Open Service Case
               </Button>
             )}
 
@@ -832,14 +833,14 @@ export default function SalesOrderDetailPage() {
       </Card>
 
       {serviceModalOpen && (
-        <CreateServiceOrderModal
+        <CreateServiceCaseModal
           presetSourceType="CO"
           presetSourceId={order.id}
           onClose={() => setServiceModalOpen(false)}
           onCreated={(svcId) => {
             setServiceModalOpen(false);
-            toast.success("Service order created");
-            navigate(`/service-orders/${svcId}`);
+            toast.success("Service case opened");
+            navigate(`/service-cases/${svcId}`);
           }}
         />
       )}

@@ -205,16 +205,18 @@ function asObj(v: unknown): Record<string, unknown> | null {
 export function Sidebar() {
   const { pathname } = useLocation();
   const [collapsed, setCollapsed] = useState(false);
-  // Auto-expand Production when viewing any /production/* route so the
-  // user can see which dept child they're on, plus Consignment (existing
-  // behavior).
+  // Auto-expand only the menu group matching the current route. Per user
+  // 2026-04-28: Consignment was hard-coded to always-open which made the
+  // sidebar feel cluttered when the user was working in another module.
+  // Now the rule is uniform: expand Consignment only when on /consignment,
+  // expand Production only when on /production, otherwise everything
+  // starts collapsed.
   const [expandedMenus, setExpandedMenus] = useState<Set<string>>(() => {
-    const initial = new Set(["Consignment"]);
-    if (
-      typeof window !== "undefined" &&
-      window.location.pathname.startsWith("/production")
-    ) {
-      initial.add("Production");
+    const initial = new Set<string>();
+    if (typeof window !== "undefined") {
+      const path = window.location.pathname;
+      if (path.startsWith("/production")) initial.add("Production");
+      if (path.startsWith("/consignment")) initial.add("Consignment");
     }
     return initial;
   });

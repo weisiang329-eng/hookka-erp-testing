@@ -46,6 +46,10 @@ export type ConsignmentNoteRow = {
   // CO + hub linkage (migration 0066)
   consignmentOrderId: string | null;
   hubId: string | null;
+  // Invoice linkage (migration 0070). NULL until the CN is converted via
+  // POST /api/consignment-notes/:id/convert-to-invoice. One-way link —
+  // see migration header for why we don't add a reverse FK on invoices.
+  convertedInvoiceId: string | null;
 };
 
 export type ConsignmentItemRow = {
@@ -97,6 +101,9 @@ export function rowToConsignmentNote(
     // CO + hub linkage
     consignmentOrderId: row.consignmentOrderId,
     hubId: row.hubId,
+    // Invoice linkage (migration 0070). NULL until the operator converts
+    // the CN via the convert-to-invoice endpoint.
+    convertedInvoiceId: row.convertedInvoiceId,
     items: items
       .filter((it) => it.consignmentNoteId === row.id)
       .map((it) => ({

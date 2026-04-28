@@ -87,6 +87,7 @@
   "containerNumber": "container_number",
   "contentType": "content_type",
   "controlAccount": "control_account",
+  "convertedInvoiceId": "converted_invoice_id",
   "correctedJson": "corrected_json",
   "costCategory": "cost_category",
   "costDiffPercent": "cost_diff_percent",

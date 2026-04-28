@@ -85,6 +85,19 @@ type ConsignmentNoteRow = {
   driverName: string;
   vehicleNo: string;
   remarks: string;
+  // Carry the full items array on the row so the Return + Convert dialogs
+  // can address line items by their real DB id (consignment_items.id) when
+  // POSTing to /:id/return or /:id/convert-to-invoice. Synthesizing fake
+  // ids client-side broke the new return endpoint's validation, so we
+  // surface the canonical ids here.
+  items: Array<{
+    id: string;
+    productCode: string;
+    productName: string;
+    quantity: number;
+    unitPrice: number;
+    productionOrderId: string | null;
+  }>;
 };
 
 // CN status mapping. See note on CNStatus above for why we re-skin the
@@ -246,6 +259,14 @@ function mapCNToRow(cn: ConsignmentNote): ConsignmentNoteRow {
     driverName: cn.driverName || "",
     vehicleNo: cn.vehicleNo || "",
     remarks: cn.notes || "",
+    items: (cn.items || []).map((it) => ({
+      id: it.id,
+      productCode: it.productCode || "",
+      productName: it.productName || "",
+      quantity: it.quantity,
+      unitPrice: it.unitPrice,
+      productionOrderId: it.productionOrderId ?? null,
+    })),
   };
 }
 
@@ -275,10 +296,11 @@ export default function ConsignmentNotePage() {
   // ----- Detail / dialog state -----
   const [detailCN, setDetailCN] = useState<ConsignmentNoteRow | null>(null);
 
-  // Transfer dialogs (preserved from the original CN page — these flows
-  // still work and the user expects them in the right-click menu).
-  const [transferDORow, setTransferDORow] = useState<ConsignmentNoteRow | null>(null);
-  const [transferDOLoading, setTransferDOLoading] = useState(false);
+  // Transfer dialogs. The CN-to-DO path was removed 2026-04-28 (consignment
+  // goods are already at the customer's branch — DO is for SO-origin
+  // dispatches and doesn't apply here). Two flows remain:
+  //   * Consignment Return (CR)  — wired to POST /:id/return
+  //   * Sales Invoice (SI)        — wired to POST /:id/convert-to-invoice
   const [transferCRRow, setTransferCRRow] = useState<ConsignmentNoteRow | null>(null);
   const [transferCRLoading, setTransferCRLoading] = useState(false);
   const [crReturnQtys, setCrReturnQtys] = useState<Record<string, number>>({});
@@ -986,11 +1008,8 @@ export default function ConsignmentNotePage() {
         },
       },
       { label: "", separator: true, action: () => {} },
-      {
-        label: "Transfer to Delivery Order",
-        icon: <Truck className="h-3.5 w-3.5" />,
-        action: () => setTransferDORow(row),
-      },
+      // CN-to-DO removed 2026-04-28 — consignment goods are at the customer
+      // already; DO is for SO-origin dispatches and doesn't apply.
       {
         label: "Transfer to Sales Invoice",
         icon: <FileText className="h-3.5 w-3.5" />,
@@ -1000,12 +1019,14 @@ export default function ConsignmentNotePage() {
         label: "Transfer to Consignment Return",
         icon: <RotateCcw className="h-3.5 w-3.5" />,
         action: () => {
+          // Seed selection state with the REAL consignment_items.id values
+          // (post-2026-04-28 wiring — the new POST /:id/return endpoint
+          // validates each id against the DB, so synthetic keys would fail).
           const qtys: Record<string, number> = {};
           const selected: Record<string, boolean> = {};
-          for (let i = 0; i < row.itemCount; i++) {
-            const key = `${row.id}-item-${i}`;
-            qtys[key] = 1;
-            selected[key] = true;
+          for (const it of row.items) {
+            qtys[it.id] = it.quantity;
+            selected[it.id] = true;
           }
           setCrReturnQtys(qtys);
           setCrSelectedItems(selected);
@@ -1036,81 +1057,104 @@ export default function ConsignmentNotePage() {
   const totalCNs = cnList.length;
   const totalPages = Math.max(1, Math.ceil(totalCNs / PAGE_SIZE));
 
-  // ---------- Transfer Handlers (preserved from original) ----------
-  const handleTransferToDO = async () => {
-    if (!transferDORow) return;
-    setTransferDOLoading(true);
-    // eslint-disable-next-line no-restricted-syntax -- UX pacing delay inside async event handler
-    await new Promise((r) => setTimeout(r, 600));
-    setTransferDOLoading(false);
-    setTransferDORow(null);
-    navigate("/delivery");
-  };
-
+  // ---------- Transfer Handlers ----------
+  // Returns hit the new POST /api/consignment-notes/:id/return endpoint
+  // which atomically updates the CN status, decrements consignment_items
+  // quantities (or flips them RETURNED), flips matching fg_units back to
+  // RETURNED, and writes a stock_movements audit row per item. The old
+  // path (POST /api/consignments with type=RETURN) just created a sibling
+  // CN row without touching the source — that's what we replaced.
   const handleTransferToCR = async () => {
     if (!transferCRRow) return;
-    const selectedCount = Object.values(crSelectedItems).filter(Boolean).length;
-    if (selectedCount === 0) {
+    const selectedItemIds = Object.entries(crSelectedItems)
+      .filter(([, sel]) => sel)
+      .map(([id]) => id);
+    if (selectedItemIds.length === 0) {
       toast.warning("Please select at least one item to return.");
       return;
     }
     setTransferCRLoading(true);
     try {
-      const res = await fetch("/api/consignments", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "RETURN",
-          sourceId: transferCRRow.consignmentId,
-          customerId: transferCRRow.customerId,
-          customerName: transferCRRow.customerName,
-          branchName: transferCRRow.branchName,
-          items: Object.entries(crSelectedItems)
-            .filter(([, sel]) => sel)
-            .map(([key]) => ({ id: key, quantity: crReturnQtys[key] ?? 1 })),
-          notes: "Return from " + transferCRRow.cnNo,
-        }),
-      });
-      if (!res.ok) throw new Error("Failed to create Consignment Return");
-      invalidateCachePrefix("/api/consignments");
+      const res = await fetch(
+        `/api/consignment-notes/${transferCRRow.id}/return`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            items: selectedItemIds.map((id) => ({
+              id,
+              quantity: crReturnQtys[id] ?? 1,
+            })),
+          }),
+        },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || "Failed to process return");
+      }
+      const json = (await res.json()) as {
+        data?: { noteNumber?: string; status?: string };
+      };
       invalidateCachePrefix("/api/consignment-notes");
+      invalidateCachePrefix("/api/consignments");
       invalidateCachePrefix("/api/invoices");
+      invalidateCachePrefix("/api/fg-units");
+      const newNo = json.data?.noteNumber ?? transferCRRow.cnNo;
+      const finalStatus = json.data?.status ?? "PARTIALLY_SOLD";
+      toast.success(
+        finalStatus === "RETURNED"
+          ? `Return processed for ${newNo} (fully returned)`
+          : `Return processed for ${newNo} (partial)`,
+      );
       setTransferCRRow(null);
-      navigate("/consignment/return");
-    } catch {
-      toast.error("Failed to create Consignment Return. Please try again.");
+      fetchData();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Failed to process return: ${msg}`);
     } finally {
       setTransferCRLoading(false);
     }
   };
 
+  // Sales-Invoice conversion hits the new POST /:id/convert-to-invoice
+  // endpoint. Backend assigns the invoice number via the shared
+  // nextInvoiceNo() sequence (no more random-number generation client
+  // side — that produced colliding INV-YYMM-NNN numbers before
+  // 2026-04-28). On success we navigate to the new invoice's detail page.
   const handleTransferToSI = async () => {
     if (!transferSIRow) return;
     setTransferSILoading(true);
     try {
-      const invNo = `INV-${new Date().getFullYear().toString().slice(-2)}${(new Date().getMonth() + 1).toString().padStart(2, "0")}-${String(Math.floor(Math.random() * 900) + 100)}`;
-      const res = await fetch("/api/invoices", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          consignmentNoteId: transferSIRow.id,
-          cnNo: transferSIRow.cnNo,
-          coRef: transferSIRow.coRef,
-          customerId: transferSIRow.customerId,
-          customerName: transferSIRow.customerName,
-          invoiceNo: invNo,
-          totalSen: transferSIRow.totalValueSen,
-          items: transferSIRow.itemCount,
-        }),
-      });
-      if (!res.ok) throw new Error("Failed");
+      const res = await fetch(
+        `/api/consignment-notes/${transferSIRow.id}/convert-to-invoice`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({}),
+        },
+      );
+      if (!res.ok) {
+        const body = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(body.error || "Failed to create Sales Invoice");
+      }
+      const json = (await res.json()) as {
+        data?: { invoiceId?: string; invoiceNo?: string };
+      };
       invalidateCachePrefix("/api/consignment-notes");
       invalidateCachePrefix("/api/consignments");
       invalidateCachePrefix("/api/invoices");
+      const invoiceId = json.data?.invoiceId;
+      const invoiceNo = json.data?.invoiceNo;
+      toast.success(`Created Sales Invoice ${invoiceNo ?? ""}`);
       setTransferSIRow(null);
-      navigate("/sales");
-    } catch {
-      toast.error("Failed to create Sales Invoice. Please try again.");
+      if (invoiceId) {
+        navigate(`/sales/invoices/${invoiceId}`);
+      } else {
+        navigate("/sales");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      toast.error(`Failed to create Sales Invoice: ${msg}`);
     } finally {
       setTransferSILoading(false);
     }
@@ -1448,26 +1492,17 @@ export default function ConsignmentNotePage() {
             </div>
 
             <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
-              {(detailCN.status === "PENDING" || detailCN.status === "DISPATCHED") && (
-                <Button
-                  variant="primary"
-                  onClick={() => {
-                    setDetailCN(null);
-                    setTransferDORow(detailCN);
-                  }}
-                >
-                  <Truck className="h-4 w-4" /> Transfer to Delivery Order
-                </Button>
-              )}
+              {/* CN-to-DO removed 2026-04-28: consignment goods are at the
+                  customer; DO is for SO-origin dispatches. */}
               <Button
                 variant="outline"
                 onClick={() => {
+                  // Real consignment_items.id keys (post-2026-04-28 wiring).
                   const qtys: Record<string, number> = {};
                   const selected: Record<string, boolean> = {};
-                  for (let i = 0; i < detailCN.itemCount; i++) {
-                    const key = `${detailCN.id}-item-${i}`;
-                    qtys[key] = 1;
-                    selected[key] = true;
+                  for (const it of detailCN.items) {
+                    qtys[it.id] = it.quantity;
+                    selected[it.id] = true;
                   }
                   setCrReturnQtys(qtys);
                   setCrSelectedItems(selected);
@@ -1485,62 +1520,8 @@ export default function ConsignmentNotePage() {
         </div>
       )}
 
-      {/* -------- Transfer to Delivery Order Dialog (preserved) -------- */}
-      {transferDORow && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setTransferDORow(null)} />
-          <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto border border-[#E2DDD8]">
-            <div className="sticky top-0 bg-white border-b border-[#E2DDD8] px-6 py-4 flex items-center justify-between rounded-t-xl">
-              <div>
-                <h2 className="text-lg font-bold text-[#1F1D1B]">Transfer to Delivery Order</h2>
-                <p className="text-xs text-[#6B7280]">Create a DO from {transferDORow.cnNo}</p>
-              </div>
-              <button onClick={() => setTransferDORow(null)} className="rounded-md p-1.5 hover:bg-[#F0ECE9] text-[#6B7280] hover:text-[#1F1D1B] transition-colors">
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="px-6 py-5 space-y-4">
-              <div className="grid grid-cols-2 gap-4 text-sm">
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">CN Number</p>
-                  <p className="font-medium doc-number">{transferDORow.cnNo}</p>
-                </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">CO Reference</p>
-                  <p className="font-medium doc-number">{transferDORow.coRef}</p>
-                </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Customer</p>
-                  <p className="font-medium">{transferDORow.customerName}</p>
-                </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Branch</p>
-                  <p className="font-medium">{transferDORow.branchName}</p>
-                </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Items</p>
-                  <p className="font-medium">{transferDORow.itemCount} item(s)</p>
-                </div>
-                <div>
-                  <p className="text-[#9CA3AF] text-xs mb-0.5">Total Value</p>
-                  <p className="font-medium">{formatCurrency(transferDORow.totalValueSen)}</p>
-                </div>
-              </div>
-              <div className="bg-[#FAF9F7] border border-[#E2DDD8] rounded-lg p-3">
-                <p className="text-sm text-[#6B7280]">
-                  This will create a Delivery Order for dispatching CN <strong>{transferDORow.cnNo}</strong> to <strong>{transferDORow.branchName}</strong>.
-                </p>
-              </div>
-            </div>
-            <div className="sticky bottom-0 bg-white border-t border-[#E2DDD8] px-6 py-4 flex items-center justify-end gap-2 rounded-b-xl">
-              <Button variant="outline" onClick={() => setTransferDORow(null)} disabled={transferDOLoading}>Cancel</Button>
-              <Button variant="primary" onClick={handleTransferToDO} disabled={transferDOLoading}>
-                <Truck className="h-4 w-4" /> {transferDOLoading ? "Creating..." : "Create Delivery Order"}
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Transfer-to-Delivery-Order dialog removed 2026-04-28: consignment
+          goods are at the customer's branch already; DO doesn't apply. */}
 
       {/* -------- Transfer to Sales Invoice Dialog (preserved) -------- */}
       {transferSIRow && (
@@ -1623,42 +1604,44 @@ export default function ConsignmentNotePage() {
                     <tr>
                       <th className="text-left px-3 py-2 text-xs text-[#9CA3AF] font-medium w-8"></th>
                       <th className="text-left px-3 py-2 text-xs text-[#9CA3AF] font-medium">Item</th>
+                      <th className="text-right px-3 py-2 text-xs text-[#9CA3AF] font-medium w-20">Sent</th>
                       <th className="text-right px-3 py-2 text-xs text-[#9CA3AF] font-medium w-24">Return Qty</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {Array.from({ length: transferCRRow.itemCount }, (_, i) => {
-                      const key = `${transferCRRow.id}-item-${i}`;
-                      return (
-                        <tr key={key} className={`border-t border-[#E2DDD8] ${!crSelectedItems[key] ? "opacity-50" : ""}`}>
-                          <td className="px-3 py-2">
-                            <input
-                              type="checkbox"
-                              checked={!!crSelectedItems[key]}
-                              onChange={(e) => setCrSelectedItems((prev) => ({ ...prev, [key]: e.target.checked }))}
-                              className="rounded border-[#E2DDD8] text-[#6B5C32] focus:ring-[#6B5C32]"
-                            />
-                          </td>
-                          <td className="px-3 py-2">
-                            <p className="font-medium">Item {i + 1}</p>
-                            <p className="text-xs text-[#9CA3AF]">From {transferCRRow.cnNo}</p>
-                          </td>
-                          <td className="px-3 py-2 text-right">
-                            <input
-                              type="number"
-                              min={1}
-                              value={crReturnQtys[key] ?? 1}
-                              onChange={(e) => {
-                                const val = Math.max(1, parseInt(e.target.value) || 1);
-                                setCrReturnQtys((prev) => ({ ...prev, [key]: val }));
-                              }}
-                              disabled={!crSelectedItems[key]}
-                              className="w-20 rounded-md border border-[#E2DDD8] px-2 py-1 text-sm text-right focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32] disabled:bg-gray-100"
-                            />
-                          </td>
-                        </tr>
-                      );
-                    })}
+                    {/* Iterate the real consignment_items so the row keys match
+                        the DB ids the new POST /:id/return endpoint expects. */}
+                    {transferCRRow.items.map((item) => (
+                      <tr key={item.id} className={`border-t border-[#E2DDD8] ${!crSelectedItems[item.id] ? "opacity-50" : ""}`}>
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={!!crSelectedItems[item.id]}
+                            onChange={(e) => setCrSelectedItems((prev) => ({ ...prev, [item.id]: e.target.checked }))}
+                            className="rounded border-[#E2DDD8] text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <p className="font-medium">{item.productName || item.productCode || "Unnamed item"}</p>
+                          <p className="text-xs text-[#9CA3AF]">{item.productCode}</p>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">{item.quantity}</td>
+                        <td className="px-3 py-2 text-right">
+                          <input
+                            type="number"
+                            min={1}
+                            max={item.quantity}
+                            value={crReturnQtys[item.id] ?? item.quantity}
+                            onChange={(e) => {
+                              const val = Math.max(1, Math.min(item.quantity, parseInt(e.target.value) || 1));
+                              setCrReturnQtys((prev) => ({ ...prev, [item.id]: val }));
+                            }}
+                            disabled={!crSelectedItems[item.id]}
+                            className="w-20 rounded-md border border-[#E2DDD8] px-2 py-1 text-sm text-right focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32] disabled:bg-gray-100"
+                          />
+                        </td>
+                      </tr>
+                    ))}
                   </tbody>
                 </table>
               </div>

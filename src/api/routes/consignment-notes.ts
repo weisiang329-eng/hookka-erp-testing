@@ -23,6 +23,8 @@ import {
   resolveTransport,
   updateConsignmentNoteById,
 } from "../lib/consignment-note-shared";
+import { nextInvoiceNo } from "./invoices";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -259,6 +261,520 @@ app.post("/", async (c) => {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error("[POST /api/consignment-notes] failed:", msg);
+    return c.json({ success: false, error: msg || "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/consignment-notes/:id/return — process a Consignment Return.
+//
+// Body: { items: [{ id: string, quantity: number }] }
+//   - id          consignment_items.id of the line being returned
+//   - quantity    number of units to return (must be ≤ item.quantity)
+//
+// Side effects (everything in a single c.var.DB.batch so a partial failure
+// rolls back):
+//   1. consignment_items: rows where returnQty fully covers item.quantity
+//      flip status='RETURNED' + returnedDate=now. Partial returns reduce
+//      item.quantity by returnQty (item stays AT_BRANCH for the remaining
+//      units — the legacy schema has no per-item returnedQty column, and
+//      adding one would force a wider migration; reducing quantity keeps
+//      the totalValue recompute trivial).
+//   2. consignment_notes: stamp dispatchedAt fallback if not yet set
+//      (a return implies the goods physically left); recompute totalValue;
+//      flip status to RETURNED if every item is fully returned, otherwise
+//      PARTIALLY_SOLD (the legacy enum value the FE re-skins as DISPATCHED;
+//      see note.tsx cnStatusFromBackend()).
+//   3. fg_units: for every item with a productionOrderId, find DELIVERED
+//      units tied to that PO (limit returnQty) and flip them to 'RETURNED'
+//      with returnedAt=now. Why we update FG stock: the goods are coming
+//      back into our warehouse, so the fg_units ledger that the Inventory
+//      page reads has to reflect that. Mirrors the LOADED→DRAFT reversal
+//      pattern in delivery-orders.ts (the inverse of the dispatch-time
+//      stamping).
+//   4. stock_movements: write one STOCK_IN audit row per item with
+//      reason='CONSIGNMENT_RETURN' and rackLabel=PO.rackingNumber so the
+//      racking ledger shows the round-trip. Schema CHECK on
+//      stock_movements.type only allows STOCK_IN/STOCK_OUT/TRANSFER, so
+//      we use STOCK_IN (positive qty back into stock); the reason field
+//      carries the business-event tag.
+//
+// SAFETY: if a CN item has no productionOrderId or the PO has been
+// deleted, we DO NOT crash. The CN status update + consignment_items
+// update still apply; we just skip the fg_units flip + stock_movements
+// row for that item and log a warning. The user's task spec calls this
+// out explicitly ("legacy CN whose source PO is deleted").
+// ---------------------------------------------------------------------------
+app.post("/:id/return", async (c) => {
+  try {
+    const id = c.req.param("id");
+    const body = (await c.req.json()) as {
+      items?: Array<{ id?: unknown; quantity?: unknown }>;
+    };
+    const requestedItems = Array.isArray(body.items) ? body.items : [];
+    if (requestedItems.length === 0) {
+      return c.json(
+        { success: false, error: "items array is required and must be non-empty" },
+        400,
+      );
+    }
+
+    // Read source CN + items.
+    const [cn, itemsRes] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
+        .bind(id)
+        .first<ConsignmentNoteRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
+      )
+        .bind(id)
+        .all<ConsignmentItemRow>(),
+    ]);
+    if (!cn) {
+      return c.json({ success: false, error: "Consignment note not found" }, 404);
+    }
+    const cnItems = itemsRes.results ?? [];
+    const itemById = new Map(cnItems.map((it) => [it.id, it]));
+
+    // Validate every requested item exists on the CN and the requested
+    // returnQty is ≤ item.quantity. We do all validation up-front so a
+    // bad payload doesn't half-apply.
+    type ValidatedReturn = {
+      item: ConsignmentItemRow;
+      returnQty: number;
+      isFull: boolean;
+    };
+    const validated: ValidatedReturn[] = [];
+    for (const r of requestedItems) {
+      const itemId = typeof r.id === "string" ? r.id : "";
+      const returnQty = Number(r.quantity);
+      if (!itemId || !Number.isFinite(returnQty) || returnQty <= 0) {
+        return c.json(
+          { success: false, error: "Each item needs id (string) and quantity (positive number)" },
+          400,
+        );
+      }
+      const item = itemById.get(itemId);
+      if (!item) {
+        return c.json(
+          { success: false, error: `CN item ${itemId} not found on consignment note ${id}` },
+          400,
+        );
+      }
+      if (returnQty > item.quantity) {
+        return c.json(
+          {
+            success: false,
+            error: `Return quantity ${returnQty} exceeds item quantity ${item.quantity} for ${itemId}`,
+          },
+          400,
+        );
+      }
+      validated.push({ item, returnQty, isFull: returnQty === item.quantity });
+    }
+
+    const now = new Date().toISOString();
+    const statements: D1PreparedStatement[] = [];
+
+    // ----------- consignment_items updates -----------
+    // Track post-update qty for each touched item so we can recompute
+    // totalValue + decide the parent CN's next status without re-reading.
+    const postUpdateQtyByItemId = new Map<string, number>();
+    for (const { item, returnQty, isFull } of validated) {
+      if (isFull) {
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE consignment_items
+                SET status = 'RETURNED', returnedDate = ?
+              WHERE id = ?`,
+          ).bind(now, item.id),
+        );
+        postUpdateQtyByItemId.set(item.id, 0);
+      } else {
+        const remaining = item.quantity - returnQty;
+        statements.push(
+          c.var.DB.prepare(
+            `UPDATE consignment_items
+                SET quantity = ?
+              WHERE id = ?`,
+          ).bind(remaining, item.id),
+        );
+        postUpdateQtyByItemId.set(item.id, remaining);
+      }
+    }
+
+    // ----------- fg_units flip + stock_movements audit -----------
+    // For each validated item, look up the linked PO, find DELIVERED
+    // fg_units we can flag RETURNED, and write a STOCK_IN audit row.
+    // Skip items with no PO link or whose PO has been deleted (legacy
+    // CN safety per task spec).
+    for (const { item, returnQty } of validated) {
+      const poId = item.productionOrderId;
+      if (!poId) {
+        console.warn(
+          `[CN return] item ${item.id} has no productionOrderId — skipping fg_units + stock_movements (legacy row)`,
+        );
+        continue;
+      }
+      const po = await c.var.DB.prepare(
+        `SELECT id, productCode, productName, quantity, rackingNumber
+           FROM production_orders WHERE id = ?`,
+      )
+        .bind(poId)
+        .first<{
+          id: string;
+          productCode: string | null;
+          productName: string | null;
+          quantity: number | null;
+          rackingNumber: string | null;
+        }>();
+      if (!po) {
+        console.warn(
+          `[CN return] productionOrder ${poId} not found — skipping fg_units + stock_movements for item ${item.id}`,
+        );
+        continue;
+      }
+
+      // Pick up to returnQty DELIVERED units for this PO and flip them
+      // RETURNED. We use a sub-SELECT with LIMIT to keep the operation
+      // bounded (a PO with 10 units shouldn't flip all 10 if only 3 are
+      // being returned). If fewer than returnQty units exist (mismatched
+      // ledgers), we flip what's there and let the stock_movements audit
+      // record the requested qty — operations can reconcile later.
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE fg_units
+              SET status = 'RETURNED', returnedAt = ?
+            WHERE id IN (
+              SELECT id FROM fg_units
+                WHERE poId = ? AND status = 'DELIVERED'
+                ORDER BY deliveredAt DESC
+                LIMIT ?
+            )`,
+        ).bind(now, po.id, returnQty),
+      );
+
+      statements.push(
+        c.var.DB.prepare(
+          `INSERT INTO stock_movements (
+             id, type, rackLocationId, rackLabel, productionOrderId,
+             productCode, productName, quantity, reason, performedBy,
+             created_at
+           ) VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?, ?, 'System', ?)`,
+        ).bind(
+          `mov-${crypto.randomUUID().slice(0, 8)}`,
+          null,
+          po.rackingNumber ?? "",
+          po.id,
+          po.productCode ?? "",
+          po.productName ?? "",
+          returnQty,
+          "CONSIGNMENT_RETURN",
+          now,
+        ),
+      );
+    }
+
+    // ----------- consignment_notes status + totalValue -----------
+    // Recompute totalValue from the post-update quantities. Items not
+    // touched keep their original quantity.
+    let nextTotalValue = 0;
+    for (const it of cnItems) {
+      const q =
+        postUpdateQtyByItemId.has(it.id)
+          ? postUpdateQtyByItemId.get(it.id)!
+          : it.quantity;
+      nextTotalValue += q * it.unitPrice;
+    }
+
+    // All-returned check: every original item must end up with qty=0 +
+    // status='RETURNED'. Iterate cnItems (the source of truth pre-update)
+    // and consult our post-update map.
+    const allReturned = cnItems.every((it) => {
+      const post = postUpdateQtyByItemId.get(it.id);
+      return post !== undefined && post === 0;
+    });
+
+    // Pick next status per task spec:
+    //   * fully returned → RETURNED
+    //   * partial         → PARTIALLY_SOLD (the legacy "some items left
+    //                       the warehouse" state; FE re-skins as DISPATCHED)
+    const nextStatus = allReturned ? "RETURNED" : "PARTIALLY_SOLD";
+
+    // Stamp dispatchedAt if not yet set (a return implies the goods
+    // physically left at some prior point even if the operator skipped
+    // the Mark Dispatched click).
+    const dispatchedAt = cn.dispatchedAt ?? now;
+
+    statements.push(
+      c.var.DB.prepare(
+        `UPDATE consignment_notes
+            SET status = ?, totalValue = ?, dispatchedAt = ?
+          WHERE id = ?`,
+      ).bind(nextStatus, nextTotalValue, dispatchedAt, id),
+    );
+
+    await c.var.DB.batch(statements);
+
+    // Audit (best-effort — never blocks the mutation per audit.ts contract).
+    await emitAudit(c, {
+      resource: "consignment-notes",
+      resourceId: id,
+      action: "return",
+      after: {
+        id,
+        status: nextStatus,
+        returnedItems: validated.map((v) => ({ id: v.item.id, quantity: v.returnQty })),
+      },
+    });
+
+    // Read back the canonical row + items so the FE can refresh without a
+    // second fetch.
+    const [updatedNote, updatedItemsRes] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
+        .bind(id)
+        .first<ConsignmentNoteRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
+      )
+        .bind(id)
+        .all<ConsignmentItemRow>(),
+    ]);
+    if (!updatedNote) {
+      return c.json(
+        { success: false, error: "Consignment note disappeared mid-update" },
+        500,
+      );
+    }
+    return c.json({
+      success: true,
+      data: rowToConsignmentNote(updatedNote, updatedItemsRes.results ?? []),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/consignment-notes/:id/return] failed:", msg);
+    return c.json({ success: false, error: msg || "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/consignment-notes/:id/convert-to-invoice — convert a CN into a
+// Sales Invoice.
+//
+// Body (all optional):
+//   notes?: string   — passed through to the invoice's notes column
+//
+// What it does:
+//   1. Reads the source CN + items.
+//   2. Pulls unit prices from the parent Consignment Order's items
+//      (consignment_order_items) where productCode matches, falling back
+//      to the unitPrice already on consignment_items, then 0.
+//   3. Generates a sequential invoice number via nextInvoiceNo() (shared
+//      INV-YYMM-NNN sequence, fixed 2026-04-28).
+//   4. INSERTs a DRAFT invoice with delivery_order_id=NULL +
+//      sales_order_id=NULL — this is a CN-origin invoice. See migration
+//      0070 header for why we chose CN→Invoice as one-way (no reverse
+//      FK on invoices). Customer + hub fields denormalized from the CN.
+//   5. INSERTs invoice_items mirroring CN items.
+//   6. UPDATEs consignment_notes.status='FULLY_SOLD' (the legacy enum
+//      value the FE re-skins as DELIVERED) and stamps deliveredAt if not
+//      yet set. Writes converted_invoice_id pointing at the new invoice.
+//   7. Marks every consignment_items row status='SOLD' + soldDate=now.
+// ---------------------------------------------------------------------------
+app.post("/:id/convert-to-invoice", async (c) => {
+  try {
+    const id = c.req.param("id");
+    const body = (await c.req.json().catch(() => ({}))) as {
+      notes?: string;
+    };
+
+    // Read source CN + items.
+    const [cn, itemsRes] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM consignment_notes WHERE id = ?")
+        .bind(id)
+        .first<ConsignmentNoteRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM consignment_items WHERE consignmentNoteId = ?",
+      )
+        .bind(id)
+        .all<ConsignmentItemRow>(),
+    ]);
+    if (!cn) {
+      return c.json({ success: false, error: "Consignment note not found" }, 404);
+    }
+    const cnItems = itemsRes.results ?? [];
+
+    // Idempotency guard — if the CN already converted, return the existing
+    // invoice id rather than creating a duplicate. (Stops a double-click
+    // from generating two invoices for the same CN.)
+    if (cn.convertedInvoiceId) {
+      return c.json(
+        {
+          success: false,
+          error: `Consignment note already converted to invoice ${cn.convertedInvoiceId}`,
+          invoiceId: cn.convertedInvoiceId,
+        },
+        409,
+      );
+    }
+
+    // Pull unit prices from the parent CO's items (best-effort fallback).
+    // CN items often store unitPrice=0 because pricing lives on the CO line.
+    let priceByCode = new Map<string, number>();
+    if (cn.consignmentOrderId) {
+      const coItemsRes = await c.var.DB.prepare(
+        "SELECT productCode, unitPriceSen FROM consignment_order_items WHERE consignmentOrderId = ?",
+      )
+        .bind(cn.consignmentOrderId)
+        .all<{ productCode: string | null; unitPriceSen: number | null }>();
+      priceByCode = new Map(
+        (coItemsRes.results ?? [])
+          .filter((r) => r.productCode)
+          .map((r) => [r.productCode as string, Number(r.unitPriceSen) || 0]),
+      );
+    }
+
+    const invoiceItems = cnItems.map((it) => {
+      // Price preference: CO item > CN item > 0.
+      const fromCo = it.productCode ? priceByCode.get(it.productCode) : undefined;
+      const unitPriceSen =
+        fromCo !== undefined ? fromCo : Number(it.unitPrice) || 0;
+      return {
+        id: `invi-${crypto.randomUUID().slice(0, 8)}`,
+        productCode: it.productCode ?? "",
+        productName: it.productName ?? "",
+        sizeLabel: "",
+        fabricCode: "",
+        quantity: it.quantity,
+        unitPriceSen,
+        totalSen: unitPriceSen * it.quantity,
+      };
+    });
+
+    const subtotalSen = invoiceItems.reduce((s, i) => s + i.totalSen, 0);
+    const totalSen = subtotalSen;
+    const now = new Date().toISOString();
+    const invoiceDate = now.split("T")[0];
+    const due = new Date();
+    due.setDate(due.getDate() + 30);
+    const dueDate = due.toISOString().split("T")[0];
+    const invoiceId = `inv-${crypto.randomUUID().slice(0, 8)}`;
+    const invoiceNo = await nextInvoiceNo(c.var.DB);
+
+    // Resolve hub name for denormalization (matches the DO→invoice path).
+    let hubName: string | null = null;
+    if (cn.hubId) {
+      const hub = await c.var.DB.prepare(
+        "SELECT shortName FROM delivery_hubs WHERE id = ?",
+      )
+        .bind(cn.hubId)
+        .first<{ shortName: string | null }>();
+      hubName = hub?.shortName ?? null;
+    }
+
+    const statements: D1PreparedStatement[] = [
+      c.var.DB.prepare(
+        `INSERT INTO invoices (
+           id, invoiceNo, deliveryOrderId, doNo, salesOrderId, companySOId,
+           customerId, customerName, customerState, hubId, hubName,
+           subtotalSen, totalSen, status, invoiceDate, dueDate, paidAmount,
+           paymentDate, paymentMethod, notes, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        invoiceId,
+        invoiceNo,
+        // CN-origin invoice: deliveryOrderId + doNo + salesOrderId stay
+        // null. The CN linkage is held one-way on consignment_notes
+        // .convertedInvoiceId (migration 0070).
+        null,
+        null,
+        null,
+        null,
+        cn.customerId,
+        cn.customerName ?? "",
+        null,
+        cn.hubId,
+        hubName,
+        subtotalSen,
+        totalSen,
+        "DRAFT",
+        invoiceDate,
+        dueDate,
+        0,
+        null,
+        "",
+        body.notes ?? `Converted from consignment note ${cn.noteNumber}`,
+        now,
+        now,
+      ),
+      ...invoiceItems.map((item) =>
+        c.var.DB.prepare(
+          `INSERT INTO invoice_items (
+             id, invoiceId, productCode, productName, sizeLabel, fabricCode,
+             quantity, unitPriceSen, totalSen
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          item.id,
+          invoiceId,
+          item.productCode,
+          item.productName,
+          item.sizeLabel,
+          item.fabricCode,
+          item.quantity,
+          item.unitPriceSen,
+          item.totalSen,
+        ),
+      ),
+      // Flip CN to FULLY_SOLD + link the new invoice id back. Stamp
+      // deliveredAt if not already (a sale-conversion implies the goods
+      // reached the customer's hands).
+      c.var.DB.prepare(
+        `UPDATE consignment_notes
+            SET status = 'FULLY_SOLD',
+                deliveredAt = COALESCE(deliveredAt, ?),
+                convertedInvoiceId = ?
+          WHERE id = ?`,
+      ).bind(now, invoiceId, id),
+      // Mark every CN item SOLD with soldDate=now. The legacy enum allows
+      // AT_BRANCH / SOLD / RETURNED / DAMAGED — SOLD is the right tag for
+      // the convert-to-invoice action.
+      c.var.DB.prepare(
+        `UPDATE consignment_items
+            SET status = 'SOLD', soldDate = ?
+          WHERE consignmentNoteId = ? AND status = 'AT_BRANCH'`,
+      ).bind(now, id),
+    ];
+
+    await c.var.DB.batch(statements);
+
+    // Audit (best-effort).
+    await emitAudit(c, {
+      resource: "consignment-notes",
+      resourceId: id,
+      action: "convert-to-invoice",
+      after: {
+        id,
+        invoiceId,
+        invoiceNo,
+        totalSen,
+      },
+    });
+
+    return c.json(
+      {
+        success: true,
+        data: {
+          invoiceId,
+          invoiceNo,
+          totalSen,
+          consignmentNoteId: id,
+        },
+      },
+      201,
+    );
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/consignment-notes/:id/convert-to-invoice] failed:", msg);
     return c.json({ success: false, error: msg || "Invalid request body" }, 400);
   }
 });

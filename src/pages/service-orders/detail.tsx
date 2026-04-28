@@ -8,7 +8,6 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -117,6 +116,8 @@ function dateLabel(iso: string): string {
   });
 }
 
+type FgPickerOpt = { id: string; code: string; name: string; stockQty?: number };
+
 export default function ServiceOrderDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
   const { toast } = useToast();
@@ -124,6 +125,15 @@ export default function ServiceOrderDetailPage() {
 
   const { data: resp, refresh } = useCachedJson<{ data?: ServiceOrderDetail }>(
     `/api/service-orders/${id}`,
+  );
+  // Pulled here so the per-row Scrap action can show a dropdown of FG batches
+  // (matches the same source the create-modal uses for STOCK_SWAP picking).
+  const { data: invResp } = useCachedJson<{
+    data?: { finishedProducts?: FgPickerOpt[] };
+  }>("/api/inventory");
+  const fgList: FgPickerOpt[] = useMemo(
+    () => invResp?.data?.finishedProducts ?? [],
+    [invResp],
   );
   const order = resp?.data;
   const [returnOpen, setReturnOpen] = useState(false);
@@ -149,6 +159,16 @@ export default function ServiceOrderDetailPage() {
   }
 
   async function advanceStatus(next: Status) {
+    if (next === "CANCELLED") {
+      const lines = order?.lines ?? [];
+      const summary =
+        order?.mode === "REPRODUCE"
+          ? `Cancel will also cancel ${lines.filter((l) => l.resolutionProductionOrderId).length} child production order(s).`
+          : order?.mode === "STOCK_SWAP"
+            ? `Cancel will restore ${lines.filter((l) => l.resolutionFgBatchId).length} reserved FG batch(es).`
+            : "";
+      if (summary && !window.confirm(`${summary} Continue?`)) return;
+    }
     setAdvancing(true);
     try {
       const res = await fetch(`/api/service-orders/${id}/status`, {
@@ -156,13 +176,27 @@ export default function ServiceOrderDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ status: next }),
       });
-      const data = (await res.json()) as { success?: boolean; error?: string };
+      const data = (await res.json()) as {
+        success?: boolean;
+        error?: string;
+        cascade?: { posCancelled: number; fgRestored: number };
+      };
       if (!res.ok || !data?.success) {
         throw new Error(data?.error || `HTTP ${res.status}`);
       }
       invalidateCachePrefix("/api/service-orders");
+      // Cancel cascades touch production_orders and fg_batches — bust their
+      // caches so the affected pages reflect the rollback immediately.
+      if (next === "CANCELLED") {
+        invalidateCachePrefix("/api/production-orders");
+        invalidateCachePrefix("/api/inventory");
+      }
       refresh();
-      toast.success(`Status → ${next}`);
+      const cascadeMsg =
+        data.cascade && (data.cascade.posCancelled || data.cascade.fgRestored)
+          ? ` (${data.cascade.posCancelled} POs cancelled, ${data.cascade.fgRestored} FG restored)`
+          : "";
+      toast.success(`Status → ${next}${cascadeMsg}`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
     } finally {
@@ -407,6 +441,7 @@ export default function ServiceOrderDetailPage() {
                       onChanged={refresh}
                       currentUserId={user?.id ?? ""}
                       currentUserName={user?.displayName ?? user?.email ?? ""}
+                      fgList={fgList}
                     />
                   ))}
                 </tbody>
@@ -414,15 +449,17 @@ export default function ServiceOrderDetailPage() {
             </div>
           )}
           <p className="text-[10px] text-[#9CA3AF] mt-2">
-            For SCRAPPED units, create a Stock Adjustment (reason: WRITE_OFF)
-            via{" "}
+            Click <strong>Scrap…</strong> on a return row to write off the
+            defective unit. The system creates the Stock Adjustment (reason:
+            DAMAGED) automatically and links it back here — no need to round
+            trip through{" "}
             <Link
               to="/inventory/adjustments"
               className="text-[#6B5C32] hover:underline"
             >
               Inventory &gt; Adjustments
-            </Link>{" "}
-            and paste the adjustment id below.
+            </Link>
+            .
           </p>
         </CardContent>
       </Card>
@@ -467,17 +504,30 @@ function ReturnRow({
   onChanged,
   currentUserId,
   currentUserName,
+  fgList,
 }: {
   svcId: string;
   ret: ServiceOrderDetail["returns"][number];
   onChanged: () => void;
   currentUserId: string;
   currentUserName: string;
+  fgList: FgPickerOpt[];
 }) {
   const { toast } = useToast();
-  const [scrapAdjId, setScrapAdjId] = useState(ret.scrappedViaAdjustmentId);
+  const [scrapFgBatchId, setScrapFgBatchId] = useState("");
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  // Pre-filter the FG dropdown to batches matching this return's product (when
+  // we know it). Operator can still see all batches if no match — small shop
+  // reality is that productId might not always be set on a return row.
+  const fgOptions = useMemo(() => {
+    if (ret.productId) {
+      const matches = fgList.filter((f) => f.id === ret.productId);
+      if (matches.length) return matches;
+    }
+    return fgList;
+  }, [fgList, ret.productId]);
 
   async function patch(body: Record<string, unknown>) {
     setBusy(true);
@@ -489,6 +539,40 @@ function ReturnRow({
       });
       const data = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      onChanged();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setBusy(false);
+      setEditing(false);
+    }
+  }
+
+  // One-click scrap: backend POST creates the stock_adjustment, decrements
+  // fg_batches.remainingQty, and flips the return to SCRAPPED with the new
+  // adj-id linked back. The user just picks WHICH FG batch to write off
+  // against (defaults pre-filtered by product when known).
+  async function scrap() {
+    if (!scrapFgBatchId) {
+      toast.error("Pick an FG batch to write off against");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/service-orders/${svcId}/returns/${ret.id}/scrap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fgBatchId: scrapFgBatchId,
+          adjustedBy: currentUserId,
+          adjustedByName: currentUserName,
+        }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string; adjustmentId?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      toast.success(`Scrapped via ${data.adjustmentId}`);
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/stock-adjustments");
       onChanged();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Failed");
@@ -525,13 +609,18 @@ function ReturnRow({
       </td>
       <td className="py-2 px-2 text-xs text-[#6B7280]">
         {editing && ret.condition === "PENDING_DECISION" ? (
-          <Input
-            type="text"
-            value={scrapAdjId}
-            onChange={(e) => setScrapAdjId(e.target.value)}
-            placeholder="adj-xxxxxxxx (for SCRAPPED)"
-            className="h-7 text-xs px-2"
-          />
+          <select
+            value={scrapFgBatchId}
+            onChange={(e) => setScrapFgBatchId(e.target.value)}
+            className="h-7 text-xs w-full rounded border border-[#E2DDD8] bg-white px-1.5"
+          >
+            <option value="">Write off against FG batch…</option>
+            {fgOptions.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.code} ({f.stockQty ?? 0} on hand)
+              </option>
+            ))}
+          </select>
         ) : (
           ret.notes || "—"
         )}
@@ -568,16 +657,11 @@ function ReturnRow({
           <div className="flex gap-1 justify-end">
             <button
               type="button"
-              disabled={busy || !scrapAdjId}
-              onClick={() =>
-                patch({
-                  condition: "SCRAPPED",
-                  scrappedViaAdjustmentId: scrapAdjId,
-                })
-              }
+              disabled={busy || !scrapFgBatchId}
+              onClick={scrap}
               className="text-xs text-[#9A3A2D] hover:underline disabled:text-[#E2DDD8]"
             >
-              Save
+              Scrap
             </button>
             <button
               type="button"

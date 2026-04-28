@@ -746,6 +746,20 @@ app.put("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // PUT /api/service-orders/:id/status — advance status with adjacency check.
 // Body: { status: Status, notes?: string }
+//
+// Cancel-side-effects (when next === 'CANCELLED'):
+//   • Mode A (REPRODUCE) — every line.resolutionProductionOrderId gets its
+//     production_orders row flipped to status='CANCELLED' so the factory
+//     stops working on the abandoned replacement. Without this, cancelling
+//     a Service Order leaves orphan POs that PIC1/PIC2 still see in their
+//     queue.
+//   • Mode B (STOCK_SWAP) — every line.resolutionFgBatchId gets its
+//     fg_batches.remainingQty restored by line.qty. Without this, the
+//     reserved unit stays "out of stock" forever even though we never
+//     actually shipped it.
+//   • Mode C (REPAIR) — no cascade; the defective unit either is or isn't
+//     physically at the factory, and that's tracked via service_order_returns
+//     independently. The user just decides what to do with each return.
 // ---------------------------------------------------------------------------
 app.put("/:id/status", async (c) => {
   const id = c.req.param("id");
@@ -776,19 +790,60 @@ app.put("/:id/status", async (c) => {
         409,
       );
     }
+
+    const stmts: D1PreparedStatement[] = [];
     const closedAt = next === "CLOSED" ? new Date().toISOString() : null;
-    await c.var.DB.prepare(
-      `UPDATE service_orders SET status = ?, closedAt = COALESCE(?, closedAt),
-         notes = COALESCE(?, notes) WHERE id = ?`,
-    )
-      .bind(next, closedAt, (body.notes as string) ?? null, id)
-      .run();
+    stmts.push(
+      c.var.DB.prepare(
+        `UPDATE service_orders SET status = ?, closedAt = COALESCE(?, closedAt),
+           notes = COALESCE(?, notes) WHERE id = ?`,
+      ).bind(next, closedAt, (body.notes as string) ?? null, id),
+    );
+
+    // Cascade-cancel side effects. Only on the OPEN/IN_PRODUCTION/RESERVED →
+    // CANCELLED transition; CLOSED → (anything) is a no-op here because
+    // CLOSED is terminal already.
+    const cascadeSummary = { posCancelled: 0, fgRestored: 0 };
+    if (next === "CANCELLED") {
+      const lines = await c.var.DB
+        .prepare("SELECT * FROM service_order_lines WHERE serviceOrderId = ?")
+        .bind(id)
+        .all<ServiceOrderLineRow>();
+      for (const ln of lines.results ?? []) {
+        if (existing.mode === "REPRODUCE" && ln.resolutionProductionOrderId) {
+          stmts.push(
+            c.var.DB
+              .prepare(
+                "UPDATE production_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ? AND status NOT IN ('COMPLETED','CANCELLED')",
+              )
+              .bind(new Date().toISOString(), ln.resolutionProductionOrderId),
+          );
+          cascadeSummary.posCancelled++;
+        }
+        if (existing.mode === "STOCK_SWAP" && ln.resolutionFgBatchId) {
+          stmts.push(
+            c.var.DB
+              .prepare(
+                "UPDATE fg_batches SET remainingQty = remainingQty + ? WHERE id = ?",
+              )
+              .bind(ln.qty, ln.resolutionFgBatchId),
+          );
+          cascadeSummary.fgRestored++;
+        }
+      }
+    }
+
+    await c.var.DB.batch(stmts);
 
     const updated = await c.var.DB
       .prepare("SELECT * FROM service_orders WHERE id = ?")
       .bind(id)
       .first<ServiceOrderRow>();
-    return c.json({ success: true, data: { id, status: updated?.status } });
+    return c.json({
+      success: true,
+      data: { id, status: updated?.status },
+      cascade: next === "CANCELLED" ? cascadeSummary : undefined,
+    });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/status] failed:", err);
     const message = err instanceof Error ? err.message : "Invalid request body";
@@ -973,11 +1028,185 @@ app.put("/:id/returns/:rid", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/service-orders/:id/returns/:rid/scrap — one-click scrap.
+//
+// Replaces the previous two-step UX (open the Inventory Adjustments page,
+// pick a write-off, copy adj-XXXX back here). One POST writes both the
+// stock_adjustments row AND links it back onto the return.
+//
+// Body: {
+//   fgBatchId: string,           // which FG batch the unit is written off against
+//   unitCostSen?: number,        // optional override; defaults to fg_batches.unitCostSen
+//   notes?: string,              // free text (appears on both adjustment + return)
+//   adjustedBy?: string, adjustedByName?: string,
+// }
+//
+// Atomic writes:
+//   1. INSERT stock_adjustments    — type=FG, qty_delta=-1, reason='DAMAGED'
+//   2. INSERT stock_movements      — STOCK_OUT audit ledger entry
+//   3. INSERT cost_ledger          — financial impact
+//   4. UPDATE fg_batches            — decrement remainingQty
+//   5. UPDATE service_order_returns — condition='SCRAPPED', scrappedViaAdjustmentId=newAdjId
+//
+// Mirrors the existing /api/stock-adjustments POST 4-row pattern (see
+// src/api/routes/stock-adjustments.ts) so the data ends up identical to
+// what the operator would have produced manually — no special-case rows.
+// ---------------------------------------------------------------------------
+app.post("/:id/returns/:rid/scrap", async (c) => {
+  const id = c.req.param("id");
+  const rid = c.req.param("rid");
+  try {
+    const body = (await c.req.json()) as Record<string, unknown>;
+    const fgBatchId = (body.fgBatchId as string) ?? "";
+    if (!fgBatchId) {
+      return c.json({ success: false, error: "fgBatchId is required" }, 400);
+    }
+
+    const ret = await c.var.DB
+      .prepare(
+        "SELECT * FROM service_order_returns WHERE id = ? AND serviceOrderId = ?",
+      )
+      .bind(rid, id)
+      .first<ServiceOrderReturnRow>();
+    if (!ret) {
+      return c.json({ success: false, error: "Return not found" }, 404);
+    }
+    if (ret.condition === "SCRAPPED") {
+      return c.json(
+        { success: false, error: "Return is already SCRAPPED" },
+        409,
+      );
+    }
+
+    const batch = await c.var.DB
+      .prepare(
+        "SELECT id, productId, remainingQty, unitCostSen FROM fg_batches WHERE id = ?",
+      )
+      .bind(fgBatchId)
+      .first<{ id: string; productId: string; remainingQty: number; unitCostSen: number }>();
+    if (!batch) {
+      return c.json({ success: false, error: "FG batch not found" }, 404);
+    }
+    if (batch.remainingQty < 1) {
+      return c.json(
+        {
+          success: false,
+          error: `FG batch has 0 on hand — pick a different batch to write off against.`,
+        },
+        409,
+      );
+    }
+
+    const prod = await c.var.DB
+      .prepare("SELECT code, name FROM products WHERE id = ?")
+      .bind(batch.productId)
+      .first<{ code: string; name: string }>();
+    const itemCode = prod?.code ?? batch.productId;
+    const itemName = prod?.name ?? null;
+    const unitCostSen = Number(body.unitCostSen) || batch.unitCostSen || 0;
+    const notes = (body.notes as string) ?? `Scrapped via Service Order ${id}`;
+    const adjustedBy = (body.adjustedBy as string) ?? null;
+    const adjustedByName = (body.adjustedByName as string) ?? null;
+
+    const adjId = `adj-${crypto.randomUUID().slice(0, 8)}`;
+    const totalCostSen = Math.round(unitCostSen);
+    const nowIso = new Date().toISOString();
+    const today = nowIso.split("T")[0];
+
+    const stmts: D1PreparedStatement[] = [
+      // 1. stock_adjustments — the canonical record
+      c.var.DB
+        .prepare(
+          `INSERT INTO stock_adjustments (id, type, itemId, itemCode, itemName,
+             qtyDelta, unitCostSen, totalCostSen, direction, reason, notes,
+             adjustedBy, adjustedByName, adjustedAt, created_at)
+           VALUES (?, 'FG', ?, ?, ?, -1, ?, ?, 'OUT', 'DAMAGED', ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          adjId,
+          fgBatchId,
+          itemCode,
+          itemName,
+          unitCostSen,
+          totalCostSen,
+          notes,
+          adjustedBy,
+          adjustedByName,
+          nowIso,
+          nowIso,
+        ),
+      // 2. stock_movements — audit
+      c.var.DB
+        .prepare(
+          `INSERT INTO stock_movements (id, type, productCode, productName,
+             quantity, reason, performedBy, created_at)
+           VALUES (?, 'STOCK_OUT', ?, ?, 1, ?, ?, ?)`,
+        )
+        .bind(
+          `mv-${adjId}`,
+          itemCode,
+          itemName,
+          `Scrap from Service Order ${id} (return ${rid})${notes ? " — " + notes : ""}`,
+          adjustedByName,
+          nowIso,
+        ),
+      // 3. cost_ledger — financial impact
+      c.var.DB
+        .prepare(
+          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+             qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, 'ADJUSTMENT', 'FG', ?, NULL, 1, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+        )
+        .bind(
+          `cl-${adjId}`,
+          today,
+          fgBatchId,
+          unitCostSen,
+          totalCostSen,
+          adjId,
+          `DAMAGED via Service Order ${id} return ${rid}`,
+        ),
+      // 4. UPDATE fg_batches
+      c.var.DB
+        .prepare("UPDATE fg_batches SET remainingQty = remainingQty - 1 WHERE id = ?")
+        .bind(fgBatchId),
+      // 5. UPDATE the return — SCRAPPED + link
+      c.var.DB
+        .prepare(
+          `UPDATE service_order_returns
+             SET condition = 'SCRAPPED',
+                 scrappedViaAdjustmentId = ?,
+                 notes = COALESCE(?, notes)
+             WHERE id = ?`,
+        )
+        .bind(adjId, notes, rid),
+    ];
+
+    await c.var.DB.batch(stmts);
+
+    const updated = await c.var.DB
+      .prepare("SELECT * FROM service_order_returns WHERE id = ?")
+      .bind(rid)
+      .first<ServiceOrderReturnRow>();
+    return c.json({
+      success: true,
+      data: updated,
+      adjustmentId: adjId,
+    });
+  } catch (err) {
+    console.error("[POST /api/service-orders/:id/returns/:rid/scrap] failed:", err);
+    const message = err instanceof Error ? err.message : "Invalid request body";
+    return c.json({ success: false, error: message }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/service-orders/:id — cancel the order. Allowed only if it's
 // still in OPEN. Once a PO has been spawned (REPRODUCE) or an FG batch
 // reserved (STOCK_SWAP), the side-effects need their own undo path which
 // is out of scope for v1 — the user goes through PUT /:id/status with
-// CANCELLED for those, accepting the side-effect orphans for now.
+// CANCELLED for those, which now cascades cleanly (cancels child POs +
+// restores reserved FG qty). See PUT /:id/status above.
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");

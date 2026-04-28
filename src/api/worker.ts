@@ -405,6 +405,7 @@ import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
 import scanPo from "./routes/scan-po";
 import serviceOrders from "./routes/service-orders";
+import serviceCases from "./routes/service-cases";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -533,6 +534,10 @@ app.route("/api/scan-po", scanPo);
 // Phase 3 — Service Orders (换货服务): customer-reported defects on shipped
 // SOs/COs. Three resolution modes (REPRODUCE / STOCK_SWAP / REPAIR); see
 // routes/service-orders.ts for the full flow.
+// Service Cases — parent of Service Orders (0074). Mounted BEFORE
+// /api/service-orders so the more-specific path wins; both Hono and the
+// SupabaseAdapter route by registration order so this matters.
+app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without

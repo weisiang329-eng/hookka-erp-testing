@@ -85,7 +85,10 @@ const MRP = lazy(() => import('./pages/planning/mrp'))
 // Quality
 const Quality = lazy(() => import('./pages/quality'))
 
-// Service Orders (换货服务) — customer-reported defects on shipped units.
+// Service Cases (parent — every customer-facing service log).
+const ServiceCases = lazy(() => import('./pages/service-cases'))
+const ServiceCaseDetail = lazy(() => import('./pages/service-cases/detail'))
+// Service Orders (child — heavy rework/swap/repair flows under a case).
 const ServiceOrders = lazy(() => import('./pages/service-orders'))
 const ServiceOrderDetail = lazy(() => import('./pages/service-orders/detail'))
 
@@ -298,7 +301,11 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   // Quality
   { path: '/quality', element: <S><Quality /></S> },
 
-  // Service Orders (换货服务) — Phase 3.
+  // Service Cases — top-level (parent). Sidebar links here.
+  { path: '/service-cases', element: <S><ServiceCases /></S> },
+  { path: '/service-cases/:id', element: <S><ServiceCaseDetail /></S> },
+  // Service Orders — child detail pages, reachable from a case detail.
+  // Not in sidebar anymore; the list page stays for direct linking.
   { path: '/service-orders', element: <S><ServiceOrders /></S> },
   { path: '/service-orders/:id', element: <S><ServiceOrderDetail /></S> },
 

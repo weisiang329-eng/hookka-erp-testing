@@ -105,6 +105,7 @@ const AdminHealth = lazy(() => import('./pages/admin/health'))
 const Consignment = lazy(() => import('./pages/consignment'))
 const ConsignmentDetail = lazy(() => import('./pages/consignment/detail'))
 const ConsignmentCreate = lazy(() => import('./pages/consignment/create'))
+const ConsignmentEdit = lazy(() => import('./pages/consignment/edit'))
 const ConsignmentNote = lazy(() => import('./pages/consignment/note'))
 const ConsignmentReturn = lazy(() => import('./pages/consignment/return'))
 
@@ -329,6 +330,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/consignment', element: <S><Consignment /></S> },
   { path: '/consignment/:id', element: <S><ConsignmentDetail /></S> },
   { path: '/consignment/create', element: <S><ConsignmentCreate /></S> },
+  { path: '/consignment/:id/edit', element: <S><ConsignmentEdit /></S> },
   { path: '/consignment/note', element: <S><ConsignmentNote /></S> },
   { path: '/consignment/return', element: <S><ConsignmentReturn /></S> },
 

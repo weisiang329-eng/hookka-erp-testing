@@ -11,7 +11,7 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
-import { generateSOPdf } from "@/lib/generate-so-pdf";
+import { generateCOPdf } from "@/lib/generate-co-pdf";
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { ConsignmentOrder as SalesOrder } from "@/types";
@@ -380,7 +380,7 @@ export default function SalesPage() {
     {
       label: "Print / Preview",
       icon: <Printer className="h-3.5 w-3.5" />,
-      action: () => generateSOPdf(row as unknown as Parameters<typeof generateSOPdf>[0], customers.find(c => c.id === row.customerId) ?? null),
+      action: () => generateCOPdf(row, customers.find(c => c.id === row.customerId) ?? null),
     },
     {
       label: "",
@@ -745,7 +745,7 @@ export default function SalesPage() {
                     setBulkPrinting(true);
                     try {
                       for (const so of selectedRows) {
-                        generateSOPdf(so as unknown as Parameters<typeof generateSOPdf>[0], customers.find(c => c.id === so.customerId) ?? null);
+                        generateCOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
                         // Tiny pacing delay between PDFs so the browser doesn't
                         // queue all download dialogs in the same tick. Inside
                         // an async event handler, not a React effect.

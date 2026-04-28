@@ -129,13 +129,26 @@ async function buildInvoiceCascadeForCN(
   ];
 }
 
-function nextCNNo(): string {
+async function nextCNNo(db: D1Database): Promise<string> {
+  // CN-YYMM-NNN sequential. Bug fix 2026-04-28: previous Math.random()*900+100
+  // collision-prone and not monotonic. Pulls max-existing-suffix+1 in the
+  // (year, month) bucket so new credit notes always increment.
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(
     now.getMonth() + 1,
   ).padStart(2, "0")}`;
-  const seq = String(Math.floor(Math.random() * 900) + 100);
-  return `CN-${yymm}-${seq}`;
+  const prefix = `CN-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT noteNumber FROM credit_notes WHERE noteNumber LIKE ? ORDER BY noteNumber DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ noteNumber: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.noteNumber.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 // GET /api/credit-notes — list all
@@ -192,7 +205,7 @@ app.post("/", async (c) => {
     const totalAmount = parsedItems.reduce((sum, item) => sum + item.total, 0);
 
     const id = genId();
-    const noteNumber = nextCNNo();
+    const noteNumber = await nextCNNo(c.var.DB);
     const date = new Date().toISOString().split("T")[0];
     const now = new Date().toISOString();
 

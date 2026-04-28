@@ -74,15 +74,24 @@ async function nextConsignmentNumber(
   db: D1Database,
   now: Date,
 ): Promise<string> {
+  // CGN-YYMM-NNN. Per user 2026-04-28 numbering decision: Credit Note
+  // owns CN- (financial standard); Consignment Note moves to CGN- to
+  // avoid the collision. Existing CON-* numbers stay valid - the lookup
+  // is scoped to the new prefix.
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const prefix = `CON-${yy}${mm}-`;
+  const prefix = `CGN-${yy}${mm}-`;
   const res = await db
-    .prepare("SELECT COUNT(*) as n FROM consignment_notes WHERE noteNumber LIKE ?")
+    .prepare(
+      "SELECT noteNumber FROM consignment_notes WHERE noteNumber LIKE ? ORDER BY noteNumber DESC LIMIT 1",
+    )
     .bind(`${prefix}%`)
-    .first<{ n: number }>();
-  const seq = (res?.n ?? 0) + 1;
-  return `${prefix}${String(seq).padStart(3, "0")}`;
+    .first<{ noteNumber: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.noteNumber.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 // GET /api/consignment-notes

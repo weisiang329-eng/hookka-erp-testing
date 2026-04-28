@@ -69,13 +69,26 @@ function genId(): string {
   return `dn-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function nextDNNo(): string {
+async function nextDNNo(db: D1Database): Promise<string> {
+  // DN-YYMM-NNN sequential. Bug fix 2026-04-28: previous Math.random
+  // sequence was collision-prone and not monotonic. Same pattern as
+  // SO/PO/DO/GRN/PI/CN.
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(
     now.getMonth() + 1,
   ).padStart(2, "0")}`;
-  const seq = String(Math.floor(Math.random() * 900) + 100);
-  return `DN-${yymm}-${seq}`;
+  const prefix = `DN-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT noteNumber FROM debit_notes WHERE noteNumber LIKE ? ORDER BY noteNumber DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ noteNumber: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.noteNumber.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 // GET /api/debit-notes — list all
@@ -132,7 +145,7 @@ app.post("/", async (c) => {
     const totalAmount = parsedItems.reduce((sum, item) => sum + item.total, 0);
 
     const id = genId();
-    const noteNumber = nextDNNo();
+    const noteNumber = await nextDNNo(c.var.DB);
     const date = new Date().toISOString().split("T")[0];
 
     await c.var.DB.prepare(

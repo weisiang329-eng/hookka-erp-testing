@@ -149,18 +149,24 @@ function genItemId(): string {
 }
 
 async function nextCompanyCOId(db: D1Database, now: Date): Promise<string> {
-  // CO-YY### format. Independent counter from SO so the two prefixes never
-  // collide in production_orders.poNo.
+  // CO-YYMM-NNN format. Aligned with SO/PO/DO/GRN/PI per user 2026-04-28
+  // numbering audit. Sequence is per (year, month) so January resets to
+  // 001. Picks max-existing-suffix+1 (NOT count) so deletions don't
+  // recycle numbers and clash with old refs.
   const yy = String(now.getFullYear()).slice(-2);
-  const prefix = `CO-${yy}`;
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const prefix = `CO-${yy}${mm}-`;
   const res = await db
     .prepare(
-      "SELECT COUNT(*) as n FROM consignment_orders WHERE companyCOId LIKE ?",
+      "SELECT companyCOId FROM consignment_orders WHERE companyCOId LIKE ? ORDER BY companyCOId DESC LIMIT 1",
     )
     .bind(`${prefix}%`)
-    .first<{ n: number }>();
-  const seq = (res?.n ?? 0) + 1;
-  return `${prefix}${String(seq).padStart(3, "0")}`;
+    .first<{ companyCOId: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.companyCOId.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 // ---------------------------------------------------------------------------

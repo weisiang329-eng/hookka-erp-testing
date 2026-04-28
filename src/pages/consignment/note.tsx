@@ -83,6 +83,13 @@ type ConsignmentNoteRow = {
   totalM3: number;          // sum of items[].itemM3 * items[].quantity — DO equivalent: row.totalM3
   totalValueSen: number;
   dispatchDate: string | null;
+  // inTransitAt — ISO timestamp stamped on PARTIALLY_SOLD → IN_TRANSIT
+  // ("Mark In Transit"). Drives the In Transit step in the Detail
+  // dialog's Tracking timeline. Persisted by migration 0078; mirrors
+  // DO's delivery_orders.inTransitAt. Field name matches the API
+  // payload (rather than the dispatchDate/deliveredDate convention)
+  // so the source-of-truth column is unambiguous in code review.
+  inTransitAt: string | null;
   deliveredDate: string | null;
   status: CNStatus;
   // Transport fields — backend already stores these on CN as of migration 0066
@@ -133,10 +140,18 @@ type ConsignmentNoteRow = {
 
 // CN status mapping. See note on CNStatus above for why we re-skin the
 // legacy status enum into a DO-shaped lifecycle.
+//
+// IN_TRANSIT (added with migration 0078) maps 1:1 from the backend status
+// — it gets its own enum value because the In Transit tab + KPI card need
+// to distinguish "dispatched & still at warehouse" from "dispatched & out
+// for delivery". Until 0078, the FE's IN_TRANSIT case was unreachable
+// (no backend status produced it) so the In Transit tab + counter were
+// always 0.
 function cnStatusFromBackend(s: string | undefined | null): CNStatus {
   switch (s) {
     case "ACTIVE": return "PENDING";          // created, not yet dispatched
     case "PARTIALLY_SOLD": return "DISPATCHED"; // some items left the warehouse
+    case "IN_TRANSIT": return "IN_TRANSIT";   // out for delivery to the branch (post 0078)
     case "FULLY_SOLD": return "DELIVERED";    // all items delivered to branch
     case "RETURNED": return "DELIVERED";      // returns are still "delivered" from a logistics view
     case "CLOSED": return "ACKNOWLEDGED";     // branch confirmed receipt and closed
@@ -303,6 +318,10 @@ function mapCNToRow(
     // to PARTIALLY_SOLD); falls back to sentDate (the CN creation date)
     // for legacy rows where the timestamp is null.
     dispatchDate: cn.dispatchedAt || cn.sentDate || null,
+    // inTransitAt (migration 0078) — null until the operator hits Mark
+    // In Transit. Read directly from the API payload so the Tracking
+    // timeline shows the precise stamp rather than the dispatch date.
+    inTransitAt: cn.inTransitAt || null,
     deliveredDate: cn.deliveredAt || null,
     status: cnStatusFromBackend(cn.status),
     // Display the 3PL company name (driverContactPerson holds the dispatcher
@@ -582,6 +601,27 @@ export default function ConsignmentNotePage() {
   };
   const providersRated = providers as ThreePLProviderRated[];
 
+  // Whole-dataset KPI / tab counts. Hoisted up here next to the other
+  // useCachedJson hooks so fetchData() can invalidate + refetch in one
+  // shot. Replaces the cnList-derived counts that were paginated to
+  // PAGE_SIZE rows; route header in src/api/routes/consignment-notes.ts
+  // documents the bucket → status mapping. pendingCN intentionally NOT
+  // served — see route header for the deferred-work rationale.
+  const {
+    data: cnStatsRaw,
+    refresh: refreshCNStats,
+  } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      pendingDispatch?: number;
+      dispatched?: number;
+      inTransit?: number;
+      delivered?: number;
+      deliveredMTD?: number;
+      acknowledged?: number;
+    };
+  }>("/api/consignment-notes/stats");
+
   const fetchData = useCallback(() => {
     invalidateCachePrefix("/api/consignment-notes");
     invalidateCachePrefix("/api/consignment-orders");
@@ -591,7 +631,12 @@ export default function ConsignmentNotePage() {
     refreshCOs();
     refreshPOs();
     refreshProducts();
-  }, [refreshCNs, refreshCOs, refreshPOs, refreshProducts]);
+    // /stats lives under /api/consignment-notes/* so invalidateCachePrefix
+    // above already dropped its cached entry — explicit refresh kicks the
+    // background refetch immediately so KPI cards + tab badges update
+    // without waiting for the next mount/visibility change.
+    refreshCNStats();
+  }, [refreshCNs, refreshCOs, refreshPOs, refreshProducts, refreshCNStats]);
 
   // Lookup: productCode → unitM3 (mirrors DO's productM3Map).
   const productM3Map = useMemo(() => {
@@ -957,33 +1002,29 @@ export default function ConsignmentNotePage() {
   }, [cnList, activeTab]);
 
   // ---------- Summary counts (mirrors DO's KPI strip) ----------
-  // Counts pulled from the loaded CN list. CN backend has no /stats
-  // endpoint yet, so we compute client-side. Will move to server-side
-  // counts once /api/consignment-notes/stats lands (follow-up).
-  const pendingDispatchCount = useMemo(
-    () => cnList.filter((c) => c.status === "PENDING").length,
-    [cnList],
-  );
-  const dispatchedCount = useMemo(
-    () => cnList.filter((c) => c.status === "DISPATCHED").length,
-    [cnList],
-  );
-  const inTransitCount = useMemo(
-    () => cnList.filter((c) => c.status === "IN_TRANSIT").length,
-    [cnList],
-  );
-  const deliveredMTD = useMemo(() => {
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    return cnList.filter(
-      (c) =>
-        c.status === "DELIVERED" &&
-        c.deliveredDate &&
-        new Date(c.deliveredDate) >= startOfMonth,
-    ).length;
-  }, [cnList]);
+  // Counts pulled from /api/consignment-notes/stats (hoisted hook above)
+  // so KPI cards + tab badges reflect the FULL dataset, not just the
+  // current paginated page. The cnList-based counts the page used
+  // previously undercounted any time the production dataset crossed
+  // PAGE_SIZE (200). Follow-up to migration 0078; same /stats pattern
+  // as /api/delivery-orders/stats on the DO side.
+  //
+  // pendingCN intentionally NOT served from /stats — its derivation
+  // requires walking production_orders + their job_cards + the linked CN
+  // items just for a count, which would duplicate the FE's existing
+  // readyPOs computation. We keep the FE-side derivation
+  // (`readyPOs.length`) for now; the route header in
+  // src/api/routes/consignment-notes.ts documents the deferred work.
+  const cnStatsData = cnStatsRaw?.data;
+  const pendingDispatchCount = cnStatsData?.pendingDispatch ?? 0;
+  const dispatchedCount = cnStatsData?.dispatched ?? 0;
+  const inTransitCount = cnStatsData?.inTransit ?? 0;
+  const deliveredCount = cnStatsData?.delivered ?? 0;
+  const acknowledgedCount = cnStatsData?.acknowledged ?? 0;
+  const deliveredMTD = cnStatsData?.deliveredMTD ?? 0;
   // Pending-CN count ignores the customer dedup since the user wants to
-  // see the raw pipeline pressure.
+  // see the raw pipeline pressure. Still computed client-side — see
+  // /stats route header for why pendingCN was intentionally left out.
   const pendingCNCount = readyPOs.length;
 
   // ---------- Pending Dispatch (Pending CN) → Create CN ----------
@@ -1899,6 +1940,36 @@ export default function ConsignmentNotePage() {
         // Driver — see openDispatchDialog comment for rationale.
         action: () => openDispatchDialog(row),
       },
+      // Mark In Transit — DISPATCHED → IN_TRANSIT, stamps inTransitAt
+      // server-side. Mirrors DO's "Mark Out for Delivery (In Transit)"
+      // action. Until migration 0078, this transition was unreachable
+      // from the FE because no backend status produced IN_TRANSIT — the
+      // In Transit tab + KPI card always read 0. The button is gated to
+      // DISPATCHED only (one forward step at a time); operators wanting
+      // to skip straight to Delivered can still use Mark Delivered which
+      // accepts both DISPATCHED and IN_TRANSIT as `from` states.
+      {
+        label: "Mark In Transit",
+        icon: <Truck className="h-3.5 w-3.5" />,
+        disabled: row.status !== "DISPATCHED",
+        action: async () => {
+          try {
+            const res = await fetch("/api/consignment-notes", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ id: row.id, status: "IN_TRANSIT" }),
+            });
+            if (!res.ok) {
+              toast.error("Failed to mark in transit");
+            } else {
+              toast.success(`${row.cnNo} marked in transit`);
+              fetchData();
+            }
+          } catch {
+            toast.error("Failed to mark in transit");
+          }
+        },
+      },
       {
         label: "Mark Delivered",
         icon: <CheckCircle2 className="h-3.5 w-3.5" />,
@@ -2011,13 +2082,18 @@ export default function ConsignmentNotePage() {
   );
 
   // ---------- Tab counts (mirrors DO) ----------
+  // Tab badges read from /stats (whole-dataset) for everything except the
+  // PO-driven Planning + Pending CN tabs. The Dispatched tab combines
+  // DISPATCHED + IN_TRANSIT to match TAB_CN_STATUSES.dispatched (the
+  // operator sees a row in that tab regardless of whether it's still at
+  // the warehouse or already on the road).
   const tabCounts: Record<string, number> = {
     planning: planningPOs.length,
     pending_cn: pendingCNCount,
     pending_dispatch: pendingDispatchCount,
     dispatched: dispatchedCount + inTransitCount,
-    delivered: cnList.filter((c) => c.status === "DELIVERED").length,
-    acknowledged: cnList.filter((c) => c.status === "ACKNOWLEDGED").length,
+    delivered: deliveredCount,
+    acknowledged: acknowledgedCount,
   };
 
   // ---------- Pagination derivations ----------
@@ -3030,16 +3106,24 @@ export default function ConsignmentNotePage() {
                     </div>
                   </div>
                   <div className="ml-4 border-l-2 border-[#E2DDD8] h-4" />
-                  {/* Step 2: In Transit. Active (slate) when status === IN_TRANSIT
-                      or DISPATCHED; done (green) once deliveredDate is set. */}
+                  {/* Step 2: In Transit. Done (green) once deliveredDate is set
+                      OR inTransitAt is stamped on a row that already moved
+                      past — slate (in-progress) when status === IN_TRANSIT
+                      and not yet delivered — gray (waiting) otherwise.
+                      Date label pulls from the actual `inTransitAt`
+                      timestamp (migration 0078) rather than a synthetic
+                      "Currently in transit" placeholder so the operator
+                      sees the precise stamp. Falls back to "Currently in
+                      transit" when status === IN_TRANSIT but inTransitAt
+                      is null (defensive: shouldn't happen post-0078). */}
                   <div className="flex items-center gap-3">
                     <div
                       className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold ${
-                        detailCN.status === "IN_TRANSIT" || detailCN.status === "DISPATCHED"
-                          ? detailCN.deliveredDate
-                            ? "bg-[#4F7C3A]"
-                            : "bg-[#3E6570]"
-                          : detailCN.deliveredDate
+                        detailCN.deliveredDate
+                          ? "bg-[#4F7C3A]"
+                          : detailCN.status === "IN_TRANSIT"
+                          ? "bg-[#3E6570]"
+                          : detailCN.inTransitAt
                           ? "bg-[#4F7C3A]"
                           : "bg-gray-300"
                       }`}
@@ -3049,11 +3133,13 @@ export default function ConsignmentNotePage() {
                     <div>
                       <p className="text-sm font-medium">In Transit</p>
                       <p className="text-xs text-[#9CA3AF]">
-                        {detailCN.status === "DISPATCHED" || detailCN.status === "IN_TRANSIT"
+                        {detailCN.inTransitAt
+                          ? formatDate(detailCN.inTransitAt)
+                          : detailCN.status === "IN_TRANSIT"
                           ? "Currently in transit"
                           : detailCN.deliveredDate
                           ? "Completed"
-                          : "Waiting"}
+                          : "Awaiting in-transit"}
                       </p>
                     </div>
                   </div>
@@ -3166,6 +3252,43 @@ export default function ConsignmentNotePage() {
                       </Button>
                     </>
                   )}
+                  {/* DISPATCHED: operator picks either Mark In Transit (next
+                      step) or Mark Delivered (skip the middle step). Mirrors
+                      the context-menu where both actions are gated on
+                      DISPATCHED — the footer surfaces the same choice for
+                      single-click access without opening the menu. The
+                      Mark In Transit button is hidden once status is
+                      already IN_TRANSIT to avoid no-op re-clicks; Mark
+                      Delivered stays visible on both states. */}
+                  {detailCN.status === "DISPATCHED" && (
+                    <Button
+                      variant="outline"
+                      onClick={async () => {
+                        // PATCH-by-id, status → IN_TRANSIT. Backend flips
+                        // the row + stamps inTransitAt automatically (see
+                        // updateConsignmentNoteById in
+                        // consignment-note-shared.ts).
+                        try {
+                          const res = await fetch("/api/consignment-notes", {
+                            method: "PATCH",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ id: detailCN.id, status: "IN_TRANSIT" }),
+                          });
+                          if (!res.ok) {
+                            toast.error("Failed to mark in transit");
+                          } else {
+                            toast.success(`${detailCN.cnNo} marked in transit`);
+                            setDetailCN(null);
+                            fetchData();
+                          }
+                        } catch {
+                          toast.error("Failed to mark in transit");
+                        }
+                      }}
+                    >
+                      <Truck className="h-4 w-4" /> Mark In Transit
+                    </Button>
+                  )}
                   {(detailCN.status === "DISPATCHED" || detailCN.status === "IN_TRANSIT") && (
                     <Button
                       variant="primary"
@@ -3173,6 +3296,10 @@ export default function ConsignmentNotePage() {
                         // PATCH-by-id (the same shape the context menu's
                         // "Mark Delivered" uses). Backend flips status →
                         // FULLY_SOLD and stamps deliveredAt automatically.
+                        // Accepts both DISPATCHED and IN_TRANSIT as the
+                        // `from` state — operators can skip the middle
+                        // step or take it; the backend stamps deliveredAt
+                        // either way.
                         try {
                           const res = await fetch("/api/consignment-notes", {
                             method: "PATCH",

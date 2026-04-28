@@ -55,6 +55,89 @@ app.get("/", async (c) => {
   return c.json({ success: true, data, total: data.length });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/consignment-notes/stats — whole-dataset KPI / tab counts.
+//
+// Mirrors the rationale behind /api/delivery-orders/stats: the CN list is
+// paginated to PAGE_SIZE on the FE, but the KPI strip + tab badges need
+// to reflect the FULL dataset, not just the current page. Once production
+// CN volume goes past a single page, computing counts client-side from
+// `cnList` undercounts every metric.
+//
+// Bucket → status mapping (legacy CN status enum, the FE re-skins):
+//   pendingDispatch  ← status='ACTIVE'           (Pending Dispatch tab)
+//   dispatched       ← status='PARTIALLY_SOLD'   (Dispatched tab — the goods left
+//                                                  the warehouse but haven't
+//                                                  reached the branch yet)
+//   inTransit        ← status='IN_TRANSIT'       (In Transit tab — added with
+//                                                  migration 0078; mirrors DO's
+//                                                  3-state shipping lane)
+//   delivered        ← status='FULLY_SOLD'       (Delivered tab)
+//   acknowledged     ← status='CLOSED'           (Acknowledged tab)
+//   deliveredMTD     ← FULLY_SOLD AND deliveredAt ≥ start-of-current-month UTC
+//                                                (KPI: deliveries booked
+//                                                 month-to-date)
+//
+// pendingCN intentionally NOT computed server-side — the derivation is
+// the multi-step JOIN-and-filter "CO-origin POs that are fully UPHOLSTERY-
+// complete AND not on any consignment_note", which is a rewrite of the FE's
+// readyPOs computation in note.tsx (~lines 933-947). Doing it correctly
+// requires loading production_orders + their job_cards + the linked CN
+// items just for a count, which is more work than the rest of /stats put
+// together. The FE keeps its current readyPOs-based pendingCNCount for
+// now; follow-up if it ever shows undercount on a production dataset.
+//
+// Registered BEFORE the PUT /:id wildcard per the project memory note
+// about Hono route ordering (static routes before /:id wildcards or they
+// get swallowed). The two GET routes (this one + GET /) live above the
+// POST/PATCH/PUT routes; static path "/stats" + parameterless GET means
+// no collision with the PUT /:id route registered later in the file.
+// ---------------------------------------------------------------------------
+app.get("/stats", async (c) => {
+  // byStatus aggregate. Same shape as /api/delivery-orders/stats so a
+  // future refactor can collapse the two if we ever decide to.
+  const aggRes = await c.var.DB
+    .prepare(
+      "SELECT status, COUNT(*) AS n FROM consignment_notes GROUP BY status",
+    )
+    .all<{ status: string; n: number }>();
+  const byStatus: Record<string, number> = {};
+  for (const row of aggRes.results ?? []) {
+    byStatus[row.status] = Number(row.n) || 0;
+  }
+
+  // deliveredMTD — count of FULLY_SOLD CNs whose deliveredAt timestamp is
+  // ≥ first-of-this-month (UTC). Operator's KPI: "how many CNs reached
+  // the branch this month so far". String comparison works because
+  // deliveredAt is stored as ISO 8601 (lexicographic order = chronological
+  // order for same-format ISO strings).
+  const now = new Date();
+  const startOfMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+  ).toISOString();
+  const mtdRes = await c.var.DB
+    .prepare(
+      `SELECT COUNT(*) AS n FROM consignment_notes
+         WHERE status = 'FULLY_SOLD' AND deliveredAt >= ?`,
+    )
+    .bind(startOfMonth)
+    .first<{ n: number }>();
+  const deliveredMTD = Number(mtdRes?.n) || 0;
+
+  return c.json({
+    success: true,
+    data: {
+      // pendingCN intentionally omitted — see route header rationale.
+      pendingDispatch: byStatus.ACTIVE ?? 0,
+      dispatched: byStatus.PARTIALLY_SOLD ?? 0,
+      inTransit: byStatus.IN_TRANSIT ?? 0,
+      delivered: byStatus.FULLY_SOLD ?? 0,
+      deliveredMTD,
+      acknowledged: byStatus.CLOSED ?? 0,
+    },
+  });
+});
+
 // POST /api/consignment-notes
 //
 // Body shape (all fields optional unless noted):
@@ -174,12 +257,12 @@ app.post("/", async (c) => {
            sentDate, status, totalValue, notes,
            driverId, driverName, driverContactPerson, driverPhone,
            vehicleId, vehicleNo, vehicleType,
-           dispatchedAt, deliveredAt, acknowledgedAt,
+           dispatchedAt, inTransitAt, deliveredAt, acknowledgedAt,
            consignmentOrderId, hubId
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?,
                    ?, ?, ?,
-                   ?, ?, ?,
+                   ?, ?, ?, ?,
                    ?, ?)`,
       ).bind(
         id,
@@ -204,7 +287,9 @@ app.post("/", async (c) => {
         transport.vehicleNo,
         transport.vehicleType,
         // Lifecycle timestamps — null on create. Get stamped by PATCH/PUT
-        // when status flips PARTIALLY_SOLD / FULLY_SOLD / CLOSED.
+        // when status flips PARTIALLY_SOLD / IN_TRANSIT / FULLY_SOLD /
+        // CLOSED. inTransitAt added by migration 0078.
+        null,
         null,
         null,
         null,

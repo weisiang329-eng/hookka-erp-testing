@@ -39,8 +39,12 @@ export type ConsignmentNoteRow = {
   vehicleId: string | null;
   vehicleNo: string | null;
   vehicleType: string | null;
-  // Lifecycle timestamps (migration 0066)
+  // Lifecycle timestamps (migration 0066 + 0078).
+  // inTransitAt was added by migration 0078 — stamped on the
+  // PARTIALLY_SOLD → IN_TRANSIT transition ("Mark In Transit") to mirror
+  // DO's 3-state shipping lane (LOADED → IN_TRANSIT → DELIVERED).
   dispatchedAt: string | null;
+  inTransitAt: string | null;
   deliveredAt: string | null;
   acknowledgedAt: string | null;
   // CO + hub linkage (migration 0066)
@@ -95,7 +99,10 @@ export function rowToConsignmentNote(
     vehicleNo: row.vehicleNo ?? "",
     vehicleType: row.vehicleType ?? "",
     // Lifecycle timestamps — null when not yet stamped, ISO string after.
+    // inTransitAt (migration 0078) stamps on the LOADED → IN_TRANSIT
+    // transition; the FE Tracking timeline + Detail dialog read it.
     dispatchedAt: row.dispatchedAt,
+    inTransitAt: row.inTransitAt,
     deliveredAt: row.deliveredAt,
     acknowledgedAt: row.acknowledgedAt,
     // CO + hub linkage
@@ -311,16 +318,20 @@ export async function resolveHubState(
 // Lifecycle (mirrors DO's status transitions, mapped onto the legacy CN
 // status enum the FE re-skins):
 //
-//   ACTIVE         → PARTIALLY_SOLD  (Mark Dispatched)   — stamps dispatchedAt
-//   PARTIALLY_SOLD → FULLY_SOLD      (Mark Delivered)     — stamps deliveredAt
+//   ACTIVE         → PARTIALLY_SOLD  (Mark Dispatched)    — stamps dispatchedAt
+//   PARTIALLY_SOLD → IN_TRANSIT      (Mark In Transit)    — stamps inTransitAt   (migration 0078)
+//   IN_TRANSIT     → FULLY_SOLD      (Mark Delivered)     — stamps deliveredAt
+//   PARTIALLY_SOLD → FULLY_SOLD      (Mark Delivered direct, skipping IN_TRANSIT)
 //   FULLY_SOLD     → CLOSED          (Mark Acknowledged)  — stamps acknowledgedAt
 //
 // Reverse transitions (added 2026-04-28 for the DO-parity reverse-action
 // context menu items on the CN page):
 //
-//   PARTIALLY_SOLD → ACTIVE          (Reverse to Pending Dispatch) — nulls dispatchedAt
-//   FULLY_SOLD     → PARTIALLY_SOLD  (Reverse to Dispatched)        — nulls deliveredAt
-//   CLOSED         → FULLY_SOLD      (Reverse to Delivered)         — nulls acknowledgedAt
+//   IN_TRANSIT     → PARTIALLY_SOLD  (Reverse to Dispatched)         — nulls inTransitAt
+//   PARTIALLY_SOLD → ACTIVE          (Reverse to Pending Dispatch)   — nulls dispatchedAt + inTransitAt
+//   IN_TRANSIT     → ACTIVE          (Reverse to Pending Dispatch in one step from in-transit)
+//   FULLY_SOLD     → PARTIALLY_SOLD  (Reverse to Dispatched)         — nulls deliveredAt
+//   CLOSED         → FULLY_SOLD      (Reverse to Delivered)          — nulls acknowledgedAt
 //
 // Auto-null logic: when the new status is strictly EARLIER in the lifecycle
 // than the existing one (per STATUS_RANK below), every timestamp at-or-after
@@ -340,12 +351,18 @@ export async function resolveHubState(
 // nulled instead of the stale value lingering. RETURNED is treated as
 // PARTIALLY_SOLD's rank since it's reachable from PARTIALLY_SOLD/FULLY_SOLD
 // via the return endpoint and shouldn't pin a forward timestamp.
+//
+// IN_TRANSIT (migration 0078) sits between PARTIALLY_SOLD (Dispatched) and
+// FULLY_SOLD (Delivered) — same position DO assigns to its IN_TRANSIT
+// state on the delivery_orders table. Existing ranks shift accordingly:
+// FULLY_SOLD 2→3, CLOSED 3→4. RETURNED stays at PARTIALLY_SOLD's rank.
 const STATUS_RANK: Record<string, number> = {
   ACTIVE: 0,
   PARTIALLY_SOLD: 1,
   RETURNED: 1,
-  FULLY_SOLD: 2,
-  CLOSED: 3,
+  IN_TRANSIT: 2,
+  FULLY_SOLD: 3,
+  CLOSED: 4,
 };
 export type UpdateCNResult =
   | { ok: true; note: ConsignmentNoteRow; items: ConsignmentItemRow[] }
@@ -370,9 +387,18 @@ export async function updateConsignmentNoteById(
 
   // Auto-stamp lifecycle timestamps (idempotent on forward transitions).
   let dispatchedAt = existing.dispatchedAt;
+  let inTransitAt = existing.inTransitAt;
   let deliveredAt = existing.deliveredAt;
   let acknowledgedAt = existing.acknowledgedAt;
   if (nextStatus === "PARTIALLY_SOLD" && !dispatchedAt) dispatchedAt = now;
+  // IN_TRANSIT (migration 0078) — Mark In Transit. Also stamp dispatchedAt
+  // if the operator skipped Mark Dispatched and went straight from ACTIVE
+  // → IN_TRANSIT (defensive — the FE gates the action on DISPATCHED, but
+  // an explicit override could still get here).
+  if (nextStatus === "IN_TRANSIT") {
+    if (!inTransitAt) inTransitAt = now;
+    if (!dispatchedAt) dispatchedAt = now;
+  }
   if (nextStatus === "FULLY_SOLD" && !deliveredAt) deliveredAt = now;
   if (nextStatus === "CLOSED" && !acknowledgedAt) acknowledgedAt = now;
 
@@ -385,16 +411,18 @@ export async function updateConsignmentNoteById(
   const nextRank = STATUS_RANK[nextStatus ?? ""] ?? 0;
   if (typeof body.status === "string" && nextRank < prevRank) {
     if (nextRank < STATUS_RANK.PARTIALLY_SOLD) dispatchedAt = null;
+    if (nextRank < STATUS_RANK.IN_TRANSIT) inTransitAt = null;
     if (nextRank < STATUS_RANK.FULLY_SOLD) deliveredAt = null;
     if (nextRank < STATUS_RANK.CLOSED) acknowledgedAt = null;
   }
 
   // Force-wipe escape hatch: clearTimestamps:true on the body nulls all
-  // three lifecycle timestamps regardless of rank. Used by the reverse
+  // four lifecycle timestamps regardless of rank. Used by the reverse
   // context-menu actions on the CN page when the FE wants the wipe to be
   // explicit rather than rely on rank inference.
   if (body.clearTimestamps === true) {
     dispatchedAt = null;
+    inTransitAt = null;
     deliveredAt = null;
     acknowledgedAt = null;
   }
@@ -403,6 +431,9 @@ export async function updateConsignmentNoteById(
   // auto-stamp and the reverse-wipe paths above.
   if (body.dispatchedAt !== undefined) {
     dispatchedAt = (body.dispatchedAt as string | null) ?? null;
+  }
+  if (body.inTransitAt !== undefined) {
+    inTransitAt = (body.inTransitAt as string | null) ?? null;
   }
   if (body.deliveredAt !== undefined) {
     deliveredAt = (body.deliveredAt as string | null) ?? null;
@@ -483,7 +514,7 @@ export async function updateConsignmentNoteById(
          status = ?, notes = ?, branchName = ?, sentDate = ?,
          driverId = ?, driverName = ?, driverContactPerson = ?, driverPhone = ?,
          vehicleId = ?, vehicleNo = ?, vehicleType = ?,
-         dispatchedAt = ?, deliveredAt = ?, acknowledgedAt = ?,
+         dispatchedAt = ?, inTransitAt = ?, deliveredAt = ?, acknowledgedAt = ?,
          consignmentOrderId = ?, hubId = ?
        WHERE id = ?`,
     )
@@ -500,6 +531,7 @@ export async function updateConsignmentNoteById(
       vehicleNo,
       vehicleType,
       dispatchedAt,
+      inTransitAt,
       deliveredAt,
       acknowledgedAt,
       consignmentOrderId,
@@ -639,22 +671,30 @@ export async function updateConsignmentNoteById(
   }
 
   // -------------------------------------------------------------------
-  // Reversal cascade on PARTIALLY_SOLD → ACTIVE ("Reverse to Pending
-  // Dispatch" context-menu action). Mirrors delivery-orders.ts ~lines
-  // 1471-1577 — unstamp fg_units that this CN claimed, write a STOCK_IN
-  // counter-movement (audit history is append-only), and re-credit
-  // wip_items.stockQty symmetrically. Without this, units would stay
-  // wedged in 'LOADED' state with an obsolete cnId pointer and the
-  // warehouse view would double-count them after a reversal.
+  // Reversal cascade on (PARTIALLY_SOLD | IN_TRANSIT) → ACTIVE ("Reverse
+  // to Pending Dispatch" context-menu action). Mirrors delivery-orders.ts
+  // ~lines 1471-1577 — unstamp fg_units that this CN claimed, write a
+  // STOCK_IN counter-movement (audit history is append-only), and
+  // re-credit wip_items.stockQty symmetrically. Without this, units
+  // would stay wedged in 'LOADED' state with an obsolete cnId pointer
+  // and the warehouse view would double-count them after a reversal.
+  //
+  // The widened IN_TRANSIT trigger (added with migration 0078) lets a CN
+  // that's already crossed into IN_TRANSIT roll all the way back to
+  // Pending Dispatch in one PUT — symmetric to the forward path which
+  // does NOT add a cascade on PARTIALLY_SOLD → IN_TRANSIT (the goods
+  // were already booked out at dispatch; IN_TRANSIT is just a tracking
+  // sub-state of LOADED).
   //
   // Skipping FULLY_SOLD → DELIVERED parity from DO is intentional:
   // consignment lifecycle differs ("delivered to branch" ≠ "sold to end
   // customer"; the SOLD event is per-line via consignment_items.soldDate,
-  // not header-level). Only the ACTIVE↔PARTIALLY_SOLD boundary touches
-  // fg_units / stock_movements / wip_items.
+  // not header-level). Only the ACTIVE↔PARTIALLY_SOLD/IN_TRANSIT boundary
+  // touches fg_units / stock_movements / wip_items.
   // -------------------------------------------------------------------
   const revertedToActive =
-    existing.status === "PARTIALLY_SOLD" && nextStatus === "ACTIVE";
+    (existing.status === "PARTIALLY_SOLD" || existing.status === "IN_TRANSIT") &&
+    nextStatus === "ACTIVE";
   if (revertedToActive) {
     const stampedPosRes = await db
       .prepare(`SELECT DISTINCT poId FROM fg_units WHERE cnId = ?`)

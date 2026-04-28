@@ -729,6 +729,14 @@ function CreateConsignmentOrderPage() {
     // res.ok the "success" branch could fire on an error response and the
     // user would navigate to a detail page for a SO that was never created.
     try {
+      // Include the picked delivery hub so the backend can resolve
+      // customerState + hubName correctly. Without this the CO row landed
+      // with null state, and earlier when the backend was joining on a
+      // (non-existent) customers.state column the create would 500 with
+      // "column 'state' does not exist". Bug fix 2026-04-28.
+      const pickedHub = selectedCustomer?.deliveryHubs?.find(
+        (h) => h.id === deliveryHubId,
+      );
       const res = await fetch("/api/consignment-orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -736,6 +744,8 @@ function CreateConsignmentOrderPage() {
           customerId, customerPOId, customerCOId, reference,
           companyCODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
           status,
+          hubId: deliveryHubId || null,
+          hubName: pickedHub?.shortName ?? null,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string } };

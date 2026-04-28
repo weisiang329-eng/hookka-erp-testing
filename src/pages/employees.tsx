@@ -1844,8 +1844,13 @@ type WorkerJobCardRow = {
   departmentCode: string;
   wipCode: string;
   wipLabel: string;
+  wipQty?: number;
   completedDate: string | null;
+  // productionTimeMinutes = perUnit x wipQty (the actual time the worker
+  // spent on this JC). perUnitMinutes is the BOM-defined per-unit value
+  // alongside it so the Daily Breakdown can show "15 min x 2 = 30 min".
   productionTimeMinutes: number;
+  perUnitMinutes?: number;
   status: string;
   picSlot: "PIC1" | "PIC2" | "";
   // True when both PIC1 and PIC2 are filled on this JC. Halve the
@@ -1972,7 +1977,9 @@ function EmployeeDetailTab({
     wipLabel: string;            // human-readable piece label (e.g. "5531 RIGHT ARM"); blank for ATT rows
     completedDate: string | null; // JC completion date (separate from `date` which is the entry date)
     deptCode: string;
-    minutes: number;
+    minutes: number;             // total time = perUnit x qty; for ATT rows, just the recorded minutes
+    perUnitMinutes?: number;     // BOM-defined per-unit time (JC rows only)
+    qty?: number;                // wipQty (JC rows only)
     status: string;
     source: "ATT" | "JC";
     picSlot?: "PIC1" | "PIC2" | "";
@@ -2005,6 +2012,8 @@ function EmployeeDetailTab({
         completedDate: jc.completedDate,
         deptCode: jc.departmentCode || "—",
         minutes: jc.productionTimeMinutes || 0,
+        perUnitMinutes: jc.perUnitMinutes,
+        qty: jc.wipQty,
         status: jc.status,
         source: "JC",
         picSlot: jc.picSlot,
@@ -2065,13 +2074,55 @@ function EmployeeDetailTab({
       ),
     },
     {
+      key: "qty",
+      label: "Qty",
+      align: "center",
+      sortable: true,
+      render: (_v, row) =>
+        row.qty && row.qty > 0 ? (
+          <span className="tabular-nums text-[#1F1D1B]">{row.qty}</span>
+        ) : (
+          <span className="text-[#9CA3AF] tabular-nums">—</span>
+        ),
+    },
+    {
+      key: "perUnitMinutes",
+      label: "WIP Time",
+      align: "right",
+      sortable: true,
+      render: (_v, row) =>
+        row.perUnitMinutes && row.perUnitMinutes > 0 ? (
+          <span className="tabular-nums text-[#4B5563]" title="Per-unit production time from BOM">
+            {formatHours(row.perUnitMinutes)}
+          </span>
+        ) : (
+          <span className="text-[#9CA3AF] tabular-nums">—</span>
+        ),
+    },
+    {
       key: "minutes",
       label: "Production Time",
       align: "right",
       sortable: true,
-      render: (_v, row) => (
-        <span className="font-medium tabular-nums">{formatHours(row.minutes)}</span>
-      ),
+      render: (_v, row) => {
+        // For JC rows with qty > 1, surface the math (e.g. "15m x 2 = 30m")
+        // so the user can verify. For qty=1 or ATT rows, just the total.
+        const total = formatHours(row.minutes);
+        if (
+          row.source === "JC" &&
+          row.perUnitMinutes &&
+          row.qty &&
+          row.qty > 1 &&
+          row.perUnitMinutes > 0
+        ) {
+          return (
+            <span className="font-medium tabular-nums" title={`${row.perUnitMinutes}m x ${row.qty}`}>
+              {total}
+            </span>
+          );
+        }
+        return <span className="font-medium tabular-nums">{total}</span>;
+      },
     },
     {
       key: "status",

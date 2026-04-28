@@ -49,6 +49,35 @@ export function parsePublicEndpoints() {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. Parse routes mounted in src/api/worker.ts that come BEFORE
+//     `app.use("/api/*", authMiddleware)` — those bypass the auth gate
+//     entirely without ever appearing in PUBLIC_PATHS / PUBLIC_PREFIXES.
+//     The PUBLIC_PATHS allowlist only governs routes that go THROUGH the
+//     middleware; pre-mounted routes are a parallel public surface that
+//     also needs snapshotting.
+//
+// Returns array of "{METHOD} {path}" strings (e.g. "GET /api/health").
+// ---------------------------------------------------------------------------
+export function parsePreAuthRoutes() {
+  const src = readFileSync(resolve(root, "src/api/worker.ts"), "utf8");
+  // Find where the auth middleware is registered. Routes registered before
+  // this line are public-by-construction.
+  const authIdx = src.search(/app\.use\(\s*["']\/api\/\*["']\s*,\s*authMiddleware/);
+  if (authIdx < 0) {
+    throw new Error("parsePreAuthRoutes: could not locate authMiddleware mount");
+  }
+  const preAuth = src.slice(0, authIdx);
+  // Match `app.<method>("/api/...", ...)` and `app.all("/api/...", ...)`.
+  const routes = [];
+  const re = /app\.(get|post|put|patch|delete|all)\(\s*["'](\/api\/[^"']+)["']/gi;
+  let m;
+  while ((m = re.exec(preAuth)) !== null) {
+    routes.push(`${m[1].toUpperCase()} ${m[2]}`);
+  }
+  return routes;
+}
+
+// ---------------------------------------------------------------------------
 // 2. Parse the seeded role -> Set<"resource:action"> matrix out of
 //    migrations/0045_rbac.sql.
 //

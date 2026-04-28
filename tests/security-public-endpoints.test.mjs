@@ -16,7 +16,7 @@
 // ---------------------------------------------------------------------------
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parsePublicEndpoints } from "./_security-helpers.mjs";
+import { parsePublicEndpoints, parsePreAuthRoutes } from "./_security-helpers.mjs";
 
 // Snapshot contract — these two arrays must mirror PUBLIC_PATHS and
 // PUBLIC_PREFIXES in src/api/lib/auth-middleware.ts EXACTLY. Any drift is
@@ -92,6 +92,35 @@ test("invite preflight prefix is still public", () => {
   // without a Bearer token — they don't have one yet.
   const { prefixes } = parsePublicEndpoints();
   assert.ok(prefixes.includes("/api/auth/invite/"));
+});
+
+// Snapshot of routes mounted in src/api/worker.ts BEFORE the auth middleware.
+// These bypass PUBLIC_PATHS / PUBLIC_PREFIXES entirely (the middleware never
+// sees them) so they need their own snapshot to catch accidental additions.
+//
+// Pre-auth routes today: /api/health (uptime probe), /api/pg-ping (Hyperdrive
+// heartbeat — leaks NOW() + table count, kept public so uptime monitors don't
+// need a Bearer token), /api/internal/refresh-mvs (cron, gated by
+// CRON_SECRET), /api/qc-pending/trigger (cron, gated by CRON_SECRET).
+//
+// The catch-all `app.all("/api/*", ...)` at the bottom of worker.ts is
+// registered AFTER the middleware, so it doesn't appear here — the
+// middleware runs first and any unauth'd request gets 401 before it would
+// reach the catch-all.
+const EXPECTED_PRE_AUTH_ROUTES = [
+  "GET /api/health",
+  "GET /api/pg-ping",
+  "POST /api/internal/refresh-mvs",
+  "POST /api/qc-pending/trigger",
+];
+
+test("pre-auth routes (mounted before authMiddleware) are locked in", () => {
+  const actual = parsePreAuthRoutes();
+  assert.deepStrictEqual(
+    [...actual].sort(),
+    [...EXPECTED_PRE_AUTH_ROUTES].sort(),
+    "Routes mounted before authMiddleware in src/api/worker.ts changed — if intentional, update EXPECTED_PRE_AUTH_ROUTES in this file too. New pre-auth routes bypass the Bearer token gate and the PUBLIC_PATHS allowlist; they MUST have their own auth (e.g. CRON_SECRET) or be obviously safe (health probes).",
+  );
 });
 
 test("no obviously dangerous prefix accidentally public", () => {

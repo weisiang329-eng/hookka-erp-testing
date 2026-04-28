@@ -190,6 +190,110 @@ export async function checkInvoiceLocked(
 }
 
 /**
+ * Customer delete guard — blocks the delete if the customer is referenced
+ * by any non-cancelled order/note/invoice. Counts across SO, CO, DO, CN,
+ * and Invoice in a single round trip. Returns null if the customer is
+ * safe to delete.
+ */
+export async function checkCustomerDeleteLocked(
+  db: D1Database,
+  customerId: string,
+): Promise<string | null> {
+  const refs = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM sales_orders WHERE customerId = ? AND status NOT IN ('CANCELLED','CLOSED')) AS so,
+         (SELECT COUNT(*) FROM consignment_orders WHERE customerId = ? AND status NOT IN ('CANCELLED','CLOSED')) AS co,
+         (SELECT COUNT(*) FROM delivery_orders WHERE customerId = ? AND status NOT IN ('CANCELLED')) AS do_,
+         (SELECT COUNT(*) FROM invoices WHERE customerId = ? AND status NOT IN ('CANCELLED')) AS inv,
+         (SELECT COUNT(*) FROM consignment_notes WHERE customerId = ?) AS cn`,
+    )
+    .bind(customerId, customerId, customerId, customerId, customerId)
+    .first<{ so: number; co: number; do_: number; inv: number; cn: number }>();
+  const counts = refs ?? { so: 0, co: 0, do_: 0, inv: 0, cn: 0 };
+  const parts: string[] = [];
+  if (counts.so) parts.push(`${counts.so} sales order(s)`);
+  if (counts.co) parts.push(`${counts.co} consignment order(s)`);
+  if (counts.do_) parts.push(`${counts.do_} delivery order(s)`);
+  if (counts.cn) parts.push(`${counts.cn} consignment note(s)`);
+  if (counts.inv) parts.push(`${counts.inv} invoice(s)`);
+  if (parts.length === 0) return null;
+  return `Cannot delete customer — still referenced by ${parts.join(", ")}. Cancel or close those documents first.`;
+}
+
+/**
+ * Product delete guard — blocks the soft-delete (status=INACTIVE flip) if
+ * the product is currently referenced by any non-cancelled SO/CO line, any
+ * active production order, or any active BOM template. Soft-delete is
+ * already non-destructive (the row stays), but operators want to know
+ * BEFORE the flip whether the product is in use.
+ */
+export async function checkProductDeleteLocked(
+  db: D1Database,
+  productId: string,
+  productCode: string,
+): Promise<string | null> {
+  const refs = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM sales_order_items soi
+            JOIN sales_orders so ON so.id = soi.salesOrderId
+            WHERE soi.productId = ? AND so.status NOT IN ('CANCELLED','CLOSED')) AS so,
+         (SELECT COUNT(*) FROM consignment_order_items coi
+            JOIN consignment_orders co ON co.id = coi.consignmentOrderId
+            WHERE coi.productId = ? AND co.status NOT IN ('CANCELLED','CLOSED')) AS co,
+         (SELECT COUNT(*) FROM production_orders WHERE productId = ?
+            AND status NOT IN ('CANCELLED','COMPLETED')) AS po,
+         (SELECT COUNT(*) FROM bom_templates WHERE productCode = ?
+            AND versionStatus = 'ACTIVE') AS bom`,
+    )
+    .bind(productId, productId, productId, productCode)
+    .first<{ so: number; co: number; po: number; bom: number }>();
+  const counts = refs ?? { so: 0, co: 0, po: 0, bom: 0 };
+  const parts: string[] = [];
+  if (counts.so) parts.push(`${counts.so} active SO line(s)`);
+  if (counts.co) parts.push(`${counts.co} active CO line(s)`);
+  if (counts.po) parts.push(`${counts.po} active production order(s)`);
+  if (counts.bom) parts.push(`${counts.bom} active BOM template(s)`);
+  if (parts.length === 0) return null;
+  return `Cannot delete product ${productCode} — still referenced by ${parts.join(", ")}. Resolve those references first.`;
+}
+
+/**
+ * Raw Material delete guard — blocks the delete if the material is
+ * referenced by any active BOM component or any pending purchase order.
+ * Fabrics also check sales_order_items.fabricCode (the existing fabric
+ * guard, kept inline in raw-materials.ts; this helper covers the
+ * non-fabric case + structural BOM/PO refs).
+ */
+export async function checkRawMaterialDeleteLocked(
+  db: D1Database,
+  itemCode: string,
+): Promise<string | null> {
+  const refs = await db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM bom_components bc
+            JOIN bom_templates bt ON bt.id = bc.bomTemplateId
+            WHERE bc.materialCode = ?
+              AND bt.versionStatus IN ('ACTIVE','DRAFT')) AS bom,
+         (SELECT COUNT(*) FROM purchase_order_items
+            WHERE materialCode = ?) AS po,
+         (SELECT COUNT(*) FROM rm_batches WHERE itemCode = ?) AS batches`,
+    )
+    .bind(itemCode, itemCode, itemCode)
+    .first<{ bom: number; po: number; batches: number }>();
+  const counts = refs ?? { bom: 0, po: 0, batches: 0 };
+  const parts: string[] = [];
+  if (counts.bom) parts.push(`${counts.bom} BOM component(s)`);
+  if (counts.po) parts.push(`${counts.po} purchase order line(s)`);
+  if (counts.batches)
+    parts.push(`${counts.batches} batch(es) on hand (delete those first)`);
+  if (parts.length === 0) return null;
+  return `Cannot delete raw material ${itemCode} — still referenced by ${parts.join(", ")}. Remove those references first.`;
+}
+
+/**
  * Standardised JSON response for a 403 lock denial. Each route returns this
  * with the message from one of the helpers above. Keeping the shape identical
  * to other error responses so the frontend can render the same toast / banner.

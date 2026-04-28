@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { checkProductDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -468,7 +469,10 @@ app.put("/:id", async (c) => {
   }
 });
 
-// DELETE /api/products/:id — soft delete (status = 'INACTIVE')
+// DELETE /api/products/:id — soft delete (status = 'INACTIVE').
+// Cascade-lock guard: rejects with 409 if the product is referenced by any
+// active SO/CO line, active production order, or active BOM template.
+// Forces the operator to resolve those references before retiring the SKU.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
@@ -478,6 +482,14 @@ app.delete("/:id", async (c) => {
     .first<ProductRow>();
   if (!existing) {
     return c.json({ success: false, error: "Product not found" }, 404);
+  }
+  const lockMsg = await checkProductDeleteLocked(
+    c.var.DB,
+    id,
+    existing.code ?? "",
+  );
+  if (lockMsg) {
+    return c.json(lockedResponse(lockMsg), 409);
   }
   await c.var.DB.prepare(
     "UPDATE products SET status = 'INACTIVE' WHERE id = ?",

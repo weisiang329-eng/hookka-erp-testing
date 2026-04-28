@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 
 const app = new Hono<Env>();
 
@@ -223,7 +224,10 @@ app.put("/:id", async (c) => {
   }
 });
 
-// DELETE /api/customers/:id — cascades via FK to delivery_hubs
+// DELETE /api/customers/:id — cascades via FK to delivery_hubs.
+// Cascade-lock guard: blocks the delete if the customer is referenced by
+// any non-cancelled SO/CO/DO/CN/Invoice. Returns 409 with a hint listing
+// the blocking documents so the operator can clean those up first.
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
@@ -233,6 +237,10 @@ app.delete("/:id", async (c) => {
     .first<CustomerRow>();
   if (!existing) {
     return c.json({ success: false, error: "Customer not found" }, 404);
+  }
+  const lockMsg = await checkCustomerDeleteLocked(c.var.DB, id);
+  if (lockMsg) {
+    return c.json(lockedResponse(lockMsg), 409);
   }
   await c.var.DB.prepare("DELETE FROM customers WHERE id = ?").bind(id).run();
   return c.json({ success: true, data: rowToCustomer(existing, []) });

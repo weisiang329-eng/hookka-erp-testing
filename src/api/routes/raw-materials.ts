@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { checkRawMaterialDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import {
   buildFabricDeleteStatements,
   buildFabricUpsertStatements,
@@ -415,8 +416,20 @@ app.delete("/:id", async (c) => {
     return c.json({ success: false, error: "Raw material not found" }, 404);
   }
 
-  // Fabric guard: block deletion if any active (non-cancelled) sales_order_items
-  // still reference this fabricCode. Otherwise cascade-delete mirror rows.
+  // Cascade-lock guard: refuse deletion if the material is still referenced
+  // by an active BOM component, a pending purchase-order line, or has any
+  // batch on hand. This catches BOTH fabric and non-fabric items.
+  const lockMsg = await checkRawMaterialDeleteLocked(
+    c.var.DB,
+    existing.itemCode,
+  );
+  if (lockMsg) {
+    return c.json(lockedResponse(lockMsg), 409);
+  }
+
+  // Fabric extra guard: block deletion if any active (non-cancelled)
+  // sales_order_items still reference this fabricCode. Then cascade-delete
+  // the fabric mirror rows; FK cascade handles rm_batches for non-fabric.
   if (isFabricGroup(existing.itemGroup)) {
     const refs = await countActiveSalesOrderRefs(c.var.DB, existing.itemCode);
     if (refs > 0) {

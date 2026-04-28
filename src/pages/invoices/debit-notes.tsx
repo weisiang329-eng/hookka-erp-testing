@@ -33,9 +33,16 @@ export default function DebitNotesPage() {
   const [selectedInvoiceId, setSelectedInvoiceId] = useState("");
   const [reason, setReason] = useState<DebitNote["reason"]>("UNDERCHARGE");
   const [reasonDetail, setReasonDetail] = useState("");
-  const [items, setItems] = useState<{ description: string; quantity: number; unitPrice: number }[]>([
-    { description: "", quantity: 1, unitPrice: 0 },
-  ]);
+  // Editor rows carry a client-only `_uid` so React keys stay stable across
+  // add / remove / reorder. The uid is stripped before POST in handleCreate().
+  type DebitNoteItemRow = { _uid: string; description: string; quantity: number; unitPrice: number };
+  const newDNItem = (): DebitNoteItemRow => ({
+    _uid: crypto.randomUUID(),
+    description: "",
+    quantity: 1,
+    unitPrice: 0,
+  });
+  const [items, setItems] = useState<DebitNoteItemRow[]>([newDNItem()]);
   const [creating, setCreating] = useState(false);
 
   const openCreate = () => {
@@ -44,7 +51,7 @@ export default function DebitNotesPage() {
   };
 
   const addItem = () => {
-    setItems([...items, { description: "", quantity: 1, unitPrice: 0 }]);
+    setItems([...items, newDNItem()]);
   };
 
   const removeItem = (idx: number) => {
@@ -63,13 +70,17 @@ export default function DebitNotesPage() {
     if (!selectedInvoiceId || items.length === 0) return;
     setCreating(true);
     try {
+      // Strip the client-only `_uid` before POST.
+      const payloadItems = items
+        .filter((i) => i.description && i.unitPrice > 0)
+        .map((i) => ({ description: i.description, quantity: i.quantity, unitPrice: i.unitPrice }));
       const data = await fetchJson("/api/debit-notes", DNMutationSchema, {
         method: "POST",
         body: {
           invoiceId: selectedInvoiceId,
           reason,
           reasonDetail,
-          items: items.filter((i) => i.description && i.unitPrice > 0),
+          items: payloadItems,
         },
       });
       if (data.success) {
@@ -77,7 +88,7 @@ export default function DebitNotesPage() {
         setSelectedInvoiceId("");
         setReason("UNDERCHARGE");
         setReasonDetail("");
-        setItems([{ description: "", quantity: 1, unitPrice: 0 }]);
+        setItems([newDNItem()]);
         invalidateCachePrefix("/api/debit-notes");
         invalidateCachePrefix("/api/invoices");
         refreshDebitNotes();
@@ -308,7 +319,7 @@ export default function DebitNotesPage() {
                 </div>
                 <div className="space-y-2">
                   {items.map((item, idx) => (
-                    <div key={idx} className="flex gap-2 items-start">
+                    <div key={item._uid} className="flex gap-2 items-start">
                       <input
                         className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm"
                         placeholder="Description"

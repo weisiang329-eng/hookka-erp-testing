@@ -704,7 +704,12 @@ function ClaudePOCard({
                   </thead>
                   <tbody>
                     {po.items.map((item, i) => (
-                      <tr key={i} className="border-t border-[#E2DDD8]">
+                      // Composite key: row's sampleId + position. Items don't
+                      // reorder/insert/delete in this modal (set once on
+                      // parse), so position is stable; sampleId scopes the
+                      // key per uploaded file so two cards expanded at once
+                      // never collide.
+                      <tr key={`${row.sampleId}-${i}`} className="border-t border-[#E2DDD8]">
                         <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
                         <td className="px-2 py-1">
                           <input

@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency, formatRM } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { Customer } from "@/lib/mock-data";
+import type { Customer } from "@/types";
 import generateCustomerQuotationPdf from "@/lib/generate-customer-quotation-pdf";
 import {
   Plus,

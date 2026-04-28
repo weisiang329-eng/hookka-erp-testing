@@ -6,7 +6,7 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import { generatePurchaseOrderPdf } from "@/lib/generate-purchase-order-pdf";
 import { generateGRNPdf } from "@/lib/generate-grn-pdf";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { PurchaseOrder } from "@/lib/mock-data";
+import type { PurchaseOrder } from "@/types";
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
   CheckCircle, Send, Lock,

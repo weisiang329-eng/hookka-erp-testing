@@ -217,8 +217,14 @@ export type SalesOrder = {
   subtotalSen: number;
   totalSen: number;
   status: SOStatus;
+  /** Saved before transitioning to ON_HOLD so we can resume to the correct state. */
+  preHoldStatus?: SOStatus;
   overdue: string;
   notes: string;
+  /** Make-to-stock flag — set when the SO was generated as a placeholder for
+   *  future customer demand (companySOId uses "SOH-" prefix). When a real
+   *  customer order lands, this SO is renamed in-place. Optional for legacy. */
+  isStock?: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -1035,16 +1041,58 @@ export type PromiseDateCalc = {
 };
 
 // --- R&D ---
+export type RDPrototypeType = "FABRIC_SEWING" | "FRAMING";
+
+export type RDProjectType = "DEVELOPMENT" | "IMPROVEMENT";
+
+export type RDBOMItem = {
+  id: string;
+  materialCode: string;
+  materialName: string;
+  qty: number;
+  unit: string;
+  unitCostSen: number;
+};
+
 export type RDPrototype = {
   id: string;
   projectId: string;
+  prototypeType: RDPrototypeType;
   version: string;
   description: string;
   materialsCost: number;
   labourHours: number;
   testResults: string;
   feedback: string;
+  improvements: string;
+  defects: string;
   createdDate: string;
+};
+
+export type RDMaterialIssuance = {
+  id: string;
+  rdProjectId: string;
+  rdProjectCode: string;
+  materialId: string;
+  materialCode: string;
+  materialName: string;
+  qty: number;
+  unit: string;
+  unitCostSen: number;
+  totalCostSen: number;
+  issuedDate: string;
+  issuedBy: string;
+  notes: string;
+};
+
+export type RDLabourLog = {
+  id: string;
+  rdProjectId: string;
+  workerName: string;
+  department: string;
+  hours: number;
+  date: string;
+  description: string;
 };
 
 export type RDProject = {
@@ -1052,14 +1100,19 @@ export type RDProject = {
   code: string;
   name: string;
   description: string;
+  projectType: RDProjectType;
   productCategory: "BEDFRAME" | "SOFA" | "ACCESSORY";
+  serviceId?: string;  // linked Return Case ID (for IMPROVEMENT type)
   currentStage: RDProjectStage;
   targetLaunchDate: string;
   assignedTeam: string[];
-  milestones: { stage: RDProjectStage; targetDate: string; actualDate: string | null; approvedBy: string | null }[];
+  milestones: { stage: RDProjectStage; targetDate: string; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
   totalBudget: number;
   actualCost: number;
   prototypes: RDPrototype[];
+  productionBOM?: RDBOMItem[];
+  materialIssuances?: RDMaterialIssuance[];
+  labourLogs?: RDLabourLog[];
   createdDate: string;
   status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
 };

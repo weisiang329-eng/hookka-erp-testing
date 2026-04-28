@@ -20,7 +20,7 @@ import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
-import type { Customer } from "@/lib/mock-data";
+import type { Customer } from "@/types";
 import type { ConsignmentOrder as SalesOrder, COStatus as SOStatus } from "@/types";
 
 type LinkedPO = {

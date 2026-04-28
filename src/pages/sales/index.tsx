@@ -14,8 +14,8 @@ import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, F
 import { generateSOPdf } from "@/lib/generate-so-pdf";
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { SalesOrder } from "@/lib/mock-data";
-import type { Customer, DeliveryOrder } from "@/lib/mock-data";
+import type { SalesOrder } from "@/types";
+import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";

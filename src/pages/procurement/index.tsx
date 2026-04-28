@@ -8,7 +8,7 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/lib/mock-data";
+import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } from "@/types";
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,

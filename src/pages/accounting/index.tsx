@@ -40,7 +40,7 @@ import type {
   APAgingEntry,
   PLEntry,
   BalanceSheetEntry,
-} from "@/lib/mock-data";
+} from "@/types";
 
 // =============== TYPES ===============
 

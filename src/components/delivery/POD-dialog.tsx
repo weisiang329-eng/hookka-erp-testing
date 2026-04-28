@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { X, Eraser, Upload, Trash2, Loader2 } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
 import { compressImage } from "@/lib/image-compress";
-import type { ProofOfDelivery } from "@/lib/mock-data";
+import type { ProofOfDelivery } from "@/types";
 
 interface PODDialogProps {
   open: boolean;

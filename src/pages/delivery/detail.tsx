@@ -26,7 +26,7 @@ import {
 import { generateDOPdf } from "@/lib/generate-do-pdf";
 import { generatePackingListPdf } from "@/lib/generate-packing-pdf";
 import PODDialog from "@/components/delivery/POD-dialog";
-import type { ProofOfDelivery } from "@/lib/mock-data";
+import type { ProofOfDelivery } from "@/types";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
@@ -298,7 +298,7 @@ export default function DeliveryDetailPage() {
             variant="outline"
             size="sm"
             onClick={() =>
-              generateDOPdf(order as unknown as import("@/lib/mock-data").DeliveryOrder)
+              generateDOPdf(order as unknown as import("@/types").DeliveryOrder)
             }
           >
             <Download className="h-4 w-4" /> Download DO PDF
@@ -307,7 +307,7 @@ export default function DeliveryDetailPage() {
             variant="outline"
             size="sm"
             onClick={() =>
-              generatePackingListPdf(order as unknown as import("@/lib/mock-data").DeliveryOrder)
+              generatePackingListPdf(order as unknown as import("@/types").DeliveryOrder)
             }
           >
             <ClipboardList className="h-4 w-4" /> Print Packing List

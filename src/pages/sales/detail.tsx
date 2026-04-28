@@ -22,7 +22,7 @@ import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
-import type { SalesOrder, SOStatus, Customer } from "@/lib/mock-data";
+import type { SalesOrder, SOStatus, Customer } from "@/types";
 
 type LinkedPO = {
   id: string;

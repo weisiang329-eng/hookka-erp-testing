@@ -23,7 +23,7 @@ import {
   Users,
 } from "lucide-react";
 import { generateInvoicePdf } from "@/lib/generate-invoice-pdf";
-import type { Invoice } from "@/lib/mock-data";
+import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { InvoiceSchema } from "@/lib/schemas/invoice";

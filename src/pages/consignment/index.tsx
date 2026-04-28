@@ -15,7 +15,7 @@ import { generateCOPdf } from "@/lib/generate-co-pdf";
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import type { ConsignmentOrder as SalesOrder } from "@/types";
-import type { Customer, DeliveryOrder } from "@/lib/mock-data";
+import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";

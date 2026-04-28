@@ -20,7 +20,7 @@ import {
   RotateCcw,
   ArchiveRestore,
 } from "lucide-react";
-import type { ConsignmentNote } from "@/lib/mock-data";
+import type { ConsignmentNote } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Types

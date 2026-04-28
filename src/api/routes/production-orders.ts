@@ -54,6 +54,12 @@ type ProductionOrderRow = {
   customerName: string | null;
   customerState: string | null;
   companySOId: string | null;
+  // Migration 0064 added consignment_order_id + company_co_id. A PO
+  // originates from EITHER a SO or a CO (mutex). Surface both so the
+  // delivery / consignment-note pages can route completed POs to the
+  // right downstream flow (SO -> Delivery Order, CO -> Consignment Note).
+  consignmentOrderId: string | null;
+  companyCOId: string | null;
   productId: string | null;
   productCode: string | null;
   productName: string | null;
@@ -220,6 +226,8 @@ type MinimalPOOut = {
   salesOrderId: string;
   salesOrderNo: string;
   companySOId: string;
+  consignmentOrderId: string;
+  companyCOId: string;
   customerPOId: string;
   customerReference: string;
   customerName: string;
@@ -283,6 +291,8 @@ function rowToMinimalPO(
     salesOrderId: row.salesOrderId ?? "",
     salesOrderNo: row.salesOrderNo ?? "",
     companySOId: row.companySOId ?? "",
+    consignmentOrderId: row.consignmentOrderId ?? "",
+    companyCOId: row.companyCOId ?? "",
     customerPOId: row.customerPOId ?? "",
     customerReference: row.customerReference ?? "",
     customerName: row.customerName ?? "",

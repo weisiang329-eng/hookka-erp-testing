@@ -249,6 +249,11 @@ type ProductionOrderApiShape = {
   salesOrderId?: string;
   salesOrderNo?: string;
   companySOId?: string;
+  // Migration 0064: a PO can come from a Consignment Order instead of a
+  // Sales Order (mutex). Surfaced so the delivery page can route CO POs
+  // to the CN flow rather than the DO flow.
+  consignmentOrderId?: string;
+  companyCOId?: string;
   customerId?: string;
   customerName?: string;
   customerState?: string;
@@ -599,10 +604,16 @@ export default function DeliveryPage() {
             .map(mapPO);
           setPlanningPOs(planning);
 
-          // Pending Delivery: production complete, not yet on a real DO
+          // Pending Delivery: production complete, not yet on a real DO.
+          // Exclude POs that came from a Consignment Order (have
+          // consignmentOrderId set) - those route to the Consignment
+          // Note flow, not the Delivery Order flow. Bug fix 2026-04-28
+          // per user: a CO that finished production was wrongly
+          // appearing in DO's "Ready for DO" list.
           const ready = allPOs
             .filter((po) => {
               if (po.status === "CANCELLED") return false;
+              if (po.consignmentOrderId) return false;
               // Check that upholstery cards exist and ALL are done
               const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
               if (uphCards.length === 0) return false;

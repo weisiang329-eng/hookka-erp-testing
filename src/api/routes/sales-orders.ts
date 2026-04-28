@@ -1081,15 +1081,13 @@ app.post("/backfill-job-cards", async (c) => {
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id/edit-eligibility — can this SO be edited right now?
 //
-// Rules (per user 2026-04-28, simplified from the original 3-rule version):
-//   1. Status must be DRAFT / CONFIRMED / IN_PRODUCTION (anything later =
-//      already shipping → no edits).
-//   2. No job_card under the SO's POs may have a completedDate stamped
-//      (any dept finishing a piece commits inventory; editing past that
-//      would strand WIP).
-// The previous "production_window > 2 days" rule was DROPPED — operators
-// asked to keep editing IN_PRODUCTION orders as long as nothing has been
-// completed yet, regardless of how long ago production started.
+// Rules (per user 2026-04-28):
+//   1. Status must be DRAFT / CONFIRMED / IN_PRODUCTION.
+//   2. No job_card under the SO's POs may have a completedDate stamped.
+//   3. The earliest JC's dueDate (i.e. when the first production step is
+//      scheduled to finish) must be more than 2 calendar days away.
+//      Once we are within 2 days of the first step's deadline, edits
+//      lock so material orders / cutting plans don't get out of sync.
 //
 // Registered BEFORE /:id so Hono's trie picks the right handler.
 // ---------------------------------------------------------------------------
@@ -1122,34 +1120,70 @@ app.get("/:id/edit-eligibility", async (c) => {
     });
   }
 
-  // IN_PRODUCTION — earliest completed JC across the SO's POs (if any).
-  const jcRes = await c.var.DB
-    .prepare(
-      `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
-         FROM job_cards jc
-         JOIN production_orders po ON po.id = jc.productionOrderId
-        WHERE po.salesOrderId = ?
-          AND jc.completedDate IS NOT NULL
-          AND jc.completedDate <> ''
-        ORDER BY jc.completedDate ASC
-        LIMIT 1`,
-    )
-    .bind(id)
-    .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>();
+  // IN_PRODUCTION — pull earliest completed JC + earliest scheduled JC
+  // dueDate in one round trip.
+  const [completedRes, earliestDueRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.completedDate IS NOT NULL
+            AND jc.completedDate <> ''
+          ORDER BY jc.completedDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>(),
+    c.var.DB
+      .prepare(
+        `SELECT jc.dueDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.dueDate IS NOT NULL
+            AND jc.dueDate <> ''
+          ORDER BY jc.dueDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ dueDate: string | null }>(),
+  ]);
 
   // Rule 2: any dept stamped a completion → fully locked.
-  if (jcRes && jcRes.completedDate) {
+  if (completedRes && completedRes.completedDate) {
     return c.json({
       success: true,
       editable: false,
       reason: "dept_completed",
       status: so.status,
-      completedDept: jcRes.departmentName || jcRes.departmentCode || "A department",
-      completedAt: jcRes.completedDate,
+      completedDept: completedRes.departmentName || completedRes.departmentCode || "A department",
+      completedAt: completedRes.completedDate,
     });
   }
 
-  // IN_PRODUCTION, no JC done yet — editable.
+  // Rule 3: earliest JC dueDate > today + 2 days. Treat missing dueDates
+  // as "not yet scheduled" → no lock (production hasn't been planned far
+  // enough to know the first step's deadline).
+  const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
+  if (earliestDue.length === 10) {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+    const cutoffStr = cutoff.toISOString().slice(0, 10);
+    if (earliestDue <= cutoffStr) {
+      return c.json({
+        success: true,
+        editable: false,
+        reason: "production_window",
+        status: so.status,
+        earliestJcDueDate: earliestDue,
+        cutoffDate: cutoffStr,
+      });
+    }
+  }
+
+  // IN_PRODUCTION, no JC done yet, earliest step still > 2 days away — editable.
   return c.json({
     success: true,
     editable: true,

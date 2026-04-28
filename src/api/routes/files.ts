@@ -43,6 +43,89 @@ const app = new Hono<Env>();
 // upload (Phase B.4 finish).
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 
+// Allowlist of MIME types we accept. Adding here is a deliberate decision —
+// HTML/SVG/JS would let an attacker host script in the same origin if
+// they tricked a victim into opening the /stream URL inline. The list
+// covers everything the existing UI uploads (POD photos, BOM PDFs,
+// service-case attachments).
+const ALLOWED_MIME = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "application/pdf",
+]);
+
+// Magic-byte signatures for the allowed MIME types. We enforce that the
+// declared `file.type` matches what the bytes actually look like so a
+// malicious client can't upload an HTML payload labelled as image/png.
+function sniffMime(bytes: Uint8Array): string | null {
+  if (bytes.length < 12) return null;
+  // PNG: 89 50 4E 47 0D 0A 1A 0A
+  if (
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  )
+    return "image/png";
+  // JPEG: FF D8 FF
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff)
+    return "image/jpeg";
+  // GIF87a / GIF89a: 47 49 46 38 (37|39) 61
+  if (
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38
+  )
+    return "image/gif";
+  // WebP: RIFF....WEBP — 52 49 46 46 ?? ?? ?? ?? 57 45 42 50
+  if (
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  )
+    return "image/webp";
+  // PDF: %PDF — 25 50 44 46
+  if (
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46
+  )
+    return "application/pdf";
+  // HEIC/HEIF: ftypheic / ftypheix / ftypmif1 / ftypmsf1 etc. — bytes 4-7
+  // are "ftyp", bytes 8-11 hint the brand. We don't strictly verify the
+  // brand here; presence of an ISO-BMFF "ftyp" box is a solid signal.
+  if (
+    bytes[4] === 0x66 &&
+    bytes[5] === 0x74 &&
+    bytes[6] === 0x79 &&
+    bytes[7] === 0x70
+  )
+    return "image/heic";
+  return null;
+}
+
+// Map of which sniffed MIME values are acceptable substitutes for a
+// declared MIME — handles benign mismatches like client declaring
+// image/jpg vs sniffer returning image/jpeg.
+function mimeMatches(declared: string, sniffed: string): boolean {
+  if (declared === sniffed) return true;
+  if (declared === "image/jpg" && sniffed === "image/jpeg") return true;
+  if (declared === "image/heif" && sniffed === "image/heic") return true;
+  return false;
+}
+
 type FileAssetRow = {
   id: string;
   resourceType: string;
@@ -120,10 +203,39 @@ app.post("/", async (c) => {
     );
   }
 
+  const declaredType = file.type || "application/octet-stream";
+  if (!ALLOWED_MIME.has(declaredType)) {
+    return c.json(
+      {
+        success: false,
+        error: `file type not allowed: ${declaredType}`,
+      },
+      400,
+    );
+  }
+
+  // Magic-byte sniff on the first 16 bytes. Reject if the declared type
+  // doesn't match the actual content — closes the path where a malicious
+  // client uploads HTML+JS labelled as image/png and later serves the
+  // stream URL to a victim.
+  const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+  const sniffed = sniffMime(head);
+  if (!sniffed || !mimeMatches(declaredType, sniffed)) {
+    return c.json(
+      {
+        success: false,
+        error: "file content does not match declared type",
+      },
+      400,
+    );
+  }
+
   const orgId = getOrgId(c);
   const id = genId();
   const filename = file.name || "upload";
-  const contentType = file.type || "application/octet-stream";
+  // Use the sniffed MIME for storage so a client lying about the type can't
+  // poison the served Content-Type later.
+  const contentType = sniffed;
   const r2Key = buildKey({ orgId, resourceType, resourceId, id, filename });
   const uploadedBy = (
     c.get as unknown as (k: string) => string | undefined
@@ -282,7 +394,13 @@ app.get("/:id/stream", async (c) => {
       headers: {
         "Content-Type": row.contentType,
         "Content-Length": String(row.sizeBytes),
+        // Force download — browser doesn't try to render HTML/SVG inline
+        // even if a stale row from before the upload allowlist landed
+        // somehow stored such content.
         "Content-Disposition": `attachment; filename="${row.filename.replace(/"/g, "")}"`,
+        // Belt-and-braces: tell the browser not to MIME-sniff in case the
+        // upload validator missed a polyglot file.
+        "X-Content-Type-Options": "nosniff",
       },
     });
   } catch (err) {

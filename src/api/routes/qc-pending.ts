@@ -132,7 +132,7 @@ async function getNextInspectionNo(db: D1Database): Promise<string> {
  * The factory operates in UTC+8 (Singapore / Malaysia). We anchor the slot
  * boundaries to local clock time so "12:00 noon" means noon LOCAL.
  */
-function currentSlotIso(now = new Date()): string {
+export function currentSlotIso(now = new Date()): string {
   // Convert to UTC+8 wall clock
   const utcMs = now.getTime();
   const localMs = utcMs + 8 * 60 * 60 * 1000;
@@ -226,7 +226,7 @@ async function constantTimeEqual(a: string, b: string): Promise<boolean> {
  * the template's items into the row. Idempotent — if a row already exists for
  * (templateId, scheduledSlotAt) we skip it. Returns count of new rows created.
  */
-async function generatePendingForSlot(
+export async function generatePendingForSlot(
   db: D1Database,
   slotIso: string,
 ): Promise<{ created: number; skipped: number }> {

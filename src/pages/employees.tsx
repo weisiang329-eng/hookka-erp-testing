@@ -2481,32 +2481,6 @@ function workingDaysInRange(from: string, to: string): number {
   return Math.max(1, count);
 }
 
-// Iterate every yyyy-mm-dd day in [from, to] inclusive. Used by the Daily
-// Breakdown table so empty-zero days still render (operators want to see
-// "what was zero on which day", not have those days hidden).
-function eachDayInRange(from: string, to: string): string[] {
-  const fy = Number(from.slice(0, 4));
-  const fm = Number(from.slice(5, 7));
-  const fd = Number(from.slice(8, 10));
-  const ty = Number(to.slice(0, 4));
-  const tm = Number(to.slice(5, 7));
-  const td = Number(to.slice(8, 10));
-  if (!fy || !fm || !fd || !ty || !tm || !td) return [];
-  const start = Date.UTC(fy, fm - 1, fd);
-  const end = Date.UTC(ty, tm - 1, td);
-  if (end < start) return [];
-  // Hard cap at 366 days so a typo doesn't iterate decades.
-  const out: string[] = [];
-  for (let t = start, i = 0; t <= end && i < 366; t += 86400000, i++) {
-    const d = new Date(t);
-    const y = d.getUTCFullYear();
-    const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const dd = String(d.getUTCDate()).padStart(2, "0");
-    out.push(`${y}-${m}-${dd}`);
-  }
-  return out;
-}
-
 // Inline panel — create / edit / delete departments. Lives under LaborCostTab
 // but operates on the same /api/departments source-of-truth that every dept
 // dropdown across the page reads from. New depts appear immediately in
@@ -2777,8 +2751,8 @@ function LaborCostTab({
   const from = fromDate;
   const to = toDate;
   // Optional category slice ("" = All). When non-empty, EVERY metric on this
-  // tab — KPI cards, per-dept rollup, Daily Breakdown — narrows to just the
-  // chosen product category so an operator can answer "what did
+  // tab — KPI cards, per-dept rollup — narrows to just the chosen product
+  // category so an operator can answer "what did
   // {Sofa|Bedframe|Accessory} cost / earn / produce on this date range".
   // Borrowed (Warehousing) and Idle (Shortfall) are NOT category-tagged
   // labor — they show their per-period totals regardless of filter so
@@ -2819,9 +2793,6 @@ function LaborCostTab({
     () => `/api/working-hour-entries/production-revenue?from=${from}&to=${to}`,
     [from, to],
   );
-  // The backend `rows` array (one entry per recognized PO) is intentionally
-  // ignored on this tab - it backed the now-removed Revenue Raw Data audit
-  // table. Only the per-category totals are read here for KPIs/rollup.
   const { data: plResp, loading: plLoading } = useCachedJson<{
     success?: boolean;
     data?: {
@@ -2829,26 +2800,19 @@ function LaborCostTab({
       BEDFRAME?: number;
       ACCESSORY?: number;
       totalSen?: number;
+      rows?: Array<{
+        date: string;
+        productCode: string;
+        productName: string;
+        category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+        qty: number;
+        unitPriceSen: number;
+        totalPriceSen: number;
+        customerName: string;
+        soNo: string;
+      }>;
     };
   }>(prodRevUrl);
-
-  // Per-day rollups for the Daily Breakdown table — order value (by
-  // companySODate), production value (by last-piece UPHOLSTERY completion
-  // date) and units completed (UPHOLSTERY job_card count). Labor cost is
-  // computed locally below from working_hour_entries since it depends on
-  // per-worker basic salary which we already have.
-  const dailyUrl = useMemo(
-    () => `/api/working-hour-entries/daily-breakdown?from=${from}&to=${to}${categoryFilter ? `&category=${categoryFilter}` : ""}`,
-    [from, to, categoryFilter],
-  );
-  const { data: dailyResp, loading: dailyLoading } = useCachedJson<{
-    success?: boolean;
-    data?: {
-      orderValueByDate?: Record<string, number>;
-      productionValueByDate?: Record<string, number>;
-      unitsCompletedByDate?: Record<string, number>;
-    };
-  }>(dailyUrl);
 
   const workersById = useMemo(() => {
     const m = new Map<string, Worker>();
@@ -2988,82 +2952,7 @@ function LaborCostTab({
   }, [plResp, categoryFilter]);
   const overallRatio = totalRevenueSen > 0 ? (totalLaborCostSen / totalRevenueSen) * 100 : 0;
 
-  // Daily Breakdown rows. Always emits one row per day in [from, to] —
-  // operators want zero-everything days visible (matches the user's reference
-  // Google Sheet behaviour), not silently skipped.
-  //
-  // Labor cost per day uses the SAME per-worker pro-rata OT logic as the
-  // per-dept rollup above: total each worker's hours-per-day → split into
-  // regular vs OT (>9h is OT) → cost = regularH × regularRate + otH × otBase
-  // × multiplier. We then attribute the worker's day-cost to the date column.
-  const dailyRows = useMemo(() => {
-    const days = eachDayInRange(from, to);
-    const ovd = (dailyResp?.success ? dailyResp.data?.orderValueByDate : null) ?? {};
-    const pvd = (dailyResp?.success ? dailyResp.data?.productionValueByDate : null) ?? {};
-    const ucd = (dailyResp?.success ? dailyResp.data?.unitsCompletedByDate : null) ?? {};
-
-    const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
-    const wd = period
-      ? workingDaysInMonth(period)
-      : workingDaysInRange(from, to);
-
-    // Group entries by worker+date so the pro-rata OT split lines up with the
-    // dept rollup.
-    const segsByWorkerDate = new Map<string, WorkingHourEntry[]>();
-    for (const e of entries) {
-      const k = `${e.workerId}|${e.date}`;
-      const arr = segsByWorkerDate.get(k) ?? [];
-      arr.push(e);
-      segsByWorkerDate.set(k, arr);
-    }
-    const laborByDate = new Map<string, number>();
-    for (const [k, segs] of segsByWorkerDate.entries()) {
-      const [workerId, date] = k.split("|");
-      const w = workersById.get(workerId);
-      if (!w || !w.basicSalarySen) continue;
-      const regularRateSen = w.basicSalarySen / wd / 9;
-      const otBaseRateSen = w.basicSalarySen / 26 / 9;
-      const otMult = w.otMultiplier ?? 1.5;
-      const totalH = segs.reduce((s, e) => s + (Number(e.hours) || 0), 0);
-      const otTotalH = Math.max(0, totalH - 9);
-      const otShare = totalH > 0 ? otTotalH / totalH : 0;
-      let dayCost = 0;
-      for (const e of segs) {
-        const hours = Number(e.hours) || 0;
-        // Pro-rata OT split is computed against TOTAL day hours regardless
-        // of filter - a 11h day is still a 9h regular + 2h OT day, that's
-        // a property of the worker's shift, not of the category. We then
-        // skip the per-segment cost contribution if the segment's category
-        // doesn't match the filter. Non-production segments (no category)
-        // are always skipped under a filter - they are accounted for in the
-        // Borrowed/Idle KPI cards which intentionally don't filter.
-        // Defensive uppercase normalize so any pre-migration lower-case
-        // rows in working_hour_entries.category still compare correctly.
-        const cat = (typeof e.category === "string" ? e.category.trim().toUpperCase() : "") as Category;
-        if (categoryFilter && cat !== categoryFilter) continue;
-        const otH = hours * otShare;
-        const regularH = hours - otH;
-        dayCost += regularH * regularRateSen + otH * otBaseRateSen * otMult;
-      }
-      laborByDate.set(date, (laborByDate.get(date) ?? 0) + dayCost);
-    }
-
-    return days.map((d) => ({
-      date: d,
-      orderValueSen: Number(ovd[d]) || 0,
-      productionValueSen: Number(pvd[d]) || 0,
-      laborCostSen: Math.round(laborByDate.get(d) ?? 0),
-      unitsCompleted: Number(ucd[d]) || 0,
-    }));
-  }, [from, to, dailyResp, entriesResp, workersById, period, categoryFilter]);
-
-  // Daily-breakdown summary strip ("PRODUCTION SALES (Upholstery Completions)"
-  // in the user's reference Google Sheet).
-  const dailyTotalUnits = dailyRows.reduce((s, r) => s + r.unitsCompleted, 0);
-  const dailyTotalProductionValue = dailyRows.reduce((s, r) => s + r.productionValueSen, 0);
-  const dailyTotalLaborCost = dailyRows.reduce((s, r) => s + r.laborCostSen, 0);
-
-  const loading = entriesLoading || plLoading || dailyLoading;
+  const loading = entriesLoading || plLoading;
 
   return (
     <Card>
@@ -3241,23 +3130,17 @@ function LaborCostTab({
           </div>
         )}
 
-        {/* Daily Breakdown — one row per day in [from, to]. Mirrors the
-            user's reference Google Sheet so operators can audit per-day
-            order intake / production completions / labor cost / units
-            shipped. Empty-zero days are still emitted so "what was zero
-            on which day" stays visible. */}
+        {/* Revenue Raw Data — one row per (poId, unitNo) recognized in
+            the period. Lets operators audit which physical units actually
+            contributed to the revenue figure shown above. Per spec, each
+            unit is recognized ONCE on the date its LAST piece (HB/Divan/
+            Cushion/…) completes UPHOLSTERY. */}
         {!loading && (
           <div className="mt-6">
             <div className="mb-2 flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-[#1F1D1B]">Daily Breakdown</h3>
+              <h3 className="text-sm font-semibold text-[#1F1D1B]">Revenue Raw Data</h3>
               <span className="text-xs text-[#6B7280]">
-                {dailyRows.length} day{dailyRows.length === 1 ? "" : "s"}
-                {" · "}
-                Units {dailyTotalUnits}
-                {" · "}
-                Production {formatCurrency(dailyTotalProductionValue)}
-                {" · "}
-                Labor {formatCurrency(dailyTotalLaborCost)}
+                {(plResp?.data?.rows?.length ?? 0)} unit{(plResp?.data?.rows?.length ?? 0) === 1 ? "" : "s"}
               </span>
             </div>
             <div className="rounded-md border border-[#E2DDD8] overflow-x-auto max-h-96 overflow-y-auto">
@@ -3265,39 +3148,52 @@ function LaborCostTab({
                 <thead className="sticky top-0 z-10">
                   <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                     <th className="h-10 px-3 text-left font-medium text-[#374151]">Date</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Order Value (RM)</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Production Value (RM)</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost (RM)</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Units Completed</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Product</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">Customer</th>
+                    <th className="h-10 px-3 text-left font-medium text-[#374151]">SO</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Qty</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Unit Price</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Total</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {dailyRows.map((r) => (
+                  {(plResp?.data?.rows ?? []).map((rr, idx) => (
                     <tr
-                      key={r.date}
+                      key={`${rr.date}-${rr.soNo}-${rr.productCode}-${idx}`}
                       className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors"
                     >
-                      <td className="h-10 px-3 text-[#1F1D1B] tabular-nums">{formatDateDMY(r.date)}</td>
+                      <td className="h-10 px-3 text-[#4B5563] tabular-nums">
+                        {rr.date ? formatDateDMY(rr.date) : <span className="text-[#9CA3AF]">—</span>}
+                      </td>
+                      <td className="h-10 px-3 text-[#1F1D1B]">
+                        <div className="font-medium">{rr.productCode || "—"}</div>
+                        {rr.productName && (
+                          <div className="text-xs text-[#6B7280]">{rr.productName}</div>
+                        )}
+                      </td>
+                      <td className="h-10 px-3 text-[#4B5563]">
+                        {rr.category ? rr.category[0] + rr.category.slice(1).toLowerCase() : "—"}
+                      </td>
+                      <td className="h-10 px-3 text-[#4B5563]">
+                        {rr.customerName || <span className="text-[#9CA3AF]">—</span>}
+                      </td>
+                      <td className="h-10 px-3 text-[#4B5563] tabular-nums">
+                        {rr.soNo || <span className="text-[#9CA3AF]">—</span>}
+                      </td>
+                      <td className="h-10 px-3 text-right tabular-nums">{rr.qty}</td>
                       <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
-                        {r.orderValueSen > 0 ? formatCurrency(r.orderValueSen) : <span className="text-[#9CA3AF]">0.00</span>}
+                        {formatCurrency(rr.unitPriceSen)}
                       </td>
-                      <td className="h-10 px-3 text-right tabular-nums text-[#4B5563]">
-                        {r.productionValueSen > 0 ? formatCurrency(r.productionValueSen) : <span className="text-[#9CA3AF]">0.00</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right tabular-nums font-medium">
-                        {r.laborCostSen > 0 ? formatCurrency(r.laborCostSen) : <span className="text-[#9CA3AF]">0.00</span>}
-                      </td>
-                      <td className="h-10 px-3 text-right tabular-nums">
-                        {r.unitsCompleted > 0
-                          ? <span className="font-medium text-[#1F1D1B]">{r.unitsCompleted}</span>
-                          : <span className="text-[#9CA3AF]">0</span>}
+                      <td className="h-10 px-3 text-right font-medium tabular-nums">
+                        {formatCurrency(rr.totalPriceSen)}
                       </td>
                     </tr>
                   ))}
-                  {dailyRows.length === 0 && (
+                  {(plResp?.data?.rows?.length ?? 0) === 0 && (
                     <tr>
-                      <td colSpan={5} className="h-24 text-center text-[#9CA3AF]">
-                        No days in the selected range.
+                      <td colSpan={8} className="h-24 text-center text-[#9CA3AF]">
+                        No production completions in this period.
                       </td>
                     </tr>
                   )}
@@ -3306,7 +3202,6 @@ function LaborCostTab({
             </div>
           </div>
         )}
-
       </CardContent>
     </Card>
   );

@@ -31,10 +31,15 @@ const STATUS_COLOR: Record<CaseStatus, string> = {
   CANCELLED: "bg-[#F5DCDC] text-[#7A2E24]",
 };
 
-const SHIPPED_STATUSES_SO = ["SHIPPED", "DELIVERED", "INVOICED", "CLOSED"];
-const SHIPPED_STATUSES_CO = [
-  "SHIPPED", "DELIVERED", "INVOICED", "CLOSED", "PARTIALLY_SOLD", "FULLY_SOLD",
-];
+// Service CASES can be opened against any source order status — a customer
+// might complain about an order that hasn't shipped yet ("where is it?",
+// "I want to change colour before it ships", "cancel my order"). Only
+// Service ORDERS (rework/swap/repair, spawned later) require shipped
+// status because rework only makes sense after physical handover.
+//
+// Cancelled/draft orders are excluded since logging a case against
+// something that was never confirmed is almost always a mistake.
+const EXCLUDED_SOURCE_STATUSES = new Set(["DRAFT", "CANCELLED"]);
 
 type ServiceCaseListItem = {
   id: string;
@@ -233,7 +238,9 @@ export function CreateServiceCaseModal({
   const [issueDescription, setIssueDescription] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
   const [rootCauseCategory, setRootCauseCategory] = useState<string>("");
-  const [rootCauseNotes, setRootCauseNotes] = useState("");
+  // rootCauseNotes removed from create form 2026-04-28 (5W moved to Issue
+  // Description). Backend field still exists for backward compat.
+  const rootCauseNotes = "";
   const [submitting, setSubmitting] = useState(false);
 
   const { data: soResp } = useCachedJson<{ data?: SalesOrderApi[] }>("/api/sales-orders");
@@ -242,7 +249,7 @@ export function CreateServiceCaseModal({
   const sourceOptions: SourceOrderOption[] = useMemo(() => {
     if (sourceType === "SO") {
       return (soResp?.data ?? [])
-        .filter((s) => SHIPPED_STATUSES_SO.includes(s.status))
+        .filter((s) => !EXCLUDED_SOURCE_STATUSES.has(s.status))
         .map((s) => ({
           id: s.id,
           customerName: s.customerName,
@@ -252,7 +259,7 @@ export function CreateServiceCaseModal({
     }
     if (sourceType === "CO") {
       return (coResp?.data ?? [])
-        .filter((s) => SHIPPED_STATUSES_CO.includes(s.status))
+        .filter((s) => !EXCLUDED_SOURCE_STATUSES.has(s.status))
         .map((s) => ({
           id: s.id,
           customerName: s.customerName,
@@ -421,28 +428,51 @@ export function CreateServiceCaseModal({
             </div>
           </div>
 
-          {/* Issue */}
+          {/* Issue — captures both customer report AND root-cause analysis.
+              Operators consolidated these in 2026-04-28 per "issue description
+              and why did this happen are double". One textarea, 5W template. */}
           <div>
-            <label className="block text-xs text-[#6B7280] mb-1">Issue Description</label>
+            <label className="block text-xs text-[#6B7280] mb-1">
+              Issue Description{" "}
+              <span className="text-[#9CA3AF]">(use the 5W template — what happened, when, who, where, result)</span>
+            </label>
             <textarea
-              rows={3}
+              rows={6}
               value={issueDescription}
               onChange={(e) => setIssueDescription(e.target.value)}
-              placeholder="What did the customer report?"
-              className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+              placeholder={[
+                "What happened? Use the 5W template:",
+                "  When  — date / time of incident (e.g. 2026-04-29 10:30)",
+                "  Who   — name (e.g. 3PL driver Ahmad / sales agent Wong)",
+                "  Where — location (e.g. customer's living room, KL)",
+                "  What  — what they did (e.g. dropped the sofa during unloading)",
+                "  Result — what problem was caused (e.g. frame cracked at left armrest)",
+              ].join("\n")}
+              className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm font-mono"
             />
           </div>
 
           {/* Photos */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">Photos ({photos.length})</label>
-            <input
-              type="file"
-              accept="image/*"
-              multiple
-              onChange={(e) => handleAddPhotos(e.target.files)}
-              className="block w-full text-xs"
-            />
+            {/* Native <input type="file"> renders as a tiny gray "Choose
+                Files" link that operators kept missing. Wrap it in a label
+                styled like a regular button so it's an obvious target. */}
+            <label className="inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs">
+              <Plus className="h-3.5 w-3.5" />
+              {photos.length === 0 ? "Add photos" : "Add more photos"}
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => {
+                  handleAddPhotos(e.target.files);
+                  // Reset value so re-selecting the same file fires onChange.
+                  e.target.value = "";
+                }}
+                className="hidden"
+              />
+            </label>
             {photos.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {photos.map((src, i) => (
@@ -484,13 +514,10 @@ export function CreateServiceCaseModal({
               <option value="TRANSPORT">Transport / 3PL</option>
               <option value="OTHER">Other</option>
             </select>
-            <textarea
-              rows={2}
-              value={rootCauseNotes}
-              onChange={(e) => setRootCauseNotes(e.target.value)}
-              placeholder="Why did this happen?"
-              className="mt-2 w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
-            />
+            {/* rootCauseNotes textarea removed 2026-04-28 — operators flagged
+                it was a duplicate of Issue Description. The 5W story lives in
+                the Issue Description field above. The category dropdown
+                tags it for reporting. */}
           </div>
 
           <div className="flex items-start gap-2 text-xs text-[#3A5670] bg-[#E0EAF4] border border-[#C9D6E4] rounded p-2">

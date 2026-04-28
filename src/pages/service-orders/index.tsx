@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Service Orders (换货服务) — list + create.
+// Service Orders — list + create.
 //
 // Phase 3 module: customer-reported defect on a SHIPPED Sales/Consignment
 // order. The list view is filterable by status; the "New Service Order"
@@ -122,7 +122,7 @@ export default function ServiceOrdersListPage() {
         <div>
           <h1 className="text-xl font-bold text-[#1F1D1B]">Service Orders</h1>
           <p className="text-xs text-[#6B7280]">
-            换货服务 — customer-reported defects on shipped Sales / Consignment
+            Service Orders — customer-reported defects on shipped Sales / Consignment
             orders. Three resolution modes: REPRODUCE (new PO), STOCK_SWAP
             (pull from FG), REPAIR (fix returned unit).
           </p>

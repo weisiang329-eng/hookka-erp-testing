@@ -2176,7 +2176,7 @@ function SubWIPTree({
                 <button
                   onClick={() => onWrap(path, si)}
                   className={`ml-auto text-[10px] px-1.5 py-0.5 rounded ${c.btn}`}
-                  title="Wrap this sub-WIP inside a new parent (上游)"
+                  title="Wrap this sub-WIP inside a new parent (upstream)"
                 >
                   + Above
                 </button>
@@ -3834,7 +3834,7 @@ function MasterTemplatesDialog({
                     <button
                       onClick={() => wrapWIPAt(wi)}
                       className="ml-auto text-[10px] px-1.5 py-0.5 bg-[#A8CAD2] text-[#3E6570] rounded hover:bg-[#8FB4BD]"
-                      title="Wrap this WIP inside a new parent (上游)"
+                      title="Wrap this WIP inside a new parent (upstream)"
                     >
                       + Above
                     </button>

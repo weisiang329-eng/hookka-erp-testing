@@ -62,6 +62,7 @@ type ServiceCaseRow = {
   customerState: string | null;
   issueDescription: string | null;
   issuePhotos: string | null;
+  actionLog: string | null;
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string | null;
   preventionAction: string | null;
@@ -120,6 +121,16 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
       // tolerate malformed JSON; surface the case anyway
     }
   }
+  // action log: array of { id, date, description, createdAt, createdByName? }
+  let actionLog: Array<Record<string, unknown>> = [];
+  if (row.actionLog) {
+    try {
+      const parsed = JSON.parse(row.actionLog);
+      if (Array.isArray(parsed)) actionLog = parsed as Array<Record<string, unknown>>;
+    } catch {
+      /* tolerate */
+    }
+  }
   return {
     id: row.id,
     caseNo: row.caseNo,
@@ -131,6 +142,7 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
     customerState: row.customerState ?? "",
     issueDescription: row.issueDescription ?? "",
     issuePhotos: photos,
+    actionLog,
     rootCauseCategory: row.rootCauseCategory,
     rootCauseNotes: row.rootCauseNotes ?? "",
     preventionAction: row.preventionAction ?? "",
@@ -398,13 +410,22 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "preventionStatus invalid" }, 400);
     }
 
+    // actionLog is JSON array on the row. Body sends it as an array; we
+    // serialise here. Undefined = keep existing.
+    const actionLogJson =
+      body.actionLog === undefined
+        ? existing.actionLog
+        : Array.isArray(body.actionLog)
+          ? JSON.stringify(body.actionLog)
+          : null;
+
     await c.var.DB
       .prepare(
         `UPDATE service_cases SET
            issueDescription = ?, issuePhotos = ?, notes = ?,
            rootCauseCategory = ?, rootCauseNotes = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
-           externalRef = ?
+           externalRef = ?, actionLog = ?
          WHERE id = ?`,
       )
       .bind(
@@ -429,6 +450,7 @@ app.put("/:id", async (c) => {
         body.externalRef !== undefined
           ? ((body.externalRef as string) ?? null)
           : existing.externalRef,
+        actionLogJson,
         id,
       )
       .run();

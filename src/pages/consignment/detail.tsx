@@ -819,7 +819,7 @@ export default function SalesOrderDetailPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => setServiceModalOpen(true)}
-                title="Log a 换货服务 (Service Case) for a customer issue / complaint"
+                title="Log a Service Case for a customer issue / complaint"
               >
                 <Wrench className="h-4 w-4" /> Open Service Case
               </Button>

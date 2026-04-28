@@ -930,6 +930,11 @@ export type ProductionOrder = {
   customerName: string;
   customerState: string;
   companySOId: string;
+  // CO-origin POs (migration 0064): a PO can come from a Consignment Order
+  // instead of a Sales Order. When the parent is a CO, salesOrderId / companySOId
+  // are empty and these two fields carry the CO linkage. Mutex with SO.
+  consignmentOrderId?: string;
+  companyCOId?: string;
   // Product info
   productId: string;
   productCode: string;

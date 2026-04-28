@@ -1,5 +1,7 @@
 -- ============================================================================
--- Migration 0066 — QC Module rebuild, Phase 1
+-- Migration 0068 — QC Module rebuild, Phase 1
+-- (Renumbered from 0066 — main moved while this PR was in flight; 0066 is
+--  consignment_notes_dispatch_linkage and 0067 is stock_adjustments_adj_no.)
 --
 -- BUSINESS MODEL (per design discussion 2026-04-28):
 --   Small sofa/bed-frame factory. QC is a "看护" (custodial) role, not a

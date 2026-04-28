@@ -854,12 +854,21 @@ async function cascadeSOStatusToPOs(
   return result;
 }
 
-// Valid status transitions — mirrors the in-memory route
+// Valid status transitions — mirrors the in-memory route.
+//
+// 2026-04-28 semantics shift: confirming an SO now lands directly at
+// IN_PRODUCTION because PO auto-creation kicks off lead-time scheduling the
+// instant confirm runs — there is no meaningful "confirmed but not in
+// production" steady state. CONFIRMED is kept as a vestigial node only so
+// legacy rows still in that status (or any in-flight transient between the
+// confirm POST and the PO cascade) remain transition-able. The cascade
+// rollback path (READY_TO_SHIP undo) now drops back to IN_PRODUCTION rather
+// than CONFIRMED.
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  DRAFT: ["CONFIRMED", "CANCELLED"],
+  DRAFT: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
   CONFIRMED: ["IN_PRODUCTION", "ON_HOLD", "CANCELLED"],
   IN_PRODUCTION: ["READY_TO_SHIP", "ON_HOLD", "CANCELLED"],
-  READY_TO_SHIP: ["SHIPPED", "ON_HOLD"],
+  READY_TO_SHIP: ["SHIPPED", "ON_HOLD", "IN_PRODUCTION"],
   SHIPPED: ["DELIVERED"],
   DELIVERED: ["INVOICED"],
   INVOICED: ["CLOSED"],
@@ -1066,6 +1075,125 @@ app.post("/backfill-job-cards", async (c) => {
       jobCardsInserted: total,
       details: results,
     },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/sales-orders/:id/edit-eligibility — can this SO be edited right now?
+//
+// Lightweight pre-flight check used by the SO edit page. Replaces the old
+// status-only block ("Only DRAFT/CONFIRMED can be edited") with a richer
+// rule set that also allows IN_PRODUCTION orders to be edited as long as
+//   (a) production hasn't started yet — earliest PO start ≥ today + 2 days
+//   (b) no job_card on any of the SO's POs has a completedDate stamped
+// Either guard tripping locks the order; the response carries the trigger
+// values (earliest start date, completed dept name + date) so the UI can
+// surface a precise reason rather than a generic "cannot edit".
+//
+// Registered BEFORE /:id so Hono's trie picks the right handler.
+// ---------------------------------------------------------------------------
+app.get("/:id/edit-eligibility", async (c) => {
+  const id = c.req.param("id");
+  const so = await c.var.DB
+    .prepare("SELECT id, status FROM sales_orders WHERE id = ?")
+    .bind(id)
+    .first<{ id: string; status: string }>();
+  if (!so) {
+    return c.json({ success: false, error: "Order not found" }, 404);
+  }
+
+  // Cutoff = today + 2 calendar days, compared as YYYY-MM-DD strings so we
+  // don't accidentally drag a timezone offset into what is meant to be a
+  // calendar-day comparison.
+  const cutoff = new Date();
+  cutoff.setUTCDate(cutoff.getUTCDate() + 2);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
+  // Rule 1: status must be one of DRAFT / CONFIRMED / IN_PRODUCTION.
+  if (so.status !== "DRAFT" && so.status !== "CONFIRMED" && so.status !== "IN_PRODUCTION") {
+    return c.json({
+      success: true,
+      editable: false,
+      reason: "status",
+      status: so.status,
+      cutoffDate: cutoffStr,
+    });
+  }
+
+  // DRAFT/CONFIRMED short-circuit — no production to inspect.
+  if (so.status === "DRAFT" || so.status === "CONFIRMED") {
+    return c.json({
+      success: true,
+      editable: true,
+      status: so.status,
+      cutoffDate: cutoffStr,
+    });
+  }
+
+  // IN_PRODUCTION — pull the SO's POs + their job-cards in one round trip.
+  const [posRes, jcRes] = await Promise.all([
+    c.var.DB
+      .prepare(
+        `SELECT id, startDate, targetEndDate
+           FROM production_orders
+          WHERE salesOrderId = ?`,
+      )
+      .bind(id)
+      .all<{ id: string; startDate: string | null; targetEndDate: string | null }>(),
+    c.var.DB
+      .prepare(
+        `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.completedDate IS NOT NULL
+            AND jc.completedDate <> ''
+          ORDER BY jc.completedDate ASC
+          LIMIT 1`,
+      )
+      .bind(id)
+      .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>(),
+  ]);
+
+  // Rule 2b: any dept stamped a completion → fully locked, regardless of dates.
+  if (jcRes && jcRes.completedDate) {
+    return c.json({
+      success: true,
+      editable: false,
+      reason: "dept_completed",
+      status: so.status,
+      cutoffDate: cutoffStr,
+      completedDept: jcRes.departmentName || jcRes.departmentCode || "A department",
+      completedAt: jcRes.completedDate,
+    });
+  }
+
+  // Rule 2a: earliest production start (per-PO startDate) must be ≥ cutoff.
+  // We treat empty/null start dates as "not yet started" so they don't
+  // accidentally lock the SO; only POs with a real ISO date contribute.
+  const startDates = (posRes.results ?? [])
+    .map((p) => (p.startDate || "").slice(0, 10))
+    .filter((d) => d.length === 10);
+  if (startDates.length > 0) {
+    const earliest = startDates.reduce((min, d) => (d < min ? d : min), startDates[0]);
+    if (earliest < cutoffStr) {
+      return c.json({
+        success: true,
+        editable: false,
+        reason: "production_window",
+        status: so.status,
+        earliestStartDate: earliest,
+        cutoffDate: cutoffStr,
+      });
+    }
+  }
+
+  // IN_PRODUCTION but neither guard tripped — editable.
+  return c.json({
+    success: true,
+    editable: true,
+    status: so.status,
+    cutoffDate: cutoffStr,
   });
 });
 
@@ -1379,10 +1507,16 @@ app.post("/", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/sales-orders/:id/confirm
 //
-// Flips DRAFT/PENDING -> CONFIRMED, writes so_status_changes, and cascades
+// Flips DRAFT/PENDING -> IN_PRODUCTION, writes so_status_changes, and cascades
 // production_orders insertion — one PO row per SO item. All writes batched
 // so a partial failure leaves no dangling state. Idempotent: re-submitting
 // confirm returns the existing production orders without duplicating.
+//
+// 2026-04-28: confirm now lands at IN_PRODUCTION directly. Previously this
+// flipped to CONFIRMED and waited for a downstream cascade to bump it; now
+// the PO auto-creation kicks off lead-time scheduling synchronously, so
+// CONFIRMED has no meaningful steady state. Legacy CONFIRMED rows are still
+// supported through VALID_TRANSITIONS for backfill / migration purposes.
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
   // RBAC gate — confirming an SO is the lock-in moment that fans out POs / JCs.
@@ -1497,9 +1631,13 @@ app.post("/:id/confirm", async (c) => {
     ? ["Production orders already exist for this SO — skipped duplicate creation."]
     : productionOrders.map((po) => `Created PO ${po.poNo}`);
 
+  // 2026-04-28: confirm lands at IN_PRODUCTION directly. The PO cascade
+  // below kicks off lead-time scheduling, so the SO IS in production the
+  // moment confirm completes — there is no meaningful CONFIRMED steady
+  // state. CONFIRMED is retained as a transition node only for legacy rows.
   await c.var.DB.batch([
     c.var.DB.prepare(
-      "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
+      "UPDATE sales_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
     ).bind(now, id),
     c.var.DB.prepare(
       `INSERT INTO so_status_changes
@@ -1509,7 +1647,7 @@ app.post("/:id/confirm", async (c) => {
       genStatusId(),
       id,
       fromStatus,
-      "CONFIRMED",
+      "IN_PRODUCTION",
       (body.changedBy as string) || "Admin",
       now,
       (body.notes as string) || "Order confirmed",
@@ -1714,9 +1852,59 @@ app.put("/:id", async (c) => {
         );
       }
       newStatus = requested;
+      // 2026-04-28: confirm-equivalent transitions are DRAFT/PENDING → either
+      // CONFIRMED (legacy callers) or IN_PRODUCTION (new direct path). Both
+      // need the production-order cascade and the same audit-row deferral.
       isDraftToConfirmed =
         (existing.status === "DRAFT" || existing.status === "PENDING") &&
-        newStatus === "CONFIRMED";
+        (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
+
+      // Pre-flight: block CANCELLED transition when any job_card under this
+      // SO's POs has a completedDate stamped. Stranded inventory would result
+      // if we cascaded CANCELLED through completed work — operators must
+      // first clear the completion dates or reassign those finished units to
+      // another order. Returns 409 Conflict (distinct from 4xx validation
+      // errors) so the frontend can render a specific blocked-cancel modal.
+      if (newStatus === "CANCELLED") {
+        const blockingRes = await c.var.DB
+          .prepare(
+            `SELECT jc.id, jc.completedDate, jc.departmentCode, jc.departmentName, po.poNo
+               FROM job_cards jc
+               JOIN production_orders po ON po.id = jc.productionOrderId
+              WHERE po.salesOrderId = ?
+                AND jc.completedDate IS NOT NULL
+                AND jc.completedDate <> ''
+                AND jc.status NOT IN ('CANCELLED')
+              ORDER BY jc.completedDate ASC
+              LIMIT 5`,
+          )
+          .bind(id)
+          .all<{
+            id: string;
+            completedDate: string;
+            departmentCode: string | null;
+            departmentName: string | null;
+            poNo: string;
+          }>();
+        const blocking = blockingRes.results ?? [];
+        if (blocking.length > 0) {
+          return c.json(
+            {
+              success: false,
+              error: "Cannot cancel: completed work blocks cancellation",
+              blockingItems: blocking.map((b) => ({
+                poNo: b.poNo,
+                departmentCode: b.departmentCode || "",
+                departmentName: b.departmentName || b.departmentCode || "Department",
+                completedDate: b.completedDate,
+              })),
+              reason:
+                "Clear completion dates or reassign these items to another order before cancelling.",
+            },
+            409,
+          );
+        }
+      }
 
       // Run cascade for ON_HOLD / CANCELLED transitions and for RESUME
       // (ON_HOLD → CONFIRMED / IN_PRODUCTION). cascadeSOStatusToPOs is a no-op

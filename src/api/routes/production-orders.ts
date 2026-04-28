@@ -337,6 +337,14 @@ function rowToPO(
     customerName: row.customerName ?? "",
     customerState: row.customerState ?? "",
     companySOId: row.companySOId ?? "",
+    // Migration 0064: a PO can come from a Consignment Order instead of
+    // an SO (mutex). Surface both source FKs so the delivery / consignment
+    // pages can route the PO to the correct downstream flow. Bug fix
+    // 2026-04-28: previously only rowToMinimalPO carried these fields;
+    // rowToPO (used by /api/production-orders' default GET path) silently
+    // dropped them, leaving CO POs misclassified as SO-source on the FE.
+    consignmentOrderId: row.consignmentOrderId ?? "",
+    companyCOId: row.companyCOId ?? "",
     productId: row.productId ?? "",
     productCode: row.productCode ?? "",
     productName: row.productName ?? "",

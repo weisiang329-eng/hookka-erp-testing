@@ -3012,7 +3012,7 @@ export default function DeliveryPage() {
                         </p>
                       </div>
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Contact Person</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Company Contact</p>
                         <p className="font-medium">{detailDO.driverContactPerson || "-"}</p>
                       </div>
                     </div>
@@ -3040,7 +3040,7 @@ export default function DeliveryPage() {
                         <p className="font-medium">{detailDO.driverName || "-"}</p>
                       </div>
                       <div>
-                        <p className="text-[#9CA3AF] text-xs mb-0.5">Phone</p>
+                        <p className="text-[#9CA3AF] text-xs mb-0.5">Driver Contact</p>
                         <p className="font-medium doc-number">{detailDO.driverPhone || "-"}</p>
                       </div>
                     </div>

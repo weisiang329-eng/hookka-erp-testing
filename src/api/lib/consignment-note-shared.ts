@@ -467,10 +467,20 @@ export async function updateConsignmentNoteById(
   const notes =
     typeof body.notes === "string" ? body.notes : (existing.notes ?? "");
 
+  // sentDate (the FE's "Delivery Date" field on the inline edit-mode dialog).
+  // Optional — if omitted from the body, retain the existing value. Pass
+  // null to explicitly clear, string to overwrite. Mirrors how DO's
+  // deliveryDate persists. Without this column in the UPDATE the inline
+  // edit-mode would silently no-op the date change.
+  const sentDate =
+    body.sentDate === undefined
+      ? existing.sentDate
+      : ((body.sentDate as string | null) ?? null);
+
   await db
     .prepare(
       `UPDATE consignment_notes SET
-         status = ?, notes = ?, branchName = ?,
+         status = ?, notes = ?, branchName = ?, sentDate = ?,
          driverId = ?, driverName = ?, driverContactPerson = ?, driverPhone = ?,
          vehicleId = ?, vehicleNo = ?, vehicleType = ?,
          dispatchedAt = ?, deliveredAt = ?, acknowledgedAt = ?,
@@ -481,6 +491,7 @@ export async function updateConsignmentNoteById(
       nextStatus,
       notes,
       branchName,
+      sentDate,
       driverId,
       driverName,
       driverContactPerson,
@@ -496,6 +507,60 @@ export async function updateConsignmentNoteById(
       id,
     )
     .run();
+
+  // Items replace — if the caller sent items[], do a delete-and-reinsert
+  // so add/remove/qty edits from the FE inline edit-mode persist. Mirrors
+  // the simplest pattern used by DO's items refresh on PUT. Guarded to
+  // ACTIVE status only — once a CN crosses into PARTIALLY_SOLD/RETURNED/
+  // FULLY_SOLD the items table carries soldDate/returnedDate state per
+  // line that we must NOT silently wipe. Edit-mode is FE-gated to PENDING
+  // (=ACTIVE) so this guard normally won't fire, but it's a hard backstop
+  // against a future status drift bug.
+  if (Array.isArray(body.items) && existing.status === "ACTIVE" && nextStatus === "ACTIVE") {
+    type ItemPayload = {
+      id?: string;
+      productionOrderId?: string | null;
+      productCode?: string;
+      productName?: string;
+      productId?: string | null;
+      quantity?: number;
+      unitPrice?: number;
+    };
+    const incoming = body.items as ItemPayload[];
+    await db
+      .prepare("DELETE FROM consignment_items WHERE consignmentNoteId = ?")
+      .bind(id)
+      .run();
+    for (const it of incoming) {
+      await db
+        .prepare(
+          `INSERT INTO consignment_items (
+             id, consignmentNoteId, productId, productName, productCode,
+             quantity, unitPrice, status, soldDate, returnedDate,
+             productionOrderId
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          // Reuse incoming id when it looks like one we minted (coni-*),
+          // otherwise generate fresh — keeps stable ids for unchanged rows
+          // so a subsequent re-edit doesn't churn coni-* keys.
+          typeof it.id === "string" && it.id.startsWith("coni-")
+            ? it.id
+            : genItemId(),
+          id,
+          it.productId ?? null,
+          it.productName ?? "",
+          it.productCode ?? "",
+          typeof it.quantity === "number" ? it.quantity : 0,
+          typeof it.unitPrice === "number" ? it.unitPrice : 0,
+          "AT_BRANCH",
+          null,
+          null,
+          it.productionOrderId ?? null,
+        )
+        .run();
+    }
+  }
 
   const [note, itemsRes] = await Promise.all([
     db

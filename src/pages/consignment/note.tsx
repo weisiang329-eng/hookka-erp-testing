@@ -2128,8 +2128,16 @@ export default function ConsignmentNotePage() {
   };
 
   // ---------- Export CSV ----------
+  // Bug fix 2026-04-28 (second-pass parity audit): the previous CSV
+  // included a "Total Value" column (totalValueSen / 100). CN rows are
+  // priced at sale time, not dispatch time — totalValueSen is always 0
+  // on freshly-dispatched CNs, so the column read "0.00" for every row
+  // and gave operators a misleading impression that the dispatch was
+  // worth nothing. Replaced with "Total M³" (sum of items[].itemM3 *
+  // quantity), which is the dispatch-stage info that actually has data
+  // — same pivot DO does on its row Status cell.
   const handleExportCSV = () => {
-    const headers = ["Dispatch Date", "CN No.", "CO Ref", "Customer", "Branch", "Items", "Total Value", "Status"];
+    const headers = ["Dispatch Date", "CN No.", "CO Ref", "Customer", "Branch", "Items", "Total M³", "Status"];
     const csvRows = filteredCNs.map((r) => [
       r.dispatchDate ? formatDate(r.dispatchDate) : "",
       r.cnNo,
@@ -2137,7 +2145,7 @@ export default function ConsignmentNotePage() {
       r.customerName,
       r.branchName,
       r.itemCount,
-      (r.totalValueSen / 100).toFixed(2),
+      (r.totalM3 ?? 0).toFixed(2),
       STATUS_LABEL[r.status],
     ]);
     const csv = [headers, ...csvRows].map((row) => row.join(",")).join("\n");
@@ -2175,10 +2183,17 @@ export default function ConsignmentNotePage() {
       </div>
 
       {/* ====================================================== */}
-      {/* KPI Strip — 4 cards, mirrors DO. Labels per task spec:  */}
-      {/*   Pending CN · Dispatched · In Transit · Delivered MTD  */}
+      {/* KPI Strip — 5 cards per task spec (second-pass parity   */}
+      {/* fix 2026-04-28). DO has 4 cards (Pending Dispatch /     */}
+      {/* Dispatched / In Transit / Delivered MTD); CN adds       */}
+      {/* "Pending CN" up front because the CO→CN promotion step  */}
+      {/* has no DO equivalent (DO promotes from a single SO with */}
+      {/* a known DD; CN must wait for the operator to bundle     */}
+      {/* per-customer pickups). Order:                           */}
+      {/*   Pending CN · Pending Dispatch · Dispatched · In       */}
+      {/*   Transit · Delivered (MTD)                             */}
       {/* ====================================================== */}
-      <div className="grid gap-4 grid-cols-1 sm:grid-cols-4">
+      <div className="grid gap-4 grid-cols-1 sm:grid-cols-5">
         <Card>
           <CardContent className="p-4 flex items-center gap-3">
             <div className="rounded-lg bg-[#FAEFCB] p-2.5">
@@ -2187,6 +2202,17 @@ export default function ConsignmentNotePage() {
             <div>
               <p className="text-2xl font-bold text-[#9C6F1E]">{loading ? "-" : pendingCNCount}</p>
               <p className="text-xs text-[#6B7280]">Pending CN</p>
+            </div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 flex items-center gap-3">
+            <div className="rounded-lg bg-[#FDE9CF] p-2.5">
+              <ClipboardList className="h-5 w-5 text-[#B5651D]" />
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#B5651D]">{loading ? "-" : pendingDispatchCount}</p>
+              <p className="text-xs text-[#6B7280]">Pending Dispatch</p>
             </div>
           </CardContent>
         </Card>

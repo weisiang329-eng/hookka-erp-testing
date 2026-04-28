@@ -4608,6 +4608,13 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
 }
 
 // ---------- Batch Edit Categories Dialog ----------
+//
+// Inline-edit redesign 2026-04-28: replaced the old "checkbox + select 100
+// templates + Apply" flow with per-row inline Category dropdowns, mirroring
+// the Dept-Pivot Editor's UX. Each row shows the template's current Category
+// for the chosen dept; user changes the dropdown directly. Save button
+// counts and persists all dirty rows. Optional "Bulk fill all visible"
+// helper for the "set 100 to CAT 1" case.
 function BatchEditCategoriesDialog({
   open,
   onClose,
@@ -4620,9 +4627,18 @@ function BatchEditCategoriesDialog({
   onTemplatesUpdated: (updated: BOMTemplate[]) => void;
 }) {
   const { toast } = useToast();
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [deptCode, setDeptCode] = useState(DEPT_ORDER[0]);
-  const [newCategory, setNewCategory] = useState("");
+  // Per-template pending category change. Key = template id; value = the
+  // category the user has clicked over to (only stored when different
+  // from the current value, so dirty count = map.size).
+  const [pendingByTemplate, setPendingByTemplate] = useState<Map<string, string>>(new Map());
+  // Multi-select for bulk-apply. Lets the user pick many templates and
+  // smash them all to the same category in one move (faster than 100
+  // dropdowns when the change is uniform). Independent of the pending
+  // map - selection only matters when "Apply [cat] to N selected" is
+  // clicked, which then writes those templates' entries into pending.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkFillCat, setBulkFillCat] = useState("");
   // Smart filters
   const [searchText, setSearchText] = useState("");
   const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
@@ -4714,28 +4730,37 @@ function BatchEditCategoriesDialog({
   /* eslint-disable react-hooks/set-state-in-effect -- reset bulk-edit dialog state every time it reopens */
   useEffect(() => {
     if (!open) return;
-    setSelectedIds(new Set());
     setDeptCode(DEPT_ORDER[0]);
-    setNewCategory(allCategories[0] || "CAT 1");
+    setPendingByTemplate(new Map());
+    setSelectedIds(new Set());
+    setBulkFillCat("");
     setSearchText("");
     setFilterCategory("ALL");
     setFilterBaseModel("");
     setFilterCurrentCat("");
-  }, [open, allCategories]);
+  }, [open]);
+  // Switching department wipes the pending-edit map - the same template's
+  // "new category" only makes sense for one dept at a time. Otherwise the
+  // user could queue a Fab Cut edit, switch to Fab Sew, and accidentally
+  // save Fab Cut edits using the Fab Sew dropdown context.
+  useEffect(() => {
+    if (!open) return;
+    setPendingByTemplate(new Map());
+    setSelectedIds(new Set());
+    setBulkFillCat("");
+  }, [deptCode, open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const allFilteredSelected = filteredTemplates.length > 0 && filteredTemplates.every((t) => selectedIds.has(t.id));
 
   function toggleAllFiltered() {
     if (allFilteredSelected) {
-      // Deselect only filtered ones
       setSelectedIds((prev) => {
         const next = new Set(prev);
         for (const t of filteredTemplates) next.delete(t.id);
         return next;
       });
     } else {
-      // Select all filtered ones (add to existing selection)
       setSelectedIds((prev) => {
         const next = new Set(prev);
         for (const t of filteredTemplates) next.add(t.id);
@@ -4749,6 +4774,56 @@ function BatchEditCategoriesDialog({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  }
+
+  // Per-row click-to-change. Only persist a pending entry when the new
+  // value differs from the template's current value - clicking back to
+  // the original removes the row from the dirty map so dirty count is
+  // honest.
+  function handleRowChange(templateId: string, newCat: string) {
+    const t = templates.find((tt) => tt.id === templateId);
+    if (!t) return;
+    const cur = getCurrentDeptCategory(t);
+    setPendingByTemplate((prev) => {
+      const next = new Map(prev);
+      if (newCat === cur) next.delete(templateId);
+      else next.set(templateId, newCat);
+      return next;
+    });
+  }
+
+  // Bulk-fill helper. Two modes - prefers selection if any rows are
+  // checked; otherwise falls through to "all currently visible / filtered".
+  // Rows where the new value matches the current are dropped from the
+  // dirty map (no-op).
+  function handleBulkFill() {
+    if (!bulkFillCat) {
+      toast.warning("Pick a category first.");
+      return;
+    }
+    const targets = selectedIds.size > 0
+      ? filteredTemplates.filter((t) => selectedIds.has(t.id))
+      : filteredTemplates;
+    if (targets.length === 0) {
+      toast.warning("No templates to apply to.");
+      return;
+    }
+    setPendingByTemplate((prev) => {
+      const next = new Map(prev);
+      let touched = 0;
+      for (const t of targets) {
+        const cur = getCurrentDeptCategory(t);
+        if (bulkFillCat === cur) {
+          next.delete(t.id);
+        } else {
+          next.set(t.id, bulkFillCat);
+          touched++;
+        }
+      }
+      const scope = selectedIds.size > 0 ? `${selectedIds.size} selected` : `${targets.length} visible`;
+      toast.success(`Queued ${touched}/${targets.length} -> ${bulkFillCat} (${scope}). Click Save to apply.`);
       return next;
     });
   }
@@ -4768,27 +4843,24 @@ function BatchEditCategoriesDialog({
   }
 
   function handleApply() {
-    if (selectedIds.size === 0) {
-      toast.warning("No templates selected.");
-      return;
-    }
-    if (!newCategory) {
-      toast.warning("Please select a category.");
+    if (pendingByTemplate.size === 0) {
+      toast.warning("No changes to save.");
       return;
     }
     let updatedCount = 0;
     const updated = templates.map((t) => {
-      if (!selectedIds.has(t.id)) return t;
+      const newCat = pendingByTemplate.get(t.id);
+      if (!newCat) return t;
       updatedCount++;
       return {
         ...t,
-        l1Processes: updateProcessCategory(t.l1Processes, deptCode, newCategory),
-        wipComponents: updateWipComponents(t.wipComponents, deptCode, newCategory),
+        l1Processes: updateProcessCategory(t.l1Processes, deptCode, newCat),
+        wipComponents: updateWipComponents(t.wipComponents, deptCode, newCat),
       };
     });
 
     onTemplatesUpdated(updated);
-    toast.success(`Updated ${updatedCount} template${updatedCount !== 1 ? "s" : ""} — ${DEPT_LABELS[deptCode]} → ${newCategory}`);
+    toast.success(`Saved ${updatedCount} template${updatedCount !== 1 ? "s" : ""} - ${DEPT_LABELS[deptCode]}`);
     onClose();
   }
 
@@ -4807,9 +4879,9 @@ function BatchEditCategoriesDialog({
 
         {/* Body */}
         <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
-          {/* Department & New Category selectors */}
-          <div className="flex gap-4">
-            <div className="flex-1">
+          {/* Department selector + Bulk-fill helper */}
+          <div className="flex gap-4 items-end">
+            <div className="w-48">
               <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
               <select
                 value={deptCode}
@@ -4822,22 +4894,30 @@ function BatchEditCategoriesDialog({
               </select>
             </div>
             <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-700 mb-1">New Category</label>
-              <select
-                value={newCategory}
-                onChange={(e) => setNewCategory(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              >
-                {allCategories.map((c) => {
-                  // Surface the production-time mins for the currently picked
-                  // dept so the operator can pick a category by impact, not
-                  // by guessing what "CAT 3" means. Falls back to "?" when no
-                  // mapping exists yet (greenfield maintenance config).
-                  const m = getProductionMinutes(deptCode, c);
-                  const label = m > 0 ? `${c} (${m} min)` : `${c} (- min)`;
-                  return <option key={c} value={c}>{label}</option>;
-                })}
-              </select>
+              <label className="block text-xs font-medium text-gray-700 mb-1">
+                Bulk fill: {selectedIds.size > 0 ? `${selectedIds.size} selected` : `all ${filteredTemplates.length} visible`} -&gt; ...
+              </label>
+              <div className="flex gap-2">
+                <select
+                  value={bulkFillCat}
+                  onChange={(e) => setBulkFillCat(e.target.value)}
+                  className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+                >
+                  <option value="">Pick category...</option>
+                  {allCategories.map((c) => {
+                    const m = getProductionMinutes(deptCode, c);
+                    const label = m > 0 ? `${c} (${m} min)` : `${c} (- min)`;
+                    return <option key={c} value={c}>{label}</option>;
+                  })}
+                </select>
+                <button
+                  onClick={handleBulkFill}
+                  disabled={!bulkFillCat}
+                  className="px-3 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                >
+                  Queue
+                </button>
+              </div>
             </div>
           </div>
 
@@ -4898,11 +4978,11 @@ function BatchEditCategoriesDialog({
             </div>
           </div>
 
-          {/* Template selection */}
+          {/* Template list with inline category dropdowns + multi-select */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <label className="text-xs font-medium text-gray-700">
-                {selectedIds.size} selected · Showing {filteredTemplates.length} of {templates.length}
+                {pendingByTemplate.size} dirty · {selectedIds.size} selected · Showing {filteredTemplates.length} of {templates.length}
               </label>
               <div className="flex items-center gap-3">
                 <button
@@ -4919,24 +4999,36 @@ function BatchEditCategoriesDialog({
                     Clear Selection
                   </button>
                 )}
+                {pendingByTemplate.size > 0 && (
+                  <button
+                    onClick={() => setPendingByTemplate(new Map())}
+                    className="text-xs text-[#9A3A2D] hover:underline"
+                  >
+                    Discard Changes
+                  </button>
+                )}
               </div>
             </div>
-            <div className="border border-[#E2DDD8] rounded-lg max-h-[280px] overflow-y-auto">
+            <div className="border border-[#E2DDD8] rounded-lg max-h-[320px] overflow-y-auto">
               {filteredTemplates.length === 0 && (
                 <p className="text-sm text-gray-400 p-4 text-center">No templates match the current filters.</p>
               )}
               {filteredTemplates.map((t) => {
                 const curCat = getCurrentDeptCategory(t);
+                const pendingCat = pendingByTemplate.get(t.id);
+                const displayCat = pendingCat ?? curCat;
+                const isDirty = pendingCat !== undefined;
+                const isSelected = selectedIds.has(t.id);
                 return (
-                  <label
+                  <div
                     key={t.id}
-                    className={`flex items-center gap-3 px-3 py-2 hover:bg-[#FAF9F7] cursor-pointer border-b border-[#E2DDD8] last:border-b-0 ${
-                      selectedIds.has(t.id) ? "bg-[#FAEFCB]/60" : ""
+                    className={`flex items-center gap-3 px-3 py-2 border-b border-[#E2DDD8] last:border-b-0 ${
+                      isDirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
                     }`}
                   >
                     <input
                       type="checkbox"
-                      checked={selectedIds.has(t.id)}
+                      checked={isSelected}
                       onChange={() => toggleOne(t.id)}
                       className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
                     />
@@ -4944,14 +5036,6 @@ function BatchEditCategoriesDialog({
                       <span className="text-sm font-medium text-[#111827]">{t.productCode}</span>
                       <span className="ml-2 text-xs text-gray-400">{t.baseModel}</span>
                     </div>
-                    {curCat && (
-                      <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
-                        {(() => {
-                          const m = getProductionMinutes(deptCode, curCat);
-                          return m > 0 ? `${curCat} (${m}m)` : curCat;
-                        })()}
-                      </span>
-                    )}
                     <span
                       className="text-[10px] font-medium px-1.5 py-0.5 rounded"
                       style={{
@@ -4961,7 +5045,23 @@ function BatchEditCategoriesDialog({
                     >
                       {t.category}
                     </span>
-                  </label>
+                    {/* Inline category dropdown - direct edit per row */}
+                    <select
+                      value={displayCat || ""}
+                      onChange={(e) => handleRowChange(t.id, e.target.value)}
+                      className={`min-w-[160px] text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] ${
+                        isDirty ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] bg-white"
+                      }`}
+                      title={isDirty ? `Was: ${curCat || "-"}` : undefined}
+                    >
+                      {!curCat && !displayCat && <option value="">- pick -</option>}
+                      {allCategories.map((c) => {
+                        const m = getProductionMinutes(deptCode, c);
+                        const label = m > 0 ? `${c} (${m}m)` : c;
+                        return <option key={c} value={c}>{label}</option>;
+                      })}
+                    </select>
+                  </div>
                 );
               })}
             </div>
@@ -4971,9 +5071,9 @@ function BatchEditCategoriesDialog({
         {/* Footer */}
         <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
           <span className="text-xs text-gray-500">
-            {selectedIds.size > 0
-              ? `Will update ${selectedIds.size} template${selectedIds.size !== 1 ? "s" : ""}: ${DEPT_LABELS[deptCode]} → ${newCategory}`
-              : "Select templates to batch update"}
+            {pendingByTemplate.size > 0
+              ? `Will save ${pendingByTemplate.size} template${pendingByTemplate.size !== 1 ? "s" : ""} on ${DEPT_LABELS[deptCode]}`
+              : "Click each row's category, or use Bulk fill above."}
           </span>
           <div className="flex gap-2">
             <button
@@ -4984,10 +5084,10 @@ function BatchEditCategoriesDialog({
             </button>
             <button
               onClick={handleApply}
-              disabled={selectedIds.size === 0}
+              disabled={pendingByTemplate.size === 0}
               className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              Apply to {selectedIds.size} Template{selectedIds.size !== 1 ? "s" : ""}
+              Save {pendingByTemplate.size} Change{pendingByTemplate.size !== 1 ? "s" : ""}
             </button>
           </div>
         </div>

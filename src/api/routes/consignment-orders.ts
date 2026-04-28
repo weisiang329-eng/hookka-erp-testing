@@ -283,7 +283,7 @@ app.post("/", async (c) => {
         (body.hubName as string) ?? null,
         companyCOId,
         companyCOId,
-        nowIso.split("T")[0],
+        (body.companyCODate as string) || nowIso.split("T")[0],
         (body.customerDeliveryDate as string) ?? null,
         (body.hookkaExpectedDD as string) ?? null,
         subtotalSen,

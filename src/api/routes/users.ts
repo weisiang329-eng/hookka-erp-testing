@@ -179,6 +179,17 @@ app.put("/:id", async (c) => {
     }
     const body = await c.req.json();
 
+    // Role changes require a separate, narrower permission. Without this
+    // gate, anyone with `users:update` (which includes ops staff who set
+    // names / emails / activation) could promote themselves or others to
+    // SUPER_ADMIN. `users:role-change` is seeded only on SUPER_ADMIN.
+    const wantsRoleChange =
+      body.role !== undefined && body.role !== existing.role;
+    if (wantsRoleChange) {
+      const roleDenied = await requirePermission(c, "users", "role-change");
+      if (roleDenied) return roleDenied;
+    }
+
     const merged = {
       email: body.email ?? existing.email,
       role: body.role ?? existing.role,

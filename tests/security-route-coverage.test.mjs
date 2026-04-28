@@ -38,7 +38,11 @@ const routes = [
   },
   {
     file: "src/api/routes/payments.ts",
-    required: [["payments", "create"]],
+    required: [
+      ["payments", "read"],
+      ["payments", "create"],
+      ["payments", "update"],
+    ],
   },
   {
     file: "src/api/routes/delivery-orders.ts",
@@ -47,6 +51,122 @@ const routes = [
       ["delivery-orders", "create"],
       ["delivery-orders", "update"],
       ["delivery-orders", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/invoices.ts",
+    required: [
+      ["invoices", "read"],
+      ["invoices", "create"],
+      ["invoices", "update"],
+      ["invoices", "post"],
+      ["invoices", "void"],
+      ["invoices", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/cost-ledger.ts",
+    required: [["cost-ledger", "read"]],
+  },
+  {
+    file: "src/api/routes/three-way-match.ts",
+    required: [
+      ["three-way-match", "read"],
+      ["three-way-match", "create"],
+    ],
+  },
+  {
+    file: "src/api/routes/grn.ts",
+    required: [
+      ["grn", "read"],
+      ["grn", "create"],
+      ["grn", "update"],
+    ],
+  },
+  {
+    file: "src/api/routes/purchase-orders.ts",
+    required: [
+      ["purchase-orders", "read"],
+      ["purchase-orders", "create"],
+      ["purchase-orders", "update"],
+      ["purchase-orders", "approve"],
+      ["purchase-orders", "receive"],
+      ["purchase-orders", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/debit-notes.ts",
+    required: [
+      ["debit-notes", "read"],
+      ["debit-notes", "create"],
+      ["debit-notes", "update"],
+    ],
+  },
+  {
+    file: "src/api/routes/e-invoices.ts",
+    required: [
+      ["e-invoices", "read"],
+      ["e-invoices", "create"],
+      ["e-invoices", "update"],
+    ],
+  },
+  {
+    file: "src/api/routes/payroll.ts",
+    required: [
+      ["payroll", "read"],
+      ["payroll", "create"],
+      ["payroll", "update"],
+    ],
+  },
+  {
+    file: "src/api/routes/payslips.ts",
+    required: [
+      ["payslips", "read"],
+      ["payslips", "create"],
+      ["payslips", "update"],
+    ],
+  },
+  {
+    file: "src/api/routes/accounting.ts",
+    required: [
+      ["accounting", "read"],
+      ["accounting", "create"],
+      ["accounting", "update"],
+      ["accounting", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/users.ts",
+    required: [
+      ["users", "read"],
+      ["users", "create"],
+      ["users", "update"],
+      ["users", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/workers.ts",
+    required: [
+      ["workers", "read"],
+      ["workers", "create"],
+      ["workers", "update"],
+      ["workers", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/purchase-invoices.ts",
+    required: [
+      ["purchase-invoices", "create"],
+      ["purchase-invoices", "update"],
+      ["purchase-invoices", "delete"],
+    ],
+  },
+  {
+    file: "src/api/routes/credit-notes.ts",
+    required: [
+      ["credit-notes", "read"],
+      ["credit-notes", "create"],
+      ["credit-notes", "update"],
     ],
   },
 ];
@@ -116,13 +236,28 @@ test("total requirePermission call count across gated routes does not regress", 
     const matches = src.match(/\brequirePermission\s*\(/g) ?? [];
     total += matches.length;
   }
-  // Current floor as of 2026-04-25:
-  //   sales-orders.ts:    2 (create + confirm)
-  //   payments.ts:        1 (create)
-  //   delivery-orders.ts: 6 (list-read + stats-read + single-read + create
-  //                          + update + delete)
-  // Total = 9. If you add a gate, raise this number with the same PR.
-  const FLOOR = 9;
+  // Current floor as of 2026-04-29 (Sprint 6 expansion):
+  //   accounting.ts:       11
+  //   cost-ledger.ts:       4
+  //   credit-notes.ts:      4
+  //   debit-notes.ts:       4
+  //   delivery-orders.ts:   6
+  //   e-invoices.ts:        4
+  //   grn.ts:               4
+  //   invoices.ts:          8 (read x3 + create + update + post + void + delete)
+  //   payments.ts:          4
+  //   payroll.ts:           3
+  //   payslips.ts:          4
+  //   purchase-invoices.ts: 3
+  //   purchase-orders.ts:   7
+  //   sales-orders.ts:      2 (create + confirm)
+  //   three-way-match.ts:   2
+  //   users.ts:            11
+  //   workers.ts:           5
+  // Total = 86. (One sales-orders read used to count via a different
+  // file; rely on the live sum below — FLOOR is a tripwire, not an
+  // exact match.) If you add a gate, raise this number with the same PR.
+  const FLOOR = 86;
   assert.ok(
     total >= FLOOR,
     `requirePermission gate count ${total} < floor ${FLOOR} — a gate was removed`,

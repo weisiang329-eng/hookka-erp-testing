@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { previewCascadeSOClosed } from "./invoices";
 
@@ -112,8 +113,9 @@ app.get("/", async (c) => {
   const customerId = c.req.query("customerId");
   const invoiceId = c.req.query("invoiceId");
 
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const params: unknown[] = [orgId];
   if (customerId) {
     where.push("customerId = ?");
     params.push(customerId);
@@ -125,7 +127,7 @@ app.get("/", async (c) => {
     where.push("allocations LIKE ?");
     params.push(`%"invoiceId":"${invoiceId}"%`);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const clause = `WHERE ${where.join(" AND ")}`;
 
   const res = await c.var.DB.prepare(
     `SELECT * FROM payment_records ${clause} ORDER BY date DESC, id DESC`,

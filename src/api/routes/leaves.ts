@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -52,8 +53,9 @@ app.get("/", async (c) => {
   const workerId = c.req.query("workerId");
   const status = c.req.query("status");
 
-  const wheres: string[] = [];
-  const binds: (string | number)[] = [];
+  const orgId = getOrgId(c);
+  const wheres: string[] = ["orgId = ?"];
+  const binds: (string | number)[] = [orgId];
   if (workerId) {
     wheres.push("workerId = ?");
     binds.push(workerId);
@@ -63,7 +65,7 @@ app.get("/", async (c) => {
     binds.push(status);
   }
 
-  const sql = `SELECT * FROM leaves${wheres.length ? " WHERE " + wheres.join(" AND ") : ""} ORDER BY startDate DESC`;
+  const sql = `SELECT * FROM leaves WHERE ${wheres.join(" AND ")} ORDER BY startDate DESC`;
   const res = await c.var.DB.prepare(sql).bind(...binds).all<LeaveRow>();
   const data = (res.results ?? []).map(rowToLeave);
   return c.json({ success: true, data, total: data.length });

@@ -2135,7 +2135,7 @@ function EmployeeDetailTab({
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold">
-              {(totalWorkMins / 60).toFixed(1)}h
+              {totalWorkMins > 0 ? formatHours(totalWorkMins) : "-"}
             </p>
             <p className="text-xs text-[#6B7280]">Total Working Hrs</p>
             {jcCount > 0 && (
@@ -2146,12 +2146,12 @@ function EmployeeDetailTab({
         <Card>
           <CardContent className="p-4 text-center">
             <p className="text-2xl font-bold">
-              {(totalProdMins / 60).toFixed(1)}h
+              {totalProdMins > 0 ? formatHours(totalProdMins) : "-"}
             </p>
             <p className="text-xs text-[#6B7280]">Total Production Hrs</p>
             {totalProdMinsJc > 0 && (
               <p className="mt-0.5 text-[10px] text-[#3E6570]">
-                {(totalProdMinsAttendance / 60).toFixed(1)}h att + {(totalProdMinsJc / 60).toFixed(1)}h jc
+                {formatHours(totalProdMinsAttendance) === "-" ? "0h" : formatHours(totalProdMinsAttendance)} att + {formatHours(totalProdMinsJc)} jc
               </p>
             )}
           </CardContent>

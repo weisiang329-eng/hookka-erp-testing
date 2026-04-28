@@ -1,0 +1,16 @@
+-- ============================================================================
+-- Migration 0075 — Service Cases: action log column
+--
+-- Per design 2026-04-28: cases need an "Action Taken (Service Agent Log)"
+-- — chronological list of what the agent did over the lifetime of the
+-- case (called the customer, scheduled an inspection, sent a replacement
+-- part, etc.). Distinct from the single-shot prevention_action field
+-- which is the long-term operational fix.
+--
+-- Stored as a JSON array on the case row to keep the data model simple
+-- (action log is always read with the case, no need for a separate table).
+-- Shape:
+--   [{ id: string, date: 'YYYY-MM-DD', description: string,
+--      createdAt: ISO, createdByName?: string }, ...]
+-- ============================================================================
+ALTER TABLE service_cases ADD COLUMN IF NOT EXISTS action_log TEXT;

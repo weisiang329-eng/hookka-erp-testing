@@ -26,6 +26,14 @@ type RootCauseCategory =
 type PreventionStatus = "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
 type Mode = "REPRODUCE" | "STOCK_SWAP" | "REPAIR";
 
+type ActionLogEntry = {
+  id: string;
+  date: string;
+  description: string;
+  createdAt?: string;
+  createdByName?: string;
+};
+
 type ServiceCaseDetail = {
   id: string;
   caseNo: string;
@@ -35,13 +43,21 @@ type ServiceCaseDetail = {
   customerId: string;
   customerName: string;
   customerState: string;
+  // Issue Description carries the 5W story (what / when / who / where /
+  // result). Editable from the case detail page; auto-saves on blur.
   issueDescription: string;
   issuePhotos: string[];
+  // Root cause + prevention. category/action/owner live here; the actual
+  // status tracking moves to a future Prevention Tracker portal — the
+  // case detail just OPENS the prevention task.
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string;
   preventionAction: string;
   preventionStatus: PreventionStatus;
   preventionOwner: string;
+  // Action log — chronological entries the agent logs over the case's
+  // lifetime (called the customer, scheduled inspection, sent parts).
+  actionLog: ActionLogEntry[];
   status: CaseStatus;
   externalRef: string;
   createdBy: string;
@@ -82,12 +98,9 @@ const ROOT_CAUSE_LABELS: Record<string, string> = {
   OTHER: "Other",
 };
 
-const PREVENTION_STATUS_COLOR: Record<string, string> = {
-  PENDING: "bg-[#F4EFE3] text-[#6B5C32] border-[#E8D8B2]",
-  IN_PROGRESS: "bg-[#E0EAF4] text-[#3A5670] border-[#C9D6E4]",
-  DONE: "bg-[#E2EFE0] text-[#3A6B47] border-[#C9DEC2]",
-  NOT_NEEDED: "bg-[#E2DDD8] text-[#5A5550] border-[#C9C5C0]",
-};
+// PREVENTION_STATUS_COLOR removed 2026-04-28 — status pill no longer
+// shown on the case detail; tracking moves to a future Prevention Tracker
+// portal. The DB column still defaults to 'PENDING'.
 
 function dateLabel(iso: string): string {
   if (!iso) return "—";
@@ -230,34 +243,51 @@ export default function ServiceCaseDetailPage() {
         </div>
       </div>
 
-      {/* Customer issue */}
-      {(caseDetail.issueDescription || caseDetail.issuePhotos.length > 0) && (
+      {/* Issue (editable) + photos.
+          Issue Description carries the 5W story (what / when / who / where /
+          result). It used to coexist with a separate "Why did this happen?"
+          textarea on the RCA panel; operators flagged that as redundant on
+          2026-04-28 so it's now one editable field, auto-saves on blur. */}
+      <IssueDescriptionPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+      {caseDetail.issuePhotos.length > 0 && (
         <Card>
           <CardHeader className="pb-2">
-            <CardTitle className="text-sm">Customer Issue</CardTitle>
+            <CardTitle className="text-sm">Photos</CardTitle>
           </CardHeader>
-          <CardContent className="text-sm text-[#1F1D1B]">
-            {caseDetail.issueDescription && (
-              <p className="whitespace-pre-line">{caseDetail.issueDescription}</p>
-            )}
-            {caseDetail.issuePhotos.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-2">
-                {caseDetail.issuePhotos.map((p, i) => (
-                  <a key={i} href={p} target="_blank" rel="noopener noreferrer">
-                    <img
-                      src={p}
-                      alt={`Photo ${i + 1}`}
-                      className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
-                    />
-                  </a>
-                ))}
-              </div>
-            )}
+          <CardContent>
+            <div className="flex flex-wrap gap-2">
+              {caseDetail.issuePhotos.map((p, i) => (
+                <a key={i} href={p} target="_blank" rel="noopener noreferrer">
+                  <img
+                    src={p}
+                    alt={`Photo ${i + 1}`}
+                    className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
+                  />
+                </a>
+              ))}
+            </div>
           </CardContent>
         </Card>
       )}
 
-      {/* Root cause + prevention */}
+      {/* Service-agent action log — chronological entries the agent logs
+          over the case's lifetime (called customer, scheduled inspection,
+          sent missing parts, etc.). */}
+      <ActionLogPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
+      {/* Root cause + prevention (open here; track elsewhere) */}
       <RootCausePanel
         caseDetail={caseDetail}
         onSaved={() => {
@@ -367,10 +397,9 @@ function RootCausePanel({
 }) {
   const { toast } = useToast();
   const [category, setCategory] = useState(caseDetail.rootCauseCategory ?? "");
-  const [notes, setNotes] = useState(caseDetail.rootCauseNotes);
   const [action, setAction] = useState(caseDetail.preventionAction);
+  // status no longer edited from this panel — see Prevention Tracker portal.
   const [owner, setOwner] = useState(caseDetail.preventionOwner);
-  const [status, setStatus] = useState(caseDetail.preventionStatus);
   const [saving, setSaving] = useState(false);
 
   async function save(patch: Record<string, unknown>) {
@@ -393,54 +422,27 @@ function RootCausePanel({
 
   return (
     <Card>
-      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+      <CardHeader className="pb-2">
         <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
-        <span
-          className={`text-[10px] uppercase px-2 py-0.5 rounded border ${PREVENTION_STATUS_COLOR[status] ?? PREVENTION_STATUS_COLOR.PENDING}`}
-        >
-          {status}
-        </span>
       </CardHeader>
       <CardContent className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          <select
-            value={category}
-            onChange={(e) => {
-              setCategory(e.target.value);
-              save({ rootCauseCategory: e.target.value || null });
-            }}
-            disabled={saving}
-            className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-sm"
-          >
-            <option value="">Category — not yet assigned</option>
-            {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
-              <option key={v} value={v}>{t}</option>
-            ))}
-          </select>
-          <select
-            value={status}
-            onChange={(e) => {
-              const next = e.target.value as PreventionStatus;
-              setStatus(next);
-              save({ preventionStatus: next });
-            }}
-            disabled={saving}
-            className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-sm"
-          >
-            <option value="PENDING">Prevention pending</option>
-            <option value="IN_PROGRESS">Prevention in progress</option>
-            <option value="DONE">Prevention done</option>
-            <option value="NOT_NEEDED">No prevention needed</option>
-          </select>
-        </div>
-        <textarea
-          rows={2}
-          value={notes}
-          onBlur={() => save({ rootCauseNotes: notes || null })}
-          onChange={(e) => setNotes(e.target.value)}
-          placeholder="Why did this happen?"
-          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
-        />
+        {/* Category — drives reporting / categorisation of recurrence. */}
+        <select
+          value={category}
+          onChange={(e) => {
+            setCategory(e.target.value);
+            save({ rootCauseCategory: e.target.value || null });
+          }}
+          disabled={saving}
+          className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+        >
+          <option value="">Category — not yet assigned</option>
+          {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
+            <option key={v} value={v}>{t}</option>
+          ))}
+        </select>
+        {/* rootCauseNotes textarea removed 2026-04-28 — duplicate of Issue
+            Description (the 5W story lives there now). */}
         <textarea
           rows={2}
           value={action}
@@ -457,6 +459,193 @@ function RootCausePanel({
           placeholder="Owner of follow-up (name)"
           className="h-8 text-sm"
         />
+        {/* Per design 2026-04-28: case detail OPENS the prevention task; the
+            actual progress tracking lives in a dedicated Prevention Tracker
+            portal (not yet built). prevention_status defaults to 'PENDING'
+            on the DB row so it shows up in the future portal automatically. */}
+        <p className="text-[10px] text-[#9CA3AF]">
+          Once the action + owner are set, the prevention task is opened. Progress
+          tracking will live in the Prevention Tracker portal (coming soon).
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===========================================================================
+// IssueDescriptionPanel — editable issue description with the 5W template.
+// ===========================================================================
+// Inline edit on the case detail page. Auto-saves on blur. The previous
+// design had this as a read-only display + a separate "Why did this happen?"
+// textarea on the RCA panel; operators flagged that as redundant on
+// 2026-04-28 so it's now one editable field.
+function IssueDescriptionPanel({
+  caseDetail,
+  onSaved,
+}: {
+  caseDetail: ServiceCaseDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [description, setDescription] = useState(caseDetail.issueDescription);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    if (description === caseDetail.issueDescription) return;
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ issueDescription: description || null }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">
+          Issue Description{" "}
+          <span className="text-[10px] font-normal text-[#9CA3AF]">
+            (5W: when / who / where / what / result)
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        <textarea
+          rows={6}
+          value={description}
+          onBlur={save}
+          onChange={(e) => setDescription(e.target.value)}
+          disabled={saving}
+          placeholder={[
+            "What happened? Use the 5W template:",
+            "  When  — date / time of incident (e.g. 2026-04-29 10:30)",
+            "  Who   — name (e.g. 3PL driver Ahmad / sales agent Wong)",
+            "  Where — location (e.g. customer's living room, KL)",
+            "  What  — what they did (e.g. dropped the sofa during unloading)",
+            "  Result — what problem was caused (e.g. frame cracked at left armrest)",
+          ].join("\n")}
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm font-mono"
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+// ===========================================================================
+// ActionLogPanel — Service-agent log of actions taken over the case lifetime.
+// ===========================================================================
+// Stored as JSON array on service_cases.action_log. Each entry: { id, date,
+// description, createdAt, createdByName? }. Auto-saves on blur of any field
+// or when entries are added/removed.
+function ActionLogPanel({
+  caseDetail,
+  onSaved,
+}: {
+  caseDetail: ServiceCaseDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const user = getCurrentUser();
+  const [entries, setEntries] = useState<ActionLogEntry[]>(caseDetail.actionLog ?? []);
+  const [saving, setSaving] = useState(false);
+
+  async function persist(next: ActionLogEntry[]) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actionLog: next }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function addEntry() {
+    const next = [
+      ...entries,
+      {
+        id: `act-${Math.random().toString(36).slice(2, 8)}`,
+        date: new Date().toISOString().slice(0, 10),
+        description: "",
+        createdAt: new Date().toISOString(),
+        createdByName: user?.displayName ?? user?.email ?? "",
+      },
+    ];
+    setEntries(next);
+    // Don't persist yet — operator will fill in the description first.
+    // Save fires on blur of the description field.
+  }
+  function patchEntry(id: string, patch: Partial<ActionLogEntry>) {
+    setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, ...patch } : e)));
+  }
+  function removeEntry(id: string) {
+    const next = entries.filter((e) => e.id !== id);
+    setEntries(next);
+    void persist(next);
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">Action Taken (Service Agent Log)</CardTitle>
+        <Button size="sm" variant="outline" onClick={addEntry} disabled={saving}>
+          <Plus className="mr-1 h-3 w-3" /> Add Entry
+        </Button>
+      </CardHeader>
+      <CardContent>
+        {entries.length === 0 ? (
+          <p className="text-xs text-[#9CA3AF]">
+            Log each action you take on this case (called customer, scheduled
+            inspection, sent missing part, etc.). Click "Add Entry" to start.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {entries.map((e) => (
+              <div key={e.id} className="flex items-center gap-2">
+                <Input
+                  type="date"
+                  value={e.date}
+                  onChange={(ev) => patchEntry(e.id, { date: ev.target.value })}
+                  onBlur={() => void persist(entries)}
+                  className="h-8 w-[150px] text-xs"
+                />
+                <Input
+                  type="text"
+                  value={e.description}
+                  onChange={(ev) => patchEntry(e.id, { description: ev.target.value })}
+                  onBlur={() => void persist(entries)}
+                  placeholder="What did you do? (e.g. Called customer, scheduled on-site inspection)"
+                  className="h-8 flex-1 text-xs"
+                />
+                <button
+                  type="button"
+                  onClick={() => removeEntry(e.id)}
+                  className="text-[#9A3A2D] hover:text-[#7A2E24] p-1"
+                  title="Remove"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );

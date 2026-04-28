@@ -1339,13 +1339,13 @@ export default function ProductsPage() {
       const text = await file.text();
       const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l.length > 0);
       if (lines.length < 2) {
-        toast.warning("CSV 是空的或只有表头。");
+        toast.warning("CSV is empty or only has headers.");
         return;
       }
       const headers = parseCsvLine(lines[0]).map((h) => h.trim());
       const codeIdx = headers.indexOf("code");
       if (codeIdx === -1) {
-        toast.warning("CSV 必须包含 'code' 列。");
+        toast.warning("CSV must include a 'code' column.");
         return;
       }
 

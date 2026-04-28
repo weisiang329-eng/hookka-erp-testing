@@ -7,6 +7,7 @@
   "accountNo": "account_no",
   "acknowledgedAt": "acknowledged_at",
   "acquiredAt": "acquired_at",
+  "actionLog": "action_log",
   "actionTaken": "action_taken",
   "activeOrgId": "active_org_id",
   "actorName": "actor_name",

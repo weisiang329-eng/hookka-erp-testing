@@ -12,7 +12,7 @@ import {
   Wrench,
 } from "lucide-react";
 // Phase 3 — Service Orders. Opens a modal pre-filled with this SO's
-// header info so the user can spawn a 换货服务 directly from the SO
+// header info so the user can spawn a Service Case directly from the SO
 // detail page when a customer reports a defect.
 // 0074 refactor: top-level entry is now Service Cases (parent). Cases can
 // spawn 0+ Service Orders for the rework/swap/repair flow.
@@ -949,7 +949,7 @@ export default function SalesOrderDetailPage() {
                 variant="outline"
                 size="sm"
                 onClick={() => setServiceModalOpen(true)}
-                title="Log a 换货服务 (Service Case) for a customer issue / complaint"
+                title="Log a Service Case for a customer issue / complaint"
               >
                 <Wrench className="h-4 w-4" /> Open Service Case
               </Button>

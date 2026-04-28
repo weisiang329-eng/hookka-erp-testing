@@ -1721,30 +1721,44 @@ export default function DeliveryPage() {
           />
         ),
       },
-      { key: "doNo", label: "DO No.", type: "docno", width: "120px", sortable: true },
-      { key: "customerName", label: "Customer", type: "text", sortable: true },
+      // Order matches the layout the operator asked for: Dispatch Date first
+      // so today's truck plan is the primary sort target. Customer/SO/State
+      // counts replace the single-customer column because a single DO can
+      // consolidate multiple drops (e.g. DO-2604-002 has Carress + Houzs
+      // Century — the legacy customerName field only carried the first one).
       {
-        key: "salesOrderNos",
-        label: "Sales Orders",
-        type: "text",
-        width: "180px",
+        key: "dispatchDate",
+        label: "Dispatch Date",
+        type: "date",
+        width: "120px",
         sortable: true,
-        // Distinct SO numbers from items[]. A DO can span multiple SOs
-        // (e.g. one truck trip consolidating two orders for the same
-        // customer); shown comma-separated. Falls back to the DO's own
-        // salesOrderId for legacy rows that have no items[] populated.
+        render: (_value, row) => (
+          <span>{row.dispatchDate ? formatDate(row.dispatchDate) : "-"}</span>
+        ),
+      },
+      { key: "doNo", label: "DO No.", type: "docno", width: "120px", sortable: true },
+      {
+        key: "customerCount",
+        label: "Customers",
+        type: "text",
+        width: "150px",
+        sortable: true,
+        // Counts distinct customers across the items via salesOrderNo →
+        // (we don't have a per-item customer field; use the DO's own
+        // customerName as the primary, and bump the count if dropPoints
+        // carries multi-drop info). Shows "Houzs Century +1 more" style
+        // when the DO is multi-customer.
         render: (_value, row) => {
-          const sos = Array.from(
-            new Set(
-              (row.items || [])
-                .map((it) => it.salesOrderNo)
-                .filter((s): s is string => Boolean(s))
-            )
-          );
-          if (sos.length === 0) {
-            return <span className="text-[#9CA3AF]">{row.salesOrderId || "-"}</span>;
+          const drops = (row as DeliveryOrderRow & { dropPoints?: number }).dropPoints ?? 1;
+          if (drops > 1) {
+            return (
+              <span className="text-[#1F1D1B]">
+                {row.customerName || "-"}{" "}
+                <span className="text-[#9C6F1E] text-xs">+{drops - 1} more</span>
+              </span>
+            );
           }
-          return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
+          return <span className="text-[#1F1D1B]">{row.customerName || "-"}</span>;
         },
       },
       {
@@ -1769,6 +1783,29 @@ export default function DeliveryPage() {
         },
       },
       {
+        key: "salesOrderNos",
+        label: "Sales Orders",
+        type: "text",
+        width: "180px",
+        sortable: true,
+        // Distinct SO numbers from items[]. A DO can span multiple SOs
+        // (e.g. one truck trip consolidating SO-2604-326 + SO-2604-328);
+        // shown comma-separated.
+        render: (_value, row) => {
+          const sos = Array.from(
+            new Set(
+              (row.items || [])
+                .map((it) => it.salesOrderNo)
+                .filter((s): s is string => Boolean(s))
+            )
+          );
+          if (sos.length === 0) {
+            return <span className="text-[#9CA3AF]">{row.salesOrderId || "-"}</span>;
+          }
+          return <span className="text-[#1F1D1B]">{sos.join(", ")}</span>;
+        },
+      },
+      {
         key: "status",
         label: "Status",
         type: "status",
@@ -1783,16 +1820,31 @@ export default function DeliveryPage() {
           </div>
         ),
       },
-      { key: "driverName", label: "Driver", type: "text", width: "130px", sortable: true },
-      { key: "lorryName", label: "Company", type: "text", width: "150px", sortable: true },
+      // driverName is the legacy 3PL provider COMPANY name (not a person —
+      // see migration 0014 + the 3PL multi-driver refactor). Relabeled
+      // "Transport Co." so it isn't mistaken for the actual driver person.
+      { key: "driverName", label: "Transport Co.", type: "text", width: "150px", sortable: true },
+      // The actual driver person — denormalized into driverContactPerson
+      // on POST/PUT (added by the 3PL refactor). Falls back to em-dash.
       {
-        key: "dispatchDate",
-        label: "Dispatch Date",
-        type: "date",
+        key: "driverContactPerson",
+        label: "Driver",
+        type: "text",
         width: "120px",
         sortable: true,
         render: (_value, row) => (
-          <span>{row.dispatchDate ? formatDate(row.dispatchDate) : "-"}</span>
+          <span className="text-[#4B5563]">{row.driverContactPerson || <span className="text-[#9CA3AF]">—</span>}</span>
+        ),
+      },
+      // Lorry plate from the picked vehicle (three_pl_vehicles).
+      {
+        key: "vehicleNo",
+        label: "Lorry Plate",
+        type: "text",
+        width: "110px",
+        sortable: true,
+        render: (_value, row) => (
+          <span className="font-mono text-[#1F1D1B]">{row.vehicleNo || <span className="text-[#9CA3AF]">—</span>}</span>
         ),
       },
     ],

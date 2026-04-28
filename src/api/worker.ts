@@ -65,6 +65,10 @@ export type Env = {
     OAUTH_GOOGLE_REDIRECT_URI?: string;
     OAUTH_GOOGLE_HOSTED_DOMAIN?: string;
     JWT_SECRET?: string;
+    // Optional: Sentry / GlitchTip DSN for worker-side error reporting.
+    // Set via `wrangler secret put SENTRY_DSN`. When unset, app.onError
+    // logs to wrangler-tail only (no third-party hop).
+    SENTRY_DSN?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -369,6 +373,7 @@ import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
+import { reportWorkerError } from "./lib/monitoring";
 
 // Phase-5 imports — historically these were in-memory stubs, but every
 // route below has since been migrated to real D1 / Supabase persistence
@@ -539,6 +544,36 @@ app.route("/api/scan-po", scanPo);
 // SupabaseAdapter route by registration order so this matters.
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
+
+// Catch-all error handler. Hono's default behaviour is to surface a 500
+// with the error message — fine for dev, but in prod we want every
+// uncaught route exception to land in Sentry (when configured) so we can
+// triage without waiting for a user to file a ticket. The reporter is
+// no-op when SENTRY_DSN is unset, so this is safe in OSS / self-host.
+app.onError((err, c) => {
+  const url = (() => {
+    try {
+      return new URL(c.req.url).pathname + new URL(c.req.url).search;
+    } catch {
+      return c.req.url;
+    }
+  })();
+  // Fire-and-forget — we don't want the error path waiting on the
+  // dynamic-import + HTTP round-trip to Sentry.
+  void reportWorkerError(err, c.env.SENTRY_DSN, {
+    method: c.req.method,
+    url,
+  });
+  // Preserve Hono's default response shape so the frontend's existing
+  // FetchJsonError handling keeps working.
+  return c.json(
+    {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    },
+    500,
+  );
+});
 
 // Unmigrated /api/* paths — return a shape the frontend can consume without
 // crashing. GET pretends to be an empty list so pages calling `.forEach` /

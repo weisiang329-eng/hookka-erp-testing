@@ -353,7 +353,8 @@ export default function StockAdjustmentsPage() {
     refreshHistory();
   }
 
-  // ---- styling shorthands ----
+  // ---- shared styling for the inline <select> elements (rows are too
+  // narrow for the standard form-row padding so we shrink to text-xs). ----
   const sel =
     "w-full rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20";
 

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Delivery-order + DO-item schemas. Mirror src/api/routes-d1/delivery-orders.ts
+// Delivery-order + DO-item schemas. Mirror src/api/routes/delivery-orders.ts
 // rowToOrder output. Loose passthrough so future columns don't break.
 // ---------------------------------------------------------------------------
 import { z } from "zod";

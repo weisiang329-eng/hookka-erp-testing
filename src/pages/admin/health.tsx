@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 
 // Shape returned by GET /api/admin/health/kpis. Keep this in sync with
-// src/api/routes-d1/admin-health.ts.
+// src/api/routes/admin-health.ts.
 type KpiPayload = {
   success: boolean;
   data: {

@@ -103,7 +103,7 @@ async function processOne(
 ): Promise<void> {
   // SO-confirm → production-PO emission. NOT the procurement PO → supplier
   // flow (that's wired to Resend in `lib/email.ts notifySupplierPoSubmitted`
-  // and runs synchronously from `routes-d1/purchase-orders.ts`). This
+  // and runs synchronously from `routes/purchase-orders.ts`). This
   // consumer fires when an SO is confirmed and spawns N production POs;
   // its job is to emit some customer-facing notification, but no
   // customer template / portal exists yet — log only until that lands.

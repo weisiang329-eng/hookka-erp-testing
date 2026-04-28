@@ -4,20 +4,20 @@ I was not allowed to touch `worker.ts` directly. Paste the snippets below into t
 
 ---
 
-## 1. Add the middleware + route imports (below the existing `import invoices from "./routes-d1/invoices";` line)
+## 1. Add the middleware + route imports (below the existing `import invoices from "./routes/invoices";` line)
 
 Current file ends its import block at:
 
 ```ts
-import invoices from "./routes-d1/invoices";
-import payments from "./routes-d1/payments";
+import invoices from "./routes/invoices";
+import payments from "./routes/payments";
 ```
 
 Add these three lines **after** `import payments`:
 
 ```ts
-import auth from "./routes-d1/auth";
-import users from "./routes-d1/users";
+import auth from "./routes/auth";
+import users from "./routes/users";
 import { authMiddleware } from "./lib/auth-middleware";
 ```
 

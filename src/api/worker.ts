@@ -1,32 +1,29 @@
 // ---------------------------------------------------------------------------
 // Hono app for Cloudflare Pages Functions — the hookka-erp backend.
 //
-// Data layer (post Phase 0-7 migration, see docs/d1-retirement-plan.md):
-//   Browser → Pages Functions (this app) → D1Compat adapter (c.var.DB)
+// Data layer:
+//   Browser → Pages Functions (this app) → SupabaseAdapter (c.var.DB)
 //     → postgres.js → Hyperdrive (CF pool) → Supabase Postgres (Singapore)
 //
-// [LEGACY DIRECTORY NAMES] `routes-d1/` and `D1Compat` are named after the
-// pre-2026-04-27 stack. The actual runtime data path is 100% Postgres.
-// The D1 binding has been removed entirely (commit 7059259); no route
-// touches a real D1Database any more. See src/api/routes-d1/README.md.
+// Note: TypeScript types still reference `D1Database` because route code
+// uses the SQLite-flavoured prepare/bind/all interface. SupabaseAdapter
+// implements that interface over Postgres. There is no real D1 binding —
+// it was retired 2026-04-27 (commit 7059259); see docs/d1-retirement-plan.md.
 //
 // Key bindings (wrangler.toml):
 //   HYPERDRIVE       — production/preview Postgres pool to Supabase
 //   SESSION_CACHE    — KV cache for auth sessions + hot lookup tables
-//   (No DB / D1Database binding — retired 2026-04-27.)
 //
 // Per-request lifecycle:
 //   1. CORS       — allow Pages origin + local Vite dev
 //   2. timingMdw  — emits [req] / [slow-req] log lines for wrangler tail
-//   3. dbInject   — constructs a D1Compat adapter over Hyperdrive and
+//   3. dbInject   — constructs a SupabaseAdapter over Hyperdrive and
 //                   stashes it on c.var.DB. Every authenticated route
 //                   below this line transacts via c.var.DB.
 //   4. authMdw    — Bearer-token gate with KV session cache (see
 //                   lib/auth-middleware.ts); public endpoints registered
 //                   BEFORE this line bypass auth by virtue of order.
-//   5. Route handlers — imported from routes-d1/* (legacy name only;
-//                   actual runtime is Postgres). New routes can land in
-//                   the same directory until the rename PR happens.
+//   5. Route handlers — imported from routes/* (Supabase-backed).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -34,7 +31,7 @@ import { cors } from "hono/cors";
 export type Env = {
   Bindings: {
     // D1 binding removed 2026-04-27 (Phase 7). Every route uses c.var.DB
-    // which is the D1Compat→Postgres adapter set up in middleware below.
+    // which is the SupabaseAdapter→Postgres adapter set up in middleware below.
     // The Bindings shape no longer exposes a raw D1Database — if a route
     // accidentally reaches for `c.env.DB`, TypeScript will catch it.
     ENVIRONMENT: string;
@@ -42,7 +39,7 @@ export type Env = {
     APP_URL: string;              // e.g. "http://localhost:8788" or "https://hookka-erp-testing.pages.dev"
     RESEND_API_KEY?: string;      // Optional — set via wrangler secret for prod, .dev.vars for local
     RESEND_FROM_EMAIL: string;    // e.g. "Hookka ERP <onboarding@resend.dev>"
-    ANTHROPIC_API_KEY?: string;   // Claude API key — set via `wrangler secret put ANTHROPIC_API_KEY`. Used by routes-d1/scan-po.ts.
+    ANTHROPIC_API_KEY?: string;   // Claude API key — set via `wrangler secret put ANTHROPIC_API_KEY`. Used by routes/scan-po.ts.
     // Supabase (Phase 2+). Transaction-mode pooler on port 6543.
     // Local dev uses DATABASE_URL directly from .dev.vars.
     // Production / preview use the HYPERDRIVE binding below (required to
@@ -121,14 +118,14 @@ app.use("/api/*", async (c, next) => {
 // The adapter is further wrapped in instrumentD1 so every prepare/all/first/
 // run/batch emits a [slow-query] line when it exceeds SLOW_QUERY_MS.
 app.use("/api/*", async (c, next) => {
-  const { D1Compat } = await import("./lib/d1-compat");
+  const { SupabaseAdapter } = await import("./lib/supabase-compat");
   const { getSql } = await import("./lib/db-pg");
   const { instrumentD1 } = await import("./lib/observability");
   // Prefer Hyperdrive binding (production / preview on Cloudflare).  Fall
   // back to DATABASE_URL env var only for local dev without Hyperdrive.
   const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
-  const adapter = new D1Compat(getSql(url)) as unknown as D1Database;
+  const adapter = new SupabaseAdapter(getSql(url)) as unknown as D1Database;
   const timer = c.get("dbTimer"); // set by timingMiddleware
   c.set("DB", instrumentD1(adapter, new URL(c.req.url).pathname, timer));
   await next();
@@ -270,70 +267,70 @@ app.get("/api/dashboard/summary", async (c) => {
 // ---------------------------------------------------------------------------
 // Route registrations — add each migrated route here.
 // ---------------------------------------------------------------------------
-import customers from "./routes-d1/customers";
-import bom from "./routes-d1/bom";
-import products from "./routes-d1/products";
-import productConfigs from "./routes-d1/product-configs";
-import workers from "./routes-d1/workers";
-import workerAuth from "./routes-d1/worker-auth";
-import departments from "./routes-d1/departments";
-import customerHubs from "./routes-d1/customer-hubs";
-import customerProducts from "./routes-d1/customer-products";
-import organisations from "./routes-d1/organisations";
-import salesOrders from "./routes-d1/sales-orders";
-import purchaseOrders from "./routes-d1/purchase-orders";
-import purchaseInvoices from "./routes-d1/purchase-invoices";
-import creditNotes from "./routes-d1/credit-notes";
-import debitNotes from "./routes-d1/debit-notes";
-import eInvoices from "./routes-d1/e-invoices";
-import threeWayMatch from "./routes-d1/three-way-match";
-import deliveryOrders from "./routes-d1/delivery-orders";
-import invoices from "./routes-d1/invoices";
-import payments from "./routes-d1/payments";
+import customers from "./routes/customers";
+import bom from "./routes/bom";
+import products from "./routes/products";
+import productConfigs from "./routes/product-configs";
+import workers from "./routes/workers";
+import workerAuth from "./routes/worker-auth";
+import departments from "./routes/departments";
+import customerHubs from "./routes/customer-hubs";
+import customerProducts from "./routes/customer-products";
+import organisations from "./routes/organisations";
+import salesOrders from "./routes/sales-orders";
+import purchaseOrders from "./routes/purchase-orders";
+import purchaseInvoices from "./routes/purchase-invoices";
+import creditNotes from "./routes/credit-notes";
+import debitNotes from "./routes/debit-notes";
+import eInvoices from "./routes/e-invoices";
+import threeWayMatch from "./routes/three-way-match";
+import deliveryOrders from "./routes/delivery-orders";
+import invoices from "./routes/invoices";
+import payments from "./routes/payments";
 // Phase 4 — production / inventory / supplier
-import productionOrders from "./routes-d1/production-orders";
-import inventory from "./routes-d1/inventory";
+import productionOrders from "./routes/production-orders";
+import inventory from "./routes/inventory";
 // Phase 4.5 — aggregated WIP endpoint (supersedes client-side
 // deriveWIPFromPO + mergeSofaWIPSets in src/pages/inventory/index.tsx).
-import inventoryWip from "./routes-d1/inventory-wip";
-import rawMaterials from "./routes-d1/raw-materials";
-import rmBatches from "./routes-d1/rm-batches";
-import grn from "./routes-d1/grn";
-import costLedger from "./routes-d1/cost-ledger";
-import fgUnits from "./routes-d1/fg-units";
-import fabricTracking from "./routes-d1/fabric-tracking";
-import fabrics from "./routes-d1/fabrics";
-import warehouse from "./routes-d1/warehouse";
-import stockAccounts from "./routes-d1/stock-accounts";
-import stockValue from "./routes-d1/stock-value";
-import goodsInTransit from "./routes-d1/goods-in-transit";
-import suppliers from "./routes-d1/suppliers";
-import supplierMaterials from "./routes-d1/supplier-materials";
-import supplierScorecards from "./routes-d1/supplier-scorecards";
-import priceHistory from "./routes-d1/price-history";
+import inventoryWip from "./routes/inventory-wip";
+import rawMaterials from "./routes/raw-materials";
+import rmBatches from "./routes/rm-batches";
+import grn from "./routes/grn";
+import costLedger from "./routes/cost-ledger";
+import fgUnits from "./routes/fg-units";
+import fabricTracking from "./routes/fabric-tracking";
+import fabrics from "./routes/fabrics";
+import warehouse from "./routes/warehouse";
+import stockAccounts from "./routes/stock-accounts";
+import stockValue from "./routes/stock-value";
+import goodsInTransit from "./routes/goods-in-transit";
+import suppliers from "./routes/suppliers";
+import supplierMaterials from "./routes/supplier-materials";
+import supplierScorecards from "./routes/supplier-scorecards";
+import priceHistory from "./routes/price-history";
 // Auth — login portal + admin user CRUD
-import auth from "./routes-d1/auth";
+import auth from "./routes/auth";
 // Phase B.3 — Google Workspace OAuth (federated SSO).
-import authOauth from "./routes-d1/auth-oauth";
+import authOauth from "./routes/auth-oauth";
 // Phase C.6 — TOTP 2FA enrollment + verify.
-import authTotp from "./routes-d1/auth-totp";
-import users from "./routes-d1/users";
-import presence from "./routes-d1/presence";
-import bomMasterTemplates from "./routes-d1/bom-master-templates";
-import kvConfig from "./routes-d1/kv-config";
+import authTotp from "./routes/auth-totp";
+import users from "./routes/users";
+import presence from "./routes/presence";
+import bomMasterTemplates from "./routes/bom-master-templates";
+import kvConfig from "./routes/kv-config";
 // Phase 5 — admin maintenance endpoints (archive/run, etc.)
-import admin from "./routes-d1/admin";
+import admin from "./routes/admin";
 // Phase 6 / P6.4 — health KPI endpoint feeding /admin/health.
-import adminHealth from "./routes-d1/admin-health";
+import adminHealth from "./routes/admin-health";
 // Phase 6 — job_card_events audit log read endpoint.
-import jobCards from "./routes-d1/job-cards";
+import jobCards from "./routes/job-cards";
 // Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
-import dashboardRevenue from "./routes-d1/dashboard-revenue";
+import dashboardRevenue from "./routes/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
-import mdm from "./routes-d1/mdm";
+import mdm from "./routes/mdm";
 // Phase B.4 — file_assets storage (R2-backed). Returns 503 until the
 // FILES R2 binding is wired up; see docs/R2-SETUP.md.
-import files from "./routes-d1/files";
+import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
@@ -342,32 +339,33 @@ import { timingMiddleware } from "./lib/observability";
 // route below has since been migrated to real D1 / Supabase persistence
 // (verified 2026-04-26). The import block name is kept for git-history
 // continuity; the routes themselves are fully durable.
-import accounting from "./routes-d1/accounting";
-import attendance from "./routes-d1/attendance";
-import workingHourEntries from "./routes-d1/working-hour-entries";
-import cashFlow from "./routes-d1/cash-flow";
-import consignments from "./routes-d1/consignments";
-import consignmentNotes from "./routes-d1/consignment-notes";
-import drivers from "./routes-d1/drivers";
-import threePlVehicles from "./routes-d1/three-pl-vehicles";
-import threePlDrivers from "./routes-d1/three-pl-drivers";
-import equipment from "./routes-d1/equipment";
-import forecasts from "./routes-d1/forecasts";
-import historicalSales from "./routes-d1/historical-sales";
-import leaves from "./routes-d1/leaves";
-import lorries from "./routes-d1/lorries";
-import maintenanceLogs from "./routes-d1/maintenance-logs";
-import mrp from "./routes-d1/mrp";
-import notifications from "./routes-d1/notifications";
-import payroll from "./routes-d1/payroll";
-import payslips from "./routes-d1/payslips";
-import productionLeadtimes from "./routes-d1/production-leadtimes";
-import jobcardSync from "./routes-d1/jobcard-sync";
-import promiseDate from "./routes-d1/promise-date";
-import qcInspections from "./routes-d1/qc-inspections";
-import rdProjects from "./routes-d1/rd-projects";
-import scheduling from "./routes-d1/scheduling";
-import scanPo from "./routes-d1/scan-po";
+import accounting from "./routes/accounting";
+import attendance from "./routes/attendance";
+import workingHourEntries from "./routes/working-hour-entries";
+import cashFlow from "./routes/cash-flow";
+import consignments from "./routes/consignments";
+import consignmentNotes from "./routes/consignment-notes";
+import consignmentOrders from "./routes/consignment-orders";
+import drivers from "./routes/drivers";
+import threePlVehicles from "./routes/three-pl-vehicles";
+import threePlDrivers from "./routes/three-pl-drivers";
+import equipment from "./routes/equipment";
+import forecasts from "./routes/forecasts";
+import historicalSales from "./routes/historical-sales";
+import leaves from "./routes/leaves";
+import lorries from "./routes/lorries";
+import maintenanceLogs from "./routes/maintenance-logs";
+import mrp from "./routes/mrp";
+import notifications from "./routes/notifications";
+import payroll from "./routes/payroll";
+import payslips from "./routes/payslips";
+import productionLeadtimes from "./routes/production-leadtimes";
+import jobcardSync from "./routes/jobcard-sync";
+import promiseDate from "./routes/promise-date";
+import qcInspections from "./routes/qc-inspections";
+import rdProjects from "./routes/rd-projects";
+import scheduling from "./routes/scheduling";
+import scanPo from "./routes/scan-po";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -455,6 +453,7 @@ app.route("/api/working-hour-entries", workingHourEntries);
 app.route("/api/cash-flow", cashFlow);
 app.route("/api/consignments", consignments);
 app.route("/api/consignment-notes", consignmentNotes);
+app.route("/api/consignment-orders", consignmentOrders);
 app.route("/api/drivers", drivers);
 app.route("/api/three-pl-vehicles", threePlVehicles);
 app.route("/api/three-pl-drivers", threePlDrivers);

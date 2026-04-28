@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Sales-order schema. Mirror src/api/routes-d1/sales-orders.ts rowToSO output.
+// Sales-order schema. Mirror src/api/routes/sales-orders.ts rowToSO output.
 // Loose passthrough — the SO shape is broad and varies by route variant.
 // ---------------------------------------------------------------------------
 import { z } from "zod";

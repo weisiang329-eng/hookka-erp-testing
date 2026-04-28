@@ -1319,7 +1319,7 @@ export default function ProductionPage({
     // Lock UI disabled (2026-04-26) — aligns with backend.
     //
     // Backend already disabled the upstream-lock predicate at
-    // src/api/routes-d1/production-orders.ts:1255 + :2121 (PATCH guard +
+    // src/api/routes/production-orders.ts:1255 + :2121 (PATCH guard +
     // scan-complete guard are no-ops). Frontend used to compute `locked`
     // from the same flat DEPT_ORDER + wipKey heuristic which:
     //   (a) fired false positives across BOM parallel branches — Wood Cut

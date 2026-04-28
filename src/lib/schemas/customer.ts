@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Customer + delivery-hub schemas. Mirror src/api/routes-d1/customers.ts
+// Customer + delivery-hub schemas. Mirror src/api/routes/customers.ts
 // rowToCustomer output. Loose passthrough so extra columns don't break
 // validation.
 // ---------------------------------------------------------------------------

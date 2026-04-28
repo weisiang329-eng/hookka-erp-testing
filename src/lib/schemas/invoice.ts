@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Invoice + payment + credit-note + debit-note schemas. Mirror the
-// rowTo* mappers in routes-d1/{invoices,payments,credit-notes,debit-notes}.ts.
+// rowTo* mappers in routes/{invoices,payments,credit-notes,debit-notes}.ts.
 // Loose passthrough — extra columns flow through unchanged.
 // ---------------------------------------------------------------------------
 import { z } from "zod";

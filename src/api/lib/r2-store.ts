@@ -30,7 +30,7 @@
 //   * Keys MUST be opaque random ids prefixed by resourceType /
 //     resourceId so a brute-force walk of the bucket can't surface
 //     attachments belonging to another tenant. The route layer
-//     (routes-d1/files.ts) is responsible for stamping the prefix.
+//     (routes/files.ts) is responsible for stamping the prefix.
 // ---------------------------------------------------------------------------
 
 /**
@@ -110,7 +110,7 @@ export async function getFile(
  * If the underlying runtime does not yet expose presigned-URL helpers
  * (older compatibility dates), we fall back to a thin proxy: callers
  * should redirect to `/api/files/:id/stream` instead, which serves the
- * body through the Worker. That fallback lives in routes-d1/files.ts.
+ * body through the Worker. That fallback lives in routes/files.ts.
  */
 export async function signedDownloadUrl(
   env: R2BucketEnv,

@@ -871,6 +871,77 @@ export type ConsignmentNote = {
   notes: string;
 };
 
+// --- Consignment Order (parallel to SalesOrder) ---
+// Mirrors SalesOrder field-for-field. Lifecycle is the same up to SHIPPED;
+// terminal states (PARTIALLY_SOLD/FULLY_SOLD/RETURNED) are inherited from
+// the legacy ConsignmentNote vocabulary so existing UI strings still apply.
+export type COStatus =
+  | "DRAFT"
+  | "CONFIRMED"
+  | "IN_PRODUCTION"
+  | "READY_TO_SHIP"
+  | "SHIPPED"
+  | "DELIVERED"
+  | "PARTIALLY_SOLD"
+  | "FULLY_SOLD"
+  | "RETURNED"
+  | "CLOSED"
+  | "ON_HOLD"
+  | "CANCELLED";
+
+export type ConsignmentOrderItem = {
+  id: string;
+  consignmentOrderId: string;
+  lineNo: number;
+  lineSuffix: string;
+  productId: string;
+  productCode: string;
+  productName: string;
+  itemCategory: string;
+  sizeCode: string;
+  sizeLabel: string;
+  fabricId: string;
+  fabricCode: string;
+  quantity: number;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  divanPriceSen: number;
+  legHeightInches: number | null;
+  legPriceSen: number;
+  specialOrder: string;
+  specialOrderPriceSen: number;
+  basePriceSen: number;
+  unitPriceSen: number;
+  lineTotalSen: number;
+  notes: string;
+};
+
+export type ConsignmentOrder = {
+  id: string;
+  customerCO: string;
+  customerCOId: string;
+  customerCODate: string;
+  reference: string;
+  customerId: string;
+  customerName: string;
+  customerState: string;
+  hubId: string | null;
+  hubName: string;
+  companyCO: string;
+  companyCOId: string;
+  companyCODate: string;
+  customerDeliveryDate: string;
+  hookkaExpectedDD: string;
+  subtotalSen: number;
+  totalSen: number;
+  status: COStatus;
+  overdue: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  items: ConsignmentOrderItem[];
+};
+
 // --- Goods In Transit ---
 export type GoodsInTransit = {
   id: string;

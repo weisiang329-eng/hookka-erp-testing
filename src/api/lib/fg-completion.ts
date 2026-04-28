@@ -23,7 +23,7 @@
 // backfillFGBatchCost checks for an FG_COMPLETED row. Calling this helper
 // repeatedly for the same PO is a no-op after the first success.
 // ---------------------------------------------------------------------------
-import { generateFGUnitsForPO } from "../routes-d1/fg-units";
+import { generateFGUnitsForPO } from "../routes/fg-units";
 import {
   backfillFGBatchCost,
   consumeRawMaterialsForPO,

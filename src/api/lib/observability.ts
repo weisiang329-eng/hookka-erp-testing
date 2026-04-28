@@ -203,7 +203,7 @@ export async function timingMiddleware(c: Context, next: Next): Promise<void> {
   }
 }
 
-// Wrap a D1Database (or Postgres-compat D1Compat) so every
+// Wrap a D1Database (or Postgres-compat SupabaseAdapter) so every
 // .prepare().all()/first()/run() logs when slow.  Drop-in replacement —
 //   const db = instrumentD1(c.var.DB, c.req.url, c.get("dbTimer"))
 // Generic preserves the concrete DB type for the caller.  When `timer` is

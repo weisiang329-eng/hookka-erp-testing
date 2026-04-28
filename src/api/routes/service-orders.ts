@@ -414,10 +414,14 @@ app.post("/", async (c) => {
         400,
       );
     }
-    const mode = body.mode as Mode;
-    if (!VALID_MODES.includes(mode)) {
+    // mode is OPTIONAL at create-time (per design 2026-04-28: open the case
+    // immediately when the customer reports the defect; pick the resolution
+    // mode later via PUT /:id/mode). null/undefined → status='OPEN', no
+    // side-effects. If a mode IS supplied, it must be valid.
+    const mode = (body.mode as Mode | null | undefined) ?? null;
+    if (mode !== null && !VALID_MODES.includes(mode)) {
       return c.json(
-        { success: false, error: "mode must be REPRODUCE, STOCK_SWAP, or REPAIR" },
+        { success: false, error: "mode must be REPRODUCE, STOCK_SWAP, REPAIR, or null" },
         400,
       );
     }
@@ -846,6 +850,224 @@ app.put("/:id/status", async (c) => {
     });
   } catch (err) {
     console.error("[PUT /api/service-orders/:id/status] failed:", err);
+    const message = err instanceof Error ? err.message : "Invalid request body";
+    return c.json({ success: false, error: message }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PUT /api/service-orders/:id/mode — set the resolution mode AFTER creation.
+//
+// Why this endpoint exists: per design 2026-04-28 the user wants to OPEN a
+// case immediately when the customer reports the defect, then DECIDE the
+// resolution mode later (REPRODUCE / STOCK_SWAP / REPAIR). This endpoint
+// is the deferred-decision entry point. It applies the same side-effects
+// the POST handler used to do at create time:
+//   • REPRODUCE  → spawns one production_orders row per existing line
+//                  (cost_category='REPAIR', service_order_id=this), and
+//                  flips status to 'IN_PRODUCTION'.
+//   • STOCK_SWAP → decrements fg_batches.remainingQty per line by line.qty;
+//                  REQUIRES the request body to supply lineFgBatches: a map
+//                  of serviceOrderLineId → fgBatchId. Status flips to
+//                  'RESERVED'.
+//   • REPAIR     → no per-line side effects; status stays OPEN until a
+//                  return is logged (then auto-flips to IN_REPAIR via
+//                  POST /:id/returns).
+//
+// Mode is single-shot: only allowed when current mode IS NULL and status
+// IS 'OPEN'. After it's set, use PUT /:id/status with CANCELLED to undo.
+//
+// Body: {
+//   mode: 'REPRODUCE' | 'STOCK_SWAP' | 'REPAIR',
+//   lineFgBatches?: { [serviceOrderLineId: string]: string }, // STOCK_SWAP only
+// }
+// ---------------------------------------------------------------------------
+app.put("/:id/mode", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const body = (await c.req.json()) as Record<string, unknown>;
+    const next = body.mode as Mode;
+    if (!VALID_MODES.includes(next)) {
+      return c.json(
+        { success: false, error: "mode must be REPRODUCE, STOCK_SWAP, or REPAIR" },
+        400,
+      );
+    }
+
+    const existing = await c.var.DB
+      .prepare("SELECT * FROM service_orders WHERE id = ?")
+      .bind(id)
+      .first<ServiceOrderRow>();
+    if (!existing) {
+      return c.json({ success: false, error: "Service order not found" }, 404);
+    }
+    if (existing.mode != null) {
+      return c.json(
+        {
+          success: false,
+          error: `Mode is already set to ${existing.mode}. Cancel and re-open if you need to change it.`,
+        },
+        409,
+      );
+    }
+    if (existing.status !== "OPEN") {
+      return c.json(
+        {
+          success: false,
+          error: `Can only set mode while status is OPEN (current: ${existing.status}).`,
+        },
+        409,
+      );
+    }
+
+    // Reload the source order — needed to look up customer details when
+    // spawning POs (REPRODUCE).
+    const source = await loadSourceOrder(
+      c.var.DB,
+      existing.sourceType as "SO" | "CO",
+      existing.sourceId,
+    );
+    if (!source) {
+      return c.json({ success: false, error: "Source order vanished" }, 404);
+    }
+
+    const linesRes = await c.var.DB
+      .prepare("SELECT * FROM service_order_lines WHERE serviceOrderId = ?")
+      .bind(id)
+      .all<ServiceOrderLineRow>();
+    const existingLines = linesRes.results ?? [];
+
+    const stmts: D1PreparedStatement[] = [];
+    const nowIso = new Date().toISOString();
+    let nextStatus: Status = "OPEN";
+
+    if (next === "REPRODUCE") {
+      nextStatus = "IN_PRODUCTION";
+      for (let idx = 0; idx < existingLines.length; idx++) {
+        const ln = existingLines[idx];
+        const poId = `pord-svc-${crypto.randomUUID().slice(0, 8)}`;
+        const poNo = `${existing.serviceOrderNo}-${String(idx + 1).padStart(2, "0")}`;
+        stmts.push(
+          c.var.DB
+            .prepare(
+              `INSERT INTO production_orders (id, poNo, salesOrderId, salesOrderNo,
+                 consignmentOrderId, companyCOId, serviceOrderId, costCategory,
+                 lineNo, customerName, customerState, productId, productCode,
+                 productName, quantity, status, currentDepartment, progress,
+                 startDate, stockedIn, created_at, updated_at)
+               VALUES (?, ?, NULL, NULL, NULL, NULL, ?, 'REPAIR',
+                 ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'FAB_CUT', 0, ?, 0, ?, ?)`,
+            )
+            .bind(
+              poId,
+              poNo,
+              id,
+              idx + 1,
+              source.customerName,
+              source.customerState ?? "",
+              ln.productId ?? "",
+              ln.productCode ?? "",
+              ln.productName ?? "",
+              ln.qty,
+              nowIso.split("T")[0],
+              nowIso,
+              nowIso,
+            ),
+        );
+        stmts.push(
+          c.var.DB
+            .prepare(
+              "UPDATE service_order_lines SET resolutionProductionOrderId = ? WHERE id = ?",
+            )
+            .bind(poId, ln.id),
+        );
+      }
+    } else if (next === "STOCK_SWAP") {
+      nextStatus = "RESERVED";
+      const lineFgBatches = (body.lineFgBatches as Record<string, string>) ?? {};
+      // Validate every existing line has a chosen FG batch.
+      for (const ln of existingLines) {
+        const fgBatchId = lineFgBatches[ln.id];
+        if (!fgBatchId) {
+          return c.json(
+            {
+              success: false,
+              error: `STOCK_SWAP requires lineFgBatches[${ln.id}] (pick an FG batch for each affected item).`,
+            },
+            400,
+          );
+        }
+        const batch = await c.var.DB
+          .prepare(
+            "SELECT id, remainingQty FROM fg_batches WHERE id = ?",
+          )
+          .bind(fgBatchId)
+          .first<{ id: string; remainingQty: number }>();
+        if (!batch) {
+          return c.json(
+            { success: false, error: `FG batch ${fgBatchId} not found` },
+            404,
+          );
+        }
+        if (batch.remainingQty < ln.qty) {
+          return c.json(
+            {
+              success: false,
+              error: `FG batch ${fgBatchId} only has ${batch.remainingQty} on hand (need ${ln.qty}).`,
+            },
+            409,
+          );
+        }
+        stmts.push(
+          c.var.DB
+            .prepare(
+              "UPDATE fg_batches SET remainingQty = remainingQty - ? WHERE id = ?",
+            )
+            .bind(ln.qty, fgBatchId),
+        );
+        stmts.push(
+          c.var.DB
+            .prepare(
+              "UPDATE service_order_lines SET resolutionFgBatchId = ? WHERE id = ?",
+            )
+            .bind(fgBatchId, ln.id),
+        );
+      }
+    }
+    // REPAIR: nextStatus stays OPEN; the next status hop happens on POST /:id/returns.
+
+    stmts.push(
+      c.var.DB
+        .prepare("UPDATE service_orders SET mode = ?, status = ? WHERE id = ?")
+        .bind(next, nextStatus, id),
+    );
+
+    await c.var.DB.batch(stmts);
+
+    const [updated, lines, returns] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM service_orders WHERE id = ?")
+        .bind(id)
+        .first<ServiceOrderRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM service_order_lines WHERE serviceOrderId = ?",
+      )
+        .bind(id)
+        .all<ServiceOrderLineRow>(),
+      c.var.DB.prepare(
+        "SELECT * FROM service_order_returns WHERE serviceOrderId = ?",
+      )
+        .bind(id)
+        .all<ServiceOrderReturnRow>(),
+    ]);
+    if (!updated) {
+      return c.json({ success: false, error: "Reload failed" }, 500);
+    }
+    return c.json({
+      success: true,
+      data: rowToApi(updated, lines.results ?? [], returns.results ?? []),
+    });
+  } catch (err) {
+    console.error("[PUT /api/service-orders/:id/mode] failed:", err);
     const message = err instanceof Error ? err.message : "Invalid request body";
     return c.json({ success: false, error: message }, 400);
   }

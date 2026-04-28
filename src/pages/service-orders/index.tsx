@@ -272,8 +272,15 @@ function CreateServiceOrderModal({
     presetSourceType ?? "SO",
   );
   const [sourceId, setSourceId] = useState<string>(presetSourceId ?? "");
-  const [mode, setMode] = useState<"REPRODUCE" | "STOCK_SWAP" | "REPAIR">(
-    "REPRODUCE",
+  // Search query for filtering shipped SO/CO. Replaces the dropdown — the
+  // user has 100s of orders and scrolling a long <select> is painful.
+  const [sourceQuery, setSourceQuery] = useState("");
+  // null = "Decide later" — operator can open the case immediately while
+  // the customer is on the phone and pick the mode as a follow-up. Backend
+  // accepts mode=null at create time; PUT /:id/mode is the deferred-pick
+  // endpoint.
+  const [mode, setMode] = useState<"REPRODUCE" | "STOCK_SWAP" | "REPAIR" | null>(
+    null,
   );
   const [issueDescription, setIssueDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -350,6 +357,9 @@ function CreateServiceOrderModal({
     pickedIds.every((id) => {
       const pick = linePicks[id];
       const qtyOk = Number(pick.qty) > 0;
+      // FG batch only required when mode is committed up-front to STOCK_SWAP.
+      // If mode is null (decide later) the user picks FG batches at PUT
+      // /:id/mode time on the detail page.
       if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
       return qtyOk;
     });
@@ -368,6 +378,9 @@ function CreateServiceOrderModal({
           productName: item?.productName,
           qty: Number(pick.qty) || 1,
           issueSummary: pick.issue || null,
+          // Only include resolutionFgBatchId when STOCK_SWAP is chosen up
+          // front; for "decide later" (mode=null) the FG batch isn't picked
+          // until PUT /:id/mode on the detail page.
           ...(mode === "STOCK_SWAP" ? { resolutionFgBatchId: pick.fgBatchId } : {}),
         };
       });
@@ -377,6 +390,9 @@ function CreateServiceOrderModal({
         body: JSON.stringify({
           sourceType,
           sourceId,
+          // mode can be null when the user picks "Decide later"; backend
+          // accepts null and creates the case in OPEN status with no
+          // side-effects.
           mode,
           issueDescription,
           lines,
@@ -428,6 +444,7 @@ function CreateServiceOrderModal({
                 onChange={(e) => {
                   setSourceType(e.target.value as "SO" | "CO");
                   setSourceId("");
+                  setSourceQuery("");
                   setLinePicks({});
                 }}
                 disabled={!!presetSourceType}
@@ -439,42 +456,62 @@ function CreateServiceOrderModal({
             </div>
             <div>
               <label className="block text-xs text-[#6B7280] mb-1">
-                Source Order (only shipped shown)
+                Source Order {selectedSource ? "" : "(search by SO# / customer)"}
               </label>
-              <select
-                value={sourceId}
-                onChange={(e) => {
-                  setSourceId(e.target.value);
-                  setLinePicks({});
-                }}
-                disabled={!!presetSourceId}
-                className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
-              >
-                <option value="">Select…</option>
-                {sourceOptions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.companyOrderId} — {s.customerName} ({s.status})
-                  </option>
-                ))}
-              </select>
+              {selectedSource ? (
+                // Already picked — show a compact summary + "Change" button.
+                // Operator rarely needs to switch mid-form; the search list
+                // would just be visual noise after a pick.
+                <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-[#FAF9F7] px-2 py-1.5 text-sm">
+                  <div className="truncate">
+                    <span className="font-mono">{selectedSource.companyOrderId}</span>{" "}
+                    <span className="text-[#6B7280]">— {selectedSource.customerName}</span>{" "}
+                    <span className="text-[10px] text-[#9CA3AF]">({selectedSource.status})</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (presetSourceId) return;
+                      setSourceId("");
+                      setSourceQuery("");
+                      setLinePicks({});
+                    }}
+                    disabled={!!presetSourceId}
+                    className="ml-2 text-xs text-[#6B5C32] hover:underline disabled:text-[#9CA3AF]"
+                  >
+                    Change
+                  </button>
+                </div>
+              ) : (
+                <SourceSearchPicker
+                  query={sourceQuery}
+                  onQueryChange={setSourceQuery}
+                  options={sourceOptions}
+                  onPick={(id) => {
+                    setSourceId(id);
+                    setLinePicks({});
+                  }}
+                />
+              )}
             </div>
           </div>
 
           {/* Mode */}
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">
-              Resolution Mode
+              Resolution Mode <span className="text-[#9CA3AF]">(optional — pick later if you're still gathering info)</span>
             </label>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-4 gap-2">
               {(
                 [
+                  { v: null, t: "Decide later", d: "Open the case now; choose resolution after follow-up" },
                   { v: "REPRODUCE", t: "Reproduce", d: "Open new PO; ship when ready" },
                   { v: "STOCK_SWAP", t: "Stock Swap", d: "Pull from FG, ship now" },
                   { v: "REPAIR", t: "Repair", d: "Customer returns; we fix" },
                 ] as const
               ).map((m) => (
                 <button
-                  key={m.v}
+                  key={m.v ?? "later"}
                   type="button"
                   onClick={() => setMode(m.v)}
                   className={`text-left rounded border p-3 text-xs ${
@@ -637,6 +674,77 @@ function CreateServiceOrderModal({
             {submitting ? "Creating…" : "Create Service Order"}
           </Button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SourceSearchPicker — typeahead for shipped SO/CO.
+// ---------------------------------------------------------------------------
+// Replaces the previous <select> dropdown. With 100s of orders the dropdown
+// was both unusable (long scroll) and visually broken in some browsers
+// (no items appeared at all). The search box filters by company order ID
+// or customer name, capped at 15 visible results so it stays performant.
+// ---------------------------------------------------------------------------
+function SourceSearchPicker({
+  query,
+  onQueryChange,
+  options,
+  onPick,
+}: {
+  query: string;
+  onQueryChange: (q: string) => void;
+  options: SourceOrderOption[];
+  onPick: (id: string) => void;
+}) {
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const matches = q
+      ? options.filter(
+          (o) =>
+            o.companyOrderId.toLowerCase().includes(q) ||
+            o.customerName.toLowerCase().includes(q),
+        )
+      : options;
+    return matches.slice(0, 15);
+  }, [options, query]);
+
+  return (
+    <div className="space-y-1">
+      <Input
+        type="text"
+        value={query}
+        onChange={(e) => onQueryChange(e.target.value)}
+        placeholder={`Type SO# or customer name… (${options.length} shipped)`}
+        className="h-8 text-sm"
+      />
+      <div className="max-h-48 overflow-y-auto rounded border border-[#E2DDD8] bg-white">
+        {filtered.length === 0 ? (
+          <div className="p-2 text-xs text-[#9CA3AF]">
+            {options.length === 0
+              ? "No shipped orders found in this category."
+              : "No matches. Try fewer characters or switch SO ↔ CO."}
+          </div>
+        ) : (
+          filtered.map((s) => (
+            <button
+              key={s.id}
+              type="button"
+              onClick={() => onPick(s.id)}
+              className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
+            >
+              <span className="font-mono">{s.companyOrderId}</span>
+              <span className="text-[#6B7280]"> — {s.customerName}</span>
+              <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
+            </button>
+          ))
+        )}
+        {options.length > 15 && filtered.length === 15 && (
+          <div className="px-2 py-1 text-[10px] text-[#9CA3AF] border-t border-[#F0ECE9]">
+            Showing first 15 — type to narrow down.
+          </div>
+        )}
       </div>
     </div>
   );

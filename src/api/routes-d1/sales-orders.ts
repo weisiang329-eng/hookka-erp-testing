@@ -1269,12 +1269,21 @@ async function cascadeSOStatusToPOs(
   return result;
 }
 
-// Valid status transitions — mirrors the in-memory route
+// Valid status transitions — mirrors the in-memory route.
+//
+// 2026-04-28 semantics shift: confirming an SO now lands directly at
+// IN_PRODUCTION because PO auto-creation kicks off lead-time scheduling the
+// instant confirm runs — there is no meaningful "confirmed but not in
+// production" steady state. CONFIRMED is kept as a vestigial node only so
+// legacy rows still in that status (or any in-flight transient between the
+// confirm POST and the PO cascade) remain transition-able. The cascade
+// rollback path (READY_TO_SHIP undo) now drops back to IN_PRODUCTION rather
+// than CONFIRMED.
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  DRAFT: ["CONFIRMED", "CANCELLED"],
+  DRAFT: ["CONFIRMED", "IN_PRODUCTION", "CANCELLED"],
   CONFIRMED: ["IN_PRODUCTION", "ON_HOLD", "CANCELLED"],
   IN_PRODUCTION: ["READY_TO_SHIP", "ON_HOLD", "CANCELLED"],
-  READY_TO_SHIP: ["SHIPPED", "ON_HOLD"],
+  READY_TO_SHIP: ["SHIPPED", "ON_HOLD", "IN_PRODUCTION"],
   SHIPPED: ["DELIVERED"],
   DELIVERED: ["INVOICED"],
   INVOICED: ["CLOSED"],
@@ -1913,10 +1922,16 @@ app.post("/", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/sales-orders/:id/confirm
 //
-// Flips DRAFT/PENDING -> CONFIRMED, writes so_status_changes, and cascades
+// Flips DRAFT/PENDING -> IN_PRODUCTION, writes so_status_changes, and cascades
 // production_orders insertion — one PO row per SO item. All writes batched
 // so a partial failure leaves no dangling state. Idempotent: re-submitting
 // confirm returns the existing production orders without duplicating.
+//
+// 2026-04-28: confirm now lands at IN_PRODUCTION directly. Previously this
+// flipped to CONFIRMED and waited for a downstream cascade to bump it; now
+// the PO auto-creation kicks off lead-time scheduling synchronously, so
+// CONFIRMED has no meaningful steady state. Legacy CONFIRMED rows are still
+// supported through VALID_TRANSITIONS for backfill / migration purposes.
 // ---------------------------------------------------------------------------
 app.post("/:id/confirm", async (c) => {
   // RBAC gate — confirming an SO is the lock-in moment that fans out POs / JCs.
@@ -2031,9 +2046,13 @@ app.post("/:id/confirm", async (c) => {
     ? ["Production orders already exist for this SO — skipped duplicate creation."]
     : productionOrders.map((po) => `Created PO ${po.poNo}`);
 
+  // 2026-04-28: confirm lands at IN_PRODUCTION directly. The PO cascade
+  // below kicks off lead-time scheduling, so the SO IS in production the
+  // moment confirm completes — there is no meaningful CONFIRMED steady
+  // state. CONFIRMED is retained as a transition node only for legacy rows.
   await c.var.DB.batch([
     c.var.DB.prepare(
-      "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
+      "UPDATE sales_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
     ).bind(now, id),
     c.var.DB.prepare(
       `INSERT INTO so_status_changes
@@ -2043,7 +2062,7 @@ app.post("/:id/confirm", async (c) => {
       genStatusId(),
       id,
       fromStatus,
-      "CONFIRMED",
+      "IN_PRODUCTION",
       (body.changedBy as string) || "Admin",
       now,
       (body.notes as string) || "Order confirmed",
@@ -2226,9 +2245,12 @@ app.put("/:id", async (c) => {
         );
       }
       newStatus = requested;
+      // 2026-04-28: confirm-equivalent transitions are DRAFT/PENDING → either
+      // CONFIRMED (legacy callers) or IN_PRODUCTION (new direct path). Both
+      // need the production-order cascade and the same audit-row deferral.
       isDraftToConfirmed =
         (existing.status === "DRAFT" || existing.status === "PENDING") &&
-        newStatus === "CONFIRMED";
+        (newStatus === "CONFIRMED" || newStatus === "IN_PRODUCTION");
 
       // Run cascade for ON_HOLD / CANCELLED transitions and for RESUME
       // (ON_HOLD → CONFIRMED / IN_PRODUCTION). cascadeSOStatusToPOs is a no-op

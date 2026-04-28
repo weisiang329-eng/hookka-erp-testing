@@ -1375,9 +1375,12 @@ async function cascadeUpholsteryToSO(
         .run();
     }
   } else if (so.status === "READY_TO_SHIP") {
+    // 2026-04-28: cascade rollback now drops back to IN_PRODUCTION, matching
+    // the new "any confirm = in production" semantics. Previously fell back
+    // to CONFIRMED, which was a steady state that no longer exists.
     await db
       .prepare(
-        "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
+        "UPDATE sales_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
       )
       .bind(now, so.id)
       .run();
@@ -1401,7 +1404,7 @@ async function cascadeUpholsteryToSO(
 // fires for UPH JCs (other depts don't drive the READY_TO_SHIP cascade).
 // It re-runs the same condition the forward path uses ("every sibling PO
 // is fully UPH-complete"); if it's no longer true and the SO is currently
-// at READY_TO_SHIP, we flip back to CONFIRMED and emit a so_status_changes
+// at READY_TO_SHIP, we flip back to IN_PRODUCTION and emit a so_status_changes
 // audit row mirroring the forward audit pattern in sales-orders.ts.
 //
 // `stockedIn` on this PO is also cleared, since the corresponding forward
@@ -1436,7 +1439,7 @@ async function cascadeUpholsteryRollbackToSO(
   if (!so) return;
 
   // Only act when the SO currently thinks it's READY_TO_SHIP — if it's
-  // already CONFIRMED or earlier, there's nothing to undo.
+  // already IN_PRODUCTION (or any earlier state), there's nothing to undo.
   if (so.status !== "READY_TO_SHIP") return;
 
   const siblings = await db
@@ -1470,10 +1473,13 @@ async function cascadeUpholsteryRollbackToSO(
   if (everyUphDone) return; // Forward condition still holds — nothing to undo.
 
   const now = new Date().toISOString();
+  // 2026-04-28: UPH-undo rollback now drops READY_TO_SHIP back to
+  // IN_PRODUCTION, matching the new "any confirm = in production" semantics.
+  // Previously dropped to CONFIRMED.
   await db.batch([
     db
       .prepare(
-        "UPDATE sales_orders SET status = 'CONFIRMED', updated_at = ? WHERE id = ?",
+        "UPDATE sales_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
       )
       .bind(now, so.id),
     db
@@ -1486,7 +1492,7 @@ async function cascadeUpholsteryRollbackToSO(
         `sc-${crypto.randomUUID().slice(0, 8)}`,
         so.id,
         "READY_TO_SHIP",
-        "CONFIRMED",
+        "IN_PRODUCTION",
         actorName,
         now,
         "UPH job card rolled back to non-DONE",

@@ -8,6 +8,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 import {
@@ -34,7 +35,9 @@ type Status =
 type ServiceOrderDetail = {
   id: string;
   serviceOrderNo: string;
-  sourceType: "SO" | "CO";
+  // RECORD = Service Case (log only); RESOLUTION = Service Order (rework/swap/repair)
+  kind: "RESOLUTION" | "RECORD";
+  sourceType: "SO" | "CO" | "EXTERNAL";
   sourceId: string;
   sourceNo: string;
   customerId: string;
@@ -45,6 +48,13 @@ type ServiceOrderDetail = {
   status: Status;
   issueDescription: string;
   issuePhotos: string[];
+  rootCauseCategory:
+    | "PRODUCTION" | "DESIGN" | "MATERIAL" | "PROCESS"
+    | "CUSTOMER" | "TRANSPORT" | "OTHER" | null;
+  rootCauseNotes: string;
+  preventionAction: string;
+  preventionStatus: "PENDING" | "IN_PROGRESS" | "DONE" | "NOT_NEEDED";
+  preventionOwner: string;
   createdBy: string;
   createdByName: string;
   createdAt: string;
@@ -92,15 +102,25 @@ const STATUS_COLOR: Record<string, string> = {
   CANCELLED: "bg-[#F5DCDC] text-[#7A2E24]",
 };
 
-// Adjacency table mirroring the backend STATUS_TRANSITIONS — used to drive
-// the action buttons on this page. Backend re-validates on every PUT.
-const STATUS_TRANSITIONS: Record<Status, Status[]> = {
+// Adjacency tables mirroring the backend STATUS_TRANSITIONS_* — drives the
+// action buttons. Backend re-validates on every PUT.
+const STATUS_TRANSITIONS_RESOLUTION: Record<Status, Status[]> = {
   OPEN: ["IN_PRODUCTION", "RESERVED", "IN_REPAIR", "CANCELLED"],
   IN_PRODUCTION: ["READY_TO_SHIP", "CANCELLED"],
   RESERVED: ["READY_TO_SHIP", "CANCELLED"],
   IN_REPAIR: ["READY_TO_SHIP", "CANCELLED"],
   READY_TO_SHIP: ["DELIVERED"],
   DELIVERED: ["CLOSED"],
+  CLOSED: [],
+  CANCELLED: [],
+};
+const STATUS_TRANSITIONS_RECORD: Record<Status, Status[]> = {
+  OPEN: ["CLOSED", "CANCELLED"],
+  IN_PRODUCTION: [],
+  RESERVED: [],
+  IN_REPAIR: [],
+  READY_TO_SHIP: [],
+  DELIVERED: [],
   CLOSED: [],
   CANCELLED: [],
 };
@@ -142,7 +162,14 @@ export default function ServiceOrderDetailPage() {
   const [advancing, setAdvancing] = useState(false);
 
   const allowedTransitions = useMemo(
-    () => (order ? STATUS_TRANSITIONS[order.status] ?? [] : []),
+    () => {
+      if (!order) return [];
+      const table =
+        order.kind === "RECORD"
+          ? STATUS_TRANSITIONS_RECORD
+          : STATUS_TRANSITIONS_RESOLUTION;
+      return table[order.status] ?? [];
+    },
     [order],
   );
 
@@ -233,7 +260,11 @@ export default function ServiceOrderDetailPage() {
             >
               {order.status}
             </span>
-            {order.mode ? (
+            {order.kind === "RECORD" ? (
+              <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-[#E0EAF4] text-[#3A5670] border border-[#C9D6E4]">
+                Service Case (record)
+              </span>
+            ) : order.mode ? (
               <Badge>{order.mode}</Badge>
             ) : (
               <span className="text-[10px] uppercase px-2 py-0.5 rounded bg-[#F4EFE3] text-[#6B5C32] border border-[#E2DDD8]">
@@ -312,9 +343,9 @@ export default function ServiceOrderDetailPage() {
       </div>
 
       {/* Issue description */}
-      {/* Mode-pending banner — shown only while the operator hasn't picked a
-          resolution mode yet. Acts as the deferred-decision call to action. */}
-      {!order.mode && order.status === "OPEN" && (
+      {/* Mode-pending banner — shown only for RESOLUTION-kind cases that
+          haven't picked a mode yet. RECORD-kind is log-only, never has a mode. */}
+      {order.kind !== "RECORD" && !order.mode && order.status === "OPEN" && (
         <SetModePanel
           svcId={order.id}
           lines={order.lines}
@@ -338,24 +369,40 @@ export default function ServiceOrderDetailPage() {
               <p className="whitespace-pre-line">{order.issueDescription}</p>
             )}
             {order.issuePhotos.length > 0 && (
-              <ul className="mt-2 space-y-1">
+              // Photos are stored as base64 data URIs (resized client-side
+              // to ~1280px). Click to open full-size in a new tab.
+              <div className="mt-2 flex flex-wrap gap-2">
                 {order.issuePhotos.map((p, i) => (
-                  <li key={i} className="text-xs">
-                    <a
-                      href={p}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[#6B5C32] hover:underline"
-                    >
-                      Photo {i + 1}
-                    </a>
-                  </li>
+                  <a
+                    key={i}
+                    href={p}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={`Photo ${i + 1}`}
+                  >
+                    <img
+                      src={p}
+                      alt={`Photo ${i + 1}`}
+                      className="h-24 w-24 rounded border border-[#E2DDD8] object-cover hover:border-[#6B5C32]"
+                    />
+                  </a>
                 ))}
-              </ul>
+              </div>
             )}
           </CardContent>
         </Card>
       )}
+
+      {/* Root cause + prevention — closes the loop so the next batch
+          doesn't have the same defect. Operator can fill in / edit
+          inline. Saves via PUT /api/service-orders/:id. */}
+      <RootCausePanel
+        order={order}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-orders");
+          refresh();
+        }}
+      />
 
       {/* Lines */}
       <Card>
@@ -954,6 +1001,136 @@ function SetModePanel({
             {submitting ? "Setting…" : "Set Mode"}
           </Button>
         </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RootCausePanel — inline editor for the root-cause + prevention loop.
+// ---------------------------------------------------------------------------
+// Saves via PUT /api/service-orders/:id (the generic metadata endpoint;
+// rootCauseCategory / rootCauseNotes / preventionAction / preventionOwner /
+// preventionStatus are all updatable there). Auto-saves on blur of each
+// field — nothing to "submit" since this is a record-keeping pane.
+// ---------------------------------------------------------------------------
+const ROOT_CAUSE_LABELS: Record<string, string> = {
+  PRODUCTION: "Production / workmanship",
+  DESIGN: "Design / R&D",
+  MATERIAL: "Material / supplier",
+  PROCESS: "Process / SOP gap",
+  CUSTOMER: "Customer (not our fault)",
+  TRANSPORT: "Transport / 3PL",
+  OTHER: "Other",
+};
+const PREVENTION_STATUS_COLOR: Record<string, string> = {
+  PENDING: "bg-[#F4EFE3] text-[#6B5C32] border-[#E8D8B2]",
+  IN_PROGRESS: "bg-[#E0EAF4] text-[#3A5670] border-[#C9D6E4]",
+  DONE: "bg-[#E2EFE0] text-[#3A6B47] border-[#C9DEC2]",
+  NOT_NEEDED: "bg-[#E2DDD8] text-[#5A5550] border-[#C9C5C0]",
+};
+
+function RootCausePanel({
+  order,
+  onSaved,
+}: {
+  order: ServiceOrderDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [category, setCategory] = useState(order.rootCauseCategory ?? "");
+  const [notes, setNotes] = useState(order.rootCauseNotes);
+  const [action, setAction] = useState(order.preventionAction);
+  const [owner, setOwner] = useState(order.preventionOwner);
+  const [status, setStatus] = useState(order.preventionStatus);
+  const [saving, setSaving] = useState(false);
+
+  async function save(patch: Record<string, unknown>) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/service-orders/${order.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `HTTP ${res.status}`);
+      }
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2 flex flex-row items-center justify-between">
+        <CardTitle className="text-sm">Root Cause &amp; Prevention</CardTitle>
+        <span
+          className={`text-[10px] uppercase px-2 py-0.5 rounded border ${PREVENTION_STATUS_COLOR[status] ?? PREVENTION_STATUS_COLOR.PENDING}`}
+        >
+          {status}
+        </span>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <div className="grid grid-cols-2 gap-2">
+          <select
+            value={category}
+            onChange={(e) => {
+              setCategory(e.target.value);
+              save({ rootCauseCategory: e.target.value || null });
+            }}
+            disabled={saving}
+            className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+          >
+            <option value="">Category — not yet assigned</option>
+            {Object.entries(ROOT_CAUSE_LABELS).map(([v, t]) => (
+              <option key={v} value={v}>{t}</option>
+            ))}
+          </select>
+          <select
+            value={status}
+            onChange={(e) => {
+              const next = e.target.value as ServiceOrderDetail["preventionStatus"];
+              setStatus(next);
+              save({ preventionStatus: next });
+            }}
+            disabled={saving}
+            className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+          >
+            <option value="PENDING">Prevention pending</option>
+            <option value="IN_PROGRESS">Prevention in progress</option>
+            <option value="DONE">Prevention done</option>
+            <option value="NOT_NEEDED">No prevention needed</option>
+          </select>
+        </div>
+        <textarea
+          rows={2}
+          value={notes}
+          onBlur={() => save({ rootCauseNotes: notes || null })}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Why did this happen? (e.g. 'Wrong fabric loaded on cutting station, SOP missing barcode scan check')"
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+        />
+        <textarea
+          rows={2}
+          value={action}
+          onBlur={() => save({ preventionAction: action || null })}
+          onChange={(e) => setAction(e.target.value)}
+          placeholder="What's the action so the next batch doesn't repeat this?"
+          className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+        />
+        <Input
+          type="text"
+          value={owner}
+          onBlur={() => save({ preventionOwner: owner || null })}
+          onChange={(e) => setOwner(e.target.value)}
+          placeholder="Owner of follow-up (name)"
+          className="h-8 text-sm"
+        />
       </CardContent>
     </Card>
   );

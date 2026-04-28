@@ -268,26 +268,46 @@ function CreateServiceOrderModal({
   const { toast } = useToast();
   const user = getCurrentUser();
 
-  const [sourceType, setSourceType] = useState<"SO" | "CO">(
+  // kind discriminates Service Order (RESOLUTION — heavy rework/swap/repair
+  // flow) from Service Case (RECORD — log-only, e.g., shipped one fewer leg
+  // and mailed it separately, complaint logged after on-site fix).
+  const [kind, setKind] = useState<"RESOLUTION" | "RECORD">("RESOLUTION");
+  const [sourceType, setSourceType] = useState<"SO" | "CO" | "EXTERNAL">(
     presetSourceType ?? "SO",
   );
   const [sourceId, setSourceId] = useState<string>(presetSourceId ?? "");
-  // Search query for filtering shipped SO/CO. Replaces the dropdown — the
-  // user has 100s of orders and scrolling a long <select> is painful.
   const [sourceQuery, setSourceQuery] = useState("");
-  // null = "Decide later" — operator can open the case immediately while
-  // the customer is on the phone and pick the mode as a follow-up. Backend
-  // accepts mode=null at create time; PUT /:id/mode is the deferred-pick
-  // endpoint.
+  // EXTERNAL-source state — no SO/CO record in the system to pull from.
+  const [externalCustomerName, setExternalCustomerName] = useState("");
+  const [externalRef, setExternalRef] = useState("");
+  // null = "Decide later" — open the case while the customer is on the
+  // phone and pick the mode as a follow-up via PUT /:id/mode.
   const [mode, setMode] = useState<"REPRODUCE" | "STOCK_SWAP" | "REPAIR" | null>(
     null,
   );
   const [issueDescription, setIssueDescription] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  // Per-line state. Map of sourceLineId → { qty, issueSummary, fgBatchId }
+  // Photos: base64 data URIs after client-side resize. Stored on the
+  // service_orders.issuePhotos JSON column. Small-shop-friendly — no R2
+  // setup required at the cost of bloating the DB row a bit.
+  const [photos, setPhotos] = useState<string[]>([]);
+  // Per-line state. Two shapes coexist:
+  //   • SO/CO source: linePicks keyed by sourceLineId (item's id from the
+  //     source order's items array)
+  //   • EXTERNAL source / RECORD-kind: freeLines (operator types product +
+  //     qty + issue by hand)
   const [linePicks, setLinePicks] = useState<
     Record<string, { qty: string; issue: string; fgBatchId: string }>
   >({});
+  const [freeLines, setFreeLines] = useState<
+    Array<{ id: string; productCode: string; productName: string; qty: string; issue: string }>
+  >([]);
+  // Root-cause + prevention loop — optional at create time, editable on
+  // detail page after follow-up.
+  const [rootCauseCategory, setRootCauseCategory] = useState<string>("");
+  const [rootCauseNotes, setRootCauseNotes] = useState("");
+  const [preventionAction, setPreventionAction] = useState("");
+  const [preventionOwner, setPreventionOwner] = useState("");
 
   // List of shipped SO/CO orders to choose from.
   const { data: soResp } = useCachedJson<{ data?: SalesOrderApi[] }>(
@@ -351,50 +371,168 @@ function CreateServiceOrderModal({
   }
 
   const pickedIds = Object.keys(linePicks);
-  const canSubmit =
-    !!sourceId &&
-    pickedIds.length > 0 &&
-    pickedIds.every((id) => {
-      const pick = linePicks[id];
-      const qtyOk = Number(pick.qty) > 0;
-      // FG batch only required when mode is committed up-front to STOCK_SWAP.
-      // If mode is null (decide later) the user picks FG batches at PUT
-      // /:id/mode time on the detail page.
-      if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
-      return qtyOk;
+
+  // Source picker state-validity:
+  //   - SO/CO   → must have a sourceId selected
+  //   - EXTERNAL → must have a customer name
+  const sourceOk =
+    sourceType === "EXTERNAL"
+      ? externalCustomerName.trim().length > 0
+      : !!sourceId;
+
+  // Lines validity depends on kind + sourceType.
+  //   RECORD: lines are optional (can have zero — pure log entry).
+  //   RESOLUTION + SO/CO: at least one picked from source items.
+  //   RESOLUTION + EXTERNAL: at least one free-text line with a productName.
+  const linesOk =
+    kind === "RECORD"
+      ? true
+      : sourceType === "EXTERNAL"
+        ? freeLines.length > 0 &&
+          freeLines.every(
+            (l) => l.productName.trim().length > 0 && Number(l.qty) > 0,
+          )
+        : pickedIds.length > 0 &&
+          pickedIds.every((id) => {
+            const pick = linePicks[id];
+            const qtyOk = Number(pick.qty) > 0;
+            if (mode === "STOCK_SWAP" && !pick.fgBatchId) return false;
+            return qtyOk;
+          });
+
+  const canSubmit = sourceOk && linesOk;
+
+  // ---- Photo helpers ----
+  // Resize a phone-sized JPEG (typically 3000×4000, ~3MB) down to ~1280px
+  // longest side @ 0.85 quality (~150-300KB). Stored as a base64 data URI
+  // on service_orders.issuePhotos. For high-volume use we'd swap to R2 +
+  // /api/files; this is good enough for a small shop's ~5 photos / case.
+  async function resizeImageToBase64(file: File, maxDim = 1280): Promise<string> {
+    const dataUrl = await new Promise<string>((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result as string);
+      r.onerror = rej;
+      r.readAsDataURL(file);
     });
+    const img = await new Promise<HTMLImageElement>((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = rej;
+      i.src = dataUrl;
+    });
+    const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
+    const w = Math.round(img.width * ratio);
+    const h = Math.round(img.height * ratio);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return dataUrl;
+    ctx.drawImage(img, 0, 0, w, h);
+    return canvas.toDataURL("image/jpeg", 0.85);
+  }
+
+  async function handleAddPhotos(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const results: string[] = [];
+    for (const f of Array.from(files)) {
+      try {
+        const b64 = await resizeImageToBase64(f);
+        results.push(b64);
+      } catch {
+        toast.error(`Couldn't read ${f.name}`);
+      }
+    }
+    setPhotos((prev) => [...prev, ...results]);
+  }
+
+  // ---- Free-line helpers (EXTERNAL source) ----
+  function addFreeLine() {
+    setFreeLines((prev) => [
+      ...prev,
+      {
+        id: `fl-${Math.random().toString(36).slice(2, 8)}`,
+        productCode: "",
+        productName: "",
+        qty: "1",
+        issue: "",
+      },
+    ]);
+  }
+  function patchFreeLine(
+    id: string,
+    p: Partial<{ productCode: string; productName: string; qty: string; issue: string }>,
+  ) {
+    setFreeLines((prev) => prev.map((l) => (l.id === id ? { ...l, ...p } : l)));
+  }
+  function removeFreeLine(id: string) {
+    setFreeLines((prev) => prev.filter((l) => l.id !== id));
+  }
 
   async function handleSubmit() {
     if (!canSubmit) return;
     setSubmitting(true);
     try {
-      const lines = pickedIds.map((id) => {
-        const pick = linePicks[id];
-        const item = sourceItems.find((x) => x.id === id);
-        return {
-          sourceLineId: id,
-          productId: item?.productId,
-          productCode: item?.productCode,
-          productName: item?.productName,
-          qty: Number(pick.qty) || 1,
-          issueSummary: pick.issue || null,
-          // Only include resolutionFgBatchId when STOCK_SWAP is chosen up
-          // front; for "decide later" (mode=null) the FG batch isn't picked
-          // until PUT /:id/mode on the detail page.
-          ...(mode === "STOCK_SWAP" ? { resolutionFgBatchId: pick.fgBatchId } : {}),
-        };
-      });
+      // Build the lines payload from whichever entry mode is active.
+      let lines: Array<Record<string, unknown>> = [];
+      if (sourceType === "EXTERNAL") {
+        lines = freeLines.map((l) => ({
+          sourceLineId: null,
+          productId: null,
+          productCode: l.productCode || null,
+          productName: l.productName,
+          qty: Number(l.qty) || 1,
+          issueSummary: l.issue || null,
+        }));
+      } else if (kind === "RESOLUTION") {
+        lines = pickedIds.map((id) => {
+          const pick = linePicks[id];
+          const item = sourceItems.find((x) => x.id === id);
+          return {
+            sourceLineId: id,
+            productId: item?.productId,
+            productCode: item?.productCode,
+            productName: item?.productName,
+            qty: Number(pick.qty) || 1,
+            issueSummary: pick.issue || null,
+            ...(mode === "STOCK_SWAP" ? { resolutionFgBatchId: pick.fgBatchId } : {}),
+          };
+        });
+      } else {
+        // RECORD + SO/CO: still allow operator to pick lines if they want to
+        // tag specific items, but it's optional.
+        lines = pickedIds.map((id) => {
+          const pick = linePicks[id];
+          const item = sourceItems.find((x) => x.id === id);
+          return {
+            sourceLineId: id,
+            productId: item?.productId,
+            productCode: item?.productCode,
+            productName: item?.productName,
+            qty: Number(pick.qty) || 1,
+            issueSummary: pick.issue || null,
+          };
+        });
+      }
       const res = await fetch("/api/service-orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          kind,
           sourceType,
-          sourceId,
-          // mode can be null when the user picks "Decide later"; backend
-          // accepts null and creates the case in OPEN status with no
-          // side-effects.
-          mode,
+          sourceId: sourceType === "EXTERNAL" ? null : sourceId,
+          // EXTERNAL fields — backend ignores when sourceType is SO/CO
+          customerName: sourceType === "EXTERNAL" ? externalCustomerName : undefined,
+          externalRef: sourceType === "EXTERNAL" ? externalRef || null : undefined,
+          // RECORD enforces null mode server-side; we still send null explicitly
+          // so an "always RECORD" form doesn't carry a stale REPRODUCE hint.
+          mode: kind === "RECORD" ? null : mode,
           issueDescription,
+          issuePhotos: photos,
+          rootCauseCategory: rootCauseCategory || null,
+          rootCauseNotes: rootCauseNotes || null,
+          preventionAction: preventionAction || null,
+          preventionOwner: preventionOwner || null,
           lines,
           createdBy: user?.id ?? null,
           createdByName: user?.displayName ?? user?.email ?? null,
@@ -422,7 +560,7 @@ function CreateServiceOrderModal({
       <div className="relative bg-white rounded-lg shadow-xl border border-[#E2DDD8] w-full max-w-3xl mx-4 max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-4 border-b border-[#E2DDD8]">
           <h3 className="text-lg font-semibold text-[#1F1D1B]">
-            New Service Order
+            {kind === "RECORD" ? "New Service Case" : "New Service Order"}
           </h3>
           <button
             onClick={onClose}
@@ -433,6 +571,43 @@ function CreateServiceOrderModal({
         </div>
 
         <div className="p-4 space-y-5">
+          {/* Kind toggle */}
+          <div>
+            <label className="block text-xs text-[#6B7280] mb-1">
+              Type of Service
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              {(
+                [
+                  {
+                    v: "RESOLUTION",
+                    t: "Service Order",
+                    d: "Rework / swap / repair — has resolution flow",
+                  },
+                  {
+                    v: "RECORD",
+                    t: "Service Case (record only)",
+                    d: "Log a complaint, missing parts shipout, on-site fix — no rework",
+                  },
+                ] as const
+              ).map((k) => (
+                <button
+                  key={k.v}
+                  type="button"
+                  onClick={() => setKind(k.v)}
+                  className={`text-left rounded border p-3 text-xs ${
+                    kind === k.v
+                      ? "border-[#6B5C32] bg-[#F4EFE3]"
+                      : "border-[#E2DDD8] hover:bg-[#FAF9F7]"
+                  }`}
+                >
+                  <div className="font-medium text-[#1F1D1B]">{k.t}</div>
+                  <div className="text-[10px] text-[#6B7280]">{k.d}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Source picker */}
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -442,16 +617,18 @@ function CreateServiceOrderModal({
               <select
                 value={sourceType}
                 onChange={(e) => {
-                  setSourceType(e.target.value as "SO" | "CO");
+                  setSourceType(e.target.value as "SO" | "CO" | "EXTERNAL");
                   setSourceId("");
                   setSourceQuery("");
                   setLinePicks({});
+                  setFreeLines([]);
                 }}
                 disabled={!!presetSourceType}
                 className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
               >
                 <option value="SO">Sales Order</option>
                 <option value="CO">Consignment Order</option>
+                <option value="EXTERNAL">External / Old order (no record in system)</option>
               </select>
             </div>
             <div>
@@ -482,6 +659,27 @@ function CreateServiceOrderModal({
                     Change
                   </button>
                 </div>
+              ) : sourceType === "EXTERNAL" ? (
+                // EXTERNAL — no record in system; operator types customer
+                // name + (optional) external reference (paper PO, manual
+                // SO number, etc.). Free-text item rows live in their own
+                // section below.
+                <div className="space-y-1">
+                  <Input
+                    type="text"
+                    value={externalCustomerName}
+                    onChange={(e) => setExternalCustomerName(e.target.value)}
+                    placeholder="Customer name (required)"
+                    className="h-8 text-sm"
+                  />
+                  <Input
+                    type="text"
+                    value={externalRef}
+                    onChange={(e) => setExternalRef(e.target.value)}
+                    placeholder="External reference (paper SO#, etc. — optional)"
+                    className="h-8 text-sm"
+                  />
+                </div>
               ) : (
                 <SourceSearchPicker
                   query={sourceQuery}
@@ -496,7 +694,8 @@ function CreateServiceOrderModal({
             </div>
           </div>
 
-          {/* Mode */}
+          {/* Mode — RESOLUTION only. RECORD doesn't have a resolution flow. */}
+          {kind === "RESOLUTION" && (
           <div>
             <label className="block text-xs text-[#6B7280] mb-1">
               Resolution Mode <span className="text-[#9CA3AF]">(optional — pick later if you're still gathering info)</span>
@@ -526,6 +725,7 @@ function CreateServiceOrderModal({
               ))}
             </div>
           </div>
+          )}
 
           {/* Issue description */}
           <div>
@@ -658,6 +858,190 @@ function CreateServiceOrderModal({
               </p>
             </div>
           )}
+
+          {/* EXTERNAL — free-text item rows. No SO/CO source items to pick
+              from, so the operator types productCode (optional) + name + qty +
+              issue. RECORD-kind allows zero rows; RESOLUTION-kind requires
+              at least one. */}
+          {sourceType === "EXTERNAL" && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs text-[#6B7280]">
+                  Affected Items{" "}
+                  {kind === "RECORD" ? "(optional)" : "(required)"}
+                </label>
+                <Button size="sm" variant="outline" onClick={addFreeLine}>
+                  <Plus className="mr-1 h-3 w-3" />
+                  Add Item
+                </Button>
+              </div>
+              {freeLines.length === 0 ? (
+                <p className="text-xs text-[#9CA3AF]">
+                  {kind === "RECORD"
+                    ? "Add an item only if the case relates to a specific product."
+                    : "Click 'Add Item' to enter at least one product the customer reported."}
+                </p>
+              ) : (
+                <div className="border border-[#E2DDD8] rounded overflow-hidden">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#FAF9F7]">
+                      <tr className="text-left text-[10px] uppercase text-[#6B7280]">
+                        <th className="p-2 w-[140px]">Code</th>
+                        <th className="p-2">Product Name</th>
+                        <th className="p-2 w-[80px]">Qty</th>
+                        <th className="p-2">Issue</th>
+                        <th className="p-2 w-[40px]"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {freeLines.map((l) => (
+                        <tr key={l.id} className="border-t border-[#F0ECE9]">
+                          <td className="p-2">
+                            <Input
+                              type="text"
+                              value={l.productCode}
+                              onChange={(e) =>
+                                patchFreeLine(l.id, { productCode: e.target.value })
+                              }
+                              placeholder="optional"
+                              className="h-7 text-xs px-2"
+                            />
+                          </td>
+                          <td className="p-2">
+                            <Input
+                              type="text"
+                              value={l.productName}
+                              onChange={(e) =>
+                                patchFreeLine(l.id, { productName: e.target.value })
+                              }
+                              placeholder="e.g. Brown leather sofa"
+                              className="h-7 text-xs px-2"
+                            />
+                          </td>
+                          <td className="p-2">
+                            <Input
+                              type="number"
+                              min="1"
+                              value={l.qty}
+                              onChange={(e) =>
+                                patchFreeLine(l.id, { qty: e.target.value })
+                              }
+                              className="h-7 text-xs px-2"
+                            />
+                          </td>
+                          <td className="p-2">
+                            <Input
+                              type="text"
+                              value={l.issue}
+                              onChange={(e) =>
+                                patchFreeLine(l.id, { issue: e.target.value })
+                              }
+                              placeholder="optional"
+                              className="h-7 text-xs px-2"
+                            />
+                          </td>
+                          <td className="p-2 text-right">
+                            <button
+                              type="button"
+                              onClick={() => removeFreeLine(l.id)}
+                              className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Photos — attach customer-supplied or in-house images of the
+              defect. Resized client-side to ~1280px JPEG and stored as base64
+              data URIs on service_orders.issuePhotos. Good enough for ~5
+              photos per case at this shop's volume. */}
+          <div>
+            <label className="block text-xs text-[#6B7280] mb-1">
+              Photos ({photos.length})
+            </label>
+            <input
+              type="file"
+              accept="image/*"
+              multiple
+              onChange={(e) => handleAddPhotos(e.target.files)}
+              className="block w-full text-xs"
+            />
+            {photos.length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {photos.map((src, i) => (
+                  <div key={i} className="relative">
+                    <img
+                      src={src}
+                      alt={`photo ${i + 1}`}
+                      className="h-20 w-20 rounded border border-[#E2DDD8] object-cover"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setPhotos((p) => p.filter((_, idx) => idx !== i))}
+                      className="absolute -top-1 -right-1 rounded-full bg-white border border-[#E2DDD8] p-0.5 text-[#9A3A2D] hover:text-[#7A2E24]"
+                      title="Remove"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Root-cause + prevention — optional at create time; usually
+              filled in later as follow-up info comes in. Surfacing it here
+              means the operator can capture an obvious cause ("3PL dropped
+              it") without needing to come back to the detail page. */}
+          <div>
+            <label className="block text-xs text-[#6B7280] mb-1">
+              Root Cause &amp; Prevention <span className="text-[#9CA3AF]">(optional)</span>
+            </label>
+            <div className="grid grid-cols-2 gap-2">
+              <select
+                value={rootCauseCategory}
+                onChange={(e) => setRootCauseCategory(e.target.value)}
+                className="h-8 rounded border border-[#E2DDD8] bg-white px-2 text-sm"
+              >
+                <option value="">Category — not yet assigned</option>
+                <option value="PRODUCTION">Production / workmanship</option>
+                <option value="DESIGN">Design / R&amp;D</option>
+                <option value="MATERIAL">Material / supplier</option>
+                <option value="PROCESS">Process / SOP gap</option>
+                <option value="CUSTOMER">Customer (not our fault)</option>
+                <option value="TRANSPORT">Transport / 3PL</option>
+                <option value="OTHER">Other</option>
+              </select>
+              <Input
+                type="text"
+                value={preventionOwner}
+                onChange={(e) => setPreventionOwner(e.target.value)}
+                placeholder="Owner of follow-up (name)"
+                className="h-8 text-sm"
+              />
+            </div>
+            <textarea
+              rows={2}
+              value={rootCauseNotes}
+              onChange={(e) => setRootCauseNotes(e.target.value)}
+              placeholder="Why did this happen? (e.g. 'Wrong fabric loaded on cutting station, SOP missing barcode scan check')"
+              className="mt-2 w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+            />
+            <textarea
+              rows={2}
+              value={preventionAction}
+              onChange={(e) => setPreventionAction(e.target.value)}
+              placeholder="What's the action so the next batch doesn't have this? (e.g. 'Add fabric-code scan to FAB_CUT job-card flow')"
+              className="mt-2 w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
+            />
+          </div>
         </div>
 
         <div className="flex justify-end gap-2 p-4 border-t border-[#E2DDD8] bg-[#FAF9F7]">
@@ -671,7 +1055,11 @@ function CreateServiceOrderModal({
             disabled={!canSubmit || submitting}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
-            {submitting ? "Creating…" : "Create Service Order"}
+            {submitting
+              ? "Creating…"
+              : kind === "RECORD"
+                ? "Create Service Case"
+                : "Create Service Order"}
           </Button>
         </div>
       </div>
@@ -698,17 +1086,20 @@ function SourceSearchPicker({
   options: SourceOrderOption[];
   onPick: (id: string) => void;
 }) {
+  const q = query.trim().toLowerCase();
+  // Empty input → show NOTHING (don't dump the first 15 options as a teaser).
+  // The user explicitly asked: "as I type more characters, results should
+  // narrow, not the other way round." Listing options up-front looked like
+  // the search was widening as you typed. Empty = empty.
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    const matches = q
-      ? options.filter(
-          (o) =>
-            o.companyOrderId.toLowerCase().includes(q) ||
-            o.customerName.toLowerCase().includes(q),
-        )
-      : options;
+    if (!q) return [];
+    const matches = options.filter(
+      (o) =>
+        o.companyOrderId.toLowerCase().includes(q) ||
+        o.customerName.toLowerCase().includes(q),
+    );
     return matches.slice(0, 15);
-  }, [options, query]);
+  }, [options, q]);
 
   return (
     <div className="space-y-1">
@@ -719,33 +1110,33 @@ function SourceSearchPicker({
         placeholder={`Type SO# or customer name… (${options.length} shipped)`}
         className="h-8 text-sm"
       />
-      <div className="max-h-48 overflow-y-auto rounded border border-[#E2DDD8] bg-white">
-        {filtered.length === 0 ? (
-          <div className="p-2 text-xs text-[#9CA3AF]">
-            {options.length === 0
-              ? "No shipped orders found in this category."
-              : "No matches. Try fewer characters or switch SO ↔ CO."}
-          </div>
-        ) : (
-          filtered.map((s) => (
-            <button
-              key={s.id}
-              type="button"
-              onClick={() => onPick(s.id)}
-              className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
-            >
-              <span className="font-mono">{s.companyOrderId}</span>
-              <span className="text-[#6B7280]"> — {s.customerName}</span>
-              <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
-            </button>
-          ))
-        )}
-        {options.length > 15 && filtered.length === 15 && (
-          <div className="px-2 py-1 text-[10px] text-[#9CA3AF] border-t border-[#F0ECE9]">
-            Showing first 15 — type to narrow down.
-          </div>
-        )}
-      </div>
+      {q && (
+        <div className="max-h-48 overflow-y-auto rounded border border-[#E2DDD8] bg-white">
+          {filtered.length === 0 ? (
+            <div className="p-2 text-xs text-[#9CA3AF]">
+              No matches for "{q}". Try fewer characters or switch SO ↔ CO.
+            </div>
+          ) : (
+            filtered.map((s) => (
+              <button
+                key={s.id}
+                type="button"
+                onClick={() => onPick(s.id)}
+                className="block w-full text-left px-2 py-1.5 text-xs hover:bg-[#F4EFE3] border-b border-[#F0ECE9] last:border-b-0"
+              >
+                <span className="font-mono">{s.companyOrderId}</span>
+                <span className="text-[#6B7280]"> — {s.customerName}</span>
+                <span className="ml-1 text-[10px] text-[#9CA3AF]">({s.status})</span>
+              </button>
+            ))
+          )}
+          {options.length > 15 && filtered.length === 15 && (
+            <div className="px-2 py-1 text-[10px] text-[#9CA3AF] border-t border-[#F0ECE9]">
+              Showing first 15 — type more to narrow down.
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

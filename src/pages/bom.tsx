@@ -4828,9 +4828,15 @@ function BatchEditCategoriesDialog({
                 onChange={(e) => setNewCategory(e.target.value)}
                 className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
               >
-                {allCategories.map((c) => (
-                  <option key={c} value={c}>{c}</option>
-                ))}
+                {allCategories.map((c) => {
+                  // Surface the production-time mins for the currently picked
+                  // dept so the operator can pick a category by impact, not
+                  // by guessing what "CAT 3" means. Falls back to "?" when no
+                  // mapping exists yet (greenfield maintenance config).
+                  const m = getProductionMinutes(deptCode, c);
+                  const label = m > 0 ? `${c} (${m} min)` : `${c} (- min)`;
+                  return <option key={c} value={c}>{label}</option>;
+                })}
               </select>
             </div>
           </div>
@@ -4940,7 +4946,10 @@ function BatchEditCategoriesDialog({
                     </div>
                     {curCat && (
                       <span className="text-[10px] text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">
-                        {curCat}
+                        {(() => {
+                          const m = getProductionMinutes(deptCode, curCat);
+                          return m > 0 ? `${curCat} (${m}m)` : curCat;
+                        })()}
                       </span>
                     )}
                     <span

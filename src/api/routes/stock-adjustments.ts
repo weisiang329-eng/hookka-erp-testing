@@ -39,6 +39,7 @@ type AdjustmentReason =
 
 type StockAdjustmentRow = {
   id: string;
+  adjNo: string | null;
   type: AdjustmentType;
   itemId: string;
   itemCode: string;
@@ -67,9 +68,31 @@ function genId(): string {
   return `adj-${crypto.randomUUID().slice(0, 8)}`;
 }
 
+// ADJ-YYMM-NNN sequential, human-readable adjustment number. Added
+// 2026-04-28 — older rows have NULL adjNo until backfilled.
+async function nextAdjNo(db: D1Database): Promise<string> {
+  const now = new Date();
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(
+    now.getMonth() + 1,
+  ).padStart(2, "0")}`;
+  const prefix = `ADJ-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT adjNo FROM stock_adjustments WHERE adjNo LIKE ? ORDER BY adjNo DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ adjNo: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.adjNo.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
+}
+
 function rowToApi(r: StockAdjustmentRow) {
   return {
     id: r.id,
+    adjNo: r.adjNo ?? "",
     type: r.type,
     itemId: r.itemId,
     itemCode: r.itemCode,
@@ -236,6 +259,7 @@ app.post("/", async (c) => {
 
     // ---- compose all writes ----
     const id = genId();
+    const adjNo = await nextAdjNo(c.var.DB);
     const direction: "IN" | "OUT" = qtyDelta > 0 ? "IN" : "OUT";
     const totalCostSen = Math.round(Math.abs(qtyDelta) * unitCostSen);
     const nowIso = new Date().toISOString();
@@ -246,12 +270,13 @@ app.post("/", async (c) => {
     // 1. stock_adjustments — the canonical record
     stmts.push(
       c.var.DB.prepare(
-        `INSERT INTO stock_adjustments (id, type, itemId, itemCode, itemName,
+        `INSERT INTO stock_adjustments (id, adjNo, type, itemId, itemCode, itemName,
            qtyDelta, unitCostSen, totalCostSen, direction, reason, notes,
            adjustedBy, adjustedByName, adjustedAt, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
+        adjNo,
         type,
         itemId,
         itemCode,

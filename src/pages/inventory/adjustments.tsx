@@ -36,6 +36,9 @@ type AdjustmentReason =
 
 type AdjustmentRow = {
   id: string;
+  // ADJ-YYMM-NNN human-readable number. Empty string for legacy rows
+  // created before the column was added on 2026-04-28.
+  adjNo: string;
   type: AdjustmentType;
   itemId: string;
   itemCode: string;

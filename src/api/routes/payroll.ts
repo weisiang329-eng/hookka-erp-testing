@@ -80,14 +80,37 @@ function rowToPayroll(r: PayrollRow) {
   };
 }
 
-async function nextPayrollId(db: D1Database): Promise<string> {
+// PAY-YYMM-NNN sequential, bucketed by payroll period. Bug fix 2026-04-28:
+// previous PAY-NNNNN format was a global counter without month context.
+// Now derives YYMM from the `period` (YYYY-MM) so all rows for a given
+// run share the same prefix and number monotonically inside it. Falls
+// back to the current month if the period is malformed.
+async function nextPayrollId(
+  db: D1Database,
+  period: string,
+): Promise<string> {
+  let yymm: string;
+  const m = /^(\d{4})-(\d{2})$/.exec(period ?? "");
+  if (m) {
+    yymm = `${m[1].slice(2)}${m[2]}`;
+  } else {
+    const now = new Date();
+    yymm = `${String(now.getFullYear()).slice(2)}${String(
+      now.getMonth() + 1,
+    ).padStart(2, "0")}`;
+  }
+  const prefix = `PAY-${yymm}-`;
   const res = await db
     .prepare(
-      "SELECT COUNT(*) AS c FROM payroll_records WHERE id LIKE 'PAY-%'",
+      "SELECT id FROM payroll_records WHERE id LIKE ? ORDER BY id DESC LIMIT 1",
     )
-    .first<{ c: number }>();
-  const seq = (res?.c ?? 0) + 1;
-  return `PAY-${String(seq).padStart(5, "0")}`;
+    .bind(`${prefix}%`)
+    .first<{ id: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.id.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,7 +194,7 @@ app.post("/", async (c) => {
       const totalDeductionsSen = epfEmployeeSen + socsoEmployeeSen + eisEmployeeSen + pcbSen;
       const netPaySen = grossSalarySen - totalDeductionsSen;
 
-      const id = await nextPayrollId(c.var.DB);
+      const id = await nextPayrollId(c.var.DB, period);
       await c.var.DB.prepare(
         `INSERT OR IGNORE INTO payroll_records (
            id, workerId, workerName, period, basicSalarySen, workingDays,

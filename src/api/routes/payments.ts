@@ -78,10 +78,26 @@ function genInvoicePaymentId(): string {
   return `invpay-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function genNextReceiptNo(): string {
+// REC-YYMM-NNN sequential. Bug fix 2026-04-28: previous random hex tail was
+// not monotonic and could collide. Pulls max-existing-suffix+1 in the
+// (year, month) bucket so new receipts always increment.
+async function nextReceiptNo(db: D1Database): Promise<string> {
   const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return `REC-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(
+    now.getMonth() + 1,
+  ).padStart(2, "0")}`;
+  const prefix = `REC-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT receiptNumber FROM payment_records WHERE receiptNumber LIKE ? ORDER BY receiptNumber DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ receiptNumber: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.receiptNumber.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 function genStatusChangeId(): string {
@@ -201,7 +217,7 @@ app.post("/", async (c) => {
 
     const id = genPaymentId();
     const date = new Date().toISOString().split("T")[0];
-    const receiptNumber = body.receiptNumber || genNextReceiptNo();
+    const receiptNumber = body.receiptNumber || (await nextReceiptNo(c.var.DB));
     const now = new Date().toISOString();
 
     const statements: D1PreparedStatement[] = [

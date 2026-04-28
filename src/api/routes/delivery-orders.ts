@@ -18,6 +18,7 @@ import { consumeFGBatchesForDO } from "../lib/do-cost-cascade";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 import { checkDeliveryOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { nextInvoiceNo } from "./invoices";
 
 const app = new Hono<Env>();
 
@@ -293,12 +294,6 @@ function genInvoiceId(): string {
 
 function genInvoiceItemId(): string {
   return `invi-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-function genNextInvoiceNo(): string {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return `INV-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
 }
 
 async function fetchOrderWithItems(db: D1Database, id: string) {
@@ -1761,7 +1756,7 @@ app.put("/:id", async (c) => {
           }
 
           const invId = genInvoiceId();
-          const invoiceNo = genNextInvoiceNo();
+          const invoiceNo = await nextInvoiceNo(c.var.DB);
           const invoiceDate = now.split("T")[0];
           const due = new Date();
           due.setDate(due.getDate() + 30);

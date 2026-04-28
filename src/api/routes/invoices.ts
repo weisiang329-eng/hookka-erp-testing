@@ -153,10 +153,27 @@ function genInvoicePaymentId(): string {
   return `invpay-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-function genNextInvoiceNo(): string {
+// INV-YYMM-NNN sequential. Bug fix 2026-04-28: previous random hex tail was
+// not monotonic and could collide. Pulls max-existing-suffix+1 in the
+// (year, month) bucket so new invoices always increment.
+// Exported so delivery-orders.ts can share the same source of truth.
+export async function nextInvoiceNo(db: D1Database): Promise<string> {
   const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  return `INV-${yymm}-${crypto.randomUUID().slice(0, 4).toUpperCase()}`;
+  const yymm = `${String(now.getFullYear()).slice(2)}${String(
+    now.getMonth() + 1,
+  ).padStart(2, "0")}`;
+  const prefix = `INV-${yymm}-`;
+  const res = await db
+    .prepare(
+      "SELECT invoiceNo FROM invoices WHERE invoiceNo LIKE ? ORDER BY invoiceNo DESC LIMIT 1",
+    )
+    .bind(`${prefix}%`)
+    .first<{ invoiceNo: string }>();
+  if (!res) return `${prefix}001`;
+  const tail = res.invoiceNo.replace(prefix, "");
+  const seq = parseInt(tail, 10);
+  if (!Number.isFinite(seq)) return `${prefix}001`;
+  return `${prefix}${String(seq + 1).padStart(3, "0")}`;
 }
 
 function genStatusChangeId(): string {
@@ -526,7 +543,7 @@ app.post("/", async (c) => {
     due.setDate(due.getDate() + 30);
     const dueDate = due.toISOString().split("T")[0];
     const id = genInvoiceId();
-    const invoiceNo = body.invoiceNo || genNextInvoiceNo();
+    const invoiceNo = body.invoiceNo || (await nextInvoiceNo(c.var.DB));
 
     const statements: D1PreparedStatement[] = [
       c.var.DB.prepare(

@@ -13,6 +13,7 @@ import {
   Beaker,
   Clock,
   CheckCircle2,
+  ChevronLeft,
   ChevronRight,
   DollarSign,
   Layers,
@@ -616,6 +617,62 @@ export default function RDProjectDetailPage() {
     });
   };
 
+  // Reorder a photo within a milestone's photos[] array (swap adjacent).
+  // The leftmost photo is the implicit cover (Ask 2 in the project card).
+  const handleReorderPhoto = async (stage: string, index: number, direction: -1 | 1) => {
+    if (!project) return;
+    const milestone = project.milestones.find((m) => m.stage === stage);
+    if (!milestone) return;
+    const localPhotos = stagePhotos[stage];
+    const sourcePhotos = (localPhotos && localPhotos.length > 0 ? localPhotos : milestone.photos) || [];
+    const swapWith = index + direction;
+    if (swapWith < 0 || swapWith >= sourcePhotos.length) return;
+    const reordered = [...sourcePhotos];
+    [reordered[index], reordered[swapWith]] = [reordered[swapWith], reordered[index]];
+
+    // Optimistic local update so the user sees the swap instantly
+    setStagePhotos((prev) => ({ ...prev, [stage]: reordered }));
+    const previousProject = project;
+    const updatedMilestones = project.milestones.map((m) =>
+      m.stage === stage ? { ...m, photos: reordered } : m,
+    );
+    setProject({ ...project, milestones: updatedMilestones });
+
+    try {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { milestones: updatedMilestones },
+      });
+      if (data.data) setProject(data.data as RDProject);
+    } catch {
+      // Rollback on error
+      setProject(previousProject);
+      setStagePhotos((prev) => ({ ...prev, [stage]: sourcePhotos }));
+      toast.error("Failed to reorder photo");
+    }
+  };
+
+  // ─── Estimated Date (running re-estimate, distinct from immutable Target) ──
+  const handleEstimatedDateChange = async (stage: string, newDate: string) => {
+    if (!project) return;
+    const previousProject = project;
+    const updatedMilestones = project.milestones.map((m) =>
+      m.stage === stage ? { ...m, estimatedDate: newDate || null } : m,
+    );
+    // Optimistic local update
+    setProject({ ...project, milestones: updatedMilestones });
+    try {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { milestones: updatedMilestones },
+      });
+      if (data.data) setProject(data.data as RDProject);
+    } catch {
+      setProject(previousProject);
+      toast.error("Failed to update estimated date");
+    }
+  };
+
   // ─── Computed Cost Summary ─────────────────────────────────────────────
 
   const materialCostSen = project
@@ -820,6 +877,7 @@ export default function RDProjectDetailPage() {
                 <tr className="border-b border-[#E2DDD8]">
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Stage</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Target</th>
+                  <th className="text-left py-2 text-xs font-semibold text-gray-500">Estimated</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Actual</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Approved By</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Photos</th>
@@ -875,6 +933,16 @@ export default function RDProjectDetailPage() {
                         )}
                       </td>
                       <td className="py-2 text-xs">
+                        {/* Estimated: running re-estimate distinct from immutable Target */}
+                        <input
+                          type="date"
+                          value={m.estimatedDate ?? ""}
+                          onChange={(e) => handleEstimatedDateChange(m.stage, e.target.value)}
+                          className="rounded border border-[#E2DDD8] px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 text-gray-600"
+                          title="Re-estimate completion date"
+                        />
+                      </td>
+                      <td className="py-2 text-xs">
                         {m.actualDate ? (
                           <span className="text-[#4F7C3A] font-medium">{formatDate(m.actualDate)}</span>
                         ) : (
@@ -884,22 +952,47 @@ export default function RDProjectDetailPage() {
                       <td className="py-2 text-xs text-gray-600">{m.approvedBy || <span className="text-gray-300">--</span>}</td>
                       <td className="py-2">
                         <div className="flex items-center gap-1.5 flex-wrap">
-                          {photos.map((photo, idx) => (
-                            <div key={idx} className="relative group/photo">
-                              <img
-                                src={photo}
-                                alt={`${STAGE_LABELS[m.stage]} photo ${idx + 1}`}
-                                className="h-10 w-10 rounded-md object-cover border border-[#E2DDD8] cursor-pointer hover:ring-2 hover:ring-[#6B5C32]/40"
-                                onClick={() => window.open(photo, "_blank")}
-                              />
-                              <button
-                                onClick={() => removeStagePhoto(m.stage, idx)}
-                                className="absolute -top-1.5 -right-1.5 hidden group-hover/photo:flex h-4 w-4 items-center justify-center rounded-full bg-[#9A3A2D] text-white text-[8px]"
-                              >
-                                <X className="h-2.5 w-2.5" />
-                              </button>
-                            </div>
-                          ))}
+                          {photos.map((photo, idx) => {
+                            const isFirst = idx === 0;
+                            const isLast = idx === photos.length - 1;
+                            return (
+                              <div key={idx} className="relative group/photo">
+                                <img
+                                  src={photo}
+                                  alt={`${STAGE_LABELS[m.stage]} photo ${idx + 1}`}
+                                  className={`h-10 w-10 rounded-md object-cover border cursor-pointer hover:ring-2 hover:ring-[#6B5C32]/40 ${
+                                    isFirst ? "border-[#6B5C32] ring-1 ring-[#6B5C32]/30" : "border-[#E2DDD8]"
+                                  }`}
+                                  onClick={() => window.open(photo, "_blank")}
+                                  title={isFirst ? "Cover photo (shown on project card)" : `Photo ${idx + 1}`}
+                                />
+                                {/* Left chevron — disabled for first */}
+                                <button
+                                  onClick={() => handleReorderPhoto(m.stage, idx, -1)}
+                                  disabled={isFirst}
+                                  className="absolute top-1/2 -left-2 -translate-y-1/2 hidden group-hover/photo:flex h-4 w-4 items-center justify-center rounded-full bg-white border border-[#E2DDD8] shadow text-gray-500 hover:text-[#6B5C32] disabled:opacity-30 disabled:cursor-not-allowed"
+                                  title="Move left"
+                                >
+                                  <ChevronLeft className="h-3 w-3" />
+                                </button>
+                                {/* Right chevron — disabled for last */}
+                                <button
+                                  onClick={() => handleReorderPhoto(m.stage, idx, 1)}
+                                  disabled={isLast}
+                                  className="absolute top-1/2 -right-2 -translate-y-1/2 hidden group-hover/photo:flex h-4 w-4 items-center justify-center rounded-full bg-white border border-[#E2DDD8] shadow text-gray-500 hover:text-[#6B5C32] disabled:opacity-30 disabled:cursor-not-allowed"
+                                  title="Move right"
+                                >
+                                  <ChevronRight className="h-3 w-3" />
+                                </button>
+                                <button
+                                  onClick={() => removeStagePhoto(m.stage, idx)}
+                                  className="absolute -top-1.5 -right-1.5 hidden group-hover/photo:flex h-4 w-4 items-center justify-center rounded-full bg-[#9A3A2D] text-white text-[8px]"
+                                >
+                                  <X className="h-2.5 w-2.5" />
+                                </button>
+                              </div>
+                            );
+                          })}
                           <button
                             onClick={() => handlePhotoUpload(m.stage)}
                             className="flex h-10 w-10 items-center justify-center rounded-md border border-dashed border-[#D0C9C0] text-gray-400 hover:border-[#6B5C32] hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors"

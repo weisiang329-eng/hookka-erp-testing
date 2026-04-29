@@ -75,9 +75,19 @@ function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
   );
 }
 
+// Derive cover photo at render time — first photo across all milestones in storage order.
+// Returns undefined if no milestone has any photos (caller renders placeholder SVG).
+function getCoverPhoto(project: RDProject): string | undefined {
+  for (const m of project.milestones) {
+    if (m.photos && m.photos.length > 0) return m.photos[0];
+  }
+  return undefined;
+}
+
 function ProjectCard({ project }: { project: RDProject }) {
   const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
   const budgetColor = budgetPct > 90 ? "text-[#9A3A2D]" : budgetPct > 70 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+  const cover = getCoverPhoto(project);
 
   return (
     <Link to={`/rd/${project.id}`}>
@@ -88,7 +98,29 @@ function ProjectCard({ project }: { project: RDProject }) {
               <p className="text-xs font-mono text-gray-400">{project.code}</p>
               <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
             </div>
-            <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+            {/* Cover thumbnail (top-right) — first milestone photo, or neutral placeholder */}
+            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+              {cover ? (
+                <img
+                  src={cover}
+                  alt={`${project.name} cover`}
+                  className="h-12 w-12 rounded-md object-cover border border-[#E2DDD8]"
+                />
+              ) : (
+                <div
+                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
+                  title="No photo yet"
+                  aria-label="No cover photo"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+              )}
+              <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">

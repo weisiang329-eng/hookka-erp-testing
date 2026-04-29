@@ -174,3 +174,108 @@ export async function appendJournalEntries(
   await db.batch(stmts);
   return stamped;
 }
+
+// --- chain verification ----------------------------------------------------
+
+export interface ChainVerifyResult {
+  ok: boolean;
+  totalRows: number;
+  brokenRowIds: string[];
+  /**
+   * Index of the first row whose stored rowHash does not match the recomputed
+   * value. -1 when the chain is intact. The chain is "broken from this point
+   * forward" — every subsequent row's prev_hash chains off a hash that no
+   * longer matches, so they're implicitly broken too. brokenRowIds lists
+   * every actually-broken row (recomputed != stored OR prev_hash != prior
+   * row's stored rowHash).
+   */
+  firstBrokenIndex: number;
+}
+
+/**
+ * Walk the ledger chain for one org, recomputing every row's hash from the
+ * stored fields and comparing against the stored rowHash. Also confirms each
+ * row's prev_hash equals the previous row's stored rowHash (so an attacker
+ * who tampered with row N can't "renumber" the chain by leaving N's hash
+ * intact but breaking the link).
+ *
+ * Defensive helper for the nightly chain-walk job. Sprint 6 added it because
+ * the test suite needed a single place to assert "tamper detected" without
+ * each test re-implementing hash recomputation. Cheap to run: O(N) hashing
+ * per org with no joins.
+ *
+ * Returns ok=true iff every row passes both checks. On any mismatch, ok=false
+ * and brokenRowIds enumerates the offending rows in chain order.
+ */
+export async function verifyJournalChain(
+  db: DbLike,
+  orgId: string,
+): Promise<ChainVerifyResult> {
+  const res = await db
+    .prepare(
+      `SELECT id, sourceType, sourceId, legNo, accountCode,
+              debitSen, creditSen, prevHash, rowHash
+         FROM ledger_journal_entries
+        WHERE orgId = ?
+        ORDER BY postedAt ASC, id ASC`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string;
+      sourceType: string;
+      sourceId: string;
+      legNo: number;
+      accountCode: string;
+      debitSen: number;
+      creditSen: number;
+      prevHash: string;
+      rowHash: string;
+    }>();
+
+  const rows = res.results ?? [];
+  const brokenRowIds: string[] = [];
+  let firstBrokenIndex = -1;
+  let priorStoredHash = "";
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    let broken = false;
+
+    // Check 1: prev_hash must equal the prior row's stored rowHash.
+    if (row.prevHash !== priorStoredHash) {
+      broken = true;
+    }
+
+    // Check 2: recomputed rowHash from stored fields must match the stored
+    // rowHash. Use the row's own prevHash for the recomputation (so the
+    // first failure point is the FIELD tamper, not the prev-hash drift).
+    const recomputed = await computeRowHash(row.prevHash, {
+      legNo: row.legNo,
+      accountCode: row.accountCode,
+      debitSen: row.debitSen,
+      creditSen: row.creditSen,
+      sourceType: row.sourceType,
+      sourceId: row.sourceId,
+    });
+    if (recomputed !== row.rowHash) {
+      broken = true;
+    }
+
+    if (broken) {
+      brokenRowIds.push(row.id);
+      if (firstBrokenIndex === -1) firstBrokenIndex = i;
+    }
+
+    // For the next iteration, advance using the row's STORED rowHash — that
+    // mirrors what append-time chain construction does and surfaces the
+    // "renumber attack" as a prev-hash mismatch on the next row.
+    priorStoredHash = row.rowHash;
+  }
+
+  return {
+    ok: brokenRowIds.length === 0,
+    totalRows: rows.length,
+    brokenRowIds,
+    firstBrokenIndex,
+  };
+}

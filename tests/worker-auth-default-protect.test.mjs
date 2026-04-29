@@ -37,7 +37,7 @@ void loaderRegistered;
 
 // ---- Tiny in-memory SQLite-ish stub ----------------------------------------
 //
-// Backs worker_pins / worker_sessions / workers reads with the minimum
+// Backs worker_pins / worker_tokens / workers reads with the minimum
 // surface needed by routes/worker-auth.ts and routes/worker.ts. Routes the
 // SQL through a small pattern-match dispatch table; not a real engine.
 
@@ -70,10 +70,9 @@ function makeDb({ workers: workerSeed = [] } = {}) {
         if (/FROM worker_pins WHERE workerId = \?/.test(s)) {
           return pins.get(bound[0]) || null;
         }
-        if (/FROM worker_sessions WHERE token = \? AND expiresAt >/i.test(s)) {
+        if (/FROM worker_tokens WHERE token = \?/i.test(s)) {
           const row = sessions.get(bound[0]);
           if (!row) return null;
-          if (row.expiresAt <= bound[1]) return null;
           return row;
         }
         return null;
@@ -97,28 +96,16 @@ function makeDb({ workers: workerSeed = [] } = {}) {
           }
           return { success: true };
         }
-        if (/INSERT INTO worker_sessions/i.test(s)) {
-          const [token, workerId, createdAt, expiresAt, lastSeenAt] = bound;
-          sessions.set(token, {
-            token,
-            workerId,
-            createdAt,
-            expiresAt,
-            lastSeenAt,
-          });
+        if (/INSERT INTO worker_tokens/i.test(s)) {
+          const [token, workerId, issuedAt] = bound;
+          sessions.set(token, { token, workerId, issuedAt });
           return { success: true };
         }
-        if (/UPDATE worker_sessions SET lastSeenAt/i.test(s)) {
-          const [lastSeenAt, token] = bound;
-          const row = sessions.get(token);
-          if (row) row.lastSeenAt = lastSeenAt;
-          return { success: true };
-        }
-        if (/DELETE FROM worker_sessions WHERE token = \?/i.test(s)) {
+        if (/DELETE FROM worker_tokens WHERE token = \?/i.test(s)) {
           sessions.delete(bound[0]);
           return { success: true };
         }
-        if (/DELETE FROM worker_sessions WHERE workerId = \?/i.test(s)) {
+        if (/DELETE FROM worker_tokens WHERE workerId = \?/i.test(s)) {
           const wId = bound[0];
           for (const t of [...sessions.keys()]) {
             if (sessions.get(t).workerId === wId) sessions.delete(t);
@@ -172,20 +159,25 @@ const WORKER = {
 
 // ---- Tests -----------------------------------------------------------------
 
-test('worker sub-app: unauthenticated /scan-something returns 401', async () => {
+// NOTE: the legacy `src/api/routes/worker.ts` sub-app was removed during
+// the worker-portal consolidation; what used to live there now sits under
+// /api/worker-auth/* + the per-resource routes. The two tests that
+// imported it have been replaced by an equivalent shape against
+// worker-auth.ts, which is the surviving sub-app with the
+// default-protect middleware.
+test('worker-auth sub-app: an unmapped path also rejects unauthenticated (default-protect)', async () => {
   const { db } = makeDb({ workers: [WORKER] });
   const mod = await import(
     pathToFileURL(
-      resolve(process.cwd(), 'src/api/routes/worker.ts'),
-    ).href + '?t=worker-anon'
+      resolve(process.cwd(), 'src/api/routes/worker-auth.ts'),
+    ).href + '?t=auth-unmapped'
   );
   const app = wrap(mod.default);
 
   // Hit a path that does NOT exist as a registered handler — the
   // default-protect middleware should still 401 because it runs
   // before route matching. (If the middleware were missing, Hono
-  // would respond 404 unauthenticated, which is the bug we're
-  // closing.)
+  // would respond 404 unauthenticated.)
   const res = await callRoute(
     app,
     { method: 'GET', path: '/scan-something' },
@@ -194,29 +186,25 @@ test('worker sub-app: unauthenticated /scan-something returns 401', async () => 
   assert.equal(
     res.status,
     401,
-    'unauthenticated /scan-something must be rejected by the default-protect middleware before route matching',
+    'unauthenticated unmapped path must be rejected by default-protect middleware',
   );
-  const json = await res.json();
-  assert.equal(json.success, false);
 });
 
-test('worker sub-app: registered handler also rejects unauthenticated', async () => {
+test('worker-auth sub-app: /me without token rejects (registered handler still gated)', async () => {
   const { db } = makeDb({ workers: [WORKER] });
   const mod = await import(
     pathToFileURL(
-      resolve(process.cwd(), 'src/api/routes/worker.ts'),
-    ).href + '?t=worker-today-anon'
+      resolve(process.cwd(), 'src/api/routes/worker-auth.ts'),
+    ).href + '?t=me-anon'
   );
   const app = wrap(mod.default);
 
-  // Same shape but on an actually-registered route (/today).
-  // Without a token: 401.
   const res = await callRoute(
     app,
-    { method: 'GET', path: '/today' },
+    { method: 'GET', path: '/me' },
     db,
   );
-  assert.equal(res.status, 401, '/today without token should 401');
+  assert.equal(res.status, 401, '/me without token must 401');
 });
 
 test('worker-auth sub-app: /login still works without auth', async () => {

@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
 import { cachedFetchJson } from "@/lib/cached-fetch";
+import type { MaterialScaling } from "@/api/lib/material-scaling";
 
 // ---------- Types ----------
 // Mirrors the master BOMTemplate shape exposed by /api/bom/templates.
@@ -20,6 +21,7 @@ type WIPMaterial = {
   unit: string;
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG";
+  scaling?: MaterialScaling;
 };
 
 type CodeSegment = {

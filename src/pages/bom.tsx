@@ -13,6 +13,10 @@ import {
   type VariantsConfig,
 } from "@/lib/kv-config";
 import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
+import type {
+  MaterialScaling,
+  MaterialScalingDimension,
+} from "@/api/lib/material-scaling";
 
 // ---------- Types ----------
 type BOMProcess = {
@@ -29,6 +33,11 @@ type WIPMaterial = {
   unit: string;
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG"; // auto-filled from SO item at production time
+  // Optional dimension scaling. At consumption time qty expands as
+  //   effectiveQty = qty + max(0, SOLine[dimension] - baseValue) * perUnit
+  // (floor: orders smaller than baseline still consume baseQty).
+  // See src/api/lib/material-scaling.ts for the apply helpers.
+  scaling?: MaterialScaling;
 };
 
 type CodeSegment = {
@@ -819,6 +828,97 @@ function RawMaterialSelect({
   );
 }
 
+// ---------- Material Scaling Editor ----------
+// Inline three-input row that lives directly under each material row in
+// the BOM editor. Lets the user attach a dimension-scaling rule:
+//
+//   { dimension, baseValue, perUnit }
+//
+// At consumption time the qty expands as:
+//
+//   effective = qty + max(0, SOLine[dim] - baseValue) * perUnit
+//
+// (See src/api/lib/material-scaling.ts for the apply path.) Leaving the
+// dimension dropdown on "none" removes the scaling rule entirely. The
+// editor renders inline + always-visible so the user can see at a glance
+// which materials scale and which don't, without an extra toggle click.
+const SCALING_DIM_OPTIONS: Array<{ value: MaterialScalingDimension; label: string }> = [
+  { value: "totalHeight", label: "total height (gap+divan+leg)" },
+  { value: "gap", label: "gap" },
+  { value: "divan", label: "divan height" },
+  { value: "leg", label: "leg height" },
+  { value: "seatHeight", label: "sofa seat height" },
+];
+
+function MaterialScalingEditor({
+  scaling,
+  unit,
+  onChange,
+}: {
+  scaling: MaterialScaling | undefined;
+  unit: string;
+  onChange: (next: MaterialScaling | undefined) => void;
+}) {
+  const dim = scaling?.dimension ?? "";
+  return (
+    <div className="ml-7 mb-1 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500">
+      <span className="text-gray-400">Scale by</span>
+      <select
+        value={dim}
+        onChange={(e) => {
+          const newDim = e.target.value as MaterialScalingDimension | "";
+          if (!newDim) {
+            onChange(undefined);
+          } else {
+            onChange({
+              dimension: newDim,
+              baseValue: scaling?.baseValue ?? 24,
+              perUnit: scaling?.perUnit ?? 0,
+            });
+          }
+        }}
+        className="text-[10px] border border-gray-200 rounded px-1 py-0.5 bg-white"
+      >
+        <option value="">— none —</option>
+        {SCALING_DIM_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {scaling && (
+        <>
+          <span className="text-gray-400">base</span>
+          <input
+            type="number"
+            value={Number.isFinite(scaling.baseValue) ? scaling.baseValue : 0}
+            step="1"
+            min="0"
+            onChange={(e) =>
+              onChange({ ...scaling, baseValue: parseFloat(e.target.value) || 0 })
+            }
+            className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-12 bg-white"
+            title="Smallest size at which the recorded qty applies"
+          />
+          <span className="text-gray-400">in, qty +</span>
+          <input
+            type="number"
+            value={Number.isFinite(scaling.perUnit) ? scaling.perUnit : 0}
+            step="0.01"
+            min="0"
+            onChange={(e) =>
+              onChange({ ...scaling, perUnit: parseFloat(e.target.value) || 0 })
+            }
+            className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-14 bg-white"
+            title="Extra qty per 1 inch over base"
+          />
+          <span className="text-gray-400">{unit || "unit"}/inch over base</span>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ---------- WIP Tree Node ----------
 // Resolves a WIP code for display by replacing autoDetect placeholders
 // ({DIVAN_HEIGHT}, {FABRIC}, etc.) with sample values so the tree shows
@@ -1544,7 +1644,7 @@ function CreateBOMDialog({
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateL1Process(i: number, field: string, value: string | number) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -1612,7 +1712,7 @@ function CreateBOMDialog({
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateWIP(i: number, field: string, value: string | number) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -1642,7 +1742,7 @@ function CreateBOMDialog({
     );
   }
 
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -1690,7 +1790,7 @@ function CreateBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -1961,28 +2061,35 @@ function CreateBOMDialog({
                       <button onClick={() => addWIPMaterial(wi)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                     </div>
                     {(w.materials || []).map((m, mi) => (
-                      <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                        {m.autoDetect ? (
-                          <div className="flex items-center gap-1.5 flex-1">
-                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                            </span>
-                            <span className="text-[10px] text-gray-400 italic">
-                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                            </span>
-                          </div>
-                        ) : (
-                          <RawMaterialSelect
-                            value={m.code ? `${m.code}` : ""}
-                            materials={rawMaterials}
-                            onSelect={(rm) => selectMaterial(wi, mi, rm)}
-                          />
-                        )}
-                        <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                        <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
+                      <div key={mi} className="bg-white rounded">
+                        <div className="flex items-center gap-2 px-2 py-1.5">
+                          {m.autoDetect ? (
+                            <div className="flex items-center gap-1.5 flex-1">
+                              <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                                {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                              </span>
+                              <span className="text-[10px] text-gray-400 italic">
+                                {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                              </span>
+                            </div>
+                          ) : (
+                            <RawMaterialSelect
+                              value={m.code ? `${m.code}` : ""}
+                              materials={rawMaterials}
+                              onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                            />
+                          )}
+                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </div>
+                        <MaterialScalingEditor
+                          scaling={m.scaling}
+                          unit={m.unit || "PCS"}
+                          onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
+                        />
                       </div>
                     ))}
                     {(w.materials || []).length === 0 && (
@@ -2134,15 +2241,15 @@ function SubWIPTree({
   path: number[];
   onAdd: (path: number[]) => void;
   onRemove: (path: number[], si: number) => void;
-  onUpdate: (path: number[], field: string, value: string | number) => void;
+  onUpdate: (path: number[], field: string, value: string | number | MaterialScaling | undefined) => void;
   onUpdateSegments: (path: number[], segs: CodeSegment[]) => void;
   onAddProcess: (path: number[]) => void;
   onRemoveProcess: (path: number[], pi: number) => void;
-  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number) => void;
+  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
   onAddMaterial: (path: number[]) => void;
   onRemoveMaterial: (path: number[], mi: number) => void;
   onSelectMaterial: (path: number[], mi: number, rm: RawMaterialOption) => void;
-  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number) => void;
+  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
   onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
   onMoveDown?: (path: number[], si: number) => void;
@@ -2247,28 +2354,35 @@ function SubWIPTree({
               <button onClick={() => onAddMaterial(childPath)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
             </div>
             {(sub.materials || []).map((m, mi) => (
-              <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                {m.autoDetect ? (
-                  <div className="flex items-center gap-1.5 flex-1">
-                    <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                      {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                    </span>
-                    <span className="text-[10px] text-gray-400 italic">
-                      {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                    </span>
-                  </div>
-                ) : (
-                  <RawMaterialSelect
-                    value={m.code ? `${m.code}` : ""}
-                    materials={rawMaterials}
-                    onSelect={(rm) => onSelectMaterial(childPath, mi, rm)}
-                  />
-                )}
-                <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                </button>
+              <div key={mi} className="bg-white rounded">
+                <div className="flex items-center gap-2 px-2 py-1.5">
+                  {m.autoDetect ? (
+                    <div className="flex items-center gap-1.5 flex-1">
+                      <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                        {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                      </span>
+                      <span className="text-[10px] text-gray-400 italic">
+                        {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                      </span>
+                    </div>
+                  ) : (
+                    <RawMaterialSelect
+                      value={m.code ? `${m.code}` : ""}
+                      materials={rawMaterials}
+                      onSelect={(rm) => onSelectMaterial(childPath, mi, rm)}
+                    />
+                  )}
+                  <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                  <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                  <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+                <MaterialScalingEditor
+                  scaling={m.scaling}
+                  unit={m.unit || "PCS"}
+                  onChange={(s) => onUpdateMaterial(childPath, mi, "scaling", s)}
+                />
               </div>
             ))}
             {(sub.materials || []).length === 0 && (
@@ -2438,7 +2552,7 @@ function EditBOMDialog({
   function removeL1Material(i: number) {
     setL1Materials((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Material(i: number, field: string, value: string | number) {
+  function updateL1Material(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Materials((prev) => prev.map((m, idx) => (idx === i ? { ...m, [field]: value } : m)));
   }
   function selectL1Material(i: number, rm: RawMaterialOption) {
@@ -2456,7 +2570,7 @@ function EditBOMDialog({
   function removeL1Process(i: number) {
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Process(i: number, field: string, value: string | number) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -2512,7 +2626,7 @@ function EditBOMDialog({
   function removeWIP(i: number) {
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateWIP(i: number, field: string, value: string | number) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -2533,7 +2647,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2573,7 +2687,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2645,7 +2759,7 @@ function EditBOMDialog({
     );
   }
 
-  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number) {
+  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({ ...node, [field]: value })))
     );
@@ -2682,7 +2796,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -2708,7 +2822,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -2915,28 +3029,37 @@ function EditBOMDialog({
               </div>
               <div className="space-y-2">
                 {l1Materials.map((m, i) => (
-                  <div key={i} className="flex items-center gap-2 bg-[#EEF3E4] border border-[#C6DBA8] rounded-md px-3 py-2">
-                    {m.autoDetect ? (
-                      <div className="flex items-center gap-1.5 flex-1">
-                        <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                          {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                        </span>
-                        <span className="text-[10px] text-gray-400 italic">
-                          {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                        </span>
-                      </div>
-                    ) : (
-                      <RawMaterialSelect
-                        value={m.code ? `${m.code}` : ""}
-                        materials={rawMaterials}
-                        onSelect={(rm) => selectL1Material(i, rm)}
+                  <div key={i} className="bg-[#EEF3E4] border border-[#C6DBA8] rounded-md">
+                    <div className="flex items-center gap-2 px-3 py-2">
+                      {m.autoDetect ? (
+                        <div className="flex items-center gap-1.5 flex-1">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                            {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                          </span>
+                          <span className="text-[10px] text-gray-400 italic">
+                            {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                          </span>
+                        </div>
+                      ) : (
+                        <RawMaterialSelect
+                          value={m.code ? `${m.code}` : ""}
+                          materials={rawMaterials}
+                          onSelect={(rm) => selectL1Material(i, rm)}
+                        />
+                      )}
+                      <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                      <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
+                      <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                    <div className="px-3 pb-1.5">
+                      <MaterialScalingEditor
+                        scaling={m.scaling}
+                        unit={m.unit || "PCS"}
+                        onChange={(s) => updateL1Material(i, "scaling", s)}
                       />
-                    )}
-                    <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
-                    <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
-                    <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
+                    </div>
                   </div>
                 ))}
                 {l1Materials.length === 0 && (
@@ -3011,28 +3134,35 @@ function EditBOMDialog({
                       <button onClick={() => addWIPMaterial(wi)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                     </div>
                     {(w.materials || []).map((m, mi) => (
-                      <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                        {m.autoDetect ? (
-                          <div className="flex items-center gap-1.5 flex-1">
-                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                            </span>
-                            <span className="text-[10px] text-gray-400 italic">
-                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                            </span>
-                          </div>
-                        ) : (
-                          <RawMaterialSelect
-                            value={m.code ? `${m.code}` : ""}
-                            materials={rawMaterials}
-                            onSelect={(rm) => selectMaterial(wi, mi, rm)}
-                          />
-                        )}
-                        <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                        <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
+                      <div key={mi} className="bg-white rounded">
+                        <div className="flex items-center gap-2 px-2 py-1.5">
+                          {m.autoDetect ? (
+                            <div className="flex items-center gap-1.5 flex-1">
+                              <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                                {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                              </span>
+                              <span className="text-[10px] text-gray-400 italic">
+                                {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                              </span>
+                            </div>
+                          ) : (
+                            <RawMaterialSelect
+                              value={m.code ? `${m.code}` : ""}
+                              materials={rawMaterials}
+                              onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                            />
+                          )}
+                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </div>
+                        <MaterialScalingEditor
+                          scaling={m.scaling}
+                          unit={m.unit || "PCS"}
+                          onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
+                        />
                       </div>
                     ))}
                     {(w.materials || []).length === 0 && (
@@ -3401,7 +3531,7 @@ function MasterTemplatesDialog({
     }));
   }
 
-  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number) {
+  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({ ...node, [field]: value }));
   }
   function updateWIPSegmentsAtPath(wi: number, path: number[], segs: CodeSegment[]) {
@@ -3467,7 +3597,7 @@ function MasterTemplatesDialog({
   function removeProcessAtPath(wi: number, path: number[], pi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, processes: node.processes.filter((_, i) => i !== pi) }));
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       processes: node.processes.map((p, i) => {
@@ -3496,7 +3626,7 @@ function MasterTemplatesDialog({
   function removeMaterialAtPath(wi: number, path: number[], mi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, materials: (node.materials || []).filter((_, i) => i !== mi) }));
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       materials: (node.materials || []).map((m, i) => (i === mi ? { ...m, [field]: value } : m)),
@@ -3909,38 +4039,45 @@ function MasterTemplatesDialog({
                     <button onClick={() => addMaterialAtPath(wi, [])} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                   </div>
                   {(w.materials || []).map((m, mi) => (
-                    <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                      {m.autoDetect ? (
-                        <div className="flex items-center gap-1.5 flex-1">
-                          <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                            {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                          </span>
-                          <span className="text-[10px] text-gray-400 italic">
-                            {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                          </span>
-                        </div>
-                      ) : (
-                        <RawMaterialSelect
-                          value={m.code ? `${m.code}` : ""}
-                          materials={rawMaterials}
-                          onSelect={(rm) => selectMaterialAtPath(wi, [], mi, rm)}
-                        />
-                      )}
-                      <select
-                        value={m.autoDetect || "NONE"}
-                        onChange={(e) => setMaterialAutoDetectAtPath(wi, [], mi, e.target.value as "FABRIC" | "LEG" | "NONE")}
-                        className="text-[10px] border border-gray-200 rounded px-1 py-1 bg-white"
-                        title="Auto-detect mode"
-                      >
-                        <option value="NONE">Manual</option>
-                        <option value="FABRIC">Auto: Fabric</option>
-                        <option value="LEG">Auto: Leg</option>
-                      </select>
-                      <input type="number" value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                      <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                      <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                      </button>
+                    <div key={mi} className="bg-white rounded">
+                      <div className="flex items-center gap-2 px-2 py-1.5">
+                        {m.autoDetect ? (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                            </span>
+                            <span className="text-[10px] text-gray-400 italic">
+                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                            </span>
+                          </div>
+                        ) : (
+                          <RawMaterialSelect
+                            value={m.code ? `${m.code}` : ""}
+                            materials={rawMaterials}
+                            onSelect={(rm) => selectMaterialAtPath(wi, [], mi, rm)}
+                          />
+                        )}
+                        <select
+                          value={m.autoDetect || "NONE"}
+                          onChange={(e) => setMaterialAutoDetectAtPath(wi, [], mi, e.target.value as "FABRIC" | "LEG" | "NONE")}
+                          className="text-[10px] border border-gray-200 rounded px-1 py-1 bg-white"
+                          title="Auto-detect mode"
+                        >
+                          <option value="NONE">Manual</option>
+                          <option value="FABRIC">Auto: Fabric</option>
+                          <option value="LEG">Auto: Leg</option>
+                        </select>
+                        <input type="number" value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                        <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </div>
+                      <MaterialScalingEditor
+                        scaling={m.scaling}
+                        unit={m.unit || "PCS"}
+                        onChange={(s) => updateMaterialAtPath(wi, [], mi, "scaling", s)}
+                      />
                     </div>
                   ))}
                   {(w.materials || []).length === 0 && (

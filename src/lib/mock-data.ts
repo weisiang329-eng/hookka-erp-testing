@@ -5382,7 +5382,7 @@ export type RDLabourLog = {
   description: string;
 };
 
-export type RDProjectType = "DEVELOPMENT" | "IMPROVEMENT";
+export type RDProjectType = "DEVELOPMENT" | "IMPROVEMENT" | "CLONE";
 
 export type RDProject = {
   id: string;
@@ -5402,6 +5402,11 @@ export type RDProject = {
   productionBOM?: RDBOMItem[];
   materialIssuances?: RDMaterialIssuance[];
   labourLogs?: RDLabourLog[];
+  // Clone-source fields (only meaningful when projectType === 'CLONE').
+  sourceProductName?: string;
+  sourceBrand?: string;
+  sourcePurchaseRef?: string;
+  sourceNotes?: string;
   createdDate: string;
   status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
 };

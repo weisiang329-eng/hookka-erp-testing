@@ -1201,13 +1201,17 @@ export default function DepartmentProductionPage() {
                           </div>
                         </td>
 
-                        {/* Production Time (from BOM) */}
+                        {/* Production Time (from BOM, total = per-unit × wipQty). */}
                         <td className="px-3 py-2 text-right text-[#4B5563] doc-number">
-                          {jc.productionTimeMinutes != null
-                            ? `${jc.productionTimeMinutes} min`
-                            : jc.estMinutes != null
-                            ? `${jc.estMinutes} min`
-                            : "-"}
+                          {(() => {
+                            const perUnit =
+                              jc.productionTimeMinutes ??
+                              jc.estMinutes ??
+                              null;
+                            if (perUnit == null) return "-";
+                            const qty = jc.wipQty ?? 1;
+                            return `${perUnit * (qty || 1)} min`;
+                          })()}
                         </td>
                       </tr>
                     );

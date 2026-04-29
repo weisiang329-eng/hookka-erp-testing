@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +15,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Crop,
   DollarSign,
   Pencil,
   Plus,
@@ -22,13 +23,16 @@ import {
   Package,
   Trash2,
   ImagePlus,
+  Pause,
+  Play,
+  Archive,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDPrototypeType, RdMaterialIssuance } from "@/types";
 import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
-import { compressImage } from "@/lib/image-compress";
+import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
 
@@ -139,9 +143,13 @@ const selectClass = inputClass;
 export default function RDProjectDetailPage() {
   const { id } = useParams();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { toast } = useToast();
   const [project, setProject] = useState<RDProject | null>(null);
   const [advancing, setAdvancing] = useState(false);
+  const [statusFlipping, setStatusFlipping] = useState<
+    null | "hold" | "resume" | "move-to-draft"
+  >(null);
 
   // Edit project modal — projectType + clone-source fields are mirror-
   // for-mirror with the Create dialog (src/pages/rd/index.tsx) so users
@@ -229,6 +237,21 @@ export default function RDProjectDetailPage() {
   const coverPhotoInputRef = useRef<HTMLInputElement>(null);
   const [coverPhotoSaving, setCoverPhotoSaving] = useState(false);
 
+  // ── Photo crop dialog state ────────────────────────────────────────────
+  // The dialog gates every cover-photo and milestone-photo upload (and any
+  // "edit crop" re-use of an existing photo). `cropTarget` carries enough
+  // info to know what to do with the cropped data URL on confirm.
+  type CropTarget =
+    | { kind: "cover" }
+    | { kind: "milestone-add"; stage: string }
+    | { kind: "milestone-replace"; stage: string; index: number };
+  const [cropOpen, setCropOpen] = useState(false);
+  const [cropImageUrl, setCropImageUrl] = useState<string>("");
+  const [cropTarget, setCropTarget] = useState<CropTarget | null>(null);
+  // For multi-file milestone uploads we queue the remaining files and feed
+  // them through the dialog one-by-one so the user can crop each.
+  const [cropQueue, setCropQueue] = useState<File[]>([]);
+
   const rdUrl = id ? `/api/rd-projects/${id}` : null;
   // Issuances are now table-backed (rd_material_issuances). The project payload
   // no longer surfaces a materialIssuances array — we fetch the list from the
@@ -266,6 +289,53 @@ export default function RDProjectDetailPage() {
     setRawMaterials(inventoryResp?.data?.rawMaterials ?? []);
   }, [inventoryResp]);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // ─── Status Flips (hold / resume / move-to-draft) ─────────────────────
+  // Wrap POST /api/rd-projects/:id/{hold|resume|move-to-draft} so an
+  // operator can pause an active project, resume it, or send it back to
+  // the Drafts backlog without going through SQL or the network tab.
+  const flipStatus = async (
+    action: "hold" | "resume" | "move-to-draft",
+    confirmMsg: string,
+    successMsg: string,
+  ) => {
+    if (!project) return;
+    if (!window.confirm(confirmMsg)) return;
+    setStatusFlipping(action);
+    try {
+      const r = await fetch(`/api/rd-projects/${id}/${action}`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+      });
+      const j = (await r.json()) as { success: boolean; data?: RDProject; error?: string };
+      if (!r.ok || !j.success || !j.data) {
+        throw new Error(j.error ?? `HTTP ${r.status}`);
+      }
+      setProject(j.data);
+      toast.success(successMsg);
+      invalidateCachePrefix("/api/rd-projects");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Status update failed");
+    } finally {
+      setStatusFlipping(null);
+    }
+  };
+
+  const handleHold = () =>
+    flipStatus(
+      "hold",
+      "Put this project on hold? It stays on the Pipeline as ON_HOLD until resumed.",
+      "Project on hold",
+    );
+  const handleResume = () =>
+    flipStatus("resume", "Resume this project back to ACTIVE?", "Project resumed");
+  const handleMoveToDraft = () =>
+    flipStatus(
+      "move-to-draft",
+      "Move this project back to Drafts? It will leave the Pipeline; started_at is cleared.",
+      "Project moved to Drafts",
+    );
 
   // ─── Advance Stage ──────────────────────────────────────────────────────
 
@@ -325,6 +395,27 @@ export default function RDProjectDetailPage() {
     });
     setEditOpen(true);
   };
+
+  // ─── Auto-open Edit modal when ?edit=1 is in the URL ─────────────────
+  // Triggered by the Pencil button on RD Projects cards (rd/index.tsx),
+  // which navigates to /rd/:id?edit=1 so a single click jumps straight
+  // into editing without an extra step on the detail page. The modal-open
+  // setStates are deferred via queueMicrotask so React processes them in
+  // the next tick rather than mid-effect — also keeps the lint rule for
+  // "no synchronous setState in effects" happy.
+  useEffect(() => {
+    if (!project) return;
+    if (searchParams.get("edit") !== "1") return;
+    queueMicrotask(() => {
+      openEditModal();
+      const next = new URLSearchParams(searchParams);
+      next.delete("edit");
+      setSearchParams(next, { replace: true });
+    });
+    // openEditModal is defined right above; depending on it would force
+    // useCallback ceremony for marginal value.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project]);
 
   const handleEditSave = async () => {
     if (!project) return;
@@ -647,9 +738,50 @@ export default function RDProjectDetailPage() {
   };
 
   // ─── Stage Photo Upload ────────────────────────────────────────────────
+  // Helper: read a File as a data URL so we can hand it to the crop dialog
+  // BEFORE we compress / save. The dialog re-encodes after cropping, so
+  // there's no point compressing twice — we feed the raw image in and let
+  // the cropper produce the final JPEG.
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result as string);
+      r.onerror = () => reject(new Error("Failed to read file"));
+      r.readAsDataURL(file);
+    });
+
   const handlePhotoUpload = (stage: string) => {
     setPhotoUploadStage(stage);
     photoInputRef.current?.click();
+  };
+
+  // Save a single cropped milestone photo at `stage`. If `replaceIndex` is
+  // provided we overwrite that slot; otherwise we append.
+  const saveMilestonePhoto = async (
+    stage: string,
+    croppedDataUrl: string,
+    replaceIndex?: number,
+  ) => {
+    if (!project) return;
+    const milestone = project.milestones.find((m) => m.stage === stage);
+    const previousPhotos = milestone?.photos ?? [];
+    const nextPhotos =
+      typeof replaceIndex === "number" && replaceIndex >= 0 && replaceIndex < previousPhotos.length
+        ? previousPhotos.map((p, i) => (i === replaceIndex ? croppedDataUrl : p))
+        : [...previousPhotos, croppedDataUrl];
+    setStagePhotos((prev) => ({ ...prev, [stage]: nextPhotos }));
+    const updatedMilestones = project.milestones.map((m) =>
+      m.stage === stage ? { ...m, photos: nextPhotos } : m,
+    );
+    try {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { milestones: updatedMilestones },
+      });
+      if (data.data) setProject(data.data as RDProject);
+    } catch {
+      toast.error("Failed to save photo");
+    }
   };
 
   const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -661,41 +793,19 @@ export default function RDProjectDetailPage() {
     e.target.value = "";
     if (!files || files.length === 0 || !stage || !project) return;
 
-    // Root-cause fix: previously this used URL.createObjectURL(file), which
-    // produces blob: URLs scoped to the current document. Those don't survive
-    // a reload and aren't transferable across devices — which is why the 3rd,
-    // 4th, 5th photos appeared "broken" once the user navigated away. Cover
-    // photo uploads (which work) use compressImage to produce a compact JPEG
-    // data URL persisted in TEXT. We now do the same here for milestone
-    // photos so the bytes actually live on the row.
+    // Multi-file: queue all but the first; we open the crop dialog with
+    // the first file. After the user confirms, we pop the next file off
+    // the queue and re-open the dialog (see handleCropConfirm below).
+    const list = Array.from(files);
+    const [first, ...rest] = list;
     try {
-      const compressed: string[] = [];
-      // Sequential await keeps memory low on phones — five 10 MB photos
-      // decoded in parallel can OOM a low-end Android. compressImage is
-      // already off-main-thread on modern browsers (OffscreenCanvas), so
-      // the cost here is just dispatch latency, not main-thread blocking.
-      for (let i = 0; i < files.length; i++) {
-        const dataUrl = await compressImage(files[i], { maxDim: 1280, quality: 0.85 });
-        compressed.push(dataUrl);
-      }
-      setStagePhotos((prev) => ({
-        ...prev,
-        [stage]: [...(prev[stage] || []), ...compressed],
-      }));
-      const milestone = project.milestones.find((m) => m.stage === stage);
-      const previousPhotos = milestone?.photos ?? [];
-      const updatedMilestones = project.milestones.map((m) =>
-        m.stage === stage
-          ? { ...m, photos: [...previousPhotos, ...compressed] }
-          : m,
-      );
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { milestones: updatedMilestones },
-      });
-      if (data.data) setProject(data.data as RDProject);
+      const dataUrl = await readFileAsDataUrl(first);
+      setCropQueue(rest);
+      setCropTarget({ kind: "milestone-add", stage });
+      setCropImageUrl(dataUrl);
+      setCropOpen(true);
     } catch {
-      toast.error("Failed to upload photo(s)");
+      toast.error("Failed to load photo");
     }
   };
 
@@ -788,14 +898,17 @@ export default function RDProjectDetailPage() {
   // Dedicated cover photo (separate from milestone photos[]). One image per
   // project, stored as a JPEG data URL in rd_projects.cover_photo_url.
 
-  const handleCoverPhotoUpload = async (file: File | null) => {
-    if (!file || !project) return;
+  // Persist a (already-cropped) data URL as the project's cover photo. The
+  // crop dialog produces JPEG output capped at 1280px so we don't run
+  // compressImage again — that would re-encode and add a generation of loss
+  // for no benefit.
+  const saveCoverPhoto = async (croppedDataUrl: string) => {
+    if (!project) return;
     setCoverPhotoSaving(true);
     try {
-      const dataUrl = await compressImage(file, { maxDim: 1280, quality: 0.85 });
       const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
-        body: { coverPhotoUrl: dataUrl },
+        body: { coverPhotoUrl: croppedDataUrl },
       });
       if (data.data) setProject(data.data as RDProject);
       toast.success("Cover photo updated");
@@ -804,6 +917,80 @@ export default function RDProjectDetailPage() {
     } finally {
       setCoverPhotoSaving(false);
     }
+  };
+
+  const handleCoverPhotoUpload = async (file: File | null) => {
+    if (!file || !project) return;
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setCropQueue([]);
+      setCropTarget({ kind: "cover" });
+      setCropImageUrl(dataUrl);
+      setCropOpen(true);
+    } catch {
+      toast.error("Failed to load photo");
+    }
+  };
+
+  // ── Crop dialog handlers ────────────────────────────────────────────────
+  const closeCropDialog = () => {
+    setCropOpen(false);
+    setCropImageUrl("");
+    setCropTarget(null);
+    setCropQueue([]);
+  };
+
+  const handleCropConfirm = async (croppedDataUrl: string) => {
+    const target = cropTarget;
+    if (!target) {
+      closeCropDialog();
+      return;
+    }
+    if (target.kind === "cover") {
+      closeCropDialog();
+      await saveCoverPhoto(croppedDataUrl);
+      return;
+    }
+    if (target.kind === "milestone-replace") {
+      closeCropDialog();
+      await saveMilestonePhoto(target.stage, croppedDataUrl, target.index);
+      return;
+    }
+    // milestone-add: save this one, then advance the queue if more files
+    // are pending. We keep the dialog open while there are more.
+    await saveMilestonePhoto(target.stage, croppedDataUrl);
+    if (cropQueue.length > 0) {
+      const [next, ...rest] = cropQueue;
+      try {
+        const dataUrl = await readFileAsDataUrl(next);
+        setCropQueue(rest);
+        setCropImageUrl(dataUrl);
+        // Keep the dialog open; same target.stage.
+      } catch {
+        toast.error("Failed to load next photo");
+        closeCropDialog();
+      }
+    } else {
+      closeCropDialog();
+    }
+  };
+
+  // Re-crop an existing photo without re-uploading. Works on both the
+  // dedicated cover photo and any milestone photo — addresses the user's
+  // ask: "let us pick which part to show" for any photo, fresh or saved.
+  const handleEditCoverCrop = () => {
+    if (!project?.coverPhotoUrl) return;
+    setCropQueue([]);
+    setCropTarget({ kind: "cover" });
+    setCropImageUrl(project.coverPhotoUrl);
+    setCropOpen(true);
+  };
+
+  const handleEditMilestoneCrop = (stage: string, index: number, dataUrl: string) => {
+    setCropQueue([]);
+    setCropTarget({ kind: "milestone-replace", stage, index });
+    setCropImageUrl(dataUrl);
+    setCropOpen(true);
   };
 
   const handleCoverPhotoRemove = async () => {
@@ -902,6 +1089,15 @@ export default function RDProjectDetailPage() {
             className="w-full aspect-square object-contain bg-[#FAF9F8]"
           />
           <div className="absolute top-2 right-2 flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleEditCoverCrop}
+              disabled={coverPhotoSaving}
+              className="inline-flex items-center justify-center rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white p-1.5 text-gray-500 hover:text-[#6B5C32] shadow-sm disabled:opacity-50"
+              title="Edit crop"
+            >
+              <Crop className="h-3.5 w-3.5" />
+            </button>
             <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">
               <ImagePlus className="h-3.5 w-3.5" />
               {coverPhotoSaving ? "Saving..." : "Replace"}
@@ -1057,6 +1253,50 @@ export default function RDProjectDetailPage() {
           <Button variant="outline" onClick={openEditModal} className="gap-1.5">
             <Pencil className="h-4 w-4" /> Edit
           </Button>
+          {project.status === "ACTIVE" && (
+            <>
+              <Button
+                variant="outline"
+                onClick={handleHold}
+                disabled={statusFlipping !== null}
+                className="gap-1.5"
+              >
+                <Pause className="h-4 w-4" />
+                {statusFlipping === "hold" ? "Holding..." : "Hold"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleMoveToDraft}
+                disabled={statusFlipping !== null}
+                className="gap-1.5"
+              >
+                <Archive className="h-4 w-4" />
+                {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
+              </Button>
+            </>
+          )}
+          {project.status === "ON_HOLD" && (
+            <>
+              <Button
+                variant="outline"
+                onClick={handleResume}
+                disabled={statusFlipping !== null}
+                className="gap-1.5"
+              >
+                <Play className="h-4 w-4" />
+                {statusFlipping === "resume" ? "Resuming..." : "Resume"}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={handleMoveToDraft}
+                disabled={statusFlipping !== null}
+                className="gap-1.5"
+              >
+                <Archive className="h-4 w-4" />
+                {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
+              </Button>
+            </>
+          )}
           {currentStageIndex < STAGES.length - 1 && project.status === "ACTIVE" && (
             <Button variant="primary" onClick={handleAdvanceStage} disabled={advancing}>
               {advancing ? "Advancing..." : `Advance to ${STAGE_LABELS[STAGES[currentStageIndex + 1]]}`}
@@ -1248,6 +1488,16 @@ export default function RDProjectDetailPage() {
                                   title="Move right"
                                 >
                                   <ChevronRight className="h-3 w-3" />
+                                </button>
+                                {/* Edit crop — opens crop dialog with the
+                                    current photo so the user can re-pick
+                                    the focal area without re-uploading. */}
+                                <button
+                                  onClick={() => handleEditMilestoneCrop(m.stage, idx, photo)}
+                                  className="absolute -top-1.5 -left-1.5 hidden group-hover/photo:flex h-4 w-4 items-center justify-center rounded-full bg-[#6B5C32] text-white"
+                                  title="Edit crop"
+                                >
+                                  <Crop className="h-2.5 w-2.5" />
                                 </button>
                                 <button
                                   onClick={() => removeStagePhoto(m.stage, idx)}
@@ -2142,6 +2392,18 @@ export default function RDProjectDetailPage() {
           </div>
         </div>
       </ModalOverlay>
+
+      {/* ─── Photo Crop Dialog ───────────────────────────────────────────────
+          Gates every cover-photo and milestone-photo upload (and any
+          "Edit crop" re-use of an existing photo). Square output by default
+          since both surfaces render in aspect-square slots. */}
+      <PhotoCropDialog
+        open={cropOpen}
+        imageDataUrl={cropImageUrl}
+        aspectRatio={1}
+        onCancel={closeCropDialog}
+        onConfirm={(url) => void handleCropConfirm(url)}
+      />
     </div>
   );
 }

@@ -1566,11 +1566,14 @@ export default function ProductionPage({
           })(),
           qty: (jc as JobCard & { wipQty?: number }).wipQty ?? o.quantity ?? 0,
           specialOrder: o.specialOrder || "",
-          // Per-jc production time (minutes). Populated on every dept sheet —
-          // the FAB_CUT merge step below aggregates this across the merged
-          // children so the collapsed row reports a sum, matching what the
-          // sticker prints. Everywhere else it's the raw job-card minutes.
-          prodTime: jc.productionTimeMinutes || jc.estMinutes || 0,
+          // Per-jc production time (minutes), TOTAL = per-unit × wipQty so the
+          // sheet column shows hours of work, not per-piece. Populated on every
+          // dept sheet — the FAB_CUT merge step below aggregates this across
+          // merged children so the collapsed row reports a sum, matching what
+          // the sticker prints.
+          prodTime:
+            ((jc.productionTimeMinutes || jc.estMinutes || 0) as number) *
+            (((jc as JobCard & { wipQty?: number }).wipQty ?? 1) || 1),
           rack: (jc as JobCard & { rackingNumber?: string }).rackingNumber || "",
           dueDate: jc.dueDate || "",
           completedDate: jc.completedDate || "",

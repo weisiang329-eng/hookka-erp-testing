@@ -4759,13 +4759,10 @@ function BatchEditMaterialsDialog({
 }) {
   const { toast } = useToast();
   const [rows, setRows] = useState<MatRow[]>([]);
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [searchText, setSearchText] = useState("");
-  // Defer searchText so the heavy memo chain (filteredRows → matrixModels →
-  // matrixWipColumns → matrixCells) doesn't re-run on every keystroke. The
-  // input itself stays controlled by `searchText` (instant feedback);
-  // filtering uses `searchTextDeferred` and lags by ~one paint frame on a
-  // busy main thread, which is invisible to the user but eliminates the
-  // hitch on a 3000-row dataset.
+  // Defer searchText so the filter useMemo doesn't re-run on every keystroke.
+  // Input itself stays controlled by `searchText`; filtering uses `searchTextDeferred`.
   const searchTextDeferred = useDeferredValue(searchText);
   const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
   const [filterWipType, setFilterWipType] = useState<string>("");
@@ -4778,13 +4775,14 @@ function BatchEditMaterialsDialog({
   const [saving, setSaving] = useState(false);
   // Monotonic counter so each "+ Add material" click produces a unique
   // rowKey for the new row (rowKey collisions break React reconciliation
-  // and the dirty Sets).
+  // and the dirty/selected Sets).
   const newRowCounterRef = React.useRef(0);
 
   /* eslint-disable react-hooks/set-state-in-effect -- reset dialog state on each open */
   useEffect(() => {
     if (!open) return;
     setRows(buildMatRows(templates));
+    setSelectedKeys(new Set());
     setSearchText("");
     setFilterCategory("ALL");
     setFilterWipType("");
@@ -4864,56 +4862,33 @@ function BatchEditMaterialsDialog({
     });
   }, [rows, filterCategory, filterWipType, filterDept, filterMaterials, searchTextDeferred]);
 
-  // Matrix axes: rows = unique productCodes, columns = unique resolved
-  // wipLabels. Same WIP archetype across models lines up under one column
-  // (e.g. `8" Divan-6FT` collapses across every BOM that resolves to it).
-  // Column list narrows when models narrow and vice versa.
-  const matrixModels = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of filteredRows) set.add(r.productCode);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [filteredRows]);
+  const allFilteredSelected =
+    filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
 
-  const matrixWipColumns = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of filteredRows) set.add(r.wipLabel);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [filteredRows]);
-
-  // (model -> wipLabel -> rows[]) lookup. The cell stacks every MatRow that
-  // lands here — multiple existing materials, plus the placeholder ("+ Add"
-  // affordance). At most one placeholder per cell (one per WIP node), so
-  // emitting the placeholder inside the cell is unambiguous.
-  const matrixCells = useMemo(() => {
-    const out: Record<string, Record<string, MatRow[]>> = {};
-    for (const r of filteredRows) {
-      const byCol = out[r.productCode] || (out[r.productCode] = {});
-      const arr = byCol[r.wipLabel] || (byCol[r.wipLabel] = []);
-      arr.push(r);
+  function toggleAllFiltered() {
+    if (allFilteredSelected) {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.delete(r.rowKey);
+        return next;
+      });
+    } else {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.add(r.rowKey);
+        return next;
+      });
     }
-    return out;
-  }, [filteredRows]);
+  }
 
-  // (model -> wipLabel -> placeholder rowKey) — built from the FULL row set,
-  // not the filtered one. The "+ Add material" affordance at the bottom of
-  // every cell needs the placeholder rowKey to call addMaterialFromPlaceholder.
-  // We can't rely on the placeholder MatRow surviving the filter pass: search
-  // text + material multi-select both drop placeholders (they have no code/
-  // name to match), so without this fallback map the user could only ever
-  // add ONE material before the filter hid the placeholder. Cells with no
-  // visible rows after filtering also need access to a stable placeholder key
-  // so the persistent "+ Add" still works in narrowed views.
-  const placeholderByCell = useMemo(() => {
-    const out: Record<string, Record<string, string>> = {};
-    for (const r of rows) {
-      if (!r.isPlaceholder) continue;
-      const byCol = out[r.productCode] || (out[r.productCode] = {});
-      // First placeholder wins per (model, wipLabel) — every WIP step emits
-      // exactly one placeholder, so first-write is also last-write here.
-      if (!byCol[r.wipLabel]) byCol[r.wipLabel] = r.rowKey;
-    }
-    return out;
-  }, [rows]);
+  function toggleOne(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
 
   function updateRow(key: string, changes: Partial<MatRow>) {
     setRows((prev) => prev.map((r) => (r.rowKey === key ? { ...r, ...changes } : r)));
@@ -4962,13 +4937,20 @@ function BatchEditMaterialsDialog({
     });
   }
 
-  // Toggle delete on a single row. New (isNew) rows are simply removed
-  // from the local array since they have no server-side counterpart.
+  // Toggle delete on a row. New (isNew) rows are simply removed from the
+  // local array since they have no server-side counterpart to mark.
   function toggleRowDelete(key: string) {
     setRows((prev) => {
       const r = prev.find((row) => row.rowKey === key);
       if (!r) return prev;
       if (r.isNew) {
+        // Drop unsaved row entirely.
+        setSelectedKeys((sel) => {
+          if (!sel.has(key)) return sel;
+          const next = new Set(sel);
+          next.delete(key);
+          return next;
+        });
         return prev.filter((row) => row.rowKey !== key);
       }
       return prev.map((row) =>
@@ -4977,9 +4959,14 @@ function BatchEditMaterialsDialog({
     });
   }
 
-  // Matrix-mode bulk-apply — operates on every visible (filtered) cell.
-  // Per-row checkboxes don't fit the matrix layout, so the bulk targets
-  // are implicit: whatever the user has narrowed via filters.
+  function targetsForBulk(): MatRow[] {
+    if (selectedKeys.size > 0) {
+      return filteredRows.filter((r) => selectedKeys.has(r.rowKey));
+    }
+    return filteredRows;
+  }
+
+  // Bulk apply — does the right thing per row type:
   //   • placeholder → add a new material to that WIP step
   //   • autoDetect  → skip (Fabric/Leg from order can't be replaced)
   //   • regular     → replace the existing material
@@ -4988,11 +4975,12 @@ function BatchEditMaterialsDialog({
       toast.warning("Pick a material first.");
       return;
     }
-    if (filteredRows.length === 0) {
-      toast.warning("No cells visible to apply to.");
+    const targets = targetsForBulk();
+    if (targets.length === 0) {
+      toast.warning("No rows to apply to.");
       return;
     }
-    const targetKeys = new Set(filteredRows.map((r) => r.rowKey));
+    const targetKeys = new Set(targets.map((r) => r.rowKey));
     let replaced = 0;
     let added = 0;
     let skipped = 0;
@@ -5047,19 +5035,17 @@ function BatchEditMaterialsDialog({
     toast.success(`${parts.join(" · ") || "no-op"}. Click Save to persist.`);
   }
 
-  // Matrix-mode bulk-delete / restore — operates on every visible cell.
   function bulkToggleDelete(markDeleted: boolean) {
-    if (filteredRows.length === 0) {
-      toast.warning("No cells visible.");
+    if (selectedKeys.size === 0) {
+      toast.warning("Select rows first.");
       return;
     }
-    const targetKeys = new Set(filteredRows.map((r) => r.rowKey));
     let touched = 0;
     let dropped = 0;
     setRows((prev) => {
       const out: MatRow[] = [];
       for (const r of prev) {
-        if (!targetKeys.has(r.rowKey)) {
+        if (!selectedKeys.has(r.rowKey)) {
           out.push(r);
           continue;
         }
@@ -5077,6 +5063,18 @@ function BatchEditMaterialsDialog({
       }
       return out;
     });
+    if (dropped > 0) {
+      // Clear those rowKeys from selection too — they no longer exist.
+      setSelectedKeys((sel) => {
+        const next = new Set(sel);
+        for (const k of sel) {
+          if (!rows.find((r) => r.rowKey === k && (r.isPlaceholder || (!r.isNew)))) {
+            next.delete(k);
+          }
+        }
+        return next;
+      });
+    }
     const verb = markDeleted ? "Marked" : "Restored";
     const dropMsg = dropped > 0 ? `, dropped ${dropped} unsaved` : "";
     toast.success(`${verb} ${touched} row${touched !== 1 ? "s" : ""}${dropMsg}.`);
@@ -5084,6 +5082,7 @@ function BatchEditMaterialsDialog({
 
   function discardChanges() {
     setRows(buildMatRows(templates));
+    setSelectedKeys(new Set());
     toast.info("Discarded all changes.");
   }
 
@@ -5237,58 +5236,53 @@ function BatchEditMaterialsDialog({
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-xl shadow-2xl w-[1200px] max-w-[97vw] max-h-[92vh] flex flex-col"
+        className="bg-white rounded-xl shadow-2xl w-[920px] max-w-[95vw] max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
         <div className="px-6 py-4 border-b border-[#E2DDD8]">
           <h2 className="text-lg font-bold text-[#111827]">
-            RawMaterial Batch Editor
+            Batch Edit Raw Materials
           </h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Rows = Model, Columns = WIP step. Click a cell to edit / add / delete its
-            materials. Bulk Replace targets every visible cell. Auto-detect rows
+            Filter → replace, add, or delete materials. Each WIP step has a
+            "+" row at the end to add a new material. Auto-detect rows
             (Fabric/Leg from order) can only be deleted.
           </p>
         </div>
 
         {/* Body */}
         <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
-          {/* Filter row — visually aligned with Production Categories Editor:
-              flex-wrap with labeled field blocks and a counter pinned to the
-              right. Field widths/typography/gap match the sibling dialog. */}
-          <div className="flex gap-3 items-end flex-wrap">
-            <div className="flex-1 min-w-[200px]">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
+          {/* Filters */}
+          <div className="bg-[#FAF9F7] rounded-lg p-3 space-y-2">
+            <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
+              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
+              Filter
+            </div>
+            <div className="grid grid-cols-5 gap-2">
               <input
                 type="text"
-                placeholder="Filter by BOM / material..."
+                placeholder="Search BOM / material..."
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+                className="border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
               />
-            </div>
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
               <select
                 value={filterCategory}
                 onChange={(e) =>
                   setFilterCategory(e.target.value as "ALL" | BOMCategory)
                 }
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
               >
                 <option value="ALL">All Categories</option>
                 <option value="BEDFRAME">Bedframe</option>
                 <option value="SOFA">Sofa</option>
                 <option value="ACCESSORY">Accessory</option>
               </select>
-            </div>
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">WIP Type</label>
               <select
                 value={filterWipType}
                 onChange={(e) => setFilterWipType(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
               >
                 <option value="">All WIP Types</option>
                 {wipTypeOptions.map((w) => (
@@ -5297,13 +5291,10 @@ function BatchEditMaterialsDialog({
                   </option>
                 ))}
               </select>
-            </div>
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
               <select
                 value={filterDept}
                 onChange={(e) => setFilterDept(e.target.value)}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
+                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
                 title="Show only WIP steps with a process in this department"
               >
                 <option value="">All Departments</option>
@@ -5313,121 +5304,107 @@ function BatchEditMaterialsDialog({
                   </option>
                 ))}
               </select>
-            </div>
-            {/* Multi-select material filter — opens a checkbox popover.
-                Same width/typography as the sibling dropdowns; only the
-                trigger affordance differs (popover vs native select). */}
-            <div className="w-48 relative">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Material</label>
-              <button
-                type="button"
-                onClick={() => setMaterialFilterOpen((v) => !v)}
-                className="w-full text-left border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm bg-white hover:bg-gray-50 flex items-center justify-between gap-1 focus:outline-none focus:border-[#6B5C32]"
-              >
-                <span className="truncate">
-                  {filterMaterials.size === 0
-                    ? "All Materials"
-                    : filterMaterials.size === 1
-                    ? Array.from(filterMaterials)[0]
-                    : `${filterMaterials.size} materials`}
-                </span>
-                <svg className="w-3 h-3 flex-shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-              {materialFilterOpen && (
-                <div className="absolute z-20 mt-1 w-[260px] right-0 max-h-[260px] overflow-y-auto bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-1.5 space-y-0.5">
-                  <div className="flex items-center justify-between px-1 py-1 border-b border-[#E2DDD8]">
-                    <span className="text-[10px] text-gray-500 uppercase tracking-wider">
-                      {filterMaterials.size} selected
-                    </span>
-                    <div className="flex items-center gap-2">
-                      {filterMaterials.size > 0 && (
+              {/* Multi-select material filter — opens a checkbox popover. */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setMaterialFilterOpen((v) => !v)}
+                  className="w-full text-left border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm bg-white hover:bg-gray-50 flex items-center justify-between gap-1"
+                >
+                  <span className="truncate">
+                    {filterMaterials.size === 0
+                      ? "All Materials"
+                      : filterMaterials.size === 1
+                      ? Array.from(filterMaterials)[0]
+                      : `${filterMaterials.size} materials`}
+                  </span>
+                  <svg className="w-3 h-3 flex-shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {materialFilterOpen && (
+                  <div className="absolute z-20 mt-1 w-[260px] right-0 max-h-[260px] overflow-y-auto bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-1.5 space-y-0.5">
+                    <div className="flex items-center justify-between px-1 py-1 border-b border-[#E2DDD8]">
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">
+                        {filterMaterials.size} selected
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {filterMaterials.size > 0 && (
+                          <button
+                            onClick={() => setFilterMaterials(new Set())}
+                            className="text-[10px] text-[#9A3A2D] hover:underline"
+                          >
+                            Clear
+                          </button>
+                        )}
                         <button
-                          onClick={() => setFilterMaterials(new Set())}
-                          className="text-[10px] text-[#9A3A2D] hover:underline"
+                          onClick={() => setMaterialFilterOpen(false)}
+                          className="text-[10px] text-gray-500 hover:underline"
                         >
-                          Clear
+                          Close
                         </button>
-                      )}
-                      <button
-                        onClick={() => setMaterialFilterOpen(false)}
-                        className="text-[10px] text-gray-500 hover:underline"
-                      >
-                        Close
-                      </button>
+                      </div>
                     </div>
+                    {materialCodeOptions.length === 0 && (
+                      <p className="text-xs text-gray-400 p-2 text-center">
+                        No material codes in any BOM yet.
+                      </p>
+                    )}
+                    {materialCodeOptions.map((c) => {
+                      const checked = filterMaterials.has(c);
+                      return (
+                        <label
+                          key={c}
+                          className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer ${
+                            checked ? "bg-[#EEF3E4]" : "hover:bg-[#FAF9F7]"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setFilterMaterials((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(c)) next.delete(c);
+                                else next.add(c);
+                                return next;
+                              });
+                            }}
+                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                          <span className="font-mono truncate">{c}</span>
+                        </label>
+                      );
+                    })}
                   </div>
-                  {materialCodeOptions.length === 0 && (
-                    <p className="text-xs text-gray-400 p-2 text-center">
-                      No material codes in any BOM yet.
-                    </p>
-                  )}
-                  {materialCodeOptions.map((c) => {
-                    const checked = filterMaterials.has(c);
-                    return (
-                      <label
-                        key={c}
-                        className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer ${
-                          checked ? "bg-[#EEF3E4]" : "hover:bg-[#FAF9F7]"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => {
-                            setFilterMaterials((prev) => {
-                              const next = new Set(prev);
-                              if (next.has(c)) next.delete(c);
-                              else next.add(c);
-                              return next;
-                            });
-                          }}
-                          className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
-                        />
-                        <span className="font-mono truncate">{c}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              )}
+                )}
+              </div>
             </div>
-            {/* Counter — sibling of the field blocks, pinned by flex layout
-                to the right edge. Mirrors Production Categories' counter
-                slot but uses material-specific metrics. */}
-            <div className="text-xs text-gray-500 pb-2">
-              {matrixModels.length} model{matrixModels.length !== 1 ? "s" : ""} ·{" "}
-              {matrixWipColumns.length} WIP column{matrixWipColumns.length !== 1 ? "s" : ""} ·{" "}
-              {filteredRows.length} of {rows.length} cell{rows.length !== 1 ? "s" : ""} ·{" "}
-              {dirtyCount} dirty
-            </div>
+            {(searchText ||
+              filterCategory !== "ALL" ||
+              filterWipType ||
+              filterDept ||
+              filterMaterials.size > 0) && (
+              <button
+                onClick={() => {
+                  setSearchText("");
+                  setFilterCategory("ALL");
+                  setFilterWipType("");
+                  setFilterDept("");
+                  setFilterMaterials(new Set());
+                }}
+                className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
+              >
+                <span>✕</span> Clear filters
+              </button>
+            )}
           </div>
-          {(searchText ||
-            filterCategory !== "ALL" ||
-            filterWipType ||
-            filterDept ||
-            filterMaterials.size > 0) && (
-            <button
-              onClick={() => {
-                setSearchText("");
-                setFilterCategory("ALL");
-                setFilterWipType("");
-                setFilterDept("");
-                setFilterMaterials(new Set());
-              }}
-              className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
-            >
-              <span>✕</span> Clear filters
-            </button>
-          )}
 
-          {/* Bulk-fill bar — targets every cell currently visible after
-              filtering. Per-row checkboxes don't fit a matrix layout, so
-              "selection" is implicit: narrow with filters above, then act. */}
+          {/* Bulk-fill bar */}
           <div className="flex flex-wrap items-end gap-2 border border-[#E2DDD8] rounded-lg p-3 bg-[#FFF8E7]">
             <div className="flex-1 min-w-[220px]">
               <label className="block text-[10px] font-medium text-gray-700 mb-0.5">
-                Replace material in {filteredRows.length} visible cell{filteredRows.length !== 1 ? "s" : ""}
+                Replace material in {selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `${filteredRows.length} visible`}
               </label>
               <div className="flex items-center gap-1">
                 <RawMaterialSelect
@@ -5437,7 +5414,7 @@ function BatchEditMaterialsDialog({
                 />
                 <button
                   onClick={bulkReplaceMaterial}
-                  disabled={!bulkMaterial || filteredRows.length === 0}
+                  disabled={!bulkMaterial}
                   className="px-2 py-1 text-xs bg-[#6B5C32] text-white rounded hover:bg-[#5A4D2A] disabled:opacity-40"
                 >
                   Apply
@@ -5447,236 +5424,186 @@ function BatchEditMaterialsDialog({
             <div className="flex items-end gap-1">
               <button
                 onClick={() => bulkToggleDelete(true)}
-                disabled={filteredRows.length === 0}
+                disabled={selectedKeys.size === 0}
                 className="px-2 py-1 text-xs bg-[#9A3A2D] text-white rounded hover:bg-[#7A2E24] disabled:opacity-40"
-                title="Mark every visible row for deletion"
+                title="Mark selected rows for deletion"
               >
-                Delete visible
+                Delete selected
               </button>
               <button
                 onClick={() => bulkToggleDelete(false)}
-                disabled={filteredRows.length === 0}
+                disabled={selectedKeys.size === 0}
                 className="px-2 py-1 text-xs bg-white border border-[#E2DDD8] rounded hover:bg-gray-50 disabled:opacity-40"
-                title="Unmark deletion on every visible row"
+                title="Unmark deletion on selected rows"
               >
                 Restore
               </button>
             </div>
           </div>
 
-          {/* Discard — counter has moved into the filter row above. */}
-          {dirtyCount > 0 && (
-            <div className="flex items-center justify-end">
+          {/* Row counter / select-all / discard */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-700">
+              <span className="font-semibold">{dirtyCount}</span> dirty ·{" "}
+              <span className="font-semibold">{selectedKeys.size}</span> selected ·
+              Showing {filteredRows.length} of {rows.length}
+            </span>
+            <div className="flex items-center gap-3">
               <button
-                onClick={discardChanges}
-                className="text-xs text-[#9A3A2D] hover:underline"
+                onClick={toggleAllFiltered}
+                className="text-xs text-[#6B5C32] hover:underline font-medium"
               >
-                Discard changes
+                {allFilteredSelected
+                  ? `Deselect ${filteredRows.length}`
+                  : `Select ${filteredRows.length} filtered`}
               </button>
+              {selectedKeys.size > 0 && (
+                <button
+                  onClick={() => setSelectedKeys(new Set())}
+                  className="text-xs text-[#9A3A2D] hover:underline"
+                >
+                  Clear selection
+                </button>
+              )}
+              {dirtyCount > 0 && (
+                <button
+                  onClick={discardChanges}
+                  className="text-xs text-[#9A3A2D] hover:underline"
+                >
+                  Discard changes
+                </button>
+              )}
             </div>
-          )}
+          </div>
 
-          {/* Pivot matrix — Model rows × WIP-column. Each cell stacks all
-              MatRows that fall in that (model, wipLabel) bucket: existing
-              materials, newly-added materials, and the placeholder "+ Add"
-              affordance at the bottom. Auto-detect rows render as a
-              disabled badge (per the existing comment). */}
+          {/* Rows */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div className="max-h-[64vh] overflow-auto">
-              <table className="text-sm border-separate border-spacing-0">
-                <thead className="bg-[#FAF9F7] sticky top-0 z-10">
-                  <tr className="text-left text-[10px] text-gray-500 uppercase tracking-wider">
-                    <th className="px-3 py-2 font-medium border-b border-[#E2DDD8] sticky left-0 bg-[#FAF9F7] z-20 min-w-[140px]">
-                      Model
-                    </th>
-                    {matrixWipColumns.map((w) => {
-                      const sample = filteredRows.find((r) => r.wipLabel === w);
-                      const wipColor =
-                        sample && WIP_TYPE_LABELS[sample.wipType]?.color
-                          ? WIP_TYPE_LABELS[sample.wipType].color
-                          : "#6B7280";
-                      return (
-                        <th
-                          key={w}
-                          className="px-2 py-2 font-medium border-b border-[#E2DDD8] min-w-[200px] text-center align-bottom"
-                          title={w}
-                        >
-                          <div
-                            className="inline-block px-1.5 py-0.5 rounded text-[10px] font-medium truncate max-w-[200px]"
-                            style={{
-                              backgroundColor: `${wipColor}20`,
-                              color: wipColor,
-                            }}
-                          >
-                            {w}
-                          </div>
-                        </th>
-                      );
-                    })}
-                  </tr>
-                </thead>
-                <tbody>
-                  {matrixModels.length === 0 && (
-                    <tr>
-                      <td
-                        colSpan={Math.max(1, matrixWipColumns.length + 1)}
-                        className="px-3 py-8 text-center text-gray-400 border-b border-[#E2DDD8]"
-                      >
-                        {rows.length === 0
-                          ? "No BOM templates loaded."
-                          : "No cells match the current filters."}
-                      </td>
-                    </tr>
-                  )}
-                  {matrixModels.map((m) => (
-                    <tr key={m} className="hover:bg-[#FAF9F7]/40">
-                      <td className="px-3 py-2 font-medium text-[#111827] border-b border-[#E2DDD8] sticky left-0 bg-white z-10 align-top">
-                        <div>{m}</div>
-                        {(() => {
-                          const sample = filteredRows.find((r) => r.productCode === m);
-                          return sample ? (
-                            <div className="text-[10px] text-gray-400">{sample.baseModel}</div>
-                          ) : null;
-                        })()}
-                      </td>
-                      {matrixWipColumns.map((w) => {
-                        const cellRows = matrixCells[m]?.[w] || [];
-                        // Real (non-placeholder) rows that survived filtering.
-                        // Placeholders are no longer rendered inline — every
-                        // cell gets its own persistent "+ Add material" row
-                        // anchored at the bottom (see below) so the user can
-                        // keep adding indefinitely, even when search/material
-                        // filters would otherwise hide the placeholder MatRow.
-                        const realRows = cellRows.filter((r) => !r.isPlaceholder);
-                        const placeholderKey = placeholderByCell[m]?.[w];
-                        if (realRows.length === 0 && !placeholderKey) {
-                          return (
-                            <td
-                              key={w}
-                              className="px-2 py-2 border-b border-[#E2DDD8] text-center text-gray-300"
-                            >
-                              —
-                            </td>
-                          );
+            <div className="grid grid-cols-[28px_minmax(110px,1fr)_minmax(110px,1fr)_minmax(220px,2fr)_70px_50px_28px] gap-2 px-3 py-2 bg-[#FAF9F7] text-[10px] font-medium text-gray-500 uppercase tracking-wider border-b border-[#E2DDD8]">
+              <span></span>
+              <span>BOM</span>
+              <span>WIP Step</span>
+              <span>Material</span>
+              <span className="text-right">Qty</span>
+              <span>Unit</span>
+              <span></span>
+            </div>
+            <div className="max-h-[360px] overflow-y-auto">
+              {filteredRows.length === 0 && (
+                <p className="text-sm text-gray-400 p-4 text-center">
+                  {rows.length === 0
+                    ? "No BOM templates loaded."
+                    : "No rows match the current filters."}
+                </p>
+              )}
+              {filteredRows.map((r) => {
+                const isSelected = selectedKeys.has(r.rowKey);
+                const dirty = isRowDirty(r);
+                const wipColor = WIP_TYPE_LABELS[r.wipType]?.color || "#6B7280";
+                const rowTone = r.isPlaceholder
+                  ? "bg-[#FAF9F7]/40 hover:bg-[#FAF9F7]"
+                  : r.toDelete
+                  ? "bg-[#F9E1DA] line-through text-gray-400"
+                  : r.isNew
+                  ? "bg-[#EEF3E4]"
+                  : dirty
+                  ? "bg-[#EEF3E4]"
+                  : isSelected
+                  ? "bg-[#FAEFCB]/60"
+                  : "hover:bg-[#FAF9F7]";
+                return (
+                  <div
+                    key={r.rowKey}
+                    className={`grid grid-cols-[28px_minmax(110px,1fr)_minmax(110px,1fr)_minmax(220px,2fr)_70px_50px_28px] gap-2 px-3 py-1.5 items-center border-b border-[#E2DDD8] last:border-b-0 text-xs ${rowTone}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => toggleOne(r.rowKey)}
+                      className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                    />
+                    <div className="min-w-0 truncate">
+                      <span className="font-medium text-[#111827]">
+                        {r.productCode}
+                      </span>
+                      <span className="ml-1 text-[10px] text-gray-400">
+                        {r.baseModel}
+                      </span>
+                    </div>
+                    <div
+                      className="px-1.5 py-0.5 rounded text-[10px] font-medium truncate inline-block max-w-full"
+                      style={{
+                        backgroundColor: `${wipColor}20`,
+                        color: wipColor,
+                      }}
+                      title={r.wipLabel}
+                    >
+                      {r.wipLabel}
+                    </div>
+                    {r.isPlaceholder ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] text-[#4F7C3A] font-medium pl-1 pr-1">+</span>
+                        <RawMaterialSelect
+                          value=""
+                          materials={rawMaterials}
+                          onSelect={(rm) => addMaterialFromPlaceholder(r.rowKey, rm)}
+                        />
+                      </div>
+                    ) : r.autoDetect ? (
+                      <div className="flex items-center gap-1">
+                        <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                          {r.autoDetect === "FABRIC"
+                            ? "Fabric from order"
+                            : "Leg from order"}
+                        </span>
+                      </div>
+                    ) : (
+                      <RawMaterialSelect
+                        value={r.code}
+                        materials={rawMaterials}
+                        onSelect={(rm) => selectMaterialForRow(r.rowKey, rm)}
+                      />
+                    )}
+                    <span
+                      className="text-right text-xs text-gray-500 tabular-nums px-1.5 py-1"
+                      title={
+                        r.isPlaceholder
+                          ? "Pick a material to add it to this WIP step."
+                          : "Qty is managed in the per-BOM Edit dialog, not here."
+                      }
+                    >
+                      {r.isPlaceholder ? "—" : r.qty}
+                    </span>
+                    <span className="text-[10px] text-gray-500">
+                      {r.isPlaceholder ? "" : r.unit}
+                    </span>
+                    {r.isPlaceholder ? (
+                      <span className="w-3.5 h-3.5" />
+                    ) : (
+                      <button
+                        onClick={() => toggleRowDelete(r.rowKey)}
+                        className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                        title={
+                          r.isNew
+                            ? "Discard this unsaved row"
+                            : r.toDelete
+                            ? "Restore"
+                            : "Delete"
                         }
-                        return (
-                          <td
-                            key={w}
-                            className="px-1.5 py-1 border-b border-[#E2DDD8] align-top"
-                          >
-                            <div className="flex flex-col gap-1.5">
-                              {realRows.map((r) => {
-                                const dirty = isRowDirty(r);
-                                const tone = r.toDelete
-                                  ? "bg-[#F9E1DA]"
-                                  : r.isNew
-                                  ? "bg-[#EEF3E4]"
-                                  : dirty
-                                  ? "bg-[#EEF3E4]"
-                                  : "";
-                                return (
-                                  <div
-                                    key={r.rowKey}
-                                    className={`flex flex-col gap-0.5 rounded px-1 py-0.5 ${tone} ${
-                                      r.toDelete ? "line-through text-gray-400" : ""
-                                    }`}
-                                  >
-                                    <div className="flex items-center gap-1">
-                                      {r.autoDetect ? (
-                                        <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap flex-1 text-center">
-                                          {r.autoDetect === "FABRIC"
-                                            ? "Fabric from order (auto)"
-                                            : "Leg from order (auto)"}
-                                        </span>
-                                      ) : (
-                                        <RawMaterialSelect
-                                          value={r.code}
-                                          materials={rawMaterials}
-                                          onSelect={(rm) => selectMaterialForRow(r.rowKey, rm)}
-                                        />
-                                      )}
-                                      <button
-                                        onClick={() => toggleRowDelete(r.rowKey)}
-                                        className="text-[#9A3A2D] hover:text-[#7A2E24] flex-shrink-0"
-                                        title={
-                                          r.isNew
-                                            ? "Discard this unsaved row"
-                                            : r.toDelete
-                                            ? "Restore"
-                                            : "Delete"
-                                        }
-                                      >
-                                        {r.toDelete ? (
-                                          <svg
-                                            className="w-3 h-3"
-                                            fill="none"
-                                            viewBox="0 0 24 24"
-                                            stroke="currentColor"
-                                            strokeWidth={2}
-                                          >
-                                            <path
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                              d="M3 12a9 9 0 0118 0M3 12a9 9 0 009 9M3 12l3-3m0 6l-3-3"
-                                            />
-                                          </svg>
-                                        ) : (
-                                          <svg
-                                            className="w-3 h-3"
-                                            fill="none"
-                                            viewBox="0 0 24 24"
-                                            stroke="currentColor"
-                                            strokeWidth={2}
-                                          >
-                                            <path
-                                              strokeLinecap="round"
-                                              strokeLinejoin="round"
-                                              d="M6 18L18 6M6 6l12 12"
-                                            />
-                                          </svg>
-                                        )}
-                                      </button>
-                                    </div>
-                                    <div
-                                      className="text-[10px] text-gray-500 tabular-nums pl-1"
-                                      title="Qty is managed in the per-BOM Edit dialog, not here."
-                                    >
-                                      {r.qty} {r.unit}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                              {/* Persistent "+ Add material" affordance —
-                                  always rendered at the bottom of every cell
-                                  that has a placeholder mapped. Clicking it
-                                  inserts a new MatRow before the placeholder
-                                  in the rows array; the placeholder itself
-                                  is preserved so the user can keep adding
-                                  indefinitely. Hidden only when the WIP step
-                                  has no placeholder at all (shouldn't happen
-                                  given buildMatRows emits one per WIP node). */}
-                              {placeholderKey && (
-                                <div className="flex items-center gap-1 rounded px-1 py-0.5 bg-[#FAF9F7]/60">
-                                  <span className="text-[10px] text-[#4F7C3A] font-semibold pl-0.5">
-                                    +
-                                  </span>
-                                  <RawMaterialSelect
-                                    value=""
-                                    materials={rawMaterials}
-                                    onSelect={(rm) =>
-                                      addMaterialFromPlaceholder(placeholderKey, rm)
-                                    }
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                      >
+                        {r.toDelete ? (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 0118 0M3 12a9 9 0 009 9M3 12l3-3m0 6l-3-3" />
+                          </svg>
+                        ) : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>
@@ -5761,26 +5688,6 @@ function buildSampleVariantCtx(p: Product | undefined, t: BOMTemplate): BomVaria
     legHeightInches: 2,
     gapInches: 0,
   };
-}
-
-// Branch-label shortener for matrix column headers.
-// Existing `branchLabel` for L1 rows = "L1 / FG"; for WIP rows = the
-// resolved leaf wipCode (e.g. `1003-(K) -HB 10" PC151-01 (FC)`). Most of
-// that is repeated across columns (the productCode + fabric + " (FC)"
-// suffix), so strip those down to just the descriptive piece. Full text
-// is preserved on hover via the column header's `title`.
-function shortenBranchLabel(label: string): string {
-  let s = label;
-  // Drop a trailing " (FC)" or "(FC)" — a fabric-cut marker that's the same
-  // for every column.
-  s = s.replace(/\s*\(FC\)\s*$/, "");
-  // If the label starts with a productCode like `1003-(K) -` or `1003(A)-(K) -`,
-  // drop everything up through the first " -" sequence.
-  s = s.replace(/^[A-Z0-9-]+(?:\([A-Z0-9]+\))?(?:-\([A-Z0-9]+\))?\s*-\s*/, "");
-  // Drop a trailing fabric code like `PC151-01` (letters + digits + dash + digits).
-  s = s.replace(/\s+[A-Z]{1,3}\d{1,4}(?:-\d{1,3})?\s*$/, "");
-  s = s.trim();
-  return s || label;
 }
 
 function buildDeptPivotRows(
@@ -5882,16 +5789,16 @@ function DeptPivotCategoryDialog({
   const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
   const [rows, setRows] = useState<DeptPivotRow[]>([]);
   const [search, setSearch] = useState("");
-  // Defer the search term so the heavy memo chain (filteredRows, matrix
-  // axes, cell map, stale count) doesn't re-run on every keystroke. The
-  // input value stays controlled by `search`; filtering uses `searchDeferred`.
+  // Defer search so the filteredRows useMemo doesn't re-run on every keystroke.
   const searchDeferred = useDeferredValue(search);
   const [modelFilter, setModelFilter] = useState<string>("");
   const [branchFilter, setBranchFilter] = useState<string>("");
   const [saving, setSaving] = useState(false);
-  // Bulk-fill: in matrix mode, "selection" maps to "all currently visible
-  // matrix cells", since per-row checkboxes don't fit a row×column layout.
-  // Apply hits every cell in the filtered (model, branch) set.
+  // Multi-select for bulk-apply. Lets the user pick many rows and smash
+  // them all to the same category in one move (matches the Batch Edit
+  // dialog's UX). Selection is keyed by rowKey, independent of the
+  // inline edit state in `rows`.
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkFillCat, setBulkFillCat] = useState("");
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
@@ -5909,6 +5816,7 @@ function DeptPivotCategoryDialog({
     setSearch("");
     setModelFilter("");
     setBranchFilter("");
+    setSelectedKeys(new Set());
     setBulkFillCat("");
   }, [open, deptCode, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -5961,34 +5869,6 @@ function DeptPivotCategoryDialog({
       return true;
     });
   }, [rows, searchDeferred, modelFilter, branchFilter]);
-
-  // Matrix axes: rows = unique productCodes, columns = unique branchLabels,
-  // both narrowed to whatever survived the filter pass. Column list narrows
-  // when models narrow and vice versa so the user only sees relevant cells.
-  const matrixModels = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of filteredRows) set.add(r.productCode);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [filteredRows]);
-
-  const matrixBranches = useMemo(() => {
-    const set = new Set<string>();
-    for (const r of filteredRows) set.add(r.branchLabel);
-    return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [filteredRows]);
-
-  // (model -> branch -> rows[]) lookup. Most cells have 0 or 1 row; when a
-  // single WIP node has multiple processes touching the same dept (rare),
-  // the cell stacks them vertically.
-  const matrixCells = useMemo(() => {
-    const out: Record<string, Record<string, DeptPivotRow[]>> = {};
-    for (const r of filteredRows) {
-      const byBranch = out[r.productCode] || (out[r.productCode] = {});
-      const arr = byBranch[r.branchLabel] || (byBranch[r.branchLabel] = []);
-      arr.push(r);
-    }
-    return out;
-  }, [filteredRows]);
 
   // "Stale" = the BOM's stored minutes don't match what the Production
   // Times matrix says for that (dept, category) pair right now. Scoped
@@ -6047,18 +5927,45 @@ function DeptPivotCategoryDialog({
     );
   }
 
-  // Bulk-fill (matrix): writes bulkFillCat into every cell currently
-  // visible in the matrix + auto-fills minutes from the dept × category
-  // matrix. "Visible" = every row that survived the filter pass, which
-  // corresponds 1:1 with the rendered (model × branch) cells.
+  // Multi-select helpers
+  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
+  function toggleAllFiltered() {
+    if (allFilteredSelected) {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.delete(r.rowKey);
+        return next;
+      });
+    } else {
+      setSelectedKeys((prev) => {
+        const next = new Set(prev);
+        for (const r of filteredRows) next.add(r.rowKey);
+        return next;
+      });
+    }
+  }
+  function toggleOne(rowKey: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(rowKey)) next.delete(rowKey);
+      else next.add(rowKey);
+      return next;
+    });
+  }
+
+  // Bulk-fill: writes bulkFillCat into every targeted row's category +
+  // auto-fills minutes from the dept x category matrix. Targets are
+  // selected rows when there is selection, otherwise all visible rows.
   function handleBulkFill() {
     if (!bulkFillCat) {
       toast.warning("Pick a category first.");
       return;
     }
-    const targetKeys = new Set(filteredRows.map((r) => r.rowKey));
+    const targetKeys = selectedKeys.size > 0
+      ? new Set(filteredRows.filter((r) => selectedKeys.has(r.rowKey)).map((r) => r.rowKey))
+      : new Set(filteredRows.map((r) => r.rowKey));
     if (targetKeys.size === 0) {
-      toast.warning("No cells to apply to.");
+      toast.warning("No rows to apply to.");
       return;
     }
     const newMinutes = getProductionMinutes(deptCode, bulkFillCat);
@@ -6068,9 +5975,8 @@ function DeptPivotCategoryDialog({
         return { ...r, category: bulkFillCat, minutes: newMinutes };
       }),
     );
-    toast.success(
-      `Filled ${targetKeys.size} cell${targetKeys.size !== 1 ? "s" : ""} -> ${bulkFillCat}. Click Save to commit.`,
-    );
+    const scope = selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `${targetKeys.size} visible`;
+    toast.success(`Filled ${targetKeys.size} row${targetKeys.size !== 1 ? "s" : ""} -> ${bulkFillCat} (${scope}). Click Save 0 to commit.`.replace("Save 0", `Save`));
   }
 
   async function handleSave() {
@@ -6173,11 +6079,10 @@ function DeptPivotCategoryDialog({
       >
         {/* Header */}
         <div className="px-6 py-4 border-b border-[#E2DDD8]">
-          <h2 className="text-lg font-bold text-[#111827]">Production Categories Editor</h2>
+          <h2 className="text-lg font-bold text-[#111827]">Dept-Pivot Category Editor</h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Pick a department → edit category on every per-product BOM process. Rows = Model,
-            Columns = Branch / Code. Minutes auto-fill from Production Times. Saves directly to
-            bom_templates.
+            Pick a department → edit category on every per-product BOM process row that touches it.
+            Minutes auto-fill from Production Times. Saves directly to bom_templates.
           </p>
         </div>
 
@@ -6233,17 +6138,15 @@ function DeptPivotCategoryDialog({
               </select>
             </div>
             <div className="text-xs text-gray-500 pb-2">
-              {matrixModels.length} model{matrixModels.length !== 1 ? "s" : ""} ·{" "}
-              {matrixBranches.length} branch column{matrixBranches.length !== 1 ? "s" : ""} ·{" "}
-              {filteredRows.length} cell{filteredRows.length !== 1 ? "s" : ""} · {dirtyCount} dirty
+              {filteredRows.length} of {rows.length} rows · {dirtyCount} dirty · {selectedKeys.size} selected
             </div>
           </div>
 
-          {/* Bulk fill bar — apply one category to every visible matrix cell. */}
+          {/* Bulk fill bar - apply one category to many rows in one click. */}
           <div className="flex items-end gap-3 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2">
             <div className="flex-1">
               <label className="block text-xs font-medium text-gray-700 mb-1">
-                Bulk fill all {filteredRows.length} visible cell{filteredRows.length !== 1 ? "s" : ""} -&gt; ...
+                Bulk fill: {selectedKeys.size > 0 ? `${selectedKeys.size} selected` : `all ${filteredRows.length} visible`} -&gt; ...
               </label>
               <div className="flex gap-2">
                 <select
@@ -6260,12 +6163,28 @@ function DeptPivotCategoryDialog({
                 </select>
                 <button
                   onClick={handleBulkFill}
-                  disabled={!bulkFillCat || filteredRows.length === 0}
+                  disabled={!bulkFillCat}
                   className="px-3 py-1.5 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
                 >
-                  Apply
+                  Fill
                 </button>
               </div>
+            </div>
+            <div className="flex items-center gap-3 text-xs pb-1">
+              <button
+                onClick={toggleAllFiltered}
+                className="text-[#6B5C32] hover:underline font-medium whitespace-nowrap"
+              >
+                {allFilteredSelected ? `Deselect All ${filteredRows.length}` : `Select All ${filteredRows.length}`}
+              </button>
+              {selectedKeys.size > 0 && (
+                <button
+                  onClick={() => setSelectedKeys(new Set())}
+                  className="text-[#9A3A2D] hover:underline whitespace-nowrap"
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
 
@@ -6276,8 +6195,8 @@ function DeptPivotCategoryDialog({
             <div className="flex items-center justify-between gap-3 rounded-md border border-[#E8D597] bg-[#FFF8E7] px-3 py-2">
               <div className="text-xs text-[#9C6F1E]">
                 <span className="font-semibold">{staleCount}</span>{" "}
-                cell{staleCount !== 1 ? "s" : ""} have stored minutes that no longer match the Production Times matrix
-                {" "}(yellow cells below). Resync to update.
+                row{staleCount !== 1 ? "s" : ""} have stored minutes that no longer match the Production Times matrix
+                {" "}(yellow rows below). Resync to update.
               </div>
               <button
                 onClick={handleResyncStale}
@@ -6288,135 +6207,119 @@ function DeptPivotCategoryDialog({
             </div>
           )}
 
-          {/* Pivot matrix — Model rows × Branch columns. Empty cells render
-              as a gray "—". Cells with multiple processes (rare: same WIP
-              step has multiple dept-matching processes) stack vertically. */}
+          {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
-            <div className="max-h-[64vh] overflow-auto">
-              <table className="text-sm border-separate border-spacing-0">
+            <div className="max-h-[60vh] overflow-y-auto">
+              <table className="w-full text-sm">
                 <thead className="bg-[#FAF9F7] sticky top-0 z-10">
                   <tr className="text-left text-xs text-gray-500 uppercase tracking-wider">
-                    <th className="px-3 py-2 font-medium border-b border-[#E2DDD8] sticky left-0 bg-[#FAF9F7] z-20 min-w-[140px]">
-                      Model
+                    <th className="px-3 py-2 font-medium w-8">
+                      <input
+                        type="checkbox"
+                        checked={allFilteredSelected}
+                        onChange={toggleAllFiltered}
+                        className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                        title={allFilteredSelected ? "Deselect all visible" : "Select all visible"}
+                      />
                     </th>
-                    {matrixBranches.map((b) => {
-                      const short = shortenBranchLabel(b);
-                      return (
-                        <th
-                          key={b}
-                          className="px-2 py-2 font-medium border-b border-[#E2DDD8] min-w-[120px] text-center align-bottom"
-                          title={b}
-                        >
-                          {short}
-                        </th>
-                      );
-                    })}
+                    <th className="px-3 py-2 font-medium">Model</th>
+                    <th className="px-3 py-2 font-medium">Branch / Code</th>
+                    <th className="px-3 py-2 font-medium">Process</th>
+                    <th className="px-3 py-2 font-medium w-32">Category</th>
+                    <th className="px-3 py-2 font-medium w-20 text-right">Minutes</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {matrixModels.length === 0 && (
+                  {filteredRows.length === 0 && (
                     <tr>
-                      <td
-                        colSpan={Math.max(1, matrixBranches.length + 1)}
-                        className="px-3 py-8 text-center text-gray-400 border-b border-[#E2DDD8]"
-                      >
+                      <td colSpan={6} className="px-3 py-8 text-center text-gray-400">
                         {rows.length === 0
                           ? `No process rows on any BOM touch ${DEPT_LABELS[deptCode]}.`
-                          : "No rows match the filters."}
+                          : "No rows match the search."}
                       </td>
                     </tr>
                   )}
-                  {matrixModels.map((m) => (
-                    <tr key={m} className="hover:bg-[#FAF9F7]/40">
-                      <td className="px-3 py-2 font-medium text-[#111827] border-b border-[#E2DDD8] sticky left-0 bg-white z-10 align-top">
-                        <div>{m}</div>
-                        {(() => {
-                          const sample = filteredRows.find((r) => r.productCode === m);
-                          return sample ? (
-                            <div className="text-[10px] text-gray-400">{sample.baseModel}</div>
-                          ) : null;
-                        })()}
-                      </td>
-                      {matrixBranches.map((b) => {
-                        const cellRows = matrixCells[m]?.[b] || [];
-                        if (cellRows.length === 0) {
-                          return (
-                            <td
-                              key={b}
-                              className="px-2 py-2 border-b border-[#E2DDD8] text-center text-gray-300"
-                            >
-                              —
-                            </td>
-                          );
-                        }
-                        // Pick a "tone" for the whole cell — green if any
-                        // dirty row, yellow if any stale row, default otherwise.
-                        const anyDirty = cellRows.some((r) => isRowDirty(r));
-                        const anyStale = !anyDirty && cellRows.some((r) => isRowStale(r));
-                        const tone = anyDirty
-                          ? "bg-[#EEF3E4]"
-                          : anyStale
-                          ? "bg-[#FFF8E7]"
-                          : "";
-                        return (
-                          <td
-                            key={b}
-                            className={`px-1.5 py-1 border-b border-[#E2DDD8] align-top ${tone}`}
+                  {filteredRows.map((r) => {
+                    const dirty = isRowDirty(r);
+                    const stale = !dirty && isRowStale(r);
+                    const isSelected = selectedKeys.has(r.rowKey);
+                    const rowTone = dirty
+                      ? "bg-[#EEF3E4]"
+                      : stale
+                      ? "bg-[#FFF8E7]"
+                      : isSelected
+                      ? "bg-[#FAEFCB]/60"
+                      : "hover:bg-[#FAF9F7]";
+                    return (
+                      <tr
+                        key={r.rowKey}
+                        className={`border-t border-[#E2DDD8] ${rowTone}`}
+                      >
+                        <td className="px-3 py-2">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleOne(r.rowKey)}
+                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="font-medium text-[#111827]">{r.productCode}</div>
+                          <div className="text-[10px] text-gray-400">{r.baseModel}</div>
+                        </td>
+                        <td
+                          className="px-3 py-2 text-gray-600"
+                          title={r.branchAncestry !== r.branchLabel ? r.branchAncestry : undefined}
+                        >
+                          {r.branchLabel}
+                        </td>
+                        <td className="px-3 py-2 text-gray-600">
+                          <span
+                            className="inline-block text-[10px] font-medium px-1.5 py-0.5 rounded"
+                            style={{
+                              backgroundColor: `${DEPT_COLORS[deptCode] || "#9CA3AF"}22`,
+                              color: DEPT_COLORS[deptCode] || "#374151",
+                            }}
                           >
-                            <div className="flex flex-col gap-1">
-                              {cellRows.map((r) => {
-                                const dirty = isRowDirty(r);
-                                const stale = !dirty && isRowStale(r);
-                                const canonical = getProductionMinutes(deptCode, r.category);
-                                return (
-                                  <div key={r.rowKey} className="flex flex-col items-stretch gap-0.5">
-                                    <select
-                                      value={r.category}
-                                      onChange={(e) => handleCategoryChange(r.rowKey, e.target.value)}
-                                      className={`w-full border rounded px-1.5 py-1 text-[11px] focus:outline-none focus:border-[#6B5C32] ${
-                                        dirty
-                                          ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]"
-                                          : "border-[#E2DDD8] bg-white"
-                                      }`}
-                                      title={
-                                        r.branchAncestry !== r.branchLabel
-                                          ? r.branchAncestry
-                                          : undefined
-                                      }
-                                    >
-                                      <option value="">—</option>
-                                      {/* Preserve legacy values that aren't in the canonical list. */}
-                                      {!categoryOptions.includes(r.category) && r.category && (
-                                        <option value={r.category}>{r.category}</option>
-                                      )}
-                                      {categoryOptions.map((c) => (
-                                        <option key={c} value={c}>{c}</option>
-                                      ))}
-                                    </select>
-                                    <div className="text-[10px] text-gray-500 text-center tabular-nums">
-                                      {stale ? (
-                                        <span
-                                          className="inline-flex items-center gap-1 text-[#9C6F1E]"
-                                          title={`Stored ${r.minutes} min, current Production Times says ${canonical} min. Click "Resync stale" to update.`}
-                                        >
-                                          <span className="line-through text-[#9CA3AF]">{r.minutes}</span>
-                                          <span className="font-semibold">→ {canonical}m</span>
-                                        </span>
-                                      ) : r.category ? (
-                                        <span>{r.minutes} min</span>
-                                      ) : (
-                                        <span className="text-gray-300">no cat</span>
-                                      )}
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
+                            {DEPT_LABELS[deptCode]}
+                          </span>
+                          <span className="ml-2 text-[10px] text-gray-400">#{r.processIndex}</span>
+                        </td>
+                        <td className="px-3 py-2">
+                          <select
+                            value={r.category}
+                            onChange={(e) => handleCategoryChange(r.rowKey, e.target.value)}
+                            className={`w-full border rounded px-2 py-1 text-xs focus:outline-none focus:border-[#6B5C32] ${
+                              dirty ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] bg-white"
+                            }`}
+                          >
+                            {/* If the current value isn't in the canonical list (legacy data),
+                                still show it so the dropdown reflects reality. */}
+                            {!categoryOptions.includes(r.category) && r.category && (
+                              <option value={r.category}>{r.category}</option>
+                            )}
+                            {categoryOptions.map((c) => (
+                              <option key={c} value={c}>{c}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-gray-600">
+                          {stale ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-[#9C6F1E]"
+                              title={`Stored ${r.minutes} min, current Production Times says ${getProductionMinutes(deptCode, r.category)} min. Click "Resync stale" to update.`}
+                            >
+                              <span className="line-through text-[#9CA3AF]">{r.minutes}</span>
+                              <span className="font-semibold">→ {getProductionMinutes(deptCode, r.category)}</span>
+                              <span className="text-[10px]">min</span>
+                            </span>
+                          ) : (
+                            <span>{r.minutes} min</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -6427,7 +6330,7 @@ function DeptPivotCategoryDialog({
         <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
           <span className="text-xs text-gray-500">
             {dirtyCount > 0
-              ? `${dirtyCount} cell${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter(isRowDirty).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
+              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter(isRowDirty).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
               : "No pending changes"}
           </span>
           <div className="flex gap-2">

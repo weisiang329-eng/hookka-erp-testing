@@ -139,7 +139,7 @@ export default function WorkerLoginPage() {
   async function handleSetup(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!/^\d{4}$/.test(pin)) {
+    if (!/^\d{6}$/.test(pin)) {
       setError(t("common.error"));
       return;
     }
@@ -171,7 +171,7 @@ export default function WorkerLoginPage() {
   async function handleReset(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
-    if (!/^\d{4}$/.test(pin)) {
+    if (!/^\d{6}$/.test(pin)) {
       setError(t("common.error"));
       return;
     }
@@ -259,12 +259,12 @@ export default function WorkerLoginPage() {
             <input
               type="password"
               inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
+              pattern="\d{6}"
+              maxLength={6}
               value={pin}
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
               className={inputCls}
-              placeholder="••••"
+              placeholder="••••••"
             />
           </Field>
           {error && <p className="text-sm text-[#9A3A2D]">{error}</p>}
@@ -300,24 +300,24 @@ export default function WorkerLoginPage() {
             <input
               type="password"
               inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
+              pattern="\d{6}"
+              maxLength={6}
               value={pin}
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
               className={inputCls}
-              placeholder="••••"
+              placeholder="••••••"
             />
           </Field>
           <Field label={t("login.confirmPin")}>
             <input
               type="password"
               inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
+              pattern="\d{6}"
+              maxLength={6}
               value={pin2}
               onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
               className={inputCls}
-              placeholder="••••"
+              placeholder="••••••"
             />
           </Field>
           {error && <p className="text-sm text-[#9A3A2D]">{error}</p>}
@@ -368,8 +368,8 @@ export default function WorkerLoginPage() {
             <input
               type="password"
               inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
+              pattern="\d{6}"
+              maxLength={6}
               value={pin}
               onChange={(e) => setPin(e.target.value.replace(/\D/g, ""))}
               className={inputCls}
@@ -379,8 +379,8 @@ export default function WorkerLoginPage() {
             <input
               type="password"
               inputMode="numeric"
-              pattern="\d{4}"
-              maxLength={4}
+              pattern="\d{6}"
+              maxLength={6}
               value={pin2}
               onChange={(e) => setPin2(e.target.value.replace(/\D/g, ""))}
               className={inputCls}

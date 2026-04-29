@@ -28,6 +28,7 @@ import {
 import { cascadeCNCompletionToCO } from "./production-orders";
 import { nextInvoiceNo } from "./invoices";
 import { emitAudit } from "../lib/audit";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -161,6 +162,8 @@ app.get("/stats", async (c) => {
 //                                  Used as a fallback when productionOrderIds
 //                                  isn't passed.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const now = new Date();
@@ -434,6 +437,8 @@ app.post("/", async (c) => {
 // out explicitly ("legacy CN whose source PO is deleted").
 // ---------------------------------------------------------------------------
 app.post("/:id/return", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as {
@@ -718,6 +723,8 @@ app.post("/:id/return", async (c) => {
 //   7. Marks every consignment_items row status='SOLD' + soldDate=now.
 // ---------------------------------------------------------------------------
 app.post("/:id/convert-to-invoice", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -1003,6 +1010,8 @@ function mapUpdateCNError(
 // too — DO does the same. Snapshot of before/after status + the four
 // lifecycle timestamps + carrier so the journal stays compact.
 app.patch("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     if (!body.id || typeof body.id !== "string") {
@@ -1052,6 +1061,8 @@ app.patch("/", async (c) => {
 // `/api/consignment-notes/{id}` instead of the body-id PATCH. Same audit
 // + error mapping as PATCH /.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as Record<string, unknown>;

@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -53,6 +54,8 @@ async function getDisplayName(
 
 // POST /api/presence — upsert my heartbeat for (recordType, recordId)
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "attendance", "create");
+  if (denied) return denied;
   const userId = getUserId(c as unknown as { get: (k: string) => string | undefined });
   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
 
@@ -126,6 +129,8 @@ app.get("/", async (c) => {
 
 // DELETE /api/presence — release my hold on a record
 app.delete("/", async (c) => {
+  const denied = await requirePermission(c, "attendance", "delete");
+  if (denied) return denied;
   const userId = getUserId(c as unknown as { get: (k: string) => string | undefined });
   if (!userId) return c.json({ success: false, error: "Unauthorized" }, 401);
 

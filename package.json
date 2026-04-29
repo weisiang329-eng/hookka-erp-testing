@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/smoke.test.mjs tests/authz.test.mjs tests/audit.test.mjs tests/security-public-endpoints.test.mjs tests/security-permission-matrix.test.mjs tests/security-route-coverage.test.mjs tests/url-state.test.mjs tests/tabs-cap.test.mjs tests/production-wip-producer-output.test.mjs",
+    "test": "node --test tests/smoke.test.mjs tests/authz.test.mjs tests/audit.test.mjs tests/security-public-endpoints.test.mjs tests/security-permission-matrix.test.mjs tests/security-route-coverage.test.mjs tests/url-state.test.mjs tests/tabs-cap.test.mjs tests/production-wip-producer-output.test.mjs tests/permissions.test.mjs tests/worker-auth.test.mjs tests/worker-auth-default-protect.test.mjs tests/scheduler.test.mjs tests/money.test.mjs tests/e2e-happy-path.test.mjs tests/hash-chain.test.mjs tests/tenant-isolation.test.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",

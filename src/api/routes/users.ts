@@ -18,7 +18,8 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
-import { inviteEmailTemplate, sendEmail } from "../lib/email";
+import { inviteEmailTemplate } from "../lib/email";
+import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -179,6 +180,17 @@ app.put("/:id", async (c) => {
     }
     const body = await c.req.json();
 
+    // Role changes require a separate, narrower permission. Without this
+    // gate, anyone with `users:update` (which includes ops staff who set
+    // names / emails / activation) could promote themselves or others to
+    // SUPER_ADMIN. `users:role-change` is seeded only on SUPER_ADMIN.
+    const wantsRoleChange =
+      body.role !== undefined && body.role !== existing.role;
+    if (wantsRoleChange) {
+      const roleDenied = await requirePermission(c, "users", "role-change");
+      if (roleDenied) return roleDenied;
+    }
+
     const merged = {
       email: body.email ?? existing.email,
       role: body.role ?? existing.role,
@@ -330,12 +342,19 @@ function publicInvite(row: InviteWithInviterRow) {
   };
 }
 
+// Sprint 4 — invite email is now ENQUEUED into outbox_emails. The cron
+// drain (.github/workflows/process-email-outbox.yml) actually contacts
+// Resend. Returns { ok: true, id: <outbox row id> } unconditionally on a
+// successful enqueue — the row id is what we stamp into
+// user_invites.emailResendId so admins can correlate audit trails to the
+// outbox state. The previous "Resend resp id" semantics no longer apply
+// (Resend is contacted later, possibly in a different request).
 async function sendInviteEmail(
-  env: Env["Bindings"],
+  c: Parameters<typeof enqueueEmail>[0],
   invite: InviteRow,
   inviterName: string,
 ): Promise<{ ok: boolean; id?: string; error?: string }> {
-  const baseUrl = (env.APP_URL || "").replace(/\/$/, "");
+  const baseUrl = (c.env.APP_URL || "").replace(/\/$/, "");
   const inviteUrl = `${baseUrl}/invite/${invite.token}`;
   const tpl = inviteEmailTemplate({
     appName: "Hookka Manufacturing ERP",
@@ -343,12 +362,20 @@ async function sendInviteEmail(
     inviteUrl,
     expiresInHours: INVITE_TTL_HOURS,
   });
-  return sendEmail(env.RESEND_API_KEY, env.RESEND_FROM_EMAIL, {
-    to: invite.email,
-    subject: tpl.subject,
-    html: tpl.html,
-    text: tpl.text,
-  });
+  try {
+    const res = await enqueueEmail(c, {
+      to: invite.email,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+    });
+    return { ok: true, id: res.id };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "enqueue failed",
+    };
+  }
 }
 
 // POST /api/users/invite — create + send invite
@@ -467,7 +494,7 @@ app.post("/invite", async (c) => {
       emailResendId: null,
     };
 
-    const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+    const emailRes = await sendInviteEmail(c, invite, inviterName);
     if (emailRes.ok) {
       await c.var.DB.prepare(
         "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
@@ -549,7 +576,7 @@ app.post("/invites/:token/resend", async (c) => {
       ? inviter.displayName
       : (inviter?.email ?? "An admin");
 
-  const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+  const emailRes = await sendInviteEmail(c, invite, inviterName);
   if (emailRes.ok) {
     await c.var.DB.prepare(
       "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",

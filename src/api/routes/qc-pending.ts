@@ -32,6 +32,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -364,6 +365,8 @@ app.get("/", async (c) => {
 
 // POST /api/qc-pending/trigger — cron entry.
 app.post("/trigger", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   const expected = c.env.CRON_SECRET;
   if (!expected || expected.length < 16) {
     console.error("[qc-pending/trigger] CRON_SECRET unset or too short — refusing");
@@ -394,6 +397,8 @@ app.post("/trigger", async (c) => {
 
 // POST /api/qc-pending/generate-now — manual trigger from UI (auth-gated by global authMiddleware)
 app.post("/generate-now", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json().catch(() => ({}));
     const slotIso =
@@ -410,6 +415,8 @@ app.post("/generate-now", async (c) => {
 
 // POST /api/qc-pending/:id/start — flip PENDING → IN_PROGRESS, attach inspector.
 app.post("/:id/start", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
     .prepare("SELECT * FROM qc_inspections WHERE id = ?")
@@ -435,6 +442,8 @@ app.post("/:id/start", async (c) => {
 
 // POST /api/qc-pending/:id/skip — mark SKIPPED with reason.
 app.post("/:id/skip", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
     .prepare("SELECT * FROM qc_inspections WHERE id = ?")
@@ -477,6 +486,8 @@ app.post("/:id/skip", async (c) => {
 //   • If stage='WIP' and subjectType='JOB_CARD', reset the JC: status=BLOCKED,
 //     completedDate=null, wipQty=0, actualMinutes=null, productionTimeMinutes=0.
 app.post("/:id/complete", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
     .prepare("SELECT * FROM qc_inspections WHERE id = ?")
@@ -662,6 +673,8 @@ app.post("/:id/complete", async (c) => {
 
 // DELETE /api/qc-pending/:id — cancel a PENDING / IN_PROGRESS slot
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "qc-inspections", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB
     .prepare("SELECT * FROM qc_inspections WHERE id = ?")

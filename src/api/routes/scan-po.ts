@@ -24,6 +24,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -113,6 +114,8 @@ type AnthropicResponse = {
 // POST /api/scan-po/extract
 // ---------------------------------------------------------------------------
 app.post("/extract", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
   const apiKey = c.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return c.json(
@@ -288,6 +291,8 @@ app.post("/extract", async (c) => {
 // POST /api/scan-po/samples/:id/confirm
 // ---------------------------------------------------------------------------
 app.post("/samples/:id/confirm", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   if (!id) {
     return c.json({ success: false, error: "Missing sample id." }, 400);

@@ -1,10 +1,17 @@
 // ---------------------------------------------------------------------------
 // Login page — email + password against POST /api/auth/login.
 //
-// On success we stash { token, user } via setAuth() and redirect to either
-// the URL carried in location.state.from (set by <RequireAuth>) or /dashboard
-// by default. Also honours ?next=<url> on the query string for the case where
-// api-client.ts bounced here after a 401.
+// Sprint 7: the session token is set by the server in a HttpOnly cookie
+// (`hookka_session`) and never touches the response body. The body returns
+// the public user blob + a CSRF token (the same value the server also set
+// in a non-HttpOnly cookie for the api-client to read). We only persist the
+// user blob via setAuth() so the sidebar/topbar can render — the cookie is
+// the credential.
+//
+// On success we redirect to either the URL carried in location.state.from
+// (set by <RequireAuth>) or /dashboard by default. Also honours ?next=<url>
+// on the query string for the case where api-client.ts bounced here after
+// a 401.
 // ---------------------------------------------------------------------------
 import { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -13,7 +20,7 @@ import { setAuth, isAuthenticated, type AuthUser } from "@/lib/auth";
 type LoginResponse =
   | {
       success: true;
-      data: { token: string; user: AuthUser };
+      data: { user: AuthUser; csrfToken: string };
     }
   | { success: false; error?: string };
 
@@ -61,6 +68,11 @@ export default function LoginPage() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // Cookies are set by the server on this response — `credentials:
+        // 'include'` ensures they actually land. (The global api-client
+        // shim adds this for /api/* but we're explicit here so a stripped-
+        // down login page still works if main.tsx imports change.)
+        credentials: "include",
         body: JSON.stringify({ email: trimmedEmail, password }),
       });
       const json = (await res.json()) as LoginResponse;
@@ -71,7 +83,10 @@ export default function LoginPage() {
         );
         return;
       }
-      setAuth(json.data);
+      // Sprint 7: only the user blob lands in localStorage; the session
+      // token stays in the HttpOnly cookie and the CSRF token is read off
+      // its non-HttpOnly cookie sibling on each mutating request.
+      setAuth({ user: json.data.user });
       navigate(getRedirectTarget(), { replace: true });
     } catch (err) {
       setError(

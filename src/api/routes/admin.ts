@@ -28,6 +28,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   createProductionOrdersForSO,
   type SalesOrderRow,
@@ -140,6 +141,8 @@ async function countCold(
 //   { success, dryRun, cutoff, moved: { production_orders, job_cards, ... } }
 // ---------------------------------------------------------------------------
 app.post("/archive/run", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
@@ -513,6 +516,8 @@ async function rebuildSingleSO(
 // POST /api/admin/rebuild-all-pos
 // ---------------------------------------------------------------------------
 app.post("/rebuild-all-pos", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
@@ -615,6 +620,8 @@ app.post("/rebuild-all-pos", async (c) => {
 // POST /api/admin/rebuild-pos/:soId
 // ---------------------------------------------------------------------------
 app.post("/rebuild-pos/:soId", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const soId = c.req.param("soId");
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
@@ -695,75 +702,9 @@ app.post("/rebuild-pos/:soId", async (c) => {
   }
 });
 
-// ---------------------------------------------------------------------------
-// POST /api/admin/clear-all-completion-dates
-//
-// TEMPORARY testing helper (added 2026-04-26 for the inventory in/out flow
-// QA pass). Resets every job_card row back to WAITING + clears completedDate
-// + flips overdue back to PENDING. Also resets every active production_order
-// to PENDING with progress 0 + nulled completedDate so the parent rollup
-// matches its newly-cleared JCs.
-//
-// Inventory: ALSO wipes cascade-written wip_items rows. Any wip_items row with
-// a non-zero stockQty gets zeroed out (these are positive producer-add rows or
-// negative skipped-upstream stub rows written by the JC completion cascade in
-// production-orders.ts). Cascade-created stub rows (id LIKE 'wip-dyn-%') with
-// stockQty=0 are deleted outright since they're pure cascade artefacts.
-// Manually-seeded zero-stock rows (id NOT LIKE 'wip-dyn-%') are preserved.
-// Without this, prior cascade writes would be orphaned and the WIP page would
-// still show stale (often negative) stock after a "fresh" reset.
-//
-// Guarded by ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to prevent accidents.
-// Should be removed once the QA pass is done.
-// ---------------------------------------------------------------------------
-app.post("/clear-all-completion-dates", async (c) => {
-  const db = c.var.DB;
-  const confirm = c.req.query("confirm") ?? "";
-  if (confirm !== "YES_CLEAR_ALL_COMPLETION_DATES") {
-    return c.json(
-      {
-        success: false,
-        error:
-          "Refusing to clear without confirmation. Pass ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to execute.",
-      },
-      400,
-    );
-  }
-
-  const now = new Date().toISOString();
-  const [jcRes, poRes, wipZeroRes, wipDeleteRes] = await db.batch([
-    db.prepare(
-      `UPDATE job_cards
-          SET status = 'WAITING',
-              completedDate = NULL,
-              overdue = 'PENDING'
-        WHERE status IN ('COMPLETED','TRANSFERRED','IN_PROGRESS')
-           OR completedDate IS NOT NULL`,
-    ),
-    db
-      .prepare(
-        `UPDATE production_orders
-            SET status = 'PENDING',
-                progress = 0,
-                currentDepartment = '',
-                completedDate = NULL,
-                updated_at = ?
-          WHERE status IN ('IN_PROGRESS','COMPLETED')`,
-      )
-      .bind(now),
-    db.prepare(`UPDATE wip_items SET stockQty = 0 WHERE stockQty != 0`),
-    db.prepare(`DELETE FROM wip_items WHERE id LIKE 'wip-dyn-%'`),
-  ]);
-
-  const clearedWipItems =
-    (wipZeroRes.meta?.changes ?? 0) + (wipDeleteRes.meta?.changes ?? 0);
-
-  return c.json({
-    success: true,
-    clearedJCs: jcRes.meta?.changes ?? 0,
-    resetPOs: poRes.meta?.changes ?? 0,
-    clearedWipItems,
-  });
-});
-
+// NOTE (rollup): S1 (commit bd40082) removed the DEV-only
+// /clear-all-completion-dates admin endpoint as a production-hygiene call.
+// S2 independently added an RBAC gate to that same endpoint. We keep S1's
+// removal — the endpoint should not exist in production at all, so adding
+// an RBAC gate to a deleted endpoint is moot.
 export default app;

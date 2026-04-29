@@ -10,7 +10,7 @@ import {
   CreditCard,
   X,
 } from "lucide-react";
-import type { PaymentRecord, Invoice } from "@/lib/mock-data";
+import type { PaymentRecord, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { PaymentSchema } from "@/lib/schemas/invoice";
@@ -92,8 +92,11 @@ export default function PaymentsPage() {
     if (!selectedCustomerId || amount <= 0) return;
     setCreating(true);
     try {
+      // Sprint 3 #4 — idempotency. Payment is the highest-risk POST
+      // in the app; a retry under network blip would double-collect.
       const data = await fetchJson("/api/payments", PaymentMutationSchema, {
         method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
         body: {
           customerId: selectedCustomerId,
           amount,

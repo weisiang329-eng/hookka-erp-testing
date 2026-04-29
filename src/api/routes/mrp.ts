@@ -20,6 +20,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   expandMaterialQty,
   parseMaterialScaling,
@@ -262,6 +263,8 @@ app.get("/", (c) => {
 
 // POST /api/mrp — compute a fresh MRP run from live D1 data.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "mrp", "create");
+  if (denied) return denied;
   const now = new Date();
   const horizonParam = c.req.query("horizon") || "all";
 

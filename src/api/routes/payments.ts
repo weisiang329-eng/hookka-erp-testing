@@ -14,8 +14,10 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 import { previewCascadeSOClosed } from "./invoices";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 
 const app = new Hono<Env>();
 
@@ -112,8 +114,9 @@ app.get("/", async (c) => {
   const customerId = c.req.query("customerId");
   const invoiceId = c.req.query("invoiceId");
 
-  const where: string[] = [];
-  const params: unknown[] = [];
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const params: unknown[] = [orgId];
   if (customerId) {
     where.push("customerId = ?");
     params.push(customerId);
@@ -125,7 +128,7 @@ app.get("/", async (c) => {
     where.push("allocations LIKE ?");
     params.push(`%"invoiceId":"${invoiceId}"%`);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const clause = `WHERE ${where.join(" AND ")}`;
 
   const res = await c.var.DB.prepare(
     `SELECT * FROM payment_records ${clause} ORDER BY date DESC, id DESC`,
@@ -144,6 +147,13 @@ app.post("/", async (c) => {
   const denied = await requirePermission(c, "payments", "create");
   if (denied) return denied;
 
+  // Sprint 3 #4 — idempotency. Payment recording is the highest-risk
+  // money endpoint: a duplicate retry double-collects from the customer
+  // (in the books) and over-credits the AR balance. Wrap so a duplicate
+  // retry returns the cached response instead of writing a second
+  // payment_records row + invoice_payments rows + paid bumps.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "payments", idemKey, async () => {
   try {
     const body = await c.req.json();
     const { customerId, amount, method, reference, allocations } = body;
@@ -404,6 +414,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating payment" }, 500);
   }
+  });
 });
 
 // GET /api/payments/:id — single

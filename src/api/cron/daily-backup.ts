@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Phase C #7 quick-win — daily logical backup of Supabase to R2.
+// Phase C #7 quick-win — daily logical backup of Supabase to Supabase Storage.
 //
 // Runs as a Cloudflare Workers Cron Trigger (commented in wrangler.toml
 // until the admin provisions the trigger; see docs/DR-RUNBOOK.md). Pages
@@ -10,19 +10,24 @@
 // Approach inside the Worker runtime:
 //   pg_dump is not available in the Workers JS runtime. Instead we run a
 //   logical SELECT-to-JSON dump of every table in the `public` schema,
-//   gzip it, and write it to R2 at:
-//     r2://hookka-files/backups/supabase/YYYY-MM-DD.json.gz
+//   gzip it, and write it to Supabase Storage at:
+//     hookka-files/backups/supabase/YYYY-MM-DD.json.gz
 //
 //   The format is JSON Lines so a partial dump can still be parsed; each
 //   line is `{"table":"sales_orders","row":{...}}`. Restore tooling
 //   (scripts/backup-supabase.mjs --restore) reads back into a target
 //   Postgres via INSERT ... ON CONFLICT DO NOTHING.
 //
-//   For higher fidelity (CONSTRAINTS, INDEXES, sequences) the
-//   admin-side scripts/backup-supabase.mjs runs `pg_dump -Fc` from a
-//   real shell and uploads the .dump to the same R2 prefix. The cron
-//   path is the inside-Workers fallback so we always have *something*
-//   even when no admin laptop is available.
+//   For higher fidelity (CONSTRAINTS, INDEXES, sequences) the GitHub
+//   Actions workflow at .github/workflows/backup.yml runs `pg_dump -Fc`
+//   from an Ubuntu runner and uploads the .dump to the same Storage
+//   prefix. The cron path is the inside-Workers fallback so we always
+//   have *something* even when the GitHub Actions runner is degraded.
+//
+// Storage backend: was Cloudflare R2 before the storage-supabase-migration
+// refactor. Helper module is src/api/lib/supabase-storage.ts; it kept the
+// original R2-flavoured export names so the call sites here didn't change
+// shape, only the import path.
 //
 // Retention: prune any object under backups/supabase/ older than 90
 // days from the SAME prefix. RPO is technically 24h with this cron;
@@ -30,14 +35,15 @@
 // for production.
 // ---------------------------------------------------------------------------
 
-import { putFile, listFiles, deleteFile } from "../lib/r2-store";
+import { putFile, listFiles, deleteFile } from "../lib/supabase-storage";
 
 /** Minimum env surface this handler needs. Imported lazily so the
  * scheduled handler doesn't pull in the full Hono Env. */
 export interface DailyBackupEnv {
   HYPERDRIVE?: { connectionString: string };
   DATABASE_URL?: string;
-  FILES?: R2Bucket;
+  SUPABASE_PROJECT_REF?: string;
+  SUPABASE_SERVICE_KEY?: string;
 }
 
 /** 90-day retention for the daily-cron logical dumps. */
@@ -64,8 +70,12 @@ export async function runDailyBackup(env: DailyBackupEnv): Promise<{
   key?: string;
   error?: string;
 }> {
-  if (!env.FILES) {
-    return { ok: false, error: "R2 binding 'FILES' not configured" };
+  if (!env.SUPABASE_PROJECT_REF || !env.SUPABASE_SERVICE_KEY) {
+    return {
+      ok: false,
+      error:
+        "Supabase Storage credentials missing — set SUPABASE_PROJECT_REF + SUPABASE_SERVICE_KEY",
+    };
   }
   const dbUrl = env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
   if (!dbUrl) {
@@ -138,7 +148,7 @@ async function pruneOldBackups(
   env: DailyBackupEnv,
   retentionDays: number,
 ): Promise<void> {
-  if (!env.FILES) return;
+  if (!env.SUPABASE_PROJECT_REF || !env.SUPABASE_SERVICE_KEY) return;
   const cutoff = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
   try {
     const objects = await listFiles(env, PREFIX, 1000);

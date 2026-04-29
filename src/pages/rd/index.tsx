@@ -18,7 +18,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDProjectType } from "@/lib/mock-data";
+import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";

@@ -1,14 +1,25 @@
 // ---------------------------------------------------------------------------
 // Global auth middleware for the D1-backed Hono app.
 //
-// Reads `Authorization: Bearer <token>`, resolves the session row in
-// user_sessions, verifies the session hasn't expired and the user is still
-// active, and stashes `userId` / `userRole` on the Hono context so downstream
-// handlers can `c.get('userId')`.
+// Sprint 7: dashboard sessions moved from `Authorization: Bearer <token>`
+// (read from localStorage on the client) to a HttpOnly `hookka_session`
+// cookie set by the server on login. To defend against CSRF the server also
+// sets a non-HttpOnly `hookka_csrf` cookie at login time; on every mutating
+// request (POST/PUT/PATCH/DELETE) the client must echo that value in the
+// `X-CSRF-Token` header. The middleware compares cookie vs header — they
+// have to match for the request to land. This is the standard
+// double-submit-cookie pattern; an attacker on a cross-origin page can
+// neither read the cookie (SameSite=Strict + HttpOnly is irrelevant for the
+// CSRF cookie, but cross-origin reads are blocked by SameSite) nor force a
+// matching header.
+//
+// Worker portal (/api/worker/*) keeps its own header-based token flow —
+// it's mobile-friendly and out of scope for this migration.
 //
 // Paths in PUBLIC_PATHS (login/logout/health) bypass the middleware so the
-// client can authenticate before acquiring a token. OPTIONS preflight always
-// passes through (CORS already handled by the top-level cors() middleware).
+// client can authenticate before acquiring a session. OPTIONS preflight
+// always passes through (CORS already handled by the top-level cors()
+// middleware).
 // ---------------------------------------------------------------------------
 import type { MiddlewareHandler } from "hono";
 import type { Env } from "../worker";
@@ -76,6 +87,16 @@ type SessionJoinRow = {
 // on the rare write side instead of 5x'ing read traffic to D1.
 const SESSION_CACHE_TTL_S = 300;
 
+// Sprint 4 — sliding session refresh.
+// The /login handler issues a 7-day expiry. authMiddleware (below) extends
+// that expiry by SESSION_TTL_MS whenever the remaining lifetime drops below
+// SLIDING_REFRESH_THRESHOLD_MS — gated by remaining-lifetime so we don't
+// fire a DB write on every request, only ~once per day per active user.
+// Net: an active user stays logged in indefinitely; an inactive user logs
+// out after 7 days.
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const SLIDING_REFRESH_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 1 day
+
 export async function sessionCacheKey(token: string): Promise<string> {
   const buf = await crypto.subtle.digest(
     "SHA-256",
@@ -130,6 +151,42 @@ export async function purgeUserSessions(
   }
 }
 
+// Parse a single cookie value out of the Cookie header, RFC-6265-lite.
+// Returns null if the cookie isn't present or the header is missing.
+export function readCookie(
+  cookieHeader: string | null | undefined,
+  name: string,
+): string | null {
+  if (!cookieHeader) return null;
+  // Cookies are separated by "; " — split is good enough; we URL-decode
+  // values just in case (login-issued tokens are URL-safe so this is a no-op
+  // for them, but invite-acceptance flows could in theory percent-encode).
+  for (const part of cookieHeader.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq < 0) continue;
+    const k = part.slice(0, eq).trim();
+    if (k !== name) continue;
+    const v = part.slice(eq + 1).trim();
+    try {
+      return decodeURIComponent(v);
+    } catch {
+      return v;
+    }
+  }
+  return null;
+}
+
+// Names used by the dashboard cookie session (Sprint 7). Worker portal does
+// NOT use these — it stays on `x-worker-token`.
+export const SESSION_COOKIE = "hookka_session";
+export const CSRF_COOKIE = "hookka_csrf";
+export const CSRF_HEADER = "x-csrf-token";
+
+// Methods that need CSRF protection. GET/HEAD/OPTIONS never mutate state and
+// are exempt — also matches what browser-issued same-origin requests can do
+// from a cross-origin form/img/script tag without scripting.
+const CSRF_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
 export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   const path = c.req.path;
 
@@ -140,18 +197,39 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   // only registered under /api/* in worker.ts, but guard here too.
   if (!path.startsWith("/api/")) return next();
 
-  // Public endpoints (login/logout/health + worker portal + public tracking)
-  // bypass the auth check entirely.
-  if (isPublicPath(path, c.req.method)) return next();
+  const isPublic = isPublicPath(path, c.req.method);
 
-  const authHeader = c.req.header("authorization") || "";
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!match) {
+  // -------- Token resolution -------------------------------------------
+  // Sprint 7: prefer the HttpOnly `hookka_session` cookie. Fall back to the
+  // legacy `Authorization: Bearer <token>` for one release while clients
+  // roll over (and to keep ad-hoc `curl` workflows working).
+  const cookieHeader = c.req.header("cookie");
+  const cookieToken = readCookie(cookieHeader, SESSION_COOKIE);
+  let token: string | null = cookieToken;
+  if (!token) {
+    const authHeader = c.req.header("authorization") || "";
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (match) token = match[1].trim();
+  }
+  if (!token) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
-  const token = match[1].trim();
-  if (!token) {
-    return c.json({ success: false, error: "Unauthorized" }, 401);
+
+  // -------- CSRF: double-submit cookie ---------------------------------
+  // Only enforce when the caller authenticated via the cookie path (the
+  // browser session). Bearer-token callers (legacy + scripts) are immune to
+  // browser-style CSRF because no browser auto-attaches the bearer header
+  // cross-origin.
+  if (cookieToken && CSRF_METHODS.has(c.req.method)) {
+    const csrfCookie = readCookie(cookieHeader, CSRF_COOKIE);
+    const csrfHeader = c.req.header(CSRF_HEADER);
+    if (!csrfCookie || !csrfHeader || csrfCookie !== csrfHeader) {
+      return c.json(
+        { success: false, error: "CSRF token missing or invalid" },
+        403,
+      );
+    }
   }
 
   // KV first — saves the Hyperdrive round trip on cache hit.
@@ -190,15 +268,50 @@ export const authMiddleware: MiddlewareHandler<Env> = async (c, next) => {
   }
 
   if (!row) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
   if (row.isActive !== 1) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
   }
 
-  const now = new Date().toISOString();
-  if (row.expiresAt <= now) {
+  // Rollup: keep S4's millisecond-style time comparison (sliding-refresh
+  // below uses these locals). Keep S1's soft-auth fallback so an expired
+  // session on a public route falls through to next() instead of 401.
+  const nowMs = Date.now();
+  const expiresMs = new Date(row.expiresAt).getTime();
+  if (expiresMs <= nowMs) {
+    if (isPublic) return next();
     return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+
+  // Sprint 4 — sliding session refresh.
+  // Gate the DB write by remaining-lifetime so an active user fires the
+  // UPDATE at most ~once per day, not on every request. After the push,
+  // expiresAt is now+SESSION_TTL_MS; the KV cache is invalidated so the
+  // next request reads the fresh row from Postgres (slight extra latency
+  // for that one request, but cheaper than wedging a stale expiry into
+  // every cached entry).
+  const remainingMs = expiresMs - nowMs;
+  if (remainingMs < SLIDING_REFRESH_THRESHOLD_MS) {
+    const newExpires = new Date(nowMs + SESSION_TTL_MS).toISOString();
+    // Fire-and-forget — extending a session is non-critical to the
+    // current request. If it fails the user just gets a normal expiry
+    // window and re-logs-in next time. waitUntil keeps the Worker alive
+    // long enough for the write to land without blocking the response.
+    c.executionCtx.waitUntil(
+      Promise.all([
+        c.var.DB.prepare(
+          "UPDATE user_sessions SET expiresAt = ? WHERE token = ?",
+        )
+          .bind(newExpires, token)
+          .run(),
+        invalidateSessionCache(kv, token),
+      ]).catch((err) => {
+        console.warn("[auth] sliding-refresh failed:", err);
+      }),
+    );
   }
 
   // Stash on ctx so downstream handlers can read via c.get('userId').

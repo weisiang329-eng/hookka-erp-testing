@@ -39,11 +39,27 @@ import {
   hashRecoveryCode,
 } from "../lib/totp";
 import { verifyPassword } from "../lib/password";
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+} from "../lib/rate-limit";
+import { emitAudit } from "../lib/audit";
+import { SESSION_COOKIE, CSRF_COOKIE } from "../lib/auth-middleware";
 
 const app = new Hono<Env>();
 
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const SESSION_TTL_S = SESSION_TTL_MS / 1000;
 const TOTP_ISSUER = "Hookka Manufacturing ERP";
+
+// Mirrors helpers in routes/auth.ts — small duplication is fine; both paths
+// land at the same cookie shape.
+function sessionCookieHeader(token: string): string {
+  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
+function csrfCookieHeader(csrfToken: string): string {
+  return `${CSRF_COOKIE}=${csrfToken}; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_S}`;
+}
 
 type UserRow = {
   id: string;
@@ -101,6 +117,14 @@ app.post("/enroll", async (c) => {
     .bind(secret, JSON.stringify(hashes), userId)
     .run();
 
+  // Sprint 2 task 5 — audit TOTP enrollment kickoff. Snapshot only the fact
+  // that an enrollment started — never the secret or recovery codes.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.enroll-start",
+  });
+
   return c.json({
     success: true,
     data: {
@@ -146,6 +170,15 @@ app.post("/verify", async (c) => {
     .bind(nowIso, userId)
     .run();
 
+  // Sprint 2 task 5 — audit completed TOTP enrollment. From here on the
+  // user MUST present a TOTP code on /login.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.enroll",
+    after: { enrolledAt: nowIso },
+  });
+
   return c.json({ success: true, enrolledAt: nowIso });
 });
 
@@ -166,6 +199,13 @@ app.post("/login-verify", async (c) => {
       400,
     );
   }
+
+  // Brute-force throttle — 10 attempts / 15 min keyed on userId. The TOTP
+  // search-space is only 10^6 so a 1000-attempts/sec script would brute the
+  // window in <1s without this gate.
+  const rlKey = `totp:${userId}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
 
   const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE id = ?",
@@ -204,11 +244,19 @@ app.post("/login-verify", async (c) => {
   }
 
   if (!ok) {
+    // Sprint 2 task 5 — audit failed login-verify so brute-force runs are
+    // visible in the journal even when the rate limiter caps them.
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp.login-verify.fail",
+    });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
 
   // Issue session — same shape as /api/auth/login.
   const sessionToken = crypto.randomUUID();
+  const csrfToken = crypto.randomUUID();
   const now = new Date();
   const expires = new Date(now.getTime() + SESSION_TTL_MS);
   await c.var.DB.batch([
@@ -222,16 +270,36 @@ app.post("/login-verify", async (c) => {
       .bind(now.toISOString(), userId),
   ]);
 
+  // Reset the rate-limit counter on success. waitUntil is best-effort —
+  // executionCtx getter throws outside Worker isolates (tests, local node).
+  try {
+    c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+  } catch {
+    void clearLoginRateLimit(c, rlKey).catch(() => {});
+  }
+
+  // Sprint 2 task 5 — audit successful login-verify. Pairs with the .fail
+  // entry above for clean brute-force timeline reconstruction.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.login-verify",
+    after: { role: user.role },
+  });
+
+  // Sprint 7: set the two auth cookies; body keeps user + csrfToken only.
+  c.header("Set-Cookie", sessionCookieHeader(sessionToken), { append: true });
+  c.header("Set-Cookie", csrfCookieHeader(csrfToken), { append: true });
   return c.json({
     success: true,
     data: {
-      token: sessionToken,
       user: {
         id: user.id,
         email: user.email,
         role: user.role,
         displayName: user.displayName ?? "",
       },
+      csrfToken,
     },
   });
 });
@@ -269,6 +337,15 @@ app.post("/disable", async (c) => {
   )
     .bind(userId)
     .run();
+
+  // Sprint 2 task 5 — audit TOTP disable. Compliance-critical: the journal
+  // must show every step from a 2FA-protected account back to a 1-factor
+  // account, with the actor.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.disable",
+  });
 
   return c.json({ success: true });
 });

@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -123,6 +125,38 @@ function rowToFGUnit(r: FGUnitRow) {
   if (r.upholsteredByName) out.upholsteredByName = r.upholsteredByName;
   if (r.upholsteredAt) out.upholsteredAt = r.upholsteredAt;
   if (r.doId) out.doId = r.doId;
+  return out;
+}
+
+// Public-safe shape for the QR /track page. Strips customer name/hub,
+// packer/upholsterer identity, and any field that could be used to harvest
+// PII by enumerating unit IDs. Keeps just the operational facts that a
+// customer scanning their own sticker needs to see: identity, product,
+// status, and the date stamps that show progress through the pipeline.
+function rowToFGUnitPublic(r: FGUnitRow) {
+  const out: Record<string, unknown> = {
+    id: r.id,
+    unitSerial: r.unitSerial,
+    shortCode: r.shortCode ?? "",
+    soNo: r.soNo ?? "",
+    soLineNo: r.soLineNo ?? 0,
+    poNo: r.poNo ?? "",
+    productCode: r.productCode ?? "",
+    productName: r.productName ?? "",
+    unitNo: r.unitNo ?? 1,
+    totalUnits: r.totalUnits ?? 1,
+    pieceNo: r.pieceNo ?? 1,
+    totalPieces: r.totalPieces ?? 1,
+    pieceName: r.pieceName ?? "",
+    mfdDate: r.mfdDate,
+    status: r.status,
+  };
+  // Date stamps are operational, not PII — they show the customer where the
+  // unit is in the pipeline. Worker IDs/names that did the work are PII.
+  if (r.packedAt) out.packedAt = r.packedAt;
+  if (r.loadedAt) out.loadedAt = r.loadedAt;
+  if (r.deliveredAt) out.deliveredAt = r.deliveredAt;
+  if (r.upholsteredAt) out.upholsteredAt = r.upholsteredAt;
   return out;
 }
 
@@ -329,8 +363,10 @@ app.get("/", async (c) => {
   const status = c.req.query("status");
   const serial = c.req.query("serial");
 
-  const clauses: string[] = [];
-  const binds: unknown[] = [];
+  // Sprint 4: org scope is the leading WHERE predicate.
+  const orgId = getOrgId(c);
+  const clauses: string[] = ["orgId = ?"];
+  const binds: unknown[] = [orgId];
   if (poId) {
     clauses.push("poId = ?");
     binds.push(poId);
@@ -347,7 +383,7 @@ app.get("/", async (c) => {
     clauses.push("(unitSerial = ? OR shortCode = ?)");
     binds.push(serial, serial);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const where = `WHERE ${clauses.join(" AND ")}`;
   const sql = `SELECT * FROM fg_units ${where} ORDER BY id ASC`;
 
   const res = await c.var.DB.prepare(sql)
@@ -360,6 +396,11 @@ app.get("/", async (c) => {
 // GET /api/fg-units/:id — single unit
 // (must be registered AFTER /generate/:poId and /scan so more specific
 // routes match first — Hono picks in insertion order)
+//
+// Public-allowlisted for QR /track page. authMiddleware does soft-auth on
+// public routes: if a valid Bearer token is present, c.get('userId') is set;
+// otherwise it's undefined. We use that to decide between a stripped public
+// shape (no PII) and the full operational shape.
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const unit = await c.var.DB.prepare("SELECT * FROM fg_units WHERE id = ?")
@@ -367,6 +408,10 @@ app.get("/:id", async (c) => {
     .first<FGUnitRow>();
   if (!unit) {
     return c.json({ success: false, error: "Unit not found" }, 404);
+  }
+  const userId = (c as unknown as { get: (k: string) => unknown }).get("userId");
+  if (!userId) {
+    return c.json({ success: true, data: rowToFGUnitPublic(unit) });
   }
   return c.json({ success: true, data: rowToFGUnit(unit) });
 });
@@ -376,6 +421,8 @@ app.get("/:id", async (c) => {
 // untouched if already generated; otherwise creates one FGUnit per
 // (unit, piece) combination derived from PO quantity and product pieces.
 app.post("/generate/:poId", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "create");
+  if (denied) return denied;
   const poId = c.req.param("poId");
   const result = await generateFGUnitsForPO(c.var.DB, poId);
   if (result.status === "not-found") {
@@ -397,6 +444,8 @@ app.post("/generate/:poId", async (c) => {
 // Body: { serial: string, action: "PACK"|"LOAD"|"DELIVER"|"RETURN", workerId?: string }
 type ScanAction = "PACK" | "LOAD" | "DELIVER" | "RETURN";
 app.post("/scan", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "create");
+  if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
   const { serial, action, workerId } = body as {
     serial?: string;

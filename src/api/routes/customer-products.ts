@@ -22,6 +22,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -240,6 +241,8 @@ app.get("/by-product/:productId", async (c) => {
 // POST /api/customer-products — assign (idempotent on UNIQUE(customerId, productId))
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { customerId, productId } = body;
@@ -356,6 +359,8 @@ app.get("/:customerProductId/price-history", async (c) => {
 
 // POST /:customerProductId/prices — append a new history row
 app.post("/:customerProductId/prices", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "create");
+  if (denied) return denied;
   const cpId = c.req.param("customerProductId");
   try {
     const parent = await c.var.DB.prepare(
@@ -444,6 +449,8 @@ app.post("/:customerProductId/prices", async (c) => {
 
 // DELETE /price-row/:priceRowId
 app.delete("/price-row/:priceRowId", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "delete");
+  if (denied) return denied;
   const id = c.req.param("priceRowId");
   const existing = await c.var.DB.prepare(
     "SELECT id, customerProductId FROM customer_product_prices WHERE id = ?",
@@ -466,6 +473,8 @@ app.delete("/price-row/:priceRowId", async (c) => {
 // PUT /api/customer-products/:id — partial update of overrides
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -564,6 +573,8 @@ app.put("/:id", async (c) => {
 // DELETE /api/customer-products/:id
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM customer_products WHERE id = ?",
@@ -591,6 +602,8 @@ app.delete("/:id", async (c) => {
 //   body: { customerId, productIds: string[] }
 // ---------------------------------------------------------------------------
 app.post("/bulk-assign", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { customerId, productIds } = body as {

@@ -53,9 +53,14 @@ export type Env = {
     CRON_SECRET?: string;
     // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
     SESSION_CACHE: KVNamespace;
-    // R2 bucket for invoice PDFs / BOM drawings / SO attachments (Phase B.4).
-    // Optional during rollout — code paths gate on `if (env.FILES)`.
-    FILES?: R2Bucket;
+    // Supabase Storage credentials — replaces the legacy FILES (R2) binding.
+    // SUPABASE_PROJECT_REF is the project slug (public, set in wrangler.toml
+    // [vars]); SUPABASE_SERVICE_KEY is the service_role key (set via
+    // `wrangler secret put SUPABASE_SERVICE_KEY`). Both optional during
+    // rollout — src/api/lib/supabase-storage.ts throws
+    // SupabaseStorageNotConfiguredError when missing, and the file-asset
+    // routes (src/api/routes/files.ts) map that to 503.
+    SUPABASE_PROJECT_REF?: string;
     // Cloudflare Queues binding for async PO emission cascade (Phase C #3).
     // Optional — falls back to synchronous inline call when absent.
     PO_EMISSION_QUEUE?: Queue;
@@ -65,6 +70,10 @@ export type Env = {
     OAUTH_GOOGLE_REDIRECT_URI?: string;
     OAUTH_GOOGLE_HOSTED_DOMAIN?: string;
     JWT_SECRET?: string;
+    // Optional: Sentry / GlitchTip DSN for worker-side error reporting.
+    // Set via `wrangler secret put SENTRY_DSN`. When unset, app.onError
+    // logs to wrangler-tail only (no third-party hop).
+    SENTRY_DSN?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -105,11 +114,79 @@ app.use("/api/*", timingMiddleware);
 // data changes), the next API call has to hit Pages Functions, not a stale
 // edge response. Without this, after a wrangler `--remote` UPDATE the user
 // kept seeing pre-reset rows for minutes (Wei Siang Apr 26 2026).
+//
+// Also applies HTTP security headers — defence in depth in case a future
+// XSS sink slips in. Today the SPA has no `dangerouslySetInnerHTML`, no
+// JSX text rendering of unsanitised HTML, and the auth flow uses Bearer
+// tokens (so CSRF isn't applicable yet) — but headers are cheap and
+// catch regressions.
 app.use("/api/*", async (c, next) => {
   await next();
   c.res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   c.res.headers.set("Pragma", "no-cache");
   c.res.headers.set("Expires", "0");
+
+  // Don't sniff MIME — protects /api/files/:id/stream and any future
+  // attachment-serving endpoint from polyglot files.
+  c.res.headers.set("X-Content-Type-Options", "nosniff");
+  // Block embedding in iframes — clickjacking protection.
+  c.res.headers.set("X-Frame-Options", "DENY");
+  // HSTS — force HTTPS for one year. Cloudflare already enforces this
+  // at the edge, but an explicit header survives proxy chains.
+  c.res.headers.set(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains",
+  );
+  // Don't leak full URLs (which carry record IDs) when the user clicks
+  // a link to an external site.
+  c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  // Disable powerful APIs by default. Camera kept on `self` for the QR
+  // scan flow; the rest are off.
+  c.res.headers.set(
+    "Permissions-Policy",
+    "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+  );
+});
+
+// Security headers on non-/api/* routes too (the SPA HTML shell + static
+// assets). Pages serves these directly when the request path doesn't match
+// a Function route; we still want headers.
+app.use("*", async (c, next) => {
+  await next();
+  if (!c.req.path.startsWith("/api/")) {
+    c.res.headers.set("X-Content-Type-Options", "nosniff");
+    c.res.headers.set("X-Frame-Options", "DENY");
+    c.res.headers.set(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains",
+    );
+    c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    c.res.headers.set(
+      "Permissions-Policy",
+      "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+    );
+    // CSP report-only for now — flips to enforcing once we've seen a
+    // week of reports with no false positives. Allowlist:
+    //   - self for scripts + styles + connections (Vite output)
+    //   - 'unsafe-inline' for styles only (Tailwind's class-based runtime
+    //     injects style tags; we'd need nonces to drop this)
+    //   - data: URIs for images (PDF previews, QR codes)
+    //   - blob: for QR canvas + dynamic chart rendering
+    c.res.headers.set(
+      "Content-Security-Policy-Report-Only",
+      [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "connect-src 'self'",
+        "font-src 'self' data:",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ].join("; "),
+    );
+  }
 });
 
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
@@ -198,6 +275,35 @@ app.post("/api/internal/refresh-mvs", async (c) => {
   }
 });
 
+// Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
+// /api/internal/refresh-mvs above. The cron workflow at
+// .github/workflows/process-email-outbox.yml hits this every 5 min; the
+// handler reads pending rows from outbox_emails, calls Resend for each,
+// and marks status. 3 retries with exponential backoff before FAILED.
+// Runtime logic lives in src/api/lib/email-outbox.ts (processOutbox).
+app.post("/api/internal/process-email-outbox", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[process-email-outbox] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { processOutbox } = await import("./lib/email-outbox");
+    const result = await processOutbox(
+      c.var.DB,
+      c.env as unknown as { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string },
+    );
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("[process-email-outbox] error:", e);
+    return c.json({ ok: false, error: "drain failed" }, 500);
+  }
+});
+
 /**
  * Constant-time string equality.  Hashes both sides before comparing so the
  * comparison time depends only on the hash output length, never on the
@@ -264,6 +370,18 @@ app.use("/api/*", authMiddleware);
 // is populated; bypasses public paths automatically (no userId → defaults
 // to 'hookka').
 app.use("/api/*", tenantMiddleware);
+
+// Sprint 4 — translate OrgIdRequiredError thrown by getOrgId / withOrgScope
+// into a 401 instead of a 500. Any tenant-scoped route handler that runs
+// without a resolved orgId on the context (auth bypassed somehow, or
+// tenantMiddleware crashed) now fails closed.
+app.onError((err, c) => {
+  if (err && (err as { name?: string }).name === "OrgIdRequiredError") {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+  console.error("[worker.onError]", err);
+  return c.json({ success: false, error: "Internal server error" }, 500);
+});
 
 // ---------------------------------------------------------------------------
 // Auth-gated routes (registered AFTER authMiddleware)
@@ -363,12 +481,14 @@ import jobCards from "./routes/job-cards";
 import dashboardRevenue from "./routes/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
-// Phase B.4 — file_assets storage (R2-backed). Returns 503 until the
-// FILES R2 binding is wired up; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets storage (Supabase Storage-backed; was R2 before
+// the storage-supabase-migration). Returns 503 until SUPABASE_PROJECT_REF
+// + SUPABASE_SERVICE_KEY are configured; see docs/DR-RUNBOOK.md.
 import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
+import { reportWorkerError } from "./lib/monitoring";
 
 // Phase-5 imports — historically these were in-memory stubs, but every
 // route below has since been migrated to real D1 / Supabase persistence
@@ -479,8 +599,8 @@ app.route("/api/dashboard/revenue", dashboardRevenue);
 // in spirit (gated by the existing auth middleware until role-aware
 // authz lands; see roadmap §1).
 app.route("/api/mdm", mdm);
-// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503
-// when env.FILES (R2 binding) is missing; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503 when
+// Supabase Storage credentials are missing; see docs/DR-RUNBOOK.md.
 app.route("/api/files", files);
 
 // Below routes were previously in-memory mock-backed (data in
@@ -540,17 +660,46 @@ app.route("/api/scan-po", scanPo);
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
 
-// Unmigrated /api/* paths — return a shape the frontend can consume without
-// crashing. GET pretends to be an empty list so pages calling `.forEach` /
-// `.filter` / `.map` on the response don't blow up; other methods return a
-// plainly-unsupported error.
-app.all("/api/*", (c) => {
-  if (c.req.method === "GET") {
-    return c.json({ success: true, data: [], total: 0, _stub: true, path: c.req.path });
-  }
+// Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
+// a 500 with the error message — fine for dev, but in prod we want every
+// uncaught route exception to land in Sentry (when configured) so we can
+// triage without waiting for a user to file a ticket. The reporter is
+// no-op when SENTRY_DSN is unset, so this is safe in OSS / self-host.
+app.onError((err, c) => {
+  const url = (() => {
+    try {
+      return new URL(c.req.url).pathname + new URL(c.req.url).search;
+    } catch {
+      return c.req.url;
+    }
+  })();
+  // Fire-and-forget — we don't want the error path waiting on the
+  // dynamic-import + HTTP round-trip to Sentry.
+  void reportWorkerError(err, c.env.SENTRY_DSN, {
+    method: c.req.method,
+    url,
+  });
+  // Preserve Hono's default response shape so the frontend's existing
+  // FetchJsonError handling keeps working.
   return c.json(
-    { success: false, error: "Not migrated to D1 yet", path: c.req.path },
-    501,
+    {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    },
+    500,
+  );
+});
+
+// Unmounted /api/* paths — return a real 404 so callers see a loud failure
+// instead of silently rendering an empty list (Sprint 1). The previous
+// behaviour (200 + `{success:true, data:[], _stub:true}`) was a prod
+// footgun: any new route the frontend referenced but the worker hadn't
+// mounted would look like "no data" forever. Now an unmounted reference
+// fails noisily.
+app.all("/api/*", (c) => {
+  return c.json(
+    { success: false, error: "Not Found", path: c.req.path },
+    404,
   );
 });
 

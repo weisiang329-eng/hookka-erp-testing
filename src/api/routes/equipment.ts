@@ -9,6 +9,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -86,15 +88,20 @@ function addDays(isoDate: string, days: number): string {
 
 // GET /api/equipment
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM equipment ORDER BY name",
-  ).all<EquipmentRow>();
+    "SELECT * FROM equipment WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<EquipmentRow>();
   const data = (res.results ?? []).map(rowToEquipment);
   return c.json({ success: true, data, total: data.length });
 });
 
 // POST /api/equipment
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "equipment", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const id = genId("eq");
@@ -158,6 +165,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/equipment/:id — either logMaintenance insert OR regular update
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "equipment", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -281,6 +290,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/equipment/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "equipment", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM equipment WHERE id = ?",

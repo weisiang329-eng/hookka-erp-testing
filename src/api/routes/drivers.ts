@@ -6,6 +6,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -57,15 +59,20 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 
 // GET /api/drivers
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM drivers ORDER BY name",
-  ).all<DriverRow>();
+    "SELECT * FROM drivers WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<DriverRow>();
   const data = (res.results ?? []).map(rowToDriver);
   return c.json({ success: true, data, total: data.length });
 });
 
 // POST /api/drivers
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "drivers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -127,6 +134,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/drivers/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "drivers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -214,6 +223,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/drivers/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "drivers", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM drivers WHERE id = ?")
     .bind(id)

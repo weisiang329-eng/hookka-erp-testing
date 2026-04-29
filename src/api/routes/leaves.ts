@@ -8,6 +8,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -52,8 +54,9 @@ app.get("/", async (c) => {
   const workerId = c.req.query("workerId");
   const status = c.req.query("status");
 
-  const wheres: string[] = [];
-  const binds: (string | number)[] = [];
+  const orgId = getOrgId(c);
+  const wheres: string[] = ["orgId = ?"];
+  const binds: (string | number)[] = [orgId];
   if (workerId) {
     wheres.push("workerId = ?");
     binds.push(workerId);
@@ -63,7 +66,7 @@ app.get("/", async (c) => {
     binds.push(status);
   }
 
-  const sql = `SELECT * FROM leaves${wheres.length ? " WHERE " + wheres.join(" AND ") : ""} ORDER BY startDate DESC`;
+  const sql = `SELECT * FROM leaves WHERE ${wheres.join(" AND ")} ORDER BY startDate DESC`;
   const res = await c.var.DB.prepare(sql).bind(...binds).all<LeaveRow>();
   const data = (res.results ?? []).map(rowToLeave);
   return c.json({ success: true, data, total: data.length });
@@ -71,6 +74,8 @@ app.get("/", async (c) => {
 
 // POST /api/leaves — create pending leave request
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "leaves", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { workerId, type, startDate, endDate, days, reason } = body;
@@ -130,6 +135,8 @@ app.post("/", async (c) => {
 
 // PUT /api/leaves — legacy body-only update `{ id, status, approvedBy }`
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "leaves", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { id, status, approvedBy } = body;
@@ -166,6 +173,8 @@ app.put("/", async (c) => {
 
 // PUT /api/leaves/:id — RESTful variant
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "leaves", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -218,6 +227,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/leaves/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "leaves", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM leaves WHERE id = ?")
     .bind(id)

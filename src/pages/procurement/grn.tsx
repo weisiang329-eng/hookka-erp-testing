@@ -9,7 +9,7 @@ import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { GoodsReceiptNote, PurchaseOrder } from "@/lib/mock-data";
+import type { GoodsReceiptNote, PurchaseOrder } from "@/types";
 import {
   Plus,
   Package,

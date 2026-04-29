@@ -19,7 +19,7 @@ import {
   CheckCircle2,
   RotateCcw,
 } from "lucide-react";
-import type { MonthlyStockValue, StockAccount } from "@/lib/mock-data";
+import type { MonthlyStockValue, StockAccount } from "@/types";
 
 // =============== TYPES ===============
 

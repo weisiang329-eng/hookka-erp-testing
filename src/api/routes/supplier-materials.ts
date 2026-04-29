@@ -10,6 +10,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -55,8 +57,9 @@ function genId(): string {
 app.get("/", async (c) => {
   const supplierId = c.req.query("supplierId");
   const materialCode = c.req.query("materialCode");
-  const where: string[] = [];
-  const binds: unknown[] = [];
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const binds: unknown[] = [orgId];
   if (supplierId) {
     where.push("supplierId = ?");
     binds.push(supplierId);
@@ -65,10 +68,7 @@ app.get("/", async (c) => {
     where.push("materialCode = ?");
     binds.push(materialCode);
   }
-  const sql =
-    where.length > 0
-      ? `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`
-      : "SELECT * FROM supplier_material_bindings ORDER BY materialCode";
+  const sql = `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`;
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<BindingRow>();
@@ -78,6 +78,8 @@ app.get("/", async (c) => {
 
 // POST /api/supplier-materials — create a new price binding
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "supplier-materials", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { supplierId, materialCode, materialName, supplierSku, unitPrice } =
@@ -168,6 +170,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/supplier-materials/:id — shallow merge partial update
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "supplier-materials", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",
@@ -247,6 +251,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/supplier-materials/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "supplier-materials", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM supplier_material_bindings WHERE id = ?",

@@ -27,7 +27,7 @@ import {
   Users,
   Save,
 } from "lucide-react";
-import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/lib/mock-data";
+import type { DeliveryOrder, ProofOfDelivery, ThreePLProvider, Customer } from "@/types";
 import PODDialog from "@/components/delivery/POD-dialog";
 import PrintDO from "@/components/delivery/print-do";
 import type { PrintDOData, PrintMode } from "@/components/delivery/print-do";

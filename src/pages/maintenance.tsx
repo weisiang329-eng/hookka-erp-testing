@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatDate, formatCurrency } from "@/lib/utils";
 import { asArray } from "@/lib/safe-json";
-import type { Equipment, MaintenanceLog } from "@/lib/mock-data";
+import type { Equipment, MaintenanceLog } from "@/types";
 import {
   Wrench,
   Plus,

@@ -248,9 +248,14 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           source: "PO_SCAN_CLAUDE",
         };
 
+        // Sprint 3 #4 — idempotency. Bulk PO-scan create can retry mid-loop;
+        // a UUID per PO ensures duplicate retries don't fan out duplicate SOs.
         const res = await fetch("/api/sales-orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+          },
           body: JSON.stringify(body),
         });
         const data = (await res.json()) as CreateSOResponse;
@@ -308,7 +313,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
 
         const res = await fetch("/api/sales-orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+          },
           body: JSON.stringify(body),
         });
 
@@ -704,7 +712,12 @@ function ClaudePOCard({
                   </thead>
                   <tbody>
                     {po.items.map((item, i) => (
-                      <tr key={i} className="border-t border-[#E2DDD8]">
+                      // Composite key: row's sampleId + position. Items don't
+                      // reorder/insert/delete in this modal (set once on
+                      // parse), so position is stable; sampleId scopes the
+                      // key per uploaded file so two cards expanded at once
+                      // never collide.
+                      <tr key={`${row.sampleId}-${i}`} className="border-t border-[#E2DDD8]">
                         <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
                         <td className="px-2 py-1">
                           <input

@@ -6,6 +6,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -43,15 +45,20 @@ const ALLOWED_STATUS = ["AVAILABLE", "IN_USE", "MAINTENANCE"] as const;
 
 // GET /api/lorries
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM lorries ORDER BY name",
-  ).all<LorryRow>();
+    "SELECT * FROM lorries WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<LorryRow>();
   const data = (res.results ?? []).map(rowToLorry);
   return c.json({ success: true, data, total: data.length });
 });
 
 // POST /api/lorries
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "lorries", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -94,6 +101,8 @@ app.post("/", async (c) => {
 
 // PUT /api/lorries — legacy body-only update
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "lorries", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { id } = body;
@@ -160,6 +169,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/lorries/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -216,6 +227,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/lorries/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT * FROM lorries WHERE id = ?")
     .bind(id)

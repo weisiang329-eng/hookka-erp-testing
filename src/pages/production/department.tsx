@@ -8,8 +8,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatDate } from "@/lib/utils";
 import { ArrowLeft, Download, Save, Printer, Check, X, Clock, User, Play } from "lucide-react";
-import { generateJobCardPdf } from "@/lib/generate-po-pdf";
-import { generateStickerPdf, generateBatchStickersPdf } from "@/lib/generate-sticker-pdf";
+// PDF generators dynamic-imported at click handlers so the 1MB jspdf
+// vendor chunk only ships when the user actually prints a card / sticker.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { fetchJson } from "@/lib/fetch-json";
 
@@ -579,6 +579,7 @@ export default function DepartmentProductionPage() {
               toast.info(`No pending ${dept.name} stickers to print.`);
               return;
             }
+            const { generateBatchStickersPdf } = await import("@/lib/generate-sticker-pdf");
             const { generated, skipped } = await generateBatchStickersPdf(pendingOrders, deptCode);
             if (generated === 0) {
               toast.warning(`No stickers generated — no orders have a ${dept.name} job card. Check BOMs.`);
@@ -806,7 +807,10 @@ export default function DepartmentProductionPage() {
                     <Button
                       variant="outline"
                       className="gap-2"
-                      onClick={() => generateJobCardPdf(order, jc.departmentCode)}
+                      onClick={async () => {
+                        const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
+                        generateJobCardPdf(order, jc.departmentCode);
+                      }}
                     >
                       <Download className="h-4 w-4" />
                       Print Job Card
@@ -814,7 +818,10 @@ export default function DepartmentProductionPage() {
                     <Button
                       variant="outline"
                       className="gap-2"
-                      onClick={() => generateStickerPdf(order, jc, orders)}
+                      onClick={async () => {
+                        const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
+                        generateStickerPdf(order, jc, orders);
+                      }}
                     >
                       <Printer className="h-4 w-4" />
                       Print Sticker
@@ -1171,7 +1178,10 @@ export default function DepartmentProductionPage() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5"
-                              onClick={() => generateJobCardPdf(row, jc.departmentCode)}
+                              onClick={async () => {
+                                const { generateJobCardPdf } = await import("@/lib/generate-po-pdf");
+                                generateJobCardPdf(row, jc.departmentCode);
+                              }}
                               title="Print Job Card"
                             >
                               <Download className="h-3 w-3" />
@@ -1180,7 +1190,10 @@ export default function DepartmentProductionPage() {
                               variant="ghost"
                               size="sm"
                               className="h-6 px-1.5"
-                              onClick={() => generateStickerPdf(row, jc, orders)}
+                              onClick={async () => {
+                                const { generateStickerPdf } = await import("@/lib/generate-sticker-pdf");
+                                generateStickerPdf(row, jc, orders);
+                              }}
                               title="Print Sticker"
                             >
                               <Printer className="h-3 w-3" />

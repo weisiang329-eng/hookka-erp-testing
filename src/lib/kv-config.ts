@@ -24,7 +24,12 @@
 //   "syncing" indicator while a write is in flight; "Saved" toasts fire
 //   AFTER the server confirms.
 // ---------------------------------------------------------------------------
-import { getAuthToken } from "./auth";
+//
+// Sprint 7: auth headers used to be `Authorization: Bearer ...` injected
+// here. Now they live in the HttpOnly `hookka_session` cookie that the
+// browser auto-attaches via api-client's `credentials: 'include'` shim,
+// and CSRF protection is handled by the same shim. We just send a plain
+// JSON content-type and let the global interceptor do the rest.
 
 type JsonValue = unknown;
 
@@ -68,12 +73,9 @@ function ensureEntry(key: string): CacheEntry {
   return e;
 }
 
-function authHeaders(): HeadersInit {
-  const token = getAuthToken();
-  const base: Record<string, string> = { "content-type": "application/json" };
-  if (token) base.authorization = `Bearer ${token}`;
-  return base;
-}
+// Header set is now constant — cookie auth + CSRF are handled by the global
+// fetch interceptor in api-client.ts.
+const JSON_HEADERS: HeadersInit = { "content-type": "application/json" };
 
 function notifyValueListeners(entry: CacheEntry, value: JsonValue): void {
   for (const cb of entry.listeners) {
@@ -245,7 +247,7 @@ async function flushSave(key: string): Promise<boolean> {
   try {
     const res = await fetch(`/api/kv-config/${encodeURIComponent(key)}`, {
       method: "PUT",
-      headers: authHeaders(),
+      headers: JSON_HEADERS,
       body: JSON.stringify(entry.value),
     });
     httpStatus = res.status;
@@ -318,7 +320,7 @@ export async function fetchKvConfig<T = JsonValue>(
     // Normal path: fetch from server.
     try {
       const res = await fetch(`/api/kv-config/${encodeURIComponent(key)}`, {
-        headers: authHeaders(),
+        headers: JSON_HEADERS,
       });
       if (!res.ok) return null;
       const json = (await res.json()) as { success?: boolean; data?: JsonValue };

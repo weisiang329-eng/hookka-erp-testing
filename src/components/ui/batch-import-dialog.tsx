@@ -12,7 +12,13 @@
 // The page owns create/update logic via `onImport(rows)`.
 // ---------------------------------------------------------------------------
 import * as React from "react";
-import * as XLSX from "xlsx";
+// xlsx is a 421KB module; dynamic-imported inside the parseFile and
+// downloadTemplate handlers so every page that uses BatchImportDialog
+// stops dragging it in on mount. We only need the .utils namespace
+// (sheet_to_json, aoa_to_sheet, book_*, writeFile) — type-only for the
+// module shape so we keep IntelliSense.
+import type * as XlsxNs from "xlsx";
+type XLSXModule = typeof XlsxNs;
 import {
   Download, Upload, X, Check, AlertTriangle,
   FileSpreadsheet, ArrowLeft,
@@ -119,7 +125,8 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   if (!open) return null;
 
   // -- Template download ----------------------------------------------------
-  const handleDownloadTemplate = () => {
+  const handleDownloadTemplate = async () => {
+    const XLSX: XLSXModule = await import("xlsx");
     const headerRow = columns.map((c) =>
       c.required ? `${c.label} *` : c.label,
     );
@@ -141,8 +148,9 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   // Produces an Excel file with the exact same schema as the template, but
   // pre-filled with the current rows. Users edit in Excel and re-upload to
   // update in bulk — the key column matches rows back to existing records.
-  const handleExportCurrent = () => {
+  const handleExportCurrent = async () => {
     if (!currentRows || currentRows.length === 0) return;
+    const XLSX: XLSXModule = await import("xlsx");
 
     const headerRow = columns.map((c) =>
       c.required ? `${c.label} *` : c.label,
@@ -189,6 +197,7 @@ export const BatchImportDialog: React.FC<BatchImportDialogProps> = ({
   const handleFile = async (file: File) => {
     setUploadErr(null);
     try {
+      const XLSX: XLSXModule = await import("xlsx");
       const buf = await file.arrayBuffer();
       const wb = XLSX.read(buf, { type: "array" });
       const ws = wb.Sheets[wb.SheetNames[0]];

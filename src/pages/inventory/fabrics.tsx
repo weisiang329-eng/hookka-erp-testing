@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { formatCurrency } from "@/lib/utils";
-import type { FabricTracking } from "@/lib/mock-data";
+import type { FabricTracking } from "@/types";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import {
   Search,

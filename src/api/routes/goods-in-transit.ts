@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -114,6 +115,8 @@ app.get("/", async (c) => {
 
 // POST /api/goods-in-transit — create new transit record
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "goods-in-transit", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { poNumber, supplierId, supplierName, shippingMethod, items } = body;
@@ -250,6 +253,8 @@ app.get("/:id", async (c) => {
 // PUT /api/goods-in-transit/:id — update scalar fields (items not replaced here,
 // matching in-memory behavior)
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "goods-in-transit", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM goods_in_transit WHERE id = ?",
@@ -357,6 +362,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/goods-in-transit/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "goods-in-transit", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM goods_in_transit WHERE id = ?",

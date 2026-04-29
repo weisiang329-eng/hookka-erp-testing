@@ -29,7 +29,8 @@ scheduled handler at `src/api/cron/daily-backup.ts`, but its `crons`
 declaration is commented out — the comment says it needs an external
 trigger (sibling Worker / cron-job.org / GitHub Action) to actually fire.
 
-The backup job is purely server-side anyway (writes to R2). It cannot
+The backup job is purely server-side anyway (writes to Supabase
+Storage; was R2 before the storage-supabase-migration). It cannot
 cause client-side refreshes.
 
 ### 3. Session TTL

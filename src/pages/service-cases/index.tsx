@@ -19,7 +19,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
-import { Plus, X, AlertCircle } from "lucide-react";
+import { compressImage } from "@/lib/image-compress";
+import { Plus, X, AlertCircle, Loader2 } from "lucide-react";
 
 type CaseStatus = "OPEN" | "IN_PROGRESS" | "CLOSED" | "CANCELLED";
 type SourceType = "SO" | "CO" | "EXTERNAL";
@@ -237,6 +238,8 @@ export function CreateServiceCaseModal({
   const [externalRef, setExternalRef] = useState("");
   const [issueDescription, setIssueDescription] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
+  // Per-batch upload progress for the off-main-thread compressor — null when idle.
+  const [photoUploadProgress, setPhotoUploadProgress] = useState<{ done: number; total: number } | null>(null);
   const [rootCauseCategory, setRootCauseCategory] = useState<string>("");
   // rootCauseNotes removed from create form 2026-04-28 (5W moved to Issue
   // Description). Backend field still exists for backward compat.
@@ -278,41 +281,30 @@ export function CreateServiceCaseModal({
       : !!sourceId;
 
   // ---- Photo helpers (resize → base64) ----
-  async function resizeImageToBase64(file: File, maxDim = 1280): Promise<string> {
-    const dataUrl = await new Promise<string>((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result as string);
-      r.onerror = rej;
-      r.readAsDataURL(file);
-    });
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = rej;
-      i.src = dataUrl;
-    });
-    const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
-    const w = Math.round(img.width * ratio);
-    const h = Math.round(img.height * ratio);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  }
+  // Uses the shared @/lib/image-compress helper which prefers
+  // createImageBitmap + OffscreenCanvas (off-main-thread) on modern browsers
+  // and falls back to FileReader/canvas on older Safari / WebView.
   async function handleAddPhotos(files: FileList | null) {
     if (!files || files.length === 0) return;
+    const list = Array.from(files);
+    setPhotoUploadProgress({ done: 0, total: list.length });
     const results: string[] = [];
-    for (const f of Array.from(files)) {
-      try {
-        results.push(await resizeImageToBase64(f));
-      } catch {
-        toast.error(`Couldn't read ${f.name}`);
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        try {
+          results.push(await compressImage(f, { maxDim: 1280, quality: 0.85 }));
+        } catch {
+          toast.error(`Couldn't read ${f.name}`);
+        }
+        setPhotoUploadProgress({ done: i + 1, total: list.length });
       }
+      if (results.length > 0) {
+        setPhotos((prev) => [...prev, ...results]);
+      }
+    } finally {
+      setPhotoUploadProgress(null);
     }
-    setPhotos((prev) => [...prev, ...results]);
   }
 
   async function handleSubmit() {
@@ -458,13 +450,20 @@ export function CreateServiceCaseModal({
             {/* Native <input type="file"> renders as a tiny gray "Choose
                 Files" link that operators kept missing. Wrap it in a label
                 styled like a regular button so it's an obvious target. */}
-            <label className="inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs">
+            <label
+              className={
+                photoUploadProgress
+                  ? "inline-flex items-center gap-2 rounded border border-[#E2DDD8] bg-white px-3 py-1.5 text-xs text-[#9CA3AF] cursor-not-allowed"
+                  : "inline-flex items-center gap-2 cursor-pointer rounded border border-[#E2DDD8] bg-white hover:bg-[#FAF9F7] px-3 py-1.5 text-xs"
+              }
+            >
               <Plus className="h-3.5 w-3.5" />
               {photos.length === 0 ? "Add photos" : "Add more photos"}
               <input
                 type="file"
                 accept="image/*"
                 multiple
+                disabled={!!photoUploadProgress}
                 onChange={(e) => {
                   handleAddPhotos(e.target.files);
                   // Reset value so re-selecting the same file fires onChange.
@@ -473,6 +472,12 @@ export function CreateServiceCaseModal({
                 className="hidden"
               />
             </label>
+            {photoUploadProgress && (
+              <span className="ml-2 inline-flex items-center gap-1 text-xs text-[#6B7280]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Compressing {Math.min(photoUploadProgress.done + 1, photoUploadProgress.total)} / {photoUploadProgress.total}...
+              </span>
+            )}
             {photos.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {photos.map((src, i) => (

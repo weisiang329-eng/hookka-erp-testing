@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   ensureLeadTimesSeeded,
   loadLeadTimes,
@@ -102,6 +103,8 @@ app.get("/", async (c) => {
 // Accepts { BEDFRAME: { DEPT: n, ... }, SOFA: {...}, hookkaDDBuffer: { BEDFRAME: n, SOFA: n } }
 // All three top-level keys are optional — any missing key is left unchanged.
 app.put("/", async (c) => {
+  const denied = await requirePermission(c, "production-leadtimes", "update");
+  if (denied) return denied;
   const body = await c.req.json().catch(() => null);
   if (!body || typeof body !== "object") {
     return c.json({ success: false, error: "Body must be an object" }, 400);
@@ -159,6 +162,8 @@ app.put("/", async (c) => {
 // current lead-time config. Mirrors the reverse-schedule in sales-orders.ts.
 // Orphans (no SO, no DD, no targetEndDate) are counted in `skipped`.
 app.post("/recalc-all", async (c) => {
+  const denied = await requirePermission(c, "production-leadtimes", "create");
+  if (denied) return denied;
   try {
     await ensureLeadTimesSeeded(c.var.DB);
     await ensureHookkaDDBufferSeeded(c.var.DB);

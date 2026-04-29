@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -192,6 +193,8 @@ app.get("/", async (c) => {
 
 // POST /api/scheduling — run backward scheduling (optionally persist)
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "scheduling", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { deliveryDate, category, productCode, soNumber, customerName } = body;

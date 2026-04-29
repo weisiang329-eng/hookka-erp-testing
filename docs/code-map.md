@@ -235,7 +235,8 @@ cache namespaces, HTTP cache headers, bundle, env declaration.
   (`prepare:false` for 6543).
 - `src/api/queues/`, `src/api/lib/queue-po-emission.ts` —
   Cloudflare Queues for async PO emission.
-- `src/api/lib/r2-store.ts` — R2 bindings.
+- `src/api/lib/supabase-storage.ts` — Supabase Storage REST wrapper
+  (was `r2-store.ts` before the storage-supabase-migration).
 - `src/api/cron/daily-backup.ts` — cron handler.
 - `src/lib/cached-fetch.ts`, `swr-fetcher.ts`,
   `use-version-check.ts` — frontend cache behaviour (TTL, namespace
@@ -244,7 +245,7 @@ cache namespaces, HTTP cache headers, bundle, env declaration.
 - `scripts/check-bundle-size.mjs`, `test-d1-compat.mjs` — CI gates.
 - `tests/smoke.test.mjs` — top-level smoke.
 - `docs/CANARY-DEPLOY.md`, `docs/QUEUES-SETUP.md`,
-  `docs/CLOUDFLARE_MIGRATION.md`, `docs/R2-SETUP.md` — runbooks.
+  `docs/CLOUDFLARE_MIGRATION.md`, `docs/STORAGE-SETUP.md` — runbooks.
 - See: BUG-HISTORY entries tagged `infrastructure`.
 
 ### audit-logging

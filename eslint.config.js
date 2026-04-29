@@ -65,6 +65,32 @@ export default defineConfig([
       'react-refresh/only-export-components': 'off',
     },
   },
+  // Sprint 5 — Bundle hygiene. Pages and shared UI components must not
+  // value-import from @/lib/mock-data: that file pulls in ~326KB of seed
+  // data (production orders, sales orders, BOM rows, etc.) that is only
+  // used by the legacy /api/routes-mock fallback and never needed by the
+  // SPA. Type-only imports are still allowed (zero runtime cost under
+  // verbatimModuleSyntax) but new code should prefer @/types and
+  // @/lib/pricing-options as the canonical sources.
+  {
+    files: ['src/pages/**/*.{ts,tsx}', 'src/components/**/*.{ts,tsx}'],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: [
+            {
+              name: '@/lib/mock-data',
+              importNames: [],
+              message:
+                'Do not value-import from @/lib/mock-data in pages/components — it bundles seed data into the page chunk. Use @/types for types and @/lib/pricing-options for pricing constants. Type-only imports (`import type`) are erased at build time and remain allowed.',
+              allowTypeImports: true,
+            },
+          ],
+        },
+      ],
+    },
+  },
   // P4.2 — Scheduler policy. Block raw setInterval / setTimeout in app code;
   // every recurring timer must go through the visibility-aware wrappers in
   // src/lib/scheduler.ts so it pauses on document.hidden and clears on

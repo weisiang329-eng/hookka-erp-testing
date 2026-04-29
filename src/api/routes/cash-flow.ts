@@ -11,6 +11,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -234,6 +235,8 @@ app.get("/", async (c) => {
 // POST /api/cash-flow — add-transaction | reconcile
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "cash-flow", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { action } = body;

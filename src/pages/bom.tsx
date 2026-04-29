@@ -5877,6 +5877,15 @@ function DeptPivotCategoryDialog({
   // inline edit state in `rows`.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkFillCat, setBulkFillCat] = useState("");
+  // Gate the stale banner + yellow row highlight until variants-config has
+  // been re-fetched on dialog open. The kv-config in-memory cache is
+  // primed at dashboard mount, but if Production Times got edited in
+  // another tab (or if the cache hasn't fully hydrated yet), the first
+  // render reads canonical=0 for every (dept, category) and flashes
+  // "540 stale" before settling on the real "1 stale". User caught the
+  // flash 2026-04-29 and reported "为什么我刚打开它时会显示这个？".
+  // configHydrated stays false until the open-time fetch resolves.
+  const [configHydrated, setConfigHydrated] = useState(false);
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
   // upstream template/products list changes (e.g. after a save).
@@ -5896,6 +5905,27 @@ function DeptPivotCategoryDialog({
     setSelectedKeys(new Set());
     setBulkFillCat("");
   }, [open, deptCode, templates, products]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Hydrate variants-config on every open so the staleness check reads
+  // current canonical values, not whatever was in the in-memory cache
+  // when the page loaded. Mirrors ProductionTimesDialog's hydrate step.
+  /* eslint-disable react-hooks/set-state-in-effect -- async fetch settle
+     into local state is the documented exception; the setState is
+     guarded by `cancelled` and only fires after the awaited fetch. */
+  useEffect(() => {
+    if (!open) {
+      setConfigHydrated(false);
+      return;
+    }
+    let cancelled = false;
+    void fetchVariantsConfig().then(() => {
+      if (!cancelled) setConfigHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const categoryOptions = useMemo(() => getCategoryOptions(), []);
@@ -5967,7 +5997,12 @@ function DeptPivotCategoryDialog({
   // memo wasn't earning its complexity.
   // BUG-2026-04-29: banner showed "8 stale" while Resync touched 0
   // because the memo had cached an earlier productionTimes snapshot.
-  const staleCount = filteredRows.filter(isRowStale).length;
+  // Also gated on configHydrated so the dialog doesn't flash a giant
+  // "540 stale" before the kv-config fetch settles (the cache's empty
+  // state would compute canonical=0 for every category).
+  const staleCount = configHydrated
+    ? filteredRows.filter(isRowStale).length
+    : 0;
 
   // Resync sets r.minutes to the current matrix value for every stale
   // row in the FILTERED set. This makes them dirty (because
@@ -6321,7 +6356,11 @@ function DeptPivotCategoryDialog({
                   )}
                   {filteredRows.map((r) => {
                     const dirty = isRowDirty(r);
-                    const stale = !dirty && isRowStale(r);
+                    // Same hydrate gate as staleCount — don't paint rows
+                    // yellow/strikethrough until the kv-config fetch on open
+                    // resolves, otherwise every row flashes "stale" using
+                    // the empty canonical=0 baseline.
+                    const stale = configHydrated && !dirty && isRowStale(r);
                     const isSelected = selectedKeys.has(r.rowKey);
                     const rowTone = dirty
                       ? "bg-[#EEF3E4]"

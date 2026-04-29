@@ -84,8 +84,8 @@ test('worker.onError translates OrgIdRequiredError to 401', () => {
   );
 });
 
-test('migration 0078 backfills org_id across the long-tail tables', () => {
-  const sql = read('migrations-postgres/0078_org_id_full_rollout.sql');
+test('migration 0087 backfills org_id across the long-tail tables', () => {
+  const sql = read('migrations-postgres/0087_org_id_full_rollout.sql');
   // Spot-check critical tables that 0049 did NOT cover.
   const required = [
     'purchase_orders',

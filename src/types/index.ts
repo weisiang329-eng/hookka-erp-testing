@@ -874,7 +874,7 @@ export type ConsignmentNote = {
   branchName: string;
   items: ConsignmentItem[];
   sentDate: string;
-  status: "ACTIVE" | "PARTIALLY_SOLD" | "FULLY_SOLD" | "RETURNED" | "CLOSED";
+  status: "ACTIVE" | "PARTIALLY_SOLD" | "IN_TRANSIT" | "FULLY_SOLD" | "RETURNED" | "CLOSED";
   totalValue: number;
   notes: string;
   // Carrier metadata (migration 0066). Mirrors DeliveryOrder fields.
@@ -885,9 +885,9 @@ export type ConsignmentNote = {
   vehicleId?: string | null;
   vehicleNo?: string;
   vehicleType?: string;
-  // Lifecycle timestamps (migration 0066). Stamped server-side on
-  // status transitions PARTIALLY_SOLD / FULLY_SOLD / CLOSED.
+  // Lifecycle timestamps (migration 0066 + 0078).
   dispatchedAt?: string | null;
+  inTransitAt?: string | null;
   deliveredAt?: string | null;
   acknowledgedAt?: string | null;
   // Linkage (migration 0066).

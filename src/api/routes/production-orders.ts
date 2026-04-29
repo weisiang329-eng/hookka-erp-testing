@@ -1700,6 +1700,94 @@ async function cascadePoCompletionToCO(
   }
 }
 
+// ----------------------------------------------------------------------------
+// CN-completion cascade — DO-parity twin (gap 1, audit fix 2026-04-29).
+//
+// DO's PUT /:id flips sales_orders.status='DELIVERED' once the DO crosses
+// to DELIVERED (delivery-orders.ts ~lines 1633-1660). CN had no parallel:
+// once every CN under a CO went FULLY_SOLD or CLOSED, the parent CO sat
+// frozen at READY_TO_SHIP forever. This helper closes that gap.
+//
+// Called from updateConsignmentNoteById (consignment-note-shared.ts) AFTER
+// the main UPDATE statement, when nextStatus IN ('FULLY_SOLD','CLOSED')
+// AND existing.consignmentOrderId is set. Also called from convert-to-
+// invoice in consignment-notes.ts after that route bumps the CN to
+// FULLY_SOLD.
+//
+// Idempotent: if the CO is already DELIVERED, this is a no-op. Re-running
+// after every CN status change is safe.
+// ----------------------------------------------------------------------------
+export async function cascadeCNCompletionToCO(
+  db: D1Database,
+  consignmentOrderId: string | null,
+): Promise<void> {
+  if (!consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+  const siblings = await db
+    .prepare("SELECT status FROM consignment_notes WHERE consignmentOrderId = ?")
+    .bind(consignmentOrderId)
+    .all<{ status: string }>();
+  const sibList = siblings.results ?? [];
+  // Need at least one CN AND every CN must be FULLY_SOLD or CLOSED.
+  // RETURNED is intentionally NOT counted as "done" — the goods came back,
+  // the CO should not flip DELIVERED.
+  const allDone =
+    sibList.length > 0 &&
+    sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
+  if (allDone && co.status !== "DELIVERED") {
+    await db
+      .prepare(
+        "UPDATE consignment_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+      )
+      .bind(new Date().toISOString(), consignmentOrderId)
+      .run();
+  }
+}
+
+// CN-completion REVERSAL twin. When a CN reverses below FULLY_SOLD AND the
+// parent CO has been bumped to DELIVERED by a prior cascadeCNCompletionToCO
+// call, flip it back to READY_TO_SHIP so the CO no longer reads as completed.
+//
+// DO doesn't have an equivalent SO bump-back: once a SO crosses to
+// DELIVERED via DO cascade, reversing the DO does not bump the SO back —
+// the operator handles that manually if desired (delivery-orders.ts is
+// silent on the reverse path for the SO cascade). For CN we mirror that
+// model by ONLY bumping back if the CO is currently DELIVERED — otherwise
+// we leave it alone. This keeps the cascade strictly additive: no
+// surprises, no clobbering an operator-set state.
+export async function cascadeCNReversalToCO(
+  db: D1Database,
+  consignmentOrderId: string | null,
+): Promise<void> {
+  if (!consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+  if (co.status !== "DELIVERED") return; // Only bump back from DELIVERED.
+  // Re-check: if sibling CNs are still all FULLY_SOLD/CLOSED, do nothing.
+  const siblings = await db
+    .prepare("SELECT status FROM consignment_notes WHERE consignmentOrderId = ?")
+    .bind(consignmentOrderId)
+    .all<{ status: string }>();
+  const sibList = siblings.results ?? [];
+  const stillAllDone =
+    sibList.length > 0 &&
+    sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
+  if (stillAllDone) return;
+  await db
+    .prepare(
+      "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+    )
+    .bind(new Date().toISOString(), consignmentOrderId)
+    .run();
+}
+
 // Track F cost cascade lives in ../lib/po-cost-cascade.ts and is wired
 // through postProductionOrderCompletion() + postJobCardLabor() below.
 

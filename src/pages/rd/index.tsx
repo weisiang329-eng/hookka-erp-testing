@@ -1,6 +1,6 @@
 import { useState, useCallback, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -20,6 +20,7 @@ import {
   Archive,
   Play,
   ImageOff,
+  Pencil,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
@@ -186,7 +187,7 @@ function DraftCard({
             onClick={handleStartClick}
             className="w-full"
           >
-            <Play className="h-4 w-4" /> 开启项目 / Start Project
+            <Play className="h-4 w-4" /> Start Project
           </Button>
         </CardContent>
       </Card>
@@ -198,16 +199,49 @@ function ProjectCard({ project }: { project: RDProject }) {
   const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
   const budgetColor = budgetPct > 90 ? "text-[#9A3A2D]" : budgetPct > 70 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
   const cover = getCoverPhoto(project);
+  // If the cover URL resolves but the browser can't render it (404, truncated
+  // base64, decode failure), swap to the neutral placeholder instead of
+  // showing the broken-image alt text overlaid on the card. Same image works
+  // on the detail page + Pipeline card, so we don't fix the data — we just
+  // degrade gracefully here.
+  const [coverFailed, setCoverFailed] = useState(false);
+  const showCover = cover && !coverFailed;
+
+  // Edit button: navigate to detail page with ?edit=1 so the detail page can
+  // auto-open its existing edit modal. We stop event propagation + prevent
+  // default so the click doesn't fall through to the outer <Link> nav, then
+  // navigate programmatically (a nested <a> inside <a> would be invalid HTML).
+  const navigate = useNavigate();
+  const handleEditClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    navigate(`/rd/${project.id}?edit=1`);
+  };
 
   return (
     <Link to={`/rd/${project.id}`}>
-      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full overflow-hidden">
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full overflow-hidden relative">
+        {/* Edit affordance — sits above the cover banner in the top-right
+            corner of the card. Routes to detail page with ?edit=1 so the
+            detail view can auto-open its edit modal. We use a <button> +
+            programmatic navigate() because nesting <Link>/<a> inside the
+            outer card <Link> would be invalid HTML. */}
+        <button
+          type="button"
+          onClick={handleEditClick}
+          aria-label={`Edit ${project.name}`}
+          className="absolute top-2 right-2 z-10 inline-flex items-center justify-center h-7 w-7 rounded-md bg-white/90 backdrop-blur-sm border border-[#E2DDD8] text-gray-500 hover:bg-white hover:text-[#6B5C32] hover:border-[#6B5C32] transition-colors shadow-sm"
+        >
+          <Pencil className="h-3.5 w-3.5" />
+        </button>
         {/* Cover photo thumbnail — full-width banner. Falls back to a neutral
-            placeholder when the project has no cover photo or milestone photos. */}
-        {cover ? (
+            placeholder when the project has no cover photo, no milestone
+            photos, or when the image source fails to load. */}
+        {showCover ? (
           <img
             src={cover}
             alt={`${project.name} cover`}
+            onError={() => setCoverFailed(true)}
             className="w-full h-24 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
         ) : (
@@ -914,7 +948,7 @@ export default function RDPage() {
   const handleStartProject = useCallback(
     async (project: RDProject) => {
       const ok = window.confirm(
-        "开启此项目? 开启后会进入生产 Pipeline。\n(Start this project? It will enter the production pipeline.)",
+        "Start this project? It will enter the production pipeline.",
       );
       if (!ok) return;
       try {
@@ -931,7 +965,7 @@ export default function RDPage() {
           }
           throw new Error(errMsg);
         }
-        toast.success("项目已开启 / Project started");
+        toast.success("Project started");
         fetchProjects();
       } catch (err) {
         toast.error(err instanceof Error ? err.message : "Failed to start project");
@@ -992,9 +1026,7 @@ export default function RDPage() {
               ))}
               {draftProjects.length === 0 && (
                 <div className="col-span-3 text-center py-16 text-gray-400 text-sm">
-                  还没有草稿款式 — 在 'New Project' 创建后会先进这里
-                  <br />
-                  <span className="text-xs">(No drafts yet — newly created projects land here first)</span>
+                  No drafts yet — newly created projects land here first
                 </div>
               )}
             </div>

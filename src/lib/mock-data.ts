@@ -5395,7 +5395,7 @@ export type RDProject = {
   currentStage: RDProjectStage;
   targetLaunchDate: string;
   assignedTeam: string[];
-  milestones: { stage: RDProjectStage; targetDate: string; estimatedDate?: string | null; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
+  milestones: { stage: RDProjectStage; targetDate: string; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
   totalBudget: number;
   actualCost: number;
   prototypes: RDPrototype[];
@@ -5407,6 +5407,9 @@ export type RDProject = {
   sourceBrand?: string;
   sourcePurchaseRef?: string;
   sourceNotes?: string;
+  // Cover photo — glanceable thumbnail of what the project is about. Stored
+  // as a JPEG data URL via @/lib/image-compress.
+  coverPhotoUrl?: string | null;
   createdDate: string;
   // DRAFT = idea backlog, NOT in Pipeline. Flipped to ACTIVE via the
   // "开启项目" button (POST /api/rd-projects/:id/start). See migration

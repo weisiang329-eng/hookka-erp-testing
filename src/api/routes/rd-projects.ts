@@ -34,7 +34,9 @@ type ProjectRow = {
   sourceProductName: string | null;
   sourceBrand: string | null;
   sourcePurchaseRef: string | null;
+  sourcePriceSen: number | null;
   sourceNotes: string | null;
+  coverPhotoUrl: string | null;
   createdDate: string | null;
   status: string | null;
   startedAt: string | null;
@@ -96,7 +98,9 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
     sourceProductName: row.sourceProductName ?? "",
     sourceBrand: row.sourceBrand ?? "",
     sourcePurchaseRef: row.sourcePurchaseRef ?? "",
+    sourcePriceSen: row.sourcePriceSen ?? null,
     sourceNotes: row.sourceNotes ?? "",
+    coverPhotoUrl: row.coverPhotoUrl ?? null,
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -210,9 +214,9 @@ app.post("/", async (c) => {
       `INSERT INTO rd_projects (id, code, name, description, projectType, productCategory,
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
          milestones, productionBOM, materialIssuances, labourLogs,
-         sourceProductName, sourceBrand, sourcePurchaseRef, sourceNotes,
-         createdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         sourceProductName, sourceBrand, sourcePurchaseRef, sourcePriceSen,
+         sourceNotes, coverPhotoUrl, createdDate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -234,7 +238,9 @@ app.post("/", async (c) => {
         body.sourceProductName ?? null,
         body.sourceBrand ?? null,
         body.sourcePurchaseRef ?? null,
+        body.sourcePriceSen ?? null,
         body.sourceNotes ?? null,
+        body.coverPhotoUrl ?? null,
         now.toISOString(),
         // New projects start in DRAFT (idea backlog) per migration 0090.
         // The shop owner clicks "开启项目 / Start Project" on the Drafts
@@ -405,10 +411,18 @@ app.put("/:id", async (c) => {
         body.sourcePurchaseRef !== undefined
           ? body.sourcePurchaseRef
           : existing.sourcePurchaseRef,
+      sourcePriceSen:
+        body.sourcePriceSen !== undefined
+          ? body.sourcePriceSen
+          : existing.sourcePriceSen,
       sourceNotes:
         body.sourceNotes !== undefined
           ? body.sourceNotes
           : existing.sourceNotes,
+      coverPhotoUrl:
+        body.coverPhotoUrl !== undefined
+          ? body.coverPhotoUrl
+          : existing.coverPhotoUrl,
       status: body.status ?? existing.status,
     };
 
@@ -419,7 +433,8 @@ app.put("/:id", async (c) => {
          assignedTeam = ?, totalBudget = ?, actualCost = ?,
          milestones = ?, productionBOM = ?, materialIssuances = ?,
          labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
-         sourcePurchaseRef = ?, sourceNotes = ?, status = ?
+         sourcePurchaseRef = ?, sourcePriceSen = ?, sourceNotes = ?,
+         coverPhotoUrl = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -440,7 +455,9 @@ app.put("/:id", async (c) => {
         merged.sourceProductName,
         merged.sourceBrand,
         merged.sourcePurchaseRef,
+        merged.sourcePriceSen,
         merged.sourceNotes,
+        merged.coverPhotoUrl,
         merged.status,
         id,
       )

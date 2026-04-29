@@ -43,7 +43,9 @@ export const RdProjectSchema = z
     sourceProductName: z.string().optional(),
     sourceBrand: z.string().optional(),
     sourcePurchaseRef: z.string().optional(),
+    sourcePriceSen: z.number().nullable().optional(),
     sourceNotes: z.string().optional(),
+    coverPhotoUrl: z.string().nullable().optional(),
     prototypes: z.array(RdPrototypeSchema).optional(),
     createdDate: z.string().optional(),
     // 'DRAFT' added in migration 0090. Server still returns the full union

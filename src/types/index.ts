@@ -1090,6 +1090,28 @@ export type RDMaterialIssuance = {
   notes: string;
 };
 
+// Row-level shape for the rd_material_issuances table introduced in migration
+// 0092. Mirrors the column names returned by the API after camelCase rewrite.
+// Kept distinct from RDMaterialIssuance (the legacy JSON shape) so the two
+// data sources can coexist while we migrate UIs to the table-backed flow.
+export type RdMaterialIssuance = {
+  id: string;
+  projectId: string;
+  rawMaterialId: string;
+  materialCode: string;
+  materialName: string;
+  qty: number;
+  unit: string;
+  unitCostSen: number;
+  totalCostSen: number;
+  issuedAt: string;          // DATE — YYYY-MM-DD
+  issuedBy: string | null;
+  notes: string | null;
+  stockMovementId: string | null;
+  orgId: string;
+  createdAt: string;
+};
+
 export type RDLabourLog = {
   id: string;
   rdProjectId: string;

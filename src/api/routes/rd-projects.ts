@@ -143,6 +143,49 @@ function estimateFIFOCost(_itemCode: string, itemGroup: string): number {
   return groupCosts[itemGroup] ?? 2000;
 }
 
+// Resolve the weighted-average unit cost (sen) for a raw material from the
+// live FIFO rm_batches. Sums (remaining_qty × unit_cost_sen) over batches with
+// remaining stock and divides by total remaining qty. Falls back to the
+// itemGroup heuristic in estimateFIFOCost() when the material has no positive
+// batches (e.g. opening-balance items that pre-date GRN posting).
+type DbBindable = {
+  prepare: (sql: string) => {
+    bind: (...args: unknown[]) => {
+      all: <T>() => Promise<{ results: T[] | null }>;
+    };
+  };
+};
+
+async function resolveWacUnitCostSen(
+  db: DbBindable,
+  rmId: string,
+  itemCode: string,
+  itemGroup: string,
+): Promise<number> {
+  const res = await db
+    .prepare(
+      `SELECT remainingQty, unitCostSen
+         FROM rm_batches
+        WHERE rmId = ? AND remainingQty > 0`,
+    )
+    .bind(rmId)
+    .all<{ remainingQty: number; unitCostSen: number }>();
+  const rows: { remainingQty: number; unitCostSen: number }[] =
+    res.results ?? [];
+  let totalQty = 0;
+  let totalValueSen = 0;
+  for (const r of rows) {
+    if (r.remainingQty > 0 && Number.isFinite(r.unitCostSen)) {
+      totalQty += r.remainingQty;
+      totalValueSen += r.remainingQty * r.unitCostSen;
+    }
+  }
+  if (totalQty > 0) {
+    return Math.round(totalValueSen / totalQty);
+  }
+  return estimateFIFOCost(itemCode, itemGroup);
+}
+
 // GET /api/rd-projects
 app.get("/", async (c) => {
   const status = c.req.query("status");
@@ -582,12 +625,17 @@ app.post("/:id/issue-material", async (c) => {
       );
     }
 
-    // Snapshot the price at issuance time. Falls back to FIFO estimate when
-    // the client didn't provide one. The snapshot is stored on the issuance
-    // record itself (JSON), so historical entries keep their accurate cost
-    // even if the raw_materials catalog price is later edited.
-    const unitCostSen =
-      body.unitCostSen ?? estimateFIFOCost(rm.itemCode, rm.itemGroup);
+    // Snapshot the price at issuance time. The unit cost is ALWAYS resolved
+    // server-side from the live FIFO weighted-average (rm_batches) — the
+    // client no longer sends unitCostSen. Snapshotting onto the issuance
+    // record means historical entries keep their accurate cost even if the
+    // raw_materials catalog price is later edited or new GRN batches arrive.
+    const unitCostSen = await resolveWacUnitCostSen(
+      c.var.DB,
+      rm.id,
+      rm.itemCode,
+      rm.itemGroup,
+    );
     const totalCostSen = Math.round(unitCostSen * qty);
     const issuanceId = genId("rdiss");
     const nowIso = new Date().toISOString();
@@ -601,13 +649,14 @@ app.post("/:id/issue-material", async (c) => {
 
     // 2. Audit ledger: write a STOCK_OUT movement so warehouse history shows
     //    where the material went. Mirrors the pattern used in stock-adjustments.
+    const stockMovementId = `mv-${issuanceId}`;
     await c.var.DB.prepare(
       `INSERT INTO stock_movements (id, type, productCode, productName,
          quantity, reason, performedBy, created_at)
        VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
-        `mv-${issuanceId}`,
+        stockMovementId,
         rm.itemCode,
         rm.description,
         qty,
@@ -616,6 +665,42 @@ app.post("/:id/issue-material", async (c) => {
         nowIso,
       )
       .run();
+
+    // 2b. Dual-write to the dedicated rd_material_issuances table introduced
+    // in migration 0092. Keeps the table-backed history correct while the
+    // legacy JSON column stays as a denormalised cache for existing readers.
+    // Wrapped in try/catch so a missing table (pre-0092 environments) doesn't
+    // break the issuance flow.
+    try {
+      await c.var.DB.prepare(
+        `INSERT INTO rd_material_issuances
+           (id, projectId, rawMaterialId, materialCode, materialName,
+            qty, unit, unitCostSen, totalCostSen, issuedAt, issuedBy,
+            notes, stockMovementId, orgId, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          issuanceId,
+          project.id,
+          rm.id,
+          rm.itemCode,
+          rm.description,
+          qty,
+          rm.baseUOM,
+          unitCostSen,
+          totalCostSen,
+          nowIso.slice(0, 10),
+          issuedBy ?? null,
+          notes ?? null,
+          stockMovementId,
+          "hookka",
+          nowIso,
+        )
+        .run();
+    } catch (err) {
+      // Migration 0092 not yet applied — fall back to JSON-only persistence.
+      console.warn("[rd-projects] rd_material_issuances insert skipped:", err);
+    }
 
     // 3. Append issuance to JSON column with the snapshotted price
     const existingIssuances = parseJSON<Record<string, unknown>[]>(
@@ -670,6 +755,348 @@ app.post("/:id/issue-material", async (c) => {
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Material-issuance endpoints (multi-issuance feature, migration 0092).
+//
+// Backed by rd_material_issuances. The legacy JSON column on rd_projects is
+// still maintained by POST /:id/issue-material for backward compatibility.
+// ---------------------------------------------------------------------------
+
+type IssuanceRow = {
+  id: string;
+  projectId: string;
+  rawMaterialId: string;
+  materialCode: string | null;
+  materialName: string | null;
+  qty: number;
+  unit: string;
+  unitCostSen: number;
+  totalCostSen: number;
+  issuedAt: string;
+  issuedBy: string | null;
+  notes: string | null;
+  stockMovementId: string | null;
+  orgId: string;
+  createdAt: string;
+};
+
+function rowToIssuance(r: IssuanceRow) {
+  return {
+    id: r.id,
+    projectId: r.projectId,
+    rawMaterialId: r.rawMaterialId,
+    materialCode: r.materialCode ?? "",
+    materialName: r.materialName ?? "",
+    qty: r.qty,
+    unit: r.unit,
+    unitCostSen: r.unitCostSen,
+    totalCostSen: r.totalCostSen,
+    issuedAt: r.issuedAt,
+    issuedBy: r.issuedBy,
+    notes: r.notes,
+    stockMovementId: r.stockMovementId,
+    orgId: r.orgId,
+    createdAt: r.createdAt,
+  };
+}
+
+// GET /api/rd-projects/:id/issuances — list all table-backed issuances for
+// the project, newest first.
+app.get("/:id/issuances", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT * FROM rd_material_issuances
+        WHERE projectId = ?
+        ORDER BY issuedAt DESC, createdAt DESC`,
+    )
+      .bind(id)
+      .all<IssuanceRow>();
+    return c.json({
+      success: true,
+      data: (res.results ?? []).map(rowToIssuance),
+    });
+  } catch {
+    // Table missing (migration 0092 not yet applied) — return empty list so
+    // the UI degrades gracefully instead of erroring out.
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// POST /api/rd-projects/:id/issuances — convenience alias for the existing
+// issue-material handler that returns the new RdMaterialIssuance shape. The
+// request body matches /issue-material (materialId, qty, issuedBy, notes).
+// We don't duplicate the handler logic — we forward into the same code path,
+// then re-fetch the newly-inserted row from rd_material_issuances.
+app.post("/:id/issuances", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  try {
+    const project = await c.var.DB.prepare(
+      "SELECT * FROM rd_projects WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProjectRow>();
+    if (!project) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+    const body = await c.req.json();
+    const { materialId, qty, issuedBy, notes } = body;
+    if (!materialId || !qty || qty <= 0) {
+      return c.json(
+        { success: false, error: "materialId and qty > 0 are required" },
+        400,
+      );
+    }
+    const rm = await c.var.DB.prepare(
+      "SELECT id, itemCode, description, itemGroup, baseUOM, balanceQty FROM raw_materials WHERE id = ?",
+    )
+      .bind(materialId)
+      .first<RawMaterialRow>();
+    if (!rm) {
+      return c.json({ success: false, error: "Raw material not found" }, 404);
+    }
+    if (rm.balanceQty < qty) {
+      return c.json(
+        {
+          success: false,
+          error: `Insufficient stock. Available: ${rm.balanceQty} ${rm.baseUOM}`,
+        },
+        400,
+      );
+    }
+
+    const unitCostSen = await resolveWacUnitCostSen(
+      c.var.DB,
+      rm.id,
+      rm.itemCode,
+      rm.itemGroup,
+    );
+    const totalCostSen = Math.round(unitCostSen * qty);
+    const issuanceId = genId("rdiss");
+    const nowIso = new Date().toISOString();
+    const stockMovementId = `mv-${issuanceId}`;
+
+    await c.var.DB.prepare(
+      "UPDATE raw_materials SET balanceQty = balanceQty - ? WHERE id = ?",
+    )
+      .bind(qty, materialId)
+      .run();
+
+    await c.var.DB.prepare(
+      `INSERT INTO stock_movements (id, type, productCode, productName,
+         quantity, reason, performedBy, created_at)
+       VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        stockMovementId,
+        rm.itemCode,
+        rm.description,
+        qty,
+        `R&D ${project.code} issuance${notes ? " — " + notes : ""}`,
+        issuedBy ?? "System",
+        nowIso,
+      )
+      .run();
+
+    await c.var.DB.prepare(
+      `INSERT INTO rd_material_issuances
+         (id, projectId, rawMaterialId, materialCode, materialName,
+          qty, unit, unitCostSen, totalCostSen, issuedAt, issuedBy,
+          notes, stockMovementId, orgId, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        issuanceId,
+        project.id,
+        rm.id,
+        rm.itemCode,
+        rm.description,
+        qty,
+        rm.baseUOM,
+        unitCostSen,
+        totalCostSen,
+        nowIso.slice(0, 10),
+        issuedBy ?? null,
+        notes ?? null,
+        stockMovementId,
+        "hookka",
+        nowIso,
+      )
+      .run();
+
+    // Mirror into the legacy JSON column so older list views keep working
+    // and actualCost stays in sync without a separate aggregator.
+    const existingIssuances = parseJSON<Record<string, unknown>[]>(
+      project.materialIssuances,
+      [],
+    );
+    const legacyEntry = {
+      id: issuanceId,
+      rdProjectId: project.id,
+      rdProjectCode: project.code,
+      materialId: rm.id,
+      materialCode: rm.itemCode,
+      materialName: rm.description,
+      qty,
+      unit: rm.baseUOM,
+      unitCostSen,
+      totalCostSen,
+      issuedDate: nowIso.slice(0, 10),
+      issuedBy: issuedBy ?? "System",
+      notes: notes ?? "",
+    };
+    const nextIssuances = [...existingIssuances, legacyEntry];
+    const nextActualCost = nextIssuances.reduce(
+      (sum, i) =>
+        sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
+      0,
+    );
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
+    )
+      .bind(JSON.stringify(nextIssuances), nextActualCost, id)
+      .run();
+
+    const row = await c.var.DB.prepare(
+      "SELECT * FROM rd_material_issuances WHERE id = ?",
+    )
+      .bind(issuanceId)
+      .first<IssuanceRow>();
+    return c.json(
+      {
+        success: true,
+        data: row ? rowToIssuance(row) : null,
+      },
+      201,
+    );
+  } catch (err) {
+    console.error("[rd-projects] POST /issuances failed:", err);
+    return c.json({ success: false, error: "Failed to create issuance" }, 400);
+  }
+});
+
+// DELETE /api/rd-projects/:id/issuances/:issuanceId — reverse an issuance:
+// re-credit raw_materials.balanceQty, write a STOCK_IN counter-movement, and
+// delete both the table row and the matching legacy JSON entry. The
+// rd_projects.actualCost is recomputed from the post-delete JSON array.
+app.delete("/:id/issuances/:issuanceId", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const issuanceId = c.req.param("issuanceId");
+  try {
+    const project = await c.var.DB.prepare(
+      "SELECT * FROM rd_projects WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProjectRow>();
+    if (!project) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+
+    // Read the row from the table when present; fall back to the JSON
+    // mirror so we can still reverse legacy-only issuances.
+    let row: IssuanceRow | null = null;
+    try {
+      row = await c.var.DB.prepare(
+        "SELECT * FROM rd_material_issuances WHERE id = ? AND projectId = ?",
+      )
+        .bind(issuanceId, id)
+        .first<IssuanceRow>();
+    } catch {
+      row = null;
+    }
+
+    type LegacyIssuance = {
+      id?: string;
+      materialId?: string;
+      materialCode?: string;
+      materialName?: string;
+      qty?: number;
+      issuedBy?: string;
+      issuedDate?: string;
+    };
+    const legacyAll = parseJSON<LegacyIssuance[]>(
+      project.materialIssuances,
+      [],
+    );
+    const legacy = legacyAll.find((x) => x.id === issuanceId);
+
+    const matRefId = row?.rawMaterialId ?? legacy?.materialId;
+    const refQty = row?.qty ?? legacy?.qty ?? 0;
+    const matCode = row?.materialCode ?? legacy?.materialCode ?? "";
+    const matName = row?.materialName ?? legacy?.materialName ?? "";
+    const performedBy = row?.issuedBy ?? legacy?.issuedBy ?? "System";
+
+    if (!matRefId || !refQty || refQty <= 0) {
+      return c.json(
+        { success: false, error: "Issuance not found or invalid" },
+        404,
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+
+    // Re-credit balance
+    await c.var.DB.prepare(
+      "UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?",
+    )
+      .bind(refQty, matRefId)
+      .run();
+
+    // Counter-movement so the audit ledger balances.
+    await c.var.DB.prepare(
+      `INSERT INTO stock_movements (id, type, productCode, productName,
+         quantity, reason, performedBy, created_at)
+       VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        `mv-rev-${issuanceId}`,
+        matCode,
+        matName,
+        refQty,
+        `R&D ${project.code} issuance reversed (id=${issuanceId})`,
+        performedBy,
+        nowIso,
+      )
+      .run();
+
+    // Drop the table row (best-effort — pre-0092 envs simply have no row).
+    try {
+      await c.var.DB.prepare(
+        "DELETE FROM rd_material_issuances WHERE id = ? AND projectId = ?",
+      )
+        .bind(issuanceId, id)
+        .run();
+    } catch {
+      // ignore — see migration 0092 fallback comment above
+    }
+
+    // Drop the legacy JSON entry and recompute actualCost.
+    const nextIssuances = legacyAll.filter((x) => x.id !== issuanceId);
+    const nextActualCost = nextIssuances.reduce(
+      (sum, i) =>
+        sum +
+        (typeof (i as { totalCostSen?: number }).totalCostSen === "number"
+          ? (i as { totalCostSen: number }).totalCostSen
+          : 0),
+      0,
+    );
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
+    )
+      .bind(JSON.stringify(nextIssuances), nextActualCost, id)
+      .run();
+
+    return c.json({ success: true, data: { id: issuanceId } });
+  } catch (err) {
+    console.error("[rd-projects] DELETE /issuances failed:", err);
+    return c.json({ success: false, error: "Failed to delete issuance" }, 400);
   }
 });
 

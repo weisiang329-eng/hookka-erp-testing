@@ -16,7 +16,6 @@ import {
   ChevronLeft,
   ChevronRight,
   DollarSign,
-  Layers,
   Pencil,
   Plus,
   X,
@@ -24,7 +23,7 @@ import {
   Trash2,
   ImagePlus,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDPrototypeType, RDBOMItem } from "@/types";
+import type { RDProject, RDProjectStage, RDPrototypeType } from "@/types";
 import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -152,28 +151,23 @@ export default function RDProjectDetailPage() {
     createdDate: new Date().toISOString().slice(0, 10),
   });
 
-  // Production BOM
-  const [bomOpen, setBomOpen] = useState(false);
-  const [bomSaving, setBomSaving] = useState(false);
-  const [bomForm, setBomForm] = useState({
-    materialCode: "",
-    materialName: "",
-    qty: 1,
-    unit: "PCS",
-    unitCostRM: 0,
-  });
+  // Production BOM section was removed in Task #8 — its modal, state, and
+  // handlers used to live here. Issue dialog and the rest of the file are
+  // unaffected.
 
   // Material Issuance modal — 2-step picker: Category (itemGroup) → Specific RawMaterial.
   const [issuanceOpen, setIssuanceOpen] = useState(false);
   const [issuanceSaving, setIssuanceSaving] = useState(false);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
   const [rmCategory, setRmCategory] = useState<string>("");
+  // Note: unit cost is no longer captured in the UI. The backend resolves it
+  // from FIFO weighted-average over the live rm_batches at issue time, so the
+  // dialog can stay focused on quantity + person + notes.
   const [issuanceForm, setIssuanceForm] = useState({
     materialId: "",
     materialCode: "",
     materialName: "",
     unit: "",
-    unitCostRM: 0,
     balanceQty: 0,
     qty: 1,
     issuedBy: "",
@@ -398,55 +392,6 @@ export default function RDProjectDetailPage() {
     }
   };
 
-  // ─── Production BOM ────────────────────────────────────────────────────
-
-  const handleAddBomItem = async () => {
-    if (!project) return;
-    if (!bomForm.materialCode.trim() || !bomForm.materialName.trim()) {
-      toast.warning("Material code and name are required");
-      return;
-    }
-    setBomSaving(true);
-    try {
-      const newItem: RDBOMItem = {
-        id: `rdbom-${Date.now()}`,
-        materialCode: bomForm.materialCode.trim(),
-        materialName: bomForm.materialName.trim(),
-        qty: bomForm.qty,
-        unit: bomForm.unit,
-        unitCostSen: Math.round(bomForm.unitCostRM * 100),
-      };
-      const updatedBOM = [...(project.productionBOM || []), newItem];
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { productionBOM: updatedBOM },
-      });
-      if (data.data) setProject(data.data as RDProject);
-      setBomOpen(false);
-      setBomForm({ materialCode: "", materialName: "", qty: 1, unit: "PCS", unitCostRM: 0 });
-      toast.success("Material added to Production BOM");
-    } catch {
-      toast.error("Failed to add material");
-    } finally {
-      setBomSaving(false);
-    }
-  };
-
-  const handleRemoveBomItem = async (itemId: string) => {
-    if (!project) return;
-    const updatedBOM = (project.productionBOM || []).filter((b) => b.id !== itemId);
-    try {
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { productionBOM: updatedBOM },
-      });
-      if (data.data) setProject(data.data as RDProject);
-      toast.success("Material removed");
-    } catch {
-      toast.error("Failed to remove material");
-    }
-  };
-
   // ─── Material Issuance ─────────────────────────────────────────────────
 
   const openIssuanceModal = () => {
@@ -457,7 +402,6 @@ export default function RDProjectDetailPage() {
       materialCode: "",
       materialName: "",
       unit: "",
-      unitCostRM: 0,
       balanceQty: 0,
       qty: 1,
       issuedBy: "",
@@ -476,7 +420,6 @@ export default function RDProjectDetailPage() {
         materialCode: "",
         materialName: "",
         unit: "",
-        unitCostRM: 0,
         balanceQty: 0,
       }));
       return;
@@ -487,7 +430,6 @@ export default function RDProjectDetailPage() {
       materialCode: rm.itemCode,
       materialName: rm.description,
       unit: rm.baseUOM,
-      unitCostRM: 0, // FIFO estimated — no cost data on RawMaterial, user enters manually
       balanceQty: rm.balanceQty,
     }));
   };
@@ -508,6 +450,9 @@ export default function RDProjectDetailPage() {
     }
     setIssuanceSaving(true);
     try {
+      // unitCostSen intentionally omitted — server resolves it from the live
+      // FIFO-weighted-average over rm_batches at issue time. See
+      // resolveWacUnitCostSen() in src/api/routes/rd-projects.ts.
       const res = await fetch(`/api/rd-projects/${id}/issue-material`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -516,7 +461,6 @@ export default function RDProjectDetailPage() {
           qty: issuanceForm.qty,
           issuedBy: issuanceForm.issuedBy.trim(),
           notes: issuanceForm.notes.trim(),
-          unitCostSen: Math.round(issuanceForm.unitCostRM * 100),
         }),
       });
       if (res.ok) {
@@ -604,43 +548,80 @@ export default function RDProjectDetailPage() {
     photoInputRef.current?.click();
   };
 
-  const handlePhotoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (!files || !photoUploadStage) return;
-    const newPhotos: string[] = [];
-    for (let i = 0; i < files.length; i++) {
-      newPhotos.push(URL.createObjectURL(files[i]));
-    }
-    setStagePhotos((prev) => ({
-      ...prev,
-      [photoUploadStage]: [...(prev[photoUploadStage] || []), ...newPhotos],
-    }));
-    // Also save to milestone photos array
-    if (project) {
-      const updatedMilestones = project.milestones.map((m) => {
-        if (m.stage === photoUploadStage) {
-          return { ...m, photos: [...(m.photos || []), ...newPhotos] };
-        }
-        return m;
-      });
-      fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { milestones: updatedMilestones },
-      }).then((data) => {
-        if (data.data) setProject(data.data as RDProject);
-      }).catch(() => {});
-    }
+    const stage = photoUploadStage;
+    // Reset the input/state immediately so the user can pick again even
+    // if compression / save is still running.
     setPhotoUploadStage(null);
     e.target.value = "";
+    if (!files || files.length === 0 || !stage || !project) return;
+
+    // Root-cause fix: previously this used URL.createObjectURL(file), which
+    // produces blob: URLs scoped to the current document. Those don't survive
+    // a reload and aren't transferable across devices — which is why the 3rd,
+    // 4th, 5th photos appeared "broken" once the user navigated away. Cover
+    // photo uploads (which work) use compressImage to produce a compact JPEG
+    // data URL persisted in TEXT. We now do the same here for milestone
+    // photos so the bytes actually live on the row.
+    try {
+      const compressed: string[] = [];
+      // Sequential await keeps memory low on phones — five 10 MB photos
+      // decoded in parallel can OOM a low-end Android. compressImage is
+      // already off-main-thread on modern browsers (OffscreenCanvas), so
+      // the cost here is just dispatch latency, not main-thread blocking.
+      for (let i = 0; i < files.length; i++) {
+        const dataUrl = await compressImage(files[i], { maxDim: 1280, quality: 0.85 });
+        compressed.push(dataUrl);
+      }
+      setStagePhotos((prev) => ({
+        ...prev,
+        [stage]: [...(prev[stage] || []), ...compressed],
+      }));
+      const milestone = project.milestones.find((m) => m.stage === stage);
+      const previousPhotos = milestone?.photos ?? [];
+      const updatedMilestones = project.milestones.map((m) =>
+        m.stage === stage
+          ? { ...m, photos: [...previousPhotos, ...compressed] }
+          : m,
+      );
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { milestones: updatedMilestones },
+      });
+      if (data.data) setProject(data.data as RDProject);
+    } catch {
+      toast.error("Failed to upload photo(s)");
+    }
   };
 
-  const removeStagePhoto = (stage: string, index: number) => {
-    setStagePhotos((prev) => {
-      const updated = [...(prev[stage] || [])];
-      URL.revokeObjectURL(updated[index]);
-      updated.splice(index, 1);
-      return { ...prev, [stage]: updated };
-    });
+  const removeStagePhoto = async (stage: string, index: number) => {
+    if (!project) return;
+    const milestone = project.milestones.find((m) => m.stage === stage);
+    const localPhotos = stagePhotos[stage];
+    const sourcePhotos = (localPhotos && localPhotos.length > 0 ? localPhotos : milestone?.photos) ?? [];
+    if (index < 0 || index >= sourcePhotos.length) return;
+    const next = [...sourcePhotos.slice(0, index), ...sourcePhotos.slice(index + 1)];
+
+    // Optimistic local update
+    setStagePhotos((prev) => ({ ...prev, [stage]: next }));
+    const previousProject = project;
+    const updatedMilestones = project.milestones.map((m) =>
+      m.stage === stage ? { ...m, photos: next } : m,
+    );
+    setProject({ ...project, milestones: updatedMilestones });
+
+    try {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { milestones: updatedMilestones },
+      });
+      if (data.data) setProject(data.data as RDProject);
+    } catch {
+      setProject(previousProject);
+      setStagePhotos((prev) => ({ ...prev, [stage]: sourcePhotos }));
+      toast.error("Failed to remove photo");
+    }
   };
 
   // Reorder a photo within a milestone's photos[] array (swap adjacent).
@@ -791,16 +772,127 @@ export default function RDProjectDetailPage() {
         .sort((a, b) => a.itemCode.localeCompare(b.itemCode))
     : [];
 
-  // Cover photo for the header thumbnail. First milestone with photos wins;
-  // local stagePhotos override the persisted set so a fresh upload appears immediately.
-  const coverPhoto: string | undefined = (() => {
-    for (const m of project.milestones) {
-      const local = stagePhotos[m.stage];
-      const photos = local && local.length > 0 ? local : m.photos;
-      if (photos && photos.length > 0) return photos[0];
-    }
-    return undefined;
-  })();
+  // The old in-line "first milestone photo" thumbnail derivation lived here;
+  // removed in Task #8 along with the small header thumbnail. The dedicated
+  // project.coverPhotoUrl is now the single source for the cover image
+  // (rendered by coverPhotoCard below).
+
+  // Right-rail cover photo card. Reused inside the 2-col grid below; kept as
+  // a const so the full-width banner removal in Task 2 (#8) doesn't leave a
+  // dangling block. The card lays out the existing upload / replace / remove
+  // controls in a square aspect ratio that fits the sidebar.
+  const coverPhotoCard = (
+    <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden">
+      {project.coverPhotoUrl ? (
+        <div className="relative">
+          <img
+            src={project.coverPhotoUrl}
+            alt={`${project.name} cover`}
+            className="w-full aspect-square object-cover bg-[#FAF9F8]"
+          />
+          <div className="absolute top-2 right-2 flex items-center gap-1.5">
+            <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">
+              <ImagePlus className="h-3.5 w-3.5" />
+              {coverPhotoSaving ? "Saving..." : "Replace"}
+              <input
+                ref={coverPhotoInputRef}
+                type="file"
+                accept="image/*"
+                disabled={coverPhotoSaving}
+                onChange={(e) => {
+                  void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
+                  e.target.value = "";
+                }}
+                className="hidden"
+              />
+            </label>
+            <button
+              type="button"
+              onClick={() => void handleCoverPhotoRemove()}
+              disabled={coverPhotoSaving}
+              className="inline-flex items-center justify-center rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white p-1.5 text-gray-500 hover:text-[#9A3A2D] shadow-sm disabled:opacity-50"
+              title="Remove cover photo"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      ) : (
+        <label className="flex flex-col items-center justify-center aspect-square cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
+          <ImagePlus className="h-8 w-8 mb-2" />
+          <span className="text-sm font-medium">
+            {coverPhotoSaving ? "Uploading..." : "Upload cover photo"}
+          </span>
+          <span className="text-xs mt-1 text-gray-400 px-3 text-center">
+            A glanceable thumbnail of this project
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            disabled={coverPhotoSaving}
+            onChange={(e) => {
+              void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
+              e.target.value = "";
+            }}
+            className="hidden"
+          />
+        </label>
+      )}
+    </div>
+  );
+
+  // Right-rail "Project Info" card — pulls Brand/Supplier out of the
+  // Clone Source 2-col grid and surfaces it alongside the other top-line
+  // facts (target launch, team, service ref). For non-CLONE projects we
+  // simply skip the supplier row.
+  const projectInfoCard = (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Project Info</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        {project.sourceBrand && (
+          <div>
+            <p className="text-xs text-gray-400">Brand / Supplier</p>
+            <p className="text-[#1F1D1B] font-medium">{project.sourceBrand}</p>
+          </div>
+        )}
+        {project.targetLaunchDate && (
+          <div>
+            <p className="text-xs text-gray-400">Target Launch</p>
+            <p className="text-[#1F1D1B] font-medium">{formatDate(project.targetLaunchDate)}</p>
+          </div>
+        )}
+        {project.assignedTeam.length > 0 && (
+          <div>
+            <p className="text-xs text-gray-400 mb-1">Team</p>
+            <div className="flex flex-wrap gap-1">
+              {project.assignedTeam.map((name) => (
+                <span
+                  key={name}
+                  className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-xs text-[#6B5C32]"
+                >
+                  {name}
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        {project.serviceId && (
+          <div>
+            <p className="text-xs text-gray-400">Service Ref</p>
+            <p className="font-mono text-[#6B5C32]">{project.serviceId}</p>
+          </div>
+        )}
+        {!project.sourceBrand &&
+          !project.targetLaunchDate &&
+          project.assignedTeam.length === 0 &&
+          !project.serviceId && (
+            <p className="text-xs text-gray-400">No project info recorded yet.</p>
+          )}
+      </CardContent>
+    </Card>
+  );
 
   return (
     <div className="space-y-6">
@@ -809,91 +901,15 @@ export default function RDProjectDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to R&D
       </Button>
 
-      {/* Cover Photo — glanceable thumbnail of what this project is about.
-          Square 1:1 box capped at 320px wide because uploaded shots are
-          typically square product photos; a full-width banner crops them. */}
-      <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden w-full max-w-[320px] aspect-square">
-        {project.coverPhotoUrl ? (
-          <div className="relative h-full w-full">
-            <img
-              src={project.coverPhotoUrl}
-              alt={`${project.name} cover`}
-              className="h-full w-full object-cover bg-[#FAF9F8]"
-            />
-            <div className="absolute top-2 right-2 flex items-center gap-1.5">
-              <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">
-                <ImagePlus className="h-3.5 w-3.5" />
-                {coverPhotoSaving ? "Saving..." : "Replace"}
-                <input
-                  ref={coverPhotoInputRef}
-                  type="file"
-                  accept="image/*"
-                  disabled={coverPhotoSaving}
-                  onChange={(e) => {
-                    void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
-                    e.target.value = "";
-                  }}
-                  className="hidden"
-                />
-              </label>
-              <button
-                type="button"
-                onClick={() => void handleCoverPhotoRemove()}
-                disabled={coverPhotoSaving}
-                className="inline-flex items-center justify-center rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white p-1.5 text-gray-500 hover:text-[#9A3A2D] shadow-sm disabled:opacity-50"
-                title="Remove cover photo"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        ) : (
-          <label className="flex h-full w-full flex-col items-center justify-center cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
-            <ImagePlus className="h-8 w-8 mb-2" />
-            <span className="text-sm font-medium">
-              {coverPhotoSaving ? "Uploading..." : "Upload cover photo"}
-            </span>
-            <span className="text-xs mt-1 text-gray-400">
-              A glanceable thumbnail of this project
-            </span>
-            <input
-              type="file"
-              accept="image/*"
-              disabled={coverPhotoSaving}
-              onChange={(e) => {
-                void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
-                e.target.value = "";
-              }}
-              className="hidden"
-            />
-          </label>
-        )}
-      </div>
-
-      {/* Header */}
+      {/* 2-column layout: main content (lg: 2/3) + sticky right rail with
+          cover photo and project info (lg: 1/3). The right rail collapses
+          BELOW the main column on small screens so the cover stays visible. */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+      <div className="lg:col-span-2 space-y-6">
+      {/* Header — small thumbnail removed: the dedicated cover photo card on
+          the right rail is now the canonical place to see/manage the cover. */}
       <div className="flex items-start justify-between gap-4">
         <div className="flex items-start gap-4 flex-1 min-w-0">
-          {/* Cover thumbnail — first milestone photo, or placeholder slot. */}
-          {coverPhoto ? (
-            <img
-              src={coverPhoto}
-              alt={`${project.name} cover`}
-              className="h-20 w-20 rounded-lg object-cover border border-[#E2DDD8] flex-shrink-0"
-            />
-          ) : (
-            <div
-              className="h-20 w-20 rounded-lg border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex flex-col items-center justify-center text-[10px] text-gray-400 leading-tight flex-shrink-0"
-              title="Upload a milestone photo to set a cover"
-              aria-label="No cover photo yet"
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6 mb-0.5">
-                <rect x="3" y="3" width="18" height="18" rx="2" />
-                <circle cx="8.5" cy="8.5" r="1.5" />
-                <path d="M21 15l-5-5L5 21" />
-              </svg>
-              <span className="font-medium">Cover</span>
-            </div>
-          )}
           <div className="flex-1 min-w-0">
           <div className="flex items-center gap-3 mb-1">
             <span className="text-sm font-mono text-gray-400">{project.code}</span>
@@ -1004,12 +1020,7 @@ export default function RDProjectDetailPage() {
                     <dd className="text-[#1F1D1B] font-medium">{project.sourceProductName}</dd>
                   </div>
                 )}
-                {project.sourceBrand && (
-                  <div>
-                    <dt className="text-xs text-gray-400">Brand / Supplier</dt>
-                    <dd className="text-[#1F1D1B] font-medium">{project.sourceBrand}</dd>
-                  </div>
-                )}
+                {/* Brand/Supplier moved to the right-rail Project Info card. */}
                 {project.sourcePurchaseRef && (
                   <div>
                     <dt className="text-xs text-gray-400">Purchase Ref / Invoice No.</dt>
@@ -1315,77 +1326,8 @@ export default function RDProjectDetailPage() {
         );
       })}
 
-      {/* Production BOM — visible when at APPROVED or PRODUCTION_READY */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between w-full">
-            <CardTitle className="text-sm flex items-center gap-2">
-              <Layers className="h-4 w-4 text-gray-400" /> Production BOM — Raw Materials
-              {(project.productionBOM || []).length > 0 && (
-                <span className="text-xs font-normal text-gray-400">
-                  ({(project.productionBOM || []).length} items)
-                </span>
-              )}
-            </CardTitle>
-            <Button variant="outline" size="sm" onClick={() => setBomOpen(true)} className="gap-1.5 text-xs">
-              <Plus className="h-3.5 w-3.5" /> Add Material
-            </Button>
-          </div>
-        </CardHeader>
-        <CardContent>
-          {(project.productionBOM || []).length === 0 ? (
-            <div className="text-center py-8 text-gray-300 text-sm">
-              No raw materials added yet. Add materials to calculate production cost.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8]">
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Code</th>
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Material</th>
-                    <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Qty</th>
-                    <th className="text-center py-2 px-2 text-xs font-semibold text-gray-500">Unit</th>
-                    <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Unit Cost</th>
-                    <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Total</th>
-                    <th className="text-center py-2 px-2 text-xs font-semibold text-gray-500 w-10"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {(project.productionBOM || []).map((item) => (
-                    <tr key={item.id} className="border-b border-[#E2DDD8]/50 hover:bg-[#F0ECE9]/50">
-                      <td className="py-2 px-2 text-xs font-mono text-gray-500">{item.materialCode}</td>
-                      <td className="py-2 px-2 text-sm font-medium text-[#1F1D1B]">{item.materialName}</td>
-                      <td className="py-2 px-2 text-right text-sm">{item.qty}</td>
-                      <td className="py-2 px-2 text-center text-xs text-gray-500">{item.unit}</td>
-                      <td className="py-2 px-2 text-right text-sm">{formatCurrency(item.unitCostSen)}</td>
-                      <td className="py-2 px-2 text-right text-sm font-semibold">{formatCurrency(item.unitCostSen * item.qty)}</td>
-                      <td className="py-2 px-2 text-center">
-                        <button
-                          onClick={() => handleRemoveBomItem(item.id)}
-                          className="text-gray-300 hover:text-[#7A2E24] transition-colors"
-                          title="Remove"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {/* Cost Summary */}
-              <div className="border-t-2 border-[#E2DDD8] pt-3 flex items-center justify-between">
-                <div className="text-sm text-gray-500">
-                  Total Raw Material Cost ({(project.productionBOM || []).length} items)
-                </div>
-                <div className="text-lg font-bold text-[#1F1D1B]">
-                  {formatCurrency((project.productionBOM || []).reduce((sum, item) => sum + item.unitCostSen * item.qty, 0))}
-                </div>
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {/* Production BOM section removed per Task #8 — production BOM
+          management is no longer surfaced on the R&D detail page. */}
 
       {/* Material Issuance Log */}
       <Card>
@@ -1520,6 +1462,15 @@ export default function RDProjectDetailPage() {
           )}
         </CardContent>
       </Card>
+      </div>
+
+      {/* Right rail — sticky cover photo + project info card. Stacks below
+          the main column on small screens (lg breakpoint flips to side-by-side). */}
+      <aside className="lg:col-span-1 lg:sticky lg:top-4 space-y-4 self-start">
+        {coverPhotoCard}
+        {projectInfoCard}
+      </aside>
+      </div>
 
       {/* ─── Edit Project Modal ──────────────────────────────────────────── */}
       <ModalOverlay open={editOpen} onClose={() => setEditOpen(false)} title="Edit Project">
@@ -1800,83 +1751,8 @@ export default function RDProjectDetailPage() {
         </div>
       </ModalOverlay>
 
-      {/* ─── Add BOM Material Modal ────────────────────────────────────────── */}
-      <ModalOverlay open={bomOpen} onClose={() => setBomOpen(false)} title="Add Raw Material to Production BOM">
-        <div className="space-y-4">
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass}>Material Code</label>
-              <input
-                className={inputClass}
-                value={bomForm.materialCode}
-                onChange={(e) => setBomForm((f) => ({ ...f, materialCode: e.target.value }))}
-                placeholder="e.g. RM-WD-001"
-              />
-            </div>
-            <div>
-              <label className={labelClass}>Material Name</label>
-              <input
-                className={inputClass}
-                value={bomForm.materialName}
-                onChange={(e) => setBomForm((f) => ({ ...f, materialName: e.target.value }))}
-                placeholder="e.g. Plywood 18mm"
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className={labelClass}>Quantity</label>
-              <input
-                type="number"
-                className={inputClass}
-                min={0.01}
-                step={0.01}
-                value={bomForm.qty}
-                onChange={(e) => setBomForm((f) => ({ ...f, qty: parseFloat(e.target.value) || 0 }))}
-              />
-            </div>
-            <div>
-              <label className={labelClass}>Unit</label>
-              <select
-                className={selectClass}
-                value={bomForm.unit}
-                onChange={(e) => setBomForm((f) => ({ ...f, unit: e.target.value }))}
-              >
-                <option value="PCS">PCS</option>
-                <option value="METER">METER</option>
-                <option value="ROLL">ROLL</option>
-                <option value="KG">KG</option>
-                <option value="BOX">BOX</option>
-                <option value="SET">SET</option>
-                <option value="SHEET">SHEET</option>
-              </select>
-            </div>
-            <div>
-              <label className={labelClass}>Unit Cost (RM)</label>
-              <input
-                type="number"
-                className={inputClass}
-                min={0}
-                step={0.01}
-                value={bomForm.unitCostRM}
-                onChange={(e) => setBomForm((f) => ({ ...f, unitCostRM: parseFloat(e.target.value) || 0 }))}
-              />
-            </div>
-          </div>
-          {bomForm.qty > 0 && bomForm.unitCostRM > 0 && (
-            <div className="bg-[#F0ECE9] rounded-lg p-3 flex items-center justify-between">
-              <span className="text-sm text-gray-500">Line Total</span>
-              <span className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(Math.round(bomForm.unitCostRM * bomForm.qty * 100))}</span>
-            </div>
-          )}
-          <div className="flex justify-end gap-2 pt-2 border-t border-[#E2DDD8]">
-            <Button variant="ghost" onClick={() => setBomOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddBomItem} disabled={bomSaving}>
-              {bomSaving ? "Adding..." : "Add Material"}
-            </Button>
-          </div>
-        </div>
-      </ModalOverlay>
+      {/* Production BOM modal removed in Task #8 (production BOM management
+          no longer surfaced on the R&D detail page). */}
 
       {/* ─── Issue Material Modal ──────────────────────────────────────────── */}
       <ModalOverlay open={issuanceOpen} onClose={() => setIssuanceOpen(false)} title="Issue Raw Material" wide>
@@ -1931,7 +1807,7 @@ export default function RDProjectDetailPage() {
             </div>
           )}
 
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Quantity</label>
               <input
@@ -1952,19 +1828,10 @@ export default function RDProjectDetailPage() {
                 placeholder="Auto-filled"
               />
             </div>
-            <div>
-              <label className={labelClass}>Unit Cost (RM)</label>
-              <input
-                type="number"
-                className={inputClass}
-                min={0}
-                step={0.01}
-                value={issuanceForm.unitCostRM}
-                onChange={(e) => setIssuanceForm((f) => ({ ...f, unitCostRM: parseFloat(e.target.value) || 0 }))}
-                placeholder="FIFO estimated"
-              />
-            </div>
           </div>
+          <p className="text-xs text-gray-400">
+            Unit cost is resolved from the current weighted-average inventory cost at the time the material is issued.
+          </p>
 
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -1986,13 +1853,6 @@ export default function RDProjectDetailPage() {
               />
             </div>
           </div>
-
-          {issuanceForm.qty > 0 && issuanceForm.unitCostRM > 0 && (
-            <div className="bg-[#F0ECE9] rounded-lg p-3 flex items-center justify-between">
-              <span className="text-sm text-gray-500">Line Total</span>
-              <span className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(Math.round(issuanceForm.unitCostRM * issuanceForm.qty * 100))}</span>
-            </div>
-          )}
 
           <div className="flex justify-end gap-2 pt-2 border-t border-[#E2DDD8]">
             <Button variant="ghost" onClick={() => setIssuanceOpen(false)}>Cancel</Button>

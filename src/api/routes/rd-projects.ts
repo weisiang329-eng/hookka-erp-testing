@@ -541,6 +541,156 @@ app.post("/:id/start", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/rd-projects/:id/hold       — ACTIVE → ON_HOLD
+// POST /api/rd-projects/:id/resume     — ON_HOLD → ACTIVE
+// POST /api/rd-projects/:id/move-to-draft — ACTIVE | ON_HOLD → DRAFT
+//
+// Inverse-direction state flips. The user can pause an active project
+// (hold) or send it back to the Drafts backlog. Each endpoint hard-codes
+// the legal source statuses to keep transitions auditable; bad source
+// returns 400 with a message naming the current state.
+//
+// Reuses rd-projects:update permission, same as POST /:id/start.
+// ---------------------------------------------------------------------------
+app.post("/:id/hold", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "ACTIVE") {
+    return c.json(
+      {
+        success: false,
+        error: `Only ACTIVE projects can be put on hold (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    "UPDATE rd_projects SET status = 'ON_HOLD' WHERE id = ?",
+  )
+    .bind(id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? []),
+  });
+});
+
+app.post("/:id/resume", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "ON_HOLD") {
+    return c.json(
+      {
+        success: false,
+        error: `Only ON_HOLD projects can be resumed (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    "UPDATE rd_projects SET status = 'ACTIVE' WHERE id = ?",
+  )
+    .bind(id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? []),
+  });
+});
+
+app.post("/:id/move-to-draft", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "ACTIVE" && existing.status !== "ON_HOLD") {
+    return c.json(
+      {
+        success: false,
+        error: `Only ACTIVE or ON_HOLD projects can be moved back to draft (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    "UPDATE rd_projects SET status = 'DRAFT', started_at = NULL WHERE id = ?",
+  )
+    .bind(id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? []),
+  });
+});
+
 // POST /api/rd-projects/:id/issue-material
 app.post("/:id/issue-material", async (c) => {
   const denied = await requirePermission(c, "rd-projects", "create");

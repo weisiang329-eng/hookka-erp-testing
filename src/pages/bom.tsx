@@ -82,6 +82,10 @@ type BOMTemplate = {
   // BOMTemplate-shaped object without it. The Dept-Pivot editor filters on
   // it to avoid showing duplicate ACTIVE+DRAFT rows for the same product.
   versionStatus?: "DRAFT" | "ACTIVE" | "OBSOLETE";
+  // ISO date — also set by rowToTemplate. Used by the selectedTemplate
+  // resolver to break ties when multiple ACTIVE rows exist for the same
+  // productCode (matches production-builder's `ORDER BY effectiveFrom DESC`).
+  effectiveFrom?: string;
 };
 
 type Product = {
@@ -6491,10 +6495,31 @@ export default function BOMManagementPage() {
     () => products.find((p) => p.code === selectedProductCode) || null,
     [products, selectedProductCode]
   );
-  const selectedTemplate = useMemo(
-    () => templates.find((t) => t.productCode === selectedProductCode) || null,
-    [templates, selectedProductCode]
-  );
+  // Pick ACTIVE first, then any version sorted by effectiveFrom DESC.
+  // Mirrors src/api/routes/_shared/production-builder.ts (the path job_cards
+  // are built from). Without this filter, when a product carries a parallel
+  // DRAFT v2.0 alongside its live v1.0, `find` would return whichever row
+  // came first in the unsorted list — so the BOM tree could render CAT 6 /
+  // 40m off the DRAFT while job_cards (and Production Sheet) correctly show
+  // CAT 2 / 80m off the ACTIVE row. The Dept-Pivot dialog already filters
+  // to ACTIVE-only (see comment at the activeOnly filter); this brings the
+  // BOM tree + EditBOMDialog selection in line with the rest of the system.
+  const selectedTemplate = useMemo(() => {
+    const matches = templates.filter((t) => t.productCode === selectedProductCode);
+    if (matches.length === 0) return null;
+    const active = matches.filter((t) => (t.versionStatus ?? "ACTIVE") === "ACTIVE");
+    const pool = active.length > 0 ? active : matches;
+    // Most recent effectiveFrom wins. Empty/missing strings sort last so a
+    // freshly-flipped DRAFT->ACTIVE row beats the legacy ACTIVE row.
+    return [...pool].sort((a, b) => {
+      const af = a.effectiveFrom || "";
+      const bf = b.effectiveFrom || "";
+      if (af === bf) return 0;
+      if (!af) return 1;
+      if (!bf) return -1;
+      return bf.localeCompare(af);
+    })[0] || null;
+  }, [templates, selectedProductCode]);
 
   // Derive variant categories from product category — matches SO variant setup
   const productVariantCategories: VariantCategoryInfo[] = useMemo(() => {

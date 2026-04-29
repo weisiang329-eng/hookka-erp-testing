@@ -702,9 +702,85 @@ app.post("/rebuild-pos/:soId", async (c) => {
   }
 });
 
-// NOTE (rollup): S1 (commit bd40082) removed the DEV-only
-// /clear-all-completion-dates admin endpoint as a production-hygiene call.
-// S2 independently added an RBAC gate to that same endpoint. We keep S1's
-// removal — the endpoint should not exist in production at all, so adding
-// an RBAC gate to a deleted endpoint is moot.
+// ---------------------------------------------------------------------------
+// POST /api/admin/clear-all-completion-dates
+//
+// Daily-ops bulk-reset (added 2026-04-26, kept as a permanent feature per
+// shop-owner workflow on 2026-04-29). Resets every job_card back to
+// WAITING + clears completedDate + flips overdue back to PENDING. Also
+// resets every active production_order to PENDING with progress 0 +
+// nulled completedDate so the parent rollup matches its newly-cleared JCs.
+//
+// Inventory: ALSO wipes cascade-written wip_items rows. Any wip_items row
+// with a non-zero stockQty gets zeroed out (positive producer-add rows or
+// negative skipped-upstream stub rows written by the JC completion cascade
+// in production-orders.ts). Cascade-created stub rows (id LIKE 'wip-dyn-%')
+// with stockQty=0 are deleted outright since they're pure cascade
+// artefacts. Manually-seeded zero-stock rows (id NOT LIKE 'wip-dyn-%') are
+// preserved. Without this, prior cascade writes would be orphaned and the
+// WIP page would still show stale (often negative) stock after a "fresh"
+// reset.
+//
+// Guarded by ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to prevent accidents.
+// RBAC: gated by users:create (admin proxy permission, same as the other
+// admin endpoints in this file — see /reset-rd-projects, /reset-prototypes
+// above). Only SUPER_ADMIN / OWNER roles get users:create.
+//
+// History: incorrectly removed in commit bd40082 (chore: remove DEV-only
+// QA reset button) — turned out the shop owner relies on this for daily
+// production-cycle resets, not just QA. Reverted on 2026-04-29.
+// ---------------------------------------------------------------------------
+app.post("/clear-all-completion-dates", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const confirm = c.req.query("confirm") ?? "";
+  if (confirm !== "YES_CLEAR_ALL_COMPLETION_DATES") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Refusing to clear without confirmation. Pass ?confirm=YES_CLEAR_ALL_COMPLETION_DATES to execute.",
+      },
+      400,
+    );
+  }
+
+  const now = new Date().toISOString();
+  const [jcRes, poRes, wipZeroRes, wipDeleteRes] = await db.batch([
+    db.prepare(
+      `UPDATE job_cards
+          SET status = 'WAITING',
+              completedDate = NULL,
+              overdue = 'PENDING'
+        WHERE status IN ('COMPLETED','TRANSFERRED','IN_PROGRESS')
+           OR completedDate IS NOT NULL`,
+    ),
+    db
+      .prepare(
+        `UPDATE production_orders
+            SET status = 'PENDING',
+                progress = 0,
+                currentDepartment = '',
+                completedDate = NULL,
+                updated_at = ?
+          WHERE status IN ('IN_PROGRESS','COMPLETED')`,
+      )
+      .bind(now),
+    db.prepare(`UPDATE wip_items SET stockQty = 0 WHERE stockQty != 0`),
+    db.prepare(`DELETE FROM wip_items WHERE id LIKE 'wip-dyn-%'`),
+  ]);
+
+  const clearedWipItems =
+    (wipZeroRes.meta?.changes ?? 0) + (wipDeleteRes.meta?.changes ?? 0);
+
+  return c.json({
+    success: true,
+    clearedJCs: jcRes.meta?.changes ?? 0,
+    resetPOs: poRes.meta?.changes ?? 0,
+    clearedWipItems,
+  });
+});
+
 export default app;

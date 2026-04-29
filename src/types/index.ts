@@ -1120,7 +1120,12 @@ export type RDProject = {
   sourcePurchaseRef?: string;  // invoice / receipt no for accounting trace
   sourceNotes?: string;        // dimensions, specs, why we want to copy
   createdDate: string;
-  status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
+  // DRAFT = idea backlog, not in Pipeline. Flipped to ACTIVE via the
+  // "开启项目" button (POST /api/rd-projects/:id/start). See migration
+  // 0090_rd_projects_draft_status.sql.
+  status: "DRAFT" | "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
+  // Timestamp the project flipped DRAFT → ACTIVE. Null while in DRAFT.
+  startedAt?: string | null;
 };
 
 // --- Pricing Config ---

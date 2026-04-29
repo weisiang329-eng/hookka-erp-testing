@@ -20,7 +20,7 @@ Entries themselves stay newest-first.
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
 - `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
 - `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
-- `bom` (17) — [BUG-2026-04-29-007](#bug-2026-04-29-007--kv-config-saves-still-lossy-on-transient-failure-401-add-resilient-sync-layer)
+- `bom` (18) — [BUG-2026-04-29-008](#bug-2026-04-29-008--dept-pivot-editor-shows-stale-minutes-same-cat-different-times-on-different-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
 - `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
 - `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
@@ -31,6 +31,68 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-04-29-008 — Dept-Pivot editor shows stale minutes (same CAT, different times on different rows)
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** in the Dept-Pivot Category Editor with
+`Department = Fab Cut`, three rows on baseModel 1003 all showed
+`Category = CAT 3`, but Minutes were `90 / 25 / 25`. Same dept × same
+category should yield the same minutes from the `productionTimes`
+matrix in `kv_config('variants-config')`.
+
+**Root cause:** `buildDeptPivotRows` in `src/pages/bom.tsx` reads
+`p.minutes` directly from each BOM template's stored process row. The
+single point at which minutes refresh from the matrix is
+`updateProcessCategory` (which fires when the user *changes* a
+category). Two scenarios put rows out of sync:
+
+1. The Production Times matrix was edited (e.g. `Fab Cut × CAT 3`
+   went from 90 → 25) AFTER the BOM rows were created. Existing rows
+   keep the old 90 because no edit on them ever fired.
+2. A row was once `(Fab Cut, CAT 1) = 90 min`, the category was
+   renamed to "CAT 3" via legacy CSV import / migration without going
+   through `updateProcessCategory`, and the minutes never refreshed.
+
+The dialog's `dirtyCount` and Save filter both keyed off
+`r.category !== r.initialCategory`, so even if a user noticed the
+mismatch and tried to fix it via the resync, there was no path to mark
+"only minutes changed" rows as dirty — they'd silently fail to save.
+
+**Fix:** `src/pages/bom.tsx` (`DeptPivotCategoryDialog`)
+- New `isRowDirty(r)` helper that returns true on EITHER category drift
+  OR minutes drift. Replaces the inline `r.category !== r.initialCategory`
+  predicate at the dirty-count, save-filter, and footer-message sites.
+- New `isRowStale(r)` helper that compares stored `r.minutes` to
+  `getProductionMinutes(deptCode, r.category)` from the live matrix,
+  scoped to the filtered row set so the count tracks the user's view.
+- New "Resync N stale" yellow banner appears only when ≥1 filtered row
+  is stale. One click runs `handleResyncStale`, which updates `r.minutes`
+  to the canonical matrix value for every stale row in the filter. Since
+  this changes `r.minutes` away from `r.initialMinutes`, the new
+  `isRowDirty` flags them and Save persists via `bulk-process-edit`.
+- Stale rows render with a subtle `#FFF8E7` background and the Minutes
+  cell shows `90 → 25 min` so the user can see the diff before resyncing.
+
+**Verification:**
+1. Open Dept-Pivot, set dept = Fab Cut. With user's reported data,
+   yellow banner appears: "N rows have stored minutes that no longer
+   match…". Yellow rows show `90 → 25 min` strike-through.
+2. Click "Resync N stale". Banner disappears, rows turn green (dirty),
+   Save count matches.
+3. Click Save. Toast confirms write. Reopen — all rows uniform per
+   matrix.
+4. Filter to `baseModel = 1003` then click Resync — only 1003's stale
+   rows are touched; other models' stale rows stay until you clear the
+   filter and resync again.
+
+**Related:** [BUG-2026-04-29-007](#bug-2026-04-29-007--kv-config-saves-still-lossy-on-transient-failure-401-add-resilient-sync-layer)
+(predecessor: now that Production Times saves reliably, the matrix
+becomes the canonical source the BOM rows should follow).
 
 ---
 

@@ -88,7 +88,17 @@ const WORKER_NAME_MAP: Record<string, { name: string; ambiguous?: boolean }> = {
 // Request / response shapes
 // ---------------------------------------------------------------------------
 type InputRow = {
-  custPONo: string;
+  // Multi-factor SO lookup. The handler tries customerPO first, then
+  // customerRef (the most common path on this dataset), then falls back to
+  // soNo. The first hit wins. All three columns accept "+"-separated
+  // multi-values (e.g. "CR0450+CR1056") which are split + OR'd.
+  custPONo?: string | null;
+  customerRef?: string | null;
+  companySO?: string | null;
+  // Optional narrowing: when set, only production_orders whose productCode
+  // equals this value are considered. Helps when one SO has multiple line
+  // items (different products) and the source row identifies which.
+  productCode?: string | null;
   deptCode: string;
   completedDate?: string;
   pic1Name?: string;
@@ -178,16 +188,70 @@ async function resolvePic(
 // ---------------------------------------------------------------------------
 type SalesOrderIdRow = { id: string };
 
-async function findSalesOrderIdsByCustPO(
-  db: D1Database,
-  custPONo: string,
-): Promise<string[]> {
-  const res = await db
-    .prepare("SELECT id FROM sales_orders WHERE customerPO = ?")
-    .bind(custPONo)
-    .all<SalesOrderIdRow>();
-  return (res.results ?? []).map((r) => r.id);
+function splitMultiRef(s: string | null | undefined): string[] {
+  if (!s) return [];
+  return s
+    .split(/[+,]/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
 }
+
+async function findSalesOrderIdsByLookup(
+  db: D1Database,
+  lookup: {
+    custPONo?: string | null;
+    customerRef?: string | null;
+    companySO?: string | null;
+  },
+): Promise<{ ids: string[]; matchedVia: string | null }> {
+  // Strategy: try each field in order. First non-empty hit wins.
+  //   1. customerPO  — if user populates `customers PO` column on the SO
+  //   2. reference   — most common (HC#, CR#, AKHC#, ZNT# etc). Supports
+  //                    combined values like "CR0450+CR1056" by splitting on
+  //                    + or , and OR-ing the lookups.
+  //   3. soNo        — fallback to our internal SO number (SO-2509-238).
+  const customerPOTokens = splitMultiRef(lookup.custPONo);
+  if (customerPOTokens.length > 0) {
+    const all = new Set<string>();
+    for (const tok of customerPOTokens) {
+      const res = await db
+        .prepare("SELECT id FROM sales_orders WHERE customerPO = ?")
+        .bind(tok)
+        .all<SalesOrderIdRow>();
+      for (const r of res.results ?? []) all.add(r.id);
+    }
+    if (all.size > 0) return { ids: Array.from(all), matchedVia: "customerPO" };
+  }
+
+  const refTokens = splitMultiRef(lookup.customerRef);
+  if (refTokens.length > 0) {
+    const all = new Set<string>();
+    for (const tok of refTokens) {
+      const res = await db
+        .prepare("SELECT id FROM sales_orders WHERE reference = ?")
+        .bind(tok)
+        .all<SalesOrderIdRow>();
+      for (const r of res.results ?? []) all.add(r.id);
+    }
+    if (all.size > 0) return { ids: Array.from(all), matchedVia: "customerRef" };
+  }
+
+  const soTokens = splitMultiRef(lookup.companySO);
+  if (soTokens.length > 0) {
+    const all = new Set<string>();
+    for (const tok of soTokens) {
+      const res = await db
+        .prepare("SELECT id FROM sales_orders WHERE soNo = ?")
+        .bind(tok)
+        .all<SalesOrderIdRow>();
+      for (const r of res.results ?? []) all.add(r.id);
+    }
+    if (all.size > 0) return { ids: Array.from(all), matchedVia: "soNo" };
+  }
+
+  return { ids: [], matchedVia: null };
+}
+
 
 async function findProductionOrdersBySO(
   db: D1Database,
@@ -234,6 +298,7 @@ async function findJobCardsByPO(
 // ---------------------------------------------------------------------------
 type RowResult = {
   matched: boolean;
+  matchedVia?: string | null;
   noSoMatch: boolean;
   noJcMatch: boolean;
   jcUpdated: number;
@@ -259,11 +324,23 @@ async function processRow(
     errors: [],
   };
 
-  if (!input.custPONo || !input.deptCode) {
+  if (!input.deptCode) {
     result.errors.push({
       row: rowIndex,
-      custPONo: input.custPONo ?? "",
-      message: "missing custPONo or deptCode",
+      custPONo: input.custPONo ?? input.customerRef ?? input.companySO ?? "",
+      message: "missing deptCode",
+    });
+    return result;
+  }
+  const hasAnyKey =
+    (input.custPONo && input.custPONo.trim()) ||
+    (input.customerRef && input.customerRef.trim()) ||
+    (input.companySO && input.companySO.trim());
+  if (!hasAnyKey) {
+    result.errors.push({
+      row: rowIndex,
+      custPONo: "",
+      message: "missing all of custPONo / customerRef / companySO — need at least one",
     });
     return result;
   }
@@ -295,12 +372,18 @@ async function processRow(
     }
   }
 
-  const soIds = await findSalesOrderIdsByCustPO(db, input.custPONo);
+  const lookup = await findSalesOrderIdsByLookup(db, {
+    custPONo: input.custPONo ?? null,
+    customerRef: input.customerRef ?? null,
+    companySO: input.companySO ?? null,
+  });
+  const soIds = lookup.ids;
   if (soIds.length === 0) {
     result.noSoMatch = true;
     return result;
   }
   result.matched = true;
+  result.matchedVia = lookup.matchedVia;
 
   // Validate completedDate format. Empty string treated as "skip date".
   const completedDate =
@@ -310,7 +393,7 @@ async function processRow(
   if (completedDate && !/^\d{4}-\d{2}-\d{2}$/.test(completedDate)) {
     result.errors.push({
       row: rowIndex,
-      custPONo: input.custPONo,
+      custPONo: input.custPONo ?? input.customerRef ?? input.companySO ?? "",
       message: `completedDate "${completedDate}" not ISO YYYY-MM-DD`,
     });
     return result;
@@ -319,9 +402,15 @@ async function processRow(
   const setStatus = completedDate !== null;
 
   // Walk every PO under every matched SO, every matching JC.
+  // If productCode is supplied, narrow the PO set to those matching it —
+  // this disambiguates rows when one SO contains multiple line items.
+  const productCodeFilter = (input.productCode || "").trim();
   let jcMatchedAny = false;
   for (const soId of soIds) {
-    const pos = await findProductionOrdersBySO(db, soId);
+    let pos = await findProductionOrdersBySO(db, soId);
+    if (productCodeFilter) {
+      pos = pos.filter((p) => (p.productCode || "") === productCodeFilter);
+    }
     for (const po of pos) {
       const allJcs = await findJobCardsByPO(db, po.id);
       const matchingJcs = allJcs.filter(
@@ -385,7 +474,7 @@ async function processRow(
         } catch (err) {
           result.errors.push({
             row: rowIndex,
-            custPONo: input.custPONo,
+            custPONo: input.custPONo ?? input.customerRef ?? input.companySO ?? "",
             message: `UPDATE job_cards failed for jcId=${jc.id}: ${
               err instanceof Error ? err.message : String(err)
             }`,
@@ -468,7 +557,7 @@ async function processRow(
             } catch (err) {
               result.errors.push({
                 row: rowIndex,
-                custPONo: input.custPONo,
+                custPONo: input.custPONo ?? input.customerRef ?? input.companySO ?? "",
                 message: `UPDATE production_orders failed for poId=${po.id}: ${
                   err instanceof Error ? err.message : String(err)
                 }`,

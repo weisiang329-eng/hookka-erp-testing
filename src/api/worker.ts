@@ -105,11 +105,79 @@ app.use("/api/*", timingMiddleware);
 // data changes), the next API call has to hit Pages Functions, not a stale
 // edge response. Without this, after a wrangler `--remote` UPDATE the user
 // kept seeing pre-reset rows for minutes (Wei Siang Apr 26 2026).
+//
+// Also applies HTTP security headers — defence in depth in case a future
+// XSS sink slips in. Today the SPA has no `dangerouslySetInnerHTML`, no
+// JSX text rendering of unsanitised HTML, and the auth flow uses Bearer
+// tokens (so CSRF isn't applicable yet) — but headers are cheap and
+// catch regressions.
 app.use("/api/*", async (c, next) => {
   await next();
   c.res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
   c.res.headers.set("Pragma", "no-cache");
   c.res.headers.set("Expires", "0");
+
+  // Don't sniff MIME — protects /api/files/:id/stream and any future
+  // attachment-serving endpoint from polyglot files.
+  c.res.headers.set("X-Content-Type-Options", "nosniff");
+  // Block embedding in iframes — clickjacking protection.
+  c.res.headers.set("X-Frame-Options", "DENY");
+  // HSTS — force HTTPS for one year. Cloudflare already enforces this
+  // at the edge, but an explicit header survives proxy chains.
+  c.res.headers.set(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains",
+  );
+  // Don't leak full URLs (which carry record IDs) when the user clicks
+  // a link to an external site.
+  c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  // Disable powerful APIs by default. Camera kept on `self` for the QR
+  // scan flow; the rest are off.
+  c.res.headers.set(
+    "Permissions-Policy",
+    "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+  );
+});
+
+// Security headers on non-/api/* routes too (the SPA HTML shell + static
+// assets). Pages serves these directly when the request path doesn't match
+// a Function route; we still want headers.
+app.use("*", async (c, next) => {
+  await next();
+  if (!c.req.path.startsWith("/api/")) {
+    c.res.headers.set("X-Content-Type-Options", "nosniff");
+    c.res.headers.set("X-Frame-Options", "DENY");
+    c.res.headers.set(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains",
+    );
+    c.res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+    c.res.headers.set(
+      "Permissions-Policy",
+      "camera=(self), microphone=(), geolocation=(), payment=(), usb=()",
+    );
+    // CSP report-only for now — flips to enforcing once we've seen a
+    // week of reports with no false positives. Allowlist:
+    //   - self for scripts + styles + connections (Vite output)
+    //   - 'unsafe-inline' for styles only (Tailwind's class-based runtime
+    //     injects style tags; we'd need nonces to drop this)
+    //   - data: URIs for images (PDF previews, QR codes)
+    //   - blob: for QR canvas + dynamic chart rendering
+    c.res.headers.set(
+      "Content-Security-Policy-Report-Only",
+      [
+        "default-src 'self'",
+        "script-src 'self'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob:",
+        "connect-src 'self'",
+        "font-src 'self' data:",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ].join("; "),
+    );
+  }
 });
 
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
@@ -540,17 +608,15 @@ app.route("/api/scan-po", scanPo);
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
 
-// Unmigrated /api/* paths — return a shape the frontend can consume without
-// crashing. GET pretends to be an empty list so pages calling `.forEach` /
-// `.filter` / `.map` on the response don't blow up; other methods return a
-// plainly-unsupported error.
+// Unmounted /api/* paths — return a real 404 so callers see a loud failure
+// instead of silently rendering an empty list. The previous behaviour
+// (200 + `{success:true, data:[], _stub:true}`) was a prod footgun: any new
+// route the frontend referenced but the worker hadn't mounted would look
+// like "no data" forever. Now an unmounted reference fails noisily.
 app.all("/api/*", (c) => {
-  if (c.req.method === "GET") {
-    return c.json({ success: true, data: [], total: 0, _stub: true, path: c.req.path });
-  }
   return c.json(
-    { success: false, error: "Not migrated to D1 yet", path: c.req.path },
-    501,
+    { success: false, error: "Not Found", path: c.req.path },
+    404,
   );
 });
 

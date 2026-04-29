@@ -22,7 +22,7 @@ import {
   applyOverridesOnce,
   saveJobCardOverride,
   savePOOverride,
-} from '../../lib/job-card-persistence';
+} from '../lib/job-card-persistence';
 import { getRawMaterialStock } from '../../lib/material-lookup';
 import {
   fifoConsume,

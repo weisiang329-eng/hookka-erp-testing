@@ -61,6 +61,8 @@
   "branchKey": "branch_key",
   "branchName": "branch_name",
   "businessNature": "business_nature",
+  "cancellationReason": "cancellation_reason",
+  "cancelledAt": "cancelled_at",
   "candidateId": "candidate_id",
   "capacityM3": "capacity_m3",
   "carrierName": "carrier_name",

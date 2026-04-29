@@ -58,6 +58,8 @@ export type ConsignmentOrderRow = {
   status: string;
   overdue: string | null;
   notes: string | null;
+  cancelledAt: string | null;
+  cancellationReason: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -111,6 +113,8 @@ function rowToCO(row: ConsignmentOrderRow, items: ConsignmentOrderItemRow[]) {
     status: row.status,
     overdue: row.overdue ?? "PENDING",
     notes: row.notes ?? "",
+    cancelledAt: row.cancelledAt ?? null,
+    cancellationReason: row.cancellationReason ?? null,
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
     items: items
@@ -1194,6 +1198,138 @@ app.put("/:id", async (c) => {
     const message = err instanceof Error ? err.message : "Invalid request body";
     return c.json({ success: false, error: message }, 400);
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/consignment-orders/:id/cancel — soft-cancel a non-DRAFT order.
+//
+// The "right semantic" for non-DRAFT orders the operator no longer wants:
+// the row stays in the DB (audit trail, finance reports, downstream
+// references all keep pointing at a real record) but `status = CANCELLED`
+// blocks any further action. Hard-delete is reserved for DRAFTs that have
+// never spawned production / consignment-note / inventory rows.
+//
+// Allowed transitions:
+//   DRAFT     → CANCELLED  (operator preference over hard-delete)
+//   CONFIRMED → CANCELLED  (main use case — backed out before production)
+//   IN_PRODUCTION → 400    ("pause production first")
+//   DELIVERED → 400        ("issue a credit note instead")
+//   CANCELLED → no-op success (idempotent)
+//
+// Body (optional): { reason: string } → cancellation_reason column.
+// ---------------------------------------------------------------------------
+app.post("/:id/cancel", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM consignment_orders WHERE id = ?",
+  )
+    .bind(id)
+    .first<ConsignmentOrderRow>();
+  if (!existing) {
+    return c.json(
+      { success: false, error: "Consignment order not found" },
+      404,
+    );
+  }
+
+  // Idempotent — already cancelled, just return current state.
+  if (existing.status === "CANCELLED") {
+    const items = await c.var.DB
+      .prepare(
+        "SELECT * FROM consignment_order_items WHERE consignmentOrderId = ?",
+      )
+      .bind(id)
+      .all<ConsignmentOrderItemRow>();
+    return c.json({
+      success: true,
+      data: rowToCO(existing, items.results ?? []),
+    });
+  }
+
+  if (existing.status === "IN_PRODUCTION") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Cannot cancel an order that's already in production. Pause production first or contact admin.",
+      },
+      400,
+    );
+  }
+  if (existing.status === "DELIVERED") {
+    return c.json(
+      {
+        success: false,
+        error:
+          "Cannot cancel a delivered order. Issue a credit note instead.",
+      },
+      400,
+    );
+  }
+  // Anything other than DRAFT / CONFIRMED at this point is also blocked —
+  // SHIPPED / PARTIALLY_SOLD / FULLY_SOLD / RETURNED / CLOSED / ON_HOLD all
+  // represent post-production states where cancellation would orphan
+  // committed work. Be explicit so unexpected statuses don't sneak through.
+  if (existing.status !== "DRAFT" && existing.status !== "CONFIRMED") {
+    return c.json(
+      {
+        success: false,
+        error: `Cannot cancel an order in status ${existing.status}.`,
+      },
+      400,
+    );
+  }
+
+  // Optional reason. Empty body is fine — we don't require JSON at all.
+  let reason: string | null = null;
+  try {
+    const body = (await c.req.json().catch(() => null)) as
+      | { reason?: unknown }
+      | null;
+    if (body && typeof body.reason === "string" && body.reason.trim()) {
+      reason = body.reason.trim();
+    }
+  } catch {
+    // No body or invalid JSON — treat as no reason supplied.
+    reason = null;
+  }
+
+  const now = new Date().toISOString();
+  await c.var.DB
+    .prepare(
+      `UPDATE consignment_orders
+          SET status = 'CANCELLED',
+              cancelled_at = ?,
+              cancellation_reason = ?,
+              updated_at = ?
+        WHERE id = ?`,
+    )
+    .bind(now, reason, now, id)
+    .run();
+
+  const [updated, items] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
+      .bind(id)
+      .first<ConsignmentOrderRow>(),
+    c.var.DB.prepare(
+      "SELECT * FROM consignment_order_items WHERE consignmentOrderId = ?",
+    )
+      .bind(id)
+      .all<ConsignmentOrderItemRow>(),
+  ]);
+  if (!updated) {
+    return c.json(
+      { success: false, error: "Failed to reload after cancel" },
+      500,
+    );
+  }
+  return c.json({
+    success: true,
+    data: rowToCO(updated, items.results ?? []),
+  });
 });
 
 // ---------------------------------------------------------------------------

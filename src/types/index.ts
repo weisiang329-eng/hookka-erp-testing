@@ -961,6 +961,11 @@ export type ConsignmentOrder = {
   status: COStatus;
   overdue: string;
   notes: string;
+  // Set by POST /:id/cancel; null when the order has never been cancelled.
+  // ISO timestamp + free-text reason kept side-by-side so finance / audit
+  // can answer "when and why" without a join into status-change log.
+  cancelledAt?: string | null;
+  cancellationReason?: string | null;
   createdAt: string;
   updatedAt: string;
   items: ConsignmentOrderItem[];

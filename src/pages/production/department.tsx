@@ -1209,7 +1209,8 @@ export default function DepartmentProductionPage() {
                               jc.estMinutes ??
                               null;
                             if (perUnit == null) return "-";
-                            const qty = jc.wipQty ?? 1;
+                            const qty =
+                              (jc as typeof jc & { wipQty?: number }).wipQty ?? 1;
                             return `${perUnit * (qty || 1)} min`;
                           })()}
                         </td>

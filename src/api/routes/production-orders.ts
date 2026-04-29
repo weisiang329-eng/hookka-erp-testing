@@ -2766,7 +2766,7 @@ app.post("/:id/scan-complete", async (c) => {
       {
         success: false,
         code: "PO_ON_HOLD",
-        error: "此 Production Order 处于 ON_HOLD。主管恢复后才能扫描。",
+        error: "This Production Order is ON_HOLD. Supervisor must resume before scanning.",
       },
       409,
     );
@@ -2776,7 +2776,7 @@ app.post("/:id/scan-complete", async (c) => {
       {
         success: false,
         code: "PO_CANCELLED",
-        error: "此 Production Order 已被取消,无法扫描。",
+        error: "This Production Order has been cancelled and cannot be scanned.",
       },
       409,
     );
@@ -2869,7 +2869,7 @@ app.post("/:id/scan-complete", async (c) => {
           requiresConfirmation: true,
           warning: {
             code: "PREREQUISITE_NOT_MET",
-            message: "前面 dept 还没完工,确定继续?",
+            message: "Earlier dept hasn't completed. Continue anyway?",
           },
           data: {
             jobCardId: scannedJc.id,

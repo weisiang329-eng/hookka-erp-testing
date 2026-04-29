@@ -17,11 +17,11 @@ interface CategorisedItem {
 
 /**
  * User-facing error message when a caller tries to put both SOFA and
- * BEDFRAME items on the same Sales Order. Bilingual on purpose — the
- * codebase mixes English and Chinese in user-facing strings already.
+ * BEDFRAME items on the same Sales Order. English-only — the codebase
+ * is in the middle of a Chinese-to-English UI sweep.
  */
 export const SO_MIXED_CATEGORY_ERROR =
-  "沙发与床架不能开在同一张销售单。请分开两张单。 (Sofa and Bedframe cannot be on the same Sales Order. Please split into two orders.)";
+  "Sofa and Bedframe cannot be on the same Sales Order. Please split into two orders.";
 
 /**
  * Returns true when the line items violate the hard restriction (both

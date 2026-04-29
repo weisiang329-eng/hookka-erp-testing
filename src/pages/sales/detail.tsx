@@ -453,7 +453,10 @@ export default function SalesOrderDetailPage() {
     try {
       res = await fetch(`/api/sales-orders/${id}/confirm`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": crypto.randomUUID(),
+        },
         body: JSON.stringify({ changedBy: "Admin" }),
       });
       data = await res.json().catch(() => ({}));

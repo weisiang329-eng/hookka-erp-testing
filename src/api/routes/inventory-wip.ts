@@ -276,6 +276,29 @@ app.get("/", async (c) => {
   const stubPos: POLite[] = stubPosRes.results ?? [];
   const stubJcs: JCLite[] = stubJcsRes.results ?? [];
 
+  // BUG-2026-04-27-009: baseModel was previously derived as
+  // `productCode.split("-")[0]` — a substring guess that breaks for any
+  // product whose canonical code carries an internal hyphen (e.g.
+  // "1003-A---K-" → "1003" is wrong; the canonical baseModel is "1003-A").
+  // Source of truth is `bom_templates.baseModel` keyed on `productCode`.
+  // Fetch once, cache in a Map. Fallback to the legacy split when the
+  // product has no BOM template registered (legacy / accessory rows that
+  // never had one — silent zero-baseModel here would surface as a blank
+  // column in the WIP detail panel, which is worse than the heuristic).
+  const bomRowsRes = await db
+    .prepare(`SELECT productCode, baseModel FROM bom_templates`)
+    .all<{ productCode: string; baseModel: string | null }>();
+  const baseModelByProductCode = new Map<string, string>();
+  for (const r of bomRowsRes.results ?? []) {
+    if (r.productCode && r.baseModel) {
+      baseModelByProductCode.set(r.productCode, r.baseModel);
+    }
+  }
+  const resolveBaseModel = (productCode: string | null | undefined): string => {
+    const code = productCode ?? "";
+    return baseModelByProductCode.get(code) ?? code.split("-")[0] ?? "";
+  };
+
   // Indexes for fast lookup.
   const poById = new Map<string, POLite>();
   for (const p of pos) poById.set(p.id, p);
@@ -581,7 +604,7 @@ app.get("/", async (c) => {
           completedDate,
           ageDays,
           fabricCode: tpo.fabricCode || "",
-          baseModel: (tpo.productCode || "").split("-")[0],
+          baseModel: resolveBaseModel(tpo.productCode),
           itemCategory: tpo.itemCategory || "",
         });
         members.push({
@@ -622,7 +645,7 @@ app.get("/", async (c) => {
           completedDate,
           ageDays,
           fabricCode: po.fabricCode || "",
-          baseModel: (po.productCode || "").split("-")[0],
+          baseModel: resolveBaseModel(po.productCode),
           itemCategory: po.itemCategory || "",
         });
         members.push({

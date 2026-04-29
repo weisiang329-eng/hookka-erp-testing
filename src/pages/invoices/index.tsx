@@ -106,8 +106,12 @@ export default function InvoicesPage() {
     if (!selectedDOId) return;
     setCreating(true);
     try {
+      // Sprint 3 #4 — idempotency. A retry of the create-invoice POST
+      // could fan out two invoice rows for the same DO. Send a UUID so
+      // the server returns the cached response on retry.
       const data = await fetchJson("/api/invoices", InvoiceMutationSchema, {
         method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
         body: { deliveryOrderId: selectedDOId },
       });
       if (data.success && data.data?.id) {

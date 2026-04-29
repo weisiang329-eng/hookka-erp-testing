@@ -696,7 +696,10 @@ export default function SalesPage() {
                     try {
                       const res = await fetch(`/api/sales-orders/${so.id}/confirm`, {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: {
+                          "Content-Type": "application/json",
+                          "Idempotency-Key": crypto.randomUUID(),
+                        },
                         body: JSON.stringify({ changedBy: "Admin", notes: "Bulk confirm" }),
                       });
                       const text = await res.text();

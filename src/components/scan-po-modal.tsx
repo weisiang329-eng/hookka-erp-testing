@@ -248,9 +248,14 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           source: "PO_SCAN_CLAUDE",
         };
 
+        // Sprint 3 #4 — idempotency. Bulk PO-scan create can retry mid-loop;
+        // a UUID per PO ensures duplicate retries don't fan out duplicate SOs.
         const res = await fetch("/api/sales-orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+          },
           body: JSON.stringify(body),
         });
         const data = (await res.json()) as CreateSOResponse;
@@ -308,7 +313,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
 
         const res = await fetch("/api/sales-orders", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Idempotency-Key": crypto.randomUUID(),
+          },
           body: JSON.stringify(body),
         });
 

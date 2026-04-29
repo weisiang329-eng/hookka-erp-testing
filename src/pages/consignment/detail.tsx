@@ -445,6 +445,53 @@ export default function SalesOrderDetailPage() {
     navigate("/consignment");
   };
 
+  // Soft-cancel: hits POST /:id/cancel. Distinct from updateStatus(CANCELLED)
+  // because the dedicated endpoint also stamps cancelled_at and stays
+  // idempotent on a second click. Only DRAFT/CONFIRMED orders qualify here —
+  // beyond that the server refuses (IN_PRODUCTION → "pause first",
+  // DELIVERED → "credit note instead"). Browser confirm() is intentional;
+  // the action lives in the page header where the modal-driven "Cancel
+  // Order" status button lower in the page covers the deeper cascade flow.
+  const cancelOrder = async () => {
+    if (!order) return;
+    if (
+      !confirm(
+        "取消此订单? 取消后无法恢复,但订单记录会保留。\n(Cancel this order? Cannot be undone, but the order record stays for audit.)",
+      )
+    )
+      return;
+    setUpdating(true);
+    let res: Response;
+    let data: { success?: boolean; error?: string } = {};
+    try {
+      res = await fetch(`/api/consignment-orders/${id}/cancel`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      data = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+      };
+    } catch (e) {
+      setUpdating(false);
+      toast.error(e instanceof Error ? e.message : "Network error — order not cancelled");
+      return;
+    }
+    if (!res.ok || !data.success) {
+      setUpdating(false);
+      toast.error(data.error || `Failed to cancel order (HTTP ${res.status})`);
+      return;
+    }
+    // List badge counts shift (CONFIRMED -1, CANCELLED +1) so prefix-invalidate
+    // the list cache. Per-id refresh is what removes the Cancel button.
+    invalidateCachePrefix("/api/consignment-orders");
+    if (id) invalidateCache(`/api/consignment-orders/${id}`);
+    toast.success("Order cancelled.");
+    fetchOrder();
+    setUpdating(false);
+  };
+
   const handleClone = () => {
     if (!order) return;
     const cloneData = {
@@ -641,6 +688,23 @@ export default function SalesOrderDetailPage() {
                 </Button>
               )}
             </>
+          )}
+          {(order.status === "DRAFT" || order.status === "CONFIRMED") && (
+            // Soft-cancel — keeps the row + audit trail. Amber accent
+            // distinguishes it from the destructive red Delete (DRAFT
+            // only, hard-removes the row). On a DRAFT both buttons are
+            // visible so the operator can pick: cancel-and-keep vs
+            // hard-delete. Hidden once cancelled / shipped / delivered
+            // — the server-side endpoint enforces the same gate.
+            <Button
+              variant="outline"
+              size="sm"
+              className="text-[#9C6F1E] border-[#E8D38A] hover:bg-[#FBF1D6] hover:text-[#7A5414]"
+              onClick={cancelOrder}
+              disabled={updating}
+            >
+              <XCircle className="h-4 w-4" /> Cancel Order
+            </Button>
           )}
           {order.status === "DRAFT" && (
             <Button variant="outline" size="sm" className="text-[#9A3A2D] hover:text-[#7A2E24]" onClick={deleteOrder}><Trash2 className="h-4 w-4" /> Delete</Button>

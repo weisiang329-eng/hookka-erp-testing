@@ -47,8 +47,15 @@ export async function enqueueEmail<E extends Env>(
   // column has DEFAULT 'hookka' and the cron drain doesn't filter by
   // org_id, so this is purely informational.
   const orgId = tryGetOrgId(c) ?? "hookka";
+  // NB: column identifiers are spelled in snake_case to match the migration
+  // (0081_email_outbox.sql). The translateSql() identifier rewriter in
+  // supabase-compat.ts only rewrites camelCase identifiers that appear in
+  // column-rename-map.json — and to_address/body_html/body_text/payload_json/
+  // last_attempt_at/sent_at/last_error are NOT in that map. Using camelCase
+  // here would slip through translateSql unchanged and Postgres would reject
+  // the query ("column toaddress does not exist"). Same shape as audit-replay.ts.
   await c.var.DB.prepare(
-    `INSERT INTO outbox_emails (id, toAddress, subject, bodyHtml, bodyText, payloadJson, orgId)
+    `INSERT INTO outbox_emails (id, to_address, subject, body_html, body_text, payload_json, org_id)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
@@ -138,12 +145,25 @@ export async function processOutbox(
     env.RESEND_FROM_EMAIL ||
     "Hookka Manufacturing ERP <noreply@houzscentury.com>";
 
+  // Columns are snake_case in DB (see migration 0081). Aliases pin the
+  // result-set keys back to camelCase so OutboxRow stays readable; we can't
+  // rely on the global snake→camel transform (transform.column.from in
+  // db-pg.ts) because the outbox columns aren't in column-rename-map.json.
+  // createdAt is in the rename map but using created_at literally keeps the
+  // ORDER BY clause matching the migration's column name 1:1.
   const pickRes = await db
     .prepare(
-      `SELECT id, toAddress, subject, bodyHtml, bodyText, status, attempts, lastAttemptAt
+      `SELECT id,
+              to_address      AS "toAddress",
+              subject,
+              body_html       AS "bodyHtml",
+              body_text       AS "bodyText",
+              status,
+              attempts,
+              last_attempt_at AS "lastAttemptAt"
          FROM outbox_emails
         WHERE status IN ('PENDING','RETRYING')
-        ORDER BY createdAt ASC
+        ORDER BY created_at ASC
         LIMIT ?`,
     )
     .bind(BATCH_SIZE)
@@ -180,7 +200,7 @@ export async function processOutbox(
       await db
         .prepare(
           `UPDATE outbox_emails
-              SET status = 'SENT', attempts = ?, lastAttemptAt = ?, sentAt = ?, lastError = NULL
+              SET status = 'SENT', attempts = ?, last_attempt_at = ?, sent_at = ?, last_error = NULL
             WHERE id = ?`,
         )
         .bind(newAttempts, nowIso, nowIso, row.id)
@@ -193,7 +213,7 @@ export async function processOutbox(
       await db
         .prepare(
           `UPDATE outbox_emails
-              SET status = 'FAILED', attempts = ?, lastAttemptAt = ?, lastError = ?
+              SET status = 'FAILED', attempts = ?, last_attempt_at = ?, last_error = ?
             WHERE id = ?`,
         )
         .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)
@@ -203,7 +223,7 @@ export async function processOutbox(
       await db
         .prepare(
           `UPDATE outbox_emails
-              SET status = 'RETRYING', attempts = ?, lastAttemptAt = ?, lastError = ?
+              SET status = 'RETRYING', attempts = ?, last_attempt_at = ?, last_error = ?
             WHERE id = ?`,
         )
         .bind(newAttempts, nowIso, send.error ?? "unknown", row.id)

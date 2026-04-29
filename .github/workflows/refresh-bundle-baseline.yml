@@ -35,6 +35,7 @@ concurrency:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   refresh:
@@ -65,7 +66,9 @@ jobs:
       - name: Regenerate baseline
         run: node scripts/check-bundle-size.mjs --write-baseline
 
-      - name: Commit and push if baseline changed
+      - name: Open PR if baseline changed
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Detect a real diff. Exit 0 with no commit if nothing changed.
           if git diff --quiet -- .bundle-baseline.json; then
@@ -73,7 +76,7 @@ jobs:
             exit 0
           fi
 
-          echo "[bundle-baseline] diff detected, committing"
+          echo "[bundle-baseline] diff detected, opening PR"
           git diff --stat -- .bundle-baseline.json
 
           # GitHub Actions bot identity — the commit shows up under that
@@ -82,11 +85,23 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
+          # Branch protection on main blocks direct pushes (and there's
+          # no good reason to bypass it for an automation commit). Open
+          # a PR instead. The branch name is stable so successive runs
+          # update the same PR rather than spawning duplicates.
+          BRANCH="bot/bundle-baseline"
+          git checkout -b "$BRANCH"
           git add .bundle-baseline.json
           git commit -m "chore: auto-regen bundle baseline [skip ci]"
+          git push -f origin "$BRANCH"
 
-          # Push back to main. With concurrency above this should only
-          # ever race with itself; if a human push lands between our
-          # build and our push the rebase below absorbs it.
-          git pull --rebase origin main
-          git push origin HEAD:main
+          # Open PR if one isn't already open for this branch.
+          if ! gh pr view "$BRANCH" --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr create \
+              --base main \
+              --head "$BRANCH" \
+              --title "chore: auto-regen bundle baseline" \
+              --body "Auto-regenerated bundle baseline from a clean Linux CI build. Merge when convenient — keeps the bundle-size gate's reference snapshot in sync. [skip ci]"
+          else
+            echo "[bundle-baseline] PR already open — branch updated, no new PR created"
+          fi

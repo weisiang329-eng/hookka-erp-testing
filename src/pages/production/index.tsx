@@ -9,11 +9,11 @@ import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
 import { QRImg } from "@/components/qr-img";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-// Rollup: S5 added useTimeout + useToast imports. S1 deleted the
-// DEV-only QA-reset button that consumed useToast — it's now unused, so
-// only useTimeout (still referenced by P4.3 effect-replacement at L2386+)
-// is kept.
+// useTimeout — P4.3 effect-replacement (still referenced at L2386+).
+// useToast — used by the "Clear All Completion Dates" admin button (the
+// 2026-04-26 QA helper the shop owner uses to bulk-reset for re-runs).
 import { useTimeout } from "@/lib/scheduler";
+import { useToast } from "@/components/ui/toast";
 
 // ----- types -----
 type JobCard = {
@@ -605,6 +605,7 @@ export default function ProductionPage({
   deptCode,
 }: { mode?: ProductionPageMode; deptCode?: string } = {}) {
   const navigate = useNavigate();
+  const { toast } = useToast();
   // Slim payload opt-in: fields=minimal drops ~20 unused PO fields + the
   // entire piece_pics tree on the wire. The Production page never reads
   // them and this response ships ~530 POs × ~9k JCs — the largest payload
@@ -3029,6 +3030,44 @@ export default function ProductionPage({
             }
           >
             Print Schedule
+          </Button>
+          {/* Bulk-reset Completion Dates — daily-ops button kept per shop
+              owner request (2026-04-29). Resets every JC to WAITING +
+              clears completedDate + flips overdue back to PENDING.
+              Cascades to ProductionOrders (→ PENDING, progress=0) and
+              wipes cascade-written wip_items rows so the WIP page returns
+              to a true zero state.
+              History: incorrectly removed in commit bd40082 as a "DEV-only
+              QA helper" — user actually uses it every cycle. Restored
+              with a non-DEV label and admin RBAC gate. */}
+          <Button
+            variant="outline"
+            className="border-rose-300 text-rose-700 hover:bg-rose-50"
+            onClick={async () => {
+              if (!confirm("Clear EVERY job-card completion date and wipe cascade-written wip_items?\n\nThis resets every JC to WAITING, every PO to PENDING, AND deletes every wip_items row written by the cascade. Manually-seeded zero-stock rows are preserved.")) return;
+              try {
+                const res = await fetch(
+                  "/api/admin/clear-all-completion-dates?confirm=YES_CLEAR_ALL_COMPLETION_DATES",
+                  { method: "POST" },
+                );
+                const j = (await res.json().catch(() => null)) as
+                  | { success?: boolean; error?: string; clearedJCs?: number; resetPOs?: number; clearedWipItems?: number }
+                  | null;
+                if (!res.ok || !j?.success) {
+                  toast.error(j?.error || `Reset failed (HTTP ${res.status})`);
+                  return;
+                }
+                toast.success(`Cleared ${j.clearedJCs ?? 0} JCs · reset ${j.resetPOs ?? 0} POs · cleared ${j.clearedWipItems ?? 0} wip_items.`);
+                invalidateCachePrefix("/api/production-orders");
+                invalidateCachePrefix("/api/inventory");
+                invalidateCachePrefix("/api/inventory/wip");
+                fetchOrders();
+              } catch (e) {
+                toast.error(e instanceof Error ? e.message : "Reset failed");
+              }
+            }}
+          >
+            Clear All Completion Dates
           </Button>
           {/* UPHOLSTERY & PACKING scan the finished good, not job cards. Keep
               the FG sticker entry point for those depts only; the QR Stickers

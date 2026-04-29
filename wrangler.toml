@@ -185,6 +185,13 @@ ENVIRONMENT = "production"
 API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
 APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
+# Sentry — Cloudflare Workers DSN. DSNs are public-safe per Sentry docs:
+# they grant event-submission only, never data read access. Keeping the
+# value in [vars] (rather than `wrangler secret put`) means every deploy
+# guarantees the worker still reports — no risk of someone forgetting to
+# re-set the secret on a fresh worker. Read by src/api/worker.ts onError
+# → reportWorkerError() (which dynamic-imports toucan-js).
+SENTRY_DSN = "https://9ad06534a79eed8df457becbe2a2244f@o4511302465814528.ingest.us.sentry.io/4511302502907904"
 # Supabase Storage — public project slug (the segment before .supabase.co).
 # Not a secret. The matching service_role key is set via
 # `wrangler secret put SUPABASE_SERVICE_KEY` and never appears here.
@@ -195,9 +202,3 @@ RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
 # OAUTH_GOOGLE_CLIENT_ID = ""
 # OAUTH_GOOGLE_REDIRECT_URI = "https://hookka-erp-testing.pages.dev/api/auth/oauth/google/callback"
 # OAUTH_GOOGLE_HOSTED_DOMAIN = "hookka.com"
-
-# Sentry / GlitchTip DSN for worker-side error reporting (Sprint 5).
-# Set via `wrangler secret put SENTRY_DSN` in prod, or via .dev.vars locally.
-# When unset, app.onError logs to wrangler-tail only. The frontend equivalent
-# is VITE_SENTRY_DSN, which Vite statically replaces at build time.
-# SENTRY_DSN = ""  # set as a secret, not a public var

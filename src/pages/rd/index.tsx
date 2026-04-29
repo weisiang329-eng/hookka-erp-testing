@@ -17,6 +17,8 @@ import {
   ArrowRight,
   Plus,
   X,
+  Archive,
+  Play,
   ImageOff,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
@@ -52,7 +54,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   ACCESSORY: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
 };
 
-type TabId = "projects" | "pipeline" | "reports";
+type TabId = "drafts" | "projects" | "pipeline" | "reports";
 
 function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
   const currentIndex = STAGES.indexOf(currentStage);
@@ -86,6 +88,110 @@ function getCoverPhoto(project: RDProject): string | undefined {
     if (m.photos && m.photos.length > 0) return m.photos[0];
   }
   return undefined;
+}
+
+// DraftCard — design choice (judgment call):
+// We DO wrap the card body in <Link> like ProjectCard for consistent navigation
+// behaviour. The "Start Project" button stops propagation + prevents default so
+// clicking it doesn't navigate to /rd/:id. This is simpler than a separate
+// "Edit details" button and keeps the whole card clickable for editing.
+function DraftCard({
+  project,
+  onStart,
+}: {
+  project: RDProject;
+  onStart: (project: RDProject) => void;
+}) {
+  const cover = getCoverPhoto(project);
+
+  const handleStartClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    onStart(project);
+  };
+
+  return (
+    <Link to={`/rd/${project.id}`}>
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full border-dashed border-[#D0C9C0] bg-[#FBF9F6]">
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-mono text-gray-400">{project.code}</p>
+              <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+            </div>
+            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+              {cover ? (
+                <img
+                  src={cover}
+                  alt={`${project.name} cover`}
+                  className="h-12 w-12 rounded-md object-cover border border-[#E2DDD8]"
+                />
+              ) : (
+                <div
+                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
+                  title="No photo yet"
+                  aria-label="No cover photo"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+              )}
+              <Badge variant="status" status="DRAFT">DRAFT</Badge>
+            </div>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+              {project.productCategory}
+            </span>
+            <span
+              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
+                project.projectType === "IMPROVEMENT"
+                  ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                  : project.projectType === "CLONE"
+                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
+                  : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
+              }`}
+            >
+              {project.projectType === "IMPROVEMENT"
+                ? "Improvement"
+                : project.projectType === "CLONE"
+                ? "Clone"
+                : "Research"}
+            </span>
+          </div>
+
+          {project.description && (
+            <p className="text-xs text-gray-500 line-clamp-2">{project.description}</p>
+          )}
+
+          <div className="grid grid-cols-2 gap-2 text-xs">
+            <div className="flex items-center gap-1 text-gray-500">
+              <Calendar className="h-3 w-3" />
+              <span>Launch: {formatDate(project.targetLaunchDate)}</span>
+            </div>
+            <div className="flex items-center gap-1 text-gray-500">
+              <Users className="h-3 w-3" />
+              <span>{project.assignedTeam.length} members</span>
+            </div>
+          </div>
+
+          <Button
+            type="button"
+            variant="primary"
+            onClick={handleStartClick}
+            className="w-full"
+          >
+            <Play className="h-4 w-4" /> 开启项目 / Start Project
+          </Button>
+        </CardContent>
+      </Card>
+    </Link>
+  );
 }
 
 function ProjectCard({ project }: { project: RDProject }) {
@@ -790,8 +896,9 @@ function CreateProjectDialog({
 }
 
 export default function RDPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("projects");
+  const [activeTab, setActiveTab] = useState<TabId>("drafts");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const { toast } = useToast();
 
   const { data: rdResp, loading, refresh: refreshRdHook } = useCachedJson<{ data?: RDProject[] }>("/api/rd-projects");
   const projects: RDProject[] = useMemo(() => rdResp?.data ?? [], [rdResp]);
@@ -800,7 +907,41 @@ export default function RDPage() {
     refreshRdHook();
   }, [refreshRdHook]);
 
+  const draftProjects = useMemo(() => projects.filter((p) => p.status === "DRAFT"), [projects]);
+  const nonDraftProjects = useMemo(() => projects.filter((p) => p.status !== "DRAFT"), [projects]);
+  const draftCount = draftProjects.length;
+
+  const handleStartProject = useCallback(
+    async (project: RDProject) => {
+      const ok = window.confirm(
+        "开启此项目? 开启后会进入生产 Pipeline。\n(Start this project? It will enter the production pipeline.)",
+      );
+      if (!ok) return;
+      try {
+        const res = await fetch(`/api/rd-projects/${project.id}/start`, {
+          method: "POST",
+        });
+        if (!res.ok) {
+          let errMsg = `Failed to start project (HTTP ${res.status})`;
+          try {
+            const body = (await res.json()) as { error?: string };
+            if (body?.error) errMsg = body.error;
+          } catch {
+            // ignore JSON parse errors, fall back to default message
+          }
+          throw new Error(errMsg);
+        }
+        toast.success("项目已开启 / Project started");
+        fetchProjects();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to start project");
+      }
+    },
+    [fetchProjects, toast],
+  );
+
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
+    { id: "drafts", label: `Drafts (${draftCount})`, icon: <Archive className="h-4 w-4" /> },
     { id: "projects", label: "Projects", icon: <Lightbulb className="h-4 w-4" /> },
     { id: "pipeline", label: "Pipeline", icon: <Layers className="h-4 w-4" /> },
     { id: "reports", label: "Reports", icon: <BarChart3 className="h-4 w-4" /> },
@@ -844,20 +985,34 @@ export default function RDPage() {
         </div>
       ) : (
         <>
+          {activeTab === "drafts" && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {draftProjects.map((project) => (
+                <DraftCard key={project.id} project={project} onStart={handleStartProject} />
+              ))}
+              {draftProjects.length === 0 && (
+                <div className="col-span-3 text-center py-16 text-gray-400 text-sm">
+                  还没有草稿款式 — 在 'New Project' 创建后会先进这里
+                  <br />
+                  <span className="text-xs">(No drafts yet — newly created projects land here first)</span>
+                </div>
+              )}
+            </div>
+          )}
           {activeTab === "projects" && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {projects.map((project) => (
+              {nonDraftProjects.map((project) => (
                 <ProjectCard key={project.id} project={project} />
               ))}
-              {projects.length === 0 && (
+              {nonDraftProjects.length === 0 && (
                 <div className="col-span-3 text-center py-16 text-gray-400">
                   No R&D projects found.
                 </div>
               )}
             </div>
           )}
-          {activeTab === "pipeline" && <PipelineView projects={projects} />}
-          {activeTab === "reports" && <ReportsView projects={projects} />}
+          {activeTab === "pipeline" && <PipelineView projects={nonDraftProjects} />}
+          {activeTab === "reports" && <ReportsView projects={nonDraftProjects} />}
         </>
       )}
 

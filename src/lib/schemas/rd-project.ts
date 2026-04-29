@@ -48,7 +48,11 @@ export const RdProjectSchema = z
     coverPhotoUrl: z.string().nullable().optional(),
     prototypes: z.array(RdPrototypeSchema).optional(),
     createdDate: z.string().optional(),
+    // 'DRAFT' added in migration 0090. Server still returns the full union
+    // (DRAFT | ACTIVE | ON_HOLD | COMPLETED | CANCELLED), but we use a
+    // loose z.string() since the API contract is a string-typed column.
     status: z.string().optional(),
+    startedAt: z.string().nullable().optional(),
   })
   .passthrough();
 

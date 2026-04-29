@@ -5411,7 +5411,12 @@ export type RDProject = {
   // as a JPEG data URL via @/lib/image-compress.
   coverPhotoUrl?: string | null;
   createdDate: string;
-  status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
+  // DRAFT = idea backlog, NOT in Pipeline. Flipped to ACTIVE via the
+  // "开启项目" button (POST /api/rd-projects/:id/start). See migration
+  // 0090_rd_projects_draft_status.sql for the lifecycle definition.
+  status: "DRAFT" | "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
+  // Timestamp the project flipped DRAFT → ACTIVE. Null while in DRAFT.
+  startedAt?: string | null;
 };
 
 export const rdProjects: RDProject[] = [];

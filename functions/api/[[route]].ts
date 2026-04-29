@@ -12,6 +12,10 @@ export interface Env {
   DB: D1Database;
   ENVIRONMENT: string;
   API_CORS_ORIGIN: string;
+  // Wired by wrangler.toml [vars]; consumed by src/api/worker.ts onError
+  // → reportWorkerError() (which dynamic-imports toucan-js). Optional so
+  // local `wrangler pages dev` without the var set still type-checks.
+  SENTRY_DSN?: string;
 }
 
 export const onRequest: PagesFunction<Env> = async (ctx) => {

@@ -39,6 +39,7 @@ type ProjectRow = {
   coverPhotoUrl: string | null;
   createdDate: string | null;
   status: string | null;
+  startedAt: string | null;
 };
 
 type PrototypeRow = {
@@ -117,7 +118,12 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
         createdDate: p.createdDate ?? "",
       })),
     createdDate: row.createdDate ?? "",
-    status: row.status ?? "ACTIVE",
+    // Default DRAFT (instead of ACTIVE) so a row with NULL status — old or
+    // newly-inserted-without-status — surfaces in the Drafts tab where
+    // it can't accidentally land in the live Pipeline. Migration 0090
+    // also flips the column default to 'DRAFT' at the DB layer.
+    status: row.status ?? "DRAFT",
+    startedAt: row.startedAt ?? null,
   };
 }
 
@@ -236,7 +242,11 @@ app.post("/", async (c) => {
         body.sourceNotes ?? null,
         body.coverPhotoUrl ?? null,
         now.toISOString(),
-        "ACTIVE",
+        // New projects start in DRAFT (idea backlog) per migration 0090.
+        // The shop owner clicks "开启项目 / Start Project" on the Drafts
+        // tab to flip status DRAFT→ACTIVE, which is when it enters the
+        // live Pipeline kanban.
+        "DRAFT",
       )
       .run();
 
@@ -471,6 +481,64 @@ app.put("/:id", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/rd-projects/:id/start
+//
+// Flip a DRAFT project to ACTIVE — i.e. "开启项目 / Start Project".
+// Only DRAFT rows are eligible; once ACTIVE, the project shows up in the
+// Pipeline kanban and the Projects tab. See migration 0090 for the
+// lifecycle definition (DRAFT → ACTIVE → ON_HOLD/COMPLETED/CANCELLED).
+//
+// Reuses rd-projects:update permission — flipping status is a state
+// edit, doesn't warrant a new permission row in the RBAC seed.
+// ---------------------------------------------------------------------------
+app.post("/:id/start", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "DRAFT") {
+    return c.json(
+      {
+        success: false,
+        error: "Only DRAFT projects can be started",
+      },
+      400,
+    );
+  }
+
+  const now = new Date().toISOString();
+  await c.var.DB.prepare(
+    `UPDATE rd_projects SET status = 'ACTIVE', started_at = ? WHERE id = ?`,
+  )
+    .bind(now, id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? []),
+  });
 });
 
 // POST /api/rd-projects/:id/issue-material

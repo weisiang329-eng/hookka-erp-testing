@@ -27,6 +27,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -119,8 +120,9 @@ app.get("/", async (c) => {
   const itemId = c.req.query("itemId");
   const from = c.req.query("from");
   const to = c.req.query("to");
-  const clauses: string[] = [];
-  const params: string[] = [];
+  const orgId = getOrgId(c);
+  const clauses: string[] = ["orgId = ?"];
+  const params: string[] = [orgId];
   if (type) {
     clauses.push("type = ?");
     params.push(type);
@@ -137,7 +139,7 @@ app.get("/", async (c) => {
     clauses.push("adjustedAt <= ?");
     params.push(to);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const where = `WHERE ${clauses.join(" AND ")}`;
   const res = await c.var.DB
     .prepare(
       `SELECT * FROM stock_adjustments ${where} ORDER BY adjustedAt DESC LIMIT 500`,

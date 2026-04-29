@@ -10,6 +10,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -87,9 +88,12 @@ function addDays(isoDate: string, days: number): string {
 
 // GET /api/equipment
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM equipment ORDER BY name",
-  ).all<EquipmentRow>();
+    "SELECT * FROM equipment WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<EquipmentRow>();
   const data = (res.results ?? []).map(rowToEquipment);
   return c.json({ success: true, data, total: data.length });
 });

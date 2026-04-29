@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -56,8 +57,9 @@ function genId(): string {
 app.get("/", async (c) => {
   const supplierId = c.req.query("supplierId");
   const materialCode = c.req.query("materialCode");
-  const where: string[] = [];
-  const binds: unknown[] = [];
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const binds: unknown[] = [orgId];
   if (supplierId) {
     where.push("supplierId = ?");
     binds.push(supplierId);
@@ -66,10 +68,7 @@ app.get("/", async (c) => {
     where.push("materialCode = ?");
     binds.push(materialCode);
   }
-  const sql =
-    where.length > 0
-      ? `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`
-      : "SELECT * FROM supplier_material_bindings ORDER BY materialCode";
+  const sql = `SELECT * FROM supplier_material_bindings WHERE ${where.join(" AND ")} ORDER BY materialCode`;
   const res = await c.var.DB.prepare(sql)
     .bind(...binds)
     .all<BindingRow>();

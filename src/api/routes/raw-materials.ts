@@ -23,6 +23,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 import { checkRawMaterialDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
 import {
@@ -121,13 +122,14 @@ function statusFromBody(body: RawMaterialBody, fallback = "ACTIVE"): string {
 
 // GET /api/raw-materials  (optional ?status=ACTIVE)
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const status = c.req.query("status");
   const sql = status
-    ? "SELECT * FROM raw_materials WHERE status = ? ORDER BY itemCode"
-    : "SELECT * FROM raw_materials ORDER BY itemCode";
+    ? "SELECT * FROM raw_materials WHERE orgId = ? AND status = ? ORDER BY itemCode"
+    : "SELECT * FROM raw_materials WHERE orgId = ? ORDER BY itemCode";
   const stmt = status
-    ? c.var.DB.prepare(sql).bind(status)
-    : c.var.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(orgId, status)
+    : c.var.DB.prepare(sql).bind(orgId);
   const res = await stmt.all<RawMaterialRow>();
   const data = (res.results ?? []).map(rowToApi);
   return c.json({ success: true, data, total: data.length });

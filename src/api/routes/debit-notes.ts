@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -96,9 +97,12 @@ app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — debit-notes:read.
   const denied = await requirePermission(c, "debit-notes", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM debit_notes ORDER BY date DESC",
-  ).all<DebitNoteRow>();
+    "SELECT * FROM debit_notes WHERE orgId = ? ORDER BY date DESC",
+  )
+    .bind(orgId)
+    .all<DebitNoteRow>();
   const data = (res.results ?? []).map(rowToDebitNote);
   return c.json({ success: true, data, total: data.length });
 });

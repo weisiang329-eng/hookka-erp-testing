@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -362,8 +363,10 @@ app.get("/", async (c) => {
   const status = c.req.query("status");
   const serial = c.req.query("serial");
 
-  const clauses: string[] = [];
-  const binds: unknown[] = [];
+  // Sprint 4: org scope is the leading WHERE predicate.
+  const orgId = getOrgId(c);
+  const clauses: string[] = ["orgId = ?"];
+  const binds: unknown[] = [orgId];
   if (poId) {
     clauses.push("poId = ?");
     binds.push(poId);
@@ -380,7 +383,7 @@ app.get("/", async (c) => {
     clauses.push("(unitSerial = ? OR shortCode = ?)");
     binds.push(serial, serial);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const where = `WHERE ${clauses.join(" AND ")}`;
   const sql = `SELECT * FROM fg_units ${where} ORDER BY id ASC`;
 
   const res = await c.var.DB.prepare(sql)

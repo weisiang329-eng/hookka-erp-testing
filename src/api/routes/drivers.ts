@@ -7,6 +7,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -58,9 +59,12 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 
 // GET /api/drivers
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM drivers ORDER BY name",
-  ).all<DriverRow>();
+    "SELECT * FROM drivers WHERE orgId = ? ORDER BY name",
+  )
+    .bind(orgId)
+    .all<DriverRow>();
   const data = (res.results ?? []).map(rowToDriver);
   return c.json({ success: true, data, total: data.length });
 });

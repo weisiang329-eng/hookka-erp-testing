@@ -10,6 +10,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { checkProductDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -152,16 +153,23 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
 
 // GET /api/products — list ACTIVE products with nested BOM + dept times
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const [products, boms, dwts] = await Promise.all([
     c.var.DB.prepare(
-      "SELECT * FROM products WHERE status = 'ACTIVE' ORDER BY code",
-    ).all<ProductRow>(),
+      "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
+    )
+      .bind(orgId)
+      .all<ProductRow>(),
     c.var.DB.prepare(
-      "SELECT b.* FROM bom_components b INNER JOIN products p ON p.id = b.productId WHERE p.status = 'ACTIVE'",
-    ).all<BomComponentRow>(),
+      "SELECT b.* FROM bom_components b INNER JOIN products p ON p.id = b.productId WHERE p.orgId = ? AND p.status = 'ACTIVE'",
+    )
+      .bind(orgId)
+      .all<BomComponentRow>(),
     c.var.DB.prepare(
-      "SELECT d.* FROM dept_working_times d INNER JOIN products p ON p.id = d.productId WHERE p.status = 'ACTIVE'",
-    ).all<DeptWorkingTimeRow>(),
+      "SELECT d.* FROM dept_working_times d INNER JOIN products p ON p.id = d.productId WHERE p.orgId = ? AND p.status = 'ACTIVE'",
+    )
+      .bind(orgId)
+      .all<DeptWorkingTimeRow>(),
   ]);
 
   const data = (products.results ?? []).map((p) =>

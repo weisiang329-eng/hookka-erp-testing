@@ -16,6 +16,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -63,13 +64,14 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 
 // GET /api/three-pl-vehicles?providerId=...
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const providerId = c.req.query("providerId");
   const sql = providerId
-    ? "SELECT * FROM three_pl_vehicles WHERE providerId = ? ORDER BY plateNo"
-    : "SELECT * FROM three_pl_vehicles ORDER BY plateNo";
+    ? "SELECT * FROM three_pl_vehicles WHERE orgId = ? AND providerId = ? ORDER BY plateNo"
+    : "SELECT * FROM three_pl_vehicles WHERE orgId = ? ORDER BY plateNo";
   const stmt = providerId
-    ? c.var.DB.prepare(sql).bind(providerId)
-    : c.var.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(orgId, providerId)
+    : c.var.DB.prepare(sql).bind(orgId);
   const res = await stmt.all<VehicleRow>();
   const data = (res.results ?? []).map(rowToVehicle);
   return c.json({ success: true, data, total: data.length });

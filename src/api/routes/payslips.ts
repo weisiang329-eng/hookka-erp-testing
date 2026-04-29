@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -172,9 +173,10 @@ app.get("/", async (c) => {
   const period = c.req.query("period");
   const employeeId = c.req.query("employeeId");
 
-  let sql = "SELECT * FROM payslips";
-  const clauses: string[] = [];
-  const binds: (string | number)[] = [];
+  // Sprint 4: leading orgId predicate.
+  const orgId = getOrgId(c);
+  const clauses: string[] = ["orgId = ?"];
+  const binds: (string | number)[] = [orgId];
   if (period) {
     clauses.push("period = ?");
     binds.push(period);
@@ -183,11 +185,8 @@ app.get("/", async (c) => {
     clauses.push("employeeId = ?");
     binds.push(employeeId);
   }
-  if (clauses.length) sql += ` WHERE ${clauses.join(" AND ")}`;
-  sql += " ORDER BY period DESC, employeeNo";
-
-  const stmt = c.var.DB.prepare(sql);
-  const res = await (binds.length ? stmt.bind(...binds) : stmt).all<PayslipRow>();
+  const sql = `SELECT * FROM payslips WHERE ${clauses.join(" AND ")} ORDER BY period DESC, employeeNo`;
+  const res = await c.var.DB.prepare(sql).bind(...binds).all<PayslipRow>();
   const data = (res.results ?? []).map(rowToPayslip);
   return c.json({ success: true, data, total: data.length });
 });

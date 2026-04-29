@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -74,11 +75,16 @@ function genId(): string {
   return `cust-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-// GET /api/customers — list all customers + their hubs
+// GET /api/customers — list all customers + their hubs (org-scoped)
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const [customers, hubs] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM customers ORDER BY code").all<CustomerRow>(),
-    c.var.DB.prepare("SELECT * FROM delivery_hubs").all<HubRow>(),
+    c.var.DB.prepare("SELECT * FROM customers WHERE orgId = ? ORDER BY code")
+      .bind(orgId)
+      .all<CustomerRow>(),
+    c.var.DB.prepare("SELECT * FROM delivery_hubs WHERE orgId = ?")
+      .bind(orgId)
+      .all<HubRow>(),
   ]);
   const data = (customers.results ?? []).map((r) =>
     rowToCustomer(r, hubs.results ?? []),

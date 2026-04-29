@@ -9,6 +9,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -36,12 +37,13 @@ function rowToScorecard(r: ScorecardRow) {
 
 // GET /api/supplier-scorecards?supplierId=...
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const supplierId = c.req.query("supplierId");
   if (supplierId) {
     const row = await c.var.DB.prepare(
-      "SELECT * FROM supplier_scorecards WHERE supplierId = ?",
+      "SELECT * FROM supplier_scorecards WHERE orgId = ? AND supplierId = ?",
     )
-      .bind(supplierId)
+      .bind(orgId, supplierId)
       .first<ScorecardRow>();
     if (!row) {
       return c.json({ error: "Scorecard not found" }, 404);
@@ -49,8 +51,10 @@ app.get("/", async (c) => {
     return c.json({ success: true, data: rowToScorecard(row) });
   }
   const res = await c.var.DB.prepare(
-    "SELECT * FROM supplier_scorecards ORDER BY supplierId",
-  ).all<ScorecardRow>();
+    "SELECT * FROM supplier_scorecards WHERE orgId = ? ORDER BY supplierId",
+  )
+    .bind(orgId)
+    .all<ScorecardRow>();
   const data = (res.results ?? []).map(rowToScorecard);
   return c.json({ success: true, data });
 });

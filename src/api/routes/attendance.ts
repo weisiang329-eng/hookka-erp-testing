@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -89,14 +90,15 @@ function genId(): string {
 // GET /api/attendance?date=YYYY-MM-DD
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const date = c.req.query("date");
   const stmt = date
     ? c.var.DB.prepare(
-        "SELECT * FROM attendance_records WHERE date = ? ORDER BY employeeId",
-      ).bind(date)
+        "SELECT * FROM attendance_records WHERE orgId = ? AND date = ? ORDER BY employeeId",
+      ).bind(orgId, date)
     : c.var.DB.prepare(
-        "SELECT * FROM attendance_records ORDER BY date DESC, employeeId",
-      );
+        "SELECT * FROM attendance_records WHERE orgId = ? ORDER BY date DESC, employeeId",
+      ).bind(orgId);
   const res = await stmt.all<AttendanceRow>();
   const data = (res.results ?? []).map(rowToAttendance);
   return c.json({ success: true, data, total: data.length });

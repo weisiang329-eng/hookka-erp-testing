@@ -958,7 +958,8 @@ const WIP_LEVEL_COLORS = [
 function WIPNode({ wip, product, level = 1 }: { wip: WIPComponent; product?: Product; level?: number }) {
   const [expanded, setExpanded] = useState(true);
   const wipStyle = WIP_TYPE_LABELS[wip.wipType] || { label: wip.wipType, color: "#6B7280" };
-  const totalMin = wip.processes.reduce((s, p) => s + p.minutes, 0);
+  const totalMin =
+    wip.processes.reduce((s, p) => s + p.minutes, 0) * (wip.quantity || 1);
   const displayCode = buildWipCodeDisplay(wip.codeSegments, product) || wip.wipCode;
   const children = wip.children || [];
   const materials = wip.materials || [];
@@ -1059,7 +1060,8 @@ function WIPNode({ wip, product, level = 1 }: { wip: WIPComponent; product?: Pro
 function wipToPrintHtml(wip: WIPComponent, level: number, product: Product): string {
   const colors = ["#dbeafe", "#ede9fe", "#ffedd5", "#d1fae5", "#ffe4e6"];
   const bg = colors[(level - 1) % colors.length];
-  const wipMin = wip.processes.reduce((s, p) => s + p.minutes, 0);
+  const wipMin =
+    wip.processes.reduce((s, p) => s + p.minutes, 0) * (wip.quantity || 1);
   const wipCodeText = buildWipCodeDisplay(wip.codeSegments, product) || wip.wipCode || "";
   const procs = wip.processes
     .map((p) => `<span class="pill">${p.dept} · ${p.category} · ${p.minutes}m</span>`)

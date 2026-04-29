@@ -1,27 +1,45 @@
-name: Daily Postgres Backup -> R2
+name: Daily Postgres Backup -> Supabase Storage
 
-# Sprint 4 — DR scaffold finish. Runs pg_dump -Fc against Supabase prod and
-# uploads the .dump file to r2://hookka-files/backups/. 18:00 UTC = 02:00 SGT
-# (UTC+8) — the same window as the in-Worker logical-dump cron, intentionally
-# overlapping so we have BOTH formats per night until WAL shipping replaces
-# the daily floor.
+# Sprint 4 (revised by storage-supabase-migration) — DR scaffold finish.
+# Runs pg_dump -Fc against Supabase prod and uploads the .dump file to
+# the Supabase Storage bucket "hookka-files" under backups/. 18:00 UTC =
+# 02:00 SGT (UTC+8) — the same window as the in-Worker logical-dump
+# cron, intentionally overlapping so we have BOTH formats per night
+# until WAL shipping replaces the daily floor.
+#
+# Storage backend was Cloudflare R2 before the storage-supabase-
+# migration refactor; we collapsed onto Supabase Storage to stay on a
+# single vendor (Supabase Pro plan includes 100 GB storage + 250 GB
+# egress/month — enough headroom for the daily dumps).
 #
 # Required GitHub repo secrets (all must be set before the schedule fires):
-#   SUPABASE_PROD_URL  — full pooler connection string (postgres://...)
-#                        Get it from Supabase dashboard -> Project Settings ->
-#                        Database -> "Connection pooling" mode, transaction
-#                        pooler. Must include `?sslmode=require`.
-#   R2_ACCESS_KEY_ID   — Cloudflare R2 API token with Object Read & Write
-#                        scoped to the hookka-files bucket.
-#   R2_SECRET_ACCESS_KEY — pair to the access key above.
-#   R2_ENDPOINT        — e.g. https://<accountId>.r2.cloudflarestorage.com
-#                        (the s3-compatible endpoint, NOT the public bucket
-#                        URL). Get from R2 dashboard -> Manage API Tokens.
+#   SUPABASE_PROD_URL          — full pooler connection string for pg_dump
+#                                (postgres://...). Get it from Supabase
+#                                dashboard -> Project Settings -> Database ->
+#                                "Connection pooling" mode, transaction
+#                                pooler. Must include `?sslmode=require`.
+#   SUPABASE_PROJECT_REF       — the slug before .supabase.co in your
+#                                Supabase project URL (NOT a secret on its
+#                                own, but kept in secrets so prod / preview
+#                                projects can swap independently).
+#   SUPABASE_SERVICE_ROLE_KEY  — service_role key from Supabase dashboard ->
+#                                Project Settings -> API. NEVER paste this
+#                                in code or chat; treat it like a root password.
+#
+# Bucket bootstrap (one-time, before the schedule fires for the first time):
+#   1. Supabase Dashboard -> Storage -> New bucket
+#      Name:       hookka-files
+#      Visibility: Private
+#   2. (Optional) Storage -> Policies -> add a "service_role can do anything"
+#      policy on the bucket so the upload below is unblocked. The
+#      service_role key bypasses RLS but explicit policies make audits
+#      cleaner.
 #
 # Manual trigger via workflow_dispatch — useful for ad-hoc snapshots before
-# a risky migration. Retention: object lifecycle on R2 keeps the last 90
-# days; we don't prune from the workflow itself (R2 lifecycle rules handle
-# it, see docs/DR-RUNBOOK.md).
+# a risky migration. Retention: object lifecycle on the bucket is NOT
+# automatic on Supabase Storage today (Cloudflare R2 had it natively); the
+# 90-day prune happens inside src/api/cron/daily-backup.ts on the Workers
+# side. See docs/DR-RUNBOOK.md "Retention" section for the trade-off.
 on:
   schedule:
     - cron: '0 18 * * *'   # 02:00 SGT daily
@@ -35,20 +53,18 @@ jobs:
       - name: Install postgresql-client-16
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client-16 awscli
+          sudo apt-get install -y postgresql-client-16
 
       - name: Verify required secrets are set
         env:
           DATABASE_URL: ${{ secrets.SUPABASE_PROD_URL }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           missing=()
           [ -z "$DATABASE_URL" ] && missing+=("SUPABASE_PROD_URL")
-          [ -z "$R2_ACCESS_KEY_ID" ] && missing+=("R2_ACCESS_KEY_ID")
-          [ -z "$R2_SECRET_ACCESS_KEY" ] && missing+=("R2_SECRET_ACCESS_KEY")
-          [ -z "$R2_ENDPOINT" ] && missing+=("R2_ENDPOINT")
+          [ -z "$SUPABASE_PROJECT_REF" ] && missing+=("SUPABASE_PROJECT_REF")
+          [ -z "$SUPABASE_SERVICE_ROLE_KEY" ] && missing+=("SUPABASE_SERVICE_ROLE_KEY")
           if [ ${#missing[@]} -gt 0 ]; then
             echo "::error::Missing required secrets: ${missing[*]}"
             echo "See .github/workflows/backup.yml header for setup instructions."
@@ -70,35 +86,52 @@ jobs:
           echo "BACKUP_FILE=backup-$STAMP.dump" >> $GITHUB_ENV
           echo "BACKUP_STAMP=$STAMP" >> $GITHUB_ENV
 
-      - name: Upload to R2
+      - name: Upload to Supabase Storage
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          # R2 only supports the auto region in the S3 API.
-          AWS_DEFAULT_REGION: auto
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
-          aws s3 cp \
-            "$BACKUP_FILE" \
-            "s3://hookka-files/backups/supabase/$BACKUP_FILE" \
-            --endpoint-url "$R2_ENDPOINT"
+          # Supabase Storage v1 object endpoint — POSTs the bytes directly
+          # with the service_role bearer token. x-upsert: true so a re-run
+          # on the same UTC date overwrites instead of 409'ing.
+          UPLOAD_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/hookka-files/backups/supabase/${BACKUP_FILE}"
+          # Capture status separately from the body so we can fail loudly
+          # on a 4xx/5xx without aws-cli's quirks.
+          HTTP_STATUS=$(curl -sS -o /tmp/upload-resp.txt -w "%{http_code}" \
+            -X POST "$UPLOAD_URL" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/octet-stream" \
+            -H "x-upsert: true" \
+            --data-binary "@${BACKUP_FILE}")
+          echo "Upload HTTP status: $HTTP_STATUS"
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "201" ]; then
+            echo "::error::Upload failed with status $HTTP_STATUS"
+            cat /tmp/upload-resp.txt
+            exit 1
+          fi
 
       - name: Verify upload (size > 1KB)
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          AWS_DEFAULT_REGION: auto
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           # Sentinel sanity check: a successful pg_dump on the current
           # dataset is at minimum a few MB. If we uploaded a near-empty
           # file the dump silently truncated and the backup is useless.
-          size=$(aws s3api head-object \
-            --bucket hookka-files \
-            --key "backups/supabase/$BACKUP_FILE" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --query 'ContentLength' \
-            --output text)
+          # We HEAD the object via the Supabase Storage info endpoint and
+          # parse the size out of the metadata.
+          INFO_URL="https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/info/hookka-files/backups/supabase/${BACKUP_FILE}"
+          RESP=$(curl -sS -X GET "$INFO_URL" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY")
+          echo "Object info response:"
+          echo "$RESP"
+          # The info endpoint returns JSON like {"size":12345,...}.
+          # Extract the size with a regex (no jq dependency).
+          size=$(echo "$RESP" | grep -oE '"size":[[:space:]]*[0-9]+' | head -1 | grep -oE '[0-9]+')
+          if [ -z "$size" ]; then
+            echo "::error::Could not parse size from Supabase Storage info response"
+            exit 1
+          fi
           echo "Uploaded size: $size bytes"
           if [ "$size" -lt 1024 ]; then
             echo "::error::Backup size $size bytes < 1KB threshold — likely a silent pg_dump failure"
@@ -107,5 +140,5 @@ jobs:
 
       - name: Print recovery hint
         run: |
-          echo "Daily backup uploaded: s3://hookka-files/backups/supabase/$BACKUP_FILE"
+          echo "Daily backup uploaded: hookka-files/backups/supabase/${BACKUP_FILE}"
           echo "To restore, see docs/DR-RUNBOOK.md (Recovery procedure)."

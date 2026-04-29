@@ -10,6 +10,26 @@ API_CORS_ORIGIN=http://localhost:3000
 # `emailSent: false` so the admin can copy the invite link manually.
 RESEND_API_KEY=re_YOUR_KEY_HERE
 
+# Supabase Storage credentials (storage-supabase-migration). Both required
+# for /api/files (upload/download/delete) and the daily-backup cron to work
+# locally. Without them, the file-asset routes return 503 and the cron
+# logs "Supabase Storage credentials missing".
+#
+# SUPABASE_PROJECT_REF is the slug from your Supabase project URL — i.e.
+# the segment before .supabase.co. NOT a secret on its own (it appears in
+# every public Supabase URL) but lives here for parity with prod.
+#
+# SUPABASE_SERVICE_KEY is the service_role key from Supabase dashboard ->
+# Project Settings -> API. Treat it like a root password — it bypasses
+# Row-Level Security and can read/write anything in the project. NEVER
+# commit this file. NEVER ship it to the SPA bundle.
+#
+# Bucket "hookka-files" must exist in Supabase Storage before any upload
+# works (Dashboard -> Storage -> New bucket -> Private). See
+# docs/DR-RUNBOOK.md "Storage bootstrap" for the full one-time setup.
+# SUPABASE_PROJECT_REF=your-project-ref
+# SUPABASE_SERVICE_KEY=eyJ...service_role_key...
+
 # Sentry / GlitchTip DSN for error reporting (Sprint 5).
 # Frontend uses VITE_SENTRY_DSN (set in .env / .env.production at build
 # time so the value is statically replaced into the bundle by Vite).

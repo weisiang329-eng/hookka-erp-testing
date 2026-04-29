@@ -4,10 +4,12 @@ import { useToast } from "@/components/ui/toast";
 import {
   fetchVariantsConfig,
   flushKvConfig,
+  getKvConfigSyncState,
   getVariantsConfigSync,
   patchVariantsConfig,
-  subscribeKvConfigSaveError,
+  subscribeKvConfigSyncState,
   VARIANTS_CONFIG_KEY,
+  type KvSyncState,
   type VariantsConfig,
 } from "@/lib/kv-config";
 import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
@@ -4014,13 +4016,67 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
 // We hydrate through the shared kv-config cache so the Products maintenance page and
 // this dialog never disagree about what's stored.
 
+// Small inline indicator that visualises the kv-config sync state. Replaces
+// the old "Saved" / "Failed" toast spam with a passive dot — green when
+// synced, yellow spinner during write/retry, red on terminal failure.
+function KvSyncIndicator({ state }: { state: KvSyncState }) {
+  if (state === "idle") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#4F7C3A]" title="All changes synced to server">
+        <span className="w-2 h-2 rounded-full bg-[#4F7C3A]" />
+        Synced
+      </span>
+    );
+  }
+  if (state === "syncing" || state === "retrying") {
+    const label = state === "retrying" ? "Retrying…" : "Saving…";
+    const tip =
+      state === "retrying"
+        ? "Server hiccup — auto-retrying with backoff. Your changes are stored locally."
+        : "Saving to server.";
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E]" title={tip}>
+        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" strokeDasharray="40 60" strokeLinecap="round" />
+        </svg>
+        {label}
+      </span>
+    );
+  }
+  if (state === "auth-error") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Auth expired — please re-login. Your changes are stored locally and will sync after re-login.">
+        <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
+        Re-login needed
+      </span>
+    );
+  }
+  // state === "error"
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Save failed after 3 retries — your changes are stored locally and will replay on next page load.">
+      <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
+      Saved locally
+    </span>
+  );
+}
+
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [categories, setCategories] = useState<string[]>([]);
   const [times, setTimes] = useState<ProductionTimes>({});
   const [dirty, setDirty] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
   const [editingCat, setEditingCat] = useState<{ index: number; value: string } | null>(null);
+  // syncState mirrors the kv-config sync state for variants-config. The
+  // resilient sync layer auto-retries transient failures and keeps a
+  // localStorage backup, so the user just needs a passive indicator
+  // instead of repeated "save failed" toasts.
+  const [syncState, setSyncStateLocal] = useState<KvSyncState>(() =>
+    getKvConfigSyncState(VARIANTS_CONFIG_KEY),
+  );
+  // Toast-after-confirm: when the user clicks Save we set this flag, then
+  // emit "Saved" the moment syncState reaches `idle` (auth-error / error
+  // states get their own toast).
+  const pendingUserSaveRef = React.useRef(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // Hydrate from D1 (via the kv-config cache) whenever the dialog opens.
@@ -4047,23 +4103,41 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Surface background save errors that happen between manual saves —
-  // e.g. a debounced save fired on close, the auth token expired, the PUT
-  // 401'd, the cache marked it saved anyway, and the user reopens to
-  // find their changes gone. Without this listener those failures stay
-  // silent. Mirrors the /products page wiring.
+  // Subscribe to sync state transitions while the dialog is open. The
+  // sync layer drives terminal toasts (Saved / Re-login / Saved locally)
+  // off these transitions so we don't lie about success and don't spam
+  // failure toasts during transient retries.
+  /* eslint-disable react-hooks/set-state-in-effect -- on dialog open we
+     need to re-sync local syncState with the kv-config layer, since the
+     module-level state may have changed while the dialog was closed
+     (e.g. a background retry from a previous session settled). The
+     subscriber callback is the steady-state path; the initial set is a
+     one-shot bootstrap. */
   useEffect(() => {
     if (!open) return undefined;
-    const off = subscribeKvConfigSaveError(VARIANTS_CONFIG_KEY, (err) => {
-      showToast(`Save failed: ${err.message}`);
+    setSyncStateLocal(getKvConfigSyncState(VARIANTS_CONFIG_KEY));
+    const off = subscribeKvConfigSyncState(VARIANTS_CONFIG_KEY, (state) => {
+      setSyncStateLocal(state);
+      if (state === "idle" && pendingUserSaveRef.current) {
+        pendingUserSaveRef.current = false;
+        setDirty(false);
+        showToast("Production times saved");
+      } else if (state === "auth-error") {
+        pendingUserSaveRef.current = false;
+        showToast("Please re-login — change is saved locally and will retry");
+      } else if (state === "error") {
+        pendingUserSaveRef.current = false;
+        showToast("Saved locally — will retry on next page load");
+      }
     });
     return off;
   }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Best-effort flush when the user closes the tab / navigates away
-  // mid-debounce. The 500ms debounce window inside kv-config is exactly
-  // what was burning Production Times edits on quick close. unload is
-  // synchronous so we can't await — fire-and-forget.
+  // mid-debounce. Even with the localStorage backup catching us, this
+  // shrinks the "wait until next page load" recovery window to zero in
+  // the common case.
   useEffect(() => {
     if (!open || typeof window === "undefined") return undefined;
     const handler = () => {
@@ -4077,7 +4151,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
     setToastMsg(msg);
     // Fire-and-forget toast clear from event-style callback (Save click).
     // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
-    setTimeout(() => setToastMsg(""), 2000);
+    setTimeout(() => setToastMsg(""), 2500);
   }
 
   function updateTime(deptCode: string, category: string, value: number) {
@@ -4088,31 +4162,24 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
     setDirty(true);
   }
 
-  async function handleSave() {
-    if (saving) return;
-    setSaving(true);
-    try {
-      // patchVariantsConfig merges into the cached blob (divanHeights,
-      // specials, etc stay intact) and schedules a 500ms-debounced PUT.
-      // We then call flushKvConfig to cancel that timer and force the
-      // PUT immediately, so we know whether it actually landed before
-      // showing "Saved". Without this the toast was lying — see
-      // BUG-2026-04-29-001.
-      patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
-      const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
-      if (ok) {
-        setDirty(false);
-        showToast("Production times saved");
-      } else {
-        // Specific errors are also surfaced via the saveError listener
-        // above. This toast is the always-on fallback.
-        showToast("Failed to save — try again");
-      }
-    } catch {
-      showToast("Failed to save — try again");
-    } finally {
-      setSaving(false);
-    }
+  function handleSave() {
+    // Resilient sync flow:
+    //   1. patchVariantsConfig writes to the in-memory cache + localStorage
+    //      backup (synchronous, can't fail).
+    //   2. It schedules a 500ms-debounced PUT and flips syncState to
+    //      `syncing`.
+    //   3. flushKvConfig cancels the debounce and fires the PUT now.
+    //   4. The PUT either succeeds (state → idle), enters retry backoff
+    //      (state → retrying, auto-flush 1s/2s/4s), or terminally fails
+    //      (state → error / auth-error).
+    //   5. The state-transition listener above turns terminal states into
+    //      toasts and clears `dirty` only on success.
+    // We never await here — the user gets immediate UI feedback via
+    // syncState, and the pendingUserSaveRef flag tells the listener that
+    // the next `idle` should fire the success toast.
+    pendingUserSaveRef.current = true;
+    patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
+    void flushKvConfig(VARIANTS_CONFIG_KEY);
   }
 
   function addCategory() {
@@ -4365,17 +4432,24 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-          <button onClick={onClose} disabled={saving} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50">
-            Close
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!dirty || saving}
-            className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            {saving ? "Saving…" : "Save Times"}
-          </button>
+        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between gap-2">
+          {/* Sync state indicator — drives off the kv-config sync state
+              machine so transient retries don't spam failure toasts. */}
+          <KvSyncIndicator state={syncState} />
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
+              Close
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={!dirty || syncState === "syncing" || syncState === "retrying"}
+              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {syncState === "syncing" || syncState === "retrying"
+                ? "Saving…"
+                : "Save Times"}
+            </button>
+          </div>
         </div>
 
         {/* Toast */}

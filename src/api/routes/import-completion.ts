@@ -324,6 +324,10 @@ async function processRow(
     errors: [],
   };
 
+  // STRICT MODE — per user spec, every row MUST supply both customerRef
+  // AND productCode. Either alone is rejected. soNo / customerPO fallback
+  // is intentionally disabled to minimise false positives during this
+  // historical migration.
   if (!input.deptCode) {
     result.errors.push({
       row: rowIndex,
@@ -332,15 +336,19 @@ async function processRow(
     });
     return result;
   }
-  const hasAnyKey =
-    (input.custPONo && input.custPONo.trim()) ||
-    (input.customerRef && input.customerRef.trim()) ||
-    (input.companySO && input.companySO.trim());
-  if (!hasAnyKey) {
+  if (!input.customerRef || !input.customerRef.trim()) {
     result.errors.push({
       row: rowIndex,
-      custPONo: "",
-      message: "missing all of custPONo / customerRef / companySO — need at least one",
+      custPONo: input.custPONo ?? "",
+      message: "strict mode requires customerRef",
+    });
+    return result;
+  }
+  if (!input.productCode || !input.productCode.trim()) {
+    result.errors.push({
+      row: rowIndex,
+      custPONo: input.customerRef ?? "",
+      message: "strict mode requires productCode",
     });
     return result;
   }
@@ -372,10 +380,9 @@ async function processRow(
     }
   }
 
+  // STRICT: lookup by customerRef ONLY (customerPO + soNo not consulted).
   const lookup = await findSalesOrderIdsByLookup(db, {
-    custPONo: input.custPONo ?? null,
-    customerRef: input.customerRef ?? null,
-    companySO: input.companySO ?? null,
+    customerRef: input.customerRef,
   });
   const soIds = lookup.ids;
   if (soIds.length === 0) {

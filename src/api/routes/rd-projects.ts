@@ -920,6 +920,272 @@ app.post("/:id/issuances", async (c) => {
   }
 });
 
+// POST /api/rd-projects/:id/issuances/batch — multi-line issuance write.
+//
+// Body:
+//   {
+//     issuedAt:  "YYYY-MM-DD" (optional, defaults to today),
+//     issuedBy:  string | null,
+//     notes:     string | null,
+//     items: [{ rawMaterialId: string, qty: number, unit: string }, ...]
+//   }
+//
+// All N item rows are inserted in a single c.var.DB.batch() (which the
+// supabase-compat shim wraps in a Postgres transaction) so partial failure
+// rolls back cleanly — no orphan stock_movements with no matching
+// rd_material_issuances row, and no half-deducted raw_materials.balanceQty.
+// Each line's unit cost is resolved server-side via FIFO at insert time
+// (resolveFifoUnitCostSen), matching the single-line endpoint's semantics.
+//
+// Returns { success, created: N, items: [...] } on success; on validation
+// failure (no items, missing material, insufficient stock) returns 400 with
+// an `error` string the frontend can show inline.
+app.post("/:id/issuances/batch", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  try {
+    const project = await c.var.DB.prepare(
+      "SELECT * FROM rd_projects WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProjectRow>();
+    if (!project) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+
+    const body = (await c.req.json()) as {
+      issuedAt?: string;
+      issuedBy?: string | null;
+      notes?: string | null;
+      items?: Array<{ rawMaterialId?: string; qty?: number; unit?: string }>;
+    };
+    const items = Array.isArray(body.items) ? body.items : [];
+    if (items.length === 0) {
+      return c.json(
+        { success: false, error: "items array is required (at least 1 line)" },
+        400,
+      );
+    }
+
+    const nowIso = new Date().toISOString();
+    const issuedAt =
+      typeof body.issuedAt === "string" && body.issuedAt
+        ? body.issuedAt
+        : nowIso.slice(0, 10);
+    const issuedBy =
+      typeof body.issuedBy === "string" && body.issuedBy.trim()
+        ? body.issuedBy.trim()
+        : null;
+    const headerNotes =
+      typeof body.notes === "string" && body.notes.trim()
+        ? body.notes.trim()
+        : null;
+
+    // Pre-resolve every line: load the raw_material row, validate stock,
+    // resolve FIFO unit cost. We aggregate the deduction PER material across
+    // lines so a user issuing the same material twice in one dialog gets
+    // their balance checked against the combined qty (not just the per-line
+    // qty against the live balance). This prevents an over-issuance bug
+    // where two lines of the same SKU would each individually pass the
+    // balance check but together exceed it.
+    type ResolvedLine = {
+      issuanceId: string;
+      stockMovementId: string;
+      rmId: string;
+      itemCode: string;
+      itemDescription: string;
+      itemGroup: string;
+      baseUOM: string;
+      qty: number;
+      unitCostSen: number;
+      totalCostSen: number;
+    };
+    const resolved: ResolvedLine[] = [];
+    const aggregateByRmId = new Map<string, number>();
+    const rmCache = new Map<string, RawMaterialRow>();
+
+    for (let i = 0; i < items.length; i += 1) {
+      const item = items[i];
+      const rawMaterialId = item.rawMaterialId;
+      const qty = typeof item.qty === "number" ? item.qty : 0;
+      if (!rawMaterialId || !Number.isFinite(qty) || qty <= 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Line ${i + 1}: rawMaterialId and qty > 0 are required`,
+          },
+          400,
+        );
+      }
+      let rm = rmCache.get(rawMaterialId);
+      if (!rm) {
+        const fetched = await c.var.DB.prepare(
+          "SELECT id, itemCode, description, itemGroup, baseUOM, balanceQty FROM raw_materials WHERE id = ?",
+        )
+          .bind(rawMaterialId)
+          .first<RawMaterialRow>();
+        if (!fetched) {
+          return c.json(
+            { success: false, error: `Line ${i + 1}: raw material not found` },
+            404,
+          );
+        }
+        rm = fetched;
+        rmCache.set(rawMaterialId, fetched);
+      }
+      const prevAgg = aggregateByRmId.get(rawMaterialId) ?? 0;
+      const nextAgg = prevAgg + qty;
+      if (rm.balanceQty < nextAgg) {
+        return c.json(
+          {
+            success: false,
+            error: `Line ${i + 1}: insufficient stock for ${rm.itemCode}. Available: ${rm.balanceQty} ${rm.baseUOM}, requested across lines: ${nextAgg}`,
+          },
+          400,
+        );
+      }
+      aggregateByRmId.set(rawMaterialId, nextAgg);
+
+      const unitCostSen = await resolveFifoUnitCostSen(
+        c.var.DB,
+        rm.id,
+        rm.itemCode,
+        rm.itemGroup,
+      );
+      const totalCostSen = Math.round(unitCostSen * qty);
+      const issuanceId = genId("rdiss");
+      resolved.push({
+        issuanceId,
+        stockMovementId: `mv-${issuanceId}`,
+        rmId: rm.id,
+        itemCode: rm.itemCode,
+        itemDescription: rm.description,
+        itemGroup: rm.itemGroup,
+        baseUOM: rm.baseUOM,
+        qty,
+        unitCostSen,
+        totalCostSen,
+      });
+    }
+
+    // Build a single atomic batch: per-line stock deduction + STOCK_OUT
+    // ledger row + rd_material_issuances row, then a final actualCost
+    // recompute. Mirroring the bom.ts /resync-job-card-times pattern.
+    const statements: D1PreparedStatement[] = [];
+    for (const r of resolved) {
+      statements.push(
+        c.var.DB
+          .prepare(
+            "UPDATE raw_materials SET balanceQty = balanceQty - ? WHERE id = ?",
+          )
+          .bind(r.qty, r.rmId),
+      );
+      statements.push(
+        c.var.DB
+          .prepare(
+            `INSERT INTO stock_movements (id, type, productCode, productName,
+               quantity, reason, performedBy, created_at)
+             VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            r.stockMovementId,
+            r.itemCode,
+            r.itemDescription,
+            r.qty,
+            `R&D ${project.code} issuance${headerNotes ? " — " + headerNotes : ""}`,
+            issuedBy ?? "System",
+            nowIso,
+          ),
+      );
+      statements.push(
+        c.var.DB
+          .prepare(
+            `INSERT INTO rd_material_issuances
+               (id, projectId, rawMaterialId, materialCode, materialName,
+                qty, unit, unitCostSen, totalCostSen, issuedAt, issuedBy,
+                notes, stockMovementId, orgId, createdAt)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            r.issuanceId,
+            project.id,
+            r.rmId,
+            r.itemCode,
+            r.itemDescription,
+            r.qty,
+            r.baseUOM,
+            r.unitCostSen,
+            r.totalCostSen,
+            issuedAt,
+            issuedBy,
+            headerNotes,
+            r.stockMovementId,
+            "hookka",
+            nowIso,
+          ),
+      );
+    }
+
+    try {
+      await c.var.DB.batch(statements);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[rd-projects] POST /issuances/batch failed:", message);
+      return c.json(
+        {
+          success: false,
+          error: `Batch issuance failed (transaction rolled back): ${message}`,
+        },
+        400,
+      );
+    }
+
+    // Recompute actualCost from the post-insert table sum so the budget
+    // cards stay in sync. Done outside the batch (single statement, post-
+    // commit) to keep the rollback story simple — if the recompute fails
+    // the rows are still durable and the next issuance will resync.
+    const sumRow = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalCostSen), 0) AS total
+         FROM rd_material_issuances WHERE projectId = ?`,
+    )
+      .bind(id)
+      .first<{ total: number }>();
+    const nextActualCost = sumRow?.total ?? 0;
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET actualCost = ? WHERE id = ?",
+    )
+      .bind(nextActualCost, id)
+      .run();
+
+    // Reload the inserted rows in the canonical RdMaterialIssuance shape
+    // so the frontend can drop them straight into its issuances list
+    // without re-fetching (though the SPA invalidates the cache anyway).
+    const insertedIds = resolved.map((r) => r.issuanceId);
+    const placeholders = insertedIds.map(() => "?").join(", ");
+    const insertedRes = await c.var.DB.prepare(
+      `SELECT * FROM rd_material_issuances WHERE id IN (${placeholders})`,
+    )
+      .bind(...insertedIds)
+      .all<IssuanceRow>();
+
+    return c.json(
+      {
+        success: true,
+        created: resolved.length,
+        items: (insertedRes.results ?? []).map(rowToIssuance),
+      },
+      201,
+    );
+  } catch (err) {
+    console.error("[rd-projects] POST /issuances/batch failed:", err);
+    return c.json(
+      { success: false, error: "Failed to create batch issuance" },
+      400,
+    );
+  }
+});
+
 // DELETE /api/rd-projects/:id/issuances/:issuanceId — reverse an issuance:
 // re-credit raw_materials.balanceQty, write a STOCK_IN counter-movement, and
 // delete the rd_material_issuances row. rd_projects.actualCost is recomputed

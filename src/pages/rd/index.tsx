@@ -19,7 +19,6 @@ import {
   X,
   Archive,
   Play,
-  ImageOff,
   Pencil,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
@@ -234,20 +233,17 @@ function ProjectCard({ project }: { project: RDProject }) {
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
-        {/* Cover photo thumbnail — full-width banner. Falls back to a neutral
-            placeholder when the project has no cover photo, no milestone
-            photos, or when the image source fails to load. */}
-        {showCover ? (
+        {/* Cover photo thumbnail — only renders the banner when there's a
+            real photo. Empty placeholders waste vertical space and made the
+            card look weird; cards without a photo just collapse to the
+            text content (slightly shorter card, cleaner grid). */}
+        {showCover && (
           <img
             src={cover}
             alt={`${project.name} cover`}
             onError={() => setCoverFailed(true)}
-            className="w-full h-24 object-contain bg-[#FAF9F8] border-b border-[#E2DDD8]"
+            className="w-full h-32 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
-        ) : (
-          <div className="w-full h-24 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">
-            <ImageOff className="h-6 w-6" />
-          </div>
         )}
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-2">
@@ -361,17 +357,14 @@ function PipelineView({ projects }: { projects: RDProject[] }) {
                 return (
                 <Link key={project.id} to={`/rd/${project.id}`}>
                   <div className="bg-white rounded-md border border-[#E2DDD8] hover:shadow-md transition-shadow cursor-pointer overflow-hidden">
-                    {/* Cover photo thumbnail — neutral placeholder when missing. */}
-                    {cover ? (
+                    {/* Cover photo thumbnail — banner is hidden entirely when
+                        there's no photo, keeping the kanban card compact. */}
+                    {cover && (
                       <img
                         src={cover}
                         alt=""
-                        className="w-full h-16 object-contain bg-[#FAF9F8] border-b border-[#E2DDD8]"
+                        className="w-full h-20 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
                       />
-                    ) : (
-                      <div className="w-full h-16 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">
-                        <ImageOff className="h-4 w-4" />
-                      </div>
                     )}
                     <div className="p-2.5 space-y-2">
                       <p className="text-[10px] font-mono text-gray-400">{project.code}</p>

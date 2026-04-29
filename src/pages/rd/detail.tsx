@@ -72,6 +72,36 @@ const PROTO_TYPE_COLORS: Record<RDPrototypeType, string> = {
 
 const LABOUR_RATE_SEN = 1500; // RM 15/hr
 
+// ─── Issuance line factory ─────────────────────────────────────────────────
+// Module-scope so the body of RDProjectDetailPage stays pure (the
+// react-hooks/purity rule forbids calling Date.now() or Math.random() during
+// render). A monotonic counter keeps the React key stable across renders;
+// it doesn't need to survive page reloads.
+type IssuanceLine = {
+  lineKey: string;        // stable React key
+  rmCategory: string;     // itemGroup filter for this line
+  materialId: string;
+  materialCode: string;
+  materialName: string;
+  unit: string;
+  balanceQty: number;
+  qty: number;
+};
+let issuanceLineSeq = 0;
+function makeBlankIssuanceLine(): IssuanceLine {
+  issuanceLineSeq += 1;
+  return {
+    lineKey: `line-${issuanceLineSeq}`,
+    rmCategory: "",
+    materialId: "",
+    materialCode: "",
+    materialName: "",
+    unit: "",
+    balanceQty: 0,
+    qty: 1,
+  };
+}
+
 // ─── Modal Overlay ──────────────────────────────────────────────────────────
 
 function ModalOverlay({ open, onClose, title, children, wide }: {
@@ -155,24 +185,28 @@ export default function RDProjectDetailPage() {
   // handlers used to live here. Issue dialog and the rest of the file are
   // unaffected.
 
-  // Material Issuance modal — 2-step picker: Category (itemGroup) → Specific RawMaterial.
+  // Material Issuance modal — multi-line form. One dialog can post N
+  // raw-material rows in a single batched transaction (POST
+  // /:id/issuances/batch). The dialog is split into:
+  //   • a common header (issuedAt + issuedBy + notes) shared by every row, and
+  //   • a list of material lines, each with its own category, raw material,
+  //     qty + unit. Lines can be added / removed individually.
+  // Note: unit cost is no longer captured in the UI. The backend resolves it
+  // per-line via FIFO over rm_batches at issue time.
   const [issuanceOpen, setIssuanceOpen] = useState(false);
   const [issuanceSaving, setIssuanceSaving] = useState(false);
+  const [issuanceError, setIssuanceError] = useState<string | null>(null);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
-  const [rmCategory, setRmCategory] = useState<string>("");
-  // Note: unit cost is no longer captured in the UI. The backend resolves it
-  // from FIFO weighted-average over the live rm_batches at issue time, so the
-  // dialog can stay focused on quantity + person + notes.
-  const [issuanceForm, setIssuanceForm] = useState({
-    materialId: "",
-    materialCode: "",
-    materialName: "",
-    unit: "",
-    balanceQty: 0,
-    qty: 1,
+  const [issuanceHeader, setIssuanceHeader] = useState({
+    issuedAt: new Date().toISOString().slice(0, 10),
     issuedBy: "",
     notes: "",
   });
+  // Lazy initialiser keeps makeBlankIssuanceLine() (which mutates the module
+  // counter) out of the render path on subsequent re-renders.
+  const [issuanceLines, setIssuanceLines] = useState<IssuanceLine[]>(() => [
+    makeBlankIssuanceLine(),
+  ]);
 
   // Labour Hours Log modal
   const [labourOpen, setLabourOpen] = useState(false);
@@ -409,86 +443,139 @@ export default function RDProjectDetailPage() {
 
   const openIssuanceModal = () => {
     fetchRawMaterials();
-    setRmCategory("");
-    setIssuanceForm({
-      materialId: "",
-      materialCode: "",
-      materialName: "",
-      unit: "",
-      balanceQty: 0,
-      qty: 1,
+    setIssuanceHeader({
+      issuedAt: new Date().toISOString().slice(0, 10),
       issuedBy: "",
       notes: "",
     });
+    setIssuanceLines([makeBlankIssuanceLine()]);
+    setIssuanceError(null);
     setIssuanceOpen(true);
   };
 
-  // Step 2 of the picker: pick a specific RawMaterial within the selected category.
-  const selectRawMaterialById = (materialId: string) => {
-    const rm = rawMaterials.find((r) => r.id === materialId);
+  const closeIssuanceModal = () => {
+    setIssuanceOpen(false);
+    setIssuanceError(null);
+  };
+
+  // Update a single line by lineKey. Used by every row-level input. We pass
+  // a partial patch so callers don't have to hand-spread every field.
+  const updateIssuanceLine = (
+    lineKey: string,
+    patch: Partial<IssuanceLine>,
+  ) => {
+    setIssuanceLines((lines) =>
+      lines.map((l) => (l.lineKey === lineKey ? { ...l, ...patch } : l)),
+    );
+  };
+
+  // Pick a specific RawMaterial for a given line. Snapshots its code/name/unit
+  // and the live balanceQty for inline validation. Passing materialId="" clears
+  // the selection (used when the user changes category).
+  const selectMaterialForLine = (lineKey: string, materialId: string) => {
+    const rm = materialId
+      ? rawMaterials.find((r) => r.id === materialId)
+      : null;
     if (!rm) {
-      setIssuanceForm((f) => ({
-        ...f,
+      updateIssuanceLine(lineKey, {
         materialId: "",
         materialCode: "",
         materialName: "",
         unit: "",
         balanceQty: 0,
-      }));
+      });
       return;
     }
-    setIssuanceForm((f) => ({
-      ...f,
+    updateIssuanceLine(lineKey, {
       materialId: rm.id,
       materialCode: rm.itemCode,
       materialName: rm.description,
       unit: rm.baseUOM,
       balanceQty: rm.balanceQty,
-    }));
+    });
+  };
+
+  const addIssuanceLine = () => {
+    setIssuanceLines((lines) => [...lines, makeBlankIssuanceLine()]);
+  };
+
+  const removeIssuanceLine = (lineKey: string) => {
+    setIssuanceLines((lines) => {
+      // Always keep at least one line — the dialog needs something to edit.
+      if (lines.length <= 1) return lines;
+      return lines.filter((l) => l.lineKey !== lineKey);
+    });
+  };
+
+  // Per-line validation used both for inline visual feedback (red borders)
+  // and the submit-time gate. Returns null when the line is valid, or a
+  // short reason string otherwise.
+  const validateIssuanceLine = (line: IssuanceLine): string | null => {
+    if (!line.materialId) return "Pick a raw material";
+    if (!Number.isFinite(line.qty) || line.qty <= 0) return "Quantity must be > 0";
+    if (line.qty > line.balanceQty)
+      return `Exceeds balance (${line.balanceQty} ${line.unit})`;
+    return null;
   };
 
   const handleIssueMaterial = async () => {
     if (!project) return;
-    if (!issuanceForm.materialId) {
-      toast.warning("Please select a material");
-      return;
+    setIssuanceError(null);
+
+    // Block submit on any invalid line. The error message points at the
+    // first offender so the user can scroll to it.
+    for (let i = 0; i < issuanceLines.length; i += 1) {
+      const reason = validateIssuanceLine(issuanceLines[i]);
+      if (reason) {
+        setIssuanceError(`Line ${i + 1}: ${reason}`);
+        return;
+      }
     }
-    if (issuanceForm.qty <= 0) {
-      toast.warning("Quantity must be greater than 0");
-      return;
-    }
-    if (!issuanceForm.issuedBy.trim()) {
-      toast.warning("Issued By is required");
-      return;
-    }
+
     setIssuanceSaving(true);
     try {
-      // unitCostSen intentionally omitted — server resolves it from FIFO
-      // (oldest batch with positive remaining_qty) over rm_batches at issue
-      // time. See resolveFifoUnitCostSen() in src/api/routes/rd-projects.ts.
-      // We POST to the new table-backed endpoint; the legacy
-      // /issue-material handler is still wired up server-side but is no
-      // longer the canonical write path.
-      const res = await fetch(`/api/rd-projects/${id}/issuances`, {
+      // unitCostSen intentionally omitted on every item — server resolves
+      // it per-line via FIFO (oldest rm_batches row) at insert time.
+      // See resolveFifoUnitCostSen() in src/api/routes/rd-projects.ts.
+      // The batch endpoint wraps every line in a single c.var.DB.batch
+      // so partial failures roll back cleanly (no orphan stock_movements).
+      const res = await fetch(`/api/rd-projects/${id}/issuances/batch`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          materialId: issuanceForm.materialId,
-          qty: issuanceForm.qty,
-          issuedBy: issuanceForm.issuedBy.trim(),
-          notes: issuanceForm.notes.trim(),
+          issuedAt: issuanceHeader.issuedAt,
+          issuedBy: issuanceHeader.issuedBy.trim(),
+          notes: issuanceHeader.notes.trim(),
+          items: issuanceLines.map((l) => ({
+            rawMaterialId: l.materialId,
+            qty: l.qty,
+            unit: l.unit,
+          })),
         }),
       });
       if (res.ok) {
-        // Re-fetch both: project (for actualCost) and issuances list.
-        await Promise.all([fetchProject(), fetchIssuances()]);
+        const n = issuanceLines.length;
+        // Re-fetch project (for actualCost) + issuances list. Inventory also
+        // gets refreshed so the next dialog pull sees post-deduction balances.
+        await Promise.all([
+          fetchProject(),
+          fetchIssuances(),
+          fetchRawMaterials(),
+        ]);
         setIssuanceOpen(false);
-        toast.success("Material issued successfully");
+        toast.success(`Issued ${n} material${n === 1 ? "" : "s"}`);
       } else {
-        toast.error("Failed to issue material");
+        let msg = "Failed to issue materials";
+        try {
+          const body = (await res.json()) as { error?: string };
+          if (body?.error) msg = body.error;
+        } catch {
+          // ignore; fall back to generic
+        }
+        setIssuanceError(msg);
       }
     } catch {
-      toast.error("Failed to issue material");
+      setIssuanceError("Network error — please try again");
     } finally {
       setIssuanceSaving(false);
     }
@@ -777,6 +864,7 @@ export default function RDProjectDetailPage() {
   const remaining = project.totalBudget - project.actualCost;
 
   // Step 1 of the picker: distinct active itemGroups, sorted alphabetically.
+  // Used by every material line in the multi-line dialog.
   const rmCategoryOptions = Array.from(
     new Set(
       rawMaterials
@@ -786,12 +874,14 @@ export default function RDProjectDetailPage() {
     ),
   ).sort();
 
-  // Step 2 of the picker: materials in the chosen itemGroup, sorted by itemCode.
-  const rmInCategory = rmCategory
-    ? rawMaterials
-        .filter((rm) => rm.isActive && rm.itemGroup === rmCategory)
-        .sort((a, b) => a.itemCode.localeCompare(b.itemCode))
-    : [];
+  // Step 2 of the picker: materials in a given itemGroup, sorted by itemCode.
+  // Multi-line dialog calls this per-row to filter the second dropdown.
+  const materialsInCategory = (cat: string) =>
+    cat
+      ? rawMaterials
+          .filter((rm) => rm.isActive && rm.itemGroup === cat)
+          .sort((a, b) => a.itemCode.localeCompare(b.itemCode))
+      : [];
 
   // The old in-line "first milestone photo" thumbnail derivation lived here;
   // removed in Task #8 along with the small header thumbnail. The dedicated
@@ -1776,109 +1866,214 @@ export default function RDProjectDetailPage() {
           no longer surfaced on the R&D detail page). */}
 
       {/* ─── Issue Material Modal ──────────────────────────────────────────── */}
-      <ModalOverlay open={issuanceOpen} onClose={() => setIssuanceOpen(false)} title="Issue Raw Material" wide>
-        <div className="space-y-4">
-          {/* 2-step picker: Category (itemGroup) → Specific raw material */}
+      {/*
+        Multi-line dialog: a single common header (issuedAt + issuedBy +
+        notes) is shared by every row, then N material lines are submitted
+        in one transaction via POST /:id/issuances/batch. Each line carries
+        its own category → raw-material picker, qty, and auto-filled unit;
+        red borders + helper text surface inline validation, and the dialog
+        body scrolls when many lines are added.
+      */}
+      <ModalOverlay open={issuanceOpen} onClose={closeIssuanceModal} title="Issue Raw Material" wide>
+        <div className="space-y-5 max-h-[85vh] overflow-y-auto pr-1">
+          {/* Common header: Issue Date + Issued By */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className={labelClass}>Category</label>
-              <select
-                className={selectClass}
-                value={rmCategory}
-                onChange={(e) => {
-                  setRmCategory(e.target.value);
-                  // Reset the specific material whenever category changes
-                  selectRawMaterialById("");
-                }}
-              >
-                <option value="">-- Select category --</option>
-                {rmCategoryOptions.map((g) => (
-                  <option key={g} value={g}>{g}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className={labelClass}>Raw Material</label>
-              <select
-                className={selectClass}
-                value={issuanceForm.materialId}
-                onChange={(e) => selectRawMaterialById(e.target.value)}
-                disabled={!rmCategory}
-              >
-                <option value="">{rmCategory ? "-- Select material --" : "-- Pick a category first --"}</option>
-                {rmInCategory.map((rm) => (
-                  <option key={rm.id} value={rm.id}>
-                    {rm.itemCode} — {rm.description} (balance: {rm.balanceQty} {rm.baseUOM})
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          {issuanceForm.materialId && (
-            <div className="bg-[#F0ECE9] rounded-lg p-3 text-sm space-y-1">
-              <div className="flex justify-between">
-                <span className="text-gray-500">Selected:</span>
-                <span className="font-medium">{issuanceForm.materialCode} - {issuanceForm.materialName}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-500">Balance Available:</span>
-                <span className="font-medium">{issuanceForm.balanceQty} {issuanceForm.unit}</span>
-              </div>
-            </div>
-          )}
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass}>Quantity</label>
+              <label className={labelClass}>Issue Date</label>
               <input
-                type="number"
+                type="date"
                 className={inputClass}
-                min={0.01}
-                step={0.01}
-                value={issuanceForm.qty}
-                onChange={(e) => setIssuanceForm((f) => ({ ...f, qty: parseFloat(e.target.value) || 0 }))}
+                value={issuanceHeader.issuedAt}
+                onChange={(e) => setIssuanceHeader((h) => ({ ...h, issuedAt: e.target.value }))}
               />
             </div>
-            <div>
-              <label className={labelClass}>Unit</label>
-              <input
-                className={`${inputClass} bg-gray-50`}
-                value={issuanceForm.unit}
-                disabled
-                placeholder="Auto-filled"
-              />
-            </div>
-          </div>
-          <p className="text-xs text-gray-400">
-            Unit cost is resolved from the current weighted-average inventory cost at the time the material is issued.
-          </p>
-
-          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Issued By</label>
               <input
                 className={inputClass}
-                value={issuanceForm.issuedBy}
-                onChange={(e) => setIssuanceForm((f) => ({ ...f, issuedBy: e.target.value }))}
+                value={issuanceHeader.issuedBy}
+                onChange={(e) => setIssuanceHeader((h) => ({ ...h, issuedBy: e.target.value }))}
                 placeholder="R&D person name"
-              />
-            </div>
-            <div>
-              <label className={labelClass}>Notes</label>
-              <input
-                className={inputClass}
-                value={issuanceForm.notes}
-                onChange={(e) => setIssuanceForm((f) => ({ ...f, notes: e.target.value }))}
-                placeholder="Optional notes..."
               />
             </div>
           </div>
 
+          <div>
+            <label className={labelClass}>Notes (optional)</label>
+            <textarea
+              className={`${inputClass} resize-none`}
+              rows={2}
+              value={issuanceHeader.notes}
+              onChange={(e) => setIssuanceHeader((h) => ({ ...h, notes: e.target.value }))}
+              placeholder="Optional notes for this issuance..."
+            />
+          </div>
+
+          {/* Materials section header */}
+          <div className="flex items-center gap-3 pt-1">
+            <div className="h-px flex-1 bg-[#E2DDD8]" />
+            <span className="text-xs font-semibold uppercase tracking-wider text-gray-500">Materials</span>
+            <div className="h-px flex-1 bg-[#E2DDD8]" />
+          </div>
+
+          {/* Per-line forms */}
+          <div className="space-y-4">
+            {issuanceLines.map((line, idx) => {
+              const lineErr = validateIssuanceLine(line);
+              const qtyOver = line.materialId && line.qty > line.balanceQty;
+              const missingMaterial = !line.materialId;
+              const inCat = materialsInCategory(line.rmCategory);
+              return (
+                <div
+                  key={line.lineKey}
+                  className="rounded-xl border border-[#E2DDD8] bg-[#FBFAF8] p-4 space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-[#6B5C32]">Line {idx + 1}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeIssuanceLine(line.lineKey)}
+                      disabled={issuanceLines.length <= 1}
+                      className="rounded-md p-1 text-gray-400 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-30 transition-colors"
+                      aria-label="Remove line"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+
+                  {/* Category + Raw Material */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelClass}>Category</label>
+                      <select
+                        className={selectClass}
+                        value={line.rmCategory}
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          // Whenever category changes, drop the line's selected
+                          // material so the panel below doesn't show stale info.
+                          updateIssuanceLine(line.lineKey, {
+                            rmCategory: next,
+                            materialId: "",
+                            materialCode: "",
+                            materialName: "",
+                            unit: "",
+                            balanceQty: 0,
+                          });
+                        }}
+                      >
+                        <option value="">-- Select category --</option>
+                        {rmCategoryOptions.map((g) => (
+                          <option key={g} value={g}>{g}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelClass}>Raw Material</label>
+                      <select
+                        className={`${selectClass} ${missingMaterial ? "border-red-300 focus:border-red-400 focus:ring-red-200" : ""}`}
+                        value={line.materialId}
+                        onChange={(e) => selectMaterialForLine(line.lineKey, e.target.value)}
+                        disabled={!line.rmCategory}
+                      >
+                        <option value="">{line.rmCategory ? "-- Select material --" : "-- Pick a category first --"}</option>
+                        {inCat.map((rm) => (
+                          <option key={rm.id} value={rm.id}>
+                            {rm.itemCode} — {rm.description} (balance: {rm.balanceQty} {rm.baseUOM})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  {/* Selected info banner — only shown after a material is picked */}
+                  {line.materialId && (
+                    <div className="bg-[#F0ECE9] rounded-lg p-3 text-sm space-y-1">
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Selected:</span>
+                        <span className="font-medium">{line.materialCode} - {line.materialName}</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-500">Balance:</span>
+                        <span className="font-medium">{line.balanceQty} {line.unit}</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Qty + Unit grouped with the material */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className={labelClass}>Quantity</label>
+                      <input
+                        type="number"
+                        className={`${inputClass} ${qtyOver ? "border-red-400 focus:border-red-500 focus:ring-red-200" : ""}`}
+                        min={0.01}
+                        step={0.01}
+                        value={line.qty}
+                        onChange={(e) =>
+                          updateIssuanceLine(line.lineKey, {
+                            qty: parseFloat(e.target.value) || 0,
+                          })
+                        }
+                      />
+                      {qtyOver && (
+                        <p className="mt-1 text-xs text-red-600">
+                          Exceeds balance ({line.balanceQty} {line.unit})
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <label className={labelClass}>Unit</label>
+                      <input
+                        className={`${inputClass} bg-gray-50`}
+                        value={line.unit}
+                        disabled
+                        placeholder={line.materialId ? "" : "Auto-filled"}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Inline line-level reason text (e.g. missing material) */}
+                  {lineErr && !qtyOver && missingMaterial && (
+                    <p className="text-xs text-red-600">{lineErr}</p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Add another line */}
+          <div>
+            <button
+              type="button"
+              onClick={addIssuanceLine}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-[#C7BFB6] bg-white px-3 py-2 text-sm font-medium text-[#6B5C32] hover:bg-[#FBFAF8] hover:border-[#6B5C32] transition-colors"
+            >
+              <Plus className="h-4 w-4" />
+              Add another material
+            </button>
+          </div>
+
+          <p className="text-xs text-gray-400">
+            Unit cost is resolved from the current FIFO inventory cost at the time the material is issued.
+          </p>
+
+          {/* Inline server-error banner — shown above the buttons so the
+              dialog can stay open while the user fixes the underlying issue. */}
+          {issuanceError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+              {issuanceError}
+            </div>
+          )}
+
           <div className="flex justify-end gap-2 pt-2 border-t border-[#E2DDD8]">
-            <Button variant="ghost" onClick={() => setIssuanceOpen(false)}>Cancel</Button>
+            <Button variant="ghost" onClick={closeIssuanceModal}>Cancel</Button>
             <Button variant="primary" onClick={handleIssueMaterial} disabled={issuanceSaving}>
-              {issuanceSaving ? "Issuing..." : "Issue Material"}
+              {issuanceSaving
+                ? "Issuing..."
+                : issuanceLines.length === 1
+                  ? "Issue Material"
+                  : `Issue ${issuanceLines.length} Materials`}
             </Button>
           </div>
         </div>

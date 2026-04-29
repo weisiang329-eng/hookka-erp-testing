@@ -797,6 +797,15 @@ app.post("/resync-job-card-times", async (c) => {
   if (denied) return denied;
 
   const dryRun = c.req.query("dryRun") === "true";
+  // Real-run cursoring. The previous unbounded variant pushed 8000+ UPDATE +
+  // audit_events INSERT statements into a single Cloudflare Workers
+  // transaction and exceeded the wall-clock budget. We now stream batches.
+  // Client loops with the returned `nextCursor` until null. Dry-run still
+  // does a full scan because it's a cheap SELECT-only path.
+  const cursor = dryRun ? undefined : c.req.query("cursor") || undefined;
+  const limit = dryRun
+    ? undefined
+    : Math.min(Math.max(Number(c.req.query("limit") ?? 500), 50), 2000);
 
   // --- 1. Load master Production Times from kv_config ----------------------
   // Server-side direct read — mirrors what /api/kv-config/:key does. We
@@ -821,7 +830,9 @@ app.post("/resync-job-card-times", async (c) => {
     }
   }
 
-  // --- 2. SELECT every job_cards row + parent PO so we have poNo ----------
+  // --- 2. SELECT job_cards rows. Dry-run gets the full table; real-run
+  // gets one cursored chunk so a single Cloudflare invocation completes
+  // before the wall-clock budget is hit.
   type JcRow = {
     id: string;
     deptCode: string | null;
@@ -831,21 +842,51 @@ app.post("/resync-job-card-times", async (c) => {
     productionOrderId: string;
     poNo: string | null;
   };
-  const sel = await c.var.DB
-    .prepare(
-      `SELECT
-         jc.id AS id,
-         jc.departmentCode AS deptCode,
-         jc.category AS category,
-         jc.productionTimeMinutes AS productionTimeMinutes,
-         jc.estMinutes AS estMinutes,
-         jc.productionOrderId AS productionOrderId,
-         po.poNo AS poNo
-       FROM job_cards jc
-       LEFT JOIN production_orders po ON po.id = jc.productionOrderId`,
-    )
-    .all<JcRow>();
-  const rows = sel.results ?? [];
+  let sel;
+  if (dryRun) {
+    sel = await c.var.DB
+      .prepare(
+        `SELECT
+           jc.id AS id,
+           jc.departmentCode AS deptCode,
+           jc.category AS category,
+           jc.productionTimeMinutes AS productionTimeMinutes,
+           jc.estMinutes AS estMinutes,
+           jc.productionOrderId AS productionOrderId,
+           po.poNo AS poNo
+         FROM job_cards jc
+         LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+         ORDER BY jc.id ASC`,
+      )
+      .all<JcRow>();
+  } else {
+    // limit+1 so we can detect "more pages remain" without a count(*).
+    const cursorClause = cursor ? "WHERE jc.id > ?" : "";
+    const sql = `SELECT
+                   jc.id AS id,
+                   jc.departmentCode AS deptCode,
+                   jc.category AS category,
+                   jc.productionTimeMinutes AS productionTimeMinutes,
+                   jc.estMinutes AS estMinutes,
+                   jc.productionOrderId AS productionOrderId,
+                   po.poNo AS poNo
+                 FROM job_cards jc
+                 LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+                 ${cursorClause}
+                 ORDER BY jc.id ASC
+                 LIMIT ?`;
+    const stmt = cursor
+      ? c.var.DB.prepare(sql).bind(cursor, limit! + 1)
+      : c.var.DB.prepare(sql).bind(limit! + 1);
+    sel = await stmt.all<JcRow>();
+  }
+  const allRows = sel.results ?? [];
+  let hasMore = false;
+  if (!dryRun && allRows.length > limit!) {
+    hasMore = true;
+    allRows.pop();
+  }
+  const rows = allRows;
 
   // --- 3. Categorize each row ---------------------------------------------
   let wouldUpdate = 0;
@@ -1023,16 +1064,22 @@ app.post("/resync-job-card-times", async (c) => {
     }
   }
 
+  // Cursor: when chunked, the last id we successfully scanned. Client
+  // re-calls with ?cursor=<this> until nextCursor is null.
+  const lastScannedId = rows.length > 0 ? rows[rows.length - 1].id : null;
+  const nextCursor = hasMore ? lastScannedId : null;
+
   return c.json({
     success: true,
     dryRun: false,
-    scope: { totalJobCards, posTouched: posTouchedSet.size },
+    scope: { scanned: totalJobCards, posTouched: posTouchedSet.size },
     wouldUpdate,
     updated,
     unchanged,
     missingMaster,
     breakdown,
     samples,
+    cursor: { hasMore, nextCursor, batchSize: limit ?? null },
   });
 });
 

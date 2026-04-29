@@ -1106,7 +1106,7 @@ export type RDProject = {
   currentStage: RDProjectStage;
   targetLaunchDate: string;
   assignedTeam: string[];
-  milestones: { stage: RDProjectStage; targetDate: string; estimatedDate?: string | null; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
+  milestones: { stage: RDProjectStage; targetDate: string; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
   totalBudget: number;
   actualCost: number;
   prototypes: RDPrototype[];

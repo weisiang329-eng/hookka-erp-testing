@@ -108,15 +108,16 @@ function ProjectCard({ project }: { project: RDProject }) {
                 />
               ) : (
                 <div
-                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
-                  title="No photo yet"
-                  aria-label="No cover photo"
+                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex flex-col items-center justify-center text-[8px] text-gray-400 leading-tight"
+                  title="Upload a milestone photo to set a cover"
+                  aria-label="No cover photo yet"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4 mb-0.5">
                     <rect x="3" y="3" width="18" height="18" rx="2" />
                     <circle cx="8.5" cy="8.5" r="1.5" />
                     <path d="M21 15l-5-5L5 21" />
                   </svg>
+                  <span className="font-medium">Cover</span>
                 </div>
               )}
               <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>

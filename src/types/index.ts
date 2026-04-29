@@ -1119,6 +1119,9 @@ export type RDProject = {
   sourceBrand?: string;        // competitor brand or supplier
   sourcePurchaseRef?: string;  // invoice / receipt no for accounting trace
   sourceNotes?: string;        // dimensions, specs, why we want to copy
+  // Cover photo — glanceable thumbnail of what the project is about. Stored
+  // as a data URL (JPEG) compressed client-side via @/lib/image-compress.
+  coverPhotoUrl?: string | null;
   createdDate: string;
   status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
 };

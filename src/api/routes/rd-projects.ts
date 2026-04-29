@@ -35,6 +35,7 @@ type ProjectRow = {
   sourceBrand: string | null;
   sourcePurchaseRef: string | null;
   sourceNotes: string | null;
+  coverPhotoUrl: string | null;
   createdDate: string | null;
   status: string | null;
 };
@@ -96,6 +97,7 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
     sourceBrand: row.sourceBrand ?? "",
     sourcePurchaseRef: row.sourcePurchaseRef ?? "",
     sourceNotes: row.sourceNotes ?? "",
+    coverPhotoUrl: row.coverPhotoUrl ?? null,
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -205,8 +207,8 @@ app.post("/", async (c) => {
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
          milestones, productionBOM, materialIssuances, labourLogs,
          sourceProductName, sourceBrand, sourcePurchaseRef, sourceNotes,
-         createdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         coverPhotoUrl, createdDate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -229,6 +231,7 @@ app.post("/", async (c) => {
         body.sourceBrand ?? null,
         body.sourcePurchaseRef ?? null,
         body.sourceNotes ?? null,
+        body.coverPhotoUrl ?? null,
         now.toISOString(),
         "ACTIVE",
       )
@@ -399,6 +402,10 @@ app.put("/:id", async (c) => {
         body.sourceNotes !== undefined
           ? body.sourceNotes
           : existing.sourceNotes,
+      coverPhotoUrl:
+        body.coverPhotoUrl !== undefined
+          ? body.coverPhotoUrl
+          : existing.coverPhotoUrl,
       status: body.status ?? existing.status,
     };
 
@@ -409,7 +416,7 @@ app.put("/:id", async (c) => {
          assignedTeam = ?, totalBudget = ?, actualCost = ?,
          milestones = ?, productionBOM = ?, materialIssuances = ?,
          labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
-         sourcePurchaseRef = ?, sourceNotes = ?, status = ?
+         sourcePurchaseRef = ?, sourceNotes = ?, coverPhotoUrl = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -431,6 +438,7 @@ app.put("/:id", async (c) => {
         merged.sourceBrand,
         merged.sourcePurchaseRef,
         merged.sourceNotes,
+        merged.coverPhotoUrl,
         merged.status,
         id,
       )

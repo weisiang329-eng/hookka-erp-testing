@@ -44,6 +44,7 @@ export const RdProjectSchema = z
     sourceBrand: z.string().optional(),
     sourcePurchaseRef: z.string().optional(),
     sourceNotes: z.string().optional(),
+    coverPhotoUrl: z.string().nullable().optional(),
     prototypes: z.array(RdPrototypeSchema).optional(),
     createdDate: z.string().optional(),
     status: z.string().optional(),

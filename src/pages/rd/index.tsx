@@ -17,6 +17,7 @@ import {
   ArrowRight,
   Plus,
   X,
+  ImageOff,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
@@ -75,9 +76,12 @@ function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
   );
 }
 
-// Derive cover photo at render time — first photo across all milestones in storage order.
-// Returns undefined if no milestone has any photos (caller renders placeholder SVG).
+// Resolve cover photo at render time. The explicit `coverPhotoUrl` field
+// (uploaded via the detail page's dedicated cover-photo block) wins; if the
+// project hasn't set one, fall back to the first photo across milestones in
+// storage order so older projects still show something useful.
 function getCoverPhoto(project: RDProject): string | undefined {
+  if (project.coverPhotoUrl) return project.coverPhotoUrl;
   for (const m of project.milestones) {
     if (m.photos && m.photos.length > 0) return m.photos[0];
   }
@@ -91,36 +95,27 @@ function ProjectCard({ project }: { project: RDProject }) {
 
   return (
     <Link to={`/rd/${project.id}`}>
-      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full overflow-hidden">
+        {/* Cover photo thumbnail — full-width banner. Falls back to a neutral
+            placeholder when the project has no cover photo or milestone photos. */}
+        {cover ? (
+          <img
+            src={cover}
+            alt={`${project.name} cover`}
+            className="w-full h-24 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+          />
+        ) : (
+          <div className="w-full h-24 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">
+            <ImageOff className="h-6 w-6" />
+          </div>
+        )}
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-2">
             <div className="flex-1 min-w-0">
               <p className="text-xs font-mono text-gray-400">{project.code}</p>
               <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
             </div>
-            {/* Cover thumbnail (top-right) — first milestone photo, or neutral placeholder */}
-            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
-              {cover ? (
-                <img
-                  src={cover}
-                  alt={`${project.name} cover`}
-                  className="h-12 w-12 rounded-md object-cover border border-[#E2DDD8]"
-                />
-              ) : (
-                <div
-                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
-                  title="No photo yet"
-                  aria-label="No cover photo"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                    <circle cx="8.5" cy="8.5" r="1.5" />
-                    <path d="M21 15l-5-5L5 21" />
-                  </svg>
-                </div>
-              )}
-              <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
-            </div>
+            <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -217,21 +212,38 @@ function PipelineView({ projects }: { projects: RDProject[] }) {
               <span className="bg-white/20 rounded-full px-1.5 py-0.5 text-[10px]">{stageProjects.length}</span>
             </div>
             <div className="flex-1 bg-gray-50 border border-t-0 border-[#E2DDD8] rounded-b-lg p-2 space-y-2">
-              {stageProjects.map((project) => (
+              {stageProjects.map((project) => {
+                const cover = getCoverPhoto(project);
+                return (
                 <Link key={project.id} to={`/rd/${project.id}`}>
-                  <div className="bg-white rounded-md border border-[#E2DDD8] p-2.5 hover:shadow-md transition-shadow cursor-pointer space-y-2">
-                    <p className="text-[10px] font-mono text-gray-400">{project.code}</p>
-                    <p className="text-xs font-medium text-[#1F1D1B] leading-snug">{project.name}</p>
-                    <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
-                      {project.productCategory}
-                    </span>
-                    <div className="flex items-center justify-between text-[10px] text-gray-400">
-                      <span>{formatDate(project.targetLaunchDate)}</span>
-                      <ArrowRight className="h-3 w-3" />
+                  <div className="bg-white rounded-md border border-[#E2DDD8] hover:shadow-md transition-shadow cursor-pointer overflow-hidden">
+                    {/* Cover photo thumbnail — neutral placeholder when missing. */}
+                    {cover ? (
+                      <img
+                        src={cover}
+                        alt=""
+                        className="w-full h-16 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+                      />
+                    ) : (
+                      <div className="w-full h-16 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">
+                        <ImageOff className="h-4 w-4" />
+                      </div>
+                    )}
+                    <div className="p-2.5 space-y-2">
+                      <p className="text-[10px] font-mono text-gray-400">{project.code}</p>
+                      <p className="text-xs font-medium text-[#1F1D1B] leading-snug">{project.name}</p>
+                      <span className={`inline-flex items-center rounded-full px-1.5 py-0.5 text-[9px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+                        {project.productCategory}
+                      </span>
+                      <div className="flex items-center justify-between text-[10px] text-gray-400">
+                        <span>{formatDate(project.targetLaunchDate)}</span>
+                        <ArrowRight className="h-3 w-3" />
+                      </div>
                     </div>
                   </div>
                 </Link>
-              ))}
+                );
+              })}
               {stageProjects.length === 0 && (
                 <div className="flex items-center justify-center h-24 text-xs text-gray-300">
                   No projects

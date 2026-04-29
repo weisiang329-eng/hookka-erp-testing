@@ -11,7 +11,7 @@ import type {
   SupplierMaterialBinding,
   PriceHistory,
   SupplierScorecard,
-} from "@/lib/mock-data";
+} from "@/types";
 
 type SupplierInfo = {
   id: string;

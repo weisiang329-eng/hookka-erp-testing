@@ -10,14 +10,14 @@ import { formatCurrency } from "@/lib/utils";
 import { calculateUnitPrice, calculateLineTotal } from "@/lib/pricing";
 import { hasMixedSofaBedframe, SO_MIXED_CATEGORY_ERROR } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, ChevronDown, ChevronUp, Check, AlertTriangle, X } from "lucide-react";
-import type { Customer, Product, FabricItem } from "@/lib/mock-data";
+import type { Customer, Product, FabricItem } from "@/types";
 import {
   divanHeightOptions,
   legHeightOptions,
   specialOrderOptions,
   gapHeightOptions,
   SEAT_HEIGHT_OPTIONS,
-} from "@/lib/mock-data";
+} from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useActiveTabDirty } from "@/contexts/tabs-context";

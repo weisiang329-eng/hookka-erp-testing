@@ -111,7 +111,9 @@ const HILTON_DEPT_TIMES: DeptWorkingTime[] = [
 const BEDFRAME_DEPT_TIMES: DeptWorkingTime[] = HILTON_DEPT_TIMES;
 
 // Seat height pricing tiers for sofa modules (in sen = RM * 100)
-export const SEAT_HEIGHT_OPTIONS = ['24"', '28"', '30"', '32"', '35"'] as const;
+// Re-exported from @/lib/pricing-options so pages can import the constant
+// without dragging in the full mock-data seed bundle.
+export { SEAT_HEIGHT_OPTIONS } from "@/lib/pricing-options";
 
 export const products: Product[] = [
   { id: "prod-1", code: "1003-(K)", name: "HILTON BEDFRAME (6FT) (183X190CM)", category: "BEDFRAME" as ItemCategory, description: "hilton bedframe king 6ft (183x190cm)", baseModel: "1003", sizeCode: "K", sizeLabel: "6FT", fabricUsage: 4, unitM3: 0.95, status: "ACTIVE", costPriceSen: 0, basePriceSen: 68000, productionTimeMinutes: 80, subAssemblies: [], bomComponents: [], deptWorkingTimes: BEDFRAME_DEPT_TIMES, skuCode: "HL10-KHB-HIL03", fabricColor: "FG66151-1", pieces: { count: 3, names: ["HB", "Divan", "Legs"] } },
@@ -5398,74 +5400,24 @@ export type RDProject = {
 export const rdProjects: RDProject[] = [];
 
 // ============================================================
-// PRICING CONFIG – Special Orders (from Google Sheet "Special orders" tab)
+// PRICING CONFIG – Special Orders
 // All surcharges in sen (1 RM = 100 sen)
+//
+// Constants live in @/lib/pricing-options so pages can import them
+// without pulling in the full mock-data seed bundle. Re-exported here
+// for back-compat with old imports.
 // ============================================================
-
-export type DivanHeightOption = {
-  height: string; // "4\"", "5\"", etc.
-  surcharge: number; // in sen
-};
-
-export type SpecialOrderOption = {
-  code: string;
-  name: string;
-  surcharge: number; // in sen (negative for discounts like "No Side Panel")
-  notes: string;
-};
-
-export type LegHeightOption = {
-  height: string;
-  surcharge: number; // in sen
-};
-
-export const divanHeightOptions: DivanHeightOption[] = [
-  { height: '4"', surcharge: 0 },
-  { height: '5"', surcharge: 0 },
-  { height: '6"', surcharge: 0 },
-  { height: '8"', surcharge: 0 },
-  { height: '10"', surcharge: 5000 },
-  { height: '11"', surcharge: 12000 },
-  { height: '12"', surcharge: 12000 },
-  { height: '13"', surcharge: 14000 },
-  { height: '14"', surcharge: 14000 },
-  { height: '16"', surcharge: 15000 },
-];
-
-export const specialOrderOptions: SpecialOrderOption[] = [
-  { code: "HB_FULL_COVER", name: "HB Fully Cover", surcharge: 5000, notes: "" },
-  { code: "DIVAN_TOP_COVER", name: "Divan Top Fully Cover", surcharge: 5000, notes: "" },
-  { code: "DIVAN_BTM_COVER", name: "Divan Full Cover", surcharge: 8000, notes: "If HB & divan full cover combined = RM100 total" },
-  { code: "LEFT_DRAWER", name: "Left Drawer", surcharge: 15000, notes: "" },
-  { code: "RIGHT_DRAWER", name: "Right Drawer", surcharge: 15000, notes: "" },
-  { code: "FRONT_DRAWER", name: "Front Drawer", surcharge: 12000, notes: "" },
-  { code: "HB_STRAIGHT", name: "HB Straight", surcharge: 0, notes: "" },
-  { code: "DIVAN_TOP_W", name: "Divan Top(W)", surcharge: 0, notes: "" },
-  { code: "ONE_PIECE_DIVAN", name: "1 Piece Divan", surcharge: 25000, notes: "" },
-  { code: "DIVAN_CURVE", name: "Divan Curve", surcharge: 5000, notes: "" },
-  { code: "NO_SIDE_PANEL", name: "No Side Panel", surcharge: 4000, notes: "" },
-  { code: "HEADBOARD_ONLY", name: "Headboard Only", surcharge: 0, notes: "Base price ÷ 2" },
-  { code: "NYLON_FABRIC", name: "Nylon Fabric", surcharge: 0, notes: "" },
-  { code: "5537_BACKREST", name: "5537 Backrest", surcharge: 0, notes: "" },
-  { code: "ADD_1_INFRONT_L", name: "Add 1\" Infront L", surcharge: 0, notes: "" },
-  { code: "SEP_BACKREST_PACK", name: "Separate Backrest Packing", surcharge: 0, notes: "" },
-  { code: "DIVAN_A11", name: "Divan A11", surcharge: 0, notes: "" },
-  { code: "SEAT_ADD_ON_4", name: "Seat Add On 4\"", surcharge: 0, notes: "" },
-];
-
-export const legHeightOptions: LegHeightOption[] = [
-  { height: "No Leg", surcharge: 0 },
-  { height: '1"', surcharge: 0 },
-  { height: '2"', surcharge: 0 },
-  { height: '4"', surcharge: 0 },
-  { height: '6"', surcharge: 0 },
-  { height: '7"', surcharge: 16000 },
-];
-
-/** Gap height options (inches) – standard range offered */
-export const gapHeightOptions = [
-  '4"', '5"', '6"', '7"', '8"', '9"', '10"',
-];
+export type {
+  DivanHeightOption,
+  SpecialOrderOption,
+  LegHeightOption,
+} from "@/lib/pricing-options";
+export {
+  divanHeightOptions,
+  specialOrderOptions,
+  legHeightOptions,
+  gapHeightOptions,
+} from "@/lib/pricing-options";
 
 // ─── Customer Hub (Parent + Branch architecture) ────────────────────
 export type CustomerHub = {

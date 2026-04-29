@@ -16,8 +16,7 @@ import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-impo
 // source. They are retained only for TYPE imports; all runtime data is now
 // fetched live from D1 via the API. After a D1 clear the UI now correctly
 // renders zero balances instead of baked-in seed values.
-import { type Product, type RawMaterial } from "@/lib/mock-data";
-import type { FGBatch } from "@/types";
+import type { Product, RawMaterial, FGBatch } from "@/types";
 import {
   SUCCESS, NEUTRAL,
   INVENTORY_TYPE_COLOR,

@@ -11,7 +11,7 @@ import {
   X,
   Trash2,
 } from "lucide-react";
-import type { DebitNote, Invoice } from "@/lib/mock-data";
+import type { DebitNote, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DebitNoteSchema } from "@/lib/schemas/invoice";

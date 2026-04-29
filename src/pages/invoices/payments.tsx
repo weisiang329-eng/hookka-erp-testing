@@ -10,7 +10,7 @@ import {
   CreditCard,
   X,
 } from "lucide-react";
-import type { PaymentRecord, Invoice } from "@/lib/mock-data";
+import type { PaymentRecord, Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { PaymentSchema } from "@/lib/schemas/invoice";

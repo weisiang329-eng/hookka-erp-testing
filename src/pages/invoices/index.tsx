@@ -16,7 +16,7 @@ import {
   BarChart3,
   List,
 } from "lucide-react";
-import type { Invoice } from "@/lib/mock-data";
+import type { Invoice } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { InvoiceSchema } from "@/lib/schemas/invoice";

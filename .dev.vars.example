@@ -9,3 +9,12 @@ API_CORS_ORIGIN=http://localhost:3000
 # Without this, POST /api/users/invite still succeeds but returns
 # `emailSent: false` so the admin can copy the invite link manually.
 RESEND_API_KEY=re_YOUR_KEY_HERE
+
+# Sentry / GlitchTip DSN for error reporting (Sprint 5).
+# Frontend uses VITE_SENTRY_DSN (set in .env / .env.production at build
+# time so the value is statically replaced into the bundle by Vite).
+# Worker uses SENTRY_DSN (set via `wrangler secret put SENTRY_DSN` in
+# prod, or via this file for local wrangler dev). Both are optional —
+# leaving them unset disables monitoring with no other side effects.
+# VITE_SENTRY_DSN=https://abc123@sentry.example.com/1
+# SENTRY_DSN=https://abc123@sentry.example.com/1

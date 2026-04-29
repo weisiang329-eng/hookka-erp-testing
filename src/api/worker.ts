@@ -65,6 +65,10 @@ export type Env = {
     OAUTH_GOOGLE_REDIRECT_URI?: string;
     OAUTH_GOOGLE_HOSTED_DOMAIN?: string;
     JWT_SECRET?: string;
+    // Optional: Sentry / GlitchTip DSN for worker-side error reporting.
+    // Set via `wrangler secret put SENTRY_DSN`. When unset, app.onError
+    // logs to wrangler-tail only (no third-party hop).
+    SENTRY_DSN?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -478,6 +482,7 @@ import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
+import { reportWorkerError } from "./lib/monitoring";
 
 // Phase-5 imports — historically these were in-memory stubs, but every
 // route below has since been migrated to real D1 / Supabase persistence
@@ -649,11 +654,42 @@ app.route("/api/scan-po", scanPo);
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
 
+// Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
+// a 500 with the error message — fine for dev, but in prod we want every
+// uncaught route exception to land in Sentry (when configured) so we can
+// triage without waiting for a user to file a ticket. The reporter is
+// no-op when SENTRY_DSN is unset, so this is safe in OSS / self-host.
+app.onError((err, c) => {
+  const url = (() => {
+    try {
+      return new URL(c.req.url).pathname + new URL(c.req.url).search;
+    } catch {
+      return c.req.url;
+    }
+  })();
+  // Fire-and-forget — we don't want the error path waiting on the
+  // dynamic-import + HTTP round-trip to Sentry.
+  void reportWorkerError(err, c.env.SENTRY_DSN, {
+    method: c.req.method,
+    url,
+  });
+  // Preserve Hono's default response shape so the frontend's existing
+  // FetchJsonError handling keeps working.
+  return c.json(
+    {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    },
+    500,
+  );
+});
+
 // Unmounted /api/* paths — return a real 404 so callers see a loud failure
-// instead of silently rendering an empty list. The previous behaviour
-// (200 + `{success:true, data:[], _stub:true}`) was a prod footgun: any new
-// route the frontend referenced but the worker hadn't mounted would look
-// like "no data" forever. Now an unmounted reference fails noisily.
+// instead of silently rendering an empty list (Sprint 1). The previous
+// behaviour (200 + `{success:true, data:[], _stub:true}`) was a prod
+// footgun: any new route the frontend referenced but the worker hadn't
+// mounted would look like "no data" forever. Now an unmounted reference
+// fails noisily.
 app.all("/api/*", (c) => {
   return c.json(
     { success: false, error: "Not Found", path: c.req.path },

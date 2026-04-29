@@ -4,7 +4,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatCurrency, formatNumber } from "@/lib/utils";
-import type { ForecastEntry, HistoricalSales, PromiseDateCalc } from "@/lib/mock-data";
+import type { ForecastEntry, HistoricalSales, PromiseDateCalc } from "@/types";
 
 type Tab = "dashboard" | "detail" | "accuracy" | "promise";
 

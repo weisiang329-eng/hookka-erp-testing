@@ -9,12 +9,12 @@ import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { hasMixedSofaBedframe, SO_MIXED_CATEGORY_ERROR } from "@/lib/so-category";
 import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
-import type { Customer, Product, FabricItem, SalesOrder } from "@/lib/mock-data";
+import type { Customer, Product, FabricItem, SalesOrder } from "@/types";
 import {
   SEAT_HEIGHT_OPTIONS,
   legHeightOptions,
   specialOrderOptions,
-} from "@/lib/mock-data";
+} from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";

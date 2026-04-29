@@ -23,10 +23,10 @@ import {
   AlertTriangle,
   Box,
 } from "lucide-react";
-import { generateDOPdf } from "@/lib/generate-do-pdf";
-import { generatePackingListPdf } from "@/lib/generate-packing-pdf";
+// PDF generators are dynamic-imported in the click handlers so the 1MB
+// jspdf vendor chunk only ships when the user actually downloads a PDF.
 import PODDialog from "@/components/delivery/POD-dialog";
-import type { ProofOfDelivery } from "@/lib/mock-data";
+import type { ProofOfDelivery } from "@/types";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
@@ -297,18 +297,20 @@ export default function DeliveryDetailPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() =>
-              generateDOPdf(order as unknown as import("@/lib/mock-data").DeliveryOrder)
-            }
+            onClick={async () => {
+              const { generateDOPdf } = await import("@/lib/generate-do-pdf");
+              generateDOPdf(order as unknown as import("@/types").DeliveryOrder);
+            }}
           >
             <Download className="h-4 w-4" /> Download DO PDF
           </Button>
           <Button
             variant="outline"
             size="sm"
-            onClick={() =>
-              generatePackingListPdf(order as unknown as import("@/lib/mock-data").DeliveryOrder)
-            }
+            onClick={async () => {
+              const { generatePackingListPdf } = await import("@/lib/generate-packing-pdf");
+              generatePackingListPdf(order as unknown as import("@/types").DeliveryOrder);
+            }}
           >
             <ClipboardList className="h-4 w-4" /> Print Packing List
           </Button>

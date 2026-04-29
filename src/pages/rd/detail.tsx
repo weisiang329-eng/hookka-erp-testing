@@ -23,7 +23,7 @@ import {
   Trash2,
   ImagePlus,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDPrototypeType, RDBOMItem } from "@/lib/mock-data";
+import type { RDProject, RDProjectStage, RDPrototypeType, RDBOMItem } from "@/types";
 import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";

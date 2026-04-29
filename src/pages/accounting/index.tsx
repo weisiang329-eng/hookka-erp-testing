@@ -774,10 +774,19 @@ function JournalEntryForm({
 }) {
   const [date, setDate] = useState(new Date().toISOString().split("T")[0]);
   const [description, setDescription] = useState("");
-  const [lines, setLines] = useState<JournalLine[]>([
-    { accountCode: "", accountName: "", debitSen: 0, creditSen: 0, description: "" },
-    { accountCode: "", accountName: "", debitSen: 0, creditSen: 0, description: "" },
-  ]);
+  // Editor rows carry a client-only `_uid` so React keys stay stable as rows
+  // are added / removed / reordered. The uid is stripped before POST in
+  // handleSave().  See sprint 7 — replacing key={idx} on mutable rows.
+  type JournalLineRow = JournalLine & { _uid: string };
+  const newRow = (): JournalLineRow => ({
+    _uid: crypto.randomUUID(),
+    accountCode: "",
+    accountName: "",
+    debitSen: 0,
+    creditSen: 0,
+    description: "",
+  });
+  const [lines, setLines] = useState<JournalLineRow[]>([newRow(), newRow()]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -803,7 +812,7 @@ function JournalEntryForm({
   };
 
   const addLine = () => {
-    setLines([...lines, { accountCode: "", accountName: "", debitSen: 0, creditSen: 0, description: "" }]);
+    setLines([...lines, newRow()]);
   };
 
   const removeLine = (idx: number) => {
@@ -826,12 +835,18 @@ function JournalEntryForm({
       setError("At least 2 lines with amounts are required");
       return;
     }
+    // Strip the client-only `_uid` so the server receives a clean JournalLine[].
+    const payloadLines = validLines.map((l) => {
+      const { _uid: _drop, ...rest } = l;
+      void _drop;
+      return rest;
+    });
 
     setSaving(true);
     const res = await fetch("/api/accounting/journals", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ date, description, lines: validLines }),
+      body: JSON.stringify({ date, description, lines: payloadLines }),
     });
     const data = asMutationResponse(await res.json());
     setSaving(false);
@@ -890,7 +905,7 @@ function JournalEntryForm({
               </thead>
               <tbody>
                 {lines.map((line, idx) => (
-                  <tr key={idx} className="border-b border-[#F0ECE9]">
+                  <tr key={line._uid} className="border-b border-[#F0ECE9]">
                     <td className="py-1.5 px-2">
                       <select
                         value={line.accountCode}

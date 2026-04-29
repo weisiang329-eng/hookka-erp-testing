@@ -41,6 +41,8 @@ type SofaModule = {
 };
 
 type LineItem = {
+  // Client-only stable id for React keys. Stripped before POST. Sprint 7.
+  _uid: string;
   productId: string;
   productCode: string;
   productName: string;
@@ -72,7 +74,10 @@ type LineItem = {
   seatHeightPrices: SeatHeightTier[];
 };
 
-const EMPTY_LINE: LineItem = {
+// Factory for new lines — gives each row a fresh `_uid` so React keys are
+// stable across add / remove / reorder. Use this instead of `{ ...EMPTY_LINE }`.
+const makeEmptyLine = (): LineItem => ({
+  _uid: crypto.randomUUID(),
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
   sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "", selectedModules: [],
@@ -80,7 +85,13 @@ const EMPTY_LINE: LineItem = {
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
   specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", notes: "",
   price1Sen: null, seatHeightPrices: [],
-};
+});
+
+// EMPTY_LINE retained for places that spread `{ ...EMPTY_LINE, ...patch }`;
+// callers in those spots either already have a `_uid` to keep, or assign a
+// fresh one alongside the spread. The bare `_uid` here is overwritten in
+// every consumer.
+const EMPTY_LINE: LineItem = makeEmptyLine();
 
 /** Extract FT portion from sizeLabel, e.g. "Queen 5FT" → "5FT", "Super King 200x200CM" → "200x200CM" */
 function extractSizeSuffix(sizeLabel: string): string {
@@ -209,7 +220,7 @@ function CreateSalesOrderPage() {
   const [customerDeliveryDate, setCustomerDeliveryDate] = useState("");
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
-  const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE }]);
+  const [items, setItems] = useState<LineItem[]>([makeEmptyLine()]);
 
   // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
   // the user has touched the form. Heuristic: any of the header fields
@@ -278,7 +289,9 @@ function CreateSalesOrderPage() {
     setCustomerDeliveryDate(restoredDraft.customerDeliveryDate);
     setHookkaExpectedDD(restoredDraft.hookkaExpectedDD);
     setNotes(restoredDraft.notes);
-    setItems(restoredDraft.items);
+    // Old drafts won't have `_uid` — backfill on restore so React keys stay
+    // stable for whatever the user does next.
+    setItems(restoredDraft.items.map((it) => (it._uid ? it : { ...it, _uid: crypto.randomUUID() })));
     setDraftBannerDismissed(true);
   };
   const discardDraft = () => {
@@ -367,10 +380,13 @@ function CreateSalesOrderPage() {
           setHookkaExpectedDD(data.hookkaExpectedDD || "");
           setNotes(data.notes || "");
           if (data.items && data.items.length > 0) {
-            // Migrate old single specialOrder string to specialOrders array
+            // Migrate old single specialOrder string to specialOrders array.
+            // Always assign a fresh `_uid` per cloned line — the source's uid
+            // could collide if the user clones twice.
             const migrated = data.items.map((it: LineItem) => ({
               ...EMPTY_LINE,
               ...it,
+              _uid: crypto.randomUUID(),
               seatHeight: it.seatHeight || "",
               specialOrders: it.specialOrders || (it.specialOrder ? it.specialOrder.split(/[;,]/).map((s: string) => s.trim()).filter(Boolean) : []),
             }));
@@ -385,7 +401,7 @@ function CreateSalesOrderPage() {
   }, [searchParams]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  const addItem = () => setItems([...items, { ...EMPTY_LINE }]);
+  const addItem = () => setItems([...items, makeEmptyLine()]);
 
   /** For sofa: replace the template line at `idx` with N line items (one per selected module productId) */
   const addSofaModules = (idx: number, moduleProductIds: string[]) => {
@@ -403,6 +419,7 @@ function CreateSalesOrderPage() {
       }
       return {
         ...EMPTY_LINE,
+        _uid: crypto.randomUUID(),
         productId: prod.id,
         productCode: prod.code,
         productName: prod.name,
@@ -735,6 +752,12 @@ function CreateSalesOrderPage() {
     // flow short-circuits both POSTs.
     const idemKey = crypto.randomUUID();
     try {
+      // Strip the client-only `_uid` so the server contract is unchanged.
+      const itemsForServer = items.map((it) => {
+        const { _uid: _drop, ...rest } = it;
+        void _drop;
+        return rest;
+      });
       const res = await fetch("/api/sales-orders", {
         method: "POST",
         headers: {
@@ -743,7 +766,8 @@ function CreateSalesOrderPage() {
         },
         body: JSON.stringify({
           customerId, customerPOId, customerSOId, reference,
-          companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+          companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
+          items: itemsForServer,
           status,
         }),
       });
@@ -1052,7 +1076,7 @@ function CreateSalesOrderPage() {
         <CardContent className="space-y-4">
           {items.map((item, idx) => (
             <LineItemCard
-              key={idx}
+              key={item._uid}
               item={item}
               idx={idx}
               products={products}

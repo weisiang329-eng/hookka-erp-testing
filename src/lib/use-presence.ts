@@ -9,7 +9,7 @@
 // Silently no-ops if the user isn't signed in.
 // ---------------------------------------------------------------------------
 import { useEffect, useRef, useState } from "react";
-import { getAuthToken } from "./auth";
+import { isAuthenticated } from "./auth";
 
 export type PresenceHolder = {
   userId: string;
@@ -21,19 +21,16 @@ export type PresenceHolder = {
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 10_000;
 
-function authHeaders(): HeadersInit {
-  const t = getAuthToken();
-  return {
-    "content-type": "application/json",
-    ...(t ? { authorization: `Bearer ${t}` } : {}),
-  };
-}
+// Sprint 7: auth + CSRF are handled by the global fetch interceptor — we
+// just send a JSON content-type and let the cookie / X-CSRF-Token plumbing
+// happen there.
+const JSON_HEADERS: HeadersInit = { "content-type": "application/json" };
 
 async function heartbeat(recordType: string, recordId: string): Promise<void> {
   try {
     await fetch("/api/presence", {
       method: "POST",
-      headers: authHeaders(),
+      headers: JSON_HEADERS,
       body: JSON.stringify({ recordType, recordId }),
       keepalive: true,
     });
@@ -46,7 +43,7 @@ async function release(recordType: string, recordId: string): Promise<void> {
   try {
     await fetch("/api/presence", {
       method: "DELETE",
-      headers: authHeaders(),
+      headers: JSON_HEADERS,
       body: JSON.stringify({ recordType, recordId }),
       keepalive: true,
     });
@@ -61,7 +58,7 @@ async function listOthers(
 ): Promise<PresenceHolder[]> {
   try {
     const q = new URLSearchParams({ recordType, recordId });
-    const res = await fetch(`/api/presence?${q}`, { headers: authHeaders() });
+    const res = await fetch(`/api/presence?${q}`, { headers: JSON_HEADERS });
     if (!res.ok) return [];
     const j = (await res.json()) as { success: boolean; data?: PresenceHolder[] };
     return Array.isArray(j.data) ? j.data : [];
@@ -89,7 +86,7 @@ export function usePresence(
       setOthers([]);
       return;
     }
-    if (!getAuthToken()) return;
+    if (!isAuthenticated()) return;
 
     activeRef.current = true;
     let hbTimer: number | undefined;

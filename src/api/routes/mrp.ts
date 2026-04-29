@@ -20,6 +20,12 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import {
+  expandMaterialQty,
+  parseMaterialScaling,
+  parseSofaSeatHeightInches,
+  type ProductionDimensions,
+} from "../lib/material-scaling";
 
 const app = new Hono<Env>();
 
@@ -76,6 +82,9 @@ type BomMaterial = {
   name?: string;
   unit?: string;
   qty?: number;
+  // Optional dimension scaling rule. Parsed via parseMaterialScaling at
+  // use site so a malformed JSON blob doesn't poison the whole MRP run.
+  scaling?: unknown;
 };
 
 type BomWipNode = {
@@ -100,6 +109,15 @@ type ProductionOrderRow = {
   quantity: number;
   targetEndDate: string | null;
   status: string;
+  // Snapshotted dimensions used by the BOM material scaling rule. All
+  // optional — sofa seat height is parsed out of sizeCode at use time
+  // (see parseSofaSeatHeightInches) since there's no dedicated INT
+  // column on production_orders.
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
 };
 
 type JobCardRow = {
@@ -194,12 +212,18 @@ function collectMaterials(
   dueDate: string,
   bucket: TimeBucket,
   demandMap: Map<string, MatDemand>,
+  // PO line dimensions used to expand each material's scaling rule (if
+  // present). expandMaterialQty falls back to the unscaled qty when no
+  // rule is attached or the relevant dimension is missing on the PO.
+  dims: ProductionDimensions,
 ): void {
   const effectiveQty = (node.quantity || 1) * parentQty;
   for (const mat of node.materials || []) {
     const key = mat.inventoryCode || mat.code;
     if (!key) continue;
-    const matQty = (mat.qty || 0) * effectiveQty * poQty;
+    const baseQty = mat.qty || 0;
+    const scaledQty = expandMaterialQty(baseQty, parseMaterialScaling(mat.scaling), dims);
+    const matQty = scaledQty * effectiveQty * poQty;
     if (matQty <= 0) continue;
 
     if (!demandMap.has(key)) {
@@ -218,7 +242,7 @@ function collectMaterials(
     entry.poSources.push({ poNo, productCode, qty: matQty, dueDate, bucket });
   }
   for (const child of node.children || []) {
-    collectMaterials(child, poQty, effectiveQty, poNo, productCode, dueDate, bucket, demandMap);
+    collectMaterials(child, poQty, effectiveQty, poNo, productCode, dueDate, bucket, demandMap, dims);
   }
 }
 
@@ -244,7 +268,8 @@ app.post("/", async (c) => {
   const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes] = await Promise.all([
     c.var.DB.prepare(
       `SELECT id, poNo, productCode, itemCategory, fabricCode, quantity,
-              targetEndDate, status
+              targetEndDate, status, gapInches, divanHeightInches,
+              legHeightInches, sizeCode, sizeLabel
          FROM production_orders
         WHERE status IN ('PENDING','IN_PROGRESS')`,
     ).all<ProductionOrderRow>(),
@@ -331,6 +356,20 @@ app.post("/", async (c) => {
     if (horizonParam === "2w" && bucket !== "THIS_WEEK" && bucket !== "NEXT_WEEK") continue;
     if (horizonParam === "1m" && bucket === "BEYOND") continue;
 
+    // Build the dimension snapshot for this PO. Sofa seat height is
+    // parsed from sizeCode (or sizeLabel as a fallback) — see
+    // parseSofaSeatHeightInches for the format. Bedframe size codes
+    // ("Q" / "K" / "S") return null so we don't mistake them for inches.
+    const dims: ProductionDimensions = {
+      gapInches: order.gapInches,
+      divanHeightInches: order.divanHeightInches,
+      legHeightInches: order.legHeightInches,
+      seatHeightInches:
+        order.itemCategory === "SOFA"
+          ? parseSofaSeatHeightInches(order.sizeCode, order.sizeLabel)
+          : null,
+    };
+
     for (const wip of wipComponents) {
       collectMaterials(
         wip,
@@ -341,6 +380,7 @@ app.post("/", async (c) => {
         earliestDue,
         bucket,
         demandMap,
+        dims,
       );
     }
   }

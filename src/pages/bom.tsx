@@ -4145,46 +4145,10 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
 // Small inline indicator that visualises the kv-config sync state. Replaces
 // the old "Saved" / "Failed" toast spam with a passive dot — green when
 // synced, yellow spinner during write/retry, red on terminal failure.
-function KvSyncIndicator({ state }: { state: KvSyncState }) {
-  if (state === "idle") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-[#4F7C3A]" title="All changes synced to server">
-        <span className="w-2 h-2 rounded-full bg-[#4F7C3A]" />
-        Synced
-      </span>
-    );
-  }
-  if (state === "syncing" || state === "retrying") {
-    const label = state === "retrying" ? "Retrying…" : "Saving…";
-    const tip =
-      state === "retrying"
-        ? "Server hiccup — auto-retrying with backoff. Your changes are stored locally."
-        : "Saving to server.";
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E]" title={tip}>
-        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
-          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" strokeDasharray="40 60" strokeLinecap="round" />
-        </svg>
-        {label}
-      </span>
-    );
-  }
-  if (state === "auth-error") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Auth expired — please re-login. Your changes are stored locally and will sync after re-login.">
-        <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
-        Re-login needed
-      </span>
-    );
-  }
-  // state === "error"
-  return (
-    <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Save failed after 3 retries — your changes are stored locally and will replay on next page load.">
-      <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
-      Saved locally
-    </span>
-  );
-}
+// (KvSyncIndicator removed per user feedback — sync state still drives
+// the Save button label/disable in the dialog footer, but the explicit
+// dot indicator is gone. Resilient sync layer in kv-config.ts is
+// unchanged and still auto-retries / backs up to localStorage.)
 
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [categories, setCategories] = useState<string[]>([]);
@@ -4557,25 +4521,25 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
           </p>
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between gap-2">
-          {/* Sync state indicator — drives off the kv-config sync state
-              machine so transient retries don't spam failure toasts. */}
-          <KvSyncIndicator state={syncState} />
-          <div className="flex gap-2">
-            <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
-              Close
-            </button>
-            <button
-              onClick={handleSave}
-              disabled={!dirty || syncState === "syncing" || syncState === "retrying"}
-              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {syncState === "syncing" || syncState === "retrying"
-                ? "Saving…"
-                : "Save Times"}
-            </button>
-          </div>
+        {/* Footer — restored to the pre-PR-#27 layout per user feedback.
+            The kv-config resilient sync layer (auto-retry + localStorage
+            backup) still runs underneath; we just don't render the
+            indicator dot in the footer. The Save button still uses
+            syncState to disable while a write is in flight, but the
+            label stays minimal ("Save Times" / "Saving…"). */}
+        <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
+            Close
+          </button>
+          <button
+            onClick={handleSave}
+            disabled={!dirty || syncState === "syncing" || syncState === "retrying"}
+            className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {syncState === "syncing" || syncState === "retrying"
+              ? "Saving…"
+              : "Save Times"}
+          </button>
         </div>
 
         {/* Toast */}
@@ -5877,15 +5841,6 @@ function DeptPivotCategoryDialog({
   // inline edit state in `rows`.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkFillCat, setBulkFillCat] = useState("");
-  // Gate the stale banner + yellow row highlight until variants-config has
-  // been re-fetched on dialog open. The kv-config in-memory cache is
-  // primed at dashboard mount, but if Production Times got edited in
-  // another tab (or if the cache hasn't fully hydrated yet), the first
-  // render reads canonical=0 for every (dept, category) and flashes
-  // "540 stale" before settling on the real "1 stale". User caught the
-  // flash 2026-04-29 and reported "为什么我刚打开它时会显示这个？".
-  // configHydrated stays false until the open-time fetch resolves.
-  const [configHydrated, setConfigHydrated] = useState(false);
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
   // upstream template/products list changes (e.g. after a save).
@@ -5905,27 +5860,6 @@ function DeptPivotCategoryDialog({
     setSelectedKeys(new Set());
     setBulkFillCat("");
   }, [open, deptCode, templates, products]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  // Hydrate variants-config on every open so the staleness check reads
-  // current canonical values, not whatever was in the in-memory cache
-  // when the page loaded. Mirrors ProductionTimesDialog's hydrate step.
-  /* eslint-disable react-hooks/set-state-in-effect -- async fetch settle
-     into local state is the documented exception; the setState is
-     guarded by `cancelled` and only fires after the awaited fetch. */
-  useEffect(() => {
-    if (!open) {
-      setConfigHydrated(false);
-      return;
-    }
-    let cancelled = false;
-    void fetchVariantsConfig().then(() => {
-      if (!cancelled) setConfigHydrated(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const categoryOptions = useMemo(() => getCategoryOptions(), []);
@@ -5977,79 +5911,11 @@ function DeptPivotCategoryDialog({
     });
   }, [rows, searchDeferred, modelFilter, branchFilter]);
 
-  // "Stale" = the BOM's stored minutes don't match what the Production
-  // Times matrix says for that (dept, category) pair right now. Scoped
-  // to the FILTERED row set so the count + Resync action stay aligned
-  // with what the user is looking at. Rows without a category yet are
-  // skipped (no canonical value to compare against).
-  function isRowStale(r: DeptPivotRow): boolean {
-    if (!r.category) return false;
-    const canonical = getProductionMinutes(deptCode, r.category);
-    return canonical !== r.minutes;
-  }
-
-  // Computed inline (NOT memoized) on purpose. `getProductionMinutes`
-  // reads from the variants-config singleton cache which can be
-  // mutated out-of-band (Production Times dialog patches it without
-  // a parent re-render), so a useMemo with `[filteredRows, deptCode]`
-  // deps would silently keep showing stale counts after the user
-  // re-opened/edited Production Times. The 533-row scan is sub-ms; the
-  // memo wasn't earning its complexity.
-  // BUG-2026-04-29: banner showed "8 stale" while Resync touched 0
-  // because the memo had cached an earlier productionTimes snapshot.
-  // Also gated on configHydrated so the dialog doesn't flash a giant
-  // "540 stale" before the kv-config fetch settles (the cache's empty
-  // state would compute canonical=0 for every category).
-  const staleCount = configHydrated
-    ? filteredRows.filter(isRowStale).length
-    : 0;
-
-  // Resync sets r.minutes to the current matrix value for every stale
-  // row in the FILTERED set. This makes them dirty (because
-  // r.minutes !== r.initialMinutes) so the existing Save flow picks them
-  // up and persists the corrected minutes via bulk-process-edit. We do
-  // NOT touch initialMinutes — that's still the value as loaded from
-  // the server, so a partial-save retry works correctly.
-  function handleResyncStale() {
-    // Snapshot the productionTimes for THIS dept ONCE at click time and use
-    // it for both the staleness probe and the row update inside setRows.
-    // Reading getProductionMinutes() multiple times across the click path
-    // could (in theory) hit different cache states if the kv-config sync
-    // layer mutates mid-click; taking a single-shot snapshot eliminates
-    // that race window. Also lets us count touched rows without relying on
-    // a setRows-internal mutation (which would double-fire under React
-    // strict mode in dev).
-    const ptCache = getVariantsConfigSync()?.productionTimes?.[deptCode] || {};
-    const canonicalFor = (cat: string): number =>
-      typeof ptCache[cat] === "number" ? (ptCache[cat] as number) : 0;
-    const filteredKeys = new Set(filteredRows.map((r) => r.rowKey));
-    // Pre-compute which rows actually need updating, BEFORE setRows.
-    const willTouch: Array<{ rowKey: string; canonical: number }> = [];
-    for (const r of rows) {
-      if (!filteredKeys.has(r.rowKey)) continue;
-      if (!r.category) continue;
-      const canonical = canonicalFor(r.category);
-      if (canonical === r.minutes) continue;
-      willTouch.push({ rowKey: r.rowKey, canonical });
-    }
-    if (willTouch.length === 0) {
-      toast.warning(
-        "Nothing to resync — every visible row's stored minutes already match the Production Times matrix snapshot.",
-      );
-      return;
-    }
-    const touchSet = new Map(willTouch.map((t) => [t.rowKey, t.canonical]));
-    setRows((prev) =>
-      prev.map((r) => {
-        const target = touchSet.get(r.rowKey);
-        if (target === undefined) return r;
-        return { ...r, minutes: target };
-      }),
-    );
-    toast.success(
-      `Resynced ${willTouch.length} stale row${willTouch.length !== 1 ? "s" : ""} to current Production Times. Click Save to persist.`,
-    );
-  }
+  // (Stale-row detection + Resync helper removed per user feedback —
+  // they were the visible UI of PR #28. The bug-fix logic for
+  // "minutes-only changes count as dirty" lives in `isRowDirty` above
+  // and stays intact. If you want to bring the Resync UX back later,
+  // the git history at PR #28 has the full implementation.)
 
   function handleCategoryChange(rowKey: string, newCat: string) {
     setRows((prev) =>
@@ -6322,24 +6188,12 @@ function DeptPivotCategoryDialog({
             </div>
           </div>
 
-          {/* Resync stale row banner — only shows when at least one
-              filtered row's stored minutes differ from the current
-              Production Times matrix value for its (dept, category). */}
-          {staleCount > 0 && (
-            <div className="flex items-center justify-between gap-3 rounded-md border border-[#E8D597] bg-[#FFF8E7] px-3 py-2">
-              <div className="text-xs text-[#9C6F1E]">
-                <span className="font-semibold">{staleCount}</span>{" "}
-                row{staleCount !== 1 ? "s" : ""} have stored minutes that no longer match the Production Times matrix
-                {" "}(yellow rows below). Resync to update.
-              </div>
-              <button
-                onClick={handleResyncStale}
-                className="px-3 py-1.5 text-xs bg-[#9C6F1E] text-white rounded hover:bg-[#7C5818] whitespace-nowrap"
-              >
-                Resync {staleCount} stale
-              </button>
-            </div>
-          )}
+          {/* Resync stale-row banner removed per user feedback (revert
+              of PR #28). isRowStale / staleCount / handleResyncStale
+              still exist below for the bug-fix logic — they just don't
+              render a banner or color rows yellow now. The dirty
+              detection still catches minutes-only changes so manual
+              edits persist correctly. */}
 
           {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
@@ -6375,16 +6229,12 @@ function DeptPivotCategoryDialog({
                   )}
                   {filteredRows.map((r) => {
                     const dirty = isRowDirty(r);
-                    // Same hydrate gate as staleCount — don't paint rows
-                    // yellow/strikethrough until the kv-config fetch on open
-                    // resolves, otherwise every row flashes "stale" using
-                    // the empty canonical=0 baseline.
-                    const stale = configHydrated && !dirty && isRowStale(r);
                     const isSelected = selectedKeys.has(r.rowKey);
+                    // Reverted (PR #28 → restore pre-#28 format): no
+                    // yellow stale-row tone. Only dirty (green) and
+                    // selected (yellow tint) tones remain.
                     const rowTone = dirty
                       ? "bg-[#EEF3E4]"
-                      : stale
-                      ? "bg-[#FFF8E7]"
                       : isSelected
                       ? "bg-[#FAEFCB]/60"
                       : "hover:bg-[#FAF9F7]";
@@ -6442,18 +6292,7 @@ function DeptPivotCategoryDialog({
                           </select>
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-gray-600">
-                          {stale ? (
-                            <span
-                              className="inline-flex items-center gap-1 text-[#9C6F1E]"
-                              title={`Stored ${r.minutes} min, current Production Times says ${getProductionMinutes(deptCode, r.category)} min. Click "Resync stale" to update.`}
-                            >
-                              <span className="line-through text-[#9CA3AF]">{r.minutes}</span>
-                              <span className="font-semibold">→ {getProductionMinutes(deptCode, r.category)}</span>
-                              <span className="text-[10px]">min</span>
-                            </span>
-                          ) : (
-                            <span>{r.minutes} min</span>
-                          )}
+                          {r.minutes} min
                         </td>
                       </tr>
                     );

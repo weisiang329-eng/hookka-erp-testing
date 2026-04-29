@@ -100,6 +100,13 @@ type InputRow = {
   // items (different products) and the source row identifies which.
   productCode?: string | null;
   deptCode: string;
+  // Optional narrowing within the dept: only job_cards whose wipType is in
+  // this array (case-insensitive) get the update. Used by the UPHOLSTERY +
+  // FRAMING migrations where the Google Sheets has separate Divan / HB
+  // columns that target different WIPs in the same dept.
+  // Examples: ["DIVAN","SOFA_BASE","SOFA_CUSHION","SOFA_ARMREST"] for Divan
+  // upholstery (everything except headboard); ["HEADBOARD"] for HB.
+  wipTypes?: string[];
   completedDate?: string;
   pic1Name?: string;
   pic2Name?: string;
@@ -418,11 +425,16 @@ async function processRow(
     if (productCodeFilter) {
       pos = pos.filter((p) => (p.productCode || "") === productCodeFilter);
     }
+    const wipTypeFilter = (input.wipTypes || [])
+      .map((s) => (s || "").toUpperCase())
+      .filter((s) => s.length > 0);
     for (const po of pos) {
       const allJcs = await findJobCardsByPO(db, po.id);
-      const matchingJcs = allJcs.filter(
-        (j) => (j.departmentCode || "").toUpperCase() === deptCode,
-      );
+      const matchingJcs = allJcs.filter((j) => {
+        if ((j.departmentCode || "").toUpperCase() !== deptCode) return false;
+        if (wipTypeFilter.length === 0) return true;
+        return wipTypeFilter.includes((j.wipType || "").toUpperCase());
+      });
       if (matchingJcs.length === 0) continue;
       jcMatchedAny = true;
 

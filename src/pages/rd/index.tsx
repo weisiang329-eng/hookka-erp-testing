@@ -490,6 +490,7 @@ function CreateProjectDialog({
     sourceProductName: "",
     sourceBrand: "",
     sourcePurchaseRef: "",
+    sourcePriceRM: "",
     sourceNotes: "",
   });
 
@@ -522,6 +523,15 @@ function CreateProjectDialog({
         if (form.sourceProductName.trim()) body.sourceProductName = form.sourceProductName.trim();
         if (form.sourceBrand.trim()) body.sourceBrand = form.sourceBrand.trim();
         if (form.sourcePurchaseRef.trim()) body.sourcePurchaseRef = form.sourcePurchaseRef.trim();
+        if (form.sourcePriceRM.trim()) {
+          // Stored in sen for consistency with totalBudget + every other
+          // money column. parseFloat handles "1,200.50" minus the comma —
+          // we strip thousands separators so the user can type either form.
+          const rm = parseFloat(form.sourcePriceRM.replace(/,/g, ""));
+          if (Number.isFinite(rm) && rm >= 0) {
+            body.sourcePriceSen = Math.round(rm * 100);
+          }
+        }
         if (form.sourceNotes.trim()) body.sourceNotes = form.sourceNotes.trim();
       }
 
@@ -549,11 +559,11 @@ function CreateProjectDialog({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
       <div
-        className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4"
+        className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+        {/* Header — sticky at top of the modal so user always sees it. */}
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8] flex-shrink-0">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">New R&D Project</h2>
           <button
             onClick={onClose}
@@ -563,8 +573,11 @@ function CreateProjectDialog({
           </button>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4">
+        {/* Form — scrollable middle. The Source Product fieldset can push
+            content past the viewport on shorter screens (and the laptop
+            taskbar steals ~60px), so the body has its own overflow region
+            and the footer below stays pinned. */}
+        <form onSubmit={handleSubmit} className="px-6 py-5 space-y-4 overflow-y-auto flex-1">
           {/* Project Name */}
           <div className="space-y-1.5">
             <label className="block text-sm font-medium text-[#1F1D1B]">
@@ -666,17 +679,34 @@ function CreateProjectDialog({
                   placeholder="e.g. ABC Furniture Sdn Bhd"
                 />
               </div>
-              <div className="space-y-1.5">
-                <label className="block text-sm font-medium text-[#1F1D1B]">
-                  Purchase Reference / Invoice No.
-                </label>
-                <input
-                  type="text"
-                  value={form.sourcePurchaseRef}
-                  onChange={(e) => setForm((f) => ({ ...f, sourcePurchaseRef: e.target.value }))}
-                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
-                  placeholder="e.g. INV-2026-0421"
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label className="block text-sm font-medium text-[#1F1D1B]">
+                    Purchase Reference
+                  </label>
+                  <input
+                    type="text"
+                    value={form.sourcePurchaseRef}
+                    onChange={(e) => setForm((f) => ({ ...f, sourcePurchaseRef: e.target.value }))}
+                    className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                    placeholder="INV-2026-0421"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <label className="block text-sm font-medium text-[#1F1D1B]">
+                    Purchase Price (RM)
+                  </label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step={0.01}
+                    value={form.sourcePriceRM}
+                    onChange={(e) => setForm((f) => ({ ...f, sourcePriceRM: e.target.value }))}
+                    className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                    placeholder="0.00"
+                  />
+                </div>
               </div>
               <div className="space-y-1.5">
                 <label className="block text-sm font-medium text-[#1F1D1B]">Source Notes</label>
@@ -741,8 +771,11 @@ function CreateProjectDialog({
             <p className="text-xs text-gray-400">Separate names with commas</p>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-end gap-3 pt-2">
+          {/* Footer — sticky at the bottom of the scrollable form so
+              the action buttons stay reachable even when the form is
+              tall enough to need scrolling (Clone fieldset + Description
+              + Date + Budget + Team can overflow on laptops). */}
+          <div className="sticky bottom-0 bg-white -mx-6 px-6 pt-3 pb-1 border-t border-[#E2DDD8] flex items-center justify-end gap-3">
             <Button type="button" variant="outline" onClick={onClose} disabled={submitting}>
               Cancel
             </Button>

@@ -114,17 +114,27 @@ export default function RDProjectDetailPage() {
   const [project, setProject] = useState<RDProject | null>(null);
   const [advancing, setAdvancing] = useState(false);
 
-  // Edit project modal
+  // Edit project modal — projectType + clone-source fields are mirror-
+  // for-mirror with the Create dialog (src/pages/rd/index.tsx) so users
+  // can switch a project's type after creation and fill in the
+  // competitor-source fields on existing rows that pre-date the CLONE
+  // feature.
   const [editOpen, setEditOpen] = useState(false);
   const [editSaving, setEditSaving] = useState(false);
   const [editForm, setEditForm] = useState({
     name: "",
     description: "",
+    projectType: "DEVELOPMENT" as RDProject["projectType"],
     productCategory: "BEDFRAME" as RDProject["productCategory"],
     targetLaunchDate: "",
     totalBudget: 0,
     assignedTeamStr: "",
     status: "ACTIVE" as RDProject["status"],
+    sourceProductName: "",
+    sourceBrand: "",
+    sourcePurchaseRef: "",
+    sourcePriceRM: "", // RM string; converted to sen on save
+    sourceNotes: "",
   });
 
   // Add prototype modal
@@ -254,11 +264,23 @@ export default function RDProjectDetailPage() {
     setEditForm({
       name: project.name,
       description: project.description,
+      projectType: project.projectType,
       productCategory: project.productCategory,
       targetLaunchDate: project.targetLaunchDate,
       totalBudget: project.totalBudget / 100, // sen to RM
       assignedTeamStr: project.assignedTeam.join(", "),
       status: project.status,
+      sourceProductName: project.sourceProductName ?? "",
+      sourceBrand: project.sourceBrand ?? "",
+      sourcePurchaseRef: project.sourcePurchaseRef ?? "",
+      // Stored in sen on the row; the editor field uses RM. Empty string
+      // (not "0") when there's nothing recorded so the input renders
+      // as an empty placeholder instead of "0.00".
+      sourcePriceRM:
+        typeof project.sourcePriceSen === "number"
+          ? (project.sourcePriceSen / 100).toString()
+          : "",
+      sourceNotes: project.sourceNotes ?? "",
     });
     setEditOpen(true);
   };
@@ -267,15 +289,40 @@ export default function RDProjectDetailPage() {
     if (!project) return;
     setEditSaving(true);
     try {
-      const payload = {
+      const payload: Record<string, unknown> = {
         name: editForm.name.trim(),
         description: editForm.description.trim(),
+        projectType: editForm.projectType,
         productCategory: editForm.productCategory,
         targetLaunchDate: editForm.targetLaunchDate,
         totalBudget: Math.round(editForm.totalBudget * 100), // RM to sen
         assignedTeam: editForm.assignedTeamStr.split(",").map((s) => s.trim()).filter(Boolean),
         status: editForm.status,
       };
+      // Clone-source fields: send when projectType === 'CLONE' (write or
+      // clear). When projectType is changing AWAY from CLONE, blank them
+      // so we don't carry stale data on the row. Other types just
+      // ignore these columns.
+      if (editForm.projectType === "CLONE") {
+        payload.sourceProductName = editForm.sourceProductName.trim() || null;
+        payload.sourceBrand = editForm.sourceBrand.trim() || null;
+        payload.sourcePurchaseRef = editForm.sourcePurchaseRef.trim() || null;
+        const priceTrimmed = editForm.sourcePriceRM.trim().replace(/,/g, "");
+        if (priceTrimmed) {
+          const rm = parseFloat(priceTrimmed);
+          payload.sourcePriceSen =
+            Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+        } else {
+          payload.sourcePriceSen = null;
+        }
+        payload.sourceNotes = editForm.sourceNotes.trim() || null;
+      } else if (project.projectType === "CLONE") {
+        payload.sourceProductName = null;
+        payload.sourceBrand = null;
+        payload.sourcePurchaseRef = null;
+        payload.sourcePriceSen = null;
+        payload.sourceNotes = null;
+      }
       const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
         body: payload,
@@ -939,6 +986,7 @@ export default function RDProjectDetailPage() {
         (project.sourceProductName ||
           project.sourceBrand ||
           project.sourcePurchaseRef ||
+          (typeof project.sourcePriceSen === "number" && project.sourcePriceSen > 0) ||
           project.sourceNotes) && (
           <Card>
             <CardHeader>
@@ -964,6 +1012,14 @@ export default function RDProjectDetailPage() {
                   <div>
                     <dt className="text-xs text-gray-400">Purchase Ref / Invoice No.</dt>
                     <dd className="font-mono text-[#6B5C32]">{project.sourcePurchaseRef}</dd>
+                  </div>
+                )}
+                {typeof project.sourcePriceSen === "number" && project.sourcePriceSen > 0 && (
+                  <div>
+                    <dt className="text-xs text-gray-400">Purchase Price</dt>
+                    <dd className="text-[#1F1D1B] font-medium tabular-nums">
+                      {formatCurrency(project.sourcePriceSen)}
+                    </dd>
                   </div>
                 )}
                 {project.sourceNotes && (
@@ -1483,6 +1539,95 @@ export default function RDProjectDetailPage() {
               onChange={(e) => setEditForm((f) => ({ ...f, description: e.target.value }))}
             />
           </div>
+          <div>
+            <label className={labelClass}>Project Type</label>
+            <select
+              className={selectClass}
+              value={editForm.projectType}
+              onChange={(e) =>
+                setEditForm((f) => ({
+                  ...f,
+                  projectType: e.target.value as RDProject["projectType"],
+                }))
+              }
+            >
+              <option value="DEVELOPMENT">New Product Research</option>
+              <option value="IMPROVEMENT">Improvement / Repair</option>
+              <option value="CLONE">Clone / Replicate Competitor</option>
+            </select>
+          </div>
+          {/* Clone source fieldset — mirrors the Create dialog fieldset.
+              Switching projectType AWAY from CLONE wipes these on save
+              (handleEditSave nulls them) so we don't carry stale data. */}
+          {editForm.projectType === "CLONE" && (
+            <div className="rounded-lg border border-dashed border-[#E2DDD8] bg-[#FBF9F6] p-3 space-y-3">
+              <p className="text-xs text-gray-500">
+                Source product info — what we bought to reverse-engineer.
+              </p>
+              <div>
+                <label className={labelClass}>Source Product / Model Name</label>
+                <input
+                  className={inputClass}
+                  value={editForm.sourceProductName}
+                  onChange={(e) =>
+                    setEditForm((f) => ({ ...f, sourceProductName: e.target.value }))
+                  }
+                  placeholder="e.g. Comfy Recliner Pro"
+                />
+              </div>
+              <div>
+                <label className={labelClass}>Source Brand / Supplier</label>
+                <input
+                  className={inputClass}
+                  value={editForm.sourceBrand}
+                  onChange={(e) =>
+                    setEditForm((f) => ({ ...f, sourceBrand: e.target.value }))
+                  }
+                  placeholder="e.g. ABC Furniture Sdn Bhd"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>Purchase Reference</label>
+                  <input
+                    className={inputClass}
+                    value={editForm.sourcePurchaseRef}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, sourcePurchaseRef: e.target.value }))
+                    }
+                    placeholder="INV-2026-0421"
+                  />
+                </div>
+                <div>
+                  <label className={labelClass}>Purchase Price (RM)</label>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min={0}
+                    step={0.01}
+                    className={inputClass}
+                    value={editForm.sourcePriceRM}
+                    onChange={(e) =>
+                      setEditForm((f) => ({ ...f, sourcePriceRM: e.target.value }))
+                    }
+                    placeholder="0.00"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className={labelClass}>Source Notes</label>
+                <textarea
+                  className={`${inputClass} resize-none`}
+                  rows={3}
+                  value={editForm.sourceNotes}
+                  onChange={(e) =>
+                    setEditForm((f) => ({ ...f, sourceNotes: e.target.value }))
+                  }
+                  placeholder="Dimensions, key specs, why we want to copy..."
+                />
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Category</label>

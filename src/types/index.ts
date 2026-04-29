@@ -1118,6 +1118,7 @@ export type RDProject = {
   sourceProductName?: string;  // competitor model / SKU
   sourceBrand?: string;        // competitor brand or supplier
   sourcePurchaseRef?: string;  // invoice / receipt no for accounting trace
+  sourcePriceSen?: number;     // what we paid for the competitor product, in sen (RM × 100)
   sourceNotes?: string;        // dimensions, specs, why we want to copy
   // Cover photo — glanceable thumbnail of what the project is about. Stored
   // as a data URL (JPEG) compressed client-side via @/lib/image-compress.

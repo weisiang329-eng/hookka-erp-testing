@@ -670,17 +670,21 @@ function CategoryDetailsForm({
   onPersist: (next: RootCauseDetails) => void;
   disabled?: boolean;
 }) {
-  // Currently-selected department (used to filter the worker list for
-  // PRODUCTION / PROCESS / PICKING). String "" → no dept yet.
+  // Currently-selected department. Treated as a non-binding referral —
+  // workers can move between depts, so the worker picker is NOT scoped to
+  // it. Operator picks a dept as context, then independently searches a
+  // worker by name/emp #.
   const deptCode = (value.departmentCode as string) ?? "";
 
   // Lazy fetches — only the active category's data source is loaded.
+  // Workers: pull the full list (no dept filter) so the typeahead below
+  // can find any of the ~100-200 employees by name regardless of which
+  // dept they're currently rostered to.
   const needsWorkers =
-    (category === "PRODUCTION" || category === "PROCESS" || category === "PICKING") &&
-    !!deptCode;
+    category === "PRODUCTION" || category === "PROCESS" || category === "PICKING";
   const { data: workersResp } = useCachedJson<{
     data?: Array<{ id: string; name: string; empNo?: string; departmentCode?: string }>;
-  }>(needsWorkers ? `/api/workers?departmentCode=${encodeURIComponent(deptCode)}` : null);
+  }>(needsWorkers ? "/api/workers" : null);
 
   const { data: prodResp } = useCachedJson<{
     data?: Array<{ id: string; code: string; name: string }>;
@@ -768,6 +772,22 @@ function CategoryDetailsForm({
       .slice(0, 10);
   }, [productSearch, products]);
 
+  // Worker typeahead — empty query shows nothing so the operator gets a
+  // clean input rather than a 200-row scroll. Match on name OR empNo so
+  // either reading habit works ("EMP-025" or "Aung Thein Win").
+  const [workerSearch, setWorkerSearch] = useState("");
+  const workerMatches = useMemo(() => {
+    const q = workerSearch.trim().toLowerCase();
+    if (!q) return [];
+    return workers
+      .filter(
+        (w) =>
+          w.name.toLowerCase().includes(q) ||
+          (w.empNo ?? "").toLowerCase().includes(q),
+      )
+      .slice(0, 10);
+  }, [workerSearch, workers]);
+
   function patch(partial: RootCauseDetails) {
     const next = { ...value, ...partial };
     onChange(next);
@@ -780,41 +800,79 @@ function CategoryDetailsForm({
     onPersist(value);
   }
 
-  // Reusable worker dropdown — depends on dept being set. Lower-case
-  // function returning JSX (called as `{renderWorkerDropdown()}`) instead
-  // of a component, to satisfy react-hooks/static-components.
+  // Reusable worker picker — search-as-you-type across the full worker
+  // list (workers aren't strictly bound to the chosen dept, since people
+  // move between lines). Lower-case function returning JSX (called as
+  // `{renderWorkerDropdown()}`) instead of a component, to satisfy
+  // react-hooks/static-components.
   function renderWorkerDropdown() {
-    if (!deptCode) {
+    if (value.workerId) {
       return (
-        <select
-          disabled
-          className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs text-[#9CA3AF]"
-        >
-          <option>Worker / PIC — pick department first</option>
-        </select>
+        <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs">
+          <span>
+            {value.workerEmpNo ? (
+              <>
+                <span className="font-mono text-[#6B5C32]">{String(value.workerEmpNo)}</span>
+                <span className="text-[#9CA3AF]"> — </span>
+              </>
+            ) : null}
+            <span>{(value.workerName as string) ?? ""}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() =>
+              patch({ workerId: null, workerName: null, workerEmpNo: null })
+            }
+            disabled={disabled}
+            className="text-[#9A3A2D] hover:text-[#7A2E24]"
+            title="Clear worker"
+          >
+            ×
+          </button>
+        </div>
       );
     }
     return (
-      <select
-        value={(value.workerId as string) ?? ""}
-        onChange={(e) => {
-          const w = workers.find((x) => x.id === e.target.value);
-          patch({
-            workerId: e.target.value || null,
-            workerName: w?.name ?? null,
-            workerEmpNo: w?.empNo ?? null,
-          });
-        }}
-        disabled={disabled}
-        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-      >
-        <option value="">Worker / PIC — pick one (optional)</option>
-        {workers.map((w) => (
-          <option key={w.id} value={w.id}>
-            {w.empNo ? `${w.empNo} — ` : ""}{w.name}
-          </option>
-        ))}
-      </select>
+      <div className="relative">
+        <Input
+          type="text"
+          value={workerSearch}
+          onChange={(e) => setWorkerSearch(e.target.value)}
+          disabled={disabled}
+          placeholder="Worker / PIC — type name or emp # to search (optional)"
+          className="h-8 text-xs"
+        />
+        {workerMatches.length > 0 && (
+          <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-60 overflow-y-auto">
+            {workerMatches.map((w) => (
+              <button
+                key={w.id}
+                type="button"
+                onClick={() => {
+                  setWorkerSearch("");
+                  patch({
+                    workerId: w.id,
+                    workerName: w.name,
+                    workerEmpNo: w.empNo ?? null,
+                  });
+                }}
+                className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
+              >
+                {w.empNo ? (
+                  <>
+                    <span className="font-mono text-[#6B5C32]">{w.empNo}</span>
+                    <span className="text-[#9CA3AF]"> — </span>
+                  </>
+                ) : null}
+                <span>{w.name}</span>
+                {w.departmentCode ? (
+                  <span className="text-[#9CA3AF]"> · {w.departmentCode}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -826,13 +884,9 @@ function CategoryDetailsForm({
             value={deptCode}
             onChange={(e) => {
               const dept = PRODUCTION_DEPTS.find((d) => d.code === e.target.value);
-              // Resetting dept also clears worker (worker filtered by dept).
               patch({
                 departmentCode: e.target.value || null,
                 departmentName: dept?.name ?? null,
-                workerId: null,
-                workerName: null,
-                workerEmpNo: null,
               });
             }}
             disabled={disabled}
@@ -1050,9 +1104,6 @@ function CategoryDetailsForm({
               patch({
                 departmentCode: e.target.value || null,
                 departmentName: dept?.name ?? null,
-                workerId: null,
-                workerName: null,
-                workerEmpNo: null,
               });
             }}
             disabled={disabled}
@@ -1182,17 +1233,15 @@ function CategoryDetailsForm({
               patch({
                 departmentCode: e.target.value || null,
                 departmentName: dept?.name ?? null,
-                workerId: null,
-                workerName: null,
-                workerEmpNo: null,
               });
             }}
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
             <option value="">Department — pick one</option>
-            <option value="PACKING">Packing</option>
-            <option value="WAREHOUSING">Warehousing</option>
+            {ALL_DEPTS.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
+            ))}
           </select>
           {renderWorkerDropdown()}
           <textarea

@@ -215,6 +215,25 @@ type ConsignmentOrderApi = {
   companyCOId?: string;
 };
 
+// Source-order line item shape returned by GET /api/sales-orders/:id and
+// /api/consignment-orders/:id. Used for the "Which product?" picker that
+// follows source-order selection on SO/CO cases (2026-04-29).
+type SourceOrderItemApi = {
+  id: string;
+  productId?: string | null;
+  productCode?: string | null;
+  productName?: string | null;
+  quantity?: number | null;
+  sizeLabel?: string | null;
+  fabricCode?: string | null;
+};
+type SourceOrderDetailApi = {
+  data?: {
+    id: string;
+    items?: SourceOrderItemApi[];
+  };
+};
+
 export function CreateServiceCaseModal({
   onClose,
   onCreated,
@@ -251,12 +270,41 @@ export function CreateServiceCaseModal({
   // Description). Backend field still exists for backward compat.
   const rootCauseNotes = "";
   const [submitting, setSubmitting] = useState(false);
+  // Inline form-level error from the API or client-side validation.
+  // Replaces the silent "button does nothing" failure mode reported by
+  // operators on 2026-04-29 (Bug #13).
+  const [formError, setFormError] = useState<string | null>(null);
+  // Affected products picked from the source order (for SO/CO sources).
+  // Stored as an array of { productId, code, name, qty? } — matches the
+  // backend's affected_product_ids JSON shape (migration 0077).
+  const [affectedProducts, setAffectedProducts] = useState<Array<{
+    productId: string;
+    code: string;
+    name: string;
+    qty?: number | null;
+  }>>([]);
 
-  const { data: soResp } = useCachedJson<{ data?: SalesOrderApi[] }>("/api/sales-orders");
-  const { data: coResp } = useCachedJson<{ data?: ConsignmentOrderApi[] }>("/api/consignment-orders");
+  const { data: soResp, loading: soLoading } = useCachedJson<{ data?: SalesOrderApi[] }>("/api/sales-orders");
+  const { data: coResp, loading: coLoading } = useCachedJson<{ data?: ConsignmentOrderApi[] }>("/api/consignment-orders");
   const { data: customersResp } = useCachedJson<{
     data?: Array<{ id: string; code: string; name: string; phone?: string | null }>;
   }>(sourceType === "EXTERNAL" ? "/api/customers" : null);
+
+  // Once a SO/CO is selected, load its line items so the operator can
+  // pick which product the issue is about (Bug #11). EXTERNAL cases don't
+  // have a source order to pick from — affected products there are
+  // recorded from the case detail page after creation.
+  const sourceDetailUrl =
+    sourceType === "EXTERNAL" || !sourceId
+      ? null
+      : sourceType === "SO"
+        ? `/api/sales-orders/${sourceId}`
+        : `/api/consignment-orders/${sourceId}`;
+  const { data: sourceDetail, loading: sourceItemsLoading } = useCachedJson<SourceOrderDetailApi>(sourceDetailUrl);
+  const sourceItems: SourceOrderItemApi[] = useMemo(
+    () => sourceDetail?.data?.items ?? [],
+    [sourceDetail],
+  );
 
   // Search-then-pick — empty query shows nothing (avoids dropdown of all
   // customers). Filtered by code OR name. Results capped at 10.
@@ -299,10 +347,23 @@ export function CreateServiceCaseModal({
 
   const selectedSource = sourceOptions.find((s) => s.id === sourceId);
 
-  const sourceOk =
-    sourceType === "EXTERNAL"
-      ? !!externalCustomerId && externalCustomerName.trim().length > 0
-      : !!sourceId;
+  function toggleAffectedProduct(item: SourceOrderItemApi) {
+    const productId = item.productId ?? "";
+    if (!productId) return;
+    setAffectedProducts((prev) => {
+      const has = prev.some((p) => p.productId === productId);
+      if (has) return prev.filter((p) => p.productId !== productId);
+      return [
+        ...prev,
+        {
+          productId,
+          code: item.productCode ?? "",
+          name: item.productName ?? "",
+          qty: item.quantity ?? null,
+        },
+      ];
+    });
+  }
 
   // ---- Photo helpers (resize → base64) ----
   // Uses the shared @/lib/image-compress helper which prefers
@@ -332,7 +393,25 @@ export function CreateServiceCaseModal({
   }
 
   async function handleSubmit() {
-    if (!sourceOk) return;
+    // Inline validation — instead of silently disabling the button (Bug #13),
+    // surface a clear inline message so the operator knows WHY they can't
+    // submit yet. The button's disabled state still prevents submission;
+    // we just no-op here when the form isn't ready.
+    setFormError(null);
+    if (sourceType === "EXTERNAL") {
+      if (!externalCustomerId || !externalCustomerName.trim()) {
+        setFormError("Pick a customer from the master list before opening the case.");
+        return;
+      }
+    } else {
+      if (!sourceId) {
+        setFormError(
+          `Pick a ${sourceType === "SO" ? "Sales Order" : "Consignment Order"} from the search results before opening the case.`,
+        );
+        return;
+      }
+    }
+
     setSubmitting(true);
     try {
       const res = await fetch("/api/service-cases", {
@@ -349,6 +428,11 @@ export function CreateServiceCaseModal({
           externalRef: sourceType === "EXTERNAL" ? externalRef || null : undefined,
           issueDescription: issueDescription || null,
           issuePhotos: photos,
+          // Affected products picked from the source order's line items
+          // (SO/CO sources only). Optional — empty array is fine if the
+          // operator doesn't know the specific product yet; they can attach
+          // products from the case detail page after creation.
+          affectedProducts: affectedProducts.length > 0 ? affectedProducts : undefined,
           rootCauseCategory: rootCauseCategory || null,
           rootCauseNotes: rootCauseNotes || null,
           createdBy: user?.id ?? null,
@@ -359,7 +443,9 @@ export function CreateServiceCaseModal({
       if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
       onCreated(data.data!.id);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Failed to create");
+      const msg = e instanceof Error ? e.message : "Failed to create";
+      setFormError(msg);
+      toast.error(msg);
     } finally {
       setSubmitting(false);
     }
@@ -387,6 +473,8 @@ export function CreateServiceCaseModal({
                   setSourceType(e.target.value as "SO" | "CO" | "EXTERNAL");
                   setSourceId("");
                   setSourceQuery("");
+                  setAffectedProducts([]);
+                  setFormError(null);
                 }}
                 disabled={!!presetSourceType}
                 className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-sm"
@@ -413,6 +501,8 @@ export function CreateServiceCaseModal({
                       if (presetSourceId) return;
                       setSourceId("");
                       setSourceQuery("");
+                      setAffectedProducts([]);
+                      setFormError(null);
                     }}
                     disabled={!!presetSourceId}
                     className="ml-2 text-xs text-[#6B5C32] hover:underline disabled:text-[#9CA3AF]"
@@ -465,6 +555,7 @@ export function CreateServiceCaseModal({
                                 setExternalCustomerName(c.name);
                                 setExternalCustomerCode(c.code);
                                 setExternalCustomerSearch("");
+                                setFormError(null);
                               }}
                               className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
                             >
@@ -493,11 +584,79 @@ export function CreateServiceCaseModal({
                   query={sourceQuery}
                   onQueryChange={setSourceQuery}
                   options={sourceOptions}
-                  onPick={(id) => setSourceId(id)}
+                  onPick={(id) => {
+                    setSourceId(id);
+                    setAffectedProducts([]);
+                    setFormError(null);
+                  }}
+                  loading={sourceType === "SO" ? soLoading : coLoading}
                 />
               )}
             </div>
           </div>
+
+          {/* Affected products — appears once a SO/CO is selected. Optional;
+              the operator can leave it blank if they're not sure which
+              product yet (they can attach products from the case detail
+              page after the case is opened). One row per line item; click
+              to toggle. EXTERNAL cases skip this — there's no source order
+              to derive products from. (Bug #11 — 2026-04-29) */}
+          {sourceType !== "EXTERNAL" && selectedSource ? (
+            <div>
+              <label className="block text-xs text-[#6B7280] mb-1">
+                Which product has the issue?{" "}
+                <span className="text-[#9CA3AF]">(optional — pick one or more lines from this order)</span>
+              </label>
+              {sourceItemsLoading ? (
+                <div className="flex items-center gap-2 text-xs text-[#6B7280] py-2">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Loading order line items…
+                </div>
+              ) : sourceItems.length === 0 ? (
+                <div className="text-xs text-[#9CA3AF] py-2">
+                  This order has no line items recorded.
+                </div>
+              ) : (
+                <div className="space-y-1 rounded border border-[#E2DDD8] bg-white max-h-56 overflow-auto">
+                  {sourceItems.map((it) => {
+                    const productId = it.productId ?? "";
+                    const picked = !!productId && affectedProducts.some((p) => p.productId === productId);
+                    return (
+                      <button
+                        key={it.id}
+                        type="button"
+                        onClick={() => toggleAffectedProduct(it)}
+                        disabled={!productId}
+                        className={`w-full text-left px-2 py-1.5 text-xs border-b border-[#F0ECE9] last:border-b-0 flex items-center gap-2 ${
+                          picked ? "bg-[#F4EFE3]" : "hover:bg-[#FAF9F7]"
+                        } ${!productId ? "opacity-50 cursor-not-allowed" : ""}`}
+                      >
+                        <span
+                          className={`inline-block w-3.5 h-3.5 rounded-sm border ${
+                            picked ? "bg-[#6B5C32] border-[#6B5C32]" : "border-[#9CA3AF]"
+                          } flex items-center justify-center text-white text-[10px]`}
+                        >
+                          {picked ? "✓" : ""}
+                        </span>
+                        <span className="font-mono text-[#6B5C32]">{it.productCode || "—"}</span>
+                        <span className="text-[#9CA3AF]"> — </span>
+                        <span className="truncate">{it.productName || "(unnamed)"}</span>
+                        {it.sizeLabel ? (
+                          <span className="text-[#9CA3AF]"> · {it.sizeLabel}</span>
+                        ) : null}
+                        <span className="ml-auto text-[#6B7280]">qty {it.quantity ?? 0}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              {affectedProducts.length > 0 && (
+                <div className="mt-1 text-[10px] text-[#6B5C32]">
+                  {affectedProducts.length} product{affectedProducts.length === 1 ? "" : "s"} selected
+                </div>
+              )}
+            </div>
+          ) : null}
 
           {/* Issue — captures both customer report AND root-cause analysis.
               Operators consolidated these in 2026-04-28 per "issue description
@@ -614,15 +773,34 @@ export function CreateServiceCaseModal({
           </div>
         </div>
 
+        {/* Inline form error — surfaced from client-side validation OR a
+            failed POST. Replaces the silent "button does nothing" failure
+            mode reported on 2026-04-29 (Bug #13). The toast still fires for
+            API failures so the message is visible even after the modal
+            scrolls. */}
+        {formError ? (
+          <div className="px-4 pb-2">
+            <div className="flex items-start gap-2 text-xs text-[#7A2E24] bg-[#F5DCDC] border border-[#E4C9C9] rounded p-2">
+              <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+              <p>{formError}</p>
+            </div>
+          </div>
+        ) : null}
+
         <div className="flex justify-end gap-2 p-4 border-t border-[#E2DDD8] bg-[#FAF9F7]">
           <Button variant="outline" size="sm" onClick={onClose} disabled={submitting}>
             Cancel
           </Button>
+          {/* Button is no longer disabled when sourceOk is false (Bug #13).
+              Disabling it without a visible reason was the silent-failure
+              footgun operators kept hitting. Click now always fires
+              handleSubmit, which surfaces an inline form error explaining
+              what's missing. Still disabled while a request is in flight. */}
           <Button
             variant="primary"
             size="sm"
             onClick={handleSubmit}
-            disabled={!sourceOk || submitting}
+            disabled={submitting}
             className="bg-[#6B5C32] text-white hover:bg-[#5a4d2a]"
           >
             {submitting ? "Opening…" : "Open Case"}
@@ -634,12 +812,13 @@ export function CreateServiceCaseModal({
 }
 
 function SourceSearchPicker({
-  query, onQueryChange, options, onPick,
+  query, onQueryChange, options, onPick, loading,
 }: {
   query: string;
   onQueryChange: (q: string) => void;
   options: SourceOrderOption[];
   onPick: (id: string) => void;
+  loading?: boolean;
 }) {
   const q = query.trim().toLowerCase();
   const filtered = useMemo(() => {
@@ -653,18 +832,31 @@ function SourceSearchPicker({
       .slice(0, 15);
   }, [options, q]);
 
+  // Placeholder used to read "(N shipped)" but cases can be opened against
+  // any non-DRAFT/CANCELLED order, so "shipped" was misleading. Now shows
+  // the real count of selectable orders, and a loading state on first
+  // mount so operators don't see "(0 ...)" while the list is still
+  // fetching. (Bug #11 — 2026-04-29)
+  const placeholder = loading
+    ? "Loading orders…"
+    : `Type order # or customer name… (${options.length} available)`;
+
   return (
     <div className="space-y-1">
       <Input
         type="text"
         value={query}
         onChange={(e) => onQueryChange(e.target.value)}
-        placeholder={`Type SO# or customer name… (${options.length} shipped)`}
+        placeholder={placeholder}
         className="h-8 text-sm"
       />
       {q && (
         <div className="max-h-48 overflow-y-auto rounded border border-[#E2DDD8] bg-white">
-          {filtered.length === 0 ? (
+          {loading ? (
+            <div className="p-2 text-xs text-[#9CA3AF] flex items-center gap-1">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading orders…
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="p-2 text-xs text-[#9CA3AF]">No matches for "{q}".</div>
           ) : (
             filtered.map((s) => (

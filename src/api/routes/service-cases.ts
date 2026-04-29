@@ -104,12 +104,20 @@ function genCaseId(): string {
 }
 
 async function nextCaseNo(db: D1Database, now: Date): Promise<string> {
+  // 2026-04-29 operator request: rename Case # prefix from "CASE-YYMM-NNN" to
+  // the more compact "SC-YYMM-NNN" so it's the same length as Sales Order #s
+  // (SO-YYMM-NNN). Existing CASE-YYMM-NNN rows stay as-is; we count BOTH
+  // prefixes for the current month so the sequence keeps incrementing
+  // monotonically across the rename without colliding visually.
   const yy = String(now.getFullYear()).slice(-2);
   const mm = String(now.getMonth() + 1).padStart(2, "0");
-  const prefix = `CASE-${yy}${mm}`;
+  const prefix = `SC-${yy}${mm}`;
+  const legacyPrefix = `CASE-${yy}${mm}`;
   const res = await db
-    .prepare("SELECT COUNT(*) as n FROM service_cases WHERE caseNo LIKE ?")
-    .bind(`${prefix}-%`)
+    .prepare(
+      "SELECT COUNT(*) as n FROM service_cases WHERE caseNo LIKE ? OR caseNo LIKE ?",
+    )
+    .bind(`${prefix}-%`, `${legacyPrefix}-%`)
     .first<{ n: number }>();
   const seq = (res?.n ?? 0) + 1;
   return `${prefix}-${String(seq).padStart(3, "0")}`;

@@ -6180,8 +6180,19 @@ function DeptPivotCategoryDialog({
 
   const categoryOptions = useMemo(() => getCategoryOptions(), []);
 
+  // A row is dirty if EITHER its category changed OR its minutes drifted
+  // from the initial value. The minutes path catches Resync-stale: an old
+  // BOM row stores `Fab Cut × CAT 3 = 90` because that was the matrix value
+  // months ago, but the current matrix has `Fab Cut × CAT 3 = 25`. Without
+  // the minutes branch, Resync would silently update r.minutes but the
+  // dirty count + Save button + bulk-process-edit payload would all
+  // ignore the change and the user would never persist it.
+  function isRowDirty(r: DeptPivotRow): boolean {
+    return r.category !== r.initialCategory || r.minutes !== r.initialMinutes;
+  }
+
   const dirtyCount = useMemo(
-    () => rows.filter((r) => r.category !== r.initialCategory).length,
+    () => rows.filter(isRowDirty).length,
     [rows],
   );
 
@@ -6215,6 +6226,53 @@ function DeptPivotCategoryDialog({
       return true;
     });
   }, [rows, search, modelFilter, branchFilter]);
+
+  // "Stale" = the BOM's stored minutes don't match what the Production
+  // Times matrix says for that (dept, category) pair right now. Scoped
+  // to the FILTERED row set so the count + Resync action stay aligned
+  // with what the user is looking at. Rows without a category yet are
+  // skipped (no canonical value to compare against).
+  function isRowStale(r: DeptPivotRow): boolean {
+    if (!r.category) return false;
+    const canonical = getProductionMinutes(deptCode, r.category);
+    return canonical !== r.minutes;
+  }
+
+  const staleCount = useMemo(
+    () => filteredRows.filter(isRowStale).length,
+    // Re-evaluate when the filter changes; deptCode is implicit via the
+    // closure but rows + filtered set already depend on it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredRows, deptCode],
+  );
+
+  // Resync sets r.minutes to the current matrix value for every stale
+  // row in the FILTERED set. This makes them dirty (because
+  // r.minutes !== r.initialMinutes) so the existing Save flow picks them
+  // up and persists the corrected minutes via bulk-process-edit. We do
+  // NOT touch initialMinutes — that's still the value as loaded from
+  // the server, so a partial-save retry works correctly.
+  function handleResyncStale() {
+    if (staleCount === 0) {
+      toast.warning("No stale rows in the current view.");
+      return;
+    }
+    const filteredKeys = new Set(filteredRows.map((r) => r.rowKey));
+    let touched = 0;
+    setRows((prev) =>
+      prev.map((r) => {
+        if (!filteredKeys.has(r.rowKey)) return r;
+        if (!r.category) return r;
+        const canonical = getProductionMinutes(deptCode, r.category);
+        if (canonical === r.minutes) return r;
+        touched++;
+        return { ...r, minutes: canonical };
+      }),
+    );
+    toast.success(
+      `Resynced ${touched} stale row${touched !== 1 ? "s" : ""} to current Production Times. Click Save to persist.`,
+    );
+  }
 
   function handleCategoryChange(rowKey: string, newCat: string) {
     setRows((prev) =>
@@ -6279,7 +6337,7 @@ function DeptPivotCategoryDialog({
   }
 
   async function handleSave() {
-    const dirty = rows.filter((r) => r.category !== r.initialCategory);
+    const dirty = rows.filter(isRowDirty);
     if (dirty.length === 0) {
       toast.warning("No changes to save.");
       return;
@@ -6487,6 +6545,25 @@ function DeptPivotCategoryDialog({
             </div>
           </div>
 
+          {/* Resync stale row banner — only shows when at least one
+              filtered row's stored minutes differ from the current
+              Production Times matrix value for its (dept, category). */}
+          {staleCount > 0 && (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-[#E8D597] bg-[#FFF8E7] px-3 py-2">
+              <div className="text-xs text-[#9C6F1E]">
+                <span className="font-semibold">{staleCount}</span>{" "}
+                row{staleCount !== 1 ? "s" : ""} have stored minutes that no longer match the Production Times matrix
+                {" "}(yellow rows below). Resync to update.
+              </div>
+              <button
+                onClick={handleResyncStale}
+                className="px-3 py-1.5 text-xs bg-[#9C6F1E] text-white rounded hover:bg-[#7C5818] whitespace-nowrap"
+              >
+                Resync {staleCount} stale
+              </button>
+            </div>
+          )}
+
           {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
             <div className="max-h-[60vh] overflow-y-auto">
@@ -6520,14 +6597,20 @@ function DeptPivotCategoryDialog({
                     </tr>
                   )}
                   {filteredRows.map((r) => {
-                    const dirty = r.category !== r.initialCategory;
+                    const dirty = isRowDirty(r);
+                    const stale = !dirty && isRowStale(r);
                     const isSelected = selectedKeys.has(r.rowKey);
+                    const rowTone = dirty
+                      ? "bg-[#EEF3E4]"
+                      : stale
+                      ? "bg-[#FFF8E7]"
+                      : isSelected
+                      ? "bg-[#FAEFCB]/60"
+                      : "hover:bg-[#FAF9F7]";
                     return (
                       <tr
                         key={r.rowKey}
-                        className={`border-t border-[#E2DDD8] ${
-                          dirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
-                        }`}
+                        className={`border-t border-[#E2DDD8] ${rowTone}`}
                       >
                         <td className="px-3 py-2">
                           <input
@@ -6578,7 +6661,18 @@ function DeptPivotCategoryDialog({
                           </select>
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-gray-600">
-                          {r.minutes} min
+                          {stale ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-[#9C6F1E]"
+                              title={`Stored ${r.minutes} min, current Production Times says ${getProductionMinutes(deptCode, r.category)} min. Click "Resync stale" to update.`}
+                            >
+                              <span className="line-through text-[#9CA3AF]">{r.minutes}</span>
+                              <span className="font-semibold">→ {getProductionMinutes(deptCode, r.category)}</span>
+                              <span className="text-[10px]">min</span>
+                            </span>
+                          ) : (
+                            <span>{r.minutes} min</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -6593,7 +6687,7 @@ function DeptPivotCategoryDialog({
         <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
           <span className="text-xs text-gray-500">
             {dirtyCount > 0
-              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter((r) => r.category !== r.initialCategory).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
+              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter(isRowDirty).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
               : "No pending changes"}
           </span>
           <div className="flex gap-2">

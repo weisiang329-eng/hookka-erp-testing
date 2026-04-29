@@ -115,6 +115,10 @@ function ProjectCard({ project }: { project: RDProject }) {
               <p className="text-xs font-mono text-gray-400">{project.code}</p>
               <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
             </div>
+            {/* Status badge — the full-width cover banner sits above the
+                CardHeader (added by the cover-photo feature), so we drop
+                the tiny top-right thumbnail that landed in 3e8dbf0 to
+                avoid showing the same image twice in one card. */}
             <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
           </div>
         </CardHeader>

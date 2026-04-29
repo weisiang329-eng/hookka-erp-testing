@@ -153,13 +153,11 @@ export default function RDProjectDetailPage() {
     unitCostRM: 0,
   });
 
-  // Material Issuance modal
+  // Material Issuance modal — 2-step picker: Category (itemGroup) → Specific RawMaterial.
   const [issuanceOpen, setIssuanceOpen] = useState(false);
   const [issuanceSaving, setIssuanceSaving] = useState(false);
   const [rawMaterials, setRawMaterials] = useState<RawMaterial[]>([]);
-  const [rmSearch, setRmSearch] = useState("");
-  const [rmDropdownOpen, setRmDropdownOpen] = useState(false);
-  const rmSearchRef = useRef<HTMLDivElement>(null);
+  const [rmCategory, setRmCategory] = useState<string>("");
   const [issuanceForm, setIssuanceForm] = useState({
     materialId: "",
     materialCode: "",
@@ -182,11 +180,6 @@ export default function RDProjectDetailPage() {
     hours: 1,
     description: "",
   });
-
-  // Inline milestone editing
-  const [editingMilestone, setEditingMilestone] = useState<string | null>(null);
-  const [milestoneDate, setMilestoneDate] = useState("");
-  const [milestoneSaving, setMilestoneSaving] = useState(false);
 
   // Stage photos
   const [stagePhotos, setStagePhotos] = useState<Record<string, string[]>>({});
@@ -411,8 +404,7 @@ export default function RDProjectDetailPage() {
 
   const openIssuanceModal = () => {
     fetchRawMaterials();
-    setRmSearch("");
-    setRmDropdownOpen(false);
+    setRmCategory("");
     setIssuanceForm({
       materialId: "",
       materialCode: "",
@@ -427,7 +419,21 @@ export default function RDProjectDetailPage() {
     setIssuanceOpen(true);
   };
 
-  const selectRawMaterial = (rm: RawMaterial) => {
+  // Step 2 of the picker: pick a specific RawMaterial within the selected category.
+  const selectRawMaterialById = (materialId: string) => {
+    const rm = rawMaterials.find((r) => r.id === materialId);
+    if (!rm) {
+      setIssuanceForm((f) => ({
+        ...f,
+        materialId: "",
+        materialCode: "",
+        materialName: "",
+        unit: "",
+        unitCostRM: 0,
+        balanceQty: 0,
+      }));
+      return;
+    }
     setIssuanceForm((f) => ({
       ...f,
       materialId: rm.id,
@@ -437,8 +443,6 @@ export default function RDProjectDetailPage() {
       unitCostRM: 0, // FIFO estimated — no cost data on RawMaterial, user enters manually
       balanceQty: rm.balanceQty,
     }));
-    setRmSearch(`${rm.itemCode} - ${rm.description}`);
-    setRmDropdownOpen(false);
   };
 
   const handleIssueMaterial = async () => {
@@ -547,37 +551,6 @@ export default function RDProjectDetailPage() {
     }
   };
 
-  // ─── Edit Milestone Target Date ─────────────────────────────────────────
-
-  const startEditMilestone = (stage: string, currentDate: string) => {
-    setEditingMilestone(stage);
-    setMilestoneDate(currentDate);
-  };
-
-  const handleMilestoneSave = async (stage: string) => {
-    if (!project) return;
-    setMilestoneSaving(true);
-    try {
-      const updatedMilestones = project.milestones.map((m) => {
-        if (m.stage === stage) {
-          return { ...m, targetDate: milestoneDate };
-        }
-        return m;
-      });
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { milestones: updatedMilestones },
-      });
-      if (data.data) setProject(data.data as RDProject);
-      setEditingMilestone(null);
-      toast.success("Milestone date updated");
-    } catch {
-      toast.error("Failed to update milestone");
-    } finally {
-      setMilestoneSaving(false);
-    }
-  };
-
   // ─── Stage Photo Upload ────────────────────────────────────────────────
   const handlePhotoUpload = (stage: string) => {
     setPhotoUploadStage(stage);
@@ -658,12 +631,12 @@ export default function RDProjectDetailPage() {
     }
   };
 
-  // ─── Estimated Date (running re-estimate, distinct from immutable Target) ──
-  const handleEstimatedDateChange = async (stage: string, newDate: string) => {
+  // ─── Target Date (editable in-place; same model as Target Launch Date) ────
+  const handleTargetDateChange = async (stage: string, newDate: string) => {
     if (!project) return;
     const previousProject = project;
     const updatedMilestones = project.milestones.map((m) =>
-      m.stage === stage ? { ...m, estimatedDate: newDate || null } : m,
+      m.stage === stage ? { ...m, targetDate: newDate } : m,
     );
     // Optimistic local update
     setProject({ ...project, milestones: updatedMilestones });
@@ -675,7 +648,7 @@ export default function RDProjectDetailPage() {
       if (data.data) setProject(data.data as RDProject);
     } catch {
       setProject(previousProject);
-      toast.error("Failed to update estimated date");
+      toast.error("Failed to update target date");
     }
   };
 
@@ -754,11 +727,33 @@ export default function RDProjectDetailPage() {
   const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
   const remaining = project.totalBudget - project.actualCost;
 
-  const filteredRMs = rawMaterials.filter((rm) => {
-    if (!rmSearch.trim()) return true;
-    const q = rmSearch.toLowerCase();
-    return rm.itemCode.toLowerCase().includes(q) || rm.description.toLowerCase().includes(q);
-  });
+  // Step 1 of the picker: distinct active itemGroups, sorted alphabetically.
+  const rmCategoryOptions = Array.from(
+    new Set(
+      rawMaterials
+        .filter((rm) => rm.isActive)
+        .map((rm) => rm.itemGroup)
+        .filter(Boolean),
+    ),
+  ).sort();
+
+  // Step 2 of the picker: materials in the chosen itemGroup, sorted by itemCode.
+  const rmInCategory = rmCategory
+    ? rawMaterials
+        .filter((rm) => rm.isActive && rm.itemGroup === rmCategory)
+        .sort((a, b) => a.itemCode.localeCompare(b.itemCode))
+    : [];
+
+  // Cover photo for the header thumbnail. First milestone with photos wins;
+  // local stagePhotos override the persisted set so a fresh upload appears immediately.
+  const coverPhoto: string | undefined = (() => {
+    for (const m of project.milestones) {
+      const local = stagePhotos[m.stage];
+      const photos = local && local.length > 0 ? local : m.photos;
+      if (photos && photos.length > 0) return photos[0];
+    }
+    return undefined;
+  })();
 
   return (
     <div className="space-y-6">
@@ -827,8 +822,30 @@ export default function RDProjectDetailPage() {
       </div>
 
       {/* Header */}
-      <div className="flex items-start justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-4 flex-1 min-w-0">
+          {/* Cover thumbnail — first milestone photo, or placeholder slot. */}
+          {coverPhoto ? (
+            <img
+              src={coverPhoto}
+              alt={`${project.name} cover`}
+              className="h-20 w-20 rounded-lg object-cover border border-[#E2DDD8] flex-shrink-0"
+            />
+          ) : (
+            <div
+              className="h-20 w-20 rounded-lg border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex flex-col items-center justify-center text-[10px] text-gray-400 leading-tight flex-shrink-0"
+              title="Upload a milestone photo to set a cover"
+              aria-label="No cover photo yet"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-6 w-6 mb-0.5">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
+              <span className="font-medium">Cover</span>
+            </div>
+          )}
+          <div className="flex-1 min-w-0">
           <div className="flex items-center gap-3 mb-1">
             <span className="text-sm font-mono text-gray-400">{project.code}</span>
             <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
@@ -858,8 +875,9 @@ export default function RDProjectDetailPage() {
             </p>
           )}
           <p className="text-sm text-gray-500 mt-1">{project.description}</p>
+          </div>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-shrink-0">
           <Button variant="outline" onClick={openEditModal} className="gap-1.5">
             <Pencil className="h-4 w-4" /> Edit
           </Button>
@@ -981,7 +999,6 @@ export default function RDProjectDetailPage() {
                 <tr className="border-b border-[#E2DDD8]">
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Stage</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Target</th>
-                  <th className="text-left py-2 text-xs font-semibold text-gray-500">Estimated</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Actual</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Approved By</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Photos</th>
@@ -1000,50 +1017,14 @@ export default function RDProjectDetailPage() {
                           {STAGE_LABELS[m.stage]}
                         </span>
                       </td>
-                      <td className="py-2 text-xs text-gray-600">
-                        {editingMilestone === m.stage ? (
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="date"
-                              value={milestoneDate}
-                              onChange={(e) => setMilestoneDate(e.target.value)}
-                              className="rounded border border-[#E2DDD8] px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30"
-                            />
-                            <button
-                              onClick={() => handleMilestoneSave(m.stage)}
-                              disabled={milestoneSaving}
-                              className="rounded bg-[#6B5C32] px-1.5 py-0.5 text-[10px] font-medium text-white hover:bg-[#5a4d2a] disabled:opacity-50"
-                            >
-                              {milestoneSaving ? "..." : "Save"}
-                            </button>
-                            <button
-                              onClick={() => setEditingMilestone(null)}
-                              className="rounded px-1 py-0.5 text-gray-400 hover:text-gray-600"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </div>
-                        ) : (
-                          <span className="inline-flex items-center gap-1 group">
-                            {formatDate(m.targetDate)}
-                            <button
-                              onClick={() => startEditMilestone(m.stage, m.targetDate)}
-                              className="opacity-0 group-hover:opacity-100 transition-opacity rounded p-0.5 text-gray-400 hover:text-[#6B5C32]"
-                              title="Edit target date"
-                            >
-                              <Pencil className="h-3 w-3" />
-                            </button>
-                          </span>
-                        )}
-                      </td>
                       <td className="py-2 text-xs">
-                        {/* Estimated: running re-estimate distinct from immutable Target */}
+                        {/* Target: editable; persisted ISO date stripped to YYYY-MM-DD, blank when unset */}
                         <input
                           type="date"
-                          value={m.estimatedDate ?? ""}
-                          onChange={(e) => handleEstimatedDateChange(m.stage, e.target.value)}
+                          value={(m.targetDate || "").slice(0, 10)}
+                          onChange={(e) => handleTargetDateChange(m.stage, e.target.value)}
                           className="rounded border border-[#E2DDD8] px-1.5 py-0.5 text-xs focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/30 text-gray-600"
-                          title="Re-estimate completion date"
+                          title="Target completion date"
                         />
                       </td>
                       <td className="py-2 text-xs">
@@ -1753,40 +1734,41 @@ export default function RDProjectDetailPage() {
       {/* ─── Issue Material Modal ──────────────────────────────────────────── */}
       <ModalOverlay open={issuanceOpen} onClose={() => setIssuanceOpen(false)} title="Issue Raw Material" wide>
         <div className="space-y-4">
-          {/* Material search */}
-          <div ref={rmSearchRef} className="relative">
-            <label className={labelClass}>Raw Material</label>
-            <input
-              className={inputClass}
-              value={rmSearch}
-              onChange={(e) => {
-                setRmSearch(e.target.value);
-                setRmDropdownOpen(true);
-                // Clear selection if user edits
-                if (issuanceForm.materialId) {
-                  setIssuanceForm((f) => ({ ...f, materialId: "", materialCode: "", materialName: "", unit: "", unitCostRM: 0, balanceQty: 0 }));
-                }
-              }}
-              onFocus={() => setRmDropdownOpen(true)}
-              placeholder="Search by item code or description..."
-            />
-            {rmDropdownOpen && filteredRMs.length > 0 && (
-              <div className="absolute z-20 mt-1 w-full max-h-48 overflow-y-auto rounded-lg border border-[#E2DDD8] bg-white shadow-lg">
-                {filteredRMs.slice(0, 20).map((rm) => (
-                  <button
-                    key={rm.id}
-                    type="button"
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#F0ECE9] border-b border-[#E2DDD8]/30 last:border-b-0"
-                    onClick={() => selectRawMaterial(rm)}
-                  >
-                    <span className="font-mono text-xs text-gray-500">{rm.itemCode}</span>
-                    <span className="mx-2 text-gray-300">-</span>
-                    <span className="text-[#1F1D1B]">{rm.description}</span>
-                    <span className="ml-2 text-xs text-gray-400">(balance: {rm.balanceQty} {rm.baseUOM})</span>
-                  </button>
+          {/* 2-step picker: Category (itemGroup) → Specific raw material */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Category</label>
+              <select
+                className={selectClass}
+                value={rmCategory}
+                onChange={(e) => {
+                  setRmCategory(e.target.value);
+                  // Reset the specific material whenever category changes
+                  selectRawMaterialById("");
+                }}
+              >
+                <option value="">-- Select category --</option>
+                {rmCategoryOptions.map((g) => (
+                  <option key={g} value={g}>{g}</option>
                 ))}
-              </div>
-            )}
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>Raw Material</label>
+              <select
+                className={selectClass}
+                value={issuanceForm.materialId}
+                onChange={(e) => selectRawMaterialById(e.target.value)}
+                disabled={!rmCategory}
+              >
+                <option value="">{rmCategory ? "-- Select material --" : "-- Pick a category first --"}</option>
+                {rmInCategory.map((rm) => (
+                  <option key={rm.id} value={rm.id}>
+                    {rm.itemCode} — {rm.description} (balance: {rm.balanceQty} {rm.baseUOM})
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
           {issuanceForm.materialId && (

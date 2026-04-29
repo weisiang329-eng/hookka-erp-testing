@@ -803,13 +803,13 @@ export default function RDProjectDetailPage() {
   // dangling block. The card lays out the existing upload / replace / remove
   // controls in a square aspect ratio that fits the sidebar.
   const coverPhotoCard = (
-    <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden">
+    <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden mx-auto w-full max-w-[280px]">
       {project.coverPhotoUrl ? (
         <div className="relative">
           <img
             src={project.coverPhotoUrl}
             alt={`${project.name} cover`}
-            className="w-full aspect-square object-cover bg-[#FAF9F8]"
+            className="w-full aspect-square object-contain bg-[#FAF9F8]"
           />
           <div className="absolute top-2 right-2 flex items-center gap-1.5">
             <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">

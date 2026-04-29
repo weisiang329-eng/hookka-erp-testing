@@ -125,7 +125,7 @@ function DraftCard({
                 <img
                   src={cover}
                   alt={`${project.name} cover`}
-                  className="h-12 w-12 rounded-md object-cover border border-[#E2DDD8]"
+                  className="h-12 w-12 rounded-md object-contain bg-[#FAF9F8] border border-[#E2DDD8]"
                 />
               ) : (
                 <div
@@ -242,7 +242,7 @@ function ProjectCard({ project }: { project: RDProject }) {
             src={cover}
             alt={`${project.name} cover`}
             onError={() => setCoverFailed(true)}
-            className="w-full h-24 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+            className="w-full h-24 object-contain bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
         ) : (
           <div className="w-full h-24 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">
@@ -366,7 +366,7 @@ function PipelineView({ projects }: { projects: RDProject[] }) {
                       <img
                         src={cover}
                         alt=""
-                        className="w-full h-16 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+                        className="w-full h-16 object-contain bg-[#FAF9F8] border-b border-[#E2DDD8]"
                       />
                     ) : (
                       <div className="w-full h-16 flex items-center justify-center bg-[#FAF9F8] border-b border-[#E2DDD8] text-gray-300">

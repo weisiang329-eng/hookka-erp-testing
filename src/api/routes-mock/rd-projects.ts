@@ -59,6 +59,7 @@ app.post('/', async (c) => {
       sourceBrand: body.sourceBrand ?? undefined,
       sourcePurchaseRef: body.sourcePurchaseRef ?? undefined,
       sourceNotes: body.sourceNotes ?? undefined,
+      coverPhotoUrl: body.coverPhotoUrl ?? null,
       createdDate: now.toISOString(),
       status: 'ACTIVE',
     };
@@ -140,6 +141,8 @@ app.put('/:id', async (c) => {
       sourcePurchaseRef:
         body.sourcePurchaseRef !== undefined ? body.sourcePurchaseRef : existing.sourcePurchaseRef,
       sourceNotes: body.sourceNotes !== undefined ? body.sourceNotes : existing.sourceNotes,
+      coverPhotoUrl:
+        body.coverPhotoUrl !== undefined ? body.coverPhotoUrl : existing.coverPhotoUrl,
       status: body.status ?? existing.status,
     };
 

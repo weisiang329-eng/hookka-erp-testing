@@ -98,6 +98,7 @@
   "costDiffPercent": "cost_diff_percent",
   "costPriceSen": "cost_price_sen",
   "costSen": "cost_sen",
+  "coverPhotoUrl": "cover_photo_url",
   "createdAt": "created_at",
   "createdBy": "created_by",
   "createdByName": "created_by_name",

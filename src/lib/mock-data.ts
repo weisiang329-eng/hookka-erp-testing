@@ -5407,6 +5407,9 @@ export type RDProject = {
   sourceBrand?: string;
   sourcePurchaseRef?: string;
   sourceNotes?: string;
+  // Cover photo — glanceable thumbnail of what the project is about. Stored
+  // as a JPEG data URL via @/lib/image-compress.
+  coverPhotoUrl?: string | null;
   createdDate: string;
   status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
 };

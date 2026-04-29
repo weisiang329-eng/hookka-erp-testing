@@ -29,6 +29,7 @@ import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
+import { compressImage } from "@/lib/image-compress";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
 
@@ -184,6 +185,11 @@ export default function RDProjectDetailPage() {
   const [stagePhotos, setStagePhotos] = useState<Record<string, string[]>>({});
   const photoInputRef = useRef<HTMLInputElement>(null);
   const [photoUploadStage, setPhotoUploadStage] = useState<string | null>(null);
+
+  // Cover photo upload — separate from per-stage photos. One photo per project,
+  // stored as a JPEG data URL via @/lib/image-compress.
+  const coverPhotoInputRef = useRef<HTMLInputElement>(null);
+  const [coverPhotoSaving, setCoverPhotoSaving] = useState(false);
 
   const rdUrl = id ? `/api/rd-projects/${id}` : null;
   const { data: projectResp, loading, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
@@ -646,6 +652,45 @@ export default function RDProjectDetailPage() {
     }
   };
 
+  // ─── Cover Photo ────────────────────────────────────────────────────────
+  // Dedicated cover photo (separate from milestone photos[]). One image per
+  // project, stored as a JPEG data URL in rd_projects.cover_photo_url.
+
+  const handleCoverPhotoUpload = async (file: File | null) => {
+    if (!file || !project) return;
+    setCoverPhotoSaving(true);
+    try {
+      const dataUrl = await compressImage(file, { maxDim: 1280, quality: 0.85 });
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { coverPhotoUrl: dataUrl },
+      });
+      if (data.data) setProject(data.data as RDProject);
+      toast.success("Cover photo updated");
+    } catch {
+      toast.error("Failed to upload cover photo");
+    } finally {
+      setCoverPhotoSaving(false);
+    }
+  };
+
+  const handleCoverPhotoRemove = async () => {
+    if (!project) return;
+    setCoverPhotoSaving(true);
+    try {
+      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
+        method: "PUT",
+        body: { coverPhotoUrl: null },
+      });
+      if (data.data) setProject(data.data as RDProject);
+      toast.success("Cover photo removed");
+    } catch {
+      toast.error("Failed to remove cover photo");
+    } finally {
+      setCoverPhotoSaving(false);
+    }
+  };
+
   // ─── Computed Cost Summary ─────────────────────────────────────────────
 
   const materialCostSen = project
@@ -716,6 +761,65 @@ export default function RDProjectDetailPage() {
       <Button variant="ghost" onClick={() => navigate("/rd")} className="gap-2">
         <ArrowLeft className="h-4 w-4" /> Back to R&D
       </Button>
+
+      {/* Cover Photo — glanceable thumbnail of what this project is about. */}
+      <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden">
+        {project.coverPhotoUrl ? (
+          <div className="relative">
+            <img
+              src={project.coverPhotoUrl}
+              alt={`${project.name} cover`}
+              className="w-full h-[200px] object-cover bg-[#FAF9F8]"
+            />
+            <div className="absolute top-2 right-2 flex items-center gap-1.5">
+              <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">
+                <ImagePlus className="h-3.5 w-3.5" />
+                {coverPhotoSaving ? "Saving..." : "Replace"}
+                <input
+                  ref={coverPhotoInputRef}
+                  type="file"
+                  accept="image/*"
+                  disabled={coverPhotoSaving}
+                  onChange={(e) => {
+                    void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
+                    e.target.value = "";
+                  }}
+                  className="hidden"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={() => void handleCoverPhotoRemove()}
+                disabled={coverPhotoSaving}
+                className="inline-flex items-center justify-center rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white p-1.5 text-gray-500 hover:text-[#9A3A2D] shadow-sm disabled:opacity-50"
+                title="Remove cover photo"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <label className="flex flex-col items-center justify-center h-[200px] cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
+            <ImagePlus className="h-8 w-8 mb-2" />
+            <span className="text-sm font-medium">
+              {coverPhotoSaving ? "Uploading..." : "Upload cover photo"}
+            </span>
+            <span className="text-xs mt-1 text-gray-400">
+              A glanceable thumbnail of this project
+            </span>
+            <input
+              type="file"
+              accept="image/*"
+              disabled={coverPhotoSaving}
+              onChange={(e) => {
+                void handleCoverPhotoUpload(e.target.files?.[0] ?? null);
+                e.target.value = "";
+              }}
+              className="hidden"
+            />
+          </label>
+        )}
+      </div>
 
       {/* Header */}
       <div className="flex items-start justify-between gap-4">

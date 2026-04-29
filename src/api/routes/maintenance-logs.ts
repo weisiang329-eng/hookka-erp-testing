@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -59,6 +60,8 @@ app.get("/", async (c) => {
 
 // POST /api/maintenance-logs
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "maintenance-logs", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     if (!body.equipmentId || !body.date) {
@@ -125,6 +128,8 @@ app.get("/:id", async (c) => {
 
 // DELETE /api/maintenance-logs/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "maintenance-logs", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM maintenance_logs WHERE id = ?",

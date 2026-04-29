@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -69,6 +70,8 @@ app.get("/", async (c) => {
 
 // POST /api/forecasts
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "forecasts", "create");
+  if (denied) return denied;
   let body: Record<string, unknown>;
   try {
     body = (await c.req.json()) as Record<string, unknown>;

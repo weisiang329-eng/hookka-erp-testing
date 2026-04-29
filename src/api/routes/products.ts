@@ -9,6 +9,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { checkProductDeleteLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -171,6 +172,8 @@ app.get("/", async (c) => {
 
 // POST /api/products — create (rejects duplicate codes)
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "products", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code, name, category } = body;
@@ -292,6 +295,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/products/:id — update (recomputes productionTimeMinutes from dept times)
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -474,6 +479,8 @@ app.put("/:id", async (c) => {
 // active SO/CO line, active production order, or active BOM template.
 // Forces the operator to resolve those references before retiring the SKU.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "products", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM products WHERE id = ?",

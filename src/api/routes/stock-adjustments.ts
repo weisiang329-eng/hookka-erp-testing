@@ -26,6 +26,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -163,6 +164,8 @@ app.get("/", async (c) => {
 // }
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "inventory", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const type = body.type as AdjustmentType;

@@ -35,6 +35,8 @@ import {
   signedDownloadUrl,
   deleteFile,
 } from "../lib/r2-store";
+import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -169,6 +171,8 @@ function buildKey(parts: {
 // POST /api/files — multipart upload
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "files", "create");
+  if (denied) return denied;
   if (!c.env.FILES) {
     return c.json({ success: false, error: "file storage unavailable" }, 503);
   }
@@ -267,6 +271,26 @@ app.post("/", async (c) => {
         orgId,
       )
       .run();
+
+    // Sprint 2 task 5 — emit one audit_events row on every successful upload.
+    // Snapshot only metadata; bytes live in R2 and aren't audit-friendly.
+    await emitAudit(c, {
+      resource: "files",
+      resourceId: id,
+      action: "create",
+      after: {
+        id,
+        resourceType,
+        resourceId,
+        filename,
+        contentType,
+        sizeBytes: file.size,
+        r2Key,
+        uploadedBy,
+        uploadedAt,
+        orgId,
+      },
+    });
 
     return c.json({
       success: true,
@@ -416,6 +440,8 @@ app.get("/:id/stream", async (c) => {
 // DELETE /api/files/:id — removes row + R2 object
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "files", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const orgId = getOrgId(c);
   const row = await c.var.DB.prepare(
@@ -445,6 +471,14 @@ app.delete("/:id", async (c) => {
   await c.var.DB.prepare("DELETE FROM file_assets WHERE id = ? AND orgId = ?")
     .bind(id, orgId)
     .run();
+
+  // Sprint 2 task 5 — emit audit_events row on every successful delete.
+  await emitAudit(c, {
+    resource: "files",
+    resourceId: id,
+    action: "delete",
+    before: row,
+  });
 
   return c.json({ success: true });
 });

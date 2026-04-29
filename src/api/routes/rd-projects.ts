@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -153,6 +154,8 @@ app.get("/", async (c) => {
 
 // POST /api/rd-projects
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { name, productCategory } = body;
@@ -256,6 +259,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/rd-projects/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -353,6 +358,8 @@ app.put("/:id", async (c) => {
 
 // POST /api/rd-projects/:id/issue-material
 app.post("/:id/issue-material", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const project = await c.var.DB.prepare(
@@ -459,6 +466,8 @@ app.post("/:id/issue-material", async (c) => {
 
 // POST /api/rd-projects/:id/labour-log
 app.post("/:id/labour-log", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const project = await c.var.DB.prepare(
@@ -524,6 +533,8 @@ app.post("/:id/labour-log", async (c) => {
 
 // DELETE /api/rd-projects/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const [row, protos] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")

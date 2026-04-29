@@ -30,6 +30,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -397,6 +398,8 @@ app.get("/:id", async (c) => {
 //                Pick mode later via PUT /:id/mode.
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "create");
+  if (denied) return denied;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
 
@@ -736,6 +739,8 @@ app.post("/", async (c) => {
 // Status changes go through PUT /:id/status; mode changes through /:id/mode.
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -809,6 +814,8 @@ app.put("/:id", async (c) => {
 //     independently. The user just decides what to do with each return.
 // ---------------------------------------------------------------------------
 app.put("/:id/status", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const body = (await c.req.json()) as { status?: string; notes?: string };
@@ -926,6 +933,8 @@ app.put("/:id/status", async (c) => {
 // }
 // ---------------------------------------------------------------------------
 app.put("/:id/mode", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
@@ -1139,6 +1148,8 @@ app.put("/:id/mode", async (c) => {
 // }
 // ---------------------------------------------------------------------------
 app.post("/:id/returns", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const so = await c.var.DB.prepare(
@@ -1222,6 +1233,8 @@ app.post("/:id/returns", async (c) => {
 // }
 // ---------------------------------------------------------------------------
 app.put("/:id/returns/:rid", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const rid = c.req.param("rid");
   try {
@@ -1326,6 +1339,8 @@ app.put("/:id/returns/:rid", async (c) => {
 // what the operator would have produced manually — no special-case rows.
 // ---------------------------------------------------------------------------
 app.post("/:id/returns/:rid/scrap", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   const rid = c.req.param("rid");
   try {
@@ -1482,6 +1497,8 @@ app.post("/:id/returns/:rid/scrap", async (c) => {
 // restores reserved FG qty). See PUT /:id/status above.
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "service-orders", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT status FROM service_orders WHERE id = ?",

@@ -39,6 +39,11 @@ import {
   hashRecoveryCode,
 } from "../lib/totp";
 import { verifyPassword } from "../lib/password";
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+} from "../lib/rate-limit";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -101,6 +106,14 @@ app.post("/enroll", async (c) => {
     .bind(secret, JSON.stringify(hashes), userId)
     .run();
 
+  // Sprint 2 task 5 — audit TOTP enrollment kickoff. Snapshot only the fact
+  // that an enrollment started — never the secret or recovery codes.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.enroll-start",
+  });
+
   return c.json({
     success: true,
     data: {
@@ -146,6 +159,15 @@ app.post("/verify", async (c) => {
     .bind(nowIso, userId)
     .run();
 
+  // Sprint 2 task 5 — audit completed TOTP enrollment. From here on the
+  // user MUST present a TOTP code on /login.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.enroll",
+    after: { enrolledAt: nowIso },
+  });
+
   return c.json({ success: true, enrolledAt: nowIso });
 });
 
@@ -166,6 +188,13 @@ app.post("/login-verify", async (c) => {
       400,
     );
   }
+
+  // Brute-force throttle — 10 attempts / 15 min keyed on userId. The TOTP
+  // search-space is only 10^6 so a 1000-attempts/sec script would brute the
+  // window in <1s without this gate.
+  const rlKey = `totp:${userId}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
 
   const user = await c.var.DB.prepare(
     "SELECT * FROM users WHERE id = ?",
@@ -204,6 +233,13 @@ app.post("/login-verify", async (c) => {
   }
 
   if (!ok) {
+    // Sprint 2 task 5 — audit failed login-verify so brute-force runs are
+    // visible in the journal even when the rate limiter caps them.
+    await emitAudit(c, {
+      resource: "auth-totp",
+      resourceId: userId,
+      action: "totp.login-verify.fail",
+    });
     return c.json({ success: false, error: "Invalid credentials" }, 401);
   }
 
@@ -221,6 +257,18 @@ app.post("/login-verify", async (c) => {
       .prepare("UPDATE users SET lastLoginAt = ? WHERE id = ?")
       .bind(now.toISOString(), userId),
   ]);
+
+  // Reset the rate-limit counter on success.
+  c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+
+  // Sprint 2 task 5 — audit successful login-verify. Pairs with the .fail
+  // entry above for clean brute-force timeline reconstruction.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.login-verify",
+    after: { role: user.role },
+  });
 
   return c.json({
     success: true,
@@ -269,6 +317,15 @@ app.post("/disable", async (c) => {
   )
     .bind(userId)
     .run();
+
+  // Sprint 2 task 5 — audit TOTP disable. Compliance-critical: the journal
+  // must show every step from a 2FA-protected account back to a 1-factor
+  // account, with the actor.
+  await emitAudit(c, {
+    resource: "auth-totp",
+    resourceId: userId,
+    action: "totp.disable",
+  });
 
   return c.json({ success: true });
 });

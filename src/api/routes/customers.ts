@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -87,6 +88,8 @@ app.get("/", async (c) => {
 
 // POST /api/customers — create
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "customers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code, name } = body;
@@ -156,6 +159,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/customers/:id — update
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -229,6 +234,8 @@ app.put("/:id", async (c) => {
 // any non-cancelled SO/CO/DO/CN/Invoice. Returns 409 with a hint listing
 // the blocking documents so the operator can clean those up first.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM customers WHERE id = ?",

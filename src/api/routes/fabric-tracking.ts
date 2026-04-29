@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -101,6 +102,8 @@ function genTrackingId(): string {
 // model the canonical way to create is via POST /api/raw-materials, but this
 // endpoint covers direct edits from the Fabric Tracking tab.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "fabric-tracking", "create");
+  if (denied) return denied;
   let body: FabricTrackingBody;
   try {
     body = (await c.req.json()) as FabricTrackingBody;
@@ -170,6 +173,8 @@ app.post("/", async (c) => {
 
 // DELETE /api/fabric-tracking/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "fabric-tracking", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM fabric_trackings WHERE id = ?",
@@ -191,6 +196,8 @@ app.delete("/:id", async (c) => {
 // PUT /api/fabric-tracking/:id — partial update (priceTier, price, soh,
 // reorderPoint). Mirrors the in-memory "only these four fields" behavior.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "fabric-tracking", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM fabric_trackings WHERE id = ?",

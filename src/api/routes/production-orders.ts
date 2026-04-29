@@ -29,6 +29,7 @@ import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -1878,7 +1879,38 @@ async function applyPoUpdate(
       try {
         await db.batch(stmts);
       } catch (err) {
-        console.error("[jc-events] append failed", err);
+        // Sprint 2 task 6 — instead of silently losing the audit batch,
+        // dead-letter the original payload so a replay sweeper can pick
+        // it up once the underlying issue is fixed (schema drift, D1
+        // transient, etc.). console.error is kept so wrangler tail still
+        // surfaces the issue in real time.
+        console.error("[jc-events] append failed — DLQ-ing", err);
+        try {
+          const dlqId = `dlq_${crypto.randomUUID().slice(0, 12)}`;
+          const errMsg =
+            (err instanceof Error ? err.message : String(err)).slice(0, 1024);
+          await db
+            .prepare(
+              `INSERT INTO audit_dlq
+                 (id, original_payload, error_message, error_kind, attempted_at)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              dlqId,
+              JSON.stringify(events),
+              errMsg,
+              "job_card_events.batch_failed",
+              new Date().toISOString(),
+            )
+            .run();
+        } catch (dlqErr) {
+          // If even the DLQ write fails, we've exhausted graceful options.
+          // Log loudly so ops can pull the values out of wrangler tail.
+          console.error(
+            "[jc-events] DLQ write also failed — events dropped on the floor",
+            { events, originalErr: err, dlqErr },
+          );
+        }
       }
     }
 
@@ -2279,6 +2311,8 @@ app.get("/historical-fgs", async (c) => {
 // and creates a new PO linked to it.
 // ---------------------------------------------------------------------------
 app.post("/stock", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const body = await c.req.json().catch(() => ({}));
   const type = body?.type as "WIP" | "FG" | undefined;
@@ -2588,6 +2622,8 @@ app.post("/stock", async (c) => {
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const scannedId = c.req.param("id");
   const scannedPo = await db
@@ -3145,11 +3181,19 @@ app.get("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // PUT /api/production-orders/:id
 // ---------------------------------------------------------------------------
-app.put("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 // ---------------------------------------------------------------------------
 // PATCH /api/production-orders/:id — alias for PUT
 // ---------------------------------------------------------------------------
-app.patch("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.patch("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 export default app;

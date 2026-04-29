@@ -345,6 +345,33 @@ app.put("/:id", async (c) => {
 
     const res = await updateConsignmentNoteById(c.var.DB, id, body);
     if (!res.ok) {
+      // Mirror consignment-notes.ts error mapping (gaps 5 + latent gap 3,
+      // 2026-04-29). The helper now returns typed errors for invalid
+      // transitions and items-lock past ACTIVE; surface them as 400/403
+      // here too instead of a misleading 404.
+      if (res.reason === "invalid_transition") {
+        return c.json(
+          {
+            success: false,
+            error: `Invalid status transition: ${res.from ?? "(none)"} → ${res.to}`,
+            reason: "invalid_transition",
+            from: res.from,
+            to: res.to,
+          },
+          400,
+        );
+      }
+      if (res.reason === "items_locked") {
+        return c.json(
+          {
+            success: false,
+            error: `Cannot edit items — consignment is in status ${res.currentStatus ?? "(unknown)"} (items only editable while ACTIVE)`,
+            reason: "items_locked",
+            currentStatus: res.currentStatus,
+          },
+          403,
+        );
+      }
       return c.json({ success: false, error: "Consignment not found" }, 404);
     }
     return c.json({

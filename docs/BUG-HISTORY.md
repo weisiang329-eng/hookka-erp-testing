@@ -20,7 +20,7 @@ Entries themselves stay newest-first.
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
 - `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
 - `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
-- `bom` (16) — [BUG-2026-04-29-006](#bug-2026-04-29-006--production-times-edits-silently-lost-after-close-or-refresh)
+- `bom` (17) — [BUG-2026-04-29-007](#bug-2026-04-29-007--kv-config-saves-still-lossy-on-transient-failure-401-add-resilient-sync-layer)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
 - `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
 - `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
@@ -31,6 +31,77 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-04-29-007 — kv-config saves still lossy on transient failure / 401; add resilient sync layer
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** after BUG-2026-04-29-006 shipped honest
+"Saved" toasts, the user pushed back: "If it keeps telling me failed
+won't that be annoying? Can we avoid it?". The honest-toast fix flagged
+failures correctly but didn't *prevent* them — every transient network
+blip / 5xx / 429 would still surface as a failure toast and lose the
+user's edit until they manually retried.
+
+**Root cause:** `src/lib/kv-config.ts` had no retry, no persistent
+backup, and no sync-state machine. A single PUT failure (whether HTTP
+500, 401-then-token-refresh, or a packet drop) became a permanent loss
+unless the user noticed the toast and remembered exactly what they had
+typed. The Production Times matrix is the worst case — 8 depts × 7
+categories = 56 cells of state held only in React memory.
+
+**Fix:** added a resilience layer to `src/lib/kv-config.ts`:
+
+1. **localStorage backup** — every `setKvConfig` synchronously writes
+   `kv-config-pending:<key>` BEFORE scheduling the PUT. The backup is
+   cleared once the server confirms. Survives tab close, browser
+   crash, network outage, and 401s.
+2. **Auto-retry with backoff** — `flushSave` classifies the outcome:
+   `ok` (clear backup, idle), `transient` (5xx / 408 / 425 / 429 /
+   network) → retry at 1s/2s/4s before giving up, `permanent` (4xx
+   other than auth) → terminal error, `auth` (401 / 403) → terminal
+   `auth-error` state for re-login UX.
+3. **Sync-state machine** — five states (`idle / syncing / retrying /
+   error / auth-error`) with `subscribeKvConfigSyncState`. UIs render
+   a passive dot indicator instead of toast spam.
+4. **Hydrate-time replay** — `fetchKvConfig` checks for a pending
+   localStorage backup; if found, hydrates from local first AND fires
+   a flush. Module-level startup hook (deferred to next tick) scans all
+   `kv-config-pending:*` keys and replays them on app load.
+5. **`ProductionTimesDialog` rewired** — drops the await-flush-then-toast
+   pattern in favour of subscribing to syncState. The Save button
+   disables during `syncing` / `retrying` and shows "Saving…". Terminal
+   `error` state shows "Saved locally — will retry on next page load"
+   instead of the alarming "Failed to save". `auth-error` shows
+   "Please re-login — change is saved locally and will retry".
+6. **Footer indicator** — new `<KvSyncIndicator>` component on the
+   ProductionTimesDialog footer renders the sync state as a coloured
+   dot + label.
+
+**Net behaviour:** edits are effectively never lost. The user's only
+visible feedback during a transient network problem is a yellow
+"Retrying…" indicator that turns green once the data lands. The infra
+benefits every kv-config consumer — `/products` Maintenance tab, future
+dialogs that adopt the same key — for free.
+
+**Verification:**
+1. Edit Production Times, click Save with normal network — indicator
+   goes yellow → green within ~1s, "Saved" toast.
+2. Throttle to offline in DevTools, click Save — indicator stays
+   yellow ("Retrying…"). Re-enable network — indicator turns green.
+3. Edit + close tab inside the 500ms debounce window — open a new tab,
+   navigate to BOM → Production Times. Values persist (replayed from
+   localStorage at module init).
+4. Force a 500 response in the worker — retries fire 3x, then state
+   goes "error" with "Saved locally" indicator. Reload — values still
+   present (localStorage backup), state retries on hydrate.
+
+**Related:** [BUG-2026-04-29-006](#bug-2026-04-29-006--production-times-edits-silently-lost-after-close-or-refresh)
+(direct predecessor; same data path, single-attempt honest-toast fix);
+commit `56dad2a` (the original `flushKvConfig` infra).
 
 ---
 

@@ -31,6 +31,11 @@ import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
+// Used by the regen-job-cards endpoints below. Lives in sales-orders.ts
+// because it's the canonical "BOM template -> job_cards" walker that the
+// SO-confirm path also calls; the force=true mode is the only thing
+// production-orders.ts itself layers on top.
+import { backfillJobCardsForPo } from "./sales-orders";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -2737,6 +2742,120 @@ app.post("/stock", async (c) => {
 
   const fresh = await fetchPO(db, newPoId);
   return c.json({ success: true, data: fresh });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/production-orders/regen-job-cards-bulk
+//
+// Cursor-paged bulk regen: walks every production_orders row (ORDER BY id
+// ASC, after `?cursor=<lastPoId>`), wipes its job_cards, and rebuilds them
+// from the current BOM template + Production Time master. Used after the
+// user edits the BOM/PT master and wants every PO's snapshotted JCs
+// refreshed in one shot. Companion to the BOM-side
+// /api/bom/resync-job-card-times endpoint (commit 05f2523), but heavier
+// because each PO regen runs the full BOM walker — hence the smaller
+// default page size (50) and lower max (200).
+//
+// Status filter: NONE. The user confirmed (2026-04-29) that no production
+// has actually started on any of these POs (no scan history, no completion
+// data), so we regenerate ACROSS ALL STATUSES — including CANCELLED. We
+// considered skipping CANCELLED defensively but the user's instruction was
+// "regenerate everything regardless of status"; honouring that. If a future
+// caller needs status filtering, add `?status=` plumbing then.
+//
+// Per-PO failures are caught and surfaced in `errors[]`; we never roll
+// back successful POs in the same batch (each PO is its own atomic
+// db.batch()). One bad BOM template will not block the rest of the run.
+//
+// Registered BEFORE /:id and /:id/* routes so Hono's literal-vs-param
+// routing picks the right handler.
+// ---------------------------------------------------------------------------
+app.post("/regen-job-cards-bulk", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+
+  const cursor = c.req.query("cursor") || null;
+  const rawLimit = Number(c.req.query("limit") ?? 50);
+  const limit = Math.min(Math.max(Number.isFinite(rawLimit) ? rawLimit : 50, 10), 200);
+
+  // limit+1 trick — if we get more than `limit` rows we know there's a next page.
+  const cursorClause = cursor ? "WHERE id > ?" : "";
+  const sql = `SELECT id FROM production_orders ${cursorClause} ORDER BY id ASC LIMIT ?`;
+  const sel = cursor
+    ? await db.prepare(sql).bind(cursor, limit + 1).all<{ id: string }>()
+    : await db.prepare(sql).bind(limit + 1).all<{ id: string }>();
+  const allRows = sel.results ?? [];
+  const hasMore = allRows.length > limit;
+  if (hasMore) allRows.pop();
+  const ids = allRows.map((r) => r.id);
+
+  let processed = 0;
+  let totalInserted = 0;
+  const errors: Array<{ poId: string; message: string }> = [];
+  const results: Array<{ poId: string; inserted: number; currentDept: string | null }> = [];
+
+  for (const poId of ids) {
+    try {
+      const { statements, jcCount, currentDept } = await backfillJobCardsForPo(db, poId, {
+        force: true,
+      });
+      if (statements.length > 0) {
+        await db.batch(statements);
+      }
+      processed++;
+      totalInserted += jcCount;
+      results.push({ poId, inserted: jcCount, currentDept });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ poId, message });
+    }
+  }
+
+  const lastScannedId = ids.length > 0 ? ids[ids.length - 1] : null;
+  const nextCursor = hasMore ? lastScannedId : null;
+
+  return c.json({
+    success: true,
+    processed,
+    batchSize: ids.length,
+    totalInserted,
+    cursor: { hasMore, nextCursor, limit },
+    errors,
+    results,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/production-orders/:poId/regen-job-cards
+//
+// Single-PO regen: wipes this PO's job_cards and rebuilds them from the
+// current BOM template + Production Time master. Force-mode wrapper around
+// backfillJobCardsForPo. Used as a per-PO escape hatch / for spot-fixing
+// one PO without running the bulk endpoint.
+// ---------------------------------------------------------------------------
+app.post("/:poId/regen-job-cards", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const poId = c.req.param("poId");
+
+  const po = await db
+    .prepare("SELECT id FROM production_orders WHERE id = ?")
+    .bind(poId)
+    .first<{ id: string }>();
+  if (!po) {
+    return c.json({ success: false, error: "Production order not found" }, 404);
+  }
+
+  const { statements, jcCount, currentDept } = await backfillJobCardsForPo(db, poId, {
+    force: true,
+  });
+  if (statements.length > 0) {
+    await db.batch(statements);
+  }
+
+  return c.json({ success: true, poId, inserted: jcCount, currentDept });
 });
 
 // ---------------------------------------------------------------------------

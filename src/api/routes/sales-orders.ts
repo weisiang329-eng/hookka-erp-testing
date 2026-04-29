@@ -367,23 +367,38 @@ export async function createProductionOrdersForSO(
 // production_orders row that has zero job_cards. Used by the one-shot
 // admin backfill endpoint below. Idempotent: checks for existing job_cards
 // and returns [] if any are present.
+//
+// opts.force = true (NEW): blow away any existing job_cards for the PO and
+// regenerate them from the current BOM template + Production Time master.
+// Used by the bulk regen endpoint in production-orders.ts (added 2026-04-29
+// so the user can wipe the snapshotted JC values across every PO after
+// editing the BOM/PT master). The DELETE statement is prepended to the
+// returned `statements` array so the caller's `db.batch([...])` runs
+// DELETE + re-insert atomically — no window where the PO is JC-less.
+// User confirmed there is NO scan history / completion data on the existing
+// job_cards (small shop, freshly-spun-up data set), so the wipe is lossless.
 // ---------------------------------------------------------------------------
-async function backfillJobCardsForPo(
+export async function backfillJobCardsForPo(
   db: D1Database,
   poId: string,
+  opts?: { force?: boolean },
 ): Promise<{ statements: D1PreparedStatement[]; jcCount: number; currentDept: string | null }> {
   await ensureLeadTimesSeeded(db);
   await ensureHookkaDDBufferSeeded(db);
   const leadTimes = await loadLeadTimes(db);
   const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
-  // Skip if any job_cards already exist.
-  const existingJc = await db
-    .prepare("SELECT id FROM job_cards WHERE productionOrderId = ? LIMIT 1")
-    .bind(poId)
-    .first<{ id: string }>();
-  if (existingJc) {
-    return { statements: [], jcCount: 0, currentDept: null };
+  const force = opts?.force === true;
+
+  // Skip if any job_cards already exist (unless force-mode says wipe-and-redo).
+  if (!force) {
+    const existingJc = await db
+      .prepare("SELECT id FROM job_cards WHERE productionOrderId = ? LIMIT 1")
+      .bind(poId)
+      .first<{ id: string }>();
+    if (existingJc) {
+      return { statements: [], jcCount: 0, currentDept: null };
+    }
   }
 
   const po = await db
@@ -464,6 +479,14 @@ async function backfillJobCardsForPo(
   );
 
   const statements: D1PreparedStatement[] = [];
+  // Force-mode: prepend a DELETE so any pre-existing job_cards for this PO
+  // are wiped in the same atomic batch as the re-insert. Caller passes the
+  // returned `statements` straight into db.batch([...]).
+  if (force) {
+    statements.push(
+      db.prepare("DELETE FROM job_cards WHERE productionOrderId = ?").bind(poId),
+    );
+  }
   let currentDept = po.currentDepartment ?? "FAB_CUT";
   let currentDeptIdx = 999;
   let jcCount = 0;

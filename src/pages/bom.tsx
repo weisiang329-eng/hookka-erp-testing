@@ -4657,11 +4657,22 @@ type MatRow = {
   toDelete: boolean;
 };
 
-function buildMatRows(templates: BOMTemplate[]): MatRow[] {
+function buildMatRows(
+  templates: BOMTemplate[],
+  products: Product[] = [],
+): MatRow[] {
   const rows: MatRow[] = [];
+  // Mirror DeptPivot's wipLabel resolution path so {DIVAN_HEIGHT}/{SIZE}/etc.
+  // tokens render as "8" Divan-6FT" instead of the literal template (BUG
+  // 2026-04-29 — user reported "WIP names are different" because the raw
+  // wipCode template was leaking through to the UI). Same `buildSampleVariantCtx`
+  // helper used by `buildDeptPivotRows` so the two dialogs read identically.
+  const productByCode = new Map(products.map((p) => [p.code, p]));
   function walk(t: BOMTemplate, w: WIPComponent, path: number[]) {
-    const wipLabel =
+    const rawLabel =
       w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
+    const ctx = buildSampleVariantCtx(productByCode.get(t.productCode), t);
+    const wipLabel = resolveWipTokens(rawLabel, ctx) || rawLabel;
     const deptCodes = Array.from(
       new Set(
         (w.processes || [])
@@ -4749,12 +4760,16 @@ function BatchEditMaterialsDialog({
   onClose,
   templates,
   rawMaterials,
+  products,
   onTemplatesUpdated,
 }: {
   open: boolean;
   onClose: () => void;
   templates: BOMTemplate[];
   rawMaterials: RawMaterialOption[];
+  // Threaded through so buildMatRows can resolve {DIVAN_HEIGHT}/{SIZE}
+  // tokens via buildSampleVariantCtx, same path DeptPivot uses.
+  products: Product[];
   onTemplatesUpdated: (updated: BOMTemplate[]) => void;
 }) {
   const { toast } = useToast();
@@ -4766,7 +4781,12 @@ function BatchEditMaterialsDialog({
   const searchTextDeferred = useDeferredValue(searchText);
   const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
   const [filterWipType, setFilterWipType] = useState<string>("");
-  const [filterDept, setFilterDept] = useState<string>("");
+  // Default Department to the first one (Fab Cut) so the dialog opens
+  // already scoped — same UX as DeptPivot. Otherwise an empty default
+  // dumps all 3563 rows on the user with no useful starting point.
+  const [filterDept, setFilterDept] = useState<string>(DEPT_ORDER[0]);
+  // Model filter (productCode dropdown), mirrors DeptPivot's modelFilter.
+  const [filterModel, setFilterModel] = useState<string>("");
   // Multi-select: when empty, no material filter; otherwise rows whose
   // material `code` is in the set are kept.
   const [filterMaterials, setFilterMaterials] = useState<Set<string>>(new Set());
@@ -4781,18 +4801,22 @@ function BatchEditMaterialsDialog({
   /* eslint-disable react-hooks/set-state-in-effect -- reset dialog state on each open */
   useEffect(() => {
     if (!open) return;
-    setRows(buildMatRows(templates));
+    setRows(buildMatRows(templates, products));
     setSelectedKeys(new Set());
     setSearchText("");
     setFilterCategory("ALL");
     setFilterWipType("");
-    setFilterDept("");
+    // Default Department to first one — same as the initial useState. Reset
+    // here on every open so re-opening doesn't carry the previous session's
+    // selection.
+    setFilterDept(DEPT_ORDER[0]);
+    setFilterModel("");
     setFilterMaterials(new Set());
     setMaterialFilterOpen(false);
     setBulkMaterial(null);
     setSaving(false);
     newRowCounterRef.current = 0;
-  }, [open, templates]);
+  }, [open, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const dirtyCount = useMemo(() => rows.filter(isRowDirty).length, [rows]);
@@ -4839,6 +4863,7 @@ function BatchEditMaterialsDialog({
       if (filterCategory !== "ALL" && r.bomCategory !== filterCategory) return false;
       if (filterWipType && r.wipType !== filterWipType) return false;
       if (filterDept && !r.deptCodes.includes(filterDept)) return false;
+      if (filterModel && r.productCode !== filterModel) return false;
       // Material multi-select: when set, drop rows that don't match. Also
       // drop placeholder rows (they have no material code to compare —
       // showing them when filtering for specific materials would be noise).
@@ -4860,7 +4885,15 @@ function BatchEditMaterialsDialog({
       }
       return true;
     });
-  }, [rows, filterCategory, filterWipType, filterDept, filterMaterials, searchTextDeferred]);
+  }, [rows, filterCategory, filterWipType, filterDept, filterModel, filterMaterials, searchTextDeferred]);
+
+  // Distinct model dropdown options — derived from full row set so the
+  // option list is stable when other filters narrow the visible rows.
+  const modelOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) if (r.productCode) set.add(r.productCode);
+    return Array.from(set).sort();
+  }, [rows]);
 
   const allFilteredSelected =
     filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
@@ -5081,7 +5114,7 @@ function BatchEditMaterialsDialog({
   }
 
   function discardChanges() {
-    setRows(buildMatRows(templates));
+    setRows(buildMatRows(templates, products));
     setSelectedKeys(new Set());
     toast.info("Discarded all changes.");
   }
@@ -5259,7 +5292,7 @@ function BatchEditMaterialsDialog({
               <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
               Filter
             </div>
-            <div className="grid grid-cols-5 gap-2">
+            <div className="grid grid-cols-6 gap-2">
               <input
                 type="text"
                 placeholder="Search BOM / material..."
@@ -5295,13 +5328,26 @@ function BatchEditMaterialsDialog({
                 value={filterDept}
                 onChange={(e) => setFilterDept(e.target.value)}
                 className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
-                title="Show only WIP steps with a process in this department"
+                title="Department is required — pick one to scope the rows. Mirrors DeptPivot's UX."
               >
-                <option value="">All Departments</option>
+                {/* No "All Departments" option per user 2026-04-29 — opening
+                    the dialog with no scope dumped 3000+ rows and was unusable.
+                    The dialog defaults to DEPT_ORDER[0] (Fab Cut). */}
                 {deptCodeOptions.map((d) => (
                   <option key={d} value={d}>
                     {DEPT_LABELS[d] || d}
                   </option>
+                ))}
+              </select>
+              <select
+                value={filterModel}
+                onChange={(e) => setFilterModel(e.target.value)}
+                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                title="Filter rows to a single Model (productCode)."
+              >
+                <option value="">All Models</option>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>{m}</option>
                 ))}
               </select>
               {/* Multi-select material filter — opens a checkbox popover. */}
@@ -5383,14 +5429,17 @@ function BatchEditMaterialsDialog({
             {(searchText ||
               filterCategory !== "ALL" ||
               filterWipType ||
-              filterDept ||
+              filterDept !== DEPT_ORDER[0] ||
+              filterModel ||
               filterMaterials.size > 0) && (
               <button
                 onClick={() => {
                   setSearchText("");
                   setFilterCategory("ALL");
                   setFilterWipType("");
-                  setFilterDept("");
+                  // Department is required — reset to default, NOT empty.
+                  setFilterDept(DEPT_ORDER[0]);
+                  setFilterModel("");
                   setFilterMaterials(new Set());
                 }}
                 className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
@@ -6649,6 +6698,7 @@ export default function BOMManagementPage() {
         onClose={() => setShowBatchEditMat(false)}
         templates={templates}
         rawMaterials={rawMaterials}
+        products={products}
         onTemplatesUpdated={(updated) => setTemplates(updated)}
       />
       <DeptPivotCategoryDialog

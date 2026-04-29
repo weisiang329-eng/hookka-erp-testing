@@ -5930,13 +5930,16 @@ function DeptPivotCategoryDialog({
     return canonical !== r.minutes;
   }
 
-  const staleCount = useMemo(
-    () => filteredRows.filter(isRowStale).length,
-    // Re-evaluate when the filter changes; deptCode is implicit via the
-    // closure but rows + filtered set already depend on it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [filteredRows, deptCode],
-  );
+  // Computed inline (NOT memoized) on purpose. `getProductionMinutes`
+  // reads from the variants-config singleton cache which can be
+  // mutated out-of-band (Production Times dialog patches it without
+  // a parent re-render), so a useMemo with `[filteredRows, deptCode]`
+  // deps would silently keep showing stale counts after the user
+  // re-opened/edited Production Times. The 533-row scan is sub-ms; the
+  // memo wasn't earning its complexity.
+  // BUG-2026-04-29: banner showed "8 stale" while Resync touched 0
+  // because the memo had cached an earlier productionTimes snapshot.
+  const staleCount = filteredRows.filter(isRowStale).length;
 
   // Resync sets r.minutes to the current matrix value for every stale
   // row in the FILTERED set. This makes them dirty (because

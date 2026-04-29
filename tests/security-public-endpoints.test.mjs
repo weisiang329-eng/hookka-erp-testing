@@ -102,7 +102,9 @@ test("invite preflight prefix is still public", () => {
 // heartbeat — leaks NOW() + table count, kept public so uptime monitors don't
 // need a Bearer token), /api/internal/refresh-mvs (cron, gated by
 // CRON_SECRET), /api/internal/process-email-outbox (Sprint 4 cron, gated by
-// CRON_SECRET — drains outbox_emails via Resend), /api/qc-pending/trigger
+// CRON_SECRET — drains outbox_emails via Resend),
+// /api/internal/replay-audit-dlq (P2 cron, gated by CRON_SECRET — drains
+// failed audit_events / job_card_events batches), /api/qc-pending/trigger
 // (cron, gated by CRON_SECRET).
 //
 // The catch-all `app.all("/api/*", ...)` at the bottom of worker.ts is
@@ -114,6 +116,7 @@ const EXPECTED_PRE_AUTH_ROUTES = [
   "GET /api/pg-ping",
   "POST /api/internal/refresh-mvs",
   "POST /api/internal/process-email-outbox",
+  "POST /api/internal/replay-audit-dlq",
   "POST /api/qc-pending/trigger",
 ];
 

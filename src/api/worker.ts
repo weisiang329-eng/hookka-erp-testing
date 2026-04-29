@@ -304,6 +304,40 @@ app.post("/api/internal/process-email-outbox", async (c) => {
   }
 });
 
+// P2 follow-up — audit_dlq replay sweeper. Sprint 2 added the audit_dlq
+// table + writer in production-orders.ts (job_card_events batch failures
+// land there), but rows accumulated forever with no replay path. This
+// endpoint drains pending rows by replaying them against the original
+// write target — same CRON_SECRET pattern as the workflows above. The
+// cron at .github/workflows/replay-audit-dlq.yml hits this every 30
+// minutes; see src/api/lib/audit-replay.ts for the dispatch logic.
+app.post("/api/internal/replay-audit-dlq", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[replay-audit-dlq] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    const { replayAuditDlq } = await import("./lib/audit-replay");
+    // Optional ?limit=N override; default 100 keeps a single Workers
+    // invocation well under any reasonable subrequest budget.
+    const url = new URL(c.req.url);
+    const limitRaw = url.searchParams.get("limit");
+    const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 100;
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 100;
+    const result = await replayAuditDlq(c.var.DB, safeLimit);
+    return c.json({ ok: true, elapsedMs: Date.now() - t0, ...result });
+  } catch (e) {
+    console.error("[replay-audit-dlq] error:", e);
+    return c.json({ ok: false, error: "replay failed" }, 500);
+  }
+});
+
 /**
  * Constant-time string equality.  Hashes both sides before comparing so the
  * comparison time depends only on the hash output length, never on the

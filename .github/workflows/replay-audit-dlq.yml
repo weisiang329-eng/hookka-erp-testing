@@ -1,0 +1,59 @@
+name: Replay audit_dlq
+
+# Hits POST /api/internal/replay-audit-dlq every 30 minutes so failed
+# audit writes (job_card_events batches that died on a transient D1 /
+# schema-drift error and got dead-lettered into audit_dlq) get replayed
+# against their original target. Without this, the DLQ accumulates
+# forever and the audit log silently stays incomplete.
+#
+# The endpoint is idempotent (replayed rows get replayed_at set; the
+# pending-row partial index excludes them on subsequent ticks) and
+# protected by the same CRON_SECRET + x-cron-secret header pattern as
+# refresh-mvs.yml and process-email-outbox.yml. The Pages worker rejects
+# with 503 if CRON_SECRET is missing on the server side, and 403 if the
+# header doesn't match.
+#
+# Bootstrap: same as the sibling crons — set CRON_SECRET as both a repo
+# secret AND a Cloudflare Pages env var, then re-deploy Pages.
+on:
+  schedule:
+    # Every 30 minutes. The DLQ should be near-empty most of the time;
+    # 30 min is the recovery window we accept for a transient outage.
+    - cron: '*/30 * * * *'
+  # Manual trigger for ops to force a drain (e.g. after fixing a schema
+  # drift that caused a backlog).
+  workflow_dispatch:
+
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST /api/internal/replay-audit-dlq
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then
+            echo "::error::CRON_SECRET repo secret is empty. See refresh-mvs.yml header for setup."
+            exit 1
+          fi
+
+          # 60s timeout — replay of 100 rows is one D1 batch + one UPDATE
+          # per row, comfortably under that. Cold start can stretch this.
+          response=$(curl --silent --show-error --write-out '\nHTTP_STATUS:%{http_code}' \
+            --max-time 60 \
+            --request POST \
+            --header "Content-Type: application/json" \
+            --header "x-cron-secret: $CRON_SECRET" \
+            --data '{}' \
+            'https://hookka-erp-testing.pages.dev/api/internal/replay-audit-dlq')
+
+          status=$(echo "$response" | tail -n1 | sed 's/HTTP_STATUS://')
+          body=$(echo "$response" | sed '$d')
+
+          echo "Status: $status"
+          echo "Body: $body"
+
+          if [ "$status" -ne 200 ]; then
+            echo "::error::replay-audit-dlq failed with HTTP $status"
+            exit 1
+          fi

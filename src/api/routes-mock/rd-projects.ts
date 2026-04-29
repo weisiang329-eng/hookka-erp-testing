@@ -55,6 +55,10 @@ app.post('/', async (c) => {
       prototypes: [],
       materialIssuances: [],
       labourLogs: [],
+      sourceProductName: body.sourceProductName ?? undefined,
+      sourceBrand: body.sourceBrand ?? undefined,
+      sourcePurchaseRef: body.sourcePurchaseRef ?? undefined,
+      sourceNotes: body.sourceNotes ?? undefined,
       createdDate: now.toISOString(),
       status: 'ACTIVE',
     };
@@ -84,6 +88,30 @@ app.put('/:id', async (c) => {
     const body = await c.req.json();
     const existing = rdProjects[idx];
 
+    // Reverse-cascade: detect deleted issuances and credit warehouse stock
+    // in the mock raw_materials array. Mirrors src/api/routes/rd-projects.ts.
+    if (Array.isArray(body.materialIssuances) && existing.materialIssuances) {
+      const nextIds = new Set<string>(
+        body.materialIssuances
+          .map((i: { id?: string }) => i.id)
+          .filter((x: string | undefined): x is string => typeof x === "string"),
+      );
+      for (const prev of existing.materialIssuances) {
+        if (!nextIds.has(prev.id)) {
+          const rm = rawMaterials.find((r) => r.id === prev.materialId);
+          if (rm) rm.balanceQty += prev.qty;
+        }
+      }
+    }
+
+    const computedActualCost = Array.isArray(body.materialIssuances)
+      ? body.materialIssuances.reduce(
+          (sum: number, i: { totalCostSen?: number }) =>
+            sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
+          0,
+        )
+      : undefined;
+
     const updated = {
       ...existing,
       name: body.name ?? existing.name,
@@ -96,11 +124,22 @@ app.put('/:id', async (c) => {
       assignedTeam: body.assignedTeam ?? existing.assignedTeam,
       milestones: body.milestones ?? existing.milestones,
       totalBudget: body.totalBudget ?? existing.totalBudget,
-      actualCost: body.actualCost ?? existing.actualCost,
+      actualCost:
+        body.actualCost !== undefined
+          ? body.actualCost
+          : computedActualCost !== undefined
+          ? computedActualCost
+          : existing.actualCost,
       prototypes: body.prototypes ?? existing.prototypes,
       productionBOM: body.productionBOM !== undefined ? body.productionBOM : existing.productionBOM,
       materialIssuances: body.materialIssuances !== undefined ? body.materialIssuances : existing.materialIssuances,
       labourLogs: body.labourLogs !== undefined ? body.labourLogs : existing.labourLogs,
+      sourceProductName:
+        body.sourceProductName !== undefined ? body.sourceProductName : existing.sourceProductName,
+      sourceBrand: body.sourceBrand !== undefined ? body.sourceBrand : existing.sourceBrand,
+      sourcePurchaseRef:
+        body.sourcePurchaseRef !== undefined ? body.sourcePurchaseRef : existing.sourcePurchaseRef,
+      sourceNotes: body.sourceNotes !== undefined ? body.sourceNotes : existing.sourceNotes,
       status: body.status ?? existing.status,
     };
 

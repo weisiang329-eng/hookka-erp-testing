@@ -13,6 +13,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -361,8 +363,10 @@ app.get("/", async (c) => {
   const status = c.req.query("status");
   const serial = c.req.query("serial");
 
-  const clauses: string[] = [];
-  const binds: unknown[] = [];
+  // Sprint 4: org scope is the leading WHERE predicate.
+  const orgId = getOrgId(c);
+  const clauses: string[] = ["orgId = ?"];
+  const binds: unknown[] = [orgId];
   if (poId) {
     clauses.push("poId = ?");
     binds.push(poId);
@@ -379,7 +383,7 @@ app.get("/", async (c) => {
     clauses.push("(unitSerial = ? OR shortCode = ?)");
     binds.push(serial, serial);
   }
-  const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+  const where = `WHERE ${clauses.join(" AND ")}`;
   const sql = `SELECT * FROM fg_units ${where} ORDER BY id ASC`;
 
   const res = await c.var.DB.prepare(sql)
@@ -417,6 +421,8 @@ app.get("/:id", async (c) => {
 // untouched if already generated; otherwise creates one FGUnit per
 // (unit, piece) combination derived from PO quantity and product pieces.
 app.post("/generate/:poId", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "create");
+  if (denied) return denied;
   const poId = c.req.param("poId");
   const result = await generateFGUnitsForPO(c.var.DB, poId);
   if (result.status === "not-found") {
@@ -438,6 +444,8 @@ app.post("/generate/:poId", async (c) => {
 // Body: { serial: string, action: "PACK"|"LOAD"|"DELIVER"|"RETURN", workerId?: string }
 type ScanAction = "PACK" | "LOAD" | "DELIVER" | "RETURN";
 app.post("/scan", async (c) => {
+  const denied = await requirePermission(c, "fg-units", "create");
+  if (denied) return denied;
   const body = await c.req.json().catch(() => ({}));
   const { serial, action, workerId } = body as {
     serial?: string;

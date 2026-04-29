@@ -53,9 +53,14 @@ export type Env = {
     CRON_SECRET?: string;
     // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
     SESSION_CACHE: KVNamespace;
-    // R2 bucket for invoice PDFs / BOM drawings / SO attachments (Phase B.4).
-    // Optional during rollout — code paths gate on `if (env.FILES)`.
-    FILES?: R2Bucket;
+    // Supabase Storage credentials — replaces the legacy FILES (R2) binding.
+    // SUPABASE_PROJECT_REF is the project slug (public, set in wrangler.toml
+    // [vars]); SUPABASE_SERVICE_KEY is the service_role key (set via
+    // `wrangler secret put SUPABASE_SERVICE_KEY`). Both optional during
+    // rollout — src/api/lib/supabase-storage.ts throws
+    // SupabaseStorageNotConfiguredError when missing, and the file-asset
+    // routes (src/api/routes/files.ts) map that to 503.
+    SUPABASE_PROJECT_REF?: string;
     // Cloudflare Queues binding for async PO emission cascade (Phase C #3).
     // Optional — falls back to synchronous inline call when absent.
     PO_EMISSION_QUEUE?: Queue;
@@ -65,6 +70,10 @@ export type Env = {
     OAUTH_GOOGLE_REDIRECT_URI?: string;
     OAUTH_GOOGLE_HOSTED_DOMAIN?: string;
     JWT_SECRET?: string;
+    // Optional: Sentry / GlitchTip DSN for worker-side error reporting.
+    // Set via `wrangler secret put SENTRY_DSN`. When unset, app.onError
+    // logs to wrangler-tail only (no third-party hop).
+    SENTRY_DSN?: string;
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -266,6 +275,69 @@ app.post("/api/internal/refresh-mvs", async (c) => {
   }
 });
 
+// Sprint 4 — email outbox drain cron entry. Same CRON_SECRET pattern as
+// /api/internal/refresh-mvs above. The cron workflow at
+// .github/workflows/process-email-outbox.yml hits this every 5 min; the
+// handler reads pending rows from outbox_emails, calls Resend for each,
+// and marks status. 3 retries with exponential backoff before FAILED.
+// Runtime logic lives in src/api/lib/email-outbox.ts (processOutbox).
+app.post("/api/internal/process-email-outbox", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[process-email-outbox] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  try {
+    const { processOutbox } = await import("./lib/email-outbox");
+    const result = await processOutbox(
+      c.var.DB,
+      c.env as unknown as { RESEND_API_KEY?: string; RESEND_FROM_EMAIL?: string },
+    );
+    return c.json({ ok: true, ...result });
+  } catch (e) {
+    console.error("[process-email-outbox] error:", e);
+    return c.json({ ok: false, error: "drain failed" }, 500);
+  }
+});
+
+// P2 follow-up — audit_dlq replay sweeper. Sprint 2 added the audit_dlq
+// table + writer in production-orders.ts (job_card_events batch failures
+// land there), but rows accumulated forever with no replay path. This
+// endpoint drains pending rows by replaying them against the original
+// write target — same CRON_SECRET pattern as the workflows above. The
+// cron at .github/workflows/replay-audit-dlq.yml hits this every 30
+// minutes; see src/api/lib/audit-replay.ts for the dispatch logic.
+app.post("/api/internal/replay-audit-dlq", async (c) => {
+  const expected = c.env.CRON_SECRET;
+  if (!expected || expected.length < 16) {
+    console.error("[replay-audit-dlq] CRON_SECRET unset or too short — refusing");
+    return c.json({ ok: false, error: "service unavailable" }, 503);
+  }
+  const given = c.req.header("x-cron-secret") || "";
+  if (!(await constantTimeEqual(given, expected))) {
+    return c.json({ ok: false, error: "forbidden" }, 403);
+  }
+  const t0 = Date.now();
+  try {
+    const { replayAuditDlq } = await import("./lib/audit-replay");
+    // Optional ?limit=N override; default 100 keeps a single Workers
+    // invocation well under any reasonable subrequest budget.
+    const url = new URL(c.req.url);
+    const limitRaw = url.searchParams.get("limit");
+    const limit = limitRaw ? Number.parseInt(limitRaw, 10) : 100;
+    const safeLimit = Number.isFinite(limit) && limit > 0 ? limit : 100;
+    const result = await replayAuditDlq(c.var.DB, safeLimit);
+    return c.json({ ok: true, elapsedMs: Date.now() - t0, ...result });
+  } catch (e) {
+    console.error("[replay-audit-dlq] error:", e);
+    return c.json({ ok: false, error: "replay failed" }, 500);
+  }
+});
+
 /**
  * Constant-time string equality.  Hashes both sides before comparing so the
  * comparison time depends only on the hash output length, never on the
@@ -332,6 +404,18 @@ app.use("/api/*", authMiddleware);
 // is populated; bypasses public paths automatically (no userId → defaults
 // to 'hookka').
 app.use("/api/*", tenantMiddleware);
+
+// Sprint 4 — translate OrgIdRequiredError thrown by getOrgId / withOrgScope
+// into a 401 instead of a 500. Any tenant-scoped route handler that runs
+// without a resolved orgId on the context (auth bypassed somehow, or
+// tenantMiddleware crashed) now fails closed.
+app.onError((err, c) => {
+  if (err && (err as { name?: string }).name === "OrgIdRequiredError") {
+    return c.json({ success: false, error: "Unauthorized" }, 401);
+  }
+  console.error("[worker.onError]", err);
+  return c.json({ success: false, error: "Internal server error" }, 500);
+});
 
 // ---------------------------------------------------------------------------
 // Auth-gated routes (registered AFTER authMiddleware)
@@ -431,12 +515,14 @@ import jobCards from "./routes/job-cards";
 import dashboardRevenue from "./routes/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
-// Phase B.4 — file_assets storage (R2-backed). Returns 503 until the
-// FILES R2 binding is wired up; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets storage (Supabase Storage-backed; was R2 before
+// the storage-supabase-migration). Returns 503 until SUPABASE_PROJECT_REF
+// + SUPABASE_SERVICE_KEY are configured; see docs/DR-RUNBOOK.md.
 import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
 import { timingMiddleware } from "./lib/observability";
+import { reportWorkerError } from "./lib/monitoring";
 
 // Phase-5 imports — historically these were in-memory stubs, but every
 // route below has since been migrated to real D1 / Supabase persistence
@@ -547,8 +633,8 @@ app.route("/api/dashboard/revenue", dashboardRevenue);
 // in spirit (gated by the existing auth middleware until role-aware
 // authz lands; see roadmap §1).
 app.route("/api/mdm", mdm);
-// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503
-// when env.FILES (R2 binding) is missing; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503 when
+// Supabase Storage credentials are missing; see docs/DR-RUNBOOK.md.
 app.route("/api/files", files);
 
 // Below routes were previously in-memory mock-backed (data in
@@ -608,11 +694,42 @@ app.route("/api/scan-po", scanPo);
 app.route("/api/service-cases", serviceCases);
 app.route("/api/service-orders", serviceOrders);
 
+// Catch-all error handler (Sprint 5). Hono's default behaviour is to surface
+// a 500 with the error message — fine for dev, but in prod we want every
+// uncaught route exception to land in Sentry (when configured) so we can
+// triage without waiting for a user to file a ticket. The reporter is
+// no-op when SENTRY_DSN is unset, so this is safe in OSS / self-host.
+app.onError((err, c) => {
+  const url = (() => {
+    try {
+      return new URL(c.req.url).pathname + new URL(c.req.url).search;
+    } catch {
+      return c.req.url;
+    }
+  })();
+  // Fire-and-forget — we don't want the error path waiting on the
+  // dynamic-import + HTTP round-trip to Sentry.
+  void reportWorkerError(err, c.env.SENTRY_DSN, {
+    method: c.req.method,
+    url,
+  });
+  // Preserve Hono's default response shape so the frontend's existing
+  // FetchJsonError handling keeps working.
+  return c.json(
+    {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    },
+    500,
+  );
+});
+
 // Unmounted /api/* paths — return a real 404 so callers see a loud failure
-// instead of silently rendering an empty list. The previous behaviour
-// (200 + `{success:true, data:[], _stub:true}`) was a prod footgun: any new
-// route the frontend referenced but the worker hadn't mounted would look
-// like "no data" forever. Now an unmounted reference fails noisily.
+// instead of silently rendering an empty list (Sprint 1). The previous
+// behaviour (200 + `{success:true, data:[], _stub:true}`) was a prod
+// footgun: any new route the frontend referenced but the worker hadn't
+// mounted would look like "no data" forever. Now an unmounted reference
+// fails noisily.
 app.all("/api/*", (c) => {
   return c.json(
     { success: false, error: "Not Found", path: c.req.path },

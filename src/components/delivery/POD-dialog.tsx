@@ -2,9 +2,10 @@
 
 import { useRef, useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { X, Eraser, Upload, Trash2 } from "lucide-react";
+import { X, Eraser, Upload, Trash2, Loader2 } from "lucide-react";
 import { useToast } from "@/components/ui/toast";
-import type { ProofOfDelivery } from "@/lib/mock-data";
+import { compressImage } from "@/lib/image-compress";
+import type { ProofOfDelivery } from "@/types";
 
 interface PODDialogProps {
   open: boolean;
@@ -44,38 +45,20 @@ const MAX_POD_PHOTO_BYTES = 200 * 1024; // soft target per photo (post-compressi
 const MAX_POD_JSON_BYTES = 700 * 1024; // total stringified POD ceiling (D1 row safe)
 
 /**
- * Read a File, downscale to PHOTO_MAX_DIMENSION on the longest side via
- * <canvas>, and JPEG-encode at PHOTO_JPEG_QUALITY. Returns a base64 data
- * URL ready to embed in the POD JSON. Rejects the promise if the browser
- * can't decode the image (corrupt/unsupported format).
+ * Read a File, downscale to PHOTO_MAX_DIMENSION on the longest side, and
+ * JPEG-encode at PHOTO_JPEG_QUALITY. Returns a base64 data URL ready to
+ * embed in the POD JSON.
+ *
+ * Implementation lives in `@/lib/image-compress` — the shared helper uses
+ * `createImageBitmap` + `OffscreenCanvas` to keep the work off the main
+ * thread on modern browsers, and falls back to the FileReader/canvas
+ * pipeline on Safari < 16.4 / old Android WebView.
  */
 async function compressPhoto(file: File): Promise<string> {
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Failed to read file"));
-    reader.readAsDataURL(file);
+  return compressImage(file, {
+    maxDim: PHOTO_MAX_DIMENSION,
+    quality: PHOTO_JPEG_QUALITY,
   });
-
-  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
-    const el = new Image();
-    el.onload = () => resolve(el);
-    el.onerror = () => reject(new Error("Failed to decode image"));
-    el.src = dataUrl;
-  });
-
-  const longest = Math.max(img.width, img.height);
-  const scale = longest > PHOTO_MAX_DIMENSION ? PHOTO_MAX_DIMENSION / longest : 1;
-  const targetW = Math.max(1, Math.round(img.width * scale));
-  const targetH = Math.max(1, Math.round(img.height * scale));
-
-  const canvas = document.createElement("canvas");
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) throw new Error("Canvas 2D context unavailable");
-  ctx.drawImage(img, 0, 0, targetW, targetH);
-  return canvas.toDataURL("image/jpeg", PHOTO_JPEG_QUALITY);
 }
 
 export default function PODDialog({
@@ -94,6 +77,9 @@ export default function PODDialog({
   const [remarks, setRemarks] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  // Per-batch upload progress: { done, total } — drives the spinner overlay
+  // on the photo grid. Cleared once compression finishes (success or error).
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number } | null>(null);
 
   // Reset state whenever the dialog opens.
   //
@@ -207,8 +193,23 @@ export default function PODDialog({
       return;
     }
 
+    // Compress sequentially so the progress counter increments smoothly and
+    // we don't stack multiple OffscreenCanvas decodes in flight on a low-end
+    // phone (the worker pool is shared and concurrent decodes can OOM).
+    setUploadProgress({ done: 0, total: toProcess.length });
+    const compressed: string[] = [];
     try {
-      const compressed = await Promise.all(toProcess.map(compressPhoto));
+      for (let i = 0; i < toProcess.length; i++) {
+        const f = toProcess[i];
+        try {
+          compressed.push(await compressPhoto(f));
+        } catch (err) {
+          toast.error(
+            `Couldn't process "${f.name}": ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        setUploadProgress({ done: i + 1, total: toProcess.length });
+      }
       // Surface a soft warning if any single photo is still over the per-photo
       // budget after compression — usually means a noisy/textured image. We
       // still accept it; the total-size check below is the hard gate.
@@ -220,12 +221,11 @@ export default function PODDialog({
           "One photo is unusually large after compression — POD payload may be tight.",
         );
       }
-      setPhotos((prev) => [...prev, ...compressed].slice(0, MAX_PHOTOS));
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Could not process photo",
-      );
+      if (compressed.length > 0) {
+        setPhotos((prev) => [...prev, ...compressed].slice(0, MAX_PHOTOS));
+      }
     } finally {
+      setUploadProgress(null);
       // Reset input so the same file can be re-selected
       input.value = "";
     }
@@ -369,18 +369,31 @@ export default function PODDialog({
                 Photos ({photos.length}/{MAX_PHOTOS})
               </label>
               {photos.length < MAX_PHOTOS && (
-                <label className="text-xs text-[#6B5C32] hover:text-[#111827] inline-flex items-center gap-1 cursor-pointer">
+                <label
+                  className={
+                    uploadProgress
+                      ? "text-xs text-[#9CA3AF] inline-flex items-center gap-1 cursor-not-allowed"
+                      : "text-xs text-[#6B5C32] hover:text-[#111827] inline-flex items-center gap-1 cursor-pointer"
+                  }
+                >
                   <Upload className="h-3 w-3" /> Add photo
                   <input
                     type="file"
                     accept="image/*"
                     multiple
                     className="hidden"
+                    disabled={!!uploadProgress}
                     onChange={handlePhotoUpload}
                   />
                 </label>
               )}
             </div>
+            {uploadProgress && (
+              <div className="mb-2 inline-flex items-center gap-2 rounded-md bg-[#FAF9F7] border border-[#E2DDD8] px-3 py-1.5 text-xs text-[#6B7280]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Compressing photos {Math.min(uploadProgress.done + 1, uploadProgress.total)} / {uploadProgress.total}...
+              </div>
+            )}
             {photos.length === 0 ? (
               <div className="rounded-md border border-dashed border-[#E2DDD8] px-3 py-6 text-center text-xs text-[#9CA3AF]">
                 No photos attached

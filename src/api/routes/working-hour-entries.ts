@@ -21,6 +21,7 @@
 // ---------------------------------------------------------------------------
 import { Hono, type Context } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -596,6 +597,8 @@ app.get("/", async (c) => {
 // POST / — create one entry
 // ---------------------------------------------------------------------------
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "attendance", "create");
+  if (denied) return denied;
   let body: { attendanceId?: unknown; workerId?: unknown; date?: unknown } & EntryInput;
   try {
     body = await c.req.json();
@@ -659,6 +662,8 @@ app.post("/", async (c) => {
 // Body: { attendanceId | (workerId + date), entries: [{ departmentCode, category, hours, notes }] }
 // ---------------------------------------------------------------------------
 app.post("/bulk", async (c) => {
+  const denied = await requirePermission(c, "attendance", "create");
+  if (denied) return denied;
   let body: { attendanceId?: unknown; workerId?: unknown; date?: unknown; entries?: unknown };
   try {
     body = await c.req.json();
@@ -727,6 +732,8 @@ app.post("/bulk", async (c) => {
 // PUT /:id — partial update of an entry (departmentCode / category / hours / notes)
 // ---------------------------------------------------------------------------
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "attendance", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   let body: EntryInput;
   try {
@@ -771,6 +778,8 @@ app.put("/:id", async (c) => {
 // DELETE /:id
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "attendance", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare("SELECT id FROM working_hour_entries WHERE id = ?")
     .bind(id)

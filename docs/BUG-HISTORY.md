@@ -18,12 +18,12 @@ Each entry below jumps to the first BUG with that category tag.
 Entries themselves stay newest-first.
 
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
-- `ui-frontend` (19) — [BUG-2026-04-26-004](#bug-2026-04-26-004-fix-strip-remaining-inline-m³-suffixes-full-system-uniform)
-- `production-orders` (17) — [BUG-2026-04-26-003](#bug-2026-04-26-003-upstream-sequence-lock-disabled)
-- `bom` (15) — [BUG-2026-04-27-010](#bug-2026-04-27-010-dept-pivot-editor-lists-draft-boms-as-duplicate-rows)
+- `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
+- `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
+- `bom` (18) — [BUG-2026-04-29-008](#bug-2026-04-29-008--dept-pivot-editor-shows-stale-minutes-same-cat-different-times-on-different-rows)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
-- `inventory-cascade` (15) — [BUG-2026-04-27-021](#bug-2026-04-27-021-do-dispatch-left-wip_itemsstockqty-qty-forever)
-- `delivery-orders` (9) — [BUG-2026-04-27-022](#bug-2026-04-27-022-fixdo-customerid-fallback-to-first-pos-customername-for-multi-so-dos)
+- `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
+- `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
 - `sales-orders` (7) — [BUG-2026-04-26-021](#bug-2026-04-26-021-fixsales-drop-wrong-mattress-label-on-sofa-category-option)
 - `pricing-products` (6) — [BUG-2026-04-24-029](#bug-2026-04-24-029-fixcustomers-sofa-seat-prices-now-render-in-customer-products-panel)
 - `data-migration` (5) — [BUG-2026-04-25-014](#bug-2026-04-25-014-fixd1-compat-ifnullcoalesce-bom-search-likeilike)
@@ -31,6 +31,463 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-04-29-008 — Dept-Pivot editor shows stale minutes (same CAT, different times on different rows)
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** in the Dept-Pivot Category Editor with
+`Department = Fab Cut`, three rows on baseModel 1003 all showed
+`Category = CAT 3`, but Minutes were `90 / 25 / 25`. Same dept × same
+category should yield the same minutes from the `productionTimes`
+matrix in `kv_config('variants-config')`.
+
+**Root cause:** `buildDeptPivotRows` in `src/pages/bom.tsx` reads
+`p.minutes` directly from each BOM template's stored process row. The
+single point at which minutes refresh from the matrix is
+`updateProcessCategory` (which fires when the user *changes* a
+category). Two scenarios put rows out of sync:
+
+1. The Production Times matrix was edited (e.g. `Fab Cut × CAT 3`
+   went from 90 → 25) AFTER the BOM rows were created. Existing rows
+   keep the old 90 because no edit on them ever fired.
+2. A row was once `(Fab Cut, CAT 1) = 90 min`, the category was
+   renamed to "CAT 3" via legacy CSV import / migration without going
+   through `updateProcessCategory`, and the minutes never refreshed.
+
+The dialog's `dirtyCount` and Save filter both keyed off
+`r.category !== r.initialCategory`, so even if a user noticed the
+mismatch and tried to fix it via the resync, there was no path to mark
+"only minutes changed" rows as dirty — they'd silently fail to save.
+
+**Fix:** `src/pages/bom.tsx` (`DeptPivotCategoryDialog`)
+- New `isRowDirty(r)` helper that returns true on EITHER category drift
+  OR minutes drift. Replaces the inline `r.category !== r.initialCategory`
+  predicate at the dirty-count, save-filter, and footer-message sites.
+- New `isRowStale(r)` helper that compares stored `r.minutes` to
+  `getProductionMinutes(deptCode, r.category)` from the live matrix,
+  scoped to the filtered row set so the count tracks the user's view.
+- New "Resync N stale" yellow banner appears only when ≥1 filtered row
+  is stale. One click runs `handleResyncStale`, which updates `r.minutes`
+  to the canonical matrix value for every stale row in the filter. Since
+  this changes `r.minutes` away from `r.initialMinutes`, the new
+  `isRowDirty` flags them and Save persists via `bulk-process-edit`.
+- Stale rows render with a subtle `#FFF8E7` background and the Minutes
+  cell shows `90 → 25 min` so the user can see the diff before resyncing.
+
+**Verification:**
+1. Open Dept-Pivot, set dept = Fab Cut. With user's reported data,
+   yellow banner appears: "N rows have stored minutes that no longer
+   match…". Yellow rows show `90 → 25 min` strike-through.
+2. Click "Resync N stale". Banner disappears, rows turn green (dirty),
+   Save count matches.
+3. Click Save. Toast confirms write. Reopen — all rows uniform per
+   matrix.
+4. Filter to `baseModel = 1003` then click Resync — only 1003's stale
+   rows are touched; other models' stale rows stay until you clear the
+   filter and resync again.
+
+**Related:** [BUG-2026-04-29-007](#bug-2026-04-29-007--kv-config-saves-still-lossy-on-transient-failure-401-add-resilient-sync-layer)
+(predecessor: now that Production Times saves reliably, the matrix
+becomes the canonical source the BOM rows should follow).
+
+---
+
+## BUG-2026-04-29-007 — kv-config saves still lossy on transient failure / 401; add resilient sync layer
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** after BUG-2026-04-29-006 shipped honest
+"Saved" toasts, the user pushed back: "If it keeps telling me failed
+won't that be annoying? Can we avoid it?". The honest-toast fix flagged
+failures correctly but didn't *prevent* them — every transient network
+blip / 5xx / 429 would still surface as a failure toast and lose the
+user's edit until they manually retried.
+
+**Root cause:** `src/lib/kv-config.ts` had no retry, no persistent
+backup, and no sync-state machine. A single PUT failure (whether HTTP
+500, 401-then-token-refresh, or a packet drop) became a permanent loss
+unless the user noticed the toast and remembered exactly what they had
+typed. The Production Times matrix is the worst case — 8 depts × 7
+categories = 56 cells of state held only in React memory.
+
+**Fix:** added a resilience layer to `src/lib/kv-config.ts`:
+
+1. **localStorage backup** — every `setKvConfig` synchronously writes
+   `kv-config-pending:<key>` BEFORE scheduling the PUT. The backup is
+   cleared once the server confirms. Survives tab close, browser
+   crash, network outage, and 401s.
+2. **Auto-retry with backoff** — `flushSave` classifies the outcome:
+   `ok` (clear backup, idle), `transient` (5xx / 408 / 425 / 429 /
+   network) → retry at 1s/2s/4s before giving up, `permanent` (4xx
+   other than auth) → terminal error, `auth` (401 / 403) → terminal
+   `auth-error` state for re-login UX.
+3. **Sync-state machine** — five states (`idle / syncing / retrying /
+   error / auth-error`) with `subscribeKvConfigSyncState`. UIs render
+   a passive dot indicator instead of toast spam.
+4. **Hydrate-time replay** — `fetchKvConfig` checks for a pending
+   localStorage backup; if found, hydrates from local first AND fires
+   a flush. Module-level startup hook (deferred to next tick) scans all
+   `kv-config-pending:*` keys and replays them on app load.
+5. **`ProductionTimesDialog` rewired** — drops the await-flush-then-toast
+   pattern in favour of subscribing to syncState. The Save button
+   disables during `syncing` / `retrying` and shows "Saving…". Terminal
+   `error` state shows "Saved locally — will retry on next page load"
+   instead of the alarming "Failed to save". `auth-error` shows
+   "Please re-login — change is saved locally and will retry".
+6. **Footer indicator** — new `<KvSyncIndicator>` component on the
+   ProductionTimesDialog footer renders the sync state as a coloured
+   dot + label.
+
+**Net behaviour:** edits are effectively never lost. The user's only
+visible feedback during a transient network problem is a yellow
+"Retrying…" indicator that turns green once the data lands. The infra
+benefits every kv-config consumer — `/products` Maintenance tab, future
+dialogs that adopt the same key — for free.
+
+**Verification:**
+1. Edit Production Times, click Save with normal network — indicator
+   goes yellow → green within ~1s, "Saved" toast.
+2. Throttle to offline in DevTools, click Save — indicator stays
+   yellow ("Retrying…"). Re-enable network — indicator turns green.
+3. Edit + close tab inside the 500ms debounce window — open a new tab,
+   navigate to BOM → Production Times. Values persist (replayed from
+   localStorage at module init).
+4. Force a 500 response in the worker — retries fire 3x, then state
+   goes "error" with "Saved locally" indicator. Reload — values still
+   present (localStorage backup), state retries on hydrate.
+
+**Related:** [BUG-2026-04-29-006](#bug-2026-04-29-006--production-times-edits-silently-lost-after-close-or-refresh)
+(direct predecessor; same data path, single-attempt honest-toast fix);
+commit `56dad2a` (the original `flushKvConfig` infra).
+
+---
+
+## BUG-2026-04-29-006 — Production Times edits silently lost after close or refresh
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** "Yesterday I edited some Production Times,
+today when I opened it they're gone again." The matrix (department ×
+category → minutes) appeared to save — toast said "Production times
+saved" — but on next page load the cells reverted to their pre-edit
+values, sometimes only partially.
+
+**Root cause:** `ProductionTimesDialog.handleSave` in `src/pages/bom.tsx`
+called `patchVariantsConfig({...})` and showed the success toast
+synchronously. Underneath, that function only updates the in-memory
+cache and schedules a **500ms-debounced** `PUT /api/kv-config/variants-config`
+(see `src/lib/kv-config.ts:181`). Three failure modes followed from
+that:
+
+1. The user closed the dialog / tab / browser inside the 500ms window —
+   the timer never fired, no PUT was sent.
+2. The PUT fired but the server returned 401/500 — `flushSave` in
+   `kv-config.ts` notifies subscribers via `subscribeKvConfigSaveError`,
+   but `ProductionTimesDialog` had never wired that listener up.
+3. Same as (2) but the cached value was already considered "saved" so
+   the next mount's `fetchVariantsConfig` overwrote local state with the
+   stale server value, making the loss invisible until the user
+   re-opened the dialog.
+
+The infrastructure to do this correctly was added in commit `56dad2a`
+("kv-config save no longer silently fails"), which introduced
+`flushKvConfig` (await server response) and the error listener API.
+`/products` Maintenance tab adopted both patterns at
+`src/pages/products/index.tsx:780,747`. `ProductionTimesDialog` predates
+those fixes and was never migrated — so it kept the lying-toast
+behaviour.
+
+**Fix:** `src/pages/bom.tsx`
+- `handleSave` is now `async`, awaits `flushKvConfig(VARIANTS_CONFIG_KEY)`,
+  and only marks the dialog clean / shows "Saved" if the server
+  confirmed the write. On failure, shows "Failed to save — try again"
+  and leaves `dirty=true` for retry.
+- New `useEffect` subscribes to `subscribeKvConfigSaveError` for the
+  variants-config key while the dialog is open, so background save
+  failures (debounced PUTs that 401 between manual saves) surface as a
+  toast instead of dying silently.
+- Second `useEffect` adds a `beforeunload` handler that fires
+  `flushKvConfig` synchronously when the user closes the tab — closes
+  the 500ms-window data-loss path on quick close.
+- Save button shows "Saving…" and is disabled while the PUT is in
+  flight; Close button is disabled too so the user can't kill the
+  in-flight save.
+
+**Verification:** Open Production Times, edit a few cells, click Save,
+wait for "Saved" toast (now appears AFTER the network round-trip).
+Refresh the page, reopen — values persist. To reproduce the original
+bug, deploy commit before the fix and immediately close the dialog
+within ~250ms of clicking Save; values revert on next open. Pre-fix:
+toast lied, values gone. Post-fix: button disabled until server
+confirms, no premature toast.
+
+**Related:** [BUG-2026-04-22-001](#bug-2026-04-22-001--fix-crash-variants-page-coerces-object-entries-to-strings-on-load)
+(same `variants-config` blob, different page); commit `56dad2a` (the
+infra this dialog should have adopted in April 22).
+
+---
+
+## BUG-2026-04-29-005 — CN dispatch left fg_units / stock_movements / wip_items untouched (no inventory cascade)
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** inventory-cascade
+
+**Symptom (user-reported):** the user dispatched a Consignment Note
+(`ACTIVE → PARTIALLY_SOLD`, FE-labelled "Mark Dispatched") and the goods
+physically left the warehouse, but the Inventory page's Available count
+never dropped. The CN's `dispatchedAt` got stamped, the FE list moved
+the CN to the Dispatched tab, and that was it — `fg_units` rows for the
+CN's source POs stayed `PENDING`, no `STOCK_OUT` row was written into
+`stock_movements`, and `wip_items.stockQty` still carried the residual
+UPH ledger entry. Net effect: the CN was a black hole for inventory
+accounting.
+
+**Root cause:** `updateConsignmentNoteById` in
+`src/api/lib/consignment-note-shared.ts` was a status-+-timestamp-only
+helper. DO had a full cascade in
+`src/api/routes/delivery-orders.ts:1346-1577` for the symmetric event
+(`DRAFT → LOADED` and the reverse), but no equivalent existed on the CN
+helper — Mark Dispatched was wired straight to a status flip with no
+inventory awareness. The CN→PO→fg_units link couldn't be expressed
+either: `fg_units` had only a `doId` column, not a `cnId` column, so
+even if the cascade had been written it would have had nowhere to stamp
+the back-reference.
+
+**Fix:** Three changes in commit `fa1f3ee`:
+
+1. **Migration** `migrations-postgres/0077_fg_units_cn_link.sql` adds
+   `cnId TEXT` + `idx_fg_units_cn_id` to `fg_units`. Separate column
+   from `doId` — overloading would silently fan out wrong joins on
+   every report that filters fg_units by source document. A unit can
+   hold AT MOST one of `{doId, cnId}`; the cascade WHERE clauses
+   enforce that with `(doId IS NULL OR doId='') AND (cnId IS NULL OR
+   cnId='')`. Manual-apply via Supabase SQL Editor (D1 retired
+   2026-04-27).
+2. **Forward cascade** (`ACTIVE → PARTIALLY_SOLD`) in
+   `updateConsignmentNoteById`:
+   - `UPDATE fg_units SET cnId=?, status='LOADED', loadedAt=? WHERE poId=? AND (doId IS NULL OR doId='') AND (cnId IS NULL OR cnId='')` per source PO
+   - `INSERT stock_movements (STOCK_OUT, reason="CN <noteNumber> dispatched")` per PO
+   - `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?` for each UPH job_card wipLabel of those POs (mirrors BUG-2026-04-27-021's DO-side fix)
+3. **Reverse cascade** (`PARTIALLY_SOLD → ACTIVE`, the FE's "Reverse to
+   Pending Dispatch" action) is the symmetric inverse: clear cnId, flip
+   fg_units back to PENDING, write STOCK_IN, re-credit wip_items.
+
+`PARTIALLY_SOLD → FULLY_SOLD` (Mark Delivered) and `FULLY_SOLD → CLOSED`
+(Mark Acknowledged) intentionally do NOT trigger another fg_units flip
+— goods are already out of inventory after dispatch, and consignment
+delivery semantics differ from DO's (per-line `consignment_items.soldDate`
+instead of header-level `deliveredAt`).
+
+**Verification:** typecheck + eslint clean. Runtime verification deferred
+until user applies migration 0077 manually — until applied, the forward
+UPDATE throws "column cnId does not exist". Documented in commit body
++ migration header.
+
+---
+
+## BUG-2026-04-29-004 — CN Detail dialog vs DO Detail dialog: 9 layout / data gaps after first parity pass
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** ui-frontend
+
+**Symptom (user-reported, after commit `55f18c0` "CN Detail parity v1"):**
+the user opened a freshly-created CN whose row already had Provider /
+Vehicle / Driver populated, clicked Edit (Pencil icon), and the inline
+edit-mode opened with **Vehicle and Driver dropdowns blank** ("—
+Optional —"). The user had to re-pick them every time. Same applied to
+the **Mark Dispatched** dialog — the picker opened with all three
+dropdowns blank even though the CN already had transport set. The list
+row Status cell showed `RM 0.00` instead of the m³ total (DO shows
+`X.XX m³`).
+
+**Root cause:** Three independent gaps in
+`src/pages/consignment/note.tsx` from the v1 CN parity work:
+
+1. `enterEditMode` hardcoded `vehicleId: ""` and `driverPersonId: ""`.
+   The DO equivalent at `src/pages/delivery/index.tsx:1340` seeds
+   `vehicleId` from `row.vehicleId` and uses a
+   `pendingDriverNameToResolveRef` pattern to resolve the driver
+   PERSON id from `driverName` once the per-provider drivers list
+   loads.
+2. `mapCNToRow` didn't extract `vehicleId` from the API response.
+   `consignment-note-shared.ts:rowToConsignmentNote` returns it, the
+   FE just dropped it on the floor, so the row had no `vehicleId`
+   field for `enterEditMode` to seed from.
+3. The list Status cell render at line ~1690 used
+   `formatCurrency(row.totalValueSen)` instead of
+   `(row.totalM3 ?? 0).toFixed(2) + " m³"`. CN row didn't carry
+   `totalM3` either — DO computes it from
+   `delivery_orders.totalM3`; CN had no aggregate column, just per-line
+   `itemM3`.
+
+**Fix (commit `707e515`, 9 numbered gaps in commit body):**
+
+- Edit dialog Vehicle dropdown pre-selects from `row.vehicleId`; Driver
+  dropdown resolves PERSON id by name via `pendingDriverNameToResolveRef`
+  (DO pattern).
+- Mark Dispatched dialog (both context-menu + Detail-dialog footer)
+  routed through new `openDispatchDialog(row)` that pre-fills
+  Provider/Vehicle from row + stashes driver name for resolve-on-load.
+- List Status secondary line: `formatCurrency(totalValueSen)` →
+  `(totalM3).toFixed(2) + " m³"`.
+- `ConsignmentNoteRow` gains `vehicleId` and `totalM3`. `mapCNToRow`
+  now copies `vehicleId` from the API response and computes `totalM3`
+  from `productM3Map` (same source as items-table footer, so the two
+  totals always agree).
+- Detail dialog basics grid: `CN Number / CO Reference / Items` →
+  `CN Number / Total M³ / Items` (mirrors DO 1:1; CO Reference moved
+  to chip strip below).
+- Edit-mode basics grid: same swap, with live `editItems`-derived
+  Total M³ that updates as the operator adds/removes items.
+- Dispatch dialog Cancel/backdrop/X all clear the pending driver-name
+  ref to prevent name bleeding between sessions.
+- `cancelEditMode` clears `pendingDriverNameToResolveRef` (mirrors DO).
+
+**Verification:** typecheck + eslint clean. User testing confirmed
+pre-fill works after deploy.
+
+---
+
+## BUG-2026-04-29-003 — `updateConsignmentNoteById` silently dropped `sentDate` and `items[]` on PUT
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** delivery-orders
+
+**Symptom:** the new CN inline edit-mode (commit `6a21d18`) PUT all
+edited fields back through `/api/consignment-notes/:id`, but two of the
+four primary editable fields silently no-op'd: changing the Delivery
+Date had no effect, and adding / removing / re-quantifying items also
+had no effect. Operators saw their edits "save" (toast confirmed
+success) but on reload the persisted state was unchanged for those two
+fields. Other fields (provider / vehicle / driver / hub / notes)
+worked.
+
+**Root cause:** `updateConsignmentNoteById` in
+`src/api/lib/consignment-note-shared.ts` (the helper both
+`/api/consignment-notes` and `/api/consignments` route through) had no
+handling for `body.sentDate` — the `UPDATE consignment_notes` statement
+just didn't include the `sentDate = ?` column. The function also had
+no items-replace path at all: `consignment_items` rows were immutable
+through this endpoint.
+
+**Fix (commit `a28dcce`):**
+
+1. Add `sentDate` to the UPDATE SET clause. Optional in body — undefined
+   keeps the existing value, null clears, string overwrites. Mirrors
+   the same body-undefined→keep / body-null→clear semantics already in
+   place for `consignmentOrderId` / `hubId`.
+2. Items replace via delete-and-reinsert when `body.items` is an array
+   AND `existing.status === "ACTIVE" && nextStatus === "ACTIVE"`. The
+   status guard exists because `consignment_items` carry per-line
+   `soldDate` / `returnedDate` state once the CN crosses into
+   `PARTIALLY_SOLD` / `RETURNED` / `FULLY_SOLD` — wiping rows then
+   would lose committed sale/return history. Edit-mode is FE-gated to
+   PENDING (= ACTIVE backend) anyway, but the guard is a hard backstop
+   against future status drift. Stable ids: incoming `item.id` matching
+   `coni-*` is reused; fresh ids are minted only for newly-added items.
+
+**Verification:** typecheck + eslint clean. Manual: operator changed
+delivery date + added an item, reloaded, both persisted.
+
+---
+
+## BUG-2026-04-29-002 — CN Edit button routed to non-existent `/consignment/note/:id/edit` page (blank page on click)
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** ui-frontend
+
+**Symptom (user-reported):** opening a Consignment Note Detail dialog
+and clicking the Edit (Pencil) icon — or the footer "Edit" button —
+navigated to a blank page at `/consignment/note/<id>/edit`. The user
+saw a clean dashboard chrome with no content, no error toast, and no
+back path beyond the browser back button.
+
+**Root cause:** commit `55f18c0` (CN Detail dialog parity v1) added the
+Edit button with `onClick={() => navigate('/consignment/note/'+id+'/edit')}`,
+on the assumption that a standalone edit page existed. It didn't —
+`src/dashboard-routes.tsx` registered no such route. The router fell
+through to the dashboard 404 fallback, which renders empty.
+
+**Fix (commit `6a21d18`):** removed both `navigate(...)` calls and
+implemented inline edit-mode in the Detail dialog itself, mirroring DO's
+pattern at `src/pages/delivery/index.tsx:1340-1478`:
+
+- Added state: `editMode`, `editForm`, `editItems`, `editSaving`,
+  `editVehicles`, `editDrivers`, `editAddItemSearch`,
+  `editShowAddItemPanel`.
+- Added handlers: `enterEditMode`, `cancelEditMode`, `removeEditItem`,
+  `addReadyPOToEdit`, `addableEditPOs` memo, `saveEditCN`.
+- `useEffect` keyed on `editForm.providerId` refetches per-provider
+  vehicles + drivers, parallel to DO's `editDialogVehicles` /
+  `editDialogDrivers` effect.
+- Detail dialog body swaps read-only fields for inputs when
+  `editMode === true` — 3PL Provider / Vehicle / Driver / Hub pickers,
+  Delivery Date, Remarks. Items table gets a Trash2 remove column +
+  an Add Items panel restricted to same-customer Pending-CN POs.
+- Header swaps to "Edit Consignment Note" + adds an "Editing" chip;
+  Print/Document icons hidden in edit mode; Tracking timeline + Remarks
+  display hidden in edit mode.
+- Footer: Cancel + Save Changes (with `RefreshCw` spinner) when
+  editing; backdrop click is a no-op so unsaved changes don't drop.
+
+**Followup:** the v1 inline implementation introduced
+BUG-2026-04-29-003 (silent no-op on `sentDate` + `items[]`) and
+BUG-2026-04-29-004 (dialog seeding gaps). Both fixed same day.
+
+---
+
+## BUG-2026-04-29-001 — Production Sheet "SO ID" column blank for SOFA rows of CO-origin POs
+
+**Status:** 🟢 Fixed (2026-04-29)
+**Category:** production-orders
+
+**Symptom (user-reported):** in the Production page's per-department
+sheet (Fab Cut / Wood Cut / Upholstery / etc.), the "SO ID" column
+rendered blank for SOFA rows whose parent was a Consignment Order
+(rather than a Sales Order). Bedframe and Accessory rows from the same
+CO showed correctly (`CO-2604-001-01`). The Overview tab also worked.
+Only the dept sheets, only on SOFA, only for CO-origin POs.
+
+**Root cause:** `src/pages/production/index.tsx:1401`:
+
+```ts
+soId: (o.itemCategory === "SOFA" ? o.companySOId : o.poNo) || "",
+```
+
+For a CO-origin SOFA PO, `o.companySOId` is empty (the order is a CO,
+not an SO) and the parent doc id lives on `o.companyCOId`. The fall-
+through to `""` silently rendered a blank cell. The non-SOFA branch
+read `o.poNo`, which is the line-suffixed `CO-YYMM-NNN-NN` for both SO
+and CO POs, so bedframe / accessory worked.
+
+The display rule (sofa drops the line suffix because a sofa set spans
+multiple variant-POs and no single suffix belongs to the whole set) is
+correct — the bug was forgetting CO is also a valid parent doc class.
+
+**Fix:** SOFA branch now reads `companySOId || companyCOId`. Also
+widened `salesOrderNo` similarly so the row metadata exposes the parent
+doc id for both flows. `salesOrderId` stays SO-only — CO double-click
+navigation to `/consignment/order/:id` is a separate follow-up; for
+now CO rows become double-click no-ops on the SO ID column instead of
+routing to a `/sales/<co_id>` 404.
+
+Type drift caught while fixing: `src/lib/mock-data.ts` `ProductionOrder`
+got `consignmentOrderId?` + `companyCOId?` added (the API has been
+returning these since `f0936ea` / 2026-04-28's `rowToPO` fix, but the
+shared type didn't carry them, so TS was permissive instead of
+helpful). Followup hotfix `da9c7b6` discovered a second `ProductionOrder`
+type **shadowing** the import at `src/pages/production/index.tsx:26`
+that ALSO needed the same fields — the deploy of the first commit
+(`f35bcd5`) failed type-check on it.
+
+**Verification:** typecheck clean after both commits. Manual: dept
+sheets now show `CO-2604-002` for SOFA rows whose parent is CO-2604-002.
 
 ---
 

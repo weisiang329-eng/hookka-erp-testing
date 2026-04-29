@@ -18,7 +18,7 @@ import {
   Plus,
   X,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDProjectType } from "@/lib/mock-data";
+import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
@@ -75,9 +75,19 @@ function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
   );
 }
 
+// Derive cover photo at render time — first photo across all milestones in storage order.
+// Returns undefined if no milestone has any photos (caller renders placeholder SVG).
+function getCoverPhoto(project: RDProject): string | undefined {
+  for (const m of project.milestones) {
+    if (m.photos && m.photos.length > 0) return m.photos[0];
+  }
+  return undefined;
+}
+
 function ProjectCard({ project }: { project: RDProject }) {
   const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
   const budgetColor = budgetPct > 90 ? "text-[#9A3A2D]" : budgetPct > 70 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+  const cover = getCoverPhoto(project);
 
   return (
     <Link to={`/rd/${project.id}`}>
@@ -88,7 +98,29 @@ function ProjectCard({ project }: { project: RDProject }) {
               <p className="text-xs font-mono text-gray-400">{project.code}</p>
               <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
             </div>
-            <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+            {/* Cover thumbnail (top-right) — first milestone photo, or neutral placeholder */}
+            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+              {cover ? (
+                <img
+                  src={cover}
+                  alt={`${project.name} cover`}
+                  className="h-12 w-12 rounded-md object-cover border border-[#E2DDD8]"
+                />
+              ) : (
+                <div
+                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
+                  title="No photo yet"
+                  aria-label="No cover photo"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+              )}
+              <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+            </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -100,10 +132,16 @@ function ProjectCard({ project }: { project: RDProject }) {
               className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
                 project.projectType === "IMPROVEMENT"
                   ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                  : project.projectType === "CLONE"
+                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
                   : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
               }`}
             >
-              {project.projectType === "IMPROVEMENT" ? "Improvement" : "Research"}
+              {project.projectType === "IMPROVEMENT"
+                ? "Improvement"
+                : project.projectType === "CLONE"
+                ? "Clone"
+                : "Research"}
             </span>
             <span
               className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
@@ -433,6 +471,10 @@ function CreateProjectDialog({
     targetLaunchDate: "",
     totalBudgetRM: "",
     teamMembers: "",
+    sourceProductName: "",
+    sourceBrand: "",
+    sourcePurchaseRef: "",
+    sourceNotes: "",
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -457,6 +499,14 @@ function CreateProjectDialog({
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
+      }
+      // Clone-source fields are only sent when projectType === 'CLONE'.
+      // Server stores nulls for non-CLONE types, so we just skip empty strings.
+      if (form.projectType === "CLONE") {
+        if (form.sourceProductName.trim()) body.sourceProductName = form.sourceProductName.trim();
+        if (form.sourceBrand.trim()) body.sourceBrand = form.sourceBrand.trim();
+        if (form.sourcePurchaseRef.trim()) body.sourcePurchaseRef = form.sourcePurchaseRef.trim();
+        if (form.sourceNotes.trim()) body.sourceNotes = form.sourceNotes.trim();
       }
 
       try {
@@ -531,6 +581,7 @@ function CreateProjectDialog({
             >
               <option value="DEVELOPMENT">New Product Research</option>
               <option value="IMPROVEMENT">Improvement / Repair</option>
+              <option value="CLONE">Clone / Replicate Competitor</option>
             </select>
           </div>
 
@@ -566,6 +617,61 @@ function CreateProjectDialog({
                 className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
                 placeholder="e.g. RC-2604-001"
               />
+            </div>
+          )}
+
+          {/* Clone-source fields — only for CLONE type */}
+          {form.projectType === "CLONE" && (
+            <div className="rounded-lg border border-dashed border-[#E2DDD8] bg-[#FBF9F6] p-3 space-y-3">
+              <p className="text-xs text-gray-500">
+                Source product info — what we bought to reverse-engineer.
+              </p>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Source Product / Model Name
+                </label>
+                <input
+                  type="text"
+                  value={form.sourceProductName}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceProductName: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. Comfy Recliner Pro"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Source Brand / Supplier
+                </label>
+                <input
+                  type="text"
+                  value={form.sourceBrand}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceBrand: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. ABC Furniture Sdn Bhd"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Purchase Reference / Invoice No.
+                </label>
+                <input
+                  type="text"
+                  value={form.sourcePurchaseRef}
+                  onChange={(e) => setForm((f) => ({ ...f, sourcePurchaseRef: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. INV-2026-0421"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">Source Notes</label>
+                <textarea
+                  value={form.sourceNotes}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceNotes: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32] resize-none"
+                  placeholder="Dimensions, key specs, why we want to copy..."
+                />
+              </div>
             </div>
           )}
 

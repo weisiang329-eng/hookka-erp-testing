@@ -11,11 +11,12 @@ import { DataGrid, type Column, type ContextMenuItem } from "@/components/ui/dat
 import { formatCurrency, cn } from "@/lib/utils";
 import { getPrimarySoCategory } from "@/lib/so-category";
 import { Plus, ShoppingCart, Download, Filter, X, Eye, Pencil, Printer, Truck, FileText, ClipboardList, RefreshCw, Package, CheckCircle, ScanLine } from "lucide-react";
-import { generateSOPdf } from "@/lib/generate-so-pdf";
+// Note: generateSOPdf is dynamic-imported at the click handler so the
+// 1MB jspdf vendor chunk only ships when the user actually prints a SO.
 import { ScanPOModal } from "@/components/scan-po-modal";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { SalesOrder } from "@/lib/mock-data";
-import type { Customer, DeliveryOrder } from "@/lib/mock-data";
+import type { SalesOrder } from "@/types";
+import type { Customer, DeliveryOrder } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { DeliveryOrderSchema } from "@/lib/schemas/delivery-order";
@@ -380,7 +381,10 @@ export default function SalesPage() {
     {
       label: "Print / Preview",
       icon: <Printer className="h-3.5 w-3.5" />,
-      action: () => generateSOPdf(row, customers.find(c => c.id === row.customerId) ?? null),
+      action: async () => {
+        const { generateSOPdf } = await import("@/lib/generate-so-pdf");
+        generateSOPdf(row, customers.find(c => c.id === row.customerId) ?? null);
+      },
     },
     {
       label: "",
@@ -696,7 +700,10 @@ export default function SalesPage() {
                     try {
                       const res = await fetch(`/api/sales-orders/${so.id}/confirm`, {
                         method: "POST",
-                        headers: { "Content-Type": "application/json" },
+                        headers: {
+                          "Content-Type": "application/json",
+                          "Idempotency-Key": crypto.randomUUID(),
+                        },
                         body: JSON.stringify({ changedBy: "Admin", notes: "Bulk confirm" }),
                       });
                       const text = await res.text();
@@ -744,6 +751,7 @@ export default function SalesPage() {
                   onClick={async () => {
                     setBulkPrinting(true);
                     try {
+                      const { generateSOPdf } = await import("@/lib/generate-so-pdf");
                       for (const so of selectedRows) {
                         generateSOPdf(so, customers.find(c => c.id === so.customerId) ?? null);
                         // Tiny pacing delay between PDFs so the browser doesn't

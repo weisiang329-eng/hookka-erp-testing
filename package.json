@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test tests/smoke.test.mjs tests/authz.test.mjs tests/audit.test.mjs tests/security-public-endpoints.test.mjs tests/security-permission-matrix.test.mjs tests/security-route-coverage.test.mjs tests/url-state.test.mjs tests/tabs-cap.test.mjs tests/production-wip-producer-output.test.mjs",
+    "test": "node --test tests/smoke.test.mjs tests/authz.test.mjs tests/audit.test.mjs tests/security-public-endpoints.test.mjs tests/security-permission-matrix.test.mjs tests/security-route-coverage.test.mjs tests/url-state.test.mjs tests/tabs-cap.test.mjs tests/production-wip-producer-output.test.mjs tests/permissions.test.mjs tests/worker-auth.test.mjs tests/worker-auth-default-protect.test.mjs tests/scheduler.test.mjs tests/money.test.mjs tests/e2e-happy-path.test.mjs tests/hash-chain.test.mjs tests/tenant-isolation.test.mjs",
     "build": "vite build",
     "build:strict": "npm run typecheck:app && npm run build",
     "typecheck": "tsc -b",
@@ -35,7 +35,6 @@
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "@hookform/resolvers": "^5.2.2",
-    "@sentry/cloudflare": "^10.50.0",
     "@sentry/react": "^10.50.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-table": "^8.21.3",
@@ -60,6 +59,7 @@
     "swr": "^2.4.1",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.2",
+    "toucan-js": "^4.1.1",
     "xlsx": "^0.18.5",
     "zod": "^4.3.6"
   },

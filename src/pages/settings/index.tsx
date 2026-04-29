@@ -172,27 +172,56 @@ const defaultSystem: SystemSettings = {
 };
 
 // ---- Storage Keys ----
-const LS_HOOKKA = "hookka-settings-company-hookka";
-const LS_OHANA = "hookka-settings-company-ohana";
-const LS_NUMBERING = "hookka-settings-numbering";
-const LS_DEPARTMENTS = "hookka-settings-departments";
-const LS_WORK_CALENDAR = "hookka-settings-work-calendar";
-const LS_LEAD_TIMES = "hookka-settings-lead-times";
-const LS_SURCHARGES = "hookka-settings-surcharges";
-const LS_SYSTEM = "hookka-settings-system";
+//
+// Sprint 3 #6: previously these were localStorage keys, hydrated on mount
+// from the per-browser blob. That meant a fresh device showed the
+// hardcoded defaults silently — no link to the server's idea of truth.
+// Now we route through /api/kv-config/<key> so all browsers see the same
+// settings, and the page distinguishes "server has no settings" from
+// "server has settings, currently loading".
+const KV_HOOKKA = "settings-company-hookka";
+const KV_OHANA = "settings-company-ohana";
+const KV_NUMBERING = "settings-numbering";
+const KV_DEPARTMENTS = "settings-departments";
+const KV_WORK_CALENDAR = "settings-work-calendar";
+const KV_LEAD_TIMES = "settings-lead-times";
+const KV_SURCHARGES = "settings-surcharges";
+const KV_SYSTEM = "settings-system";
 
-function loadJSON<T>(key: string, fallback: T): T {
-  if (typeof window === "undefined") return fallback;
+/**
+ * Fetch one kv-config value. Returns null if the key is unset OR if the
+ * fetch fails (offline / 401). The caller decides whether null means
+ * "load default" or "show initialize button" based on the aggregate
+ * across all keys.
+ */
+async function kvLoad<T>(key: string): Promise<T | null> {
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
+    const res = await fetch(`/api/kv-config/${encodeURIComponent(key)}`);
+    if (!res.ok) return null;
+    const j = (await res.json()) as { success?: boolean; data?: unknown };
+    if (!j.success) return null;
+    return (j.data ?? null) as T | null;
   } catch {
-    return fallback;
+    return null;
   }
 }
 
-function saveJSON<T>(key: string, data: T): void {
-  localStorage.setItem(key, JSON.stringify(data));
+/**
+ * Persist one kv-config value. Resolves regardless of result so the
+ * UI doesn't block on a transient network error — toast only fires on
+ * the optimistic success path.
+ */
+async function kvSave<T>(key: string, value: T): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/kv-config/${encodeURIComponent(key)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
 }
 
 // ---- Tabs ----
@@ -219,9 +248,25 @@ function SaveToast({ show }: { show: boolean }) {
 }
 
 // ---- Main Page ----
+//
+// Sprint 3 #6: server-backed config (`/api/kv-config/<key>`).
+//
+// Load-state machine:
+//   loadState = 'loading'        → page is fetching; show skeleton.
+//   loadState = 'uninitialized'  → server returned null for ALL keys;
+//                                   show "Initialize defaults" CTA so the
+//                                   user has to opt in to seeding the KV
+//                                   store from the hardcoded defaults.
+//   loadState = 'ready'          → at least one key has data; per-section
+//                                   state is hydrated from server values
+//                                   (with a default fallback per missing
+//                                   section so partial seeds keep working).
+type LoadState = "loading" | "uninitialized" | "ready";
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("company");
   const [showToast, setShowToast] = useState(false);
+  const [loadState, setLoadState] = useState<LoadState>("loading");
 
   // Company Profile state
   const [hookka, setHookka] = useState<CompanyProfile>(defaultHookka);
@@ -239,17 +284,56 @@ export default function SettingsPage() {
   // System state
   const [systemSettings, setSystemSettings] = useState<SystemSettings>(defaultSystem);
 
-  // Load from localStorage on mount
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount-time hydrate from localStorage */
+  // Load from /api/kv-config on mount. We fetch all 8 keys in parallel.
+  // If every key returns null, we hold off on populating state with the
+  // hardcoded defaults — the user sees an "Initialize defaults" button
+  // and must explicitly seed the KV store. This stops the prior silent
+  // overwrite where every fresh browser pretended the config existed.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount-time hydrate from server */
   useEffect(() => {
-    setHookka(loadJSON(LS_HOOKKA, defaultHookka));
-    setOhana(loadJSON(LS_OHANA, defaultOhana));
-    setNumbering(loadJSON(LS_NUMBERING, defaultNumbering));
-    setDeptConfig(loadJSON(LS_DEPARTMENTS, defaultDepartments));
-    setWorkCalendar(loadJSON(LS_WORK_CALENDAR, defaultWorkCalendar));
-    setLeadTimes(loadJSON(LS_LEAD_TIMES, defaultLeadTimes));
-    setSurcharges(loadJSON(LS_SURCHARGES, defaultSurcharges));
-    setSystemSettings(loadJSON(LS_SYSTEM, defaultSystem));
+    let cancelled = false;
+    (async () => {
+      const [
+        hookkaSrv, ohanaSrv, numberingSrv, deptSrv,
+        wcSrv, ltSrv, surchargeSrv, sysSrv,
+      ] = await Promise.all([
+        kvLoad<CompanyProfile>(KV_HOOKKA),
+        kvLoad<CompanyProfile>(KV_OHANA),
+        kvLoad<NumberingRule[]>(KV_NUMBERING),
+        kvLoad<DepartmentConfig[]>(KV_DEPARTMENTS),
+        kvLoad<WorkCalendar>(KV_WORK_CALENDAR),
+        kvLoad<LeadTime[]>(KV_LEAD_TIMES),
+        kvLoad<SpecialSurcharge[]>(KV_SURCHARGES),
+        kvLoad<SystemSettings>(KV_SYSTEM),
+      ]);
+      if (cancelled) return;
+
+      const allEmpty =
+        hookkaSrv == null && ohanaSrv == null && numberingSrv == null &&
+        deptSrv == null && wcSrv == null && ltSrv == null &&
+        surchargeSrv == null && sysSrv == null;
+
+      if (allEmpty) {
+        setLoadState("uninitialized");
+        return;
+      }
+
+      // Partial seed: hydrate from server where present, fall back to
+      // defaults where the server has nothing (so an unset section
+      // doesn't render blank-and-broken).
+      if (hookkaSrv) setHookka(hookkaSrv);
+      if (ohanaSrv) setOhana(ohanaSrv);
+      if (numberingSrv) setNumbering(numberingSrv);
+      if (deptSrv) setDeptConfig(deptSrv);
+      if (wcSrv) setWorkCalendar(wcSrv);
+      if (ltSrv) setLeadTimes(ltSrv);
+      if (surchargeSrv) setSurcharges(surchargeSrv);
+      if (sysSrv) setSystemSettings(sysSrv);
+      setLoadState("ready");
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
 
@@ -259,6 +343,27 @@ export default function SettingsPage() {
     // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
     setTimeout(() => setShowToast(false), 2000);
   }, []);
+
+  /**
+   * Seed every KV key with the hardcoded defaults. Used by the
+   * "Initialize defaults" button that's shown when the server reports
+   * no settings at all. After a successful seed we flip to 'ready' so
+   * the normal tab UI renders with the freshly seeded values.
+   */
+  const initializeDefaults = useCallback(async () => {
+    await Promise.all([
+      kvSave(KV_HOOKKA, defaultHookka),
+      kvSave(KV_OHANA, defaultOhana),
+      kvSave(KV_NUMBERING, defaultNumbering),
+      kvSave(KV_DEPARTMENTS, defaultDepartments),
+      kvSave(KV_WORK_CALENDAR, defaultWorkCalendar),
+      kvSave(KV_LEAD_TIMES, defaultLeadTimes),
+      kvSave(KV_SURCHARGES, defaultSurcharges),
+      kvSave(KV_SYSTEM, defaultSystem),
+    ]);
+    setLoadState("ready");
+    flash();
+  }, [flash]);
 
   // Generate preview number
   const previewNumber = (rule: NumberingRule) => {
@@ -323,9 +428,11 @@ export default function SettingsPage() {
       <div className="flex justify-end">
         <Button
           variant="primary"
-          onClick={() => {
-            saveJSON(LS_HOOKKA, hookka);
-            saveJSON(LS_OHANA, ohana);
+          onClick={async () => {
+            await Promise.all([
+              kvSave(KV_HOOKKA, hookka),
+              kvSave(KV_OHANA, ohana),
+            ]);
             flash();
           }}
         >
@@ -395,8 +502,8 @@ export default function SettingsPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={() => {
-                          saveJSON(LS_NUMBERING, numbering);
+                        onClick={async () => {
+                          await kvSave(KV_NUMBERING, numbering);
                           flash();
                         }}
                       >
@@ -688,11 +795,13 @@ export default function SettingsPage() {
       <div className="flex justify-end">
         <Button
           variant="primary"
-          onClick={() => {
-            saveJSON(LS_DEPARTMENTS, deptConfig);
-            saveJSON(LS_WORK_CALENDAR, workCalendar);
-            saveJSON(LS_LEAD_TIMES, leadTimes);
-            saveJSON(LS_SURCHARGES, surcharges);
+          onClick={async () => {
+            await Promise.all([
+              kvSave(KV_DEPARTMENTS, deptConfig),
+              kvSave(KV_WORK_CALENDAR, workCalendar),
+              kvSave(KV_LEAD_TIMES, leadTimes),
+              kvSave(KV_SURCHARGES, surcharges),
+            ]);
             flash();
           }}
         >
@@ -846,8 +955,8 @@ export default function SettingsPage() {
         <div className="flex justify-end">
           <Button
             variant="primary"
-            onClick={() => {
-              saveJSON(LS_SYSTEM, systemSettings);
+            onClick={async () => {
+              await kvSave(KV_SYSTEM, systemSettings);
               flash();
             }}
           >
@@ -860,6 +969,50 @@ export default function SettingsPage() {
   };
 
   // ---- Main Render ----
+
+  // Loading + uninitialized states ride above the tab content. We render
+  // the page header in both cases so the chrome doesn't pop in/out, but
+  // gate the tabs themselves on having either fetched data or seeded
+  // defaults explicitly via the CTA.
+  if (loadState === "loading") {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Settings</h1>
+          <p className="text-xs text-[#6B7280]">Loading configuration…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadState === "uninitialized") {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-xl font-bold text-[#1F1D1B]">Settings</h1>
+          <p className="text-xs text-[#6B7280]">System administration and configuration</p>
+        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle>No saved settings yet</CardTitle>
+            <CardDescription>
+              The configuration store on the server is empty. Click below
+              to seed it with the recommended defaults — you can edit any
+              value afterwards. Until you initialize, all other workflows
+              that read settings will fall back to their built-in defaults.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button variant="primary" onClick={initializeDefaults}>
+              <Save className="h-4 w-4" />
+              Initialize defaults
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
       <SaveToast show={showToast} />

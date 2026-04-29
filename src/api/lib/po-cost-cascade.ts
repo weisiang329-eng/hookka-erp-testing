@@ -44,6 +44,12 @@
 // ---------------------------------------------------------------------------
 import { fifoConsume, laborRateForDate } from "../../lib/costing";
 import type { RMBatch } from "../../types";
+import {
+  expandMaterialQty,
+  parseMaterialScaling,
+  parseSofaSeatHeightInches,
+  type ProductionDimensions,
+} from "./material-scaling";
 
 type RMBatchRow = {
   id: string;
@@ -65,6 +71,17 @@ type ProductionOrderRow = {
   productCode: string | null;
   quantity: number;
   completedDate: string | null;
+  // Snapshotted SO/CO line dimensions used by the BOM material scaling
+  // rule. Bedframe dims are stored as INTs; sofa seat height lives
+  // inline in sizeCode/sizeLabel and is parsed at use time via
+  // parseSofaSeatHeightInches. itemCategory tells us whether to do
+  // that parse (bedframe sizeCode is "K"/"Q"/"S", not inches).
+  itemCategory: string | null;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
 };
 
 type BomVersionRow = {
@@ -95,7 +112,17 @@ type MaterialLine = {
 
 // Walk a BOM tree JSON node and gather every `materials[]` entry across all
 // nested levels. The tree is the JSON stored in bom_versions.tree.
-function collectTreeMaterials(node: unknown, out: MaterialLine[]): void {
+//
+// Material scaling is applied HERE (not later in consumeRawMaterialsForPO)
+// so the resulting `qtyPerUnit` is already the SCALED per-FG-unit qty.
+// Downstream multiplication by `po.quantity` and `(1 + wastePct/100)`
+// stays unchanged. If a row has no scaling rule, expandMaterialQty
+// returns the raw qty — same behaviour as before this change.
+function collectTreeMaterials(
+  node: unknown,
+  out: MaterialLine[],
+  dims: ProductionDimensions,
+): void {
   if (!node || typeof node !== "object") return;
   const n = node as Record<string, unknown>;
   const mats = n.materials;
@@ -106,17 +133,19 @@ function collectTreeMaterials(node: unknown, out: MaterialLine[]): void {
       const code = typeof row.code === "string" ? row.code : "";
       const name = typeof row.name === "string" ? row.name : code;
       const qty = typeof row.qty === "number" ? row.qty : Number(row.qty) || 0;
+      const scaling = parseMaterialScaling(row.scaling);
+      const scaledQty = expandMaterialQty(qty, scaling, dims);
       const waste =
         typeof row.wastePct === "number"
           ? row.wastePct
           : Number(row.wastePct) || 0;
       const inventoryCode =
         typeof row.inventoryCode === "string" ? row.inventoryCode : undefined;
-      if (qty > 0 && (code || name)) {
+      if (scaledQty > 0 && (code || name)) {
         out.push({
           code: code || name,
           name,
-          qtyPerUnit: qty,
+          qtyPerUnit: scaledQty,
           wastePct: waste,
           inventoryCode,
         });
@@ -126,14 +155,16 @@ function collectTreeMaterials(node: unknown, out: MaterialLine[]): void {
   const kids = n.children;
   if (Array.isArray(kids)) {
     for (const child of kids) {
-      collectTreeMaterials(child, out);
+      collectTreeMaterials(child, out, dims);
     }
   }
 }
 
 // Resolve the BOM material list for a PO. Prefers bom_versions.tree
-// (rich schema with inventoryCode + nested materials), falls back to
-// bom_components rows. Returns [] if nothing is found.
+// (rich schema with inventoryCode + nested materials + optional scaling
+// rules), falls back to bom_components rows. Returns [] if nothing is
+// found. Dimensions snapshot is used by the JSON-tree path to expand
+// per-material scaling rules at extraction time.
 async function resolveBomMaterials(
   db: D1Database,
   po: ProductionOrderRow,
@@ -157,11 +188,24 @@ async function resolveBomMaterials(
       .first<BomVersionRow>();
   }
 
+  // Build the dimension snapshot used by every scaling rule on this PO.
+  // Bedframe sizeCode ("Q" / "K" / "S") is rejected by the parser so it
+  // doesn't pollute seatHeightInches; only sofa SO lines populate it.
+  const dims: ProductionDimensions = {
+    gapInches: po.gapInches,
+    divanHeightInches: po.divanHeightInches,
+    legHeightInches: po.legHeightInches,
+    seatHeightInches:
+      po.itemCategory === "SOFA"
+        ? parseSofaSeatHeightInches(po.sizeCode, po.sizeLabel)
+        : null,
+  };
+
   if (version?.tree) {
     try {
       const parsed = JSON.parse(version.tree);
       const acc: MaterialLine[] = [];
-      collectTreeMaterials(parsed, acc);
+      collectTreeMaterials(parsed, acc, dims);
       if (acc.length > 0) return acc;
     } catch {
       // fall through to bom_components
@@ -256,7 +300,10 @@ export async function consumeRawMaterialsForPO(
 
   const po = await db
     .prepare(
-      "SELECT id, poNo, productId, productCode, quantity, completedDate FROM production_orders WHERE id = ?",
+      `SELECT id, poNo, productId, productCode, quantity, completedDate,
+              itemCategory, gapInches, divanHeightInches, legHeightInches,
+              sizeCode, sizeLabel
+         FROM production_orders WHERE id = ?`,
     )
     .bind(poId)
     .first<ProductionOrderRow>();

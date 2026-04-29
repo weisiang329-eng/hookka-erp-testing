@@ -23,7 +23,9 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { getOrgId } from "../lib/tenant";
 import { checkRawMaterialDeleteLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
 import {
   buildFabricDeleteStatements,
   buildFabricUpsertStatements,
@@ -120,13 +122,14 @@ function statusFromBody(body: RawMaterialBody, fallback = "ACTIVE"): string {
 
 // GET /api/raw-materials  (optional ?status=ACTIVE)
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const status = c.req.query("status");
   const sql = status
-    ? "SELECT * FROM raw_materials WHERE status = ? ORDER BY itemCode"
-    : "SELECT * FROM raw_materials ORDER BY itemCode";
+    ? "SELECT * FROM raw_materials WHERE orgId = ? AND status = ? ORDER BY itemCode"
+    : "SELECT * FROM raw_materials WHERE orgId = ? ORDER BY itemCode";
   const stmt = status
-    ? c.var.DB.prepare(sql).bind(status)
-    : c.var.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(orgId, status)
+    : c.var.DB.prepare(sql).bind(orgId);
   const res = await stmt.all<RawMaterialRow>();
   const data = (res.results ?? []).map(rowToApi);
   return c.json({ success: true, data, total: data.length });
@@ -148,6 +151,8 @@ app.get("/:id", async (c) => {
 
 // POST /api/raw-materials
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "create");
+  if (denied) return denied;
   let body: RawMaterialBody;
   try {
     body = (await c.req.json()) as RawMaterialBody;
@@ -252,6 +257,8 @@ app.post("/", async (c) => {
 
 // PUT /api/raw-materials/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
@@ -406,6 +413,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/raw-materials/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM raw_materials WHERE id = ?",
@@ -463,6 +472,8 @@ app.delete("/:id", async (c) => {
 // Qty` gets stale the moment a GRN posts). On INSERT balanceQty defaults
 // to 0; the first GRN against the new code will bring it up to level.
 app.post("/bulk-import", async (c) => {
+  const denied = await requirePermission(c, "raw-materials", "create");
+  if (denied) return denied;
   let body: { rows?: RawMaterialBody[] };
   try {
     body = (await c.req.json()) as typeof body;

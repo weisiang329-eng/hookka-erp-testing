@@ -1,7 +1,7 @@
 # Phase C — Enterprise Upgrade Arc (6-Month Roadmap)
 
 **Status:** Draft, written 2026-04-25
-**Prerequisites:** Phase A complete (TypeScript clean, RBAC matrix live, audit log writing on every mutation), Phase B complete (Workers SDK split, CI strict-build gate, OAuth-ready auth, R2 attachment store, canary deploy pipeline)
+**Prerequisites:** Phase A complete (TypeScript clean, RBAC matrix live, audit log writing on every mutation), Phase B complete (Workers SDK split, CI strict-build gate, OAuth-ready auth, Supabase Storage attachment store [was R2 pre-storage-supabase-migration], canary deploy pipeline)
 **Owner:** TBD (recommend a dedicated tech lead, ~0.5 FTE for the full 6 months)
 
 ---
@@ -232,7 +232,7 @@ Ship **Google Workspace OAuth only**, no SCIM yet, no Microsoft yet. Hookka's ow
 
 ### What
 
-Documented and *drilled* recovery process. Daily automated logical backup (`pg_dump` for Supabase, D1 export for D1) to an off-account R2 bucket with 90-day retention. A runbook that walks through restoring to a fresh project. A quarterly drill where someone *actually does* the restore on a Friday afternoon and times it.
+Documented and *drilled* recovery process. Daily automated logical backup (`pg_dump` for Supabase) to an off-vendor object store with 90-day retention. (Originally specced as Cloudflare R2; the storage-supabase-migration moved daily dumps to Supabase Storage, with the same-vendor-as-Postgres caveat called out in `docs/DR-RUNBOOK.md` plus a GitHub Actions artifact retained for 90 days as the off-vendor floor.) A runbook that walks through restoring to a fresh project. A quarterly drill where someone *actually does* the restore on a Friday afternoon and times it.
 
 ### Acceptance criteria
 
@@ -248,7 +248,7 @@ A primary-region Cloudflare incident (rare but real — Jun 2025 outage) without
 
 ### Cost
 
-**3 engineer-weeks** + 1 day per quarter ongoing for drills. ~1 week WAL shipping + R2 sink, ~1 week runbook + restore tooling, ~1 week first drill + lessons-learned cleanup.
+**3 engineer-weeks** + 1 day per quarter ongoing for drills. ~1 week WAL shipping + Storage sink, ~1 week runbook + restore tooling, ~1 week first drill + lessons-learned cleanup.
 
 ### Dependencies
 
@@ -257,7 +257,11 @@ A primary-region Cloudflare incident (rare but real — Jun 2025 outage) without
 
 ### Quick-win subset (1-2 weeks)
 
-Ship **daily logical backups to R2** with 90-day retention. No drill yet. This stops the bleeding (today there is no off-account backup at all). The drill follows once the rest of Phase C settles.
+Ship **daily logical backups to Supabase Storage** (was R2 in the
+original Phase C draft; updated by storage-supabase-migration) with
+90-day retention. No drill yet. This stops the bleeding (today there
+is no off-vendor backup at all). The drill follows once the rest of
+Phase C settles.
 
 ---
 
@@ -272,7 +276,7 @@ The order below respects the dependency graph (each item only starts after its b
 | **M2** | W5-W6 | #2 quick-win | Dual-write to `journal_entries` (chain collecting, not yet enforced) |
 | | W7-W8 | #2 part 2 | Reversal model + tamper-check job |
 | **M3** | W9 | #2 finish | Flip immutability trigger; ledger is read-only |
-| | W10-W11 | #7 quick-win | Daily `pg_dump` to off-account R2, 90-day retention |
+| | W10-W11 | #7 quick-win | Daily `pg_dump` to off-vendor object store (Supabase Storage post-migration), 90-day retention |
 | | W12 | #4 quick-win | Duplicate-detection nightly job + review queue |
 | **M4** | W13-W14 | #3 quick-win | PO emission moved to Cloudflare Queue (kills ~70% of stuck cascades) |
 | | W15-W17 | #3 finish | Full SO->payment cascade as Workflows; idempotency + retry |

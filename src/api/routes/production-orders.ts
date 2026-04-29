@@ -29,6 +29,8 @@ import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 // Phase 6 — parallel event sourcing for JC mutations. appendJobCardEvent
 // writes go after the UPDATE lands so the source-of-truth row is committed
 // before we narrate what changed; a write failure here does NOT roll the
@@ -428,13 +430,25 @@ async function fetchInChunks<R>(
   return out;
 }
 
-async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
+async function fetchAllPOs(
+  db: D1Database,
+  orgId: string,
+): Promise<ProductionOrderOut[]> {
   const [pos, jcs, pics] = await Promise.all([
     db
-      .prepare("SELECT * FROM production_orders ORDER BY created_at DESC, id DESC")
+      .prepare(
+        "SELECT * FROM production_orders WHERE orgId = ? ORDER BY created_at DESC, id DESC",
+      )
+      .bind(orgId)
       .all<ProductionOrderRow>(),
-    db.prepare("SELECT * FROM job_cards").all<JobCardRow>(),
-    db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    db
+      .prepare("SELECT * FROM job_cards WHERE orgId = ?")
+      .bind(orgId)
+      .all<JobCardRow>(),
+    db
+      .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+      .bind(orgId)
+      .all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
     rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -451,6 +465,7 @@ async function fetchAllPOs(db: D1Database): Promise<ProductionOrderOut[]> {
 //   return POs with `jobCards: []`. Defaults to true for backward compat.
 async function fetchFilteredPOs(
   db: D1Database,
+  orgId: string,
   statuses: string[] | null,
   includeJobCards: boolean,
   includeArchive = false,
@@ -474,12 +489,14 @@ async function fetchFilteredPOs(
         UNION ALL
         SELECT * FROM job_cards_archive)`
     : "job_cards";
+  // Sprint 4: orgId is always the leading WHERE predicate. Status filter
+  // becomes an AND clause when present.
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(...(statuses as string[]))
-    : db.prepare(poSql);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]))
+    : db.prepare(poSql).bind(orgId);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -494,10 +511,12 @@ async function fetchFilteredPOs(
   // wipKey-grouped variant keeps the JC-row payload down (only loads
   // wipKeys that the active dept actually touches) while letting the
   // frontend picker find the full chain.
+  // Dept-narrowing: orgId scopes the inner subqueries too — otherwise the
+  // wipKey-grouped lookup could return JC ids from another tenant.
   const jcWhereDept = deptFilter
-    ? ` WHERE wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL)
-          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL))
-          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG')`
+    ? ` WHERE orgId = ? AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NOT NULL)
+          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NULL))
+          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG'))`
     : "";
 
   if (!includeJobCards) {
@@ -516,9 +535,10 @@ async function fetchFilteredPOs(
     if (deptFilter) {
       // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
       // payload bounded. Leave it untouched.
+      // Sprint 4: 7 bind slots = orgId outer + (orgId,dept) x 3 inner subqueries.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(deptFilter, deptFilter, deptFilter);
+        .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -547,7 +567,9 @@ async function fetchFilteredPOs(
       return poRows.map((p) => rowToMinimalPO(p, jcs));
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
-    const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
+    const jcStmt = db
+      .prepare(`SELECT * FROM ${jcSource} WHERE orgId = ?`)
+      .bind(orgId);
     const [pos, jcs] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -560,11 +582,14 @@ async function fetchFilteredPOs(
   if (deptFilter) {
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(deptFilter, deptFilter, deptFilter);
+      .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
-      db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+      db
+        .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+        .bind(orgId)
+        .all<PiecePicRow>(),
     ]);
     return (pos.results ?? []).map((p) =>
       rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -602,11 +627,16 @@ async function fetchFilteredPOs(
     return poRows.map((p) => rowToPO(p, jcs, pics));
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
-  const jcStmt = db.prepare(`SELECT * FROM ${jcSource}`);
+  const jcStmt = db
+    .prepare(`SELECT * FROM ${jcSource} WHERE orgId = ?`)
+    .bind(orgId);
   const [pos, jcs, pics] = await Promise.all([
     poStmt.all<ProductionOrderRow>(),
     jcStmt.all<JobCardRow>(),
-    db.prepare("SELECT * FROM piece_pics").all<PiecePicRow>(),
+    db
+      .prepare("SELECT * FROM piece_pics WHERE orgId = ?")
+      .bind(orgId)
+      .all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
     rowToPO(p, jcs.results ?? [], pics.results ?? []),
@@ -619,6 +649,7 @@ async function fetchFilteredPOs(
 // (not the whole table), which is the big win when the list is paginated.
 async function fetchPaginatedPOs(
   db: D1Database,
+  orgId: string,
   statuses: string[] | null,
   includeJobCards: boolean,
   page: number,
@@ -645,18 +676,18 @@ async function fetchPaginatedPOs(
     : "job_cards";
 
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE status IN (${statusPlaceholders})`
-    : `SELECT COUNT(*) AS n FROM ${poSource}`;
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})`
+    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?`;
   const pageSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : `SELECT * FROM ${poSource} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
-    ? db.prepare(countSql).bind(...(statuses as string[]))
-    : db.prepare(countSql);
+    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]))
+    : db.prepare(countSql).bind(orgId);
   const pageStmt = hasFilter
-    ? db.prepare(pageSql).bind(...(statuses as string[]), limit, offset)
-    : db.prepare(pageSql).bind(limit, offset);
+    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), limit, offset)
+    : db.prepare(pageSql).bind(orgId, limit, offset);
 
   const [countRes, pageRes] = await Promise.all([
     countStmt.first<{ n: number }>(),
@@ -1669,6 +1700,94 @@ async function cascadePoCompletionToCO(
   }
 }
 
+// ----------------------------------------------------------------------------
+// CN-completion cascade — DO-parity twin (gap 1, audit fix 2026-04-29).
+//
+// DO's PUT /:id flips sales_orders.status='DELIVERED' once the DO crosses
+// to DELIVERED (delivery-orders.ts ~lines 1633-1660). CN had no parallel:
+// once every CN under a CO went FULLY_SOLD or CLOSED, the parent CO sat
+// frozen at READY_TO_SHIP forever. This helper closes that gap.
+//
+// Called from updateConsignmentNoteById (consignment-note-shared.ts) AFTER
+// the main UPDATE statement, when nextStatus IN ('FULLY_SOLD','CLOSED')
+// AND existing.consignmentOrderId is set. Also called from convert-to-
+// invoice in consignment-notes.ts after that route bumps the CN to
+// FULLY_SOLD.
+//
+// Idempotent: if the CO is already DELIVERED, this is a no-op. Re-running
+// after every CN status change is safe.
+// ----------------------------------------------------------------------------
+export async function cascadeCNCompletionToCO(
+  db: D1Database,
+  consignmentOrderId: string | null,
+): Promise<void> {
+  if (!consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+  const siblings = await db
+    .prepare("SELECT status FROM consignment_notes WHERE consignmentOrderId = ?")
+    .bind(consignmentOrderId)
+    .all<{ status: string }>();
+  const sibList = siblings.results ?? [];
+  // Need at least one CN AND every CN must be FULLY_SOLD or CLOSED.
+  // RETURNED is intentionally NOT counted as "done" — the goods came back,
+  // the CO should not flip DELIVERED.
+  const allDone =
+    sibList.length > 0 &&
+    sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
+  if (allDone && co.status !== "DELIVERED") {
+    await db
+      .prepare(
+        "UPDATE consignment_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+      )
+      .bind(new Date().toISOString(), consignmentOrderId)
+      .run();
+  }
+}
+
+// CN-completion REVERSAL twin. When a CN reverses below FULLY_SOLD AND the
+// parent CO has been bumped to DELIVERED by a prior cascadeCNCompletionToCO
+// call, flip it back to READY_TO_SHIP so the CO no longer reads as completed.
+//
+// DO doesn't have an equivalent SO bump-back: once a SO crosses to
+// DELIVERED via DO cascade, reversing the DO does not bump the SO back —
+// the operator handles that manually if desired (delivery-orders.ts is
+// silent on the reverse path for the SO cascade). For CN we mirror that
+// model by ONLY bumping back if the CO is currently DELIVERED — otherwise
+// we leave it alone. This keeps the cascade strictly additive: no
+// surprises, no clobbering an operator-set state.
+export async function cascadeCNReversalToCO(
+  db: D1Database,
+  consignmentOrderId: string | null,
+): Promise<void> {
+  if (!consignmentOrderId) return;
+  const co = await db
+    .prepare("SELECT id, status FROM consignment_orders WHERE id = ?")
+    .bind(consignmentOrderId)
+    .first<{ id: string; status: string }>();
+  if (!co) return;
+  if (co.status !== "DELIVERED") return; // Only bump back from DELIVERED.
+  // Re-check: if sibling CNs are still all FULLY_SOLD/CLOSED, do nothing.
+  const siblings = await db
+    .prepare("SELECT status FROM consignment_notes WHERE consignmentOrderId = ?")
+    .bind(consignmentOrderId)
+    .all<{ status: string }>();
+  const sibList = siblings.results ?? [];
+  const stillAllDone =
+    sibList.length > 0 &&
+    sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
+  if (stillAllDone) return;
+  await db
+    .prepare(
+      "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+    )
+    .bind(new Date().toISOString(), consignmentOrderId)
+    .run();
+}
+
 // Track F cost cascade lives in ../lib/po-cost-cascade.ts and is wired
 // through postProductionOrderCompletion() + postJobCardLabor() below.
 
@@ -1878,7 +1997,38 @@ async function applyPoUpdate(
       try {
         await db.batch(stmts);
       } catch (err) {
-        console.error("[jc-events] append failed", err);
+        // Sprint 2 task 6 — instead of silently losing the audit batch,
+        // dead-letter the original payload so a replay sweeper can pick
+        // it up once the underlying issue is fixed (schema drift, D1
+        // transient, etc.). console.error is kept so wrangler tail still
+        // surfaces the issue in real time.
+        console.error("[jc-events] append failed — DLQ-ing", err);
+        try {
+          const dlqId = `dlq_${crypto.randomUUID().slice(0, 12)}`;
+          const errMsg =
+            (err instanceof Error ? err.message : String(err)).slice(0, 1024);
+          await db
+            .prepare(
+              `INSERT INTO audit_dlq
+                 (id, original_payload, error_message, error_kind, attempted_at)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              dlqId,
+              JSON.stringify(events),
+              errMsg,
+              "job_card_events.batch_failed",
+              new Date().toISOString(),
+            )
+            .run();
+        } catch (dlqErr) {
+          // If even the DLQ write fails, we've exhausted graceful options.
+          // Log loudly so ops can pull the values out of wrangler tail.
+          console.error(
+            "[jc-events] DLQ write also failed — events dropped on the floor",
+            { events, originalErr: err, dlqErr },
+          );
+        }
       }
     }
 
@@ -2147,9 +2297,12 @@ app.get("/", async (c) => {
       ? deptParamRaw.trim().toUpperCase()
       : null;
 
+  const orgId = getOrgId(c);
+
   if (!paginate) {
     const data = await fetchFilteredPOs(
       c.var.DB,
+      orgId,
       statuses,
       includeJobCards,
       includeArchive,
@@ -2164,6 +2317,7 @@ app.get("/", async (c) => {
   const limit = Math.min(500, Math.max(1, rawLimit));
   const { data, total } = await fetchPaginatedPOs(
     c.var.DB,
+    orgId,
     statuses,
     includeJobCards,
     page,
@@ -2180,7 +2334,7 @@ app.get("/", async (c) => {
 // Distinct WIPs that have appeared in any JobCard to date.
 // ---------------------------------------------------------------------------
 app.get("/historical-wips", async (c) => {
-  const all = await fetchAllPOs(c.var.DB);
+  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
   type H = {
     wipLabel: string;
     wipKey?: string;
@@ -2234,7 +2388,7 @@ app.get("/historical-wips", async (c) => {
 // GET /api/production-orders/historical-fgs
 // ---------------------------------------------------------------------------
 app.get("/historical-fgs", async (c) => {
-  const all = await fetchAllPOs(c.var.DB);
+  const all = await fetchAllPOs(c.var.DB, getOrgId(c));
   type H = {
     sourcePoId: string;
     sourcePoNo: string;
@@ -2279,6 +2433,8 @@ app.get("/historical-fgs", async (c) => {
 // and creates a new PO linked to it.
 // ---------------------------------------------------------------------------
 app.post("/stock", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const body = await c.req.json().catch(() => ({}));
   const type = body?.type as "WIP" | "FG" | undefined;
@@ -2588,6 +2744,8 @@ app.post("/stock", async (c) => {
 // B-flow piece-pic FIFO routing + sticker binding.
 // ---------------------------------------------------------------------------
 app.post("/:id/scan-complete", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const scannedId = c.req.param("id");
   const scannedPo = await db
@@ -3145,11 +3303,19 @@ app.get("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 // PUT /api/production-orders/:id
 // ---------------------------------------------------------------------------
-app.put("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 // ---------------------------------------------------------------------------
 // PATCH /api/production-orders/:id — alias for PUT
 // ---------------------------------------------------------------------------
-app.patch("/:id", async (c) => applyPoUpdate(c, c.req.param("id")));
+app.patch("/:id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  return applyPoUpdate(c, c.req.param("id"));
+});
 
 export default app;

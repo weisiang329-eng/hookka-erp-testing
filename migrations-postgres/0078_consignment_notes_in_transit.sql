@@ -1,0 +1,71 @@
+-- ============================================================================
+-- Migration 0078 - Add inTransitAt column to consignment_notes so the CN
+-- lifecycle can record the LOADED → IN_TRANSIT transition timestamp the
+-- same way DO does on delivery_orders. Brings CN to full DO parity on the
+-- 3-state shipping lane: LOADED → IN_TRANSIT → DELIVERED.
+--
+-- BACKGROUND:
+--   DO's `delivery_orders` table records inTransitAt on the LOADED →
+--   IN_TRANSIT transition; the FE renders an "In Transit" tab + KPI card +
+--   tracking-timeline step driven by that column. CN's `consignment_notes`
+--   table only had dispatchedAt / deliveredAt / acknowledgedAt — no slot
+--   for the middle step. The FE's CNStatus enum already includes
+--   IN_TRANSIT and the tab/KPI card already render, but
+--   cnStatusFromBackend() never returned IN_TRANSIT because the backend
+--   had no way to distinguish "dispatched & still at the warehouse"
+--   from "dispatched & out for delivery". This column closes that gap.
+--
+-- COLUMN SEMANTICS:
+--   inTransitAt — ISO timestamp stamped when the operator clicks "Mark
+--   In Transit" on a DISPATCHED (PARTIALLY_SOLD) CN. Analogous to:
+--     dispatchedAt   — stamped on ACTIVE → PARTIALLY_SOLD ("Mark Dispatched")
+--     inTransitAt    — stamped on PARTIALLY_SOLD → IN_TRANSIT ("Mark In Transit")
+--     deliveredAt    — stamped on IN_TRANSIT/PARTIALLY_SOLD → FULLY_SOLD ("Mark Delivered")
+--     acknowledgedAt — stamped on FULLY_SOLD → CLOSED ("Mark Acknowledged")
+--   Reverse transitions null the at-or-after timestamps (see STATUS_RANK
+--   logic in src/api/lib/consignment-note-shared.ts).
+--
+-- WHY NOT WIDEN THE STATUS ENUM:
+--   The legacy CN status enum (ACTIVE / PARTIALLY_SOLD / IN_TRANSIT /
+--   FULLY_SOLD / RETURNED / CLOSED) already contains IN_TRANSIT — the
+--   string is accepted by the existing status TEXT column with no
+--   schema change needed. This migration only adds the timestamp column;
+--   the status string flips via UPDATE on the existing column.
+--
+-- INVENTORY CASCADE:
+--   No cascade fires on PARTIALLY_SOLD → IN_TRANSIT — the goods are
+--   already out of inventory once dispatched (the
+--   ACTIVE → PARTIALLY_SOLD transition stamps fg_units LOADED + writes
+--   STOCK_OUT in the same code path). IN_TRANSIT is a tracking sub-state
+--   of LOADED, not a new inventory boundary. The reverse cascade widens
+--   to accept IN_TRANSIT → ACTIVE so a CN that crossed into in-transit
+--   can still be reversed back to Pending Dispatch in one step (see the
+--   `existing.status IN (PARTIALLY_SOLD, IN_TRANSIT)` widening in
+--   updateConsignmentNoteById).
+--
+-- IDEMPOTENCY:
+--   ADD COLUMN IF NOT EXISTS — re-running this migration on a database
+--   that already has the column is a no-op.
+--
+-- DEPLOYMENT:
+--   Apply MANUALLY via the Supabase SQL Editor. The CI step that
+--   auto-applied D1 migrations was retired 2026-04-27 (see MEMORY.md
+--   note about D1 retirement / Hyperdrive cutover). Until this is
+--   applied, the UPDATE inside updateConsignmentNoteById will throw
+--   "column inTransitAt does not exist" the first time anyone clicks
+--   Mark In Transit — apply BEFORE deploying the matching backend
+--   change, or revert the IN_TRANSIT footer/menu wiring until you do.
+--
+--   Apply ORDER: 0077 (fg_units cnId) before 0078. They touch different
+--   tables so the order is technically irrelevant, but applying in
+--   numeric order matches the file naming and avoids surprises.
+-- ============================================================================
+
+-- IMPORTANT: column name must use snake_case (in_transit_at, not inTransitAt).
+-- Postgres folds unquoted identifiers to LOWERCASE — so writing `inTransitAt`
+-- here would create a column literally named `intransitat` (no separators),
+-- which then breaks every runtime SQL that references `in_transit_at` via
+-- the D1Compat camelCase→snake_case translation. Verified 2026-04-29 after
+-- the original (incorrect) version of this migration shipped.
+ALTER TABLE consignment_notes
+  ADD COLUMN IF NOT EXISTS in_transit_at TEXT;

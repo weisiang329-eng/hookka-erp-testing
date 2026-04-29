@@ -1,0 +1,92 @@
+name: Refresh bundle baseline
+
+# Self-healing bundle-size baseline. Runs on every push to main, builds
+# the bundle from a clean Linux CI environment, regenerates
+# .bundle-baseline.json, and commits the change back to main if (and
+# only if) it actually changed.
+#
+# Why: Vite/rolldown content hashes drift between platforms — Windows
+# local builds sometimes produce 9-char hashes while Linux CI produces
+# 8-char ones. The deploy.yml bundle-size gate is currently
+# `continue-on-error: true` because of that drift. With the regex tweak
+# in scripts/check-bundle-size.mjs (now accepts 6-12 chars) the stem
+# names align across platforms, but the canonical sizes still need to
+# come from a Linux build. This workflow keeps the baseline locked to
+# Linux CI output, so subsequent gate checks compare like-for-like.
+#
+# Once 1-2 main pushes have run this and the baseline looks stable, the
+# bundle gate in deploy.yml can be flipped from `continue-on-error: true`
+# back to blocking — that flip happens in a follow-up PR.
+#
+# The commit message ends with `[skip ci]` so the auto-commit doesn't
+# re-trigger this workflow (or any other workflow that listens to push)
+# in an infinite loop.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Avoid two parallel runs racing on the same branch — the second push
+# cancels the first; we only need the latest snapshot.
+concurrency:
+  group: refresh-bundle-baseline
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Need full history so the auto-commit pushes onto the tip,
+          # not a detached HEAD.
+          fetch-depth: 0
+          # Use the default GITHUB_TOKEN for push back; permissions:
+          # contents: write above is what enables it.
+          persist-credentials: true
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: npm ci
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Regenerate baseline
+        run: node scripts/check-bundle-size.mjs --write-baseline
+
+      - name: Commit and push if baseline changed
+        run: |
+          # Detect a real diff. Exit 0 with no commit if nothing changed.
+          if git diff --quiet -- .bundle-baseline.json; then
+            echo "[bundle-baseline] no change — nothing to commit"
+            exit 0
+          fi
+
+          echo "[bundle-baseline] diff detected, committing"
+          git diff --stat -- .bundle-baseline.json
+
+          # GitHub Actions bot identity — the commit shows up under that
+          # account, not whoever pushed to main, so it's clear this is
+          # automation.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          git add .bundle-baseline.json
+          git commit -m "chore: auto-regen bundle baseline [skip ci]"
+
+          # Push back to main. With concurrency above this should only
+          # ever race with itself; if a human push lands between our
+          # build and our push the rebase below absorbs it.
+          git pull --rebase origin main
+          git push origin HEAD:main

@@ -1,6 +1,12 @@
+#!/usr/bin/env sh
 # --no-stash: lint-staged's auto-stash collides with multi-agent workflows
 # in this repo (parallel sub-agents share the working tree; lint-staged
 # stashed unstaged WIP and either swept it into the commit or failed to
 # restore it). With --no-stash, only the staged files are linted; unstaged
 # changes stay in the working tree untouched. See AGENTS-COMMIT-HYGIENE.md.
-npx lint-staged --no-stash
+npx lint-staged --no-stash || exit 1
+
+# Sprint 6 — `npm test` is now BLOCKING on commit. Failed tests must not
+# land. --silent suppresses npm's own preamble; the test runner's own
+# pass/fail still prints. Exit non-zero on any failure to abort the commit.
+npm test --silent || exit 1

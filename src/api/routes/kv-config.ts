@@ -13,6 +13,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -53,6 +54,8 @@ app.get("/:key", async (c) => {
 
 // PUT /api/kv-config/:key  — upsert
 app.put("/:key", async (c) => {
+  const denied = await requirePermission(c, "users", "update");
+  if (denied) return denied;
   const key = c.req.param("key");
   let body: unknown;
   try {

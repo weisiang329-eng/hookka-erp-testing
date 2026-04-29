@@ -176,14 +176,23 @@ export async function checkInvoiceLocked(
   db: D1Database,
   invoiceId: string,
 ): Promise<string | null> {
+  // Column is `paid_amount` in the schema (see migration 0001 + the
+  // invoices.id query at routes/invoices.ts:285). Pre-2026-04-29 this
+  // helper aliased it as `paidAmountSen`, which D1Compat translated
+  // to `paid_amount_sen` — a non-existent column, so the SELECT
+  // threw and bubbled out of GET /api/invoices/:id as HTTP 500.
+  // The bug was masked because the helper is only called from the
+  // detail GET handler (DO-origin invoices were rarely opened
+  // directly; CN-converted invoices surfaced it once the convert-to-
+  // invoice flow shipped 2026-04-29).
   const inv = await db
     .prepare(
-      `SELECT invoiceNo, status, paidAmountSen FROM invoices WHERE id = ?`,
+      `SELECT invoiceNo, status, paidAmount FROM invoices WHERE id = ?`,
     )
     .bind(invoiceId)
-    .first<{ invoiceNo: string; status: string; paidAmountSen: number }>();
+    .first<{ invoiceNo: string; status: string; paidAmount: number }>();
   if (!inv) return null;
-  if (inv.status === "PAID" || (inv.paidAmountSen ?? 0) > 0) {
+  if (inv.status === "PAID" || (inv.paidAmount ?? 0) > 0) {
     return `Cannot edit Invoice ${inv.invoiceNo} — a payment has been recorded. Issue a credit note instead.`;
   }
   return null;

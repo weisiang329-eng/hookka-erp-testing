@@ -22,9 +22,13 @@ import {
   nextConsignmentNoteNumber,
   resolveTransport,
   updateConsignmentNoteById,
+  validatePOMutex,
+  CN_VALID_TRANSITIONS,
 } from "../lib/consignment-note-shared";
+import { cascadeCNCompletionToCO } from "./production-orders";
 import { nextInvoiceNo } from "./invoices";
 import { emitAudit } from "../lib/audit";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -55,6 +59,89 @@ app.get("/", async (c) => {
   return c.json({ success: true, data, total: data.length });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/consignment-notes/stats — whole-dataset KPI / tab counts.
+//
+// Mirrors the rationale behind /api/delivery-orders/stats: the CN list is
+// paginated to PAGE_SIZE on the FE, but the KPI strip + tab badges need
+// to reflect the FULL dataset, not just the current page. Once production
+// CN volume goes past a single page, computing counts client-side from
+// `cnList` undercounts every metric.
+//
+// Bucket → status mapping (legacy CN status enum, the FE re-skins):
+//   pendingDispatch  ← status='ACTIVE'           (Pending Dispatch tab)
+//   dispatched       ← status='PARTIALLY_SOLD'   (Dispatched tab — the goods left
+//                                                  the warehouse but haven't
+//                                                  reached the branch yet)
+//   inTransit        ← status='IN_TRANSIT'       (In Transit tab — added with
+//                                                  migration 0078; mirrors DO's
+//                                                  3-state shipping lane)
+//   delivered        ← status='FULLY_SOLD'       (Delivered tab)
+//   acknowledged     ← status='CLOSED'           (Acknowledged tab)
+//   deliveredMTD     ← FULLY_SOLD AND deliveredAt ≥ start-of-current-month UTC
+//                                                (KPI: deliveries booked
+//                                                 month-to-date)
+//
+// pendingCN intentionally NOT computed server-side — the derivation is
+// the multi-step JOIN-and-filter "CO-origin POs that are fully UPHOLSTERY-
+// complete AND not on any consignment_note", which is a rewrite of the FE's
+// readyPOs computation in note.tsx (~lines 933-947). Doing it correctly
+// requires loading production_orders + their job_cards + the linked CN
+// items just for a count, which is more work than the rest of /stats put
+// together. The FE keeps its current readyPOs-based pendingCNCount for
+// now; follow-up if it ever shows undercount on a production dataset.
+//
+// Registered BEFORE the PUT /:id wildcard per the project memory note
+// about Hono route ordering (static routes before /:id wildcards or they
+// get swallowed). The two GET routes (this one + GET /) live above the
+// POST/PATCH/PUT routes; static path "/stats" + parameterless GET means
+// no collision with the PUT /:id route registered later in the file.
+// ---------------------------------------------------------------------------
+app.get("/stats", async (c) => {
+  // byStatus aggregate. Same shape as /api/delivery-orders/stats so a
+  // future refactor can collapse the two if we ever decide to.
+  const aggRes = await c.var.DB
+    .prepare(
+      "SELECT status, COUNT(*) AS n FROM consignment_notes GROUP BY status",
+    )
+    .all<{ status: string; n: number }>();
+  const byStatus: Record<string, number> = {};
+  for (const row of aggRes.results ?? []) {
+    byStatus[row.status] = Number(row.n) || 0;
+  }
+
+  // deliveredMTD — count of FULLY_SOLD CNs whose deliveredAt timestamp is
+  // ≥ first-of-this-month (UTC). Operator's KPI: "how many CNs reached
+  // the branch this month so far". String comparison works because
+  // deliveredAt is stored as ISO 8601 (lexicographic order = chronological
+  // order for same-format ISO strings).
+  const now = new Date();
+  const startOfMonth = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+  ).toISOString();
+  const mtdRes = await c.var.DB
+    .prepare(
+      `SELECT COUNT(*) AS n FROM consignment_notes
+         WHERE status = 'FULLY_SOLD' AND deliveredAt >= ?`,
+    )
+    .bind(startOfMonth)
+    .first<{ n: number }>();
+  const deliveredMTD = Number(mtdRes?.n) || 0;
+
+  return c.json({
+    success: true,
+    data: {
+      // pendingCN intentionally omitted — see route header rationale.
+      pendingDispatch: byStatus.ACTIVE ?? 0,
+      dispatched: byStatus.PARTIALLY_SOLD ?? 0,
+      inTransit: byStatus.IN_TRANSIT ?? 0,
+      delivered: byStatus.FULLY_SOLD ?? 0,
+      deliveredMTD,
+      acknowledged: byStatus.CLOSED ?? 0,
+    },
+  });
+});
+
 // POST /api/consignment-notes
 //
 // Body shape (all fields optional unless noted):
@@ -75,6 +162,8 @@ app.get("/", async (c) => {
 //                                  Used as a fallback when productionOrderIds
 //                                  isn't passed.
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const now = new Date();
@@ -113,6 +202,46 @@ app.post("/", async (c) => {
           (x): x is string => typeof x === "string" && x.length > 0,
         )
       : [];
+
+    // PO mutex check (latent gap 1, 2026-04-29). Reject if any incoming
+    // PO is already on a non-terminal DO — the dispatch race would
+    // silently no-op the second one to fire, leaking inventory. Symmetric
+    // DO-side check is intentionally skipped per task spec (DO is
+    // reference-only); a future DO refactor should mirror this guard.
+    if (productionOrderIds.length > 0) {
+      const mutex = await validatePOMutex(c.var.DB, productionOrderIds, "CN");
+      if (!mutex.ok) {
+        return c.json(
+          {
+            success: false,
+            error: `Cannot create consignment note — ${mutex.conflicts.length} PO${mutex.conflicts.length === 1 ? "" : "s"} already on an active delivery order: ${mutex.conflicts.join(", ")}`,
+            conflicts: mutex.conflicts,
+            reason: mutex.reason,
+          },
+          409,
+        );
+      }
+    }
+    // Also check legacy items[] path for productionOrderId fields.
+    if (productionOrderIds.length === 0 && Array.isArray(body.items)) {
+      const itemPoIds = (body.items as Array<Record<string, unknown>>)
+        .map((it) => it.productionOrderId)
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      if (itemPoIds.length > 0) {
+        const mutex = await validatePOMutex(c.var.DB, itemPoIds, "CN");
+        if (!mutex.ok) {
+          return c.json(
+            {
+              success: false,
+              error: `Cannot create consignment note — ${mutex.conflicts.length} PO${mutex.conflicts.length === 1 ? "" : "s"} already on an active delivery order: ${mutex.conflicts.join(", ")}`,
+              conflicts: mutex.conflicts,
+              reason: mutex.reason,
+            },
+            409,
+          );
+        }
+      }
+    }
 
     type ItemSeed = {
       id: string;
@@ -174,12 +303,12 @@ app.post("/", async (c) => {
            sentDate, status, totalValue, notes,
            driverId, driverName, driverContactPerson, driverPhone,
            vehicleId, vehicleNo, vehicleType,
-           dispatchedAt, deliveredAt, acknowledgedAt,
+           dispatchedAt, inTransitAt, deliveredAt, acknowledgedAt,
            consignmentOrderId, hubId
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?,
                    ?, ?, ?,
-                   ?, ?, ?,
+                   ?, ?, ?, ?,
                    ?, ?)`,
       ).bind(
         id,
@@ -204,7 +333,9 @@ app.post("/", async (c) => {
         transport.vehicleNo,
         transport.vehicleType,
         // Lifecycle timestamps — null on create. Get stamped by PATCH/PUT
-        // when status flips PARTIALLY_SOLD / FULLY_SOLD / CLOSED.
+        // when status flips PARTIALLY_SOLD / IN_TRANSIT / FULLY_SOLD /
+        // CLOSED. inTransitAt added by migration 0078.
+        null,
         null,
         null,
         null,
@@ -306,6 +437,8 @@ app.post("/", async (c) => {
 // out explicitly ("legacy CN whose source PO is deleted").
 // ---------------------------------------------------------------------------
 app.post("/:id/return", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as {
@@ -441,17 +574,25 @@ app.post("/:id/return", async (c) => {
       // being returned). If fewer than returnQty units exist (mismatched
       // ledgers), we flip what's there and let the stock_movements audit
       // record the requested qty — operations can reconcile later.
+      //
+      // CN-scoped filter (latent gap 2, 2026-04-29): the WHERE clause
+      // requires cnId=? in addition to poId=?, otherwise a DO-delivered
+      // unit with the same poId could be flipped to RETURNED here.
+      // CN-dispatched units carry cnId set + (post-FULLY_SOLD)
+      // status='DELIVERED'; DO-delivered units carry doId set + cnId
+      // NULL. Filtering on cnId ensures we only ever touch units that
+      // THIS CN claimed.
       statements.push(
         c.var.DB.prepare(
           `UPDATE fg_units
               SET status = 'RETURNED', returnedAt = ?
             WHERE id IN (
               SELECT id FROM fg_units
-                WHERE poId = ? AND status = 'DELIVERED'
+                WHERE poId = ? AND cnId = ? AND status = 'DELIVERED'
                 ORDER BY deliveredAt DESC
                 LIMIT ?
             )`,
-        ).bind(now, po.id, returnQty),
+        ).bind(now, po.id, id, returnQty),
       );
 
       statements.push(
@@ -582,6 +723,8 @@ app.post("/:id/return", async (c) => {
 //   7. Marks every consignment_items row status='SOLD' + soldDate=now.
 // ---------------------------------------------------------------------------
 app.post("/:id/convert-to-invoice", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "create");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json().catch(() => ({}))) as {
@@ -743,9 +886,33 @@ app.post("/:id/convert-to-invoice", async (c) => {
             SET status = 'SOLD', soldDate = ?
           WHERE consignmentNoteId = ? AND status = 'AT_BRANCH'`,
       ).bind(now, id),
+      // gap 2 (2026-04-29): flip fg_units LOADED → DELIVERED to mirror
+      // DO's DELIVERED transition. updateConsignmentNoteById has the same
+      // flip on the FULLY_SOLD edge, but this route bypasses that helper
+      // and does a direct UPDATE on consignment_notes — so the flip has
+      // to be repeated here. Without this, units stay LOADED forever and
+      // /return matches zero rows.
+      c.var.DB.prepare(
+        `UPDATE fg_units
+            SET status = 'DELIVERED', deliveredAt = ?
+          WHERE cnId = ? AND status = 'LOADED'`,
+      ).bind(now, id),
     ];
 
     await c.var.DB.batch(statements);
+
+    // gap 1 (2026-04-29): cascade to parent CO if every sibling CN is
+    // FULLY_SOLD/CLOSED. Best-effort — never blocks the conversion.
+    if (cn.consignmentOrderId) {
+      try {
+        await cascadeCNCompletionToCO(c.var.DB, cn.consignmentOrderId);
+      } catch (err) {
+        console.error(
+          "[POST /api/consignment-notes/:id/convert-to-invoice] CO cascade failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     // Audit (best-effort).
     await emitAudit(c, {
@@ -779,24 +946,107 @@ app.post("/:id/convert-to-invoice", async (c) => {
   }
 });
 
+// ----------------------------------------------------------------------------
+// Helper: map an UpdateCNResult error reason to an HTTP response. Shared
+// between PATCH / PUT so the two paths surface identical errors.
+//
+// Gaps 5 + audit (2026-04-29):
+//   - not_found            → 404
+//   - invalid_transition   → 400 with descriptive message (gap 5)
+//   - items_locked         → 403 with descriptive message (latent gap 3)
+// ----------------------------------------------------------------------------
+function mapUpdateCNError(
+  res: Extract<
+    Awaited<ReturnType<typeof updateConsignmentNoteById>>,
+    { ok: false }
+  >,
+): { status: 400 | 403 | 404; body: Record<string, unknown> } {
+  if (res.reason === "not_found") {
+    return {
+      status: 404,
+      body: { success: false, error: "Consignment note not found" },
+    };
+  }
+  if (res.reason === "invalid_transition") {
+    const allowed = CN_VALID_TRANSITIONS[res.from ?? ""] ?? [];
+    return {
+      status: 400,
+      body: {
+        success: false,
+        error: `Invalid status transition: ${res.from ?? "(none)"} → ${res.to}. Allowed transitions from ${res.from ?? "(none)"}: ${allowed.length > 0 ? allowed.join(", ") : "none"}`,
+        reason: "invalid_transition",
+        from: res.from,
+        to: res.to,
+      },
+    };
+  }
+  if (res.reason === "items_locked") {
+    return {
+      status: 403,
+      body: {
+        success: false,
+        error: `Cannot edit items — consignment note is in status ${res.currentStatus ?? "(unknown)"}. Items can only be edited while the CN is in Pending Dispatch (ACTIVE).`,
+        reason: "items_locked",
+        currentStatus: res.currentStatus,
+      },
+    };
+  }
+  // Exhaustiveness guard.
+  return {
+    status: 400,
+    body: { success: false, error: "Update rejected" },
+  };
+}
+
 // PATCH /api/consignment-notes — partial update by body.id (legacy shape).
 //
 // See updateConsignmentNoteById for the lifecycle / driver / vehicle /
 // hub merge semantics. Both this PATCH and the PUT /:id alias delegate
 // to that helper so the two paths stay identical.
+//
+// Audit (gap 6, 2026-04-29): emits an audit_events row on every successful
+// update. Mirrors DO's emit (delivery-orders.ts ~lines 1831-1839). Always
+// fired (not just status changes) so carrier/hub/items edits leave a trail
+// too — DO does the same. Snapshot of before/after status + the four
+// lifecycle timestamps + carrier so the journal stays compact.
 app.patch("/", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const body = (await c.req.json()) as Record<string, unknown>;
     if (!body.id || typeof body.id !== "string") {
       return c.json({ success: false, error: "id required in body" }, 400);
     }
+    // Snapshot existing status BEFORE the helper runs so we can include it
+    // in the audit emit's `before` payload.
+    const beforeRow = await c.var.DB
+      .prepare("SELECT status FROM consignment_notes WHERE id = ?")
+      .bind(body.id)
+      .first<{ status: string | null }>();
     const res = await updateConsignmentNoteById(c.var.DB, body.id, body);
     if (!res.ok) {
-      return c.json(
-        { success: false, error: "Consignment note not found" },
-        404,
-      );
+      const mapped = mapUpdateCNError(res);
+      return c.json(mapped.body, mapped.status);
     }
+    await emitAudit(c, {
+      resource: "consignment-notes",
+      resourceId: body.id,
+      action:
+        beforeRow && beforeRow.status !== res.note.status
+          ? "status-change"
+          : "update",
+      before: { status: beforeRow?.status ?? null },
+      after: {
+        status: res.note.status,
+        dispatchedAt: res.note.dispatchedAt,
+        inTransitAt: res.note.inTransitAt,
+        deliveredAt: res.note.deliveredAt,
+        acknowledgedAt: res.note.acknowledgedAt,
+        driverId: res.note.driverId,
+        vehicleId: res.note.vehicleId,
+        hubId: res.note.hubId,
+      },
+    });
     return c.json({
       success: true,
       data: rowToConsignmentNote(res.note, res.items),
@@ -808,18 +1058,42 @@ app.patch("/", async (c) => {
 
 // PUT /api/consignment-notes/:id — same as PATCH but addressed by URL
 // param. FE alias so the CN page's row-action menu can use REST-style
-// `/api/consignment-notes/{id}` instead of the body-id PATCH.
+// `/api/consignment-notes/{id}` instead of the body-id PATCH. Same audit
+// + error mapping as PATCH /.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "consignment-notes", "update");
+  if (denied) return denied;
   try {
     const id = c.req.param("id");
     const body = (await c.req.json()) as Record<string, unknown>;
+    const beforeRow = await c.var.DB
+      .prepare("SELECT status FROM consignment_notes WHERE id = ?")
+      .bind(id)
+      .first<{ status: string | null }>();
     const res = await updateConsignmentNoteById(c.var.DB, id, body);
     if (!res.ok) {
-      return c.json(
-        { success: false, error: "Consignment note not found" },
-        404,
-      );
+      const mapped = mapUpdateCNError(res);
+      return c.json(mapped.body, mapped.status);
     }
+    await emitAudit(c, {
+      resource: "consignment-notes",
+      resourceId: id,
+      action:
+        beforeRow && beforeRow.status !== res.note.status
+          ? "status-change"
+          : "update",
+      before: { status: beforeRow?.status ?? null },
+      after: {
+        status: res.note.status,
+        dispatchedAt: res.note.dispatchedAt,
+        inTransitAt: res.note.inTransitAt,
+        deliveredAt: res.note.deliveredAt,
+        acknowledgedAt: res.note.acknowledgedAt,
+        driverId: res.note.driverId,
+        vehicleId: res.note.vehicleId,
+        hubId: res.note.hubId,
+      },
+    });
     return c.json({
       success: true,
       data: rowToConsignmentNote(res.note, res.items),

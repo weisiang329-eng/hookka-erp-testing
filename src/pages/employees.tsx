@@ -237,6 +237,15 @@ function WorkingHoursTab({
   const [rows, setRows] = useState<EntryDraft[]>([]);
   const [loading, setLoading] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
+  // "Copy from" workflow — operator picks a source date, hits Copy, and
+  // every entry from that date becomes a fresh DRAFT row on the current
+  // date. No backend write yet — the rows land unsaved so the operator
+  // can micro-adjust hours/notes and click Save All. Bulk-day copy
+  // mirrors how a 100-worker payroll table would otherwise demand 100
+  // individual Add Row clicks.
+  const [copyFromDate, setCopyFromDate] = useState<string>("");
+  const [copying, setCopying] = useState(false);
+  const [copyError, setCopyError] = useState<string>("");
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -299,6 +308,67 @@ function WorkingHoursTab({
       },
     ]);
   }, []);
+
+  // Copy every entry from `copyFromDate` and append them as fresh DRAFT
+  // rows on the currently-selected date. Skips workers that already have
+  // a saved row on the current date so the operator doesn't end up with
+  // duplicate entries per (worker, dept, date) tuple. Falls through with
+  // a toast-equivalent error message into copyError state on failure.
+  const copyFromPreviousDate = useCallback(async () => {
+    setCopyError("");
+    if (!copyFromDate) {
+      setCopyError("Pick a source date first");
+      return;
+    }
+    if (copyFromDate === selectedDate) {
+      setCopyError("Source date can't equal target date");
+      return;
+    }
+    setCopying(true);
+    try {
+      const res = await fetch(`/api/working-hour-entries?date=${copyFromDate}`);
+      const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry[] };
+      const src = j?.data ?? [];
+      if (src.length === 0) {
+        setCopyError(`No entries on ${copyFromDate} to copy`);
+        setCopying(false);
+        return;
+      }
+      // Dedup: skip a source row if the same (workerId, departmentCode,
+      // category) tuple already exists on the current date — saved or
+      // not. Multiple segments per worker are allowed (operator might
+      // legitimately have a saved Fab Cut row but want a copied
+      // Upholstery row added).
+      const existingKeys = new Set(
+        rows
+          .filter((r) => r.workerId)
+          .map((r) => `${r.workerId}|${r.departmentCode}|${r.category}`),
+      );
+      const newDrafts: EntryDraft[] = src
+        .filter((e) => !existingKeys.has(`${e.workerId}|${e.departmentCode}|${e.category}`))
+        .map((e) => ({
+          // No id — these are unsaved on the new date and will POST when
+          // the operator clicks Save All.
+          workerId: e.workerId,
+          departmentCode: e.departmentCode,
+          category: e.category,
+          hours: e.hours,
+          notes: e.notes,
+          saving: false,
+          saved: false,
+        }));
+      if (newDrafts.length === 0) {
+        setCopyError("All matching entries already exist on this date");
+        setCopying(false);
+        return;
+      }
+      setRows((prev) => [...prev, ...newDrafts]);
+    } catch (e) {
+      setCopyError(e instanceof Error ? e.message : "Copy failed");
+    } finally {
+      setCopying(false);
+    }
+  }, [copyFromDate, selectedDate, rows]);
 
   const duplicateRow = useCallback((idx: number) => {
     setRows((prev) => {
@@ -425,13 +495,35 @@ function WorkingHoursTab({
           <CardTitle className="flex items-center gap-2">
             <Clock className="h-5 w-5 text-[#6B5C32]" /> Daily Working Hours
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Input
               type="date"
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
               className="w-44"
+              title="Working date — entries are scoped to this day"
             />
+            {/* Copy-from date workflow — typical use: payroll operator
+                pulls yesterday's full table, micro-adjusts the rows that
+                differ today, hits Save All. */}
+            <div className="flex items-center gap-1.5">
+              <Input
+                type="date"
+                value={copyFromDate}
+                onChange={(e) => setCopyFromDate(e.target.value)}
+                className="w-40"
+                title="Copy from — pick a source date whose entries will be cloned as drafts on the working date"
+                placeholder="Copy from..."
+              />
+              <Button
+                variant="outline"
+                onClick={copyFromPreviousDate}
+                disabled={copying || !copyFromDate}
+                title="Copy every entry from the source date as drafts on the working date"
+              >
+                {copying ? "Copying…" : "Copy"}
+              </Button>
+            </div>
             <Button variant="outline" onClick={addRow}>
               <Plus className="h-4 w-4" /> Add Row
             </Button>
@@ -441,6 +533,9 @@ function WorkingHoursTab({
             </Button>
           </div>
         </div>
+        {copyError && (
+          <div className="mt-2 text-xs text-[#9A3A2D]">{copyError}</div>
+        )}
       </CardHeader>
       <CardContent>
         {/* Per-worker total chip strip — over 9h shows amber (OT zone). */}

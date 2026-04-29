@@ -9,13 +9,18 @@
 //     * cron/daily-backup.ts — runs inside CF Workers, JSON-Lines fallback.
 //     * scripts/backup-supabase.mjs — runs from a dev laptop or CI box
 //       that has `pg_dump` installed; produces .dump.gz alongside the
-//       cron's .json.gz under r2://hookka-files/backups/supabase/.
+//       cron's .json.gz under hookka-files/backups/supabase/.
+//
+// Storage backend: was Cloudflare R2 before the storage-supabase-migration
+// (2026-04-29). Now uploads to Supabase Storage via the v1 REST API. No
+// aws-sdk dependency anymore — plain fetch() with a service-role bearer.
 //
 // Strategy (this script):
 //   1. Shell out to `pg_dump -Fc --no-owner --no-acl $DATABASE_URL`
 //      and pipe the output through `gzip` to a temp file.
-//   2. Upload the temp file to R2 at backups/supabase/<YYYY-MM-DD>.dump.gz
-//      via the Cloudflare R2 S3-compatible API.
+//   2. Upload the temp file to Supabase Storage at
+//      hookka-files/backups/supabase/<YYYY-MM-DD>.dump.gz with
+//      `x-upsert: true` so re-runs replace.
 //   3. List existing keys under that prefix and delete anything older
 //      than 90 days (RETENTION_DAYS).
 //
@@ -26,10 +31,14 @@
 //
 // Required env vars:
 //   DATABASE_URL                 — Supabase Postgres connection string
-//   R2_ENDPOINT                  — https://<account>.r2.cloudflarestorage.com
-//   R2_ACCESS_KEY_ID             — from Cloudflare dashboard → R2 → API Tokens
-//   R2_SECRET_ACCESS_KEY         — same
-//   R2_BUCKET                    — e.g. "hookka-files"
+//   SUPABASE_PROJECT_REF         — slug from <ref>.supabase.co
+//   SUPABASE_SERVICE_ROLE_KEY    — service_role key (bearer auth)
+//   SUPABASE_BUCKET              — optional; defaults to "hookka-files"
+//
+// Note: this script is largely superseded by .github/workflows/backup.yml,
+// which does the same thing on Ubuntu runners with curl. Kept for ad-hoc
+// local runs (e.g. before a risky migration the operator wants a fresh
+// snapshot of, without pushing first).
 //
 // Usage:
 //   node scripts/backup-supabase.mjs            # one-shot backup
@@ -43,19 +52,19 @@ import { join } from "node:path";
 import { createWriteStream } from "node:fs";
 
 const RETENTION_DAYS = 90;
-const R2_PREFIX = "backups/supabase/";
+const STORAGE_PREFIX = "backups/supabase/";
 
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------
 const env = {
   DATABASE_URL: process.env.DATABASE_URL,
-  R2_ENDPOINT: process.env.R2_ENDPOINT,
-  R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID,
-  R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY,
-  R2_BUCKET: process.env.R2_BUCKET ?? "hookka-files",
+  SUPABASE_PROJECT_REF: process.env.SUPABASE_PROJECT_REF,
+  SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
+  SUPABASE_BUCKET: process.env.SUPABASE_BUCKET ?? "hookka-files",
 };
-const missing = Object.entries(env).filter(([, v]) => !v).map(([k]) => k);
+const REQUIRED = ["DATABASE_URL", "SUPABASE_PROJECT_REF", "SUPABASE_SERVICE_ROLE_KEY"];
+const missing = REQUIRED.filter((k) => !env[k]);
 if (missing.length > 0) {
   console.error(
     `[backup-supabase] missing env vars: ${missing.join(", ")}\n` +
@@ -64,12 +73,14 @@ if (missing.length > 0) {
   process.exit(1);
 }
 
+const STORAGE_BASE = `https://${env.SUPABASE_PROJECT_REF}.supabase.co/storage/v1`;
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
   const today = new Date().toISOString().slice(0, 10);
-  const key = `${R2_PREFIX}${today}.dump.gz`;
+  const key = `${STORAGE_PREFIX}${today}.dump.gz`;
 
   const workDir = await mkdir(join(tmpdir(), `hookka-backup-${today}`), {
     recursive: true,
@@ -82,8 +93,10 @@ async function main() {
   const sz = (await stat(dumpPath)).size;
   console.log(`[backup-supabase] dump complete: ${sz} bytes`);
 
-  console.log(`[backup-supabase] uploading to r2://${env.R2_BUCKET}/${key}`);
-  await uploadToR2(dumpPath, key, "application/gzip");
+  console.log(
+    `[backup-supabase] uploading to supabase://${env.SUPABASE_BUCKET}/${key}`,
+  );
+  await uploadToStorage(dumpPath, key, "application/gzip");
 
   console.log(`[backup-supabase] pruning backups older than ${RETENTION_DAYS}d`);
   await pruneOldBackups();
@@ -138,63 +151,73 @@ function runPgDumpToFile(connectionString, outPath) {
 }
 
 // ---------------------------------------------------------------------------
-// R2 — minimal S3-compatible PUT/LIST/DELETE
+// Supabase Storage v1 — POST/LIST/DELETE via plain fetch()
 // ---------------------------------------------------------------------------
-async function r2Fetch(method, key, body, extraHeaders = {}) {
-  // Deferred: the full SigV4 signing is library-shaped — for the script
-  // path we use AWS SDK v3's @aws-sdk/client-s3. This script intentionally
-  // declares the dependency at the runbook level (docs/DR-RUNBOOK.md
-  // step 0) so the repo stays slim for the Workers build.
-  const { S3Client, PutObjectCommand, ListObjectsV2Command, DeleteObjectCommand } =
-    await import("@aws-sdk/client-s3");
-  const client = new S3Client({
-    region: "auto",
-    endpoint: env.R2_ENDPOINT,
-    credentials: {
-      accessKeyId: env.R2_ACCESS_KEY_ID,
-      secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-    },
-  });
-  if (method === "PUT") {
-    const buf = body instanceof Buffer ? body : await readFile(body);
-    return client.send(
-      new PutObjectCommand({
-        Bucket: env.R2_BUCKET,
-        Key: key,
-        Body: buf,
-        ContentType: extraHeaders["Content-Type"] ?? "application/octet-stream",
-      }),
-    );
-  }
-  if (method === "LIST") {
-    return client.send(
-      new ListObjectsV2Command({ Bucket: env.R2_BUCKET, Prefix: R2_PREFIX }),
-    );
-  }
-  if (method === "DELETE") {
-    return client.send(
-      new DeleteObjectCommand({ Bucket: env.R2_BUCKET, Key: key }),
-    );
-  }
-  throw new Error(`unhandled method ${method}`);
-}
+const authHeader = () => ({
+  Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+});
 
-async function uploadToR2(filePath, key, contentType) {
-  await r2Fetch("PUT", key, filePath, { "Content-Type": contentType });
+async function uploadToStorage(filePath, key, contentType) {
+  const body = await readFile(filePath);
+  const url = `${STORAGE_BASE}/object/${encodeURIComponent(env.SUPABASE_BUCKET)}/${encodeObjectPath(key)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      ...authHeader(),
+      "Content-Type": contentType,
+      "x-upsert": "true",
+    },
+    body,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "<no body>");
+    throw new Error(`upload failed ${res.status}: ${text}`);
+  }
 }
 
 async function pruneOldBackups() {
-  const res = await r2Fetch("LIST");
+  const url = `${STORAGE_BASE}/object/list/${encodeURIComponent(env.SUPABASE_BUCKET)}`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { ...authHeader(), "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prefix: STORAGE_PREFIX.replace(/\/+$/, ""),
+      limit: 1000,
+      offset: 0,
+      sortBy: { column: "name", order: "asc" },
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "<no body>");
+    throw new Error(`list failed ${res.status}: ${text}`);
+  }
+  const list = await res.json();
   const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  for (const obj of res.Contents ?? []) {
-    const lastMod = obj.LastModified
-      ? new Date(obj.LastModified).getTime()
-      : NaN;
-    if (Number.isFinite(lastMod) && lastMod < cutoff) {
-      console.log(`[backup-supabase] pruning ${obj.Key} (age > ${RETENTION_DAYS}d)`);
-      await r2Fetch("DELETE", obj.Key);
+  for (const obj of list ?? []) {
+    const ts = obj.updated_at ?? obj.created_at;
+    const last = ts ? new Date(ts).getTime() : NaN;
+    if (Number.isFinite(last) && last < cutoff) {
+      const fullKey = `${STORAGE_PREFIX}${obj.name}`;
+      console.log(
+        `[backup-supabase] pruning ${fullKey} (age > ${RETENTION_DAYS}d)`,
+      );
+      const delUrl = `${STORAGE_BASE}/object/${encodeURIComponent(env.SUPABASE_BUCKET)}/${encodeObjectPath(fullKey)}`;
+      const delRes = await fetch(delUrl, {
+        method: "DELETE",
+        headers: authHeader(),
+      });
+      if (!delRes.ok && delRes.status !== 404) {
+        console.warn(`[backup-supabase]   delete failed ${delRes.status}`);
+      }
     }
   }
+}
+
+function encodeObjectPath(key) {
+  return key
+    .split("/")
+    .map((part) => encodeURIComponent(part))
+    .join("/");
 }
 
 // ---------------------------------------------------------------------------

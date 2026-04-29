@@ -1,13 +1,22 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
   fetchVariantsConfig,
+  flushKvConfig,
+  getKvConfigSyncState,
   getVariantsConfigSync,
   patchVariantsConfig,
+  subscribeKvConfigSyncState,
+  VARIANTS_CONFIG_KEY,
+  type KvSyncState,
   type VariantsConfig,
 } from "@/lib/kv-config";
 import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
+import type {
+  MaterialScaling,
+  MaterialScalingDimension,
+} from "@/api/lib/material-scaling";
 
 // ---------- Types ----------
 type BOMProcess = {
@@ -24,6 +33,11 @@ type WIPMaterial = {
   unit: string;
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG"; // auto-filled from SO item at production time
+  // Optional dimension scaling. At consumption time qty expands as
+  //   effectiveQty = qty + max(0, SOLine[dimension] - baseValue) * perUnit
+  // (floor: orders smaller than baseline still consume baseQty).
+  // See src/api/lib/material-scaling.ts for the apply helpers.
+  scaling?: MaterialScaling;
 };
 
 type CodeSegment = {
@@ -201,23 +215,12 @@ function notifyHydrateListeners() {
   }
 }
 
+// Sprint 7: dashboard auth lives in a HttpOnly cookie auto-attached by the
+// browser via api-client's `credentials: 'include'` shim, and CSRF is
+// injected there too. This local helper used to fish a Bearer token out of
+// localStorage; now it just returns the JSON content-type.
 function authHeaders(): HeadersInit {
-  const raw =
-    typeof window !== "undefined"
-      ? localStorage.getItem("hookka_auth")
-      : null;
-  if (!raw) return { "content-type": "application/json" };
-  try {
-    const parsed = JSON.parse(raw) as { token?: string };
-    return parsed.token
-      ? {
-          "content-type": "application/json",
-          authorization: `Bearer ${parsed.token}`,
-        }
-      : { "content-type": "application/json" };
-  } catch {
-    return { "content-type": "application/json" };
-  }
+  return { "content-type": "application/json" };
 }
 
 async function migrateLocalMastersToD1IfNeeded(): Promise<MasterTemplate[]> {
@@ -809,6 +812,97 @@ function RawMaterialSelect({
             )}
           </div>
         </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Material Scaling Editor ----------
+// Inline three-input row that lives directly under each material row in
+// the BOM editor. Lets the user attach a dimension-scaling rule:
+//
+//   { dimension, baseValue, perUnit }
+//
+// At consumption time the qty expands as:
+//
+//   effective = qty + max(0, SOLine[dim] - baseValue) * perUnit
+//
+// (See src/api/lib/material-scaling.ts for the apply path.) Leaving the
+// dimension dropdown on "none" removes the scaling rule entirely. The
+// editor renders inline + always-visible so the user can see at a glance
+// which materials scale and which don't, without an extra toggle click.
+const SCALING_DIM_OPTIONS: Array<{ value: MaterialScalingDimension; label: string }> = [
+  { value: "totalHeight", label: "total height (gap+divan+leg)" },
+  { value: "gap", label: "gap" },
+  { value: "divan", label: "divan height" },
+  { value: "leg", label: "leg height" },
+  { value: "seatHeight", label: "sofa seat height" },
+];
+
+function MaterialScalingEditor({
+  scaling,
+  unit,
+  onChange,
+}: {
+  scaling: MaterialScaling | undefined;
+  unit: string;
+  onChange: (next: MaterialScaling | undefined) => void;
+}) {
+  const dim = scaling?.dimension ?? "";
+  return (
+    <div className="ml-7 mb-1 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500">
+      <span className="text-gray-400">Scale by</span>
+      <select
+        value={dim}
+        onChange={(e) => {
+          const newDim = e.target.value as MaterialScalingDimension | "";
+          if (!newDim) {
+            onChange(undefined);
+          } else {
+            onChange({
+              dimension: newDim,
+              baseValue: scaling?.baseValue ?? 24,
+              perUnit: scaling?.perUnit ?? 0,
+            });
+          }
+        }}
+        className="text-[10px] border border-gray-200 rounded px-1 py-0.5 bg-white"
+      >
+        <option value="">— none —</option>
+        {SCALING_DIM_OPTIONS.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      {scaling && (
+        <>
+          <span className="text-gray-400">base</span>
+          <input
+            type="number"
+            value={Number.isFinite(scaling.baseValue) ? scaling.baseValue : 0}
+            step="1"
+            min="0"
+            onChange={(e) =>
+              onChange({ ...scaling, baseValue: parseFloat(e.target.value) || 0 })
+            }
+            className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-12 bg-white"
+            title="Smallest size at which the recorded qty applies"
+          />
+          <span className="text-gray-400">in, qty +</span>
+          <input
+            type="number"
+            value={Number.isFinite(scaling.perUnit) ? scaling.perUnit : 0}
+            step="0.01"
+            min="0"
+            onChange={(e) =>
+              onChange({ ...scaling, perUnit: parseFloat(e.target.value) || 0 })
+            }
+            className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-14 bg-white"
+            title="Extra qty per 1 inch over base"
+          />
+          <span className="text-gray-400">{unit || "unit"}/inch over base</span>
+        </>
       )}
     </div>
   );
@@ -1539,7 +1633,7 @@ function CreateBOMDialog({
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateL1Process(i: number, field: string, value: string | number) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -1607,7 +1701,7 @@ function CreateBOMDialog({
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateWIP(i: number, field: string, value: string | number) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -1637,7 +1731,7 @@ function CreateBOMDialog({
     );
   }
 
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -1685,7 +1779,7 @@ function CreateBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -1956,28 +2050,35 @@ function CreateBOMDialog({
                       <button onClick={() => addWIPMaterial(wi)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                     </div>
                     {(w.materials || []).map((m, mi) => (
-                      <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                        {m.autoDetect ? (
-                          <div className="flex items-center gap-1.5 flex-1">
-                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                            </span>
-                            <span className="text-[10px] text-gray-400 italic">
-                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                            </span>
-                          </div>
-                        ) : (
-                          <RawMaterialSelect
-                            value={m.code ? `${m.code}` : ""}
-                            materials={rawMaterials}
-                            onSelect={(rm) => selectMaterial(wi, mi, rm)}
-                          />
-                        )}
-                        <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                        <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
+                      <div key={mi} className="bg-white rounded">
+                        <div className="flex items-center gap-2 px-2 py-1.5">
+                          {m.autoDetect ? (
+                            <div className="flex items-center gap-1.5 flex-1">
+                              <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                                {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                              </span>
+                              <span className="text-[10px] text-gray-400 italic">
+                                {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                              </span>
+                            </div>
+                          ) : (
+                            <RawMaterialSelect
+                              value={m.code ? `${m.code}` : ""}
+                              materials={rawMaterials}
+                              onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                            />
+                          )}
+                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </div>
+                        <MaterialScalingEditor
+                          scaling={m.scaling}
+                          unit={m.unit || "PCS"}
+                          onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
+                        />
                       </div>
                     ))}
                     {(w.materials || []).length === 0 && (
@@ -2129,15 +2230,15 @@ function SubWIPTree({
   path: number[];
   onAdd: (path: number[]) => void;
   onRemove: (path: number[], si: number) => void;
-  onUpdate: (path: number[], field: string, value: string | number) => void;
+  onUpdate: (path: number[], field: string, value: string | number | MaterialScaling | undefined) => void;
   onUpdateSegments: (path: number[], segs: CodeSegment[]) => void;
   onAddProcess: (path: number[]) => void;
   onRemoveProcess: (path: number[], pi: number) => void;
-  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number) => void;
+  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
   onAddMaterial: (path: number[]) => void;
   onRemoveMaterial: (path: number[], mi: number) => void;
   onSelectMaterial: (path: number[], mi: number, rm: RawMaterialOption) => void;
-  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number) => void;
+  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
   onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
   onMoveDown?: (path: number[], si: number) => void;
@@ -2242,28 +2343,35 @@ function SubWIPTree({
               <button onClick={() => onAddMaterial(childPath)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
             </div>
             {(sub.materials || []).map((m, mi) => (
-              <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                {m.autoDetect ? (
-                  <div className="flex items-center gap-1.5 flex-1">
-                    <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                      {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                    </span>
-                    <span className="text-[10px] text-gray-400 italic">
-                      {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                    </span>
-                  </div>
-                ) : (
-                  <RawMaterialSelect
-                    value={m.code ? `${m.code}` : ""}
-                    materials={rawMaterials}
-                    onSelect={(rm) => onSelectMaterial(childPath, mi, rm)}
-                  />
-                )}
-                <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                </button>
+              <div key={mi} className="bg-white rounded">
+                <div className="flex items-center gap-2 px-2 py-1.5">
+                  {m.autoDetect ? (
+                    <div className="flex items-center gap-1.5 flex-1">
+                      <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                        {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                      </span>
+                      <span className="text-[10px] text-gray-400 italic">
+                        {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                      </span>
+                    </div>
+                  ) : (
+                    <RawMaterialSelect
+                      value={m.code ? `${m.code}` : ""}
+                      materials={rawMaterials}
+                      onSelect={(rm) => onSelectMaterial(childPath, mi, rm)}
+                    />
+                  )}
+                  <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                  <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                  <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+                <MaterialScalingEditor
+                  scaling={m.scaling}
+                  unit={m.unit || "PCS"}
+                  onChange={(s) => onUpdateMaterial(childPath, mi, "scaling", s)}
+                />
               </div>
             ))}
             {(sub.materials || []).length === 0 && (
@@ -2433,7 +2541,7 @@ function EditBOMDialog({
   function removeL1Material(i: number) {
     setL1Materials((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Material(i: number, field: string, value: string | number) {
+  function updateL1Material(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Materials((prev) => prev.map((m, idx) => (idx === i ? { ...m, [field]: value } : m)));
   }
   function selectL1Material(i: number, rm: RawMaterialOption) {
@@ -2451,7 +2559,7 @@ function EditBOMDialog({
   function removeL1Process(i: number) {
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Process(i: number, field: string, value: string | number) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -2507,7 +2615,7 @@ function EditBOMDialog({
   function removeWIP(i: number) {
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateWIP(i: number, field: string, value: string | number) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -2528,7 +2636,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2568,7 +2676,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2640,7 +2748,7 @@ function EditBOMDialog({
     );
   }
 
-  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number) {
+  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({ ...node, [field]: value })))
     );
@@ -2677,7 +2785,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -2703,7 +2811,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -2910,28 +3018,37 @@ function EditBOMDialog({
               </div>
               <div className="space-y-2">
                 {l1Materials.map((m, i) => (
-                  <div key={i} className="flex items-center gap-2 bg-[#EEF3E4] border border-[#C6DBA8] rounded-md px-3 py-2">
-                    {m.autoDetect ? (
-                      <div className="flex items-center gap-1.5 flex-1">
-                        <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                          {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                        </span>
-                        <span className="text-[10px] text-gray-400 italic">
-                          {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                        </span>
-                      </div>
-                    ) : (
-                      <RawMaterialSelect
-                        value={m.code ? `${m.code}` : ""}
-                        materials={rawMaterials}
-                        onSelect={(rm) => selectL1Material(i, rm)}
+                  <div key={i} className="bg-[#EEF3E4] border border-[#C6DBA8] rounded-md">
+                    <div className="flex items-center gap-2 px-3 py-2">
+                      {m.autoDetect ? (
+                        <div className="flex items-center gap-1.5 flex-1">
+                          <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                            {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                          </span>
+                          <span className="text-[10px] text-gray-400 italic">
+                            {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                          </span>
+                        </div>
+                      ) : (
+                        <RawMaterialSelect
+                          value={m.code ? `${m.code}` : ""}
+                          materials={rawMaterials}
+                          onSelect={(rm) => selectL1Material(i, rm)}
+                        />
+                      )}
+                      <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                      <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
+                      <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                    <div className="px-3 pb-1.5">
+                      <MaterialScalingEditor
+                        scaling={m.scaling}
+                        unit={m.unit || "PCS"}
+                        onChange={(s) => updateL1Material(i, "scaling", s)}
                       />
-                    )}
-                    <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
-                    <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
-                    <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                    </button>
+                    </div>
                   </div>
                 ))}
                 {l1Materials.length === 0 && (
@@ -3006,28 +3123,35 @@ function EditBOMDialog({
                       <button onClick={() => addWIPMaterial(wi)} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                     </div>
                     {(w.materials || []).map((m, mi) => (
-                      <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                        {m.autoDetect ? (
-                          <div className="flex items-center gap-1.5 flex-1">
-                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                            </span>
-                            <span className="text-[10px] text-gray-400 italic">
-                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                            </span>
-                          </div>
-                        ) : (
-                          <RawMaterialSelect
-                            value={m.code ? `${m.code}` : ""}
-                            materials={rawMaterials}
-                            onSelect={(rm) => selectMaterial(wi, mi, rm)}
-                          />
-                        )}
-                        <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                        <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
+                      <div key={mi} className="bg-white rounded">
+                        <div className="flex items-center gap-2 px-2 py-1.5">
+                          {m.autoDetect ? (
+                            <div className="flex items-center gap-1.5 flex-1">
+                              <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                                {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                              </span>
+                              <span className="text-[10px] text-gray-400 italic">
+                                {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                              </span>
+                            </div>
+                          ) : (
+                            <RawMaterialSelect
+                              value={m.code ? `${m.code}` : ""}
+                              materials={rawMaterials}
+                              onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                            />
+                          )}
+                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                          <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                          </button>
+                        </div>
+                        <MaterialScalingEditor
+                          scaling={m.scaling}
+                          unit={m.unit || "PCS"}
+                          onChange={(s) => updateWIPMaterial(wi, mi, "scaling", s)}
+                        />
                       </div>
                     ))}
                     {(w.materials || []).length === 0 && (
@@ -3396,7 +3520,7 @@ function MasterTemplatesDialog({
     }));
   }
 
-  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number) {
+  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({ ...node, [field]: value }));
   }
   function updateWIPSegmentsAtPath(wi: number, path: number[], segs: CodeSegment[]) {
@@ -3462,7 +3586,7 @@ function MasterTemplatesDialog({
   function removeProcessAtPath(wi: number, path: number[], pi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, processes: node.processes.filter((_, i) => i !== pi) }));
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       processes: node.processes.map((p, i) => {
@@ -3491,7 +3615,7 @@ function MasterTemplatesDialog({
   function removeMaterialAtPath(wi: number, path: number[], mi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, materials: (node.materials || []).filter((_, i) => i !== mi) }));
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       materials: (node.materials || []).map((m, i) => (i === mi ? { ...m, [field]: value } : m)),
@@ -3904,38 +4028,45 @@ function MasterTemplatesDialog({
                     <button onClick={() => addMaterialAtPath(wi, [])} className="text-[10px] px-1.5 py-0.5 bg-[#EEF3E4] text-[#4F7C3A] rounded hover:bg-[#C6DBA8]">+ Material</button>
                   </div>
                   {(w.materials || []).map((m, mi) => (
-                    <div key={mi} className="flex items-center gap-2 bg-white rounded px-2 py-1.5">
-                      {m.autoDetect ? (
-                        <div className="flex items-center gap-1.5 flex-1">
-                          <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
-                            {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
-                          </span>
-                          <span className="text-[10px] text-gray-400 italic">
-                            {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
-                          </span>
-                        </div>
-                      ) : (
-                        <RawMaterialSelect
-                          value={m.code ? `${m.code}` : ""}
-                          materials={rawMaterials}
-                          onSelect={(rm) => selectMaterialAtPath(wi, [], mi, rm)}
-                        />
-                      )}
-                      <select
-                        value={m.autoDetect || "NONE"}
-                        onChange={(e) => setMaterialAutoDetectAtPath(wi, [], mi, e.target.value as "FABRIC" | "LEG" | "NONE")}
-                        className="text-[10px] border border-gray-200 rounded px-1 py-1 bg-white"
-                        title="Auto-detect mode"
-                      >
-                        <option value="NONE">Manual</option>
-                        <option value="FABRIC">Auto: Fabric</option>
-                        <option value="LEG">Auto: Leg</option>
-                      </select>
-                      <input type="number" value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
-                      <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
-                      <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
-                      </button>
+                    <div key={mi} className="bg-white rounded">
+                      <div className="flex items-center gap-2 px-2 py-1.5">
+                        {m.autoDetect ? (
+                          <div className="flex items-center gap-1.5 flex-1">
+                            <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
+                              {m.autoDetect === "FABRIC" ? "Fabric from order" : "Leg from order"}
+                            </span>
+                            <span className="text-[10px] text-gray-400 italic">
+                              {m.autoDetect === "FABRIC" ? "SO item fabricCode" : "SO item legHeightInches"}
+                            </span>
+                          </div>
+                        ) : (
+                          <RawMaterialSelect
+                            value={m.code ? `${m.code}` : ""}
+                            materials={rawMaterials}
+                            onSelect={(rm) => selectMaterialAtPath(wi, [], mi, rm)}
+                          />
+                        )}
+                        <select
+                          value={m.autoDetect || "NONE"}
+                          onChange={(e) => setMaterialAutoDetectAtPath(wi, [], mi, e.target.value as "FABRIC" | "LEG" | "NONE")}
+                          className="text-[10px] border border-gray-200 rounded px-1 py-1 bg-white"
+                          title="Auto-detect mode"
+                        >
+                          <option value="NONE">Manual</option>
+                          <option value="FABRIC">Auto: Fabric</option>
+                          <option value="LEG">Auto: Leg</option>
+                        </select>
+                        <input type="number" value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                        <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
+                        <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
+                        </button>
+                      </div>
+                      <MaterialScalingEditor
+                        scaling={m.scaling}
+                        unit={m.unit || "PCS"}
+                        onChange={(s) => updateMaterialAtPath(wi, [], mi, "scaling", s)}
+                      />
                     </div>
                   ))}
                   {(w.materials || []).length === 0 && (
@@ -4011,12 +4142,67 @@ function buildDefaultProductionTimes(cats: string[]): ProductionTimes {
 // We hydrate through the shared kv-config cache so the Products maintenance page and
 // this dialog never disagree about what's stored.
 
+// Small inline indicator that visualises the kv-config sync state. Replaces
+// the old "Saved" / "Failed" toast spam with a passive dot — green when
+// synced, yellow spinner during write/retry, red on terminal failure.
+function KvSyncIndicator({ state }: { state: KvSyncState }) {
+  if (state === "idle") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#4F7C3A]" title="All changes synced to server">
+        <span className="w-2 h-2 rounded-full bg-[#4F7C3A]" />
+        Synced
+      </span>
+    );
+  }
+  if (state === "syncing" || state === "retrying") {
+    const label = state === "retrying" ? "Retrying…" : "Saving…";
+    const tip =
+      state === "retrying"
+        ? "Server hiccup — auto-retrying with backoff. Your changes are stored locally."
+        : "Saving to server.";
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E]" title={tip}>
+        <svg className="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2.5" strokeDasharray="40 60" strokeLinecap="round" />
+        </svg>
+        {label}
+      </span>
+    );
+  }
+  if (state === "auth-error") {
+    return (
+      <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Auth expired — please re-login. Your changes are stored locally and will sync after re-login.">
+        <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
+        Re-login needed
+      </span>
+    );
+  }
+  // state === "error"
+  return (
+    <span className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D]" title="Save failed after 3 retries — your changes are stored locally and will replay on next page load.">
+      <span className="w-2 h-2 rounded-full bg-[#9A3A2D]" />
+      Saved locally
+    </span>
+  );
+}
+
 function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [categories, setCategories] = useState<string[]>([]);
   const [times, setTimes] = useState<ProductionTimes>({});
   const [dirty, setDirty] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
   const [editingCat, setEditingCat] = useState<{ index: number; value: string } | null>(null);
+  // syncState mirrors the kv-config sync state for variants-config. The
+  // resilient sync layer auto-retries transient failures and keeps a
+  // localStorage backup, so the user just needs a passive indicator
+  // instead of repeated "save failed" toasts.
+  const [syncState, setSyncStateLocal] = useState<KvSyncState>(() =>
+    getKvConfigSyncState(VARIANTS_CONFIG_KEY),
+  );
+  // Toast-after-confirm: when the user clicks Save we set this flag, then
+  // emit "Saved" the moment syncState reaches `idle` (auth-error / error
+  // states get their own toast).
+  const pendingUserSaveRef = React.useRef(false);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   // Hydrate from D1 (via the kv-config cache) whenever the dialog opens.
@@ -4043,11 +4229,55 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Subscribe to sync state transitions while the dialog is open. The
+  // sync layer drives terminal toasts (Saved / Re-login / Saved locally)
+  // off these transitions so we don't lie about success and don't spam
+  // failure toasts during transient retries.
+  /* eslint-disable react-hooks/set-state-in-effect -- on dialog open we
+     need to re-sync local syncState with the kv-config layer, since the
+     module-level state may have changed while the dialog was closed
+     (e.g. a background retry from a previous session settled). The
+     subscriber callback is the steady-state path; the initial set is a
+     one-shot bootstrap. */
+  useEffect(() => {
+    if (!open) return undefined;
+    setSyncStateLocal(getKvConfigSyncState(VARIANTS_CONFIG_KEY));
+    const off = subscribeKvConfigSyncState(VARIANTS_CONFIG_KEY, (state) => {
+      setSyncStateLocal(state);
+      if (state === "idle" && pendingUserSaveRef.current) {
+        pendingUserSaveRef.current = false;
+        setDirty(false);
+        showToast("Production times saved");
+      } else if (state === "auth-error") {
+        pendingUserSaveRef.current = false;
+        showToast("Please re-login — change is saved locally and will retry");
+      } else if (state === "error") {
+        pendingUserSaveRef.current = false;
+        showToast("Saved locally — will retry on next page load");
+      }
+    });
+    return off;
+  }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Best-effort flush when the user closes the tab / navigates away
+  // mid-debounce. Even with the localStorage backup catching us, this
+  // shrinks the "wait until next page load" recovery window to zero in
+  // the common case.
+  useEffect(() => {
+    if (!open || typeof window === "undefined") return undefined;
+    const handler = () => {
+      void flushKvConfig(VARIANTS_CONFIG_KEY);
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [open]);
+
   function showToast(msg: string) {
     setToastMsg(msg);
     // Fire-and-forget toast clear from event-style callback (Save click).
     // eslint-disable-next-line no-restricted-syntax -- one-shot toast timer from event handler
-    setTimeout(() => setToastMsg(""), 2000);
+    setTimeout(() => setToastMsg(""), 2500);
   }
 
   function updateTime(deptCode: string, category: string, value: number) {
@@ -4059,16 +4289,23 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   }
 
   function handleSave() {
-    try {
-      // patchVariantsConfig merges into whatever else is stored (divanHeights,
-      // specials, etc) so other settings remain untouched. Save is debounced
-      // on the client; we show the toast optimistically.
-      patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
-      setDirty(false);
-      showToast("Production times saved");
-    } catch {
-      showToast("Failed to save");
-    }
+    // Resilient sync flow:
+    //   1. patchVariantsConfig writes to the in-memory cache + localStorage
+    //      backup (synchronous, can't fail).
+    //   2. It schedules a 500ms-debounced PUT and flips syncState to
+    //      `syncing`.
+    //   3. flushKvConfig cancels the debounce and fires the PUT now.
+    //   4. The PUT either succeeds (state → idle), enters retry backoff
+    //      (state → retrying, auto-flush 1s/2s/4s), or terminally fails
+    //      (state → error / auth-error).
+    //   5. The state-transition listener above turns terminal states into
+    //      toasts and clears `dirty` only on success.
+    // We never await here — the user gets immediate UI feedback via
+    // syncState, and the pendingUserSaveRef flag tells the listener that
+    // the next `idle` should fire the success toast.
+    pendingUserSaveRef.current = true;
+    patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
+    void flushKvConfig(VARIANTS_CONFIG_KEY);
   }
 
   function addCategory() {
@@ -4321,17 +4558,24 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
-            Close
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!dirty}
-            className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            Save Times
-          </button>
+        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between gap-2">
+          {/* Sync state indicator — drives off the kv-config sync state
+              machine so transient retries don't spam failure toasts. */}
+          <KvSyncIndicator state={syncState} />
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
+              Close
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={!dirty || syncState === "syncing" || syncState === "retrying"}
+              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              {syncState === "syncing" || syncState === "retrying"
+                ? "Saving…"
+                : "Save Times"}
+            </button>
+          </div>
         </div>
 
         {/* Toast */}
@@ -4348,498 +4592,10 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   );
 }
 
-// ---------- Batch Edit Categories Dialog ----------
-//
-// Inline-edit redesign 2026-04-28: replaced the old "checkbox + select 100
-// templates + Apply" flow with per-row inline Category dropdowns, mirroring
-// the Dept-Pivot Editor's UX. Each row shows the template's current Category
-// for the chosen dept; user changes the dropdown directly. Save button
-// counts and persists all dirty rows. Optional "Bulk fill all visible"
-// helper for the "set 100 to CAT 1" case.
-function BatchEditCategoriesDialog({
-  open,
-  onClose,
-  templates,
-  onTemplatesUpdated,
-}: {
-  open: boolean;
-  onClose: () => void;
-  templates: BOMTemplate[];
-  onTemplatesUpdated: (updated: BOMTemplate[]) => void;
-}) {
-  const { toast } = useToast();
-  const [deptCode, setDeptCode] = useState(DEPT_ORDER[0]);
-  // Per-template pending category change. Key = template id; value = the
-  // category the user has clicked over to (only stored when different
-  // from the current value, so dirty count = map.size).
-  const [pendingByTemplate, setPendingByTemplate] = useState<Map<string, string>>(new Map());
-  // Multi-select for bulk-apply. Lets the user pick many templates and
-  // smash them all to the same category in one move (faster than 100
-  // dropdowns when the change is uniform). Independent of the pending
-  // map - selection only matters when "Apply [cat] to N selected" is
-  // clicked, which then writes those templates' entries into pending.
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [bulkFillCat, setBulkFillCat] = useState("");
-  // Smart filters
-  const [searchText, setSearchText] = useState("");
-  const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
-  const [filterBaseModel, setFilterBaseModel] = useState("");
-  const [filterCurrentCat, setFilterCurrentCat] = useState("");
-
-  // Collect all distinct categories across all templates' processes
-  const allCategories = useMemo(() => {
-    const cats = new Set<string>();
-    function collectFromProcesses(procs: BOMProcess[]) {
-      for (const p of procs) {
-        if (p.category) cats.add(p.category);
-      }
-    }
-    function collectFromWip(wips: WIPComponent[]) {
-      for (const w of wips) {
-        collectFromProcesses(w.processes);
-        if (w.children) collectFromWip(w.children);
-      }
-    }
-    for (const t of templates) {
-      collectFromProcesses(t.l1Processes);
-      collectFromWip(t.wipComponents);
-    }
-    const configCats = getCategoryOptions();
-    for (const c of configCats) cats.add(c);
-    return Array.from(cats).sort();
-  }, [templates]);
-
-  // Unique base models for filter dropdown
-  const uniqueBaseModels = useMemo(() => {
-    const models = new Set<string>();
-    for (const t of templates) {
-      if (t.baseModel) models.add(t.baseModel);
-    }
-    return Array.from(models).sort();
-  }, [templates]);
-
-  // Get current category for a template in the selected dept
-  function getCurrentDeptCategory(t: BOMTemplate): string {
-    // Check l1Processes first
-    const l1Match = t.l1Processes.find((p) => p.deptCode === deptCode);
-    if (l1Match?.category) return l1Match.category;
-    // Check WIP processes
-    function findInWip(wips: WIPComponent[]): string {
-      for (const w of wips) {
-        const match = w.processes.find((p) => p.deptCode === deptCode);
-        if (match?.category) return match.category;
-        if (w.children) {
-          const childResult = findInWip(w.children);
-          if (childResult) return childResult;
-        }
-      }
-      return "";
-    }
-    return findInWip(t.wipComponents);
-  }
-
-  // Unique current categories for the selected dept
-  const uniqueCurrentCats = useMemo(() => {
-    const cats = new Set<string>();
-    for (const t of templates) {
-      const cat = getCurrentDeptCategory(t);
-      if (cat) cats.add(cat);
-    }
-    return Array.from(cats).sort();
-  }, [templates, deptCode]);
-
-  // Filtered templates
-  const filteredTemplates = useMemo(() => {
-    return templates.filter((t) => {
-      if (filterCategory !== "ALL" && t.category !== filterCategory) return false;
-      if (filterBaseModel && t.baseModel !== filterBaseModel) return false;
-      if (filterCurrentCat) {
-        const cur = getCurrentDeptCategory(t);
-        if (cur !== filterCurrentCat) return false;
-      }
-      if (searchText) {
-        const q = searchText.toLowerCase();
-        if (
-          !t.productCode.toLowerCase().includes(q) &&
-          !t.baseModel.toLowerCase().includes(q)
-        ) return false;
-      }
-      return true;
-    });
-  }, [templates, filterCategory, filterBaseModel, filterCurrentCat, searchText, deptCode]);
-
-  /* eslint-disable react-hooks/set-state-in-effect -- reset bulk-edit dialog state every time it reopens */
-  useEffect(() => {
-    if (!open) return;
-    setDeptCode(DEPT_ORDER[0]);
-    setPendingByTemplate(new Map());
-    setSelectedIds(new Set());
-    setBulkFillCat("");
-    setSearchText("");
-    setFilterCategory("ALL");
-    setFilterBaseModel("");
-    setFilterCurrentCat("");
-  }, [open]);
-  // Switching department wipes the pending-edit map - the same template's
-  // "new category" only makes sense for one dept at a time. Otherwise the
-  // user could queue a Fab Cut edit, switch to Fab Sew, and accidentally
-  // save Fab Cut edits using the Fab Sew dropdown context.
-  useEffect(() => {
-    if (!open) return;
-    setPendingByTemplate(new Map());
-    setSelectedIds(new Set());
-    setBulkFillCat("");
-  }, [deptCode, open]);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  const allFilteredSelected = filteredTemplates.length > 0 && filteredTemplates.every((t) => selectedIds.has(t.id));
-
-  function toggleAllFiltered() {
-    if (allFilteredSelected) {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        for (const t of filteredTemplates) next.delete(t.id);
-        return next;
-      });
-    } else {
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        for (const t of filteredTemplates) next.add(t.id);
-        return next;
-      });
-    }
-  }
-
-  function toggleOne(id: string) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  // Per-row click-to-change. Only persist a pending entry when the new
-  // value differs from the template's current value - clicking back to
-  // the original removes the row from the dirty map so dirty count is
-  // honest.
-  function handleRowChange(templateId: string, newCat: string) {
-    const t = templates.find((tt) => tt.id === templateId);
-    if (!t) return;
-    const cur = getCurrentDeptCategory(t);
-    setPendingByTemplate((prev) => {
-      const next = new Map(prev);
-      if (newCat === cur) next.delete(templateId);
-      else next.set(templateId, newCat);
-      return next;
-    });
-  }
-
-  // Bulk-fill helper. Two modes - prefers selection if any rows are
-  // checked; otherwise falls through to "all currently visible / filtered".
-  // Rows where the new value matches the current are dropped from the
-  // dirty map (no-op).
-  function handleBulkFill() {
-    if (!bulkFillCat) {
-      toast.warning("Pick a category first.");
-      return;
-    }
-    const targets = selectedIds.size > 0
-      ? filteredTemplates.filter((t) => selectedIds.has(t.id))
-      : filteredTemplates;
-    if (targets.length === 0) {
-      toast.warning("No templates to apply to.");
-      return;
-    }
-    setPendingByTemplate((prev) => {
-      const next = new Map(prev);
-      let touched = 0;
-      for (const t of targets) {
-        const cur = getCurrentDeptCategory(t);
-        if (bulkFillCat === cur) {
-          next.delete(t.id);
-        } else {
-          next.set(t.id, bulkFillCat);
-          touched++;
-        }
-      }
-      const scope = selectedIds.size > 0 ? `${selectedIds.size} selected` : `${targets.length} visible`;
-      toast.success(`Queued ${touched}/${targets.length} -> ${bulkFillCat} (${scope}). Click Save to apply.`);
-      return next;
-    });
-  }
-
-  function updateProcessCategory(procs: BOMProcess[], dept: string, cat: string): BOMProcess[] {
-    return procs.map((p) =>
-      p.deptCode === dept ? { ...p, category: cat, minutes: getProductionMinutes(dept, cat) } : p
-    );
-  }
-
-  function updateWipComponents(wips: WIPComponent[], dept: string, cat: string): WIPComponent[] {
-    return wips.map((w) => ({
-      ...w,
-      processes: updateProcessCategory(w.processes, dept, cat),
-      children: w.children ? updateWipComponents(w.children, dept, cat) : undefined,
-    }));
-  }
-
-  function handleApply() {
-    if (pendingByTemplate.size === 0) {
-      toast.warning("No changes to save.");
-      return;
-    }
-    let updatedCount = 0;
-    const updated = templates.map((t) => {
-      const newCat = pendingByTemplate.get(t.id);
-      if (!newCat) return t;
-      updatedCount++;
-      return {
-        ...t,
-        l1Processes: updateProcessCategory(t.l1Processes, deptCode, newCat),
-        wipComponents: updateWipComponents(t.wipComponents, deptCode, newCat),
-      };
-    });
-
-    onTemplatesUpdated(updated);
-    toast.success(`Saved ${updatedCount} template${updatedCount !== 1 ? "s" : ""} - ${DEPT_LABELS[deptCode]}`);
-    onClose();
-  }
-
-  if (!open) return null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl w-[720px] max-w-[95vw] max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-[#E2DDD8]">
-          <h2 className="text-lg font-bold text-[#111827]">Batch Edit Categories</h2>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Filter → Select All Filtered → Apply. Change categories across many templates in seconds.
-          </p>
-        </div>
-
-        {/* Body */}
-        <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
-          {/* Department selector + Bulk-fill helper */}
-          <div className="flex gap-4 items-end">
-            <div className="w-48">
-              <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
-              <select
-                value={deptCode}
-                onChange={(e) => { setDeptCode(e.target.value); setFilterCurrentCat(""); }}
-                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-              >
-                {DEPT_ORDER.map((d) => (
-                  <option key={d} value={d}>{DEPT_LABELS[d]}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1">
-              <label className="block text-xs font-medium text-gray-700 mb-1">
-                Bulk fill: {selectedIds.size > 0 ? `${selectedIds.size} selected` : `all ${filteredTemplates.length} visible`} -&gt; ...
-              </label>
-              <div className="flex gap-2">
-                <select
-                  value={bulkFillCat}
-                  onChange={(e) => setBulkFillCat(e.target.value)}
-                  className="flex-1 border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
-                >
-                  <option value="">Pick category...</option>
-                  {allCategories.map((c) => {
-                    const m = getProductionMinutes(deptCode, c);
-                    const label = m > 0 ? `${c} (${m} min)` : `${c} (- min)`;
-                    return <option key={c} value={c}>{label}</option>;
-                  })}
-                </select>
-                <button
-                  onClick={handleBulkFill}
-                  disabled={!bulkFillCat}
-                  className="px-3 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-                >
-                  Queue
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Smart Filters */}
-          <div className="bg-[#FAF9F7] rounded-lg p-3 space-y-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
-              Filter Templates
-            </div>
-            <div className="grid grid-cols-4 gap-2">
-              <input
-                type="text"
-                placeholder="Search code / model..."
-                value={searchText}
-                onChange={(e) => setSearchText(e.target.value)}
-                className="col-span-2 border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
-              />
-              <select
-                value={filterCategory}
-                onChange={(e) => setFilterCategory(e.target.value as "ALL" | BOMCategory)}
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
-              >
-                <option value="ALL">All Types</option>
-                <option value="BEDFRAME">Bedframe</option>
-                <option value="SOFA">Sofa</option>
-                <option value="ACCESSORY">Accessory</option>
-              </select>
-              <select
-                value={filterBaseModel}
-                onChange={(e) => setFilterBaseModel(e.target.value)}
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
-              >
-                <option value="">All Models</option>
-                {uniqueBaseModels.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex items-center gap-2">
-              <select
-                value={filterCurrentCat}
-                onChange={(e) => setFilterCurrentCat(e.target.value)}
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
-              >
-                <option value="">Current {DEPT_LABELS[deptCode]} Category: All</option>
-                {uniqueCurrentCats.map((c) => (
-                  <option key={c} value={c}>Current: {c}</option>
-                ))}
-              </select>
-              {(searchText || filterCategory !== "ALL" || filterBaseModel || filterCurrentCat) && (
-                <button
-                  onClick={() => { setSearchText(""); setFilterCategory("ALL"); setFilterBaseModel(""); setFilterCurrentCat(""); }}
-                  className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
-                >
-                  <span>✕</span> Clear filters
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* Template list with inline category dropdowns + multi-select */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs font-medium text-gray-700">
-                {pendingByTemplate.size} dirty · {selectedIds.size} selected · Showing {filteredTemplates.length} of {templates.length}
-              </label>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={toggleAllFiltered}
-                  className="text-xs text-[#6B5C32] hover:underline font-medium"
-                >
-                  {allFilteredSelected ? `Deselect All ${filteredTemplates.length}` : `Select All ${filteredTemplates.length} Filtered`}
-                </button>
-                {selectedIds.size > 0 && (
-                  <button
-                    onClick={() => setSelectedIds(new Set())}
-                    className="text-xs text-[#9A3A2D] hover:underline"
-                  >
-                    Clear Selection
-                  </button>
-                )}
-                {pendingByTemplate.size > 0 && (
-                  <button
-                    onClick={() => setPendingByTemplate(new Map())}
-                    className="text-xs text-[#9A3A2D] hover:underline"
-                  >
-                    Discard Changes
-                  </button>
-                )}
-              </div>
-            </div>
-            <div className="border border-[#E2DDD8] rounded-lg max-h-[320px] overflow-y-auto">
-              {filteredTemplates.length === 0 && (
-                <p className="text-sm text-gray-400 p-4 text-center">No templates match the current filters.</p>
-              )}
-              {filteredTemplates.map((t) => {
-                const curCat = getCurrentDeptCategory(t);
-                const pendingCat = pendingByTemplate.get(t.id);
-                const displayCat = pendingCat ?? curCat;
-                const isDirty = pendingCat !== undefined;
-                const isSelected = selectedIds.has(t.id);
-                return (
-                  <div
-                    key={t.id}
-                    className={`flex items-center gap-3 px-3 py-2 border-b border-[#E2DDD8] last:border-b-0 ${
-                      isDirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
-                    }`}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleOne(t.id)}
-                      className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <span className="text-sm font-medium text-[#111827]">{t.productCode}</span>
-                      <span className="ml-2 text-xs text-gray-400">{t.baseModel}</span>
-                    </div>
-                    <span
-                      className="text-[10px] font-medium px-1.5 py-0.5 rounded"
-                      style={{
-                        backgroundColor: t.category === "BEDFRAME" ? "#DBEAFE" : "#D1FAE5",
-                        color: t.category === "BEDFRAME" ? "#1E40AF" : "#065F46",
-                      }}
-                    >
-                      {t.category}
-                    </span>
-                    {/* Inline category dropdown - direct edit per row */}
-                    <select
-                      value={displayCat || ""}
-                      onChange={(e) => handleRowChange(t.id, e.target.value)}
-                      className={`min-w-[160px] text-xs px-2 py-1 rounded border focus:outline-none focus:border-[#6B5C32] ${
-                        isDirty ? "border-[#4F7C3A] bg-white font-semibold text-[#4F7C3A]" : "border-[#E2DDD8] bg-white"
-                      }`}
-                      title={isDirty ? `Was: ${curCat || "-"}` : undefined}
-                    >
-                      {!curCat && !displayCat && <option value="">- pick -</option>}
-                      {allCategories.map((c) => {
-                        const m = getProductionMinutes(deptCode, c);
-                        const label = m > 0 ? `${c} (${m}m)` : c;
-                        return <option key={c} value={c}>{label}</option>;
-                      })}
-                    </select>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
-          <span className="text-xs text-gray-500">
-            {pendingByTemplate.size > 0
-              ? `Will save ${pendingByTemplate.size} template${pendingByTemplate.size !== 1 ? "s" : ""} on ${DEPT_LABELS[deptCode]}`
-              : "Click each row's category, or use Bulk fill above."}
-          </span>
-          <div className="flex gap-2">
-            <button
-              onClick={onClose}
-              className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={handleApply}
-              disabled={pendingByTemplate.size === 0}
-              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Save {pendingByTemplate.size} Change{pendingByTemplate.size !== 1 ? "s" : ""}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ---------- Batch Edit Raw Materials Dialog ----------
-// Mirrors Batch Edit Categories' inline-edit UX, but for raw materials
-// across every WIP step in every BOM template.
+// ---------- RawMaterial Batch Editor Dialog ----------
+// Per-row inline-edit UX (was previously paired with Batch Edit Categories,
+// which got removed 2026-04-29). For raw materials across every WIP step
+// in every BOM template.
 //
 // SCOPE: this dialog manages WHAT raw materials each WIP step consumes —
 // not HOW MUCH (qty stays untouched, owned by the per-BOM Edit dialog and
@@ -4869,7 +4625,22 @@ type MatRow = {
   path: number[];
   wipType: WIPComponent["wipType"];
   wipLabel: string;
+  // Distinct dept codes pulled off this WIP step's processes[]. Used by
+  // the "filter by department" dropdown so the user can pick e.g. FAB_CUT
+  // and see every WIP step that goes through Fab Cut.
+  deptCodes: string[];
+  // Index into the WIP node's materials[] for existing rows. -1 for
+  // placeholder + isNew rows (those don't exist on the server yet).
   matIndex: number;
+  // Placeholder rows are emitted once per WIP step regardless of whether
+  // it has materials, so the user can click "+ Add material" and stamp a
+  // new material entry into that step. Placeholder rows are never dirty
+  // and are skipped on save.
+  isPlaceholder: boolean;
+  // Newly-added rows (created by clicking + on a placeholder) get
+  // appended to the WIP's materials[] on save instead of mutating an
+  // existing index.
+  isNew: boolean;
   // Initial values captured when rows were built — used to compute dirtiness
   // and to roll back via Discard Changes.
   initialCode: string;
@@ -4886,11 +4657,29 @@ type MatRow = {
   toDelete: boolean;
 };
 
-function buildMatRows(templates: BOMTemplate[]): MatRow[] {
+function buildMatRows(
+  templates: BOMTemplate[],
+  products: Product[] = [],
+): MatRow[] {
   const rows: MatRow[] = [];
+  // Mirror DeptPivot's wipLabel resolution path so {DIVAN_HEIGHT}/{SIZE}/etc.
+  // tokens render as "8" Divan-6FT" instead of the literal template (BUG
+  // 2026-04-29 — user reported "WIP names are different" because the raw
+  // wipCode template was leaking through to the UI). Same `buildSampleVariantCtx`
+  // helper used by `buildDeptPivotRows` so the two dialogs read identically.
+  const productByCode = new Map(products.map((p) => [p.code, p]));
   function walk(t: BOMTemplate, w: WIPComponent, path: number[]) {
-    const wipLabel =
+    const rawLabel =
       w.wipCode || WIP_TYPE_LABELS[w.wipType]?.label || w.wipType;
+    const ctx = buildSampleVariantCtx(productByCode.get(t.productCode), t);
+    const wipLabel = resolveWipTokens(rawLabel, ctx) || rawLabel;
+    const deptCodes = Array.from(
+      new Set(
+        (w.processes || [])
+          .map((p) => p.deptCode)
+          .filter((d): d is string => Boolean(d)),
+      ),
+    );
     (w.materials || []).forEach((m, mi) => {
       rows.push({
         rowKey: `${t.id}|${path.join("-")}|${mi}`,
@@ -4901,7 +4690,10 @@ function buildMatRows(templates: BOMTemplate[]): MatRow[] {
         path: [...path],
         wipType: w.wipType,
         wipLabel,
+        deptCodes,
         matIndex: mi,
+        isPlaceholder: false,
+        isNew: false,
         initialCode: m.code || "",
         initialName: m.name || "",
         initialUnit: m.unit || "PCS",
@@ -4915,6 +4707,32 @@ function buildMatRows(templates: BOMTemplate[]): MatRow[] {
         toDelete: false,
       });
     });
+    // Always emit one placeholder per WIP step so the user can add a
+    // (possibly first) material to it. Hidden when the active material
+    // filter is non-empty (an empty WIP step has no material to match).
+    rows.push({
+      rowKey: `${t.id}|${path.join("-")}|+`,
+      templateId: t.id,
+      productCode: t.productCode,
+      baseModel: t.baseModel,
+      bomCategory: t.category,
+      path: [...path],
+      wipType: w.wipType,
+      wipLabel,
+      deptCodes,
+      matIndex: -1,
+      isPlaceholder: true,
+      isNew: false,
+      initialCode: "",
+      initialName: "",
+      initialUnit: "",
+      initialQty: 0,
+      code: "",
+      name: "",
+      unit: "",
+      qty: 0,
+      toDelete: false,
+    });
     (w.children || []).forEach((c, ci) => walk(t, c, [...path, ci]));
   }
   for (const t of templates) {
@@ -4924,7 +4742,9 @@ function buildMatRows(templates: BOMTemplate[]): MatRow[] {
 }
 
 function isRowDirty(r: MatRow): boolean {
+  if (r.isPlaceholder) return false;
   if (r.toDelete) return true;
+  if (r.isNew) return true;
   // Qty is NOT considered — see SCOPE note above. Material identity
   // (code / name / unit ride together via RawMaterialSelect) is what we
   // track here.
@@ -4940,36 +4760,63 @@ function BatchEditMaterialsDialog({
   onClose,
   templates,
   rawMaterials,
+  products,
   onTemplatesUpdated,
 }: {
   open: boolean;
   onClose: () => void;
   templates: BOMTemplate[];
   rawMaterials: RawMaterialOption[];
+  // Threaded through so buildMatRows can resolve {DIVAN_HEIGHT}/{SIZE}
+  // tokens via buildSampleVariantCtx, same path DeptPivot uses.
+  products: Product[];
   onTemplatesUpdated: (updated: BOMTemplate[]) => void;
 }) {
   const { toast } = useToast();
   const [rows, setRows] = useState<MatRow[]>([]);
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [searchText, setSearchText] = useState("");
+  // Defer searchText so the filter useMemo doesn't re-run on every keystroke.
+  // Input itself stays controlled by `searchText`; filtering uses `searchTextDeferred`.
+  const searchTextDeferred = useDeferredValue(searchText);
   const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
   const [filterWipType, setFilterWipType] = useState<string>("");
-  const [filterMaterial, setFilterMaterial] = useState<string>("");
+  // Default Department to the first one (Fab Cut) so the dialog opens
+  // already scoped — same UX as DeptPivot. Otherwise an empty default
+  // dumps all 3563 rows on the user with no useful starting point.
+  const [filterDept, setFilterDept] = useState<string>(DEPT_ORDER[0]);
+  // Model filter (productCode dropdown), mirrors DeptPivot's modelFilter.
+  const [filterModel, setFilterModel] = useState<string>("");
+  // Multi-select: when empty, no material filter; otherwise rows whose
+  // material `code` is in the set are kept.
+  const [filterMaterials, setFilterMaterials] = useState<Set<string>>(new Set());
+  const [materialFilterOpen, setMaterialFilterOpen] = useState(false);
   const [bulkMaterial, setBulkMaterial] = useState<RawMaterialOption | null>(null);
   const [saving, setSaving] = useState(false);
+  // Monotonic counter so each "+ Add material" click produces a unique
+  // rowKey for the new row (rowKey collisions break React reconciliation
+  // and the dirty/selected Sets).
+  const newRowCounterRef = React.useRef(0);
 
   /* eslint-disable react-hooks/set-state-in-effect -- reset dialog state on each open */
   useEffect(() => {
     if (!open) return;
-    setRows(buildMatRows(templates));
+    setRows(buildMatRows(templates, products));
     setSelectedKeys(new Set());
     setSearchText("");
     setFilterCategory("ALL");
     setFilterWipType("");
-    setFilterMaterial("");
+    // Default Department to first one — same as the initial useState. Reset
+    // here on every open so re-opening doesn't carry the previous session's
+    // selection.
+    setFilterDept(DEPT_ORDER[0]);
+    setFilterModel("");
+    setFilterMaterials(new Set());
+    setMaterialFilterOpen(false);
     setBulkMaterial(null);
     setSaving(false);
-  }, [open, templates]);
+    newRowCounterRef.current = 0;
+  }, [open, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const dirtyCount = useMemo(() => rows.filter(isRowDirty).length, [rows]);
@@ -4979,16 +4826,33 @@ function BatchEditMaterialsDialog({
     return ids.size;
   }, [rows]);
 
-  // Distinct WIP types & material codes seen across all rows — for filters.
+  // Distinct WIP types / dept codes / material codes — for filters. WIP
+  // types and dept codes come from EVERY row (including placeholders) so
+  // the dropdowns surface every WIP step the user has, even ones that
+  // have no materials yet. Material codes only come from non-placeholder
+  // rows since you can't filter by something that doesn't exist.
   const wipTypeOptions = useMemo(() => {
     const s = new Set<string>();
     for (const r of rows) s.add(r.wipType);
     return Array.from(s).sort();
   }, [rows]);
 
+  const deptCodeOptions = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of rows) for (const d of r.deptCodes) s.add(d);
+    // Preserve canonical DEPT_ORDER for the ones we know; tack any unknown
+    // dept codes on at the end so we don't silently drop them.
+    const known = DEPT_ORDER.filter((d) => s.has(d));
+    const extra = Array.from(s)
+      .filter((d) => !DEPT_ORDER.includes(d as (typeof DEPT_ORDER)[number]))
+      .sort();
+    return [...known, ...extra];
+  }, [rows]);
+
   const materialCodeOptions = useMemo(() => {
     const s = new Set<string>();
     for (const r of rows) {
+      if (r.isPlaceholder) continue;
       if (r.code) s.add(r.code);
     }
     return Array.from(s).sort();
@@ -4998,9 +4862,17 @@ function BatchEditMaterialsDialog({
     return rows.filter((r) => {
       if (filterCategory !== "ALL" && r.bomCategory !== filterCategory) return false;
       if (filterWipType && r.wipType !== filterWipType) return false;
-      if (filterMaterial && r.code !== filterMaterial) return false;
-      if (searchText.trim()) {
-        const q = searchText.toLowerCase();
+      if (filterDept && !r.deptCodes.includes(filterDept)) return false;
+      if (filterModel && r.productCode !== filterModel) return false;
+      // Material multi-select: when set, drop rows that don't match. Also
+      // drop placeholder rows (they have no material code to compare —
+      // showing them when filtering for specific materials would be noise).
+      if (filterMaterials.size > 0) {
+        if (r.isPlaceholder) return false;
+        if (!filterMaterials.has(r.code)) return false;
+      }
+      if (searchTextDeferred.trim()) {
+        const q = searchTextDeferred.toLowerCase();
         if (
           !r.productCode.toLowerCase().includes(q) &&
           !r.baseModel.toLowerCase().includes(q) &&
@@ -5013,7 +4885,15 @@ function BatchEditMaterialsDialog({
       }
       return true;
     });
-  }, [rows, filterCategory, filterWipType, filterMaterial, searchText]);
+  }, [rows, filterCategory, filterWipType, filterDept, filterModel, filterMaterials, searchTextDeferred]);
+
+  // Distinct model dropdown options — derived from full row set so the
+  // option list is stable when other filters narrow the visible rows.
+  const modelOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rows) if (r.productCode) set.add(r.productCode);
+    return Array.from(set).sort();
+  }, [rows]);
 
   const allFilteredSelected =
     filteredRows.length > 0 && filteredRows.every((r) => selectedKeys.has(r.rowKey));
@@ -5056,6 +4936,62 @@ function BatchEditMaterialsDialog({
     });
   }
 
+  // Build a "new material" row from a placeholder. Inserts BEFORE the
+  // placeholder in the rows array so the placeholder stays parked at the
+  // bottom of its WIP step, ready to accept another addition.
+  function addMaterialFromPlaceholder(
+    placeholderKey: string,
+    rm: RawMaterialOption,
+  ) {
+    setRows((prev) => {
+      const idx = prev.findIndex((r) => r.rowKey === placeholderKey);
+      if (idx < 0) return prev;
+      const ph = prev[idx];
+      if (!ph.isPlaceholder) return prev;
+      const counter = ++newRowCounterRef.current;
+      const newRow: MatRow = {
+        ...ph,
+        rowKey: `${ph.rowKey}~new${counter}`,
+        matIndex: -1,
+        isPlaceholder: false,
+        isNew: true,
+        code: rm.itemCode,
+        name: rm.description,
+        unit: rm.baseUOM,
+        inventoryCode: rm.itemCode,
+        qty: 1,
+        initialCode: "",
+        initialName: "",
+        initialUnit: "",
+        initialQty: 0,
+        toDelete: false,
+      };
+      return [...prev.slice(0, idx), newRow, ...prev.slice(idx)];
+    });
+  }
+
+  // Toggle delete on a row. New (isNew) rows are simply removed from the
+  // local array since they have no server-side counterpart to mark.
+  function toggleRowDelete(key: string) {
+    setRows((prev) => {
+      const r = prev.find((row) => row.rowKey === key);
+      if (!r) return prev;
+      if (r.isNew) {
+        // Drop unsaved row entirely.
+        setSelectedKeys((sel) => {
+          if (!sel.has(key)) return sel;
+          const next = new Set(sel);
+          next.delete(key);
+          return next;
+        });
+        return prev.filter((row) => row.rowKey !== key);
+      }
+      return prev.map((row) =>
+        row.rowKey === key ? { ...row, toDelete: !row.toDelete } : row,
+      );
+    });
+  }
+
   function targetsForBulk(): MatRow[] {
     if (selectedKeys.size > 0) {
       return filteredRows.filter((r) => selectedKeys.has(r.rowKey));
@@ -5063,6 +4999,10 @@ function BatchEditMaterialsDialog({
     return filteredRows;
   }
 
+  // Bulk apply — does the right thing per row type:
+  //   • placeholder → add a new material to that WIP step
+  //   • autoDetect  → skip (Fabric/Leg from order can't be replaced)
+  //   • regular     → replace the existing material
   function bulkReplaceMaterial() {
     if (!bulkMaterial) {
       toast.warning("Pick a material first.");
@@ -5074,27 +5014,58 @@ function BatchEditMaterialsDialog({
       return;
     }
     const targetKeys = new Set(targets.map((r) => r.rowKey));
-    let touched = 0;
+    let replaced = 0;
+    let added = 0;
     let skipped = 0;
-    setRows((prev) =>
-      prev.map((r) => {
-        if (!targetKeys.has(r.rowKey)) return r;
-        if (r.autoDetect) {
-          skipped++;
-          return r;
+    setRows((prev) => {
+      const out: MatRow[] = [];
+      for (const r of prev) {
+        if (!targetKeys.has(r.rowKey)) {
+          out.push(r);
+          continue;
         }
-        touched++;
-        return {
-          ...r,
-          code: bulkMaterial.itemCode,
-          name: bulkMaterial.description,
-          unit: bulkMaterial.baseUOM,
-          inventoryCode: bulkMaterial.itemCode,
-        };
-      }),
-    );
-    const skipMsg = skipped > 0 ? ` (skipped ${skipped} auto-detect)` : "";
-    toast.success(`Replaced ${touched} row${touched !== 1 ? "s" : ""}${skipMsg}. Click Save to persist.`);
+        if (r.isPlaceholder) {
+          const counter = ++newRowCounterRef.current;
+          out.push({
+            ...r,
+            rowKey: `${r.rowKey}~new${counter}`,
+            matIndex: -1,
+            isPlaceholder: false,
+            isNew: true,
+            code: bulkMaterial.itemCode,
+            name: bulkMaterial.description,
+            unit: bulkMaterial.baseUOM,
+            inventoryCode: bulkMaterial.itemCode,
+            qty: 1,
+            initialCode: "",
+            initialName: "",
+            initialUnit: "",
+            initialQty: 0,
+            toDelete: false,
+          });
+          out.push(r); // keep placeholder for next add
+          added++;
+        } else if (r.autoDetect) {
+          out.push(r);
+          skipped++;
+        } else {
+          out.push({
+            ...r,
+            code: bulkMaterial.itemCode,
+            name: bulkMaterial.description,
+            unit: bulkMaterial.baseUOM,
+            inventoryCode: bulkMaterial.itemCode,
+          });
+          replaced++;
+        }
+      }
+      return out;
+    });
+    const parts: string[] = [];
+    if (replaced > 0) parts.push(`replaced ${replaced}`);
+    if (added > 0) parts.push(`added ${added}`);
+    if (skipped > 0) parts.push(`${skipped} skipped (auto-detect)`);
+    toast.success(`${parts.join(" · ") || "no-op"}. Click Save to persist.`);
   }
 
   function bulkToggleDelete(markDeleted: boolean) {
@@ -5102,15 +5073,48 @@ function BatchEditMaterialsDialog({
       toast.warning("Select rows first.");
       return;
     }
-    setRows((prev) =>
-      prev.map((r) => (selectedKeys.has(r.rowKey) ? { ...r, toDelete: markDeleted } : r)),
-    );
+    let touched = 0;
+    let dropped = 0;
+    setRows((prev) => {
+      const out: MatRow[] = [];
+      for (const r of prev) {
+        if (!selectedKeys.has(r.rowKey)) {
+          out.push(r);
+          continue;
+        }
+        if (r.isPlaceholder) {
+          out.push(r); // can't delete a placeholder
+          continue;
+        }
+        if (r.isNew && markDeleted) {
+          // Drop unsaved new row entirely.
+          dropped++;
+          continue;
+        }
+        out.push({ ...r, toDelete: markDeleted });
+        touched++;
+      }
+      return out;
+    });
+    if (dropped > 0) {
+      // Clear those rowKeys from selection too — they no longer exist.
+      setSelectedKeys((sel) => {
+        const next = new Set(sel);
+        for (const k of sel) {
+          if (!rows.find((r) => r.rowKey === k && (r.isPlaceholder || (!r.isNew)))) {
+            next.delete(k);
+          }
+        }
+        return next;
+      });
+    }
     const verb = markDeleted ? "Marked" : "Restored";
-    toast.success(`${verb} ${selectedKeys.size} row${selectedKeys.size !== 1 ? "s" : ""}.`);
+    const dropMsg = dropped > 0 ? `, dropped ${dropped} unsaved` : "";
+    toast.success(`${verb} ${touched} row${touched !== 1 ? "s" : ""}${dropMsg}.`);
   }
 
   function discardChanges() {
-    setRows(buildMatRows(templates));
+    setRows(buildMatRows(templates, products));
     setSelectedKeys(new Set());
     toast.info("Discarded all changes.");
   }
@@ -5161,12 +5165,17 @@ function BatchEditMaterialsDialog({
             JSON.stringify(t.wipComponents),
           ) as WIPComponent[],
         };
-        // Apply non-delete edits first; deletes by descending matIndex so
-        // earlier deletes don't shift later ones' indices.
-        const updates = edits.filter((e) => !e.toDelete);
+        // Order matters because matIndex shifts as we mutate the array:
+        //   1. updates  — mutate in place, no shift
+        //   2. deletes  — by descending matIndex (later indices first so
+        //                 earlier ones stay valid)
+        //   3. inserts  — append to materials[]; new materials don't have
+        //                 a stable matIndex anyway
+        const updates = edits.filter((e) => !e.toDelete && !e.isNew);
         const deletes = edits
-          .filter((e) => e.toDelete)
+          .filter((e) => e.toDelete && !e.isNew)
           .sort((a, b) => b.matIndex - a.matIndex);
+        const inserts = edits.filter((e) => e.isNew && !e.toDelete);
 
         for (const e of updates) {
           const node = getNode(clone.wipComponents, e.path);
@@ -5185,6 +5194,18 @@ function BatchEditMaterialsDialog({
           const node = getNode(clone.wipComponents, e.path);
           if (!node || !node.materials) continue;
           node.materials.splice(e.matIndex, 1);
+        }
+        for (const e of inserts) {
+          const node = getNode(clone.wipComponents, e.path);
+          if (!node) continue;
+          if (!node.materials) node.materials = [];
+          node.materials.push({
+            code: e.code,
+            name: e.name,
+            unit: e.unit,
+            qty: e.qty,
+            inventoryCode: e.inventoryCode,
+          });
         }
 
         try {
@@ -5226,36 +5247,14 @@ function BatchEditMaterialsDialog({
         onClose();
       } else {
         toast.warning(
-          `Saved ${okCount}; ${failed.length} failed. Dialog stays open so you can retry.`,
+          `Saved ${okCount}; ${failed.length} failed. Dialog stays open — re-edit the failed BOMs and save again.`,
         );
-        // Re-seed rows from the just-updated templates (so successful saves
-        // become the new "initial" baseline; failed templates' rows are
-        // still dirty for retry).
-        setRows((prev) =>
-          prev.map((r) => {
-            const clone = cloneById.get(r.templateId);
-            if (!clone) return r;
-            const node = getNode(clone.wipComponents, r.path);
-            const m = node?.materials?.[r.matIndex];
-            if (!m) {
-              // Material was deleted; mark row as removed-from-server. We
-              // simply drop it from the row list.
-              return r;
-            }
-            return {
-              ...r,
-              initialCode: m.code || "",
-              initialName: m.name || "",
-              initialUnit: m.unit || "PCS",
-              initialQty: m.qty || 0,
-              code: m.code || "",
-              name: m.name || "",
-              unit: m.unit || "PCS",
-              qty: m.qty || 0,
-              toDelete: false,
-            };
-          }),
-        );
+        // Note: onTemplatesUpdated above propagates the succeeded clones
+        // back to the parent; the dialog's open-effect rebuilds rows from
+        // the new templates prop on next render. Failed templates revert
+        // to their server state too — their unsaved edits are lost. This
+        // is a known limitation of the per-template PUT model; the user
+        // sees which BOMs failed via the toast and can retry.
       }
     } finally {
       setSaving(false);
@@ -5279,8 +5278,9 @@ function BatchEditMaterialsDialog({
             Batch Edit Raw Materials
           </h2>
           <p className="text-xs text-gray-500 mt-0.5">
-            Filter → edit per row, or select rows and use Bulk fill. Auto-detect
-            rows (Fabric/Leg from order) only allow qty edits.
+            Filter → replace, add, or delete materials. Each WIP step has a
+            "+" row at the end to add a new material. Auto-detect rows
+            (Fabric/Leg from order) can only be deleted.
           </p>
         </div>
 
@@ -5292,7 +5292,7 @@ function BatchEditMaterialsDialog({
               <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
               Filter
             </div>
-            <div className="grid grid-cols-4 gap-2">
+            <div className="grid grid-cols-6 gap-2">
               <input
                 type="text"
                 placeholder="Search BOM / material..."
@@ -5325,28 +5325,122 @@ function BatchEditMaterialsDialog({
                 ))}
               </select>
               <select
-                value={filterMaterial}
-                onChange={(e) => setFilterMaterial(e.target.value)}
+                value={filterDept}
+                onChange={(e) => setFilterDept(e.target.value)}
                 className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                title="Department is required — pick one to scope the rows. Mirrors DeptPivot's UX."
               >
-                <option value="">All Materials</option>
-                {materialCodeOptions.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
+                {/* No "All Departments" option per user 2026-04-29 — opening
+                    the dialog with no scope dumped 3000+ rows and was unusable.
+                    The dialog defaults to DEPT_ORDER[0] (Fab Cut). */}
+                {deptCodeOptions.map((d) => (
+                  <option key={d} value={d}>
+                    {DEPT_LABELS[d] || d}
                   </option>
                 ))}
               </select>
+              <select
+                value={filterModel}
+                onChange={(e) => setFilterModel(e.target.value)}
+                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                title="Filter rows to a single Model (productCode)."
+              >
+                <option value="">All Models</option>
+                {modelOptions.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+              {/* Multi-select material filter — opens a checkbox popover. */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setMaterialFilterOpen((v) => !v)}
+                  className="w-full text-left border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm bg-white hover:bg-gray-50 flex items-center justify-between gap-1"
+                >
+                  <span className="truncate">
+                    {filterMaterials.size === 0
+                      ? "All Materials"
+                      : filterMaterials.size === 1
+                      ? Array.from(filterMaterials)[0]
+                      : `${filterMaterials.size} materials`}
+                  </span>
+                  <svg className="w-3 h-3 flex-shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+                {materialFilterOpen && (
+                  <div className="absolute z-20 mt-1 w-[260px] right-0 max-h-[260px] overflow-y-auto bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-1.5 space-y-0.5">
+                    <div className="flex items-center justify-between px-1 py-1 border-b border-[#E2DDD8]">
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">
+                        {filterMaterials.size} selected
+                      </span>
+                      <div className="flex items-center gap-2">
+                        {filterMaterials.size > 0 && (
+                          <button
+                            onClick={() => setFilterMaterials(new Set())}
+                            className="text-[10px] text-[#9A3A2D] hover:underline"
+                          >
+                            Clear
+                          </button>
+                        )}
+                        <button
+                          onClick={() => setMaterialFilterOpen(false)}
+                          className="text-[10px] text-gray-500 hover:underline"
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                    {materialCodeOptions.length === 0 && (
+                      <p className="text-xs text-gray-400 p-2 text-center">
+                        No material codes in any BOM yet.
+                      </p>
+                    )}
+                    {materialCodeOptions.map((c) => {
+                      const checked = filterMaterials.has(c);
+                      return (
+                        <label
+                          key={c}
+                          className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer ${
+                            checked ? "bg-[#EEF3E4]" : "hover:bg-[#FAF9F7]"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setFilterMaterials((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(c)) next.delete(c);
+                                else next.add(c);
+                                return next;
+                              });
+                            }}
+                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                          />
+                          <span className="font-mono truncate">{c}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
             {(searchText ||
               filterCategory !== "ALL" ||
               filterWipType ||
-              filterMaterial) && (
+              filterDept !== DEPT_ORDER[0] ||
+              filterModel ||
+              filterMaterials.size > 0) && (
               <button
                 onClick={() => {
                   setSearchText("");
                   setFilterCategory("ALL");
                   setFilterWipType("");
-                  setFilterMaterial("");
+                  // Department is required — reset to default, NOT empty.
+                  setFilterDept(DEPT_ORDER[0]);
+                  setFilterModel("");
+                  setFilterMaterials(new Set());
                 }}
                 className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
               >
@@ -5446,26 +5540,48 @@ function BatchEditMaterialsDialog({
               {filteredRows.length === 0 && (
                 <p className="text-sm text-gray-400 p-4 text-center">
                   {rows.length === 0
-                    ? "No materials defined in any BOM."
+                    ? "No BOM templates loaded."
                     : "No rows match the current filters."}
                 </p>
               )}
+              {/* Per-WIP-step material count, used to label the placeholder
+                  row "+ Add another material" instead of "+ Select material..."
+                  when at least one material is already present. Helps the
+                  operator realize the placeholder is persistent — they can
+                  keep clicking it to add more rows to the same WIP step. */}
+              {(() => null)()}
               {filteredRows.map((r) => {
                 const isSelected = selectedKeys.has(r.rowKey);
                 const dirty = isRowDirty(r);
                 const wipColor = WIP_TYPE_LABELS[r.wipType]?.color || "#6B7280";
+                // Count non-placeholder, non-deleted siblings in the same
+                // (templateId, path) bucket — drives the "Add another"
+                // language on the placeholder row.
+                const siblingMaterialCount = r.isPlaceholder
+                  ? rows.filter(
+                      (x) =>
+                        !x.isPlaceholder &&
+                        !x.toDelete &&
+                        x.templateId === r.templateId &&
+                        x.path.length === r.path.length &&
+                        x.path.every((seg, i) => seg === r.path[i]),
+                    ).length
+                  : 0;
+                const rowTone = r.isPlaceholder
+                  ? "bg-[#FAF9F7]/40 hover:bg-[#FAF9F7]"
+                  : r.toDelete
+                  ? "bg-[#F9E1DA] line-through text-gray-400"
+                  : r.isNew
+                  ? "bg-[#EEF3E4]"
+                  : dirty
+                  ? "bg-[#EEF3E4]"
+                  : isSelected
+                  ? "bg-[#FAEFCB]/60"
+                  : "hover:bg-[#FAF9F7]";
                 return (
                   <div
                     key={r.rowKey}
-                    className={`grid grid-cols-[28px_minmax(110px,1fr)_minmax(110px,1fr)_minmax(220px,2fr)_70px_50px_28px] gap-2 px-3 py-1.5 items-center border-b border-[#E2DDD8] last:border-b-0 text-xs ${
-                      r.toDelete
-                        ? "bg-[#F9E1DA] line-through text-gray-400"
-                        : dirty
-                        ? "bg-[#EEF3E4]"
-                        : isSelected
-                        ? "bg-[#FAEFCB]/60"
-                        : "hover:bg-[#FAF9F7]"
-                    }`}
+                    className={`grid grid-cols-[28px_minmax(110px,1fr)_minmax(110px,1fr)_minmax(220px,2fr)_70px_50px_28px] gap-2 px-3 py-1.5 items-center border-b border-[#E2DDD8] last:border-b-0 text-xs ${rowTone}`}
                   >
                     <input
                       type="checkbox"
@@ -5491,7 +5607,25 @@ function BatchEditMaterialsDialog({
                     >
                       {r.wipLabel}
                     </div>
-                    {r.autoDetect ? (
+                    {r.isPlaceholder ? (
+                      <div className="flex items-center gap-1">
+                        <span
+                          className="text-[10px] text-[#4F7C3A] font-medium pl-1 pr-1 whitespace-nowrap"
+                          title={
+                            siblingMaterialCount > 0
+                              ? "Click again to add another material — the + row is persistent"
+                              : "Pick a material to add it to this WIP step."
+                          }
+                        >
+                          {siblingMaterialCount > 0 ? "+ Add another" : "+"}
+                        </span>
+                        <RawMaterialSelect
+                          value=""
+                          materials={rawMaterials}
+                          onSelect={(rm) => addMaterialFromPlaceholder(r.rowKey, rm)}
+                        />
+                      </div>
+                    ) : r.autoDetect ? (
                       <div className="flex items-center gap-1">
                         <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-medium border border-[#A8CAD2] whitespace-nowrap">
                           {r.autoDetect === "FABRIC"
@@ -5508,28 +5642,42 @@ function BatchEditMaterialsDialog({
                     )}
                     <span
                       className="text-right text-xs text-gray-500 tabular-nums px-1.5 py-1"
-                      title="Qty is managed in the per-BOM Edit dialog, not here."
-                    >
-                      {r.qty}
-                    </span>
-                    <span className="text-[10px] text-gray-500">{r.unit}</span>
-                    <button
-                      onClick={() =>
-                        updateRow(r.rowKey, { toDelete: !r.toDelete })
+                      title={
+                        r.isPlaceholder
+                          ? "Pick a material to add it to this WIP step."
+                          : "Qty is managed in the per-BOM Edit dialog, not here."
                       }
-                      className="text-[#9A3A2D] hover:text-[#7A2E24]"
-                      title={r.toDelete ? "Restore" : "Delete"}
                     >
-                      {r.toDelete ? (
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 0118 0M3 12a9 9 0 009 9M3 12l3-3m0 6l-3-3" />
-                        </svg>
-                      ) : (
-                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      )}
-                    </button>
+                      {r.isPlaceholder ? "—" : r.qty}
+                    </span>
+                    <span className="text-[10px] text-gray-500">
+                      {r.isPlaceholder ? "" : r.unit}
+                    </span>
+                    {r.isPlaceholder ? (
+                      <span className="w-3.5 h-3.5" />
+                    ) : (
+                      <button
+                        onClick={() => toggleRowDelete(r.rowKey)}
+                        className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                        title={
+                          r.isNew
+                            ? "Discard this unsaved row"
+                            : r.toDelete
+                            ? "Restore"
+                            : "Delete"
+                        }
+                      >
+                        {r.toDelete ? (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M3 12a9 9 0 0118 0M3 12a9 9 0 009 9M3 12l3-3m0 6l-3-3" />
+                          </svg>
+                        ) : (
+                          <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                          </svg>
+                        )}
+                      </button>
+                    )}
                   </div>
                 );
               })}
@@ -5718,6 +5866,8 @@ function DeptPivotCategoryDialog({
   const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
   const [rows, setRows] = useState<DeptPivotRow[]>([]);
   const [search, setSearch] = useState("");
+  // Defer search so the filteredRows useMemo doesn't re-run on every keystroke.
+  const searchDeferred = useDeferredValue(search);
   const [modelFilter, setModelFilter] = useState<string>("");
   const [branchFilter, setBranchFilter] = useState<string>("");
   const [saving, setSaving] = useState(false);
@@ -5727,6 +5877,15 @@ function DeptPivotCategoryDialog({
   // inline edit state in `rows`.
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [bulkFillCat, setBulkFillCat] = useState("");
+  // Gate the stale banner + yellow row highlight until variants-config has
+  // been re-fetched on dialog open. The kv-config in-memory cache is
+  // primed at dashboard mount, but if Production Times got edited in
+  // another tab (or if the cache hasn't fully hydrated yet), the first
+  // render reads canonical=0 for every (dept, category) and flashes
+  // "540 stale" before settling on the real "1 stale". User caught the
+  // flash 2026-04-29 and reported "为什么我刚打开它时会显示这个？".
+  // configHydrated stays false until the open-time fetch resolves.
+  const [configHydrated, setConfigHydrated] = useState(false);
 
   // Rebuild rows whenever the dialog opens, the dept changes, or the
   // upstream template/products list changes (e.g. after a save).
@@ -5748,10 +5907,42 @@ function DeptPivotCategoryDialog({
   }, [open, deptCode, templates, products]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Hydrate variants-config on every open so the staleness check reads
+  // current canonical values, not whatever was in the in-memory cache
+  // when the page loaded. Mirrors ProductionTimesDialog's hydrate step.
+  /* eslint-disable react-hooks/set-state-in-effect -- async fetch settle
+     into local state is the documented exception; the setState is
+     guarded by `cancelled` and only fires after the awaited fetch. */
+  useEffect(() => {
+    if (!open) {
+      setConfigHydrated(false);
+      return;
+    }
+    let cancelled = false;
+    void fetchVariantsConfig().then(() => {
+      if (!cancelled) setConfigHydrated(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   const categoryOptions = useMemo(() => getCategoryOptions(), []);
 
+  // A row is dirty if EITHER its category changed OR its minutes drifted
+  // from the initial value. The minutes path catches Resync-stale: an old
+  // BOM row stores `Fab Cut × CAT 3 = 90` because that was the matrix value
+  // months ago, but the current matrix has `Fab Cut × CAT 3 = 25`. Without
+  // the minutes branch, Resync would silently update r.minutes but the
+  // dirty count + Save button + bulk-process-edit payload would all
+  // ignore the change and the user would never persist it.
+  function isRowDirty(r: DeptPivotRow): boolean {
+    return r.category !== r.initialCategory || r.minutes !== r.initialMinutes;
+  }
+
   const dirtyCount = useMemo(
-    () => rows.filter((r) => r.category !== r.initialCategory).length,
+    () => rows.filter(isRowDirty).length,
     [rows],
   );
 
@@ -5770,7 +5961,7 @@ function DeptPivotCategoryDialog({
   }, [rows]);
 
   const filteredRows = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = searchDeferred.trim().toLowerCase();
     return rows.filter((r) => {
       if (modelFilter && r.productCode !== modelFilter) return false;
       if (branchFilter && r.branchLabel !== branchFilter) return false;
@@ -5784,7 +5975,81 @@ function DeptPivotCategoryDialog({
       }
       return true;
     });
-  }, [rows, search, modelFilter, branchFilter]);
+  }, [rows, searchDeferred, modelFilter, branchFilter]);
+
+  // "Stale" = the BOM's stored minutes don't match what the Production
+  // Times matrix says for that (dept, category) pair right now. Scoped
+  // to the FILTERED row set so the count + Resync action stay aligned
+  // with what the user is looking at. Rows without a category yet are
+  // skipped (no canonical value to compare against).
+  function isRowStale(r: DeptPivotRow): boolean {
+    if (!r.category) return false;
+    const canonical = getProductionMinutes(deptCode, r.category);
+    return canonical !== r.minutes;
+  }
+
+  // Computed inline (NOT memoized) on purpose. `getProductionMinutes`
+  // reads from the variants-config singleton cache which can be
+  // mutated out-of-band (Production Times dialog patches it without
+  // a parent re-render), so a useMemo with `[filteredRows, deptCode]`
+  // deps would silently keep showing stale counts after the user
+  // re-opened/edited Production Times. The 533-row scan is sub-ms; the
+  // memo wasn't earning its complexity.
+  // BUG-2026-04-29: banner showed "8 stale" while Resync touched 0
+  // because the memo had cached an earlier productionTimes snapshot.
+  // Also gated on configHydrated so the dialog doesn't flash a giant
+  // "540 stale" before the kv-config fetch settles (the cache's empty
+  // state would compute canonical=0 for every category).
+  const staleCount = configHydrated
+    ? filteredRows.filter(isRowStale).length
+    : 0;
+
+  // Resync sets r.minutes to the current matrix value for every stale
+  // row in the FILTERED set. This makes them dirty (because
+  // r.minutes !== r.initialMinutes) so the existing Save flow picks them
+  // up and persists the corrected minutes via bulk-process-edit. We do
+  // NOT touch initialMinutes — that's still the value as loaded from
+  // the server, so a partial-save retry works correctly.
+  function handleResyncStale() {
+    // Snapshot the productionTimes for THIS dept ONCE at click time and use
+    // it for both the staleness probe and the row update inside setRows.
+    // Reading getProductionMinutes() multiple times across the click path
+    // could (in theory) hit different cache states if the kv-config sync
+    // layer mutates mid-click; taking a single-shot snapshot eliminates
+    // that race window. Also lets us count touched rows without relying on
+    // a setRows-internal mutation (which would double-fire under React
+    // strict mode in dev).
+    const ptCache = getVariantsConfigSync()?.productionTimes?.[deptCode] || {};
+    const canonicalFor = (cat: string): number =>
+      typeof ptCache[cat] === "number" ? (ptCache[cat] as number) : 0;
+    const filteredKeys = new Set(filteredRows.map((r) => r.rowKey));
+    // Pre-compute which rows actually need updating, BEFORE setRows.
+    const willTouch: Array<{ rowKey: string; canonical: number }> = [];
+    for (const r of rows) {
+      if (!filteredKeys.has(r.rowKey)) continue;
+      if (!r.category) continue;
+      const canonical = canonicalFor(r.category);
+      if (canonical === r.minutes) continue;
+      willTouch.push({ rowKey: r.rowKey, canonical });
+    }
+    if (willTouch.length === 0) {
+      toast.warning(
+        "Nothing to resync — every visible row's stored minutes already match the Production Times matrix snapshot.",
+      );
+      return;
+    }
+    const touchSet = new Map(willTouch.map((t) => [t.rowKey, t.canonical]));
+    setRows((prev) =>
+      prev.map((r) => {
+        const target = touchSet.get(r.rowKey);
+        if (target === undefined) return r;
+        return { ...r, minutes: target };
+      }),
+    );
+    toast.success(
+      `Resynced ${willTouch.length} stale row${willTouch.length !== 1 ? "s" : ""} to current Production Times. Click Save to persist.`,
+    );
+  }
 
   function handleCategoryChange(rowKey: string, newCat: string) {
     setRows((prev) =>
@@ -5849,7 +6114,7 @@ function DeptPivotCategoryDialog({
   }
 
   async function handleSave() {
-    const dirty = rows.filter((r) => r.category !== r.initialCategory);
+    const dirty = rows.filter(isRowDirty);
     if (dirty.length === 0) {
       toast.warning("No changes to save.");
       return;
@@ -6057,6 +6322,25 @@ function DeptPivotCategoryDialog({
             </div>
           </div>
 
+          {/* Resync stale row banner — only shows when at least one
+              filtered row's stored minutes differ from the current
+              Production Times matrix value for its (dept, category). */}
+          {staleCount > 0 && (
+            <div className="flex items-center justify-between gap-3 rounded-md border border-[#E8D597] bg-[#FFF8E7] px-3 py-2">
+              <div className="text-xs text-[#9C6F1E]">
+                <span className="font-semibold">{staleCount}</span>{" "}
+                row{staleCount !== 1 ? "s" : ""} have stored minutes that no longer match the Production Times matrix
+                {" "}(yellow rows below). Resync to update.
+              </div>
+              <button
+                onClick={handleResyncStale}
+                className="px-3 py-1.5 text-xs bg-[#9C6F1E] text-white rounded hover:bg-[#7C5818] whitespace-nowrap"
+              >
+                Resync {staleCount} stale
+              </button>
+            </div>
+          )}
+
           {/* Pivot table */}
           <div className="border border-[#E2DDD8] rounded-lg overflow-hidden">
             <div className="max-h-[60vh] overflow-y-auto">
@@ -6090,14 +6374,24 @@ function DeptPivotCategoryDialog({
                     </tr>
                   )}
                   {filteredRows.map((r) => {
-                    const dirty = r.category !== r.initialCategory;
+                    const dirty = isRowDirty(r);
+                    // Same hydrate gate as staleCount — don't paint rows
+                    // yellow/strikethrough until the kv-config fetch on open
+                    // resolves, otherwise every row flashes "stale" using
+                    // the empty canonical=0 baseline.
+                    const stale = configHydrated && !dirty && isRowStale(r);
                     const isSelected = selectedKeys.has(r.rowKey);
+                    const rowTone = dirty
+                      ? "bg-[#EEF3E4]"
+                      : stale
+                      ? "bg-[#FFF8E7]"
+                      : isSelected
+                      ? "bg-[#FAEFCB]/60"
+                      : "hover:bg-[#FAF9F7]";
                     return (
                       <tr
                         key={r.rowKey}
-                        className={`border-t border-[#E2DDD8] ${
-                          dirty ? "bg-[#EEF3E4]" : isSelected ? "bg-[#FAEFCB]/60" : "hover:bg-[#FAF9F7]"
-                        }`}
+                        className={`border-t border-[#E2DDD8] ${rowTone}`}
                       >
                         <td className="px-3 py-2">
                           <input
@@ -6148,7 +6442,18 @@ function DeptPivotCategoryDialog({
                           </select>
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-gray-600">
-                          {r.minutes} min
+                          {stale ? (
+                            <span
+                              className="inline-flex items-center gap-1 text-[#9C6F1E]"
+                              title={`Stored ${r.minutes} min, current Production Times says ${getProductionMinutes(deptCode, r.category)} min. Click "Resync stale" to update.`}
+                            >
+                              <span className="line-through text-[#9CA3AF]">{r.minutes}</span>
+                              <span className="font-semibold">→ {getProductionMinutes(deptCode, r.category)}</span>
+                              <span className="text-[10px]">min</span>
+                            </span>
+                          ) : (
+                            <span>{r.minutes} min</span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -6163,7 +6468,7 @@ function DeptPivotCategoryDialog({
         <div className="px-6 py-4 border-t border-[#E2DDD8] flex items-center justify-between">
           <span className="text-xs text-gray-500">
             {dirtyCount > 0
-              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter((r) => r.category !== r.initialCategory).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
+              ? `${dirtyCount} row${dirtyCount !== 1 ? "s" : ""} pending — affects ${new Set(rows.filter(isRowDirty).map((r) => r.templateId)).size} template${dirtyCount !== 1 ? "s" : ""}`
               : "No pending changes"}
           </span>
           <div className="flex gap-2">
@@ -6206,7 +6511,9 @@ export default function BOMManagementPage() {
   const [showEdit, setShowEdit] = useState(false);
   const [showMaster, setShowMaster] = useState(false);
   const [showProductionTimes, setShowProductionTimes] = useState(false);
-  const [showBatchEditCat, setShowBatchEditCat] = useState(false);
+  // Batch Edit Categories button removed 2026-04-29 per user request —
+  // the Production Categories Editor (Dept-Pivot) covers the same use
+  // case at higher granularity (per-dept rather than per-template).
   const [showBatchEditMat, setShowBatchEditMat] = useState(false);
   const [showDeptPivot, setShowDeptPivot] = useState(false);
 
@@ -6426,18 +6733,10 @@ export default function BOMManagementPage() {
             </button>
           )}
           {/* Export / Import BOM CSV buttons removed 2026-04-28 per user
-              request - inline editors (Batch Edit Categories + Dept-Pivot
-              Editor) cover the spreadsheet round-trip use case directly. */}
-          <button
-            onClick={() => setShowBatchEditCat(true)}
-            title="Batch edit production categories across multiple BOM templates"
-            className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
-          >
-            <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h7" />
-            </svg>
-            Batch Edit Categories
-          </button>
+              request - inline editors (RawMaterial Batch Editor +
+              Production Categories Editor) cover the spreadsheet round-trip
+              use case directly. Batch Edit Categories button removed
+              2026-04-29 per user — Production Categories Editor covers it. */}
           <button
             onClick={() => setShowBatchEditMat(true)}
             title="Batch edit raw materials (qty / replace / delete) across every BOM's WIP steps"
@@ -6446,17 +6745,17 @@ export default function BOMManagementPage() {
             <svg className="w-4 h-4 text-[#4F7C3A]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
-            Batch Edit Materials
+            RawMaterial Batch Editor
           </button>
           <button
             onClick={() => setShowDeptPivot(true)}
-            title="Dept-Pivot Category Editor — edit every process row in a department across all BOMs"
+            title="Production Categories Editor — edit every process row in a department across all BOMs"
             className="flex items-center gap-2 px-3 py-2 bg-white border border-[#E2DDD8] rounded-lg text-sm text-gray-700 hover:bg-[#FAF9F7]"
           >
             <svg className="w-4 h-4 text-[#6B5C32]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h18M3 14h18M9 6v12M15 6v12" />
             </svg>
-            Dept-Pivot Editor
+            Production Categories Editor
           </button>
           <button
             onClick={() => setShowProductionTimes(true)}
@@ -6483,17 +6782,12 @@ export default function BOMManagementPage() {
       </div>
       <MasterTemplatesDialog open={showMaster} onClose={handleMasterClosed} rawMaterials={rawMaterials} fabricOptions={fabricOptions} />
       <ProductionTimesDialog open={showProductionTimes} onClose={() => setShowProductionTimes(false)} />
-      <BatchEditCategoriesDialog
-        open={showBatchEditCat}
-        onClose={() => setShowBatchEditCat(false)}
-        templates={templates}
-        onTemplatesUpdated={(updated) => setTemplates(updated)}
-      />
       <BatchEditMaterialsDialog
         open={showBatchEditMat}
         onClose={() => setShowBatchEditMat(false)}
         templates={templates}
         rawMaterials={rawMaterials}
+        products={products}
         onTemplatesUpdated={(updated) => setTemplates(updated)}
       />
       <DeptPivotCategoryDialog

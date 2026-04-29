@@ -8,6 +8,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -45,13 +47,14 @@ function genId(): string {
 
 // GET /api/maintenance-logs?equipmentId=...
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const equipmentId = c.req.query("equipmentId");
   const sql = equipmentId
-    ? "SELECT * FROM maintenance_logs WHERE equipmentId = ? ORDER BY date DESC"
-    : "SELECT * FROM maintenance_logs ORDER BY date DESC";
+    ? "SELECT * FROM maintenance_logs WHERE orgId = ? AND equipmentId = ? ORDER BY date DESC"
+    : "SELECT * FROM maintenance_logs WHERE orgId = ? ORDER BY date DESC";
   const stmt = equipmentId
-    ? c.var.DB.prepare(sql).bind(equipmentId)
-    : c.var.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(orgId, equipmentId)
+    : c.var.DB.prepare(sql).bind(orgId);
   const res = await stmt.all<MaintenanceLogRow>();
   const data = (res.results ?? []).map(rowToLog);
   return c.json({ success: true, data, total: data.length });
@@ -59,6 +62,8 @@ app.get("/", async (c) => {
 
 // POST /api/maintenance-logs
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "maintenance-logs", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     if (!body.equipmentId || !body.date) {
@@ -125,6 +130,8 @@ app.get("/:id", async (c) => {
 
 // DELETE /api/maintenance-logs/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "maintenance-logs", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM maintenance_logs WHERE id = ?",

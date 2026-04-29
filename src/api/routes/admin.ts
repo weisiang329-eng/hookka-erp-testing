@@ -28,6 +28,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 import {
   createProductionOrdersForSO,
   type SalesOrderRow,
@@ -140,6 +141,8 @@ async function countCold(
 //   { success, dryRun, cutoff, moved: { production_orders, job_cards, ... } }
 // ---------------------------------------------------------------------------
 app.post("/archive/run", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
@@ -513,6 +516,8 @@ async function rebuildSingleSO(
 // POST /api/admin/rebuild-all-pos
 // ---------------------------------------------------------------------------
 app.post("/rebuild-all-pos", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
   const dryRun = dryRunParam !== "false";
@@ -615,6 +620,8 @@ app.post("/rebuild-all-pos", async (c) => {
 // POST /api/admin/rebuild-pos/:soId
 // ---------------------------------------------------------------------------
 app.post("/rebuild-pos/:soId", async (c) => {
+  const denied = await requirePermission(c, "users", "create");
+  if (denied) return denied;
   const db = c.var.DB;
   const soId = c.req.param("soId");
   const dryRunParam = (c.req.query("dryRun") ?? "true").toLowerCase();
@@ -695,4 +702,9 @@ app.post("/rebuild-pos/:soId", async (c) => {
   }
 });
 
+// NOTE (rollup): S1 (commit bd40082) removed the DEV-only
+// /clear-all-completion-dates admin endpoint as a production-hygiene call.
+// S2 independently added an RBAC gate to that same endpoint. We keep S1's
+// removal — the endpoint should not exist in production at all, so adding
+// an RBAC gate to a deleted endpoint is moot.
 export default app;

@@ -5,8 +5,9 @@
 Every pull request targeting `main` automatically deploys to a unique
 Cloudflare Pages preview branch and comments the preview URL on the
 PR. Reviewers test the change against real Pages infrastructure
-(Hyperdrive → Supabase, KV `SESSION_CACHE`, future R2 `FILES`) before
-merging — no more "looks fine on my laptop, broke on prod."
+(Hyperdrive → Supabase, KV `SESSION_CACHE`, Supabase Storage when the
+service-role key is set) before merging — no more "looks fine on my
+laptop, broke on prod."
 
 ---
 
@@ -41,7 +42,8 @@ bindings:
 * `HYPERDRIVE` → live Supabase (production data)
 * `DB` (D1) → live D1 database
 * `SESSION_CACHE` (KV) → live KV namespace
-* `FILES` (R2, when uncommented) → live R2 bucket
+* Supabase Storage credentials (`SUPABASE_PROJECT_REF`,
+  `SUPABASE_SERVICE_KEY`) → live Supabase Storage bucket when set
 * All `[vars]` from `wrangler.toml`
 
 This means **canary deploys CAN write to production data**. That's

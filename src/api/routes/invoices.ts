@@ -20,9 +20,18 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
-import { emitAudit } from "../lib/audit";
-import { appendJournalEntries } from "../lib/journal-hash";
+// Rollup: S3 won the audit/journal-hash signature change (batched into the
+// invoice txn via buildAuditStatement + buildJournalEntryStatements). S4's
+// pre-S3 emitAudit/appendJournalEntries variants are superseded. S4's
+// getOrgId import is additive and stays.
+import {
+  buildAuditStatement,
+  recordAuditCreatedMetric,
+} from "../lib/audit";
+import { buildJournalEntryStatements } from "../lib/journal-hash";
+import { getOrgId } from "../lib/tenant";
 import { checkInvoiceLocked, lockedResponse } from "../lib/lock-helpers";
+import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
 
 const app = new Hono<Env>();
 
@@ -324,8 +333,11 @@ app.get("/", async (c) => {
   const limitParam = c.req.query("limit");
   const paginate = pageParam !== undefined || limitParam !== undefined;
 
-  const where: string[] = [];
-  const params: unknown[] = [];
+  // Sprint 4: org_id is always the leading predicate so list endpoints
+  // can never leak across tenants regardless of optional filters.
+  const orgId = getOrgId(c);
+  const where: string[] = ["orgId = ?"];
+  const params: unknown[] = [orgId];
   if (customerId) {
     where.push("customerId = ?");
     params.push(customerId);
@@ -334,7 +346,7 @@ app.get("/", async (c) => {
     where.push("status = ?");
     params.push(status);
   }
-  const clause = where.length ? `WHERE ${where.join(" AND ")}` : "";
+  const clause = `WHERE ${where.join(" AND ")}`;
 
   if (!paginate) {
     // 2026-04-26 prod 500 fix: cap the unbounded items + payments fetch
@@ -354,21 +366,21 @@ app.get("/", async (c) => {
         .prepare(
           customerId || status
             ? `SELECT i.* FROM invoice_items i
-                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 INNER JOIN invoices v ON v.id = i.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
                  LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_items LIMIT ${ROWS_HARD_CAP}`,
+            : `SELECT * FROM invoice_items WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
         )
-        .bind(...params)
+        .bind(...(customerId || status ? params : [orgId]))
         .all<InvoiceItemRow>(),
       db
         .prepare(
           customerId || status
             ? `SELECT p.* FROM invoice_payments p
-                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/customerId/g, "v.customerId").replace(/status/g, "v.status")}
+                 INNER JOIN invoices v ON v.id = p.invoiceId ${clause.replace(/(?<![\w.])orgId/g, "v.orgId").replace(/(?<![\w.])customerId/g, "v.customerId").replace(/(?<![\w.])status/g, "v.status")}
                  LIMIT ${ROWS_HARD_CAP}`
-            : `SELECT * FROM invoice_payments LIMIT ${ROWS_HARD_CAP}`,
+            : `SELECT * FROM invoice_payments WHERE orgId = ? LIMIT ${ROWS_HARD_CAP}`,
         )
-        .bind(...params)
+        .bind(...(customerId || status ? params : [orgId]))
         .all<InvoicePaymentRow>(),
     ]);
 
@@ -447,6 +459,13 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — invoices:create.
   const denied = await requirePermission(c, "invoices", "create");
   if (denied) return denied;
+  // Sprint 3 #4 — idempotency. POSTing an invoice for the same DO twice
+  // produces two distinct invoice rows today (the only guard is DO status
+  // = DELIVERED, which the first request flips to INVOICED — but the
+  // window between read and write is wide). Wrap so a duplicate retry
+  // returns the cached response instead.
+  const idemKey = readIdempotencyKey(c);
+  return withIdempotency(c, "invoices", idemKey, async () => {
   try {
     const body = await c.req.json();
     const deliveryOrderId: string | undefined = body.deliveryOrderId;
@@ -619,6 +638,7 @@ app.post("/", async (c) => {
     }
     return c.json({ success: false, error: msg || "Internal error creating invoice" }, 500);
   }
+  });
 });
 
 // GET /api/invoices/:id — single
@@ -826,41 +846,61 @@ app.put("/:id", async (c) => {
       statements.push(...cascadeStmts);
     }
 
-    await c.var.DB.batch(statements);
+    // ------------------------------------------------------------------
+    // Sprint 3 #2 — fold audit + ledger writes into the SAME batch as
+    // the business mutation, instead of running them post-batch with a
+    // try/catch. Two transitions trigger side-effects:
+    //   • DRAFT → SENT       → audit "post"  + dual-write 2-3 ledger legs
+    //   • ANY   → CANCELLED  → audit "void"  (no ledger write — voids are
+    //                                          journaled separately when /
+    //                                          if a credit-note posts)
+    // Skip the remaining payment-driven transitions (SENT →
+    // PARTIAL_PAID / PAID / OVERDUE) — those are journaled via payment
+    // audit events on payments.ts. Avoid double-logging.
+    //
+    // We build a projected `afterSnapshot` from the in-flight column
+    // values so the audit row can land in the same batch as the UPDATE
+    // (we cannot SELECT-back inside the batch). The fields here mirror
+    // those that the UPDATE statement above writes; non-mutated fields
+    // are inherited from `existing`.
+    // ------------------------------------------------------------------
+    const isPostTransition =
+      existing.status === "DRAFT" && nextStatus === "SENT";
+    const isVoidTransition =
+      nextStatus === "CANCELLED" && existing.status !== "CANCELLED";
 
-    const updated = await fetchInvoiceWithChildren(c.var.DB, id);
+    const afterSnapshot =
+      isPostTransition || isVoidTransition
+        ? {
+            ...existing,
+            status: nextStatus,
+            paidAmount: nextPaidAmount,
+            paymentDate: merged.paymentDate,
+            paymentMethod: merged.paymentMethod,
+            notes: merged.notes,
+            dueDate: merged.dueDate,
+            updatedAt: now,
+          }
+        : null;
 
-    // Audit emit (P3.4) — only on the two sensitive status transitions:
-    //   • post  = DRAFT → SENT (the finalize / publish moment)
-    //   • void  = ANY   → CANCELLED (the kill-switch)
-    // Skip the remaining payment-driven transitions (SENT → PARTIAL_PAID /
-    // PAID / OVERDUE) — those are already journaled via payment audit
-    // events on payments.ts. Avoid double-logging.
-    if (existing.status === "DRAFT" && nextStatus === "SENT") {
-      await emitAudit(c, {
+    if (isPostTransition && afterSnapshot) {
+      const auditStmt = await buildAuditStatement(c, {
         resource: "invoices",
         resourceId: id,
         action: "post",
         before: existing,
-        after: updated,
+        after: afterSnapshot,
       });
+      if (auditStmt) statements.push(auditStmt);
 
-      // ----------------------------------------------------------------
-      // Phase C #2 quick-win — dual-write to the immutable ledger.
-      //
+      // Phase C #2 — immutable-ledger dual-write, NOW inside the batch.
       // Standard 2-leg invoice posting per the roadmap (chart in 0010):
       //   DR 1100 Accounts Receivable     totalSen
       //   CR 4000 Sales Revenue           subtotalSen
       //   CR 2400 GST Output              taxSen   (only if non-zero)
-      //
-      // taxSen is derived as totalSen - subtotalSen. The current invoice
-      // schema doesn't carry an explicit tax column, so the GST leg only
-      // fires once a future migration starts populating it; today this
-      // resolves to 0 and the leg is skipped.
-      //
-      // Errors are caught and warned, not thrown (same pattern as audit).
-      // The editable invoice posting stays authoritative until M3/W9 when
-      // the immutability trigger flips.
+      // taxSen = max(0, totalSen - subtotalSen). The current invoice
+      // schema doesn't carry an explicit tax column; the GST leg fires
+      // only when a future migration starts populating it.
       try {
         const orgId =
           (existing as unknown as { orgId?: string | null }).orgId ??
@@ -910,25 +950,45 @@ app.put("/:id", async (c) => {
             orgId,
           });
         }
-        await appendJournalEntries(c.var.DB, orgId, legs);
+        const { statements: ledgerStmts } = await buildJournalEntryStatements(
+          c.var.DB,
+          orgId,
+          legs,
+        );
+        statements.push(...ledgerStmts);
       } catch (e) {
+        // Hash computation / chain-head read failed BEFORE the batch.
+        // The ledger write is critical for audit-trail integrity but the
+        // surrounding refactor preserves the original "never block the
+        // mutation" contract — log loudly and proceed without the dual-
+        // write. The chain-walker job will flag the missing legs.
         console.warn(
-          `[ledger] dual-write failed for invoice ${id} post:`,
+          `[ledger] failed to BUILD statements for invoice ${id} post:`,
           e,
         );
       }
-    } else if (
-      nextStatus === "CANCELLED" &&
-      existing.status !== "CANCELLED"
-    ) {
-      await emitAudit(c, {
+    } else if (isVoidTransition && afterSnapshot) {
+      const auditStmt = await buildAuditStatement(c, {
         resource: "invoices",
         resourceId: id,
         action: "void",
         before: existing,
-        after: updated,
+        after: afterSnapshot,
       });
+      if (auditStmt) statements.push(auditStmt);
     }
+
+    await c.var.DB.batch(statements);
+
+    // Post-batch: success metrics for the audit / ledger writes that
+    // landed atomically with the business mutation. Failures swallowed.
+    if (isPostTransition) {
+      recordAuditCreatedMetric(c, { resource: "invoices", action: "post" });
+    } else if (isVoidTransition) {
+      recordAuditCreatedMetric(c, { resource: "invoices", action: "void" });
+    }
+
+    const updated = await fetchInvoiceWithChildren(c.var.DB, id);
 
     return c.json({ success: true, data: updated });
   } catch (err) {

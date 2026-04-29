@@ -15,6 +15,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -117,6 +118,8 @@ app.get("/", async (c) => {
 
 // POST /api/bom — create BOM version
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const {
@@ -273,6 +276,8 @@ app.get("/templates", async (c) => {
 
 // POST /api/bom/templates — create single template
 app.post("/templates", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { productCode, baseModel, category, l1Processes, wipComponents } =
@@ -346,6 +351,8 @@ app.post("/templates", async (c) => {
 // PUT /api/bom/templates — bulk replace. DELETE ALL + INSERT ALL in one D1
 // batch (single transaction). Matches the old splice(0, length, ...sanitized).
 app.put("/templates", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const incoming: unknown = body?.templates;
@@ -451,6 +458,8 @@ app.put("/templates", async (c) => {
 // where a template is constructed locally with `id: bom-${Date.now()}` and
 // then saved via PUT — there is no prior POST to /templates.
 app.put("/templates/:id", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_templates WHERE id = ?",
@@ -596,6 +605,8 @@ app.put("/templates/:id", async (c) => {
 //
 // Response: { success: true, updated: N, failed: [{templateId, error}] }
 app.post("/templates/bulk-process-edit", async (c) => {
+  const denied = await requirePermission(c, "bom", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const incoming: unknown = body?.edits;
@@ -769,6 +780,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/bom/:id — update BOM version (shallow merge over existing)
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM bom_versions WHERE id = ?",
@@ -779,27 +792,57 @@ app.put("/:id", async (c) => {
     return c.json({ success: false, error: "BOM version not found" }, 404);
   }
   try {
-    const body = await c.req.json();
+    const body = (await c.req.json()) as Record<string, unknown>;
 
-    // Decode existing + merge incoming partial, mirroring the old
-    // `{ ...bomVersions[idx], ...body, id }` spread behavior.
+    // Sprint 2 audit (security): the previous shallow merge
+    //   `{ ...current, ...body, id }`
+    // copied EVERY key from the request body onto the row, including
+    // hypothetical future internal columns or denormalised aggregates the
+    // server alone should own. Replace with an explicit allow-list of
+    // user-editable fields. Anything not in this list is ignored.
+    const ALLOWED = [
+      "productId",
+      "productCode",
+      "version",
+      "status",
+      "effectiveFrom",
+      "effectiveTo",
+      "tree",
+      "totalMinutes",
+      "labourCost",
+      "materialCost",
+      "totalCost",
+    ] as const;
+    const patch: Record<string, unknown> = {};
+    for (const k of ALLOWED) {
+      if (Object.prototype.hasOwnProperty.call(body, k)) {
+        patch[k] = body[k];
+      }
+    }
+
     const current = rowToVersion(existing);
-    const merged = { ...current, ...body, id };
+    const merged = { ...current, ...patch };
 
     const row = {
       id,
-      productId: String(merged.productId),
-      productCode: merged.productCode ?? null,
-      version: merged.version ?? existing.version,
-      status: merged.status ?? existing.status,
-      effectiveFrom: merged.effectiveFrom ?? existing.effectiveFrom,
-      effectiveTo: merged.effectiveTo ?? existing.effectiveTo,
+      productId: String(merged.productId ?? existing.productId),
+      productCode: (merged as { productCode?: string | null }).productCode ?? null,
+      version: (merged as { version?: string }).version ?? existing.version,
+      status: (merged as { status?: string }).status ?? existing.status,
+      effectiveFrom:
+        (merged as { effectiveFrom?: string | null }).effectiveFrom ??
+        existing.effectiveFrom,
+      effectiveTo:
+        (merged as { effectiveTo?: string | null }).effectiveTo ??
+        existing.effectiveTo,
       tree:
-        merged.tree === undefined ? existing.tree : JSON.stringify(merged.tree),
-      totalMinutes: Number(merged.totalMinutes) || 0,
-      labourCost: Number(merged.labourCost) || 0,
-      materialCost: Number(merged.materialCost) || 0,
-      totalCost: Number(merged.totalCost) || 0,
+        (merged as { tree?: unknown }).tree === undefined
+          ? existing.tree
+          : JSON.stringify((merged as { tree?: unknown }).tree),
+      totalMinutes: Number((merged as { totalMinutes?: number }).totalMinutes) || 0,
+      labourCost: Number((merged as { labourCost?: number }).labourCost) || 0,
+      materialCost: Number((merged as { materialCost?: number }).materialCost) || 0,
+      totalCost: Number((merged as { totalCost?: number }).totalCost) || 0,
     };
 
     await c.var.DB.prepare(

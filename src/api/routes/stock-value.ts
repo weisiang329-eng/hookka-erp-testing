@@ -7,6 +7,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -69,6 +70,8 @@ app.get("/", async (c) => {
 
 // POST /api/stock-value — seed rows for a new period, carrying prior closings
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "stock-value", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { period } = body;
@@ -180,6 +183,8 @@ app.get("/:id", async (c) => {
 // PUT /api/stock-value/:id — partial update; recomputes closingValue when
 // purchases/consumption change, and variancePercent when physicalCount set.
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "stock-value", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM monthly_stock_values WHERE id = ?",

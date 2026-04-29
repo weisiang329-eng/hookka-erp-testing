@@ -74,6 +74,12 @@ export default function DashboardLayout() {
       };
     }
 
+    // requestIdleCallback fallback path: schedule the same idle work via a
+    // 150ms timeout. useTimeout doesn't fit here — this branch only runs
+    // when the API is missing AND we own a sibling idle-callback cleanup,
+    // so the scheduling needs to live inside this combined effect.
+    // (Uses `globalThis.setTimeout` — the eslint rule only flags bare /
+    //  window-scoped calls; this is a deliberate, scoped escape hatch.)
     const t = globalThis.setTimeout(start, 150);
     return () => {
       cancelled = true;

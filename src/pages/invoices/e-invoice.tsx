@@ -17,7 +17,7 @@ import {
   RefreshCw,
   Ban,
 } from "lucide-react";
-import type { EInvoice } from "@/lib/mock-data";
+import type { EInvoice } from "@/types";
 
 type Invoice = {
   id: string;

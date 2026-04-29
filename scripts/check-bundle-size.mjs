@@ -38,14 +38,25 @@ const BASELINE_PATH = join(REPO_ROOT, ".bundle-baseline.json");
 const GROWTH_THRESHOLD = 0.05;
 
 // Filenames look like `<stem>-<hash>.js`. Vite/rolldown's content hash is
-// exactly 8 base64url characters — so the hash itself can contain `-` or
-// `_`, e.g. `POD-dialog-QP-ltr3-.js` (stem=POD-dialog, hash=QP-ltr3-).
-// The regex is anchored greedy: `^(.+)-([8 chars])\.js$` — the greedy
-// `.+` consumes as much as possible, leaving exactly 8 chars + the dash
+// nominally 8 base64url characters on Linux CI builds — but Windows local
+// builds (rolldown native binary differences) sometimes emit 9-char hashes
+// like `scan-DF6EzliO2.js`. Both should map to the same stem so that the
+// baseline written from one platform doesn't trip the gate on the other.
+// We accept 6-12 chars to absorb that variance plus future drift; the hash
+// itself can contain `-` or `_`, e.g. `POD-dialog-QP-ltr3-.js`.
+//
+// The regex is anchored greedy: `^(.+)-([6-12 chars])\.js$` — the greedy
+// `.+` consumes as much as possible, leaving the trailing hash + dash
 // separator at the tail. Earlier dashes inside the stem are preserved.
 // Files that don't match (unhashed entry chunks) fall back to the full
 // filename minus `.js`.
-const STEM_RE = /^(.+)-([A-Za-z0-9_-]{8})\.js$/;
+//
+// Sanity check: this regex must extract stem `scan` from BOTH
+// `scan-DF6EzliO2.js` (9-char hash, Windows) and `scan-XXXXXXXX.js`
+// (8-char hash, Linux). See refresh-bundle-baseline.yml — the auto-regen
+// workflow rewrites the baseline on every main push so the canonical
+// hash length is whatever Linux CI emits.
+const STEM_RE = /^(.+)-([A-Za-z0-9_-]{6,12})\.js$/;
 
 function stemOf(filename) {
   const m = filename.match(STEM_RE);

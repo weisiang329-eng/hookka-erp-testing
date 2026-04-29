@@ -15,6 +15,10 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { hashPin, isPinHashed } from "../lib/auth-utils";
+import {
+  checkLoginRateLimit,
+  clearLoginRateLimit,
+} from "../lib/rate-limit";
 
 const app = new Hono<Env>();
 
@@ -81,7 +85,15 @@ type WorkerRow = {
   nationality: string | null;
 };
 
-type PinRow = { workerId: string; pin: string; updatedAt: string | null };
+type PinRow = {
+  workerId: string;
+  pin: string;
+  updatedAt: string | null;
+  // Sprint 2: PIN length grew from 4 → 6 digits. Existing 4-digit PINs are
+  // flagged must_reset=1 by migration 0079; they must reset to a 6-digit PIN
+  // before they can sign in again.
+  must_reset: number | null;
+};
 type TokenRow = { token: string; workerId: string; issuedAt: number };
 
 function newToken(): string {
@@ -118,6 +130,13 @@ app.post("/login", async (c) => {
   };
   if (!empNo) return c.json({ success: false, error: "empNo required" }, 400);
 
+  // Brute-force throttle — 10 attempts / 15 min keyed on empNo. PINs are
+  // 6 digits (10^6 search space) but a tight bot loop could still try every
+  // PIN against a stolen empNo within minutes — this caps the dollar cost.
+  const rlKey = `wlogin:${empNo.trim().toLowerCase()}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
+
   // Match by case-insensitive empNo.
   const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",
@@ -139,7 +158,7 @@ app.post("/login", async (c) => {
 
   // First-time registration path.
   if (!existing) {
-    if (!firstTimePin || !/^\d{4}$/.test(firstTimePin)) {
+    if (!firstTimePin || !/^\d{6}$/.test(firstTimePin)) {
       // 200 so the client treats it as info, not a failure, and shows the setup screen.
       return c.json(
         { success: false, error: "PIN_NOT_SET", needsSetup: true },
@@ -148,11 +167,25 @@ app.post("/login", async (c) => {
     }
     const hashed = await hashPin(firstTimePin);
     await c.var.DB.prepare(
-      "INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)",
+      "INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)",
     )
       .bind(worker.id, hashed, new Date().toISOString())
       .run();
   } else {
+    // Sprint 2 — force-reset gate. Workers whose stored PIN is from the old
+    // 4-digit era (must_reset=1, set by migration 0079) must run the reset
+    // flow before logging in. The portal UI handles this by surfacing the
+    // reset-PIN screen when needsReset=true comes back.
+    if (existing.must_reset === 1) {
+      return c.json(
+        {
+          success: false,
+          error: "PIN_RESET_REQUIRED",
+          needsReset: true,
+        },
+        200,
+      );
+    }
     if (!pin) {
       return c.json({ success: false, error: "Wrong PIN" }, 401);
     }
@@ -184,6 +217,16 @@ app.post("/login", async (c) => {
     .bind(token, worker.id, Date.now())
     .run();
 
+  // Reset the rate-limit counter on success. waitUntil is best-effort —
+  // when running outside a Worker (tests, local node), `executionCtx`
+  // throws on access, so we fall back to fire-and-forget. The cleanup is
+  // idempotent and a missed reset just costs the next 15-min window.
+  try {
+    c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+  } catch {
+    void clearLoginRateLimit(c, rlKey).catch(() => {});
+  }
+
   return c.json({
     success: true,
     token,
@@ -205,9 +248,15 @@ app.post("/reset-pin", async (c) => {
   if (!empNo || !phoneLast4 || !newPin) {
     return c.json({ success: false, error: "Missing fields" }, 400);
   }
-  if (!/^\d{4}$/.test(newPin)) {
-    return c.json({ success: false, error: "PIN must be 4 digits" }, 400);
+  if (!/^\d{6}$/.test(newPin)) {
+    return c.json({ success: false, error: "PIN must be 6 digits" }, 400);
   }
+
+  // Brute-force throttle — 10 attempts / 15 min keyed on empNo. The
+  // phoneLast4 verifier only has 10^4 entropy so it must be rate-limited.
+  const rlKey = `wreset:${empNo.trim().toLowerCase()}`;
+  const rlDenied = await checkLoginRateLimit(c, rlKey);
+  if (rlDenied) return rlDenied;
 
   const worker = await c.var.DB.prepare(
     "SELECT * FROM workers WHERE LOWER(empNo) = LOWER(?) LIMIT 1",
@@ -229,8 +278,8 @@ app.post("/reset-pin", async (c) => {
 
   const hashedNew = await hashPin(newPin);
   await c.var.DB.prepare(
-    `INSERT INTO worker_pins (workerId, pin, updatedAt) VALUES (?, ?, ?)
-     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt`,
+    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
+     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
   )
     .bind(worker.id, hashedNew, new Date().toISOString())
     .run();

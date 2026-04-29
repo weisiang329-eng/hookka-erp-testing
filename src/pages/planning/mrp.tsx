@@ -17,7 +17,7 @@ import {
   ArrowDownUp,
   Filter,
 } from "lucide-react";
-import type { MaterialRequirement, MRPRun } from "@/lib/mock-data";
+import type { MaterialRequirement, MRPRun } from "@/types";
 
 type Tab = "DASHBOARD" | "REQUIREMENTS" | "FABRIC";
 type StatusFilter = "ALL" | "SUFFICIENT" | "LOW" | "SHORTAGE";

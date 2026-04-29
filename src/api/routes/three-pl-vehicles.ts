@@ -15,6 +15,8 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -62,13 +64,14 @@ function coerceStatus(v: unknown, fallback: AllowedStatus = "ACTIVE"): AllowedSt
 
 // GET /api/three-pl-vehicles?providerId=...
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const providerId = c.req.query("providerId");
   const sql = providerId
-    ? "SELECT * FROM three_pl_vehicles WHERE providerId = ? ORDER BY plateNo"
-    : "SELECT * FROM three_pl_vehicles ORDER BY plateNo";
+    ? "SELECT * FROM three_pl_vehicles WHERE orgId = ? AND providerId = ? ORDER BY plateNo"
+    : "SELECT * FROM three_pl_vehicles WHERE orgId = ? ORDER BY plateNo";
   const stmt = providerId
-    ? c.var.DB.prepare(sql).bind(providerId)
-    : c.var.DB.prepare(sql);
+    ? c.var.DB.prepare(sql).bind(orgId, providerId)
+    : c.var.DB.prepare(sql).bind(orgId);
   const res = await stmt.all<VehicleRow>();
   const data = (res.results ?? []).map(rowToVehicle);
   return c.json({ success: true, data, total: data.length });
@@ -76,6 +79,8 @@ app.get("/", async (c) => {
 
 // POST /api/three-pl-vehicles
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "lorries", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const providerId =
@@ -149,6 +154,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/three-pl-vehicles/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -220,6 +227,8 @@ app.put("/:id", async (c) => {
 
 // DELETE /api/three-pl-vehicles/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "lorries", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM three_pl_vehicles WHERE id = ?",

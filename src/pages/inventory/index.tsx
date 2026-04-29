@@ -16,8 +16,7 @@ import { BatchImportDialog, type ImportColumn } from "@/components/ui/batch-impo
 // source. They are retained only for TYPE imports; all runtime data is now
 // fetched live from D1 via the API. After a D1 clear the UI now correctly
 // renders zero balances instead of baked-in seed values.
-import { type Product, type RawMaterial } from "@/lib/mock-data";
-import type { FGBatch } from "@/types";
+import type { Product, RawMaterial, FGBatch } from "@/types";
 import {
   SUCCESS, NEUTRAL,
   INVENTORY_TYPE_COLOR,
@@ -1231,6 +1230,49 @@ export default function InventoryPage() {
       }
     };
 
+    // /api/consignment-notes → mirror of fetchDOStates for the CN side
+    // (BUG-2026-04-29-007). Inventory was previously DO-only, so a PO
+    // sitting in a CN (consignment) showed up as Available even when
+    // the CN had been dispatched. Maps every PO to a coarse DO-state-
+    // equivalent so the same deriveFGStock picker can consume both:
+    //   CN ACTIVE                                         → DRAFT
+    //   CN PARTIALLY_SOLD / IN_TRANSIT / FULLY_SOLD /
+    //      RETURNED / CLOSED                              → DISPATCHED
+    // The mapping rule mirrors DO's: anything past the "still in our
+    // warehouse" line counts as dispatched and drops out of inventory.
+    const fetchCNStates = async (): Promise<
+      Map<string, "DRAFT" | "DISPATCHED">
+    > => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: Array<{
+            status?: string;
+            items?: Array<{ productionOrderId?: string | null }>;
+          }>;
+          _stub?: boolean;
+        }>("/api/consignment-notes");
+        const map = new Map<string, "DRAFT" | "DISPATCHED">();
+        if (json && json.success && Array.isArray(json.data) && !json._stub) {
+          for (const cn of json.data) {
+            const state: "DRAFT" | "DISPATCHED" =
+              cn.status === "ACTIVE" ? "DRAFT" : "DISPATCHED";
+            for (const item of cn.items ?? []) {
+              const poId = item.productionOrderId;
+              if (!poId) continue;
+              // Same conflict resolution as DO map: harder state wins.
+              const cur = map.get(poId);
+              if (cur === "DISPATCHED") continue;
+              map.set(poId, state);
+            }
+          }
+        }
+        return map;
+      } catch {
+        return new Map();
+      }
+    };
+
     // /api/inventory/wip — every wip_items row with stock_qty != 0
     // already projected to the WIPItem grid shape. Includes both
     // positive (produced WIP stock) and negative (skipped-upstream
@@ -1250,18 +1292,29 @@ export default function InventoryPage() {
     };
 
     (async () => {
-      const [inv, pos, wipRows, doStates] = await Promise.all([
+      const [inv, pos, wipRows, doStates, cnStates] = await Promise.all([
         fetchInventory(),
         fetchPOs(),
         fetchWipRows(),
         fetchDOStates(),
+        fetchCNStates(),
       ]);
       if (cancelled) return;
+      // Merge DO + CN state maps so deriveFGStock sees a PO regardless
+      // of source-doc class (BUG-2026-04-29-007). Same conflict rule:
+      // DISPATCHED wins over DRAFT — the harder state sticks if the
+      // same PO somehow appears in both.
+      const merged = new Map(doStates);
+      for (const [poId, state] of cnStates) {
+        const cur = merged.get(poId);
+        if (cur === "DISPATCHED") continue;
+        merged.set(poId, state);
+      }
       setProducts(inv.products);
       setLiveRawMaterials(inv.rawMaterials);
       setPoData(pos);
       setBackendWipRows(wipRows);
-      setPoToDOState(doStates);
+      setPoToDOState(merged);
       setLoading(false);
     })();
 

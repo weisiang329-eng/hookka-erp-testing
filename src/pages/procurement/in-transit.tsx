@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatCurrency } from "@/lib/utils";
 import { useCachedJson } from "@/lib/cached-fetch";
-import type { GoodsInTransit, TransitStatus } from "@/lib/mock-data";
+import type { GoodsInTransit, TransitStatus } from "@/types";
 import {
   Ship,
   Plane,

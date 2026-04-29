@@ -18,7 +18,8 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
-import { Plus, X, AlertCircle } from "lucide-react";
+import { compressImage } from "@/lib/image-compress";
+import { Plus, X, AlertCircle, Loader2 } from "lucide-react";
 
 // SO-only set; CO has the additional consignment-specific terminal states.
 // Kept aligned with the backend SHIPPED_STATUSES_SO / SHIPPED_STATUSES_CO
@@ -291,6 +292,8 @@ function CreateServiceOrderModal({
   // service_orders.issuePhotos JSON column. Small-shop-friendly — no R2
   // setup required at the cost of bloating the DB row a bit.
   const [photos, setPhotos] = useState<string[]>([]);
+  // Per-batch upload progress for the off-main-thread compressor — null when idle.
+  const [photoUploadProgress, setPhotoUploadProgress] = useState<{ done: number; total: number } | null>(null);
   // Per-line state. Two shapes coexist:
   //   • SO/CO source: linePicks keyed by sourceLineId (item's id from the
   //     source order's items array)
@@ -407,43 +410,30 @@ function CreateServiceOrderModal({
   // longest side @ 0.85 quality (~150-300KB). Stored as a base64 data URI
   // on service_orders.issuePhotos. For high-volume use we'd swap to R2 +
   // /api/files; this is good enough for a small shop's ~5 photos / case.
-  async function resizeImageToBase64(file: File, maxDim = 1280): Promise<string> {
-    const dataUrl = await new Promise<string>((res, rej) => {
-      const r = new FileReader();
-      r.onload = () => res(r.result as string);
-      r.onerror = rej;
-      r.readAsDataURL(file);
-    });
-    const img = await new Promise<HTMLImageElement>((res, rej) => {
-      const i = new Image();
-      i.onload = () => res(i);
-      i.onerror = rej;
-      i.src = dataUrl;
-    });
-    const ratio = Math.min(1, maxDim / Math.max(img.width, img.height));
-    const w = Math.round(img.width * ratio);
-    const h = Math.round(img.height * ratio);
-    const canvas = document.createElement("canvas");
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return dataUrl;
-    ctx.drawImage(img, 0, 0, w, h);
-    return canvas.toDataURL("image/jpeg", 0.85);
-  }
-
+  //
+  // Compression delegated to @/lib/image-compress (off-main-thread on modern
+  // browsers via createImageBitmap + OffscreenCanvas; fallback elsewhere).
   async function handleAddPhotos(files: FileList | null) {
     if (!files || files.length === 0) return;
+    const list = Array.from(files);
+    setPhotoUploadProgress({ done: 0, total: list.length });
     const results: string[] = [];
-    for (const f of Array.from(files)) {
-      try {
-        const b64 = await resizeImageToBase64(f);
-        results.push(b64);
-      } catch {
-        toast.error(`Couldn't read ${f.name}`);
+    try {
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        try {
+          results.push(await compressImage(f, { maxDim: 1280, quality: 0.85 }));
+        } catch {
+          toast.error(`Couldn't read ${f.name}`);
+        }
+        setPhotoUploadProgress({ done: i + 1, total: list.length });
       }
+      if (results.length > 0) {
+        setPhotos((prev) => [...prev, ...results]);
+      }
+    } finally {
+      setPhotoUploadProgress(null);
     }
-    setPhotos((prev) => [...prev, ...results]);
   }
 
   // ---- Free-line helpers (EXTERNAL source) ----
@@ -970,9 +960,19 @@ function CreateServiceOrderModal({
               type="file"
               accept="image/*"
               multiple
-              onChange={(e) => handleAddPhotos(e.target.files)}
+              disabled={!!photoUploadProgress}
+              onChange={(e) => {
+                handleAddPhotos(e.target.files);
+                e.target.value = "";
+              }}
               className="block w-full text-xs"
             />
+            {photoUploadProgress && (
+              <div className="mt-1 inline-flex items-center gap-1 text-xs text-[#6B7280]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Compressing {Math.min(photoUploadProgress.done + 1, photoUploadProgress.total)} / {photoUploadProgress.total}...
+              </div>
+            )}
             {photos.length > 0 && (
               <div className="mt-2 flex flex-wrap gap-2">
                 {photos.map((src, i) => (

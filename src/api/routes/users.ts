@@ -19,6 +19,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
 import { inviteEmailTemplate, sendEmail } from "../lib/email";
+import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
@@ -341,12 +342,24 @@ function publicInvite(row: InviteWithInviterRow) {
   };
 }
 
+// Sprint 4 — invite email is normally ENQUEUED into outbox_emails. The
+// cron drain (.github/workflows/process-email-outbox.yml) actually
+// contacts Resend. Returns { ok: true, id: <outbox row id> } on a
+// successful enqueue.
+//
+// FALLBACK PATH (added 2026-04-29 after BUG-2026-04-29-009): if the
+// outbox enqueue throws — most commonly because migration 0081 hasn't
+// been applied to the live DB so `outbox_emails` doesn't exist — we
+// fall through to a direct sendEmail() call. That bypasses the queue's
+// retry / durability guarantees, but it gets the invite out the door
+// in environments where the queue infra hasn't shipped yet. The error
+// propagates back to the route so the UI can show a meaningful toast.
 async function sendInviteEmail(
-  env: Env["Bindings"],
+  c: Parameters<typeof enqueueEmail>[0],
   invite: InviteRow,
   inviterName: string,
-): Promise<{ ok: boolean; id?: string; error?: string }> {
-  const baseUrl = (env.APP_URL || "").replace(/\/$/, "");
+): Promise<{ ok: boolean; id?: string; error?: string; viaFallback?: boolean }> {
+  const baseUrl = (c.env.APP_URL || "").replace(/\/$/, "");
   const inviteUrl = `${baseUrl}/invite/${invite.token}`;
   const tpl = inviteEmailTemplate({
     appName: "Hookka Manufacturing ERP",
@@ -354,12 +367,54 @@ async function sendInviteEmail(
     inviteUrl,
     expiresInHours: INVITE_TTL_HOURS,
   });
-  return sendEmail(env.RESEND_API_KEY, env.RESEND_FROM_EMAIL, {
+
+  // --- Primary path: enqueue into outbox_emails (durable, retried) ---
+  let enqueueError: string | null = null;
+  try {
+    const res = await enqueueEmail(c, {
+      to: invite.email,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+    });
+    return { ok: true, id: res.id };
+  } catch (err) {
+    enqueueError = err instanceof Error ? err.message : "enqueue failed";
+    console.warn(
+      `[users.invite] outbox enqueue failed for ${invite.email}: ${enqueueError}. Falling through to direct send.`,
+    );
+  }
+
+  // --- Fallback path: direct Resend POST -----------------------------
+  // Only useful if RESEND_API_KEY is configured. Otherwise the helper
+  // returns { ok: false, error: "RESEND_API_KEY not configured" } which
+  // we surface verbatim — gives the admin actionable feedback.
+  const env = c.env as {
+    RESEND_API_KEY?: string;
+    RESEND_FROM_EMAIL?: string;
+  };
+  if (!env.RESEND_API_KEY) {
+    return {
+      ok: false,
+      error: `Outbox enqueue failed (${enqueueError}) and RESEND_API_KEY is not configured for direct fallback.`,
+    };
+  }
+  const from =
+    env.RESEND_FROM_EMAIL ||
+    "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+  const direct = await sendEmail(env.RESEND_API_KEY, from, {
     to: invite.email,
     subject: tpl.subject,
     html: tpl.html,
     text: tpl.text,
   });
+  if (direct.ok) {
+    return { ok: true, id: direct.id, viaFallback: true };
+  }
+  return {
+    ok: false,
+    error: `Outbox enqueue failed (${enqueueError}); direct send also failed (${direct.error ?? "unknown"}).`,
+  };
 }
 
 // POST /api/users/invite — create + send invite
@@ -478,7 +533,7 @@ app.post("/invite", async (c) => {
       emailResendId: null,
     };
 
-    const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+    const emailRes = await sendInviteEmail(c, invite, inviterName);
     if (emailRes.ok) {
       await c.var.DB.prepare(
         "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",
@@ -560,7 +615,7 @@ app.post("/invites/:token/resend", async (c) => {
       ? inviter.displayName
       : (inviter?.email ?? "An admin");
 
-  const emailRes = await sendInviteEmail(c.env, invite, inviterName);
+  const emailRes = await sendInviteEmail(c, invite, inviterName);
   if (emailRes.ok) {
     await c.var.DB.prepare(
       "UPDATE user_invites SET emailSentAt = ?, emailResendId = ? WHERE token = ?",

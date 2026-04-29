@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -30,6 +31,10 @@ type ProjectRow = {
   productionBOM: string | null;
   materialIssuances: string | null;
   labourLogs: string | null;
+  sourceProductName: string | null;
+  sourceBrand: string | null;
+  sourcePurchaseRef: string | null;
+  sourceNotes: string | null;
   createdDate: string | null;
   status: string | null;
 };
@@ -87,6 +92,10 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
       : undefined,
     materialIssuances: parseJSON<unknown[]>(row.materialIssuances, []),
     labourLogs: parseJSON<unknown[]>(row.labourLogs, []),
+    sourceProductName: row.sourceProductName ?? "",
+    sourceBrand: row.sourceBrand ?? "",
+    sourcePurchaseRef: row.sourcePurchaseRef ?? "",
+    sourceNotes: row.sourceNotes ?? "",
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -153,6 +162,8 @@ app.get("/", async (c) => {
 
 // POST /api/rd-projects
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { name, productCategory } = body;
@@ -192,8 +203,10 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO rd_projects (id, code, name, description, projectType, productCategory,
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
-         milestones, productionBOM, materialIssuances, labourLogs, createdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         milestones, productionBOM, materialIssuances, labourLogs,
+         sourceProductName, sourceBrand, sourcePurchaseRef, sourceNotes,
+         createdDate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -212,6 +225,10 @@ app.post("/", async (c) => {
         null,
         JSON.stringify([]),
         JSON.stringify([]),
+        body.sourceProductName ?? null,
+        body.sourceBrand ?? null,
+        body.sourcePurchaseRef ?? null,
+        body.sourceNotes ?? null,
         now.toISOString(),
         "ACTIVE",
       )
@@ -256,6 +273,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/rd-projects/:id
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -267,6 +286,60 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "R&D project not found" }, 404);
     }
     const body = await c.req.json();
+
+    // ─── Reverse-cascade: detect deleted issuances and credit warehouse stock ──
+    // When the SPA PUTs a shorter materialIssuances[] (issuance removed via
+    // the UI's trash button), we need to emit a STOCK_IN counter-movement and
+    // re-credit raw_materials.balance_qty. We compare by issuance.id.
+    type IssuanceLite = {
+      id?: string;
+      materialId?: string;
+      materialCode?: string;
+      materialName?: string;
+      qty?: number;
+      issuedBy?: string;
+      notes?: string;
+    };
+    if (body.materialIssuances !== undefined && Array.isArray(body.materialIssuances)) {
+      const previousIssuances = parseJSON<IssuanceLite[]>(
+        existing.materialIssuances,
+        [],
+      );
+      const nextIds = new Set<string>(
+        (body.materialIssuances as IssuanceLite[])
+          .map((i) => i.id)
+          .filter((x): x is string => typeof x === "string"),
+      );
+      const removed = previousIssuances.filter(
+        (i) => i.id && !nextIds.has(i.id),
+      );
+      const nowIso = new Date().toISOString();
+      for (const r of removed) {
+        if (!r.materialId || !r.qty || r.qty <= 0) continue;
+        // Re-credit balance_qty
+        await c.var.DB.prepare(
+          "UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?",
+        )
+          .bind(r.qty, r.materialId)
+          .run();
+        // Counter-movement (STOCK_IN) so audit trail balances
+        await c.var.DB.prepare(
+          `INSERT INTO stock_movements (id, type, productCode, productName,
+             quantity, reason, performedBy, created_at)
+           VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?)`,
+        )
+          .bind(
+            `mv-rev-${r.id}`,
+            r.materialCode ?? "",
+            r.materialName ?? "",
+            r.qty,
+            `R&D ${existing.code} issuance reversed (id=${r.id})`,
+            r.issuedBy ?? "System",
+            nowIso,
+          )
+          .run();
+      }
+    }
 
     const merged = {
       name: body.name ?? existing.name,
@@ -281,7 +354,18 @@ app.put("/:id", async (c) => {
         ? JSON.stringify(body.assignedTeam)
         : existing.assignedTeam,
       totalBudget: body.totalBudget ?? existing.totalBudget,
-      actualCost: body.actualCost ?? existing.actualCost,
+      // When materialIssuances changes (e.g., issuance removed), recompute
+      // actualCost from the new array so the budget cards stay in sync.
+      actualCost:
+        body.actualCost !== undefined
+          ? body.actualCost
+          : Array.isArray(body.materialIssuances)
+          ? (body.materialIssuances as Array<{ totalCostSen?: number }>).reduce(
+              (sum, i) =>
+                sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
+              0,
+            )
+          : existing.actualCost,
       milestones: body.milestones
         ? JSON.stringify(body.milestones)
         : existing.milestones,
@@ -299,6 +383,22 @@ app.put("/:id", async (c) => {
         body.labourLogs !== undefined
           ? JSON.stringify(body.labourLogs)
           : existing.labourLogs,
+      sourceProductName:
+        body.sourceProductName !== undefined
+          ? body.sourceProductName
+          : existing.sourceProductName,
+      sourceBrand:
+        body.sourceBrand !== undefined
+          ? body.sourceBrand
+          : existing.sourceBrand,
+      sourcePurchaseRef:
+        body.sourcePurchaseRef !== undefined
+          ? body.sourcePurchaseRef
+          : existing.sourcePurchaseRef,
+      sourceNotes:
+        body.sourceNotes !== undefined
+          ? body.sourceNotes
+          : existing.sourceNotes,
       status: body.status ?? existing.status,
     };
 
@@ -308,7 +408,8 @@ app.put("/:id", async (c) => {
          productCategory = ?, currentStage = ?, targetLaunchDate = ?,
          assignedTeam = ?, totalBudget = ?, actualCost = ?,
          milestones = ?, productionBOM = ?, materialIssuances = ?,
-         labourLogs = ?, status = ?
+         labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
+         sourcePurchaseRef = ?, sourceNotes = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -326,6 +427,10 @@ app.put("/:id", async (c) => {
         merged.productionBOM,
         merged.materialIssuances,
         merged.labourLogs,
+        merged.sourceProductName,
+        merged.sourceBrand,
+        merged.sourcePurchaseRef,
+        merged.sourceNotes,
         merged.status,
         id,
       )
@@ -353,6 +458,8 @@ app.put("/:id", async (c) => {
 
 // POST /api/rd-projects/:id/issue-material
 app.post("/:id/issue-material", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const project = await c.var.DB.prepare(
@@ -390,24 +497,48 @@ app.post("/:id/issue-material", async (c) => {
       );
     }
 
+    // Snapshot the price at issuance time. Falls back to FIFO estimate when
+    // the client didn't provide one. The snapshot is stored on the issuance
+    // record itself (JSON), so historical entries keep their accurate cost
+    // even if the raw_materials catalog price is later edited.
     const unitCostSen =
       body.unitCostSen ?? estimateFIFOCost(rm.itemCode, rm.itemGroup);
     const totalCostSen = Math.round(unitCostSen * qty);
+    const issuanceId = genId("rdiss");
+    const nowIso = new Date().toISOString();
 
-    // Deduct raw material stock
+    // 1. Deduct raw material stock (warehouse balance must drop on issuance)
     await c.var.DB.prepare(
       "UPDATE raw_materials SET balanceQty = balanceQty - ? WHERE id = ?",
     )
       .bind(qty, materialId)
       .run();
 
-    // Append issuance to JSON column
+    // 2. Audit ledger: write a STOCK_OUT movement so warehouse history shows
+    //    where the material went. Mirrors the pattern used in stock-adjustments.
+    await c.var.DB.prepare(
+      `INSERT INTO stock_movements (id, type, productCode, productName,
+         quantity, reason, performedBy, created_at)
+       VALUES (?, 'STOCK_OUT', ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        `mv-${issuanceId}`,
+        rm.itemCode,
+        rm.description,
+        qty,
+        `R&D ${project.code} issuance${notes ? " — " + notes : ""}`,
+        issuedBy ?? "System",
+        nowIso,
+      )
+      .run();
+
+    // 3. Append issuance to JSON column with the snapshotted price
     const existingIssuances = parseJSON<Record<string, unknown>[]>(
       project.materialIssuances,
       [],
     );
     const issuance = {
-      id: genId("rdiss"),
+      id: issuanceId,
       rdProjectId: project.id,
       rdProjectCode: project.code,
       materialId: rm.id,
@@ -417,7 +548,7 @@ app.post("/:id/issue-material", async (c) => {
       unit: rm.baseUOM,
       unitCostSen,
       totalCostSen,
-      issuedDate: new Date().toISOString().slice(0, 10),
+      issuedDate: nowIso.slice(0, 10),
       issuedBy: issuedBy ?? "System",
       notes: notes ?? "",
     };
@@ -459,6 +590,8 @@ app.post("/:id/issue-material", async (c) => {
 
 // POST /api/rd-projects/:id/labour-log
 app.post("/:id/labour-log", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const project = await c.var.DB.prepare(
@@ -524,6 +657,8 @@ app.post("/:id/labour-log", async (c) => {
 
 // DELETE /api/rd-projects/:id
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const [row, protos] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")

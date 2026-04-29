@@ -8,6 +8,8 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { checkCustomerDeleteLocked, lockedResponse } from "../lib/lock-helpers";
+import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -73,11 +75,16 @@ function genId(): string {
   return `cust-${crypto.randomUUID().slice(0, 8)}`;
 }
 
-// GET /api/customers — list all customers + their hubs
+// GET /api/customers — list all customers + their hubs (org-scoped)
 app.get("/", async (c) => {
+  const orgId = getOrgId(c);
   const [customers, hubs] = await Promise.all([
-    c.var.DB.prepare("SELECT * FROM customers ORDER BY code").all<CustomerRow>(),
-    c.var.DB.prepare("SELECT * FROM delivery_hubs").all<HubRow>(),
+    c.var.DB.prepare("SELECT * FROM customers WHERE orgId = ? ORDER BY code")
+      .bind(orgId)
+      .all<CustomerRow>(),
+    c.var.DB.prepare("SELECT * FROM delivery_hubs WHERE orgId = ?")
+      .bind(orgId)
+      .all<HubRow>(),
   ]);
   const data = (customers.results ?? []).map((r) =>
     rowToCustomer(r, hubs.results ?? []),
@@ -87,6 +94,8 @@ app.get("/", async (c) => {
 
 // POST /api/customers — create
 app.post("/", async (c) => {
+  const denied = await requirePermission(c, "customers", "create");
+  if (denied) return denied;
   try {
     const body = await c.req.json();
     const { code, name } = body;
@@ -156,6 +165,8 @@ app.get("/:id", async (c) => {
 
 // PUT /api/customers/:id — update
 app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
   const id = c.req.param("id");
   try {
     const existing = await c.var.DB.prepare(
@@ -229,6 +240,8 @@ app.put("/:id", async (c) => {
 // any non-cancelled SO/CO/DO/CN/Invoice. Returns 409 with a hint listing
 // the blocking documents so the operator can clean those up first.
 app.delete("/:id", async (c) => {
+  const denied = await requirePermission(c, "customers", "delete");
+  if (denied) return denied;
   const id = c.req.param("id");
   const existing = await c.var.DB.prepare(
     "SELECT * FROM customers WHERE id = ?",

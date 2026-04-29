@@ -18,7 +18,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { hashPassword } from "../lib/password";
-import { inviteEmailTemplate } from "../lib/email";
+import { inviteEmailTemplate, sendEmail } from "../lib/email";
 import { enqueueEmail } from "../lib/email-outbox";
 import { emitAudit } from "../lib/audit";
 
@@ -342,18 +342,23 @@ function publicInvite(row: InviteWithInviterRow) {
   };
 }
 
-// Sprint 4 — invite email is now ENQUEUED into outbox_emails. The cron
-// drain (.github/workflows/process-email-outbox.yml) actually contacts
-// Resend. Returns { ok: true, id: <outbox row id> } unconditionally on a
-// successful enqueue — the row id is what we stamp into
-// user_invites.emailResendId so admins can correlate audit trails to the
-// outbox state. The previous "Resend resp id" semantics no longer apply
-// (Resend is contacted later, possibly in a different request).
+// Sprint 4 — invite email is normally ENQUEUED into outbox_emails. The
+// cron drain (.github/workflows/process-email-outbox.yml) actually
+// contacts Resend. Returns { ok: true, id: <outbox row id> } on a
+// successful enqueue.
+//
+// FALLBACK PATH (added 2026-04-29 after BUG-2026-04-29-009): if the
+// outbox enqueue throws — most commonly because migration 0081 hasn't
+// been applied to the live DB so `outbox_emails` doesn't exist — we
+// fall through to a direct sendEmail() call. That bypasses the queue's
+// retry / durability guarantees, but it gets the invite out the door
+// in environments where the queue infra hasn't shipped yet. The error
+// propagates back to the route so the UI can show a meaningful toast.
 async function sendInviteEmail(
   c: Parameters<typeof enqueueEmail>[0],
   invite: InviteRow,
   inviterName: string,
-): Promise<{ ok: boolean; id?: string; error?: string }> {
+): Promise<{ ok: boolean; id?: string; error?: string; viaFallback?: boolean }> {
   const baseUrl = (c.env.APP_URL || "").replace(/\/$/, "");
   const inviteUrl = `${baseUrl}/invite/${invite.token}`;
   const tpl = inviteEmailTemplate({
@@ -362,6 +367,9 @@ async function sendInviteEmail(
     inviteUrl,
     expiresInHours: INVITE_TTL_HOURS,
   });
+
+  // --- Primary path: enqueue into outbox_emails (durable, retried) ---
+  let enqueueError: string | null = null;
   try {
     const res = await enqueueEmail(c, {
       to: invite.email,
@@ -371,11 +379,42 @@ async function sendInviteEmail(
     });
     return { ok: true, id: res.id };
   } catch (err) {
+    enqueueError = err instanceof Error ? err.message : "enqueue failed";
+    console.warn(
+      `[users.invite] outbox enqueue failed for ${invite.email}: ${enqueueError}. Falling through to direct send.`,
+    );
+  }
+
+  // --- Fallback path: direct Resend POST -----------------------------
+  // Only useful if RESEND_API_KEY is configured. Otherwise the helper
+  // returns { ok: false, error: "RESEND_API_KEY not configured" } which
+  // we surface verbatim — gives the admin actionable feedback.
+  const env = c.env as {
+    RESEND_API_KEY?: string;
+    RESEND_FROM_EMAIL?: string;
+  };
+  if (!env.RESEND_API_KEY) {
     return {
       ok: false,
-      error: err instanceof Error ? err.message : "enqueue failed",
+      error: `Outbox enqueue failed (${enqueueError}) and RESEND_API_KEY is not configured for direct fallback.`,
     };
   }
+  const from =
+    env.RESEND_FROM_EMAIL ||
+    "Hookka Manufacturing ERP <noreply@houzscentury.com>";
+  const direct = await sendEmail(env.RESEND_API_KEY, from, {
+    to: invite.email,
+    subject: tpl.subject,
+    html: tpl.html,
+    text: tpl.text,
+  });
+  if (direct.ok) {
+    return { ok: true, id: direct.id, viaFallback: true };
+  }
+  return {
+    ok: false,
+    error: `Outbox enqueue failed (${enqueueError}); direct send also failed (${direct.error ?? "unknown"}).`,
+  };
 }
 
 // POST /api/users/invite — create + send invite

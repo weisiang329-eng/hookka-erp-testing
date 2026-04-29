@@ -37,6 +37,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { getCurrentUser } from "@/lib/auth";
+import { copyText } from "@/lib/copy-text";
 
 // ---------- Row types ------------------------------------------------------
 
@@ -127,6 +128,10 @@ export default function UsersPage() {
   const [flash, setFlash] = useState<{ kind: "ok" | "err"; msg: string } | null>(
     null,
   );
+  // Manual-copy fallback: when the Clipboard API + execCommand both
+  // refuse (e.g. plain HTTP, sandboxed iframe), we render a small modal
+  // with the URL pre-selected so the user can Ctrl/Cmd+C themselves.
+  const [manualCopyText, setManualCopyText] = useState<string | null>(null);
   const showFlash = useCallback(
     (kind: "ok" | "err", msg: string) => {
       setFlash({ kind, msg });
@@ -257,10 +262,17 @@ export default function UsersPage() {
         emailError?: string;
       }>;
       if (json.success && json.data) {
+        // When emailSent is false, surface the server's reason verbatim
+        // so the admin sees actionable detail (e.g. "RESEND_API_KEY not
+        // configured" or "outbox_emails table missing — apply migration
+        // 0081"). Without it the toast was just a vague "not sent".
+        const emailErr = json.data.emailError;
         setInviteResult({
           kind: "ok",
           message: json.data.emailSent
             ? `Invite sent to ${inviteEmail.trim()}`
+            : emailErr
+            ? `Invite created — but email failed: ${emailErr}. Copy the link below.`
             : `Invite created. Email not sent — copy the link below.`,
           inviteUrl: json.data.inviteUrl,
           emailSent: json.data.emailSent,
@@ -287,11 +299,14 @@ export default function UsersPage() {
   const copyInviteLink = async (token: string) => {
     const origin = window.location.origin;
     const url = `${origin}/invite/${token}`;
-    try {
-      await navigator.clipboard.writeText(url);
+    const result = await copyText(url);
+    if (result.ok) {
       showFlash("ok", "Invite link copied");
-    } catch {
-      showFlash("err", "Clipboard blocked — copy manually");
+    } else {
+      // Both the modern Clipboard API and the execCommand fallback
+      // refused. Fall back to a manual-copy modal so the user still
+      // has a path to get the link out of the page.
+      setManualCopyText(url);
     }
   };
 
@@ -727,6 +742,53 @@ export default function UsersPage() {
           </form>
         </CardContent>
       </Card>
+
+      {/* =========================================================== */}
+      {/* Manual-copy fallback modal — fires when both navigator.clipboard
+          and execCommand refused (e.g. plain HTTP / sandboxed iframe).
+          Renders the link in a readonly textarea pre-selected so the
+          user can Ctrl/Cmd+C themselves. */}
+      {/* =========================================================== */}
+      {manualCopyText && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={() => setManualCopyText(null)}
+        >
+          <div
+            className="w-full max-w-lg rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2 className="text-lg font-semibold text-[#1F1D1B] flex items-center gap-2">
+              <Copy className="h-5 w-5 text-[#6B5C32]" />
+              Copy invite link
+            </h2>
+            <p className="text-sm text-gray-500 mt-1">
+              Your browser blocked automatic clipboard access (this happens
+              over plain HTTP or in some sandboxed contexts). Select the
+              link below and press <kbd className="px-1 py-0.5 bg-gray-100 border border-gray-300 rounded text-xs">Ctrl/Cmd</kbd>+
+              <kbd className="px-1 py-0.5 bg-gray-100 border border-gray-300 rounded text-xs">C</kbd> to copy manually.
+            </p>
+            <div className="mt-4">
+              <textarea
+                readOnly
+                autoFocus
+                value={manualCopyText}
+                rows={3}
+                onFocus={(e) => e.currentTarget.select()}
+                className="w-full text-xs font-mono border border-gray-200 rounded px-3 py-2 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32]"
+              />
+            </div>
+            <div className="mt-6 flex justify-end gap-2">
+              <Button
+                variant="primary"
+                onClick={() => setManualCopyText(null)}
+              >
+                Done
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* =========================================================== */}
       {/* Reset password modal */}

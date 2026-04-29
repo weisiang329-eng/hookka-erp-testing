@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useDeferredValue } from "react";
 import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
@@ -4771,6 +4771,13 @@ function BatchEditMaterialsDialog({
   const { toast } = useToast();
   const [rows, setRows] = useState<MatRow[]>([]);
   const [searchText, setSearchText] = useState("");
+  // Defer searchText so the heavy memo chain (filteredRows → matrixModels →
+  // matrixWipColumns → matrixCells) doesn't re-run on every keystroke. The
+  // input itself stays controlled by `searchText` (instant feedback);
+  // filtering uses `searchTextDeferred` and lags by ~one paint frame on a
+  // busy main thread, which is invisible to the user but eliminates the
+  // hitch on a 3000-row dataset.
+  const searchTextDeferred = useDeferredValue(searchText);
   const [filterCategory, setFilterCategory] = useState<"ALL" | BOMCategory>("ALL");
   const [filterWipType, setFilterWipType] = useState<string>("");
   const [filterDept, setFilterDept] = useState<string>("");
@@ -4852,8 +4859,8 @@ function BatchEditMaterialsDialog({
         if (r.isPlaceholder) return false;
         if (!filterMaterials.has(r.code)) return false;
       }
-      if (searchText.trim()) {
-        const q = searchText.toLowerCase();
+      if (searchTextDeferred.trim()) {
+        const q = searchTextDeferred.toLowerCase();
         if (
           !r.productCode.toLowerCase().includes(q) &&
           !r.baseModel.toLowerCase().includes(q) &&
@@ -4866,7 +4873,7 @@ function BatchEditMaterialsDialog({
       }
       return true;
     });
-  }, [rows, filterCategory, filterWipType, filterDept, filterMaterials, searchText]);
+  }, [rows, filterCategory, filterWipType, filterDept, filterMaterials, searchTextDeferred]);
 
   // Matrix axes: rows = unique productCodes, columns = unique resolved
   // wipLabels. Same WIP archetype across models lines up under one column
@@ -4897,6 +4904,27 @@ function BatchEditMaterialsDialog({
     }
     return out;
   }, [filteredRows]);
+
+  // (model -> wipLabel -> placeholder rowKey) — built from the FULL row set,
+  // not the filtered one. The "+ Add material" affordance at the bottom of
+  // every cell needs the placeholder rowKey to call addMaterialFromPlaceholder.
+  // We can't rely on the placeholder MatRow surviving the filter pass: search
+  // text + material multi-select both drop placeholders (they have no code/
+  // name to match), so without this fallback map the user could only ever
+  // add ONE material before the filter hid the placeholder. Cells with no
+  // visible rows after filtering also need access to a stable placeholder key
+  // so the persistent "+ Add" still works in narrowed views.
+  const placeholderByCell = useMemo(() => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const r of rows) {
+      if (!r.isPlaceholder) continue;
+      const byCol = out[r.productCode] || (out[r.productCode] = {});
+      // First placeholder wins per (model, wipLabel) — every WIP step emits
+      // exactly one placeholder, so first-write is also last-write here.
+      if (!byCol[r.wipLabel]) byCol[r.wipLabel] = r.rowKey;
+    }
+    return out;
+  }, [rows]);
 
   function updateRow(key: string, changes: Partial<MatRow>) {
     setRows((prev) => prev.map((r) => (r.rowKey === key ? { ...r, ...changes } : r)));
@@ -5237,36 +5265,41 @@ function BatchEditMaterialsDialog({
 
         {/* Body */}
         <div className="px-6 py-4 overflow-y-auto flex-1 space-y-4">
-          {/* Filters */}
-          <div className="bg-[#FAF9F7] rounded-lg p-3 space-y-2">
-            <div className="flex items-center gap-2 text-xs font-medium text-gray-500 uppercase tracking-wider">
-              <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/></svg>
-              Filter
-            </div>
-            <div className="grid grid-cols-5 gap-2">
+          {/* Filter row — visually aligned with Production Categories Editor:
+              flex-wrap with labeled field blocks and a counter pinned to the
+              right. Field widths/typography/gap match the sibling dialog. */}
+          <div className="flex gap-3 items-end flex-wrap">
+            <div className="flex-1 min-w-[200px]">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Search</label>
               <input
                 type="text"
-                placeholder="Search BOM / material..."
+                placeholder="Filter by BOM / material..."
                 value={searchText}
                 onChange={(e) => setSearchText(e.target.value)}
-                className="border border-[#E2DDD8] rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
               />
+            </div>
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Category</label>
               <select
                 value={filterCategory}
                 onChange={(e) =>
                   setFilterCategory(e.target.value as "ALL" | BOMCategory)
                 }
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
               >
                 <option value="ALL">All Categories</option>
                 <option value="BEDFRAME">Bedframe</option>
                 <option value="SOFA">Sofa</option>
                 <option value="ACCESSORY">Accessory</option>
               </select>
+            </div>
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">WIP Type</label>
               <select
                 value={filterWipType}
                 onChange={(e) => setFilterWipType(e.target.value)}
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
               >
                 <option value="">All WIP Types</option>
                 {wipTypeOptions.map((w) => (
@@ -5275,10 +5308,13 @@ function BatchEditMaterialsDialog({
                   </option>
                 ))}
               </select>
+            </div>
+            <div className="w-48">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Department</label>
               <select
                 value={filterDept}
                 onChange={(e) => setFilterDept(e.target.value)}
-                className="border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-[#6B5C32] bg-white"
+                className="w-full border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-[#6B5C32]"
                 title="Show only WIP steps with a process in this department"
               >
                 <option value="">All Departments</option>
@@ -5288,101 +5324,113 @@ function BatchEditMaterialsDialog({
                   </option>
                 ))}
               </select>
-              {/* Multi-select material filter — opens a checkbox popover. */}
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => setMaterialFilterOpen((v) => !v)}
-                  className="w-full text-left border border-[#E2DDD8] rounded-lg px-2 py-1.5 text-sm bg-white hover:bg-gray-50 flex items-center justify-between gap-1"
-                >
-                  <span className="truncate">
-                    {filterMaterials.size === 0
-                      ? "All Materials"
-                      : filterMaterials.size === 1
-                      ? Array.from(filterMaterials)[0]
-                      : `${filterMaterials.size} materials`}
-                  </span>
-                  <svg className="w-3 h-3 flex-shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-                  </svg>
-                </button>
-                {materialFilterOpen && (
-                  <div className="absolute z-20 mt-1 w-[260px] right-0 max-h-[260px] overflow-y-auto bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-1.5 space-y-0.5">
-                    <div className="flex items-center justify-between px-1 py-1 border-b border-[#E2DDD8]">
-                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">
-                        {filterMaterials.size} selected
-                      </span>
-                      <div className="flex items-center gap-2">
-                        {filterMaterials.size > 0 && (
-                          <button
-                            onClick={() => setFilterMaterials(new Set())}
-                            className="text-[10px] text-[#9A3A2D] hover:underline"
-                          >
-                            Clear
-                          </button>
-                        )}
-                        <button
-                          onClick={() => setMaterialFilterOpen(false)}
-                          className="text-[10px] text-gray-500 hover:underline"
-                        >
-                          Close
-                        </button>
-                      </div>
-                    </div>
-                    {materialCodeOptions.length === 0 && (
-                      <p className="text-xs text-gray-400 p-2 text-center">
-                        No material codes in any BOM yet.
-                      </p>
-                    )}
-                    {materialCodeOptions.map((c) => {
-                      const checked = filterMaterials.has(c);
-                      return (
-                        <label
-                          key={c}
-                          className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer ${
-                            checked ? "bg-[#EEF3E4]" : "hover:bg-[#FAF9F7]"
-                          }`}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() => {
-                              setFilterMaterials((prev) => {
-                                const next = new Set(prev);
-                                if (next.has(c)) next.delete(c);
-                                else next.add(c);
-                                return next;
-                              });
-                            }}
-                            className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
-                          />
-                          <span className="font-mono truncate">{c}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
             </div>
-            {(searchText ||
-              filterCategory !== "ALL" ||
-              filterWipType ||
-              filterDept ||
-              filterMaterials.size > 0) && (
+            {/* Multi-select material filter — opens a checkbox popover.
+                Same width/typography as the sibling dropdowns; only the
+                trigger affordance differs (popover vs native select). */}
+            <div className="w-48 relative">
+              <label className="block text-xs font-medium text-gray-700 mb-1">Material</label>
               <button
-                onClick={() => {
-                  setSearchText("");
-                  setFilterCategory("ALL");
-                  setFilterWipType("");
-                  setFilterDept("");
-                  setFilterMaterials(new Set());
-                }}
-                className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
+                type="button"
+                onClick={() => setMaterialFilterOpen((v) => !v)}
+                className="w-full text-left border border-[#E2DDD8] rounded-lg px-3 py-2 text-sm bg-white hover:bg-gray-50 flex items-center justify-between gap-1 focus:outline-none focus:border-[#6B5C32]"
               >
-                <span>✕</span> Clear filters
+                <span className="truncate">
+                  {filterMaterials.size === 0
+                    ? "All Materials"
+                    : filterMaterials.size === 1
+                    ? Array.from(filterMaterials)[0]
+                    : `${filterMaterials.size} materials`}
+                </span>
+                <svg className="w-3 h-3 flex-shrink-0 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                </svg>
               </button>
-            )}
+              {materialFilterOpen && (
+                <div className="absolute z-20 mt-1 w-[260px] right-0 max-h-[260px] overflow-y-auto bg-white border border-[#E2DDD8] rounded-lg shadow-lg p-1.5 space-y-0.5">
+                  <div className="flex items-center justify-between px-1 py-1 border-b border-[#E2DDD8]">
+                    <span className="text-[10px] text-gray-500 uppercase tracking-wider">
+                      {filterMaterials.size} selected
+                    </span>
+                    <div className="flex items-center gap-2">
+                      {filterMaterials.size > 0 && (
+                        <button
+                          onClick={() => setFilterMaterials(new Set())}
+                          className="text-[10px] text-[#9A3A2D] hover:underline"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setMaterialFilterOpen(false)}
+                        className="text-[10px] text-gray-500 hover:underline"
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </div>
+                  {materialCodeOptions.length === 0 && (
+                    <p className="text-xs text-gray-400 p-2 text-center">
+                      No material codes in any BOM yet.
+                    </p>
+                  )}
+                  {materialCodeOptions.map((c) => {
+                    const checked = filterMaterials.has(c);
+                    return (
+                      <label
+                        key={c}
+                        className={`flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer ${
+                          checked ? "bg-[#EEF3E4]" : "hover:bg-[#FAF9F7]"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => {
+                            setFilterMaterials((prev) => {
+                              const next = new Set(prev);
+                              if (next.has(c)) next.delete(c);
+                              else next.add(c);
+                              return next;
+                            });
+                          }}
+                          className="rounded border-gray-300 text-[#6B5C32] focus:ring-[#6B5C32]"
+                        />
+                        <span className="font-mono truncate">{c}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {/* Counter — sibling of the field blocks, pinned by flex layout
+                to the right edge. Mirrors Production Categories' counter
+                slot but uses material-specific metrics. */}
+            <div className="text-xs text-gray-500 pb-2">
+              {matrixModels.length} model{matrixModels.length !== 1 ? "s" : ""} ·{" "}
+              {matrixWipColumns.length} WIP column{matrixWipColumns.length !== 1 ? "s" : ""} ·{" "}
+              {filteredRows.length} of {rows.length} cell{rows.length !== 1 ? "s" : ""} ·{" "}
+              {dirtyCount} dirty
+            </div>
           </div>
+          {(searchText ||
+            filterCategory !== "ALL" ||
+            filterWipType ||
+            filterDept ||
+            filterMaterials.size > 0) && (
+            <button
+              onClick={() => {
+                setSearchText("");
+                setFilterCategory("ALL");
+                setFilterWipType("");
+                setFilterDept("");
+                setFilterMaterials(new Set());
+              }}
+              className="text-xs text-gray-500 hover:text-[#9A3A2D] flex items-center gap-1"
+            >
+              <span>✕</span> Clear filters
+            </button>
+          )}
 
           {/* Bulk-fill bar — targets every cell currently visible after
               filtering. Per-row checkboxes don't fit a matrix layout, so
@@ -5427,25 +5475,17 @@ function BatchEditMaterialsDialog({
             </div>
           </div>
 
-          {/* Row counter / discard */}
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-700">
-              <span className="font-semibold">{dirtyCount}</span> dirty ·{" "}
-              {matrixModels.length} model{matrixModels.length !== 1 ? "s" : ""} ·{" "}
-              {matrixWipColumns.length} WIP column{matrixWipColumns.length !== 1 ? "s" : ""} ·{" "}
-              {filteredRows.length} of {rows.length} cells
-            </span>
-            <div className="flex items-center gap-3">
-              {dirtyCount > 0 && (
-                <button
-                  onClick={discardChanges}
-                  className="text-xs text-[#9A3A2D] hover:underline"
-                >
-                  Discard changes
-                </button>
-              )}
+          {/* Discard — counter has moved into the filter row above. */}
+          {dirtyCount > 0 && (
+            <div className="flex items-center justify-end">
+              <button
+                onClick={discardChanges}
+                className="text-xs text-[#9A3A2D] hover:underline"
+              >
+                Discard changes
+              </button>
             </div>
-          </div>
+          )}
 
           {/* Pivot matrix — Model rows × WIP-column. Each cell stacks all
               MatRows that fall in that (model, wipLabel) bucket: existing
@@ -5512,7 +5552,15 @@ function BatchEditMaterialsDialog({
                       </td>
                       {matrixWipColumns.map((w) => {
                         const cellRows = matrixCells[m]?.[w] || [];
-                        if (cellRows.length === 0) {
+                        // Real (non-placeholder) rows that survived filtering.
+                        // Placeholders are no longer rendered inline — every
+                        // cell gets its own persistent "+ Add material" row
+                        // anchored at the bottom (see below) so the user can
+                        // keep adding indefinitely, even when search/material
+                        // filters would otherwise hide the placeholder MatRow.
+                        const realRows = cellRows.filter((r) => !r.isPlaceholder);
+                        const placeholderKey = placeholderByCell[m]?.[w];
+                        if (realRows.length === 0 && !placeholderKey) {
                           return (
                             <td
                               key={w}
@@ -5528,36 +5576,15 @@ function BatchEditMaterialsDialog({
                             className="px-1.5 py-1 border-b border-[#E2DDD8] align-top"
                           >
                             <div className="flex flex-col gap-1.5">
-                              {cellRows.map((r) => {
+                              {realRows.map((r) => {
                                 const dirty = isRowDirty(r);
-                                const tone = r.isPlaceholder
-                                  ? "bg-[#FAF9F7]/60"
-                                  : r.toDelete
+                                const tone = r.toDelete
                                   ? "bg-[#F9E1DA]"
                                   : r.isNew
                                   ? "bg-[#EEF3E4]"
                                   : dirty
                                   ? "bg-[#EEF3E4]"
                                   : "";
-                                if (r.isPlaceholder) {
-                                  return (
-                                    <div
-                                      key={r.rowKey}
-                                      className={`flex items-center gap-1 rounded px-1 py-0.5 ${tone}`}
-                                    >
-                                      <span className="text-[10px] text-[#4F7C3A] font-semibold pl-0.5">
-                                        +
-                                      </span>
-                                      <RawMaterialSelect
-                                        value=""
-                                        materials={rawMaterials}
-                                        onSelect={(rm) =>
-                                          addMaterialFromPlaceholder(r.rowKey, rm)
-                                        }
-                                      />
-                                    </div>
-                                  );
-                                }
                                 return (
                                   <div
                                     key={r.rowKey}
@@ -5630,6 +5657,29 @@ function BatchEditMaterialsDialog({
                                   </div>
                                 );
                               })}
+                              {/* Persistent "+ Add material" affordance —
+                                  always rendered at the bottom of every cell
+                                  that has a placeholder mapped. Clicking it
+                                  inserts a new MatRow before the placeholder
+                                  in the rows array; the placeholder itself
+                                  is preserved so the user can keep adding
+                                  indefinitely. Hidden only when the WIP step
+                                  has no placeholder at all (shouldn't happen
+                                  given buildMatRows emits one per WIP node). */}
+                              {placeholderKey && (
+                                <div className="flex items-center gap-1 rounded px-1 py-0.5 bg-[#FAF9F7]/60">
+                                  <span className="text-[10px] text-[#4F7C3A] font-semibold pl-0.5">
+                                    +
+                                  </span>
+                                  <RawMaterialSelect
+                                    value=""
+                                    materials={rawMaterials}
+                                    onSelect={(rm) =>
+                                      addMaterialFromPlaceholder(placeholderKey, rm)
+                                    }
+                                  />
+                                </div>
+                              )}
                             </div>
                           </td>
                         );
@@ -5843,6 +5893,10 @@ function DeptPivotCategoryDialog({
   const [deptCode, setDeptCode] = useState<string>(DEPT_ORDER[0]);
   const [rows, setRows] = useState<DeptPivotRow[]>([]);
   const [search, setSearch] = useState("");
+  // Defer the search term so the heavy memo chain (filteredRows, matrix
+  // axes, cell map, stale count) doesn't re-run on every keystroke. The
+  // input value stays controlled by `search`; filtering uses `searchDeferred`.
+  const searchDeferred = useDeferredValue(search);
   const [modelFilter, setModelFilter] = useState<string>("");
   const [branchFilter, setBranchFilter] = useState<string>("");
   const [saving, setSaving] = useState(false);
@@ -5903,7 +5957,7 @@ function DeptPivotCategoryDialog({
   }, [rows]);
 
   const filteredRows = useMemo(() => {
-    const q = search.trim().toLowerCase();
+    const q = searchDeferred.trim().toLowerCase();
     return rows.filter((r) => {
       if (modelFilter && r.productCode !== modelFilter) return false;
       if (branchFilter && r.branchLabel !== branchFilter) return false;
@@ -5917,7 +5971,7 @@ function DeptPivotCategoryDialog({
       }
       return true;
     });
-  }, [rows, search, modelFilter, branchFilter]);
+  }, [rows, searchDeferred, modelFilter, branchFilter]);
 
   // Matrix axes: rows = unique productCodes, columns = unique branchLabels,
   // both narrowed to whatever survived the filter pass. Column list narrows

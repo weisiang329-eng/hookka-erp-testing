@@ -223,7 +223,7 @@ test('login + token survives a fresh Worker process (D1 stub shared across impor
   // First-time PIN registration.
   let res = await callRoute(
     appA,
-    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '1234' } },
+    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '123456' } },
     db,
   );
   let json = await res.json();
@@ -268,7 +268,7 @@ test('logout invalidates the token', async () => {
   // Register + login.
   let res = await callRoute(
     app,
-    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '4321' } },
+    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '654321' } },
     db,
   );
   const { token } = await res.json();
@@ -316,7 +316,7 @@ test('reset-pin invalidates ALL of the workers tokens', async () => {
   // First-time login.
   let res = await callRoute(
     app,
-    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '0000' } },
+    { method: 'POST', path: '/login', body: { empNo: 'EMP001', firstTimePin: '000000' } },
     db,
   );
   const tokenA = (await res.json()).token;
@@ -325,7 +325,7 @@ test('reset-pin invalidates ALL of the workers tokens', async () => {
   // Second login from the "phone" — same PIN, second active session.
   res = await callRoute(
     app,
-    { method: 'POST', path: '/login', body: { empNo: 'EMP001', pin: '0000' } },
+    { method: 'POST', path: '/login', body: { empNo: 'EMP001', pin: '000000' } },
     db,
   );
   const tokenB = (await res.json()).token;
@@ -354,7 +354,7 @@ test('reset-pin invalidates ALL of the workers tokens', async () => {
     {
       method: 'POST',
       path: '/reset-pin',
-      body: { empNo: 'EMP001', phoneLast4: '6789', newPin: '9999' },
+      body: { empNo: 'EMP001', phoneLast4: '6789', newPin: '999999' },
     },
     db,
   );

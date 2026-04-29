@@ -221,7 +221,7 @@ test('worker-auth sub-app: /login still works without auth', async () => {
     {
       method: 'POST',
       path: '/login',
-      body: { empNo: 'EMP001', firstTimePin: '1234' },
+      body: { empNo: 'EMP001', firstTimePin: '123456' },
     },
     db,
   );
@@ -252,7 +252,7 @@ test('worker-auth sub-app: /reset-pin still works without auth', async () => {
     {
       method: 'POST',
       path: '/reset-pin',
-      body: { empNo: 'EMP001', phoneLast4: '6789', newPin: '9999' },
+      body: { empNo: 'EMP001', phoneLast4: '6789', newPin: '999999' },
     },
     db,
   );
@@ -284,7 +284,7 @@ test('worker-auth sub-app: /logout NOW requires auth (was previously public)', a
     {
       method: 'POST',
       path: '/login',
-      body: { empNo: 'EMP001', firstTimePin: '0000' },
+      body: { empNo: 'EMP001', firstTimePin: '000000' },
     },
     db,
   );

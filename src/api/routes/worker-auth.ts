@@ -217,8 +217,15 @@ app.post("/login", async (c) => {
     .bind(token, worker.id, Date.now())
     .run();
 
-  // Reset the rate-limit counter on success.
-  c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+  // Reset the rate-limit counter on success. waitUntil is best-effort —
+  // when running outside a Worker (tests, local node), `executionCtx`
+  // throws on access, so we fall back to fire-and-forget. The cleanup is
+  // idempotent and a missed reset just costs the next 15-min window.
+  try {
+    c.executionCtx.waitUntil(clearLoginRateLimit(c, rlKey));
+  } catch {
+    void clearLoginRateLimit(c, rlKey).catch(() => {});
+  }
 
   return c.json({
     success: true,

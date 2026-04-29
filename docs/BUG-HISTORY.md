@@ -20,7 +20,7 @@ Entries themselves stay newest-first.
 - `inventory-display` (23) — [BUG-2026-04-27-032](#bug-2026-04-27-032-wip-page-inflated-displayed-qty-by-summing-uph-jc-capacity-instead-of-trusting-wip_itemsstockqty)
 - `ui-frontend` (21) — [BUG-2026-04-29-004](#bug-2026-04-29-004--cn-detail-dialog-vs-do-detail-dialog-9-layout--data-gaps-after-first-parity-pass)
 - `production-orders` (18) — [BUG-2026-04-29-001](#bug-2026-04-29-001--production-sheet-so-id-column-blank-for-sofa-rows-of-co-origin-pos)
-- `bom` (15) — [BUG-2026-04-27-010](#bug-2026-04-27-010-dept-pivot-editor-lists-draft-boms-as-duplicate-rows)
+- `bom` (16) — [BUG-2026-04-29-006](#bug-2026-04-29-006--production-times-edits-silently-lost-after-close-or-refresh)
 - `infrastructure` (15) — [BUG-2026-04-27-029](#bug-2026-04-27-029-fixdb-hyperdrive-needs-preparefalse-supavisor-6543-rejects-prepared-statements)
 - `inventory-cascade` (16) — [BUG-2026-04-29-005](#bug-2026-04-29-005--cn-dispatch-left-fg_units--stock_movements--wip_items-untouched-no-inventory-cascade)
 - `delivery-orders` (10) — [BUG-2026-04-29-003](#bug-2026-04-29-003--updateconsignmentnotebyid-silently-dropped-sentdate-and-items-on-put)
@@ -31,6 +31,72 @@ Entries themselves stay newest-first.
 - `auth-rbac` (2) — [BUG-2026-04-26-033](#bug-2026-04-26-033-fixauthz-invalidate-kv-session-cache-on-role-change-p38)
 - `scheduling` (2) — [BUG-2026-04-24-035](#bug-2026-04-24-035-fixschedule-lead-time-days-before-delivery-per-dept-parallel-not-serial)
 - `audit-logging` (1) — [BUG-2026-04-27-007](#bug-2026-04-27-007-audit-event-write-failures-swallowed-silently)
+
+---
+
+## BUG-2026-04-29-006 — Production Times edits silently lost after close or refresh
+
+**Status:** 🟡 Fix in progress (2026-04-29)
+**Category:** bom
+
+**Symptom (user-reported):** "Yesterday I edited some Production Times,
+today when I opened it they're gone again." The matrix (department ×
+category → minutes) appeared to save — toast said "Production times
+saved" — but on next page load the cells reverted to their pre-edit
+values, sometimes only partially.
+
+**Root cause:** `ProductionTimesDialog.handleSave` in `src/pages/bom.tsx`
+called `patchVariantsConfig({...})` and showed the success toast
+synchronously. Underneath, that function only updates the in-memory
+cache and schedules a **500ms-debounced** `PUT /api/kv-config/variants-config`
+(see `src/lib/kv-config.ts:181`). Three failure modes followed from
+that:
+
+1. The user closed the dialog / tab / browser inside the 500ms window —
+   the timer never fired, no PUT was sent.
+2. The PUT fired but the server returned 401/500 — `flushSave` in
+   `kv-config.ts` notifies subscribers via `subscribeKvConfigSaveError`,
+   but `ProductionTimesDialog` had never wired that listener up.
+3. Same as (2) but the cached value was already considered "saved" so
+   the next mount's `fetchVariantsConfig` overwrote local state with the
+   stale server value, making the loss invisible until the user
+   re-opened the dialog.
+
+The infrastructure to do this correctly was added in commit `56dad2a`
+("kv-config save no longer silently fails"), which introduced
+`flushKvConfig` (await server response) and the error listener API.
+`/products` Maintenance tab adopted both patterns at
+`src/pages/products/index.tsx:780,747`. `ProductionTimesDialog` predates
+those fixes and was never migrated — so it kept the lying-toast
+behaviour.
+
+**Fix:** `src/pages/bom.tsx`
+- `handleSave` is now `async`, awaits `flushKvConfig(VARIANTS_CONFIG_KEY)`,
+  and only marks the dialog clean / shows "Saved" if the server
+  confirmed the write. On failure, shows "Failed to save — try again"
+  and leaves `dirty=true` for retry.
+- New `useEffect` subscribes to `subscribeKvConfigSaveError` for the
+  variants-config key while the dialog is open, so background save
+  failures (debounced PUTs that 401 between manual saves) surface as a
+  toast instead of dying silently.
+- Second `useEffect` adds a `beforeunload` handler that fires
+  `flushKvConfig` synchronously when the user closes the tab — closes
+  the 500ms-window data-loss path on quick close.
+- Save button shows "Saving…" and is disabled while the PUT is in
+  flight; Close button is disabled too so the user can't kill the
+  in-flight save.
+
+**Verification:** Open Production Times, edit a few cells, click Save,
+wait for "Saved" toast (now appears AFTER the network round-trip).
+Refresh the page, reopen — values persist. To reproduce the original
+bug, deploy commit before the fix and immediately close the dialog
+within ~250ms of clicking Save; values revert on next open. Pre-fix:
+toast lied, values gone. Post-fix: button disabled until server
+confirms, no premature toast.
+
+**Related:** [BUG-2026-04-22-001](#bug-2026-04-22-001--fix-crash-variants-page-coerces-object-entries-to-strings-on-load)
+(same `variants-config` blob, different page); commit `56dad2a` (the
+infra this dialog should have adopted in April 22).
 
 ---
 

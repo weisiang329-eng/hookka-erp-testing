@@ -3,8 +3,11 @@ import { cachedFetchJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import {
   fetchVariantsConfig,
+  flushKvConfig,
   getVariantsConfigSync,
   patchVariantsConfig,
+  subscribeKvConfigSaveError,
+  VARIANTS_CONFIG_KEY,
   type VariantsConfig,
 } from "@/lib/kv-config";
 import { resolveWipTokens, type BomVariantContext } from "@/api/lib/bom-wip-breakdown";
@@ -4015,6 +4018,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   const [categories, setCategories] = useState<string[]>([]);
   const [times, setTimes] = useState<ProductionTimes>({});
   const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [toastMsg, setToastMsg] = useState("");
   const [editingCat, setEditingCat] = useState<{ index: number; value: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
@@ -4043,6 +4047,32 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Surface background save errors that happen between manual saves —
+  // e.g. a debounced save fired on close, the auth token expired, the PUT
+  // 401'd, the cache marked it saved anyway, and the user reopens to
+  // find their changes gone. Without this listener those failures stay
+  // silent. Mirrors the /products page wiring.
+  useEffect(() => {
+    if (!open) return undefined;
+    const off = subscribeKvConfigSaveError(VARIANTS_CONFIG_KEY, (err) => {
+      showToast(`Save failed: ${err.message}`);
+    });
+    return off;
+  }, [open]);
+
+  // Best-effort flush when the user closes the tab / navigates away
+  // mid-debounce. The 500ms debounce window inside kv-config is exactly
+  // what was burning Production Times edits on quick close. unload is
+  // synchronous so we can't await — fire-and-forget.
+  useEffect(() => {
+    if (!open || typeof window === "undefined") return undefined;
+    const handler = () => {
+      void flushKvConfig(VARIANTS_CONFIG_KEY);
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [open]);
+
   function showToast(msg: string) {
     setToastMsg(msg);
     // Fire-and-forget toast clear from event-style callback (Save click).
@@ -4058,16 +4088,30 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
     setDirty(true);
   }
 
-  function handleSave() {
+  async function handleSave() {
+    if (saving) return;
+    setSaving(true);
     try {
-      // patchVariantsConfig merges into whatever else is stored (divanHeights,
-      // specials, etc) so other settings remain untouched. Save is debounced
-      // on the client; we show the toast optimistically.
+      // patchVariantsConfig merges into the cached blob (divanHeights,
+      // specials, etc stay intact) and schedules a 500ms-debounced PUT.
+      // We then call flushKvConfig to cancel that timer and force the
+      // PUT immediately, so we know whether it actually landed before
+      // showing "Saved". Without this the toast was lying — see
+      // BUG-2026-04-29-001.
       patchVariantsConfig({ productionTimes: times, fabricGroups: categories });
-      setDirty(false);
-      showToast("Production times saved");
+      const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
+      if (ok) {
+        setDirty(false);
+        showToast("Production times saved");
+      } else {
+        // Specific errors are also surfaced via the saveError listener
+        // above. This toast is the always-on fallback.
+        showToast("Failed to save — try again");
+      }
     } catch {
-      showToast("Failed to save");
+      showToast("Failed to save — try again");
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -4322,15 +4366,15 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-[#E2DDD8] flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50">
+          <button onClick={onClose} disabled={saving} className="px-4 py-2 text-sm border border-[#E2DDD8] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50">
             Close
           </button>
           <button
             onClick={handleSave}
-            disabled={!dirty}
+            disabled={!dirty || saving}
             className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Save Times
+            {saving ? "Saving…" : "Save Times"}
           </button>
         </div>
 

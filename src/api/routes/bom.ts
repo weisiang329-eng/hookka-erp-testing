@@ -16,6 +16,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { buildAuditStatement, recordAuditCreatedMetric } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -760,6 +761,279 @@ app.post("/templates/bulk-process-edit", async (c) => {
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/bom/resync-job-card-times — strong-overwrite refresh of
+// production_time_minutes / est_minutes on every job_cards row from the
+// master Production Times table (kv_config['variants-config'].productionTimes).
+//
+// Why this exists: Production Times live in a master config keyed by
+// (deptCode, category). When a job_cards row is created (see
+// backfillJobCardsForPo / createProductionOrdersForSO in sales-orders.ts) the
+// master value at that moment is SNAPSHOTTED into the row. Later edits to the
+// master never propagate. After a bulk edit pass on the master, the user
+// wants every existing row pushed to the new values regardless of PO status.
+//
+// Scope: ALL job_cards rows, NO stale-detection filter, NO PO-status filter.
+// Strong overwrite — the only rows skipped are those whose (deptCode,
+// category) pair has no entry in the master (reported as `missingMaster`).
+//
+// Query string:
+//   ?dryRun=true   → counts + breakdown only, no UPDATEs, no audit rows.
+//   (default false → execute the UPDATE batch + emit audit_events.)
+//
+// Audit: each UPDATE on a real run is paired with one audit_events row in
+// the same atomic batch (buildAuditStatement). resource='job-cards',
+// action='resync-production-time'. before/after carry just the two changed
+// columns plus the resync's resolved (deptCode, category) — keeping each
+// audit row small since this can touch thousands of rows.
+//
+// Response: see TaskShape below — counts, per-(dept,category) breakdown,
+// and up to 10 sample rows so the caller can spot-check the math.
+// ---------------------------------------------------------------------------
+app.post("/resync-job-card-times", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
+
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // --- 1. Load master Production Times from kv_config ----------------------
+  // Server-side direct read — mirrors what /api/kv-config/:key does. We
+  // can't import the client helper (it talks to /api/* over fetch).
+  type VariantsConfigBlob = {
+    productionTimes?: Record<string, Record<string, number>>;
+  };
+  const cfgRow = await c.var.DB
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("variants-config")
+    .first<{ value: string }>();
+  let productionTimes: Record<string, Record<string, number>> = {};
+  if (cfgRow?.value) {
+    try {
+      const parsed = JSON.parse(cfgRow.value) as VariantsConfigBlob;
+      if (parsed && typeof parsed === "object" && parsed.productionTimes) {
+        productionTimes = parsed.productionTimes;
+      }
+    } catch {
+      // Fall through with empty map — every row will be reported as
+      // missingMaster, no DB writes will fire.
+    }
+  }
+
+  // --- 2. SELECT every job_cards row + parent PO so we have poNo ----------
+  type JcRow = {
+    id: string;
+    deptCode: string | null;
+    category: string | null;
+    productionTimeMinutes: number | null;
+    estMinutes: number | null;
+    productionOrderId: string;
+    poNo: string | null;
+  };
+  const sel = await c.var.DB
+    .prepare(
+      `SELECT
+         jc.id AS id,
+         jc.departmentCode AS deptCode,
+         jc.category AS category,
+         jc.productionTimeMinutes AS productionTimeMinutes,
+         jc.estMinutes AS estMinutes,
+         jc.productionOrderId AS productionOrderId,
+         po.poNo AS poNo
+       FROM job_cards jc
+       LEFT JOIN production_orders po ON po.id = jc.productionOrderId`,
+    )
+    .all<JcRow>();
+  const rows = sel.results ?? [];
+
+  // --- 3. Categorize each row ---------------------------------------------
+  let wouldUpdate = 0;
+  let unchanged = 0;
+  let missingMaster = 0;
+  const posTouchedSet = new Set<string>();
+
+  // breakdown keyed by `${deptCode}::${category}::${oldValue ?? 'null'}`
+  // so distinct old values don't collapse together. The user wants to see
+  // "82 rows had old=45min, now move to 50min" separate from "3 rows had
+  // old=30min, now move to 50min".
+  type BreakdownKey = string;
+  const breakdownMap = new Map<
+    BreakdownKey,
+    {
+      deptCode: string;
+      category: string;
+      oldValue: number | null;
+      newValue: number;
+      rowCount: number;
+    }
+  >();
+  const samples: Array<{
+    jobCardId: string;
+    poNumber: string;
+    deptCode: string;
+    category: string;
+    oldMinutes: number;
+    newMinutes: number;
+  }> = [];
+
+  // Plan rows that WILL be updated on a real run.
+  type Plan = {
+    row: JcRow;
+    target: number;
+    oldMinutes: number;
+  };
+  const plans: Plan[] = [];
+
+  for (const r of rows) {
+    const deptCode = r.deptCode ?? "";
+    const category = r.category ?? "";
+    if (!deptCode || !category) {
+      // No way to look up a master entry; treat as missing.
+      missingMaster++;
+      continue;
+    }
+    const target = productionTimes[deptCode]?.[category];
+    if (typeof target !== "number" || !Number.isFinite(target)) {
+      missingMaster++;
+      continue;
+    }
+
+    // Compare against the stored value. Use productionTimeMinutes as the
+    // canonical column — est_minutes was historically populated to the same
+    // value at insert time (sales-orders backfillJobCardsForPo line ~570,
+    // ~628). If they have drifted (manual SQL? old migration?) we still
+    // overwrite both columns to the master value, but classify based on
+    // productionTimeMinutes since that's the column the SPA reads.
+    const oldMinutes = r.productionTimeMinutes ?? 0;
+    if (oldMinutes === target && (r.estMinutes ?? 0) === target) {
+      unchanged++;
+      continue;
+    }
+
+    wouldUpdate++;
+    posTouchedSet.add(r.productionOrderId);
+    plans.push({ row: r, target, oldMinutes });
+
+    const key: BreakdownKey = `${deptCode}::${category}::${oldMinutes}`;
+    const entry = breakdownMap.get(key);
+    if (entry) {
+      entry.rowCount++;
+    } else {
+      breakdownMap.set(key, {
+        deptCode,
+        category,
+        oldValue: oldMinutes,
+        newValue: target,
+        rowCount: 1,
+      });
+    }
+
+    if (samples.length < 10) {
+      samples.push({
+        jobCardId: r.id,
+        poNumber: r.poNo ?? "",
+        deptCode,
+        category,
+        oldMinutes,
+        newMinutes: target,
+      });
+    }
+  }
+
+  const totalJobCards = rows.length;
+  const breakdown = Array.from(breakdownMap.values()).sort(
+    (a, b) =>
+      a.deptCode.localeCompare(b.deptCode) ||
+      a.category.localeCompare(b.category) ||
+      (a.oldValue ?? -1) - (b.oldValue ?? -1),
+  );
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      scope: { totalJobCards, posTouched: posTouchedSet.size },
+      wouldUpdate,
+      unchanged,
+      missingMaster,
+      breakdown,
+      samples,
+    });
+  }
+
+  // --- 4. Real run: build atomic batch (UPDATE + audit_events) ------------
+  // Single batch wraps everything in a Postgres transaction (per
+  // supabase-compat.ts batch() impl). Partial failure rolls back so the
+  // master never leaves the job_cards table in a half-resynced state.
+  const statements: D1PreparedStatement[] = [];
+  for (const p of plans) {
+    statements.push(
+      c.var.DB
+        .prepare(
+          `UPDATE job_cards
+             SET productionTimeMinutes = ?, estMinutes = ?
+             WHERE id = ?`,
+        )
+        .bind(p.target, p.target, p.row.id),
+    );
+    const auditStmt = await buildAuditStatement(c, {
+      resource: "job-cards",
+      resourceId: p.row.id,
+      action: "resync-production-time",
+      before: {
+        productionTimeMinutes: p.oldMinutes,
+        estMinutes: p.row.estMinutes ?? 0,
+        deptCode: p.row.deptCode ?? "",
+        category: p.row.category ?? "",
+      },
+      after: {
+        productionTimeMinutes: p.target,
+        estMinutes: p.target,
+        deptCode: p.row.deptCode ?? "",
+        category: p.row.category ?? "",
+      },
+      source: "admin",
+    });
+    if (auditStmt) statements.push(auditStmt);
+  }
+
+  let updated = 0;
+  if (statements.length > 0) {
+    try {
+      await c.var.DB.batch(statements);
+      updated = plans.length;
+      // Mirror the metric counter that emitAudit() would have fired.
+      for (const _p of plans) {
+        recordAuditCreatedMetric(c, {
+          resource: "job-cards",
+          action: "resync-production-time",
+        });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[bom resync-job-card-times] batch failed: ${message}`);
+      return c.json(
+        {
+          success: false,
+          error: `Batch UPDATE failed (transaction rolled back): ${message}`,
+        },
+        500,
+      );
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    scope: { totalJobCards, posTouched: posTouchedSet.size },
+    wouldUpdate,
+    updated,
+    unchanged,
+    missingMaster,
+    breakdown,
+    samples,
+  });
 });
 
 // ---------------------------------------------------------------------------

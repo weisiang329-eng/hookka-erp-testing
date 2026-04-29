@@ -17,9 +17,10 @@
 -- Field notes:
 --   * qty is NUMERIC(12,4) so fractional issuances (e.g. 0.5m of fabric) round
 --     correctly. CHECK (qty > 0) keeps any UI bug from writing a negative.
---   * unit_cost_sen is the WAC snapshot at issue time (resolved server-side
---     from rm_batches). Default 0 keeps the column NOT NULL while leaving
---     room for future bulk inserts that want to fill it later.
+--   * unit_cost_sen is the FIFO oldest-batch snapshot at issue time (resolved
+--     server-side from rm_batches ORDER BY received_date ASC LIMIT 1). Default
+--     0 keeps the column NOT NULL while leaving room for future bulk inserts
+--     that want to fill it later.
 --   * issued_at is a DATE (not timestamp) so the UI's "issued on" filter
 --     matches the user's mental model of issuance days.
 --   * stock_movement_id pins the audit trail: deleting an issuance must

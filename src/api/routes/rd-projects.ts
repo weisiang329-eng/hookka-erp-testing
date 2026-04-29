@@ -1,12 +1,14 @@
 // ---------------------------------------------------------------------------
 // D1-backed R&D Projects route.
 //
-// Uses rd_projects table (already in 0001_init.sql). Complex nested fields
-// (assignedTeam, milestones, productionBOM, materialIssuances, labourLogs,
-// prototypes) are stored as JSON TEXT. Prototypes get their own table row
-// but we load them through a separate SELECT for list endpoints.
+// Uses rd_projects table (already in 0001_init.sql). Nested fields
+// (assignedTeam, milestones, productionBOM, labourLogs) are still JSON TEXT
+// on the row. Prototypes get their own table row.
 //
-// Material issuances deduct from raw_materials.balanceQty inline.
+// Material issuances are owned by rd_material_issuances (migration 0092);
+// they deduct from raw_materials.balanceQty inline. The legacy JSON column
+// rd_projects.material_issuances is no longer written or read by this file
+// (see migration 0095 for the one-shot backfill before the cutover).
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -93,7 +95,10 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
     productionBOM: row.productionBOM
       ? parseJSON<unknown[]>(row.productionBOM, [])
       : undefined,
-    materialIssuances: parseJSON<unknown[]>(row.materialIssuances, []),
+    // materialIssuances is no longer surfaced on the project payload —
+    // callers must use GET /api/rd-projects/:id/issuances (table-backed).
+    // The legacy JSON column on the row stays untouched for backfill safety
+    // (see migration 0095) but is never read or returned anymore.
     labourLogs: parseJSON<unknown[]>(row.labourLogs, []),
     sourceProductName: row.sourceProductName ?? "",
     sourceBrand: row.sourceBrand ?? "",
@@ -143,45 +148,50 @@ function estimateFIFOCost(_itemCode: string, itemGroup: string): number {
   return groupCosts[itemGroup] ?? 2000;
 }
 
-// Resolve the weighted-average unit cost (sen) for a raw material from the
-// live FIFO rm_batches. Sums (remaining_qty × unit_cost_sen) over batches with
-// remaining stock and divides by total remaining qty. Falls back to the
-// itemGroup heuristic in estimateFIFOCost() when the material has no positive
-// batches (e.g. opening-balance items that pre-date GRN posting).
+// Resolve the FIFO unit cost (sen) for a raw material — the price of the
+// OLDEST rm_batches row that still has remaining stock. This matches what the
+// Inventory page surfaces ("the cost shown in Inventory at issue time"): the
+// shop's mental model is that R&D draws from the oldest batch first, and the
+// issuance record snapshots THAT price.
+//
+// If a single issuance qty exceeds the oldest batch's remaining_qty, we still
+// just snapshot the oldest batch's unit_cost — we don't try to compute a
+// weighted-average across batches. This keeps the model simple and matches
+// the user's intent ("拿了什么资料，你就直接记录下来当时的价钱").
+//
+// Falls back to the itemGroup heuristic in estimateFIFOCost() when the
+// material has no positive batches (e.g. opening-balance items that pre-date
+// GRN posting).
 type DbBindable = {
   prepare: (sql: string) => {
     bind: (...args: unknown[]) => {
       all: <T>() => Promise<{ results: T[] | null }>;
+      first: <T>() => Promise<T | null>;
     };
   };
 };
 
-async function resolveWacUnitCostSen(
+async function resolveFifoUnitCostSen(
   db: DbBindable,
   rmId: string,
   itemCode: string,
   itemGroup: string,
 ): Promise<number> {
-  const res = await db
+  // Oldest batch with positive remaining qty wins. The Inventory drilldown
+  // (GET /api/inventory/rm-source/:rmId) orders by `receivedDate ASC, id ASC`
+  // for the same FIFO semantics — we mirror that here.
+  const row = await db
     .prepare(
-      `SELECT remainingQty, unitCostSen
+      `SELECT unitCostSen
          FROM rm_batches
-        WHERE rmId = ? AND remainingQty > 0`,
+        WHERE rmId = ? AND remainingQty > 0
+        ORDER BY receivedDate ASC, id ASC
+        LIMIT 1`,
     )
     .bind(rmId)
-    .all<{ remainingQty: number; unitCostSen: number }>();
-  const rows: { remainingQty: number; unitCostSen: number }[] =
-    res.results ?? [];
-  let totalQty = 0;
-  let totalValueSen = 0;
-  for (const r of rows) {
-    if (r.remainingQty > 0 && Number.isFinite(r.unitCostSen)) {
-      totalQty += r.remainingQty;
-      totalValueSen += r.remainingQty * r.unitCostSen;
-    }
-  }
-  if (totalQty > 0) {
-    return Math.round(totalValueSen / totalQty);
+    .first<{ unitCostSen: number }>();
+  if (row && Number.isFinite(row.unitCostSen)) {
+    return row.unitCostSen;
   }
   return estimateFIFOCost(itemCode, itemGroup);
 }
@@ -346,59 +356,11 @@ app.put("/:id", async (c) => {
     }
     const body = await c.req.json();
 
-    // ─── Reverse-cascade: detect deleted issuances and credit warehouse stock ──
-    // When the SPA PUTs a shorter materialIssuances[] (issuance removed via
-    // the UI's trash button), we need to emit a STOCK_IN counter-movement and
-    // re-credit raw_materials.balance_qty. We compare by issuance.id.
-    type IssuanceLite = {
-      id?: string;
-      materialId?: string;
-      materialCode?: string;
-      materialName?: string;
-      qty?: number;
-      issuedBy?: string;
-      notes?: string;
-    };
-    if (body.materialIssuances !== undefined && Array.isArray(body.materialIssuances)) {
-      const previousIssuances = parseJSON<IssuanceLite[]>(
-        existing.materialIssuances,
-        [],
-      );
-      const nextIds = new Set<string>(
-        (body.materialIssuances as IssuanceLite[])
-          .map((i) => i.id)
-          .filter((x): x is string => typeof x === "string"),
-      );
-      const removed = previousIssuances.filter(
-        (i) => i.id && !nextIds.has(i.id),
-      );
-      const nowIso = new Date().toISOString();
-      for (const r of removed) {
-        if (!r.materialId || !r.qty || r.qty <= 0) continue;
-        // Re-credit balance_qty
-        await c.var.DB.prepare(
-          "UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?",
-        )
-          .bind(r.qty, r.materialId)
-          .run();
-        // Counter-movement (STOCK_IN) so audit trail balances
-        await c.var.DB.prepare(
-          `INSERT INTO stock_movements (id, type, productCode, productName,
-             quantity, reason, performedBy, created_at)
-           VALUES (?, 'STOCK_IN', ?, ?, ?, ?, ?, ?)`,
-        )
-          .bind(
-            `mv-rev-${r.id}`,
-            r.materialCode ?? "",
-            r.materialName ?? "",
-            r.qty,
-            `R&D ${existing.code} issuance reversed (id=${r.id})`,
-            r.issuedBy ?? "System",
-            nowIso,
-          )
-          .run();
-      }
-    }
+    // Note: prior versions of this handler watched body.materialIssuances for
+    // a shorter array (SPA-side trash-button removal) and emitted reversal
+    // STOCK_IN movements. That path is gone — all issuance create / delete
+    // now flows through POST/DELETE /:id/issuances on the dedicated table.
+    // The legacy JSON column is no longer written here either.
 
     const merged = {
       name: body.name ?? existing.name,
@@ -413,18 +375,13 @@ app.put("/:id", async (c) => {
         ? JSON.stringify(body.assignedTeam)
         : existing.assignedTeam,
       totalBudget: body.totalBudget ?? existing.totalBudget,
-      // When materialIssuances changes (e.g., issuance removed), recompute
-      // actualCost from the new array so the budget cards stay in sync.
+      // actualCost is owned by the issuance endpoints (POST/DELETE
+      // /:id/issuances) which recompute it from rd_material_issuances on
+      // every write. PUT only honours an explicit body.actualCost (rare,
+      // mostly for migrations / admin tooling); body.materialIssuances is
+      // ignored — see note above re: dual-write removal.
       actualCost:
-        body.actualCost !== undefined
-          ? body.actualCost
-          : Array.isArray(body.materialIssuances)
-          ? (body.materialIssuances as Array<{ totalCostSen?: number }>).reduce(
-              (sum, i) =>
-                sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
-              0,
-            )
-          : existing.actualCost,
+        body.actualCost !== undefined ? body.actualCost : existing.actualCost,
       milestones: body.milestones
         ? JSON.stringify(body.milestones)
         : existing.milestones,
@@ -434,10 +391,10 @@ app.put("/:id", async (c) => {
             ? null
             : JSON.stringify(body.productionBOM)
           : existing.productionBOM,
-      materialIssuances:
-        body.materialIssuances !== undefined
-          ? JSON.stringify(body.materialIssuances)
-          : existing.materialIssuances,
+      // materialIssuances JSON column is no longer written. Preserve whatever
+      // is already on the row (read by rowToProject for back-compat display
+      // until migration 0095 backfills + a future migration drops the column).
+      materialIssuances: existing.materialIssuances,
       labourLogs:
         body.labourLogs !== undefined
           ? JSON.stringify(body.labourLogs)
@@ -626,11 +583,12 @@ app.post("/:id/issue-material", async (c) => {
     }
 
     // Snapshot the price at issuance time. The unit cost is ALWAYS resolved
-    // server-side from the live FIFO weighted-average (rm_batches) — the
-    // client no longer sends unitCostSen. Snapshotting onto the issuance
-    // record means historical entries keep their accurate cost even if the
-    // raw_materials catalog price is later edited or new GRN batches arrive.
-    const unitCostSen = await resolveWacUnitCostSen(
+    // server-side from the FIFO oldest-batch unit_cost (rm_batches ORDER BY
+    // received_date ASC) — the client no longer sends unitCostSen.
+    // Snapshotting onto the issuance record means historical entries keep
+    // their accurate cost even if the raw_materials catalog price is later
+    // edited or new GRN batches arrive.
+    const unitCostSen = await resolveFifoUnitCostSen(
       c.var.DB,
       rm.id,
       rm.itemCode,
@@ -666,47 +624,53 @@ app.post("/:id/issue-material", async (c) => {
       )
       .run();
 
-    // 2b. Dual-write to the dedicated rd_material_issuances table introduced
-    // in migration 0092. Keeps the table-backed history correct while the
-    // legacy JSON column stays as a denormalised cache for existing readers.
-    // Wrapped in try/catch so a missing table (pre-0092 environments) doesn't
-    // break the issuance flow.
-    try {
-      await c.var.DB.prepare(
-        `INSERT INTO rd_material_issuances
-           (id, projectId, rawMaterialId, materialCode, materialName,
-            qty, unit, unitCostSen, totalCostSen, issuedAt, issuedBy,
-            notes, stockMovementId, orgId, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    // 3. Insert into the dedicated rd_material_issuances table (migration
+    // 0092). This is now the SOLE write target — the legacy JSON column
+    // (rd_projects.materialIssuances) is no longer written. The frontend
+    // reads from GET /api/rd-projects/:id/issuances. Pre-0092 environments
+    // are no longer supported by this handler.
+    await c.var.DB.prepare(
+      `INSERT INTO rd_material_issuances
+         (id, projectId, rawMaterialId, materialCode, materialName,
+          qty, unit, unitCostSen, totalCostSen, issuedAt, issuedBy,
+          notes, stockMovementId, orgId, createdAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        issuanceId,
+        project.id,
+        rm.id,
+        rm.itemCode,
+        rm.description,
+        qty,
+        rm.baseUOM,
+        unitCostSen,
+        totalCostSen,
+        nowIso.slice(0, 10),
+        issuedBy ?? null,
+        notes ?? null,
+        stockMovementId,
+        "hookka",
+        nowIso,
       )
-        .bind(
-          issuanceId,
-          project.id,
-          rm.id,
-          rm.itemCode,
-          rm.description,
-          qty,
-          rm.baseUOM,
-          unitCostSen,
-          totalCostSen,
-          nowIso.slice(0, 10),
-          issuedBy ?? null,
-          notes ?? null,
-          stockMovementId,
-          "hookka",
-          nowIso,
-        )
-        .run();
-    } catch (err) {
-      // Migration 0092 not yet applied — fall back to JSON-only persistence.
-      console.warn("[rd-projects] rd_material_issuances insert skipped:", err);
-    }
+      .run();
 
-    // 3. Append issuance to JSON column with the snapshotted price
-    const existingIssuances = parseJSON<Record<string, unknown>[]>(
-      project.materialIssuances,
-      [],
-    );
+    // 4. Recompute actualCost on the project from the table-backed sum so the
+    // budget cards stay in sync. We don't read from materialIssuances JSON
+    // anymore — sum directly from rd_material_issuances.
+    const sumRow = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalCostSen), 0) AS total
+         FROM rd_material_issuances WHERE projectId = ?`,
+    )
+      .bind(id)
+      .first<{ total: number }>();
+    const nextActualCost = sumRow?.total ?? 0;
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET actualCost = ? WHERE id = ?",
+    )
+      .bind(nextActualCost, id)
+      .run();
+
     const issuance = {
       id: issuanceId,
       rdProjectId: project.id,
@@ -722,18 +686,6 @@ app.post("/:id/issue-material", async (c) => {
       issuedBy: issuedBy ?? "System",
       notes: notes ?? "",
     };
-    const nextIssuances = [...existingIssuances, issuance];
-    const nextActualCost = nextIssuances.reduce(
-      (sum, i) =>
-        sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
-      0,
-    );
-
-    await c.var.DB.prepare(
-      "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
-    )
-      .bind(JSON.stringify(nextIssuances), nextActualCost, id)
-      .run();
 
     const [updated, protos] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
@@ -761,8 +713,9 @@ app.post("/:id/issue-material", async (c) => {
 // ---------------------------------------------------------------------------
 // Material-issuance endpoints (multi-issuance feature, migration 0092).
 //
-// Backed by rd_material_issuances. The legacy JSON column on rd_projects is
-// still maintained by POST /:id/issue-material for backward compatibility.
+// Backed by rd_material_issuances exclusively — the legacy JSON column on
+// rd_projects is no longer written or read by these endpoints. See migration
+// 0095 for the JSON→table backfill of pre-cutover data.
 // ---------------------------------------------------------------------------
 
 type IssuanceRow = {
@@ -826,11 +779,15 @@ app.get("/:id/issuances", async (c) => {
   }
 });
 
-// POST /api/rd-projects/:id/issuances — convenience alias for the existing
-// issue-material handler that returns the new RdMaterialIssuance shape. The
-// request body matches /issue-material (materialId, qty, issuedBy, notes).
-// We don't duplicate the handler logic — we forward into the same code path,
-// then re-fetch the newly-inserted row from rd_material_issuances.
+// POST /api/rd-projects/:id/issuances — canonical write endpoint for
+// material issuance against an R&D project. Body: { materialId, qty,
+// issuedBy, notes }. Returns the inserted rd_material_issuances row in
+// the RdMaterialIssuance shape. The unit cost is server-resolved from the
+// FIFO oldest batch (rm_batches ORDER BY received_date ASC LIMIT 1) — the
+// client does not send unitCostSen.
+//
+// The legacy POST /:id/issue-material handler still exists for back-compat
+// callers but is no longer the path used by the SPA.
 app.post("/:id/issuances", async (c) => {
   const denied = await requirePermission(c, "rd-projects", "create");
   if (denied) return denied;
@@ -870,7 +827,7 @@ app.post("/:id/issuances", async (c) => {
       );
     }
 
-    const unitCostSen = await resolveWacUnitCostSen(
+    const unitCostSen = await resolveFifoUnitCostSen(
       c.var.DB,
       rm.id,
       rm.itemCode,
@@ -929,37 +886,20 @@ app.post("/:id/issuances", async (c) => {
       )
       .run();
 
-    // Mirror into the legacy JSON column so older list views keep working
-    // and actualCost stays in sync without a separate aggregator.
-    const existingIssuances = parseJSON<Record<string, unknown>[]>(
-      project.materialIssuances,
-      [],
-    );
-    const legacyEntry = {
-      id: issuanceId,
-      rdProjectId: project.id,
-      rdProjectCode: project.code,
-      materialId: rm.id,
-      materialCode: rm.itemCode,
-      materialName: rm.description,
-      qty,
-      unit: rm.baseUOM,
-      unitCostSen,
-      totalCostSen,
-      issuedDate: nowIso.slice(0, 10),
-      issuedBy: issuedBy ?? "System",
-      notes: notes ?? "",
-    };
-    const nextIssuances = [...existingIssuances, legacyEntry];
-    const nextActualCost = nextIssuances.reduce(
-      (sum, i) =>
-        sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
-      0,
-    );
-    await c.var.DB.prepare(
-      "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
+    // Recompute actualCost from the table-backed sum so the budget cards
+    // stay in sync. The legacy JSON column on rd_projects is no longer
+    // written — rd_material_issuances is the single source of truth.
+    const sumRow = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalCostSen), 0) AS total
+         FROM rd_material_issuances WHERE projectId = ?`,
     )
-      .bind(JSON.stringify(nextIssuances), nextActualCost, id)
+      .bind(id)
+      .first<{ total: number }>();
+    const nextActualCost = sumRow?.total ?? 0;
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET actualCost = ? WHERE id = ?",
+    )
+      .bind(nextActualCost, id)
       .run();
 
     const row = await c.var.DB.prepare(
@@ -982,8 +922,10 @@ app.post("/:id/issuances", async (c) => {
 
 // DELETE /api/rd-projects/:id/issuances/:issuanceId — reverse an issuance:
 // re-credit raw_materials.balanceQty, write a STOCK_IN counter-movement, and
-// delete both the table row and the matching legacy JSON entry. The
-// rd_projects.actualCost is recomputed from the post-delete JSON array.
+// delete the rd_material_issuances row. rd_projects.actualCost is recomputed
+// from the post-delete table sum. The legacy JSON column on rd_projects is
+// no longer touched — migration 0095 backfilled all pre-existing JSON rows
+// into rd_material_issuances, so the table is the sole source of truth.
 app.delete("/:id/issuances/:issuanceId", async (c) => {
   const denied = await requirePermission(c, "rd-projects", "delete");
   if (denied) return denied;
@@ -999,46 +941,24 @@ app.delete("/:id/issuances/:issuanceId", async (c) => {
       return c.json({ success: false, error: "R&D project not found" }, 404);
     }
 
-    // Read the row from the table when present; fall back to the JSON
-    // mirror so we can still reverse legacy-only issuances.
-    let row: IssuanceRow | null = null;
-    try {
-      row = await c.var.DB.prepare(
-        "SELECT * FROM rd_material_issuances WHERE id = ? AND projectId = ?",
-      )
-        .bind(issuanceId, id)
-        .first<IssuanceRow>();
-    } catch {
-      row = null;
-    }
+    const row = await c.var.DB.prepare(
+      "SELECT * FROM rd_material_issuances WHERE id = ? AND projectId = ?",
+    )
+      .bind(issuanceId, id)
+      .first<IssuanceRow>();
 
-    type LegacyIssuance = {
-      id?: string;
-      materialId?: string;
-      materialCode?: string;
-      materialName?: string;
-      qty?: number;
-      issuedBy?: string;
-      issuedDate?: string;
-    };
-    const legacyAll = parseJSON<LegacyIssuance[]>(
-      project.materialIssuances,
-      [],
-    );
-    const legacy = legacyAll.find((x) => x.id === issuanceId);
-
-    const matRefId = row?.rawMaterialId ?? legacy?.materialId;
-    const refQty = row?.qty ?? legacy?.qty ?? 0;
-    const matCode = row?.materialCode ?? legacy?.materialCode ?? "";
-    const matName = row?.materialName ?? legacy?.materialName ?? "";
-    const performedBy = row?.issuedBy ?? legacy?.issuedBy ?? "System";
-
-    if (!matRefId || !refQty || refQty <= 0) {
+    if (!row || !row.rawMaterialId || !row.qty || row.qty <= 0) {
       return c.json(
         { success: false, error: "Issuance not found or invalid" },
         404,
       );
     }
+
+    const matRefId = row.rawMaterialId;
+    const refQty = row.qty;
+    const matCode = row.materialCode ?? "";
+    const matName = row.materialName ?? "";
+    const performedBy = row.issuedBy ?? "System";
 
     const nowIso = new Date().toISOString();
 
@@ -1066,31 +986,25 @@ app.delete("/:id/issuances/:issuanceId", async (c) => {
       )
       .run();
 
-    // Drop the table row (best-effort — pre-0092 envs simply have no row).
-    try {
-      await c.var.DB.prepare(
-        "DELETE FROM rd_material_issuances WHERE id = ? AND projectId = ?",
-      )
-        .bind(issuanceId, id)
-        .run();
-    } catch {
-      // ignore — see migration 0092 fallback comment above
-    }
-
-    // Drop the legacy JSON entry and recompute actualCost.
-    const nextIssuances = legacyAll.filter((x) => x.id !== issuanceId);
-    const nextActualCost = nextIssuances.reduce(
-      (sum, i) =>
-        sum +
-        (typeof (i as { totalCostSen?: number }).totalCostSen === "number"
-          ? (i as { totalCostSen: number }).totalCostSen
-          : 0),
-      0,
-    );
+    // Drop the table row.
     await c.var.DB.prepare(
-      "UPDATE rd_projects SET materialIssuances = ?, actualCost = ? WHERE id = ?",
+      "DELETE FROM rd_material_issuances WHERE id = ? AND projectId = ?",
     )
-      .bind(JSON.stringify(nextIssuances), nextActualCost, id)
+      .bind(issuanceId, id)
+      .run();
+
+    // Recompute actualCost from the post-delete table sum.
+    const sumRow = await c.var.DB.prepare(
+      `SELECT COALESCE(SUM(totalCostSen), 0) AS total
+         FROM rd_material_issuances WHERE projectId = ?`,
+    )
+      .bind(id)
+      .first<{ total: number }>();
+    const nextActualCost = sumRow?.total ?? 0;
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET actualCost = ? WHERE id = ?",
+    )
+      .bind(nextActualCost, id)
       .run();
 
     return c.json({ success: true, data: { id: issuanceId } });

@@ -23,7 +23,7 @@ import {
   Trash2,
   ImagePlus,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDPrototypeType } from "@/types";
+import type { RDProject, RDProjectStage, RDPrototypeType, RdMaterialIssuance } from "@/types";
 import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -196,7 +196,13 @@ export default function RDProjectDetailPage() {
   const [coverPhotoSaving, setCoverPhotoSaving] = useState(false);
 
   const rdUrl = id ? `/api/rd-projects/${id}` : null;
+  // Issuances are now table-backed (rd_material_issuances). The project payload
+  // no longer surfaces a materialIssuances array — we fetch the list from the
+  // dedicated GET /:id/issuances endpoint and refresh it after every issuance
+  // mutation. See migration 0095 for the JSON→table backfill.
+  const issuancesUrl = id ? `/api/rd-projects/${id}/issuances` : null;
   const { data: projectResp, loading, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
+  const { data: issuancesResp, refresh: refreshIssuancesHook } = useCachedJson<{ data?: RdMaterialIssuance[] }>(issuancesUrl);
   const { data: inventoryResp, refresh: refreshInventoryHook } = useCachedJson<{ data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
 
   const fetchProject = useCallback(() => {
@@ -205,10 +211,17 @@ export default function RDProjectDetailPage() {
     refreshProjectHook();
   }, [rdUrl, refreshProjectHook]);
 
+  const fetchIssuances = useCallback(() => {
+    if (issuancesUrl) invalidateCachePrefix(issuancesUrl);
+    refreshIssuancesHook();
+  }, [issuancesUrl, refreshIssuancesHook]);
+
   const fetchRawMaterials = useCallback(() => {
     invalidateCachePrefix("/api/inventory");
     refreshInventoryHook();
   }, [refreshInventoryHook]);
+
+  const issuances: RdMaterialIssuance[] = issuancesResp?.data ?? [];
 
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR project + inventory data into mutable local state */
   useEffect(() => {
@@ -450,10 +463,13 @@ export default function RDProjectDetailPage() {
     }
     setIssuanceSaving(true);
     try {
-      // unitCostSen intentionally omitted — server resolves it from the live
-      // FIFO-weighted-average over rm_batches at issue time. See
-      // resolveWacUnitCostSen() in src/api/routes/rd-projects.ts.
-      const res = await fetch(`/api/rd-projects/${id}/issue-material`, {
+      // unitCostSen intentionally omitted — server resolves it from FIFO
+      // (oldest batch with positive remaining_qty) over rm_batches at issue
+      // time. See resolveFifoUnitCostSen() in src/api/routes/rd-projects.ts.
+      // We POST to the new table-backed endpoint; the legacy
+      // /issue-material handler is still wired up server-side but is no
+      // longer the canonical write path.
+      const res = await fetch(`/api/rd-projects/${id}/issuances`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -464,7 +480,8 @@ export default function RDProjectDetailPage() {
         }),
       });
       if (res.ok) {
-        await fetchProject();
+        // Re-fetch both: project (for actualCost) and issuances list.
+        await Promise.all([fetchProject(), fetchIssuances()]);
         setIssuanceOpen(false);
         toast.success("Material issued successfully");
       } else {
@@ -479,13 +496,13 @@ export default function RDProjectDetailPage() {
 
   const handleRemoveIssuance = async (issuanceId: string) => {
     if (!project) return;
-    const updated = (project.materialIssuances || []).filter((i) => i.id !== issuanceId);
     try {
-      const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
-        method: "PUT",
-        body: { materialIssuances: updated },
-      });
-      if (data.data) setProject(data.data as RDProject);
+      const res = await fetch(
+        `/api/rd-projects/${id}/issuances/${issuanceId}`,
+        { method: "DELETE" },
+      );
+      if (!res.ok) throw new Error("Failed to remove issuance");
+      await Promise.all([fetchProject(), fetchIssuances()]);
       toast.success("Issuance removed");
     } catch {
       toast.error("Failed to remove issuance");
@@ -721,9 +738,13 @@ export default function RDProjectDetailPage() {
 
   // ─── Computed Cost Summary ─────────────────────────────────────────────
 
-  const materialCostSen = project
-    ? (project.materialIssuances || []).reduce((sum, i) => sum + i.totalCostSen, 0)
-    : 0;
+  // Sum from the table-backed issuances list, NOT project.materialIssuances
+  // (which is no longer surfaced on the project payload after the dual-write
+  // cutover; the JSON column is still on the row but not read by the API).
+  const materialCostSen = issuances.reduce(
+    (sum, i) => sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
+    0,
+  );
   const totalLabourHours = project
     ? (project.labourLogs || []).reduce((sum, l) => sum + l.hours, 0)
     : 0;
@@ -1344,7 +1365,7 @@ export default function RDProjectDetailPage() {
           </div>
         </CardHeader>
         <CardContent>
-          {(project.materialIssuances || []).length === 0 ? (
+          {issuances.length === 0 ? (
             <div className="text-center py-8 text-gray-300 text-sm">
               No materials issued yet. Issue raw materials to track R&D consumption.
             </div>
@@ -1366,17 +1387,17 @@ export default function RDProjectDetailPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {(project.materialIssuances || []).map((iss) => (
+                  {issuances.map((iss) => (
                     <tr key={iss.id} className="border-b border-[#E2DDD8]/50 hover:bg-[#F0ECE9]/50">
-                      <td className="py-2 px-2 text-xs text-gray-600">{formatDate(iss.issuedDate)}</td>
+                      <td className="py-2 px-2 text-xs text-gray-600">{formatDate(iss.issuedAt)}</td>
                       <td className="py-2 px-2 text-xs font-mono text-gray-500">{iss.materialCode}</td>
                       <td className="py-2 px-2 text-sm text-[#1F1D1B]">{iss.materialName}</td>
                       <td className="py-2 px-2 text-right text-sm">{iss.qty}</td>
                       <td className="py-2 px-2 text-center text-xs text-gray-500">{iss.unit}</td>
                       <td className="py-2 px-2 text-right text-sm">{formatCurrency(iss.unitCostSen)}</td>
                       <td className="py-2 px-2 text-right text-sm font-semibold">{formatCurrency(iss.totalCostSen)}</td>
-                      <td className="py-2 px-2 text-xs text-gray-600">{iss.issuedBy}</td>
-                      <td className="py-2 px-2 text-xs text-gray-500 max-w-[120px] truncate" title={iss.notes}>{iss.notes || "\u2014"}</td>
+                      <td className="py-2 px-2 text-xs text-gray-600">{iss.issuedBy ?? ""}</td>
+                      <td className="py-2 px-2 text-xs text-gray-500 max-w-[120px] truncate" title={iss.notes ?? ""}>{iss.notes || "\u2014"}</td>
                       <td className="py-2 px-2 text-center">
                         <button
                           onClick={() => handleRemoveIssuance(iss.id)}
@@ -1392,7 +1413,7 @@ export default function RDProjectDetailPage() {
               </table>
               <div className="border-t-2 border-[#E2DDD8] pt-3 flex items-center justify-between">
                 <div className="text-sm text-gray-500">
-                  Total Material Issuance ({(project.materialIssuances || []).length} entries)
+                  Total Material Issuance ({issuances.length} entries)
                 </div>
                 <div className="text-lg font-bold text-[#1F1D1B]">
                   {formatCurrency(materialCostSen)}

@@ -6011,24 +6011,43 @@ function DeptPivotCategoryDialog({
   // NOT touch initialMinutes — that's still the value as loaded from
   // the server, so a partial-save retry works correctly.
   function handleResyncStale() {
-    if (staleCount === 0) {
-      toast.warning("No stale rows in the current view.");
+    // Snapshot the productionTimes for THIS dept ONCE at click time and use
+    // it for both the staleness probe and the row update inside setRows.
+    // Reading getProductionMinutes() multiple times across the click path
+    // could (in theory) hit different cache states if the kv-config sync
+    // layer mutates mid-click; taking a single-shot snapshot eliminates
+    // that race window. Also lets us count touched rows without relying on
+    // a setRows-internal mutation (which would double-fire under React
+    // strict mode in dev).
+    const ptCache = getVariantsConfigSync()?.productionTimes?.[deptCode] || {};
+    const canonicalFor = (cat: string): number =>
+      typeof ptCache[cat] === "number" ? (ptCache[cat] as number) : 0;
+    const filteredKeys = new Set(filteredRows.map((r) => r.rowKey));
+    // Pre-compute which rows actually need updating, BEFORE setRows.
+    const willTouch: Array<{ rowKey: string; canonical: number }> = [];
+    for (const r of rows) {
+      if (!filteredKeys.has(r.rowKey)) continue;
+      if (!r.category) continue;
+      const canonical = canonicalFor(r.category);
+      if (canonical === r.minutes) continue;
+      willTouch.push({ rowKey: r.rowKey, canonical });
+    }
+    if (willTouch.length === 0) {
+      toast.warning(
+        "Nothing to resync — every visible row's stored minutes already match the Production Times matrix snapshot.",
+      );
       return;
     }
-    const filteredKeys = new Set(filteredRows.map((r) => r.rowKey));
-    let touched = 0;
+    const touchSet = new Map(willTouch.map((t) => [t.rowKey, t.canonical]));
     setRows((prev) =>
       prev.map((r) => {
-        if (!filteredKeys.has(r.rowKey)) return r;
-        if (!r.category) return r;
-        const canonical = getProductionMinutes(deptCode, r.category);
-        if (canonical === r.minutes) return r;
-        touched++;
-        return { ...r, minutes: canonical };
+        const target = touchSet.get(r.rowKey);
+        if (target === undefined) return r;
+        return { ...r, minutes: target };
       }),
     );
     toast.success(
-      `Resynced ${touched} stale row${touched !== 1 ? "s" : ""} to current Production Times. Click Save to persist.`,
+      `Resynced ${willTouch.length} stale row${willTouch.length !== 1 ? "s" : ""} to current Production Times. Click Save to persist.`,
     );
   }
 

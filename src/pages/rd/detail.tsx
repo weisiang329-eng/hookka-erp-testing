@@ -677,10 +677,16 @@ export default function RDProjectDetailPage() {
               className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold border ${
                 project.projectType === "IMPROVEMENT"
                   ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                  : project.projectType === "CLONE"
+                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
                   : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
               }`}
             >
-              {project.projectType === "IMPROVEMENT" ? "Improvement" : "Research"}
+              {project.projectType === "IMPROVEMENT"
+                ? "Improvement"
+                : project.projectType === "CLONE"
+                ? "Clone / Replicate"
+                : "Research"}
             </span>
             <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
           </div>
@@ -748,6 +754,49 @@ export default function RDProjectDetailPage() {
           </div>
         </CardContent>
       </Card>
+
+      {/* Clone source — only shown for CLONE projects with at least one field set */}
+      {project.projectType === "CLONE" &&
+        (project.sourceProductName ||
+          project.sourceBrand ||
+          project.sourcePurchaseRef ||
+          project.sourceNotes) && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                <Package className="h-4 w-4 text-gray-400" /> Clone Source
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                {project.sourceProductName && (
+                  <div>
+                    <dt className="text-xs text-gray-400">Product / Model</dt>
+                    <dd className="text-[#1F1D1B] font-medium">{project.sourceProductName}</dd>
+                  </div>
+                )}
+                {project.sourceBrand && (
+                  <div>
+                    <dt className="text-xs text-gray-400">Brand / Supplier</dt>
+                    <dd className="text-[#1F1D1B] font-medium">{project.sourceBrand}</dd>
+                  </div>
+                )}
+                {project.sourcePurchaseRef && (
+                  <div>
+                    <dt className="text-xs text-gray-400">Purchase Ref / Invoice No.</dt>
+                    <dd className="font-mono text-[#6B5C32]">{project.sourcePurchaseRef}</dd>
+                  </div>
+                )}
+                {project.sourceNotes && (
+                  <div className="sm:col-span-2">
+                    <dt className="text-xs text-gray-400">Notes</dt>
+                    <dd className="text-[#1F1D1B] whitespace-pre-wrap">{project.sourceNotes}</dd>
+                  </div>
+                )}
+              </dl>
+            </CardContent>
+          </Card>
+        )}
 
       <div className="grid grid-cols-2 gap-6">
         {/* Milestones */}

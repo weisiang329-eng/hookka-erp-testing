@@ -55,6 +55,10 @@ app.post('/', async (c) => {
       prototypes: [],
       materialIssuances: [],
       labourLogs: [],
+      sourceProductName: body.sourceProductName ?? undefined,
+      sourceBrand: body.sourceBrand ?? undefined,
+      sourcePurchaseRef: body.sourcePurchaseRef ?? undefined,
+      sourceNotes: body.sourceNotes ?? undefined,
       createdDate: now.toISOString(),
       status: 'ACTIVE',
     };
@@ -101,6 +105,12 @@ app.put('/:id', async (c) => {
       productionBOM: body.productionBOM !== undefined ? body.productionBOM : existing.productionBOM,
       materialIssuances: body.materialIssuances !== undefined ? body.materialIssuances : existing.materialIssuances,
       labourLogs: body.labourLogs !== undefined ? body.labourLogs : existing.labourLogs,
+      sourceProductName:
+        body.sourceProductName !== undefined ? body.sourceProductName : existing.sourceProductName,
+      sourceBrand: body.sourceBrand !== undefined ? body.sourceBrand : existing.sourceBrand,
+      sourcePurchaseRef:
+        body.sourcePurchaseRef !== undefined ? body.sourcePurchaseRef : existing.sourcePurchaseRef,
+      sourceNotes: body.sourceNotes !== undefined ? body.sourceNotes : existing.sourceNotes,
       status: body.status ?? existing.status,
     };
 

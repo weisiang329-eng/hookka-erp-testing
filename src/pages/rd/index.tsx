@@ -100,10 +100,16 @@ function ProjectCard({ project }: { project: RDProject }) {
               className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
                 project.projectType === "IMPROVEMENT"
                   ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                  : project.projectType === "CLONE"
+                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
                   : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
               }`}
             >
-              {project.projectType === "IMPROVEMENT" ? "Improvement" : "Research"}
+              {project.projectType === "IMPROVEMENT"
+                ? "Improvement"
+                : project.projectType === "CLONE"
+                ? "Clone"
+                : "Research"}
             </span>
             <span
               className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
@@ -433,6 +439,10 @@ function CreateProjectDialog({
     targetLaunchDate: "",
     totalBudgetRM: "",
     teamMembers: "",
+    sourceProductName: "",
+    sourceBrand: "",
+    sourcePurchaseRef: "",
+    sourceNotes: "",
   });
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -457,6 +467,14 @@ function CreateProjectDialog({
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean);
+      }
+      // Clone-source fields are only sent when projectType === 'CLONE'.
+      // Server stores nulls for non-CLONE types, so we just skip empty strings.
+      if (form.projectType === "CLONE") {
+        if (form.sourceProductName.trim()) body.sourceProductName = form.sourceProductName.trim();
+        if (form.sourceBrand.trim()) body.sourceBrand = form.sourceBrand.trim();
+        if (form.sourcePurchaseRef.trim()) body.sourcePurchaseRef = form.sourcePurchaseRef.trim();
+        if (form.sourceNotes.trim()) body.sourceNotes = form.sourceNotes.trim();
       }
 
       try {
@@ -531,6 +549,7 @@ function CreateProjectDialog({
             >
               <option value="DEVELOPMENT">New Product Research</option>
               <option value="IMPROVEMENT">Improvement / Repair</option>
+              <option value="CLONE">Clone / Replicate Competitor</option>
             </select>
           </div>
 
@@ -566,6 +585,61 @@ function CreateProjectDialog({
                 className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
                 placeholder="e.g. RC-2604-001"
               />
+            </div>
+          )}
+
+          {/* Clone-source fields — only for CLONE type */}
+          {form.projectType === "CLONE" && (
+            <div className="rounded-lg border border-dashed border-[#E2DDD8] bg-[#FBF9F6] p-3 space-y-3">
+              <p className="text-xs text-gray-500">
+                Source product info — what we bought to reverse-engineer.
+              </p>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Source Product / Model Name
+                </label>
+                <input
+                  type="text"
+                  value={form.sourceProductName}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceProductName: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. Comfy Recliner Pro"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Source Brand / Supplier
+                </label>
+                <input
+                  type="text"
+                  value={form.sourceBrand}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceBrand: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. ABC Furniture Sdn Bhd"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">
+                  Purchase Reference / Invoice No.
+                </label>
+                <input
+                  type="text"
+                  value={form.sourcePurchaseRef}
+                  onChange={(e) => setForm((f) => ({ ...f, sourcePurchaseRef: e.target.value }))}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32]"
+                  placeholder="e.g. INV-2026-0421"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="block text-sm font-medium text-[#1F1D1B]">Source Notes</label>
+                <textarea
+                  value={form.sourceNotes}
+                  onChange={(e) => setForm((f) => ({ ...f, sourceNotes: e.target.value }))}
+                  rows={3}
+                  className="w-full rounded-lg border border-[#E2DDD8] px-3 py-2 text-sm text-[#1F1D1B] placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/30 focus:border-[#6B5C32] resize-none"
+                  placeholder="Dimensions, key specs, why we want to copy..."
+                />
+              </div>
             </div>
           )}
 

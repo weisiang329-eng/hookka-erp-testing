@@ -31,6 +31,10 @@ type ProjectRow = {
   productionBOM: string | null;
   materialIssuances: string | null;
   labourLogs: string | null;
+  sourceProductName: string | null;
+  sourceBrand: string | null;
+  sourcePurchaseRef: string | null;
+  sourceNotes: string | null;
   createdDate: string | null;
   status: string | null;
 };
@@ -88,6 +92,10 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
       : undefined,
     materialIssuances: parseJSON<unknown[]>(row.materialIssuances, []),
     labourLogs: parseJSON<unknown[]>(row.labourLogs, []),
+    sourceProductName: row.sourceProductName ?? "",
+    sourceBrand: row.sourceBrand ?? "",
+    sourcePurchaseRef: row.sourcePurchaseRef ?? "",
+    sourceNotes: row.sourceNotes ?? "",
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -195,8 +203,10 @@ app.post("/", async (c) => {
     await c.var.DB.prepare(
       `INSERT INTO rd_projects (id, code, name, description, projectType, productCategory,
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
-         milestones, productionBOM, materialIssuances, labourLogs, createdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         milestones, productionBOM, materialIssuances, labourLogs,
+         sourceProductName, sourceBrand, sourcePurchaseRef, sourceNotes,
+         createdDate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -215,6 +225,10 @@ app.post("/", async (c) => {
         null,
         JSON.stringify([]),
         JSON.stringify([]),
+        body.sourceProductName ?? null,
+        body.sourceBrand ?? null,
+        body.sourcePurchaseRef ?? null,
+        body.sourceNotes ?? null,
         now.toISOString(),
         "ACTIVE",
       )
@@ -304,6 +318,22 @@ app.put("/:id", async (c) => {
         body.labourLogs !== undefined
           ? JSON.stringify(body.labourLogs)
           : existing.labourLogs,
+      sourceProductName:
+        body.sourceProductName !== undefined
+          ? body.sourceProductName
+          : existing.sourceProductName,
+      sourceBrand:
+        body.sourceBrand !== undefined
+          ? body.sourceBrand
+          : existing.sourceBrand,
+      sourcePurchaseRef:
+        body.sourcePurchaseRef !== undefined
+          ? body.sourcePurchaseRef
+          : existing.sourcePurchaseRef,
+      sourceNotes:
+        body.sourceNotes !== undefined
+          ? body.sourceNotes
+          : existing.sourceNotes,
       status: body.status ?? existing.status,
     };
 
@@ -313,7 +343,8 @@ app.put("/:id", async (c) => {
          productCategory = ?, currentStage = ?, targetLaunchDate = ?,
          assignedTeam = ?, totalBudget = ?, actualCost = ?,
          milestones = ?, productionBOM = ?, materialIssuances = ?,
-         labourLogs = ?, status = ?
+         labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
+         sourcePurchaseRef = ?, sourceNotes = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -331,6 +362,10 @@ app.put("/:id", async (c) => {
         merged.productionBOM,
         merged.materialIssuances,
         merged.labourLogs,
+        merged.sourceProductName,
+        merged.sourceBrand,
+        merged.sourcePurchaseRef,
+        merged.sourceNotes,
         merged.status,
         id,
       )

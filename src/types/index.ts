@@ -1043,7 +1043,7 @@ export type PromiseDateCalc = {
 // --- R&D ---
 export type RDPrototypeType = "FABRIC_SEWING" | "FRAMING";
 
-export type RDProjectType = "DEVELOPMENT" | "IMPROVEMENT";
+export type RDProjectType = "DEVELOPMENT" | "IMPROVEMENT" | "CLONE";
 
 export type RDBOMItem = {
   id: string;
@@ -1113,6 +1113,12 @@ export type RDProject = {
   productionBOM?: RDBOMItem[];
   materialIssuances?: RDMaterialIssuance[];
   labourLogs?: RDLabourLog[];
+  // Clone-source fields — populated when projectType === 'CLONE'.
+  // The boss bought a competitor's product and we're reverse-engineering it.
+  sourceProductName?: string;  // competitor model / SKU
+  sourceBrand?: string;        // competitor brand or supplier
+  sourcePurchaseRef?: string;  // invoice / receipt no for accounting trace
+  sourceNotes?: string;        // dimensions, specs, why we want to copy
   createdDate: string;
   status: "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
 };

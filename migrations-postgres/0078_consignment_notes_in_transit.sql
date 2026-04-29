@@ -61,5 +61,11 @@
 --   numeric order matches the file naming and avoids surprises.
 -- ============================================================================
 
+-- IMPORTANT: column name must use snake_case (in_transit_at, not inTransitAt).
+-- Postgres folds unquoted identifiers to LOWERCASE — so writing `inTransitAt`
+-- here would create a column literally named `intransitat` (no separators),
+-- which then breaks every runtime SQL that references `in_transit_at` via
+-- the D1Compat camelCase→snake_case translation. Verified 2026-04-29 after
+-- the original (incorrect) version of this migration shipped.
 ALTER TABLE consignment_notes
-  ADD COLUMN IF NOT EXISTS inTransitAt TEXT;
+  ADD COLUMN IF NOT EXISTS in_transit_at TEXT;

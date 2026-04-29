@@ -37,10 +37,16 @@
 --   backend change, or revert the CN dispatch path until you do.
 -- ============================================================================
 
+-- IMPORTANT: column names must use snake_case (cn_id, not cnId).
+-- Postgres folds unquoted identifiers to LOWERCASE — so writing `cnId`
+-- here would create a column literally named `cnid` (no separator),
+-- which then breaks every runtime SQL that references `cn_id` via the
+-- D1Compat camelCase→snake_case translation. Verified 2026-04-29
+-- after the original (incorrect) version of this migration shipped.
 ALTER TABLE fg_units
-  ADD COLUMN IF NOT EXISTS cnId TEXT;
+  ADD COLUMN IF NOT EXISTS cn_id TEXT;
 
--- Index supports the reverse cascade's `SELECT DISTINCT poId WHERE cnId = ?`
--- and the forward cascade's idempotency guard `(cnId IS NULL OR cnId='')`.
+-- Index supports the reverse cascade's `SELECT DISTINCT po_id WHERE cn_id = ?`
+-- and the forward cascade's idempotency guard `(cn_id IS NULL OR cn_id='')`.
 CREATE INDEX IF NOT EXISTS idx_fg_units_cn_id
-  ON fg_units(cnId);
+  ON fg_units(cn_id);

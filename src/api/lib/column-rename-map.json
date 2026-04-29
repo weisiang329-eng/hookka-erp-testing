@@ -373,6 +373,7 @@
   "idx_workers_departmentCode": "idx_workers_department_code",
   "idx_workers_departmentId": "idx_workers_department_id",
   "idx_workers_empNo": "idx_workers_emp_no",
+  "inTransitAt": "in_transit_at",
   "inspectionDate": "inspection_date",
   "inspectionId": "inspection_id",
   "inspectionNo": "inspection_no",

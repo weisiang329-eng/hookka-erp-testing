@@ -53,9 +53,14 @@ export type Env = {
     CRON_SECRET?: string;
     // Per-request hot cache — auth sessions + hot lookup tables (Phase 2.6/4).
     SESSION_CACHE: KVNamespace;
-    // R2 bucket for invoice PDFs / BOM drawings / SO attachments (Phase B.4).
-    // Optional during rollout — code paths gate on `if (env.FILES)`.
-    FILES?: R2Bucket;
+    // Supabase Storage credentials — replaces the legacy FILES (R2) binding.
+    // SUPABASE_PROJECT_REF is the project slug (public, set in wrangler.toml
+    // [vars]); SUPABASE_SERVICE_KEY is the service_role key (set via
+    // `wrangler secret put SUPABASE_SERVICE_KEY`). Both optional during
+    // rollout — src/api/lib/supabase-storage.ts throws
+    // SupabaseStorageNotConfiguredError when missing, and the file-asset
+    // routes (src/api/routes/files.ts) map that to 503.
+    SUPABASE_PROJECT_REF?: string;
     // Cloudflare Queues binding for async PO emission cascade (Phase C #3).
     // Optional — falls back to synchronous inline call when absent.
     PO_EMISSION_QUEUE?: Queue;
@@ -476,8 +481,9 @@ import jobCards from "./routes/job-cards";
 import dashboardRevenue from "./routes/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
 import mdm from "./routes/mdm";
-// Phase B.4 — file_assets storage (R2-backed). Returns 503 until the
-// FILES R2 binding is wired up; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets storage (Supabase Storage-backed; was R2 before
+// the storage-supabase-migration). Returns 503 until SUPABASE_PROJECT_REF
+// + SUPABASE_SERVICE_KEY are configured; see docs/DR-RUNBOOK.md.
 import files from "./routes/files";
 import { authMiddleware } from "./lib/auth-middleware";
 import { tenantMiddleware } from "./lib/tenant";
@@ -593,8 +599,8 @@ app.route("/api/dashboard/revenue", dashboardRevenue);
 // in spirit (gated by the existing auth middleware until role-aware
 // authz lands; see roadmap §1).
 app.route("/api/mdm", mdm);
-// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503
-// when env.FILES (R2 binding) is missing; see docs/R2-SETUP.md.
+// Phase B.4 — file_assets API. Mounted under /api/files. Returns 503 when
+// Supabase Storage credentials are missing; see docs/DR-RUNBOOK.md.
 app.route("/api/files", files);
 
 // Below routes were previously in-memory mock-backed (data in

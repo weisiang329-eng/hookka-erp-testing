@@ -132,30 +132,32 @@ id = "8f4c4b7ac1f142ff8378eada4602458a"
 # dead_letter_queue = "po-emission-dlq"
 
 # ---------------------------------------------------------------------------
-# Phase B.4 — R2 bucket for invoice PDFs / BOM drawings / SO attachments.
+# File storage — moved from Cloudflare R2 to Supabase Storage
 # ---------------------------------------------------------------------------
-# Bucket-create runbook:
-#   wrangler r2 bucket create hookka-files
-# Then uncomment the block below and redeploy. Helper in
-# src/api/lib/r2-store.ts raises a clear error when the binding is
-# missing, so routes that need files (src/api/routes-d1/files.ts) return
-# 503 instead of crashing. Full runbook in docs/R2-SETUP.md.
+# Storage now lives on Supabase Storage (same vendor as Postgres) instead
+# of R2. The Supabase Pro plan we already pay for includes 100 GB storage
+# + 250 GB egress/month — comfortably covers daily pg_dump (~5 GB/mo) and
+# file attachments (~3 GB/mo).
 #
-# Sprint 4 — activated. The bucket must already exist (`wrangler r2 bucket
-# create hookka-files`) before deploy or the binding fails to attach.
-# Routes that need files (src/api/routes/files.ts) call r2-store.ts which
-# returns 503 when env.FILES is undefined, so a bucket-not-yet-created
-# state degrades gracefully rather than crashing.
-[[r2_buckets]]
-binding = "FILES"
-bucket_name = "hookka-files"
+# Bootstrap (one-time, before deploy):
+#   1. Supabase Dashboard → Storage → New bucket → name "hookka-files",
+#      visibility = Private. (See docs/DR-RUNBOOK.md "Storage bootstrap".)
+#   2. wrangler secret put SUPABASE_SERVICE_KEY    # service_role key
+#   3. SUPABASE_PROJECT_REF goes in [vars] below (it's the public slug
+#      from the supabase.co URL — not a secret).
+#
+# Helper in src/api/lib/supabase-storage.ts raises
+# `SupabaseStorageNotConfiguredError` when either env var is missing, and
+# routes that need files (src/api/routes/files.ts) return 503 instead of
+# crashing.
 
 # ---------------------------------------------------------------------------
 # Phase C #7 — Daily backup cron trigger (scaffold).
 # ---------------------------------------------------------------------------
-# Uncomment after the FILES R2 binding is live. Runs the
-# src/api/cron/daily-backup.ts handler, which writes a logical dump of
-# the Supabase tables to r2://hookka-files/backups/supabase/<date>.json.gz.
+# Uncomment after Supabase Storage bucket "hookka-files" is provisioned.
+# Runs the src/api/cron/daily-backup.ts handler, which writes a logical
+# dump to: <SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/
+# hookka-files/backups/supabase/<date>.json.gz.
 # Pages Functions does not support `[triggers] crons`; you'll need to
 # move this entry to a sibling Worker project. See docs/DR-RUNBOOK.md.
 #
@@ -183,6 +185,11 @@ ENVIRONMENT = "production"
 API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
 APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
+# Supabase Storage — public project slug (the segment before .supabase.co).
+# Not a secret. The matching service_role key is set via
+# `wrangler secret put SUPABASE_SERVICE_KEY` and never appears here.
+# Leave this blank in dev / local — the helper degrades to 503 cleanly.
+# SUPABASE_PROJECT_REF = "your-project-ref"
 # Uncomment + fill once the Google Cloud Console step is done. Empty values
 # keep the OAuth route returning 503 (fails closed, see auth-oauth.ts).
 # OAUTH_GOOGLE_CLIENT_ID = ""

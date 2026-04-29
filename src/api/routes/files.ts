@@ -1,23 +1,34 @@
 // ---------------------------------------------------------------------------
 // Phase B.4 — File assets API.
 //
+// Storage backend: Supabase Storage (was Cloudflare R2 before the
+// storage-supabase-migration refactor). The wrapper module retains the
+// historic R2-flavoured names — putFile / getFile / signedDownloadUrl /
+// deleteFile — so route logic didn't change shape, only the import path.
+//
 // Routes:
-//   POST   /api/files                  — multipart upload; stores to R2 +
-//                                        records the row in file_assets.
+//   POST   /api/files                  — multipart upload; stores to Supabase
+//                                        Storage + records the row in file_assets.
 //   GET    /api/files                  — list (filter by resourceType,
 //                                        resourceId).
 //   GET    /api/files/:id              — fetch metadata.
 //   GET    /api/files/:id/download     — 302 to a short-lived presigned
-//                                        URL (or the /stream proxy if R2
-//                                        presigning isn't available).
+//                                        URL (or the /stream proxy if signing
+//                                        fails).
 //   GET    /api/files/:id/stream       — proxy stream the body. Used as
 //                                        the fallback when presigned URLs
-//                                        aren't available on the runtime.
-//   DELETE /api/files/:id              — removes the row + R2 object.
+//                                        aren't available.
+//   DELETE /api/files/:id              — removes the row + storage object.
 //
-// Behavior when R2 binding is missing:
+// Behavior when Supabase Storage isn't configured:
 //   Every route returns 503 with `{ ok: false, error: "file storage
 //   unavailable" }`. Frontend can detect this and hide upload controls.
+//
+// Persistence note: the DB column is still named `r2Key` / `r2_key`. We
+// kept the column name to avoid a data-migrating schema change for what
+// is effectively just an opaque object identifier — its semantic meaning
+// is "storage object key", and the underlying backend is now Supabase
+// Storage. Renaming the column is tracked as a follow-up.
 //
 // The migrations live at:
 //   migrations/0055_file_assets.sql           (D1 source-of-truth schema)
@@ -29,12 +40,12 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
 import {
-  R2BucketNotConfiguredError,
+  SupabaseStorageNotConfiguredError,
   putFile,
   getFile,
   signedDownloadUrl,
   deleteFile,
-} from "../lib/r2-store";
+} from "../lib/supabase-storage";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
 
@@ -146,7 +157,7 @@ function genId(): string {
 }
 
 /**
- * Build the R2 object key. Format:
+ * Build the storage object key. Format:
  *   <orgId>/<resourceType>/<resourceId>/<id>-<filename>
  *
  * orgId-prefixed so even an admin tool that walks the bucket can't
@@ -173,7 +184,7 @@ function buildKey(parts: {
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "files", "create");
   if (denied) return denied;
-  if (!c.env.FILES) {
+  if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
     return c.json({ success: false, error: "file storage unavailable" }, 503);
   }
 
@@ -248,7 +259,7 @@ app.post("/", async (c) => {
 
   try {
     // Upload first, DB second — if the DB write fails we have an
-    // orphan object in R2 (cleanable by a sweeper job; cheaper than
+    // orphan object in storage (cleanable by a sweeper job; cheaper than
     // an orphan DB row pointing at nothing).
     await putFile(c.env, r2Key, await file.arrayBuffer(), contentType);
 
@@ -273,7 +284,7 @@ app.post("/", async (c) => {
       .run();
 
     // Sprint 2 task 5 — emit one audit_events row on every successful upload.
-    // Snapshot only metadata; bytes live in R2 and aren't audit-friendly.
+    // Snapshot only metadata; bytes live in storage and aren't audit-friendly.
     await emitAudit(c, {
       resource: "files",
       resourceId: id,
@@ -308,16 +319,16 @@ app.post("/", async (c) => {
       },
     });
   } catch (err) {
-    if (err instanceof R2BucketNotConfiguredError) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
       return c.json({ success: false, error: "file storage unavailable" }, 503);
     }
     console.error("[files/POST] upload failed:", err);
-    // Best-effort cleanup of the R2 object since we don't know if put
+    // Best-effort cleanup of the storage object since we don't know if put
     // succeeded before the DB write blew up.
     try {
       await deleteFile(c.env, r2Key);
     } catch {
-      // Already gone, or R2 is transient — sweeper will catch it.
+      // Already gone, or storage is transient — sweeper will catch it.
     }
     return c.json({ success: false, error: "upload failed" }, 500);
   }
@@ -368,7 +379,7 @@ app.get("/:id", async (c) => {
 // GET /api/files/:id/download — 302 to a presigned URL.
 // ---------------------------------------------------------------------------
 app.get("/:id/download", async (c) => {
-  if (!c.env.FILES) {
+  if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
     return c.json({ success: false, error: "file storage unavailable" }, 503);
   }
   const id = c.req.param("id");
@@ -386,7 +397,7 @@ app.get("/:id/download", async (c) => {
     // Presigning unavailable on this runtime — fall through to stream proxy.
     return c.redirect(`/api/files/${id}/stream`, 302);
   } catch (err) {
-    if (err instanceof R2BucketNotConfiguredError) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
       return c.json({ success: false, error: "file storage unavailable" }, 503);
     }
     console.error("[files/download] failed:", err);
@@ -399,7 +410,7 @@ app.get("/:id/download", async (c) => {
 // not available on this runtime).
 // ---------------------------------------------------------------------------
 app.get("/:id/stream", async (c) => {
-  if (!c.env.FILES) {
+  if (!c.env.SUPABASE_PROJECT_REF || !c.env.SUPABASE_SERVICE_KEY) {
     return c.json({ success: false, error: "file storage unavailable" }, 503);
   }
   const id = c.req.param("id");
@@ -428,7 +439,7 @@ app.get("/:id/stream", async (c) => {
       },
     });
   } catch (err) {
-    if (err instanceof R2BucketNotConfiguredError) {
+    if (err instanceof SupabaseStorageNotConfiguredError) {
       return c.json({ success: false, error: "file storage unavailable" }, 503);
     }
     console.error("[files/stream] failed:", err);
@@ -454,16 +465,17 @@ app.delete("/:id", async (c) => {
   try {
     await deleteFile(c.env, row.r2Key);
   } catch (err) {
-    if (err instanceof R2BucketNotConfiguredError) {
-      // Without R2 we can't actually delete the bytes; still drop the
-      // DB row so the user-facing list reflects the intent. The orphan
-      // object will get pruned once R2 is enabled and the sweeper runs.
+    if (err instanceof SupabaseStorageNotConfiguredError) {
+      // Without storage credentials we can't actually delete the bytes;
+      // still drop the DB row so the user-facing list reflects the intent.
+      // The orphan object will get pruned once storage is configured and
+      // the sweeper runs.
       console.warn(
-        "[files/DELETE] R2 unavailable — dropping DB row only, leaving orphan key",
+        "[files/DELETE] storage unavailable — dropping DB row only, leaving orphan key",
         row.r2Key,
       );
     } else {
-      console.error("[files/DELETE] r2 delete failed:", err);
+      console.error("[files/DELETE] storage delete failed:", err);
       return c.json({ success: false, error: "delete failed" }, 500);
     }
   }

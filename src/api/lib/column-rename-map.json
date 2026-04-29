@@ -677,6 +677,7 @@
   "sourceNo": "source_no",
   "sourceNotes": "source_notes",
   "sourcePieceIndex": "source_piece_index",
+  "sourcePriceSen": "source_price_sen",
   "sourceProductName": "source_product_name",
   "sourcePurchaseRef": "source_purchase_ref",
   "sourceRefId": "source_ref_id",

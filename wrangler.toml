@@ -178,6 +178,12 @@ ENVIRONMENT = "production"
 API_CORS_ORIGIN = "https://hookka-erp-testing.pages.dev"
 APP_URL = "https://hookka-erp-testing.pages.dev"
 RESEND_FROM_EMAIL = "Hookka Manufacturing ERP <noreply@houzscentury.com>"
+# Sentry — Cloudflare Workers DSN. Sentry DSNs are public-safe per their
+# docs: a DSN grants event-submission only, never data read access. Keeping
+# it here (rather than `wrangler pages secret put`) means every deploy
+# guarantees the worker still talks to Sentry, even if someone forgot to
+# re-set the secret. Read by functions/_middleware.ts via env.SENTRY_DSN.
+SENTRY_DSN = "https://9ad06534a79eed8df457becbe2a2244f@o4511302465814528.ingest.us.sentry.io/4511302502907904"
 # Uncomment + fill once the Google Cloud Console step is done. Empty values
 # keep the OAuth route returning 503 (fails closed, see auth-oauth.ts).
 # OAUTH_GOOGLE_CLIENT_ID = ""

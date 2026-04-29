@@ -44,7 +44,17 @@ jobs:
       # is BLOCKING — any TS error fails the deploy. Paired with `strict: true`
       # in tsconfig.app.json (TS.E), this is the graduated form of P1.6 in
       # docs/UPGRADE-CONTROL-BOARD.md: no `continue-on-error`, no opt-out.
+      #
+      # VITE_SENTRY_DSN is injected at build time so the bundled JS knows
+      # where to report client-side errors. The DSN is public-safe per
+      # Sentry docs (event-submission only, no data read), so we keep it
+      # in the workflow file rather than as a GH secret — keeps the
+      # Sentry pipeline self-healing across forks / new clones / new CI
+      # runners. Mirrors the wrangler.toml `[vars] SENTRY_DSN` for the
+      # worker side.
       - run: npm run build:strict
+        env:
+          VITE_SENTRY_DSN: https://0b81e5f99dab7b31f74514a5bb9f6f62@o4511302465814528.ingest.us.sentry.io/4511302481346560
 
       # Bundle size budget (P7.2) — non-blocking initially.
       # Compares dist chunk sizes against `.bundle-baseline.json`; fails if

@@ -35,6 +35,8 @@
   "dependencies": {
     "@hono/node-server": "^1.19.14",
     "@hookform/resolvers": "^5.2.2",
+    "@sentry/cloudflare": "^10.50.0",
+    "@sentry/react": "^10.50.0",
     "@tailwindcss/vite": "^4.2.2",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.24",

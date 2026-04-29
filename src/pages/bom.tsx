@@ -5544,10 +5544,29 @@ function BatchEditMaterialsDialog({
                     : "No rows match the current filters."}
                 </p>
               )}
+              {/* Per-WIP-step material count, used to label the placeholder
+                  row "+ Add another material" instead of "+ Select material..."
+                  when at least one material is already present. Helps the
+                  operator realize the placeholder is persistent — they can
+                  keep clicking it to add more rows to the same WIP step. */}
+              {(() => null)()}
               {filteredRows.map((r) => {
                 const isSelected = selectedKeys.has(r.rowKey);
                 const dirty = isRowDirty(r);
                 const wipColor = WIP_TYPE_LABELS[r.wipType]?.color || "#6B7280";
+                // Count non-placeholder, non-deleted siblings in the same
+                // (templateId, path) bucket — drives the "Add another"
+                // language on the placeholder row.
+                const siblingMaterialCount = r.isPlaceholder
+                  ? rows.filter(
+                      (x) =>
+                        !x.isPlaceholder &&
+                        !x.toDelete &&
+                        x.templateId === r.templateId &&
+                        x.path.length === r.path.length &&
+                        x.path.every((seg, i) => seg === r.path[i]),
+                    ).length
+                  : 0;
                 const rowTone = r.isPlaceholder
                   ? "bg-[#FAF9F7]/40 hover:bg-[#FAF9F7]"
                   : r.toDelete
@@ -5590,7 +5609,16 @@ function BatchEditMaterialsDialog({
                     </div>
                     {r.isPlaceholder ? (
                       <div className="flex items-center gap-1">
-                        <span className="text-[10px] text-[#4F7C3A] font-medium pl-1 pr-1">+</span>
+                        <span
+                          className="text-[10px] text-[#4F7C3A] font-medium pl-1 pr-1 whitespace-nowrap"
+                          title={
+                            siblingMaterialCount > 0
+                              ? "Click again to add another material — the + row is persistent"
+                              : "Pick a material to add it to this WIP step."
+                          }
+                        >
+                          {siblingMaterialCount > 0 ? "+ Add another" : "+"}
+                        </span>
                         <RawMaterialSelect
                           value=""
                           materials={rawMaterials}

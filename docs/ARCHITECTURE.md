@@ -1,8 +1,15 @@
 # Architecture
 
 A bird's-eye view of how HOOKKA ERP is put together — the shape of the
-frontend, the Hono API, the shared data layer, and the extension points you
-should know about before touching anything.
+frontend, the Hono API on Cloudflare Pages Functions, the Postgres data
+layer, and the extension points you should know about before touching
+anything.
+
+> **2026-04-29 update** — this doc previously described a mock-data-only
+> world that's been retired since the D1→Supabase migration completed
+> 2026-04-27. The runtime now serves real data from Supabase Postgres
+> via Hyperdrive. The mock layer (`src/api/routes-mock/*` + `src/lib/mock-data.ts`)
+> is **dev-server-only** and not reachable from the deployed Pages site.
 
 ---
 
@@ -18,30 +25,43 @@ should know about before touching anything.
 │  │             │  │  StatusBadge)│  │  thresholds)   │  │
 │  └──────┬──────┘  └──────────────┘  └────────────────┘  │
 │         │                                               │
-│         ▼  fetch('/api/...')                            │
+│         ▼  fetch('/api/...', { credentials: 'include' })│
 └─────────┼───────────────────────────────────────────────┘
           │
+          │  HttpOnly hookka_session cookie + X-CSRF-Token
+          │  (Bearer fallback retained one release)
+          │
 ┌─────────┴───────────────────────────────────────────────┐
-│  Hono API (Node, port 3001)                             │
+│  Cloudflare Pages Function — functions/api/[[route]].ts │
 │  ┌────────────────────────────────────────────────┐     │
-│  │  routes/   one file per resource               │     │
-│  │  sales-orders.ts → mock-data.salesOrders       │     │
-│  │  production-orders.ts → mock-data.productionOrders
-│  │  …                                             │     │
+│  │  src/api/worker.ts (Hono)                       │    │
+│  │   • CORS + no-cache + security headers          │    │
+│  │   • timing middleware                           │    │
+│  │   • DB injection (SupabaseAdapter wraps         │    │
+│  │     postgres.js → Hyperdrive)                   │    │
+│  │   • authMiddleware (cookie-first / Bearer)      │    │
+│  │   • tenantMiddleware (orgId from JWT)           │    │
+│  │   • ~70 route subapps from src/api/routes/      │    │
+│  │     each calls requirePermission + withOrgScope │    │
 │  └───────────────┬────────────────────────────────┘     │
 │                  │                                      │
 │  ┌───────────────▼────────────────────────────────┐     │
-│  │  lib/mock-data.ts                              │     │
-│  │  In-memory maps of every entity (SO, PO, GRN,  │     │
-│  │  Customer, Worker, FGUnit, …). Shared by the   │     │
-│  │  API and imported directly by pages during dev.│     │
+│  │  Hyperdrive (Cloudflare-pooled Postgres)        │    │
+│  │   ↓                                             │    │
+│  │  Supabase Postgres (primary OLTP)               │    │
+│  │   • 80+ migrations under migrations-postgres/   │    │
+│  │   • org_id NOT NULL on all transaction tables   │    │
+│  │   • immutable ledger_journal_entries hash chain │    │
+│  │   • PITR (7d WAL) + daily pg_dump → R2          │    │
 │  └────────────────────────────────────────────────┘     │
 └─────────────────────────────────────────────────────────┘
 ```
 
-The frontend and API live in the same repo and ship together. In production
-the Hono server would front a real database; today every route reads and
-mutates `mock-data.ts` in memory.
+The frontend and API live in the same repo and ship together. Production
+serves real Postgres data on every `/api/*` route mounted in
+`src/api/worker.ts`. The dev-only Hono node server (`src/api/index.ts` on
+port 3001) and `src/api/routes-mock/*` are **not deployed** — they exist
+for offline development without Hyperdrive credentials.
 
 ---
 
@@ -150,27 +170,62 @@ resets).
 
 ## API
 
-### Server
+### Production server
 
-`src/api/index.ts` wires a single Hono app on port 3001. It mounts ~55 route
-files at `/api/<resource>/…` and serves a `/health` check. CORS is open to
-the Vite dev server origin. Start it with `npm run api` (which uses `tsx`
-and the app tsconfig for path aliases).
+The deployed API is a Cloudflare Pages Function — `functions/api/[[route]].ts`
+imports `src/api/worker.ts` which is the real Hono app. Mounted middleware
+(in order):
+
+1. **CORS** — allowlist of Pages origin + local Vite dev (8787).
+2. **Timing + observability** — `[req] ...` / `[slow-req] ...` lines via
+   `wrangler tail`; W3C `traceparent` propagation; per-request DB time
+   aggregated into `Server-Timing` response header.
+3. **No-cache + security headers** — `X-Content-Type-Options: nosniff`,
+   `X-Frame-Options: DENY`, HSTS, `Referrer-Policy`, `Permissions-Policy`,
+   and CSP (report-only on the SPA shell).
+4. **DB injection** — `SupabaseAdapter` wraps `postgres.js` to expose a
+   D1-shaped interface as `c.var.DB`. Connection routed through Cloudflare
+   Hyperdrive (pooled Supabase Postgres).
+5. **authMiddleware** — soft-auth; reads `hookka_session` HttpOnly cookie
+   first, falls back to `Authorization: Bearer` (legacy clients during
+   migration window). On public-allowlisted routes (`/api/auth/login`,
+   `/api/health`, `/api/fg-units/:id` for QR tracking, etc.) the middleware
+   continues without auth but populates `userId` if a valid token IS
+   present (so handlers can branch on auth state).
+6. **CSRF check** — for cookie-authed mutating methods, requires
+   `X-CSRF-Token` header to match the `hookka_csrf` cookie.
+7. **tenantMiddleware** — resolves `users.orgId` into Hono context;
+   throws `OrgIdRequiredError` (→ 401) if absent.
+8. **Route subapps** — ~70 files in `src/api/routes/` mount at `/api/<resource>`.
+
+The dev server (`src/api/index.ts`, port 3001) wires a parallel Hono app on
+Node that imports `src/api/routes-mock/*` (in-memory fixtures). Start with
+`npm run api`. **This is dev-only and unreachable in production.**
 
 ### Route conventions
 
 Each route file in `src/api/routes/` is a thin `Hono` sub-app:
 
 ```ts
-const app = new Hono()
+const app = new Hono<Env>()
 
-app.get('/',      (c) => c.json({ success, data, total }))
-app.get('/:id',   (c) => c.json({ success, data } | { error }))
-app.post('/',     (c) => /* validate + mutate + return new resource */)
-app.patch('/:id', (c) => /* partial update */)
-app.delete('/:id',(c) => /* soft-delete where applicable */)
+app.get('/', async (c) => {
+  const denied = await requirePermission(c, "<resource>", "read");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const rows = await c.var.DB.prepare(
+    "SELECT * FROM <table> WHERE org_id = ? ORDER BY created_at DESC"
+  ).bind(orgId).all();
+  return c.json({ success: true, data: rows.results, total: rows.results.length });
+});
 
-export default app
+app.post('/', async (c) => {
+  const denied = await requirePermission(c, "<resource>", "create");
+  if (denied) return denied;
+  return withIdempotency(c, "<resource>", c.req.header("Idempotency-Key"),
+    async () => { /* validate + insert + audit emit + return */ }
+  );
+});
 ```
 
 Uniform envelope:
@@ -183,16 +238,17 @@ Uniform envelope:
 { "success": false, "error": "Customer not found" }
 ```
 
-There is no shared middleware for validation today; routes call into
-`src/lib/validation.ts` Zod schemas where the shape warrants it. For the
-MVP, bodies are permissive.
+Validation is opt-in via `src/lib/validation.ts` Zod schemas (broader Zod
+coverage on POST/PATCH bodies is a P2 follow-up — today money handlers
+have first-priority).
 
 ### Data model
 
-All types live in `src/types/index.ts` (public / widely-used) and
-`src/lib/mock-data.ts` (entity interfaces + seed data). The split is
-historical; types that the backend "owns" (enums, core entities) belong in
-`types/` and are imported by both the API and pages.
+Types live in `src/types/index.ts` (canonical for both backend handlers
+and frontend pages). `src/lib/mock-data.ts` is dev-server seed data only
+and **not** shipped to the SPA bundle (ESLint `no-restricted-imports`
+rule blocks value imports of it from `src/pages/**` and
+`src/components/**`).
 
 Relationships worth calling out:
 
@@ -223,18 +279,41 @@ The non-UI heart of the app. A selected tour:
 | File                         | Purpose                                                     |
 | ---------------------------- | ----------------------------------------------------------- |
 | `design-tokens.ts`           | Colours, enum maps, thresholds (see DESIGN-SYSTEM)          |
-| `mock-data.ts`               | In-memory DB + seed data + `generateId` / `getNext*No` gens |
+| `mock-data.ts`               | Dev-only seed + types re-export. Banned from page bundle.   |
+| `pricing-options.ts`         | Static pricing constants (divan/leg/seat/special-order)     |
 | `utils.ts`                   | `cn()`, `formatCurrency()`, `formatDate()`, `getStatusColor` |
 | `pricing.ts`                 | Unit + line total calculation, seat-height price picker     |
+| `costing.ts`                 | FIFO consume + month-floating labor rate (sen integer)      |
 | `scheduling.ts`              | Capacity-aware production scheduling                        |
+| `scheduler.ts`               | `useInterval` / `useTimeout` with `pauseOnHidden`           |
+| `cached-fetch.ts`            | SWR + AbortController + in-flight dedup over `useState` cache |
 | `validation.ts`              | Shared Zod schemas (SO create body, DO create body, …)      |
 | `material-lookup.ts`         | SKU ↔ product match / fuzzy lookup                          |
 | `po-parser.ts`               | Parse supplier-PO emails / PDFs → structured items          |
-| `job-card-persistence.ts`    | Shop-floor localStorage autosave                            |
+| `auth.ts`                    | `getCurrentUser`, `isAuthenticated`, login response handling |
+| `csrf.ts`                    | Read `hookka_csrf` cookie + attach `X-CSRF-Token` header    |
+| `image-compress.ts`          | OffscreenCanvas-based photo compression off main thread     |
+| `monitoring.ts`              | Optional Sentry init (no-op if `VITE_SENTRY_DSN` unset)     |
 | `qr-utils.ts`                | FG-unit QR encode/decode, track URL builder                 |
 | `pdf-utils.ts`               | Shared jsPDF helpers (header, footer, signatures)           |
-| `generate-*-pdf.ts`          | One generator per document (SO, Invoice, DO, GRN, PO, …)    |
+| `generate-*-pdf.ts`          | One generator per document (dynamic-imported on click)      |
 | `production-order-builder.ts`| Explode SO item → PO(s) per department                      |
+
+`src/api/lib/`:
+
+| File                          | Purpose                                                    |
+| ----------------------------- | ---------------------------------------------------------- |
+| `auth-middleware.ts`          | Cookie-first session resolution, soft-auth on public paths |
+| `rbac.ts`                     | `requirePermission(c, resource, action)` gate              |
+| `tenant.ts`                   | `getOrgId`, `withOrgScope` for per-tenant SQL              |
+| `rate-limit.ts`               | KV-backed login + auth-flow rate limiter                   |
+| `idempotency.ts`              | `withIdempotency` for money mutations                      |
+| `audit.ts`                    | `emitAudit` + `buildAuditStatement` for txn batching       |
+| `journal-hash.ts`             | Append-only SHA-256 ledger, `verifyJournalChain` helper    |
+| `email-outbox.ts`             | `enqueueEmail` + `processOutbox` (retry-with-backoff)      |
+| `supabase-compat.ts`          | D1-shaped facade over `postgres.js`; batch = transaction   |
+| `monitoring.ts`               | Optional toucan-js error capture in worker                 |
+| `job-card-persistence.ts`     | Shop-floor localStorage overlay (server-only deps)         |
 
 ### Currency and dates
 
@@ -251,11 +330,9 @@ The non-UI heart of the app. A selected tour:
 
 Places explicitly designed to be swapped:
 
-1. **Mock data → real database**
-   Every API route imports from `lib/mock-data.ts`. Replace those imports
-   with a Prisma / Drizzle / Kysely data-access layer that exposes the same
-   shapes. Types in `src/types/index.ts` and the entity interfaces in
-   `mock-data.ts` are already database-shaped (no UI concerns leak in).
+1. ~~**Mock data → real database**~~ — **DONE 2026-04-27.** Production
+   serves real Postgres via Hyperdrive. The mock-data layer remains
+   only for offline dev (`npm run api`).
 
 2. **`fetch` → React Query**
    Most pages call `fetch('/api/…')` inline. Wrapping those in React Query

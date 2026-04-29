@@ -809,14 +809,16 @@ export default function RDProjectDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to R&D
       </Button>
 
-      {/* Cover Photo — glanceable thumbnail of what this project is about. */}
-      <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden">
+      {/* Cover Photo — glanceable thumbnail of what this project is about.
+          Square 1:1 box capped at 320px wide because uploaded shots are
+          typically square product photos; a full-width banner crops them. */}
+      <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden w-full max-w-[320px] aspect-square">
         {project.coverPhotoUrl ? (
-          <div className="relative">
+          <div className="relative h-full w-full">
             <img
               src={project.coverPhotoUrl}
               alt={`${project.name} cover`}
-              className="w-full h-[200px] object-cover bg-[#FAF9F8]"
+              className="h-full w-full object-cover bg-[#FAF9F8]"
             />
             <div className="absolute top-2 right-2 flex items-center gap-1.5">
               <label className="inline-flex items-center gap-1.5 cursor-pointer rounded-lg border border-[#E2DDD8] bg-white/95 hover:bg-white px-2.5 py-1 text-xs font-medium text-[#1F1D1B] shadow-sm">
@@ -846,7 +848,7 @@ export default function RDProjectDetailPage() {
             </div>
           </div>
         ) : (
-          <label className="flex flex-col items-center justify-center h-[200px] cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
+          <label className="flex h-full w-full flex-col items-center justify-center cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
             <ImagePlus className="h-8 w-8 mb-2" />
             <span className="text-sm font-medium">
               {coverPhotoSaving ? "Uploading..." : "Upload cover photo"}

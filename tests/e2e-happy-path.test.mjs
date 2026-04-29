@@ -202,16 +202,19 @@ test("Invoice PUT handler triggers journal-hash on the post transition (DRAFT->S
     /["']SENT["']/,
     "Invoice route must reference SENT (the post-equivalent state)",
   );
-  // appendJournalEntries import + actual call must both exist.
+  // Journal-hash dual-write must happen on the post transition. Either
+  // appendJournalEntries (standalone-post path) or buildJournalEntryStatements
+  // (Sprint 3 batched-into-business-txn path) satisfies the contract — both
+  // funnel through the same hash-chain logic and both stamp sourceType=invoice.
   assert.match(
     src,
-    /import\s*\{[^}]*\bappendJournalEntries\b[^}]*\}\s*from\s*["']\.\.\/lib\/journal-hash["']/,
-    "Invoice route must import appendJournalEntries from ../lib/journal-hash",
+    /import\s*\{[^}]*\b(appendJournalEntries|buildJournalEntryStatements)\b[^}]*\}\s*from\s*["']\.\.\/lib\/journal-hash["']/,
+    "Invoice route must import appendJournalEntries or buildJournalEntryStatements from ../lib/journal-hash",
   );
   assert.match(
     src,
-    /\bappendJournalEntries\s*\(/,
-    "Invoice route must call appendJournalEntries on the post transition",
+    /\b(appendJournalEntries|buildJournalEntryStatements)\s*\(/,
+    "Invoice route must call appendJournalEntries or buildJournalEntryStatements on the post transition",
   );
   // sourceType: "invoice" — confirms the journal entries are tagged for this
   // domain (so chain-walk verification can scope per source).

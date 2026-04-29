@@ -73,6 +73,17 @@ const ALL_DEPTS = [
   { code: "MAINTENANCE", name: "Maintenance" },
 ];
 
+// Affected product on the case — operator can attach 0..N product SKUs.
+// Optional: SO/CO-sourced cases pre-fill from order lines; EXTERNAL cases
+// add manually. Stored as JSON on service_cases.affected_product_ids
+// (migration 0077).
+type AffectedProduct = {
+  productId: string;
+  code: string;
+  name: string;
+  qty?: number | null;
+};
+
 type ServiceCaseDetail = {
   id: string;
   caseNo: string;
@@ -86,6 +97,7 @@ type ServiceCaseDetail = {
   // result). Editable from the case detail page; auto-saves on blur.
   issueDescription: string;
   issuePhotos: string[];
+  affectedProducts: AffectedProduct[];
   // Root cause + prevention. category/action/owner live here; the actual
   // status tracking moves to a future Prevention Tracker portal — the
   // case detail just OPENS the prevention task.
@@ -155,6 +167,20 @@ export default function ServiceCaseDetailPage() {
     `/api/service-cases/${id}`,
   );
   const caseDetail = resp?.data;
+
+  // Customer lookup — surface the actual name + phone from the customer
+  // master, so the header doesn't only show the customer code (operators
+  // complained the bare code wasn't useful at-a-glance, 2026-04-29).
+  const { data: custResp } = useCachedJson<{
+    data?: Array<{ id: string; code?: string; name: string; phone?: string; mobile?: string }>;
+  }>("/api/customers");
+  const customerRecord = useMemo(() => {
+    if (!caseDetail || !custResp?.data) return null;
+    return (
+      custResp.data.find((c) => c.id === caseDetail.customerId) ?? null
+    );
+  }, [caseDetail, custResp]);
+
   const [advancing, setAdvancing] = useState(false);
   const [spawnOpen, setSpawnOpen] = useState(false);
 
@@ -226,8 +252,21 @@ export default function ServiceCaseDetailPage() {
               {caseDetail.status}
             </span>
           </div>
+          {/* Header customer row — includes name + phone from the customer
+              master if we can match it by id, otherwise just falls back to
+              the snapshot name stored on the case (covers older cases and
+              EXTERNAL cases keyed by name only). */}
           <p className="text-xs text-[#6B7280] mt-1">
-            Customer: <span className="font-medium">{caseDetail.customerName}</span>
+            Customer:{" "}
+            <span className="font-medium">
+              {customerRecord?.code ?? ""}
+              {customerRecord?.code && customerRecord?.name ? " — " : ""}
+              {customerRecord?.name ?? caseDetail.customerName}
+            </span>
+            {(() => {
+              const phone = customerRecord?.phone || customerRecord?.mobile;
+              return phone ? <span className="text-[#9CA3AF]"> ({phone})</span> : null;
+            })()}
             {" · "}
             Source:{" "}
             {sourceHref ? (
@@ -235,7 +274,11 @@ export default function ServiceCaseDetailPage() {
                 {caseDetail.sourceType} {caseDetail.sourceNo || caseDetail.sourceId}
               </Link>
             ) : (
-              <span>EXTERNAL{caseDetail.externalRef ? ` (${caseDetail.externalRef})` : ""}</span>
+              <span>
+                EXTERNAL
+                {caseDetail.externalRef ? ` (${caseDetail.externalRef})` : ""}
+                <span className="text-[#9CA3AF]"> — customer reported directly</span>
+              </span>
             )}
             {caseDetail.createdAt ? ` · Opened ${dateLabel(caseDetail.createdAt)}` : ""}
             {caseDetail.createdByName ? ` by ${caseDetail.createdByName}` : ""}
@@ -290,6 +333,18 @@ export default function ServiceCaseDetailPage() {
         }}
       />
       <PhotosPanel
+        caseDetail={caseDetail}
+        onSaved={() => {
+          invalidateCachePrefix("/api/service-cases");
+          refresh();
+        }}
+      />
+
+      {/* Affected products — operator can attach 0..N SKUs the issue
+          relates to. Optional (case might be a service complaint with no
+          specific product). For SO/CO-sourced cases the operator can
+          quickly add lines that match the source order's products. */}
+      <AffectedProductsPanel
         caseDetail={caseDetail}
         onSaved={() => {
           invalidateCachePrefix("/api/service-cases");
@@ -586,9 +641,18 @@ function IssueDescriptionPanel({
 // ===========================================================================
 // CategoryDetailsForm — per-category structured second-level inputs.
 // ===========================================================================
-// Renders different fields based on the selected root_cause_category. All
-// data sources are fetched lazily here so the rest of the case detail page
-// doesn't pay the cost when no category is set.
+// Renders different fields based on the selected root_cause_category.
+//
+// Design principle (2026-04-29 operator feedback): "种类太多了" — instead
+// of forcing every variant into a rigid enum, each category has a small
+// number of structured dropdowns (dept / product / supplier / 3PL — things
+// that map to other masters) plus a free-text **issue notes** field with
+// example placeholders. The placeholder lists examples in light grey so
+// the operator sees the kind of detail to capture without being boxed in.
+//
+// Lazy fetches: only the active category's data source is loaded. Worker
+// dropdowns also depend on the chosen department, so they re-fetch when
+// dept changes.
 //
 // onChange fires on every keystroke / select change (so the field shows
 // the latest value); onPersist fires on blur of free-text inputs and on
@@ -606,25 +670,84 @@ function CategoryDetailsForm({
   onPersist: (next: RootCauseDetails) => void;
   disabled?: boolean;
 }) {
+  // Currently-selected department (used to filter the worker list for
+  // PRODUCTION / PROCESS / PICKING). String "" → no dept yet.
+  const deptCode = (value.departmentCode as string) ?? "";
+
   // Lazy fetches — only the active category's data source is loaded.
-  const { data: prodResp } = useCachedJson<{ data?: Array<{ id: string; code: string; name: string }> }>(
-    category === "DESIGN" ? "/api/products" : null,
-  );
+  const needsWorkers =
+    (category === "PRODUCTION" || category === "PROCESS" || category === "PICKING") &&
+    !!deptCode;
+  const { data: workersResp } = useCachedJson<{
+    data?: Array<{ id: string; name: string; empNo?: string; departmentCode?: string }>;
+  }>(needsWorkers ? `/api/workers?departmentCode=${encodeURIComponent(deptCode)}` : null);
+
+  const { data: prodResp } = useCachedJson<{
+    data?: Array<{ id: string; code: string; name: string }>;
+  }>(category === "DESIGN" ? "/api/products" : null);
+
   const { data: rmResp } = useCachedJson<{
-    data?: Array<{ id: string; itemCode: string; itemName: string; itemGroup?: string }>;
+    data?: Array<{
+      id: string;
+      itemCode: string;
+      description?: string;
+      itemGroup?: string;
+      mainSupplierCode?: string;
+    }>;
   }>(category === "MATERIAL" ? "/api/raw-materials" : null);
-  const { data: supplierResp } = useCachedJson<{ data?: Array<{ id: string; name: string }> }>(
-    category === "MATERIAL" ? "/api/suppliers" : null,
-  );
+
+  const { data: supplierResp } = useCachedJson<{
+    data?: Array<{ id: string; code?: string; name: string }>;
+  }>(category === "MATERIAL" ? "/api/suppliers" : null);
+
+  // When an RM is picked, look up suppliers bound to it via supplier-materials.
+  // If none, the UI falls back to the full /api/suppliers list.
+  const rmCode = (value.rawMaterialCode as string) ?? "";
+  const { data: smResp } = useCachedJson<{
+    data?: Array<{ supplierId: string; isMainSupplier?: boolean }>;
+  }>(category === "MATERIAL" && rmCode ? `/api/supplier-materials?materialCode=${encodeURIComponent(rmCode)}` : null);
+
   const { data: vehResp } = useCachedJson<{
     data?: Array<{ id: string; companyName?: string; threePlCompany?: string }>;
   }>(category === "TRANSPORT" ? "/api/three-pl-vehicles" : null);
 
-  const products = prodResp?.data ?? [];
-  const rawMaterials = rmResp?.data ?? [];
-  const suppliers = supplierResp?.data ?? [];
-  // Distinct 3PL company names from the vehicle list (the vehicle row is
-  // keyed by company; same company may have multiple lorries).
+  // Wrap each derived list in useMemo so the empty-array fallback doesn't
+  // create a new identity every render (would invalidate downstream useMemos).
+  const workers = useMemo(() => workersResp?.data ?? [], [workersResp]);
+  const products = useMemo(() => prodResp?.data ?? [], [prodResp]);
+  const rawMaterials = useMemo(() => rmResp?.data ?? [], [rmResp]);
+  const suppliers = useMemo(() => supplierResp?.data ?? [], [supplierResp]);
+
+  // Distinct item groups derived from the RM master (so the operator only
+  // sees groups that actually have RMs in the system, not a hardcoded list).
+  const itemGroups = useMemo(() => {
+    const set = new Set<string>();
+    for (const r of rawMaterials) {
+      if (r.itemGroup) set.add(r.itemGroup);
+    }
+    return Array.from(set).sort();
+  }, [rawMaterials]);
+
+  // RMs filtered by the chosen item group (so picking "FABRIC" narrows
+  // the next dropdown to fabric SKUs only). If no group chosen, show all.
+  const selectedGroup = (value.itemGroup as string) ?? "";
+  const rmsForGroup = useMemo(() => {
+    if (!selectedGroup) return rawMaterials;
+    return rawMaterials.filter((r) => r.itemGroup === selectedGroup);
+  }, [rawMaterials, selectedGroup]);
+
+  // Suppliers filtered by the picked RM (via supplier-materials). Falls
+  // back to the full supplier list when no RM picked or no bindings exist.
+  const suppliersForRm = useMemo(() => {
+    if (!rmCode) return suppliers;
+    const bound = smResp?.data ?? [];
+    if (bound.length === 0) return suppliers;
+    const ids = new Set(bound.map((b) => b.supplierId));
+    return suppliers.filter((s) => ids.has(s.id));
+  }, [rmCode, smResp, suppliers]);
+
+  // Distinct 3PL company names from the vehicle list (vehicles share
+  // company; same company may have multiple lorries).
   const threePlCompanies = useMemo(() => {
     const set = new Set<string>();
     for (const v of vehResp?.data ?? []) {
@@ -633,6 +756,17 @@ function CategoryDetailsForm({
     }
     return Array.from(set).sort();
   }, [vehResp]);
+
+  // Product search box state for DESIGN — empty query shows nothing
+  // (avoids dumping the full SKU list).
+  const [productSearch, setProductSearch] = useState("");
+  const productMatches = useMemo(() => {
+    const q = productSearch.trim().toLowerCase();
+    if (!q) return [];
+    return products
+      .filter((p) => p.code.toLowerCase().includes(q) || p.name.toLowerCase().includes(q))
+      .slice(0, 10);
+  }, [productSearch, products]);
 
   function patch(partial: RootCauseDetails) {
     const next = { ...value, ...partial };
@@ -646,15 +780,60 @@ function CategoryDetailsForm({
     onPersist(value);
   }
 
+  // Reusable worker dropdown — depends on dept being set. Lower-case
+  // function returning JSX (called as `{renderWorkerDropdown()}`) instead
+  // of a component, to satisfy react-hooks/static-components.
+  function renderWorkerDropdown() {
+    if (!deptCode) {
+      return (
+        <select
+          disabled
+          className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs text-[#9CA3AF]"
+        >
+          <option>Worker / PIC — pick department first</option>
+        </select>
+      );
+    }
+    return (
+      <select
+        value={(value.workerId as string) ?? ""}
+        onChange={(e) => {
+          const w = workers.find((x) => x.id === e.target.value);
+          patch({
+            workerId: e.target.value || null,
+            workerName: w?.name ?? null,
+            workerEmpNo: w?.empNo ?? null,
+          });
+        }}
+        disabled={disabled}
+        className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+      >
+        <option value="">Worker / PIC — pick one (optional)</option>
+        {workers.map((w) => (
+          <option key={w.id} value={w.id}>
+            {w.empNo ? `${w.empNo} — ` : ""}{w.name}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
   switch (category) {
     case "PRODUCTION":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
           <select
-            value={(value.departmentCode as string) ?? ""}
+            value={deptCode}
             onChange={(e) => {
-              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
-              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+              const dept = PRODUCTION_DEPTS.find((d) => d.code === e.target.value);
+              // Resetting dept also clears worker (worker filtered by dept).
+              patch({
+                departmentCode: e.target.value || null,
+                departmentName: dept?.name ?? null,
+                workerId: null,
+                workerName: null,
+                workerEmpNo: null,
+              });
             }}
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
@@ -664,23 +843,15 @@ function CategoryDetailsForm({
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
           </select>
-          <Input
-            type="text"
-            value={(value.where as string) ?? ""}
-            onChange={(e) => patchOnly({ where: e.target.value })}
+          {renderWorkerDropdown()}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
             onBlur={persistAll}
             disabled={disabled}
-            placeholder="Where in the process? (e.g. left armrest sewing, leg joinery)"
-            className="h-8 text-xs"
-          />
-          <Input
-            type="text"
-            value={(value.workerName as string) ?? ""}
-            onChange={(e) => patchOnly({ workerName: e.target.value })}
-            onBlur={persistAll}
-            disabled={disabled}
-            placeholder="Worker / PIC name (optional)"
-            className="h-8 text-xs"
+            rows={2}
+            placeholder="Where in the process? e.g. left armrest sewing seam, leg joinery glue gap, foam wrapping uneven, framing nail spacing wrong…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
       );
@@ -688,34 +859,89 @@ function CategoryDetailsForm({
     case "DESIGN":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          {/* Product search-then-pick. Once picked, shows the chosen
+              product as a chip with × to clear. */}
+          {value.productId ? (
+            <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-white px-2 py-1 text-xs">
+              <span>
+                <span className="font-mono text-[#6B5C32]">{(value.productCode as string) ?? ""}</span>
+                <span className="text-[#9CA3AF]"> — </span>
+                <span>{(value.productName as string) ?? ""}</span>
+              </span>
+              <button
+                type="button"
+                onClick={() =>
+                  patch({ productId: null, productCode: null, productName: null })
+                }
+                disabled={disabled}
+                className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                title="Clear product"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ) : (
+            <div className="relative">
+              <Input
+                type="text"
+                value={productSearch}
+                onChange={(e) => setProductSearch(e.target.value)}
+                disabled={disabled}
+                placeholder="Search product by code or name (e.g. SOFA-3S, BED-Q)"
+                className="h-8 text-xs"
+              />
+              {productMatches.length > 0 && (
+                <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
+                  {productMatches.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => {
+                        setProductSearch("");
+                        patch({
+                          productId: p.id,
+                          productCode: p.code,
+                          productName: p.name,
+                        });
+                      }}
+                      className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
+                    >
+                      <span className="font-mono text-[#6B5C32]">{p.code}</span>
+                      <span className="text-[#9CA3AF]"> — </span>
+                      <span>{p.name}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {/* Department — which dept can't fulfill this design (so R&D
+              knows who to talk to about the spec change). */}
           <select
-            value={(value.productId as string) ?? ""}
+            value={(value.designDeptCode as string) ?? ""}
             onChange={(e) => {
-              const p = products.find((x) => x.id === e.target.value);
+              const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
               patch({
-                productId: e.target.value || null,
-                productCode: p?.code ?? null,
-                productName: p?.name ?? null,
+                designDeptCode: e.target.value || null,
+                designDeptName: dept?.name ?? null,
               });
             }}
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Product — pick one</option>
-            {products.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.code} — {p.name}
-              </option>
+            <option value="">Which department can't follow the design? — pick one</option>
+            {ALL_DEPTS.map((d) => (
+              <option key={d.code} value={d.code}>{d.name}</option>
             ))}
           </select>
-          <Input
-            type="text"
-            value={(value.component as string) ?? ""}
-            onChange={(e) => patchOnly({ component: e.target.value })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
             onBlur={persistAll}
             disabled={disabled}
-            placeholder="Which component / part? (e.g. armrest, headboard slats, divan support)"
-            className="h-8 text-xs"
+            rows={3}
+            placeholder="What's wrong with the design? e.g. fabric size off by 2cm, wood template nailed at wrong position, foam density too soft, cardboard too thin, hardware mismatch, dimensions wrong, assembly instructions unclear…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
           <Input
             type="text"
@@ -732,6 +958,28 @@ function CategoryDetailsForm({
     case "MATERIAL":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
+          {/* Cascade: Item group → RM (filtered) → Supplier (filtered) */}
+          <select
+            value={selectedGroup}
+            onChange={(e) => {
+              // Changing group resets the RM + supplier (they were tied
+              // to the previous group).
+              patch({
+                itemGroup: e.target.value || null,
+                rawMaterialId: null,
+                rawMaterialCode: null,
+                supplierId: null,
+                supplierName: null,
+              });
+            }}
+            disabled={disabled}
+            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+          >
+            <option value="">Item group — pick one</option>
+            {itemGroups.map((g) => (
+              <option key={g} value={g}>{g}</option>
+            ))}
+          </select>
           <select
             value={(value.rawMaterialId as string) ?? ""}
             onChange={(e) => {
@@ -739,31 +987,26 @@ function CategoryDetailsForm({
               patch({
                 rawMaterialId: e.target.value || null,
                 rawMaterialCode: rm?.itemCode ?? null,
-                itemGroup: rm?.itemGroup ?? null,
+                // Auto-fill group when RM is picked (in case operator picked RM first without group).
+                itemGroup: rm?.itemGroup ?? selectedGroup ?? null,
+                // Reset supplier so they pick a supplier bound to the new RM.
+                supplierId: null,
+                supplierName: null,
               });
             }}
-            disabled={disabled}
+            disabled={disabled || rmsForGroup.length === 0}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Raw material — pick one</option>
-            {rawMaterials.map((r) => (
+            <option value="">
+              {selectedGroup
+                ? `Raw material in ${selectedGroup} — pick one`
+                : "Raw material — pick one (or pick group above first)"}
+            </option>
+            {rmsForGroup.map((r) => (
               <option key={r.id} value={r.id}>
-                {r.itemCode} — {r.itemName}
+                {r.itemCode}{r.description ? ` — ${r.description}` : ""}
               </option>
             ))}
-          </select>
-          <select
-            value={(value.itemGroup as string) ?? ""}
-            onChange={(e) => patch({ itemGroup: e.target.value || null })}
-            disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">Item group (auto-filled when RM picked, override if needed)</option>
-            <option value="FABRIC">Fabric</option>
-            <option value="FOAM">Foam</option>
-            <option value="WOOD">Wood / timber</option>
-            <option value="HARDWARE">Hardware (mechanism / screws / springs)</option>
-            <option value="OTHER">Other</option>
           </select>
           <select
             value={(value.supplierId as string) ?? ""}
@@ -774,19 +1017,25 @@ function CategoryDetailsForm({
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
           >
-            <option value="">Supplier — pick one</option>
-            {suppliers.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}</option>
+            <option value="">
+              {rmCode
+                ? `Supplier of ${rmCode} — pick one`
+                : "Supplier — pick one"}
+            </option>
+            {suppliersForRm.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.code ? `${s.code} — ` : ""}{s.name}
+              </option>
             ))}
           </select>
-          <Input
-            type="text"
-            value={(value.grnRef as string) ?? ""}
-            onChange={(e) => patchOnly({ grnRef: e.target.value })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
             onBlur={persistAll}
             disabled={disabled}
-            placeholder="GRN # / receipt batch (optional)"
-            className="h-8 text-xs"
+            rows={2}
+            placeholder="GRN # / batch / specifics — e.g. fabric color faded after wash, foam crumbling within 6 months, wood warped, hardware threads stripped, GRN-2604-013 batch was off-spec…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
           />
         </div>
       );
@@ -795,10 +1044,16 @@ function CategoryDetailsForm({
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
           <select
-            value={(value.departmentCode as string) ?? ""}
+            value={deptCode}
             onChange={(e) => {
               const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
-              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+              patch({
+                departmentCode: e.target.value || null,
+                departmentName: dept?.name ?? null,
+                workerId: null,
+                workerName: null,
+                workerEmpNo: null,
+              });
             }}
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
@@ -808,6 +1063,7 @@ function CategoryDetailsForm({
               <option key={d.code} value={d.code}>{d.name}</option>
             ))}
           </select>
+          {renderWorkerDropdown()}
           <Input
             type="text"
             value={(value.sopName as string) ?? ""}
@@ -817,41 +1073,33 @@ function CategoryDetailsForm({
             placeholder="SOP name (e.g. 'pre-shipment dust-cover check')"
             className="h-8 text-xs"
           />
-          <select
-            value={(value.gapType as string) ?? ""}
-            onChange={(e) => patch({ gapType: e.target.value || null })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
+            onBlur={persistAll}
             disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">Gap type — pick one</option>
-            <option value="MISSING">Missing — no SOP yet</option>
-            <option value="OUTDATED">Outdated — SOP exists but is wrong</option>
-            <option value="NOT_ENFORCED">Not enforced — SOP exists but skipped</option>
-          </select>
+            rows={2}
+            placeholder="Gap details — e.g. SOP missing entirely, outdated wording, skipped under time pressure, worker not trained, jig/tool missing, SOP wording too ambiguous, only senior knows it…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
+          />
         </div>
       );
 
     case "CUSTOMER":
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
-          <select
-            value={(value.subReason as string) ?? ""}
-            onChange={(e) => patch({ subReason: e.target.value || null })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
+            onBlur={persistAll}
             disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">Sub-reason — pick one</option>
-            <option value="MISUSE">Misuse</option>
-            <option value="WRONG_MEASUREMENT">Wrong measurement (door / space)</option>
-            <option value="PET_DAMAGE">Pet damage</option>
-            <option value="WRONG_CLEANING">Wrong cleaning chemical</option>
-            <option value="BUYER_REMORSE">Buyer's remorse / change of mind</option>
-            <option value="WRONG_SETUP">Wrong setup at home</option>
-            <option value="OTHER">Other</option>
-          </select>
+            rows={2}
+            placeholder="Sub-reason — e.g. misuse, wrong measurement (door / space), pet damage, wrong cleaning chemical, buyer's remorse, wrong setup at home…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
+          />
           <p className="text-[10px] text-[#9CA3AF]">
-            Specific details belong in the Issue Description above (5W). This sub-reason is for
-            reporting / category roll-ups.
+            The 5W story stays in the Issue Description above. This sub-reason is for category
+            roll-ups only — keep it short.
           </p>
         </div>
       );
@@ -870,20 +1118,15 @@ function CategoryDetailsForm({
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
-          <select
-            value={(value.damageType as string) ?? ""}
-            onChange={(e) => patch({ damageType: e.target.value || null })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
+            onBlur={persistAll}
             disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">Damage / issue type — pick one</option>
-            <option value="DROPPED">Dropped during loading / unloading</option>
-            <option value="SCRAPED">Scraped against wall / floor</option>
-            <option value="WATER">Water damage (no tarp / open truck)</option>
-            <option value="WRONG_ROUTE">Wrong route / address</option>
-            <option value="LATE">Late delivery</option>
-            <option value="OTHER">Other</option>
-          </select>
+            rows={2}
+            placeholder="Issue — e.g. dropped during unloading, scraped against wall, water damage from open truck, wrong route / address, late delivery, customer not contacted before arrival…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
+          />
           <Input
             type="text"
             value={(value.doNo as string) ?? ""}
@@ -917,20 +1160,15 @@ function CategoryDetailsForm({
             placeholder="Sales person name"
             className="h-8 text-xs"
           />
-          <select
-            value={(value.errorType as string) ?? ""}
-            onChange={(e) => patch({ errorType: e.target.value || null })}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
+            onBlur={persistAll}
             disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">What was wrong on the order? — pick one</option>
-            <option value="SIZE">Size / dimensions</option>
-            <option value="COLOR">Colour</option>
-            <option value="FABRIC">Fabric / material spec</option>
-            <option value="HEIGHT">Leg / divan height</option>
-            <option value="PRICE">Price / discount</option>
-            <option value="OTHER">Other</option>
-          </select>
+            rows={2}
+            placeholder="Order error — e.g. size wrong, color wrong, fabric spec off, leg / divan height off, price / discount entered wrong, missing add-on, wrong delivery address…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
+          />
         </div>
       );
 
@@ -938,10 +1176,16 @@ function CategoryDetailsForm({
       return (
         <div className="space-y-2 rounded border border-[#E8D8B2] bg-[#FAF7F0] p-2">
           <select
-            value={(value.departmentCode as string) ?? ""}
+            value={deptCode}
             onChange={(e) => {
               const dept = ALL_DEPTS.find((d) => d.code === e.target.value);
-              patch({ departmentCode: e.target.value || null, departmentName: dept?.name ?? null });
+              patch({
+                departmentCode: e.target.value || null,
+                departmentName: dept?.name ?? null,
+                workerId: null,
+                workerName: null,
+                workerEmpNo: null,
+              });
             }}
             disabled={disabled}
             className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
@@ -950,20 +1194,16 @@ function CategoryDetailsForm({
             <option value="PACKING">Packing</option>
             <option value="WAREHOUSING">Warehousing</option>
           </select>
-          <select
-            value={(value.missingItem as string) ?? ""}
-            onChange={(e) => patch({ missingItem: e.target.value || null })}
+          {renderWorkerDropdown()}
+          <textarea
+            value={(value.notes as string) ?? ""}
+            onChange={(e) => patchOnly({ notes: e.target.value })}
+            onBlur={persistAll}
             disabled={disabled}
-            className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
-          >
-            <option value="">What was missing / wrong? — pick one</option>
-            <option value="LEGS">Legs</option>
-            <option value="HARDWARE">Hardware bag (screws / wrench)</option>
-            <option value="MANUAL">Assembly manual</option>
-            <option value="ACCESSORY">Accessory (cushion, throw, etc.)</option>
-            <option value="WRONG_PRODUCT">Wrong product shipped</option>
-            <option value="OTHER">Other</option>
-          </select>
+            rows={2}
+            placeholder="Issue — e.g. legs missing, hardware bag missing, manual missing, wrong product shipped, manifest says X but actual Y, mislabeled box, packaging damaged before shipment, quantity off, accessory missing…"
+            className="w-full rounded border border-[#E2DDD8] bg-white px-2 py-1.5 text-xs placeholder:text-[#C4B59A]"
+          />
         </div>
       );
 
@@ -977,6 +1217,169 @@ function CategoryDetailsForm({
     default:
       return null;
   }
+}
+
+// ===========================================================================
+// AffectedProductsPanel — attach 0..N product SKUs to the case.
+// ===========================================================================
+// Optional: a case might be about a single product, a multi-product order,
+// or zero products (a customer service complaint about delivery, billing,
+// etc.). Operator can search-add and remove SKUs; persisted as JSON on
+// service_cases.affected_product_ids (migration 0077).
+function AffectedProductsPanel({
+  caseDetail,
+  onSaved,
+}: {
+  caseDetail: ServiceCaseDetail;
+  onSaved: () => void;
+}) {
+  const { toast } = useToast();
+  const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
+  const { data: prodResp } = useCachedJson<{
+    data?: Array<{ id: string; code: string; name: string }>;
+  }>("/api/products");
+  const products = useMemo(() => prodResp?.data ?? [], [prodResp]);
+
+  // Filter products that are NOT already attached, and match the search
+  // term (operator types a few chars; no result dump until they search).
+  const matches = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return [];
+    const already = new Set(caseDetail.affectedProducts.map((p) => p.productId));
+    return products
+      .filter((p) => !already.has(p.id))
+      .filter(
+        (p) =>
+          p.code.toLowerCase().includes(q) ||
+          p.name.toLowerCase().includes(q),
+      )
+      .slice(0, 10);
+  }, [search, products, caseDetail.affectedProducts]);
+
+  async function persist(next: AffectedProduct[]) {
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/service-cases/${caseDetail.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ affectedProducts: next }),
+      });
+      const data = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !data?.success) throw new Error(data?.error || `HTTP ${res.status}`);
+      onSaved();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function addProduct(p: { id: string; code: string; name: string }) {
+    const next = [
+      ...caseDetail.affectedProducts,
+      { productId: p.id, code: p.code, name: p.name, qty: null },
+    ];
+    setSearch("");
+    void persist(next);
+  }
+
+  function removeProduct(productId: string) {
+    void persist(caseDetail.affectedProducts.filter((p) => p.productId !== productId));
+  }
+
+  function setQty(productId: string, qty: number | null) {
+    const next = caseDetail.affectedProducts.map((p) =>
+      p.productId === productId ? { ...p, qty } : p,
+    );
+    void persist(next);
+  }
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">
+          Affected Products ({caseDetail.affectedProducts.length})
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {/* Search-then-add. Empty query shows no list (avoids dropdown
+            of 1000+ SKUs). Click a result to add. */}
+        <div className="relative">
+          <Input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            disabled={saving}
+            placeholder="Search product by code or name to add (optional — leave empty if no specific SKU)"
+            className="h-8 text-xs"
+          />
+          {matches.length > 0 && (
+            <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
+              {matches.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => addProduct(p)}
+                  className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
+                >
+                  <span className="font-mono text-[#6B5C32]">{p.code}</span>
+                  <span className="text-[#9CA3AF]"> — </span>
+                  <span>{p.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {caseDetail.affectedProducts.length === 0 ? (
+          <p className="text-[10px] text-[#9CA3AF]">
+            No products attached. Optional — only add if the issue is tied to
+            specific SKUs. SO/CO-sourced cases can also reference the source
+            order's lines without re-attaching them here.
+          </p>
+        ) : (
+          <ul className="divide-y divide-[#E2DDD8] border border-[#E2DDD8] rounded">
+            {caseDetail.affectedProducts.map((p) => (
+              <li
+                key={p.productId}
+                className="flex items-center justify-between px-2 py-1.5 text-xs"
+              >
+                <div className="min-w-0 flex-1">
+                  <span className="font-mono text-[#6B5C32]">{p.code}</span>
+                  <span className="text-[#9CA3AF]"> — </span>
+                  <span className="text-[#1F1D1B]">{p.name}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Input
+                    type="number"
+                    min={0}
+                    value={p.qty ?? ""}
+                    onChange={(e) => {
+                      const n = e.target.value === "" ? null : Number(e.target.value);
+                      setQty(p.productId, Number.isFinite(n as number) ? n : null);
+                    }}
+                    disabled={saving}
+                    placeholder="Qty"
+                    className="h-7 w-16 text-xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removeProduct(p.productId)}
+                    disabled={saving}
+                    className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                    title="Remove"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </CardContent>
+    </Card>
+  );
 }
 
 // ===========================================================================

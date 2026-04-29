@@ -26,6 +26,7 @@
   "adjustedAt": "adjusted_at",
   "adjustedBy": "adjusted_by",
   "adjustedByName": "adjusted_by_name",
+  "affectedProductIds": "affected_product_ids",
   "afterJson": "after_json",
   "agingOn": "aging_on",
   "allowancesSen": "allowances_sen",

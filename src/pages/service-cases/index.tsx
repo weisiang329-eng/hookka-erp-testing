@@ -234,7 +234,13 @@ export function CreateServiceCaseModal({
   );
   const [sourceId, setSourceId] = useState<string>(presetSourceId ?? "");
   const [sourceQuery, setSourceQuery] = useState("");
+  // EXTERNAL-source customer picker — search the customer master and
+  // attach { id, code, name } so the case is properly linked (not just a
+  // free-text name like before). 2026-04-29 operator request.
+  const [externalCustomerId, setExternalCustomerId] = useState<string>("");
   const [externalCustomerName, setExternalCustomerName] = useState("");
+  const [externalCustomerCode, setExternalCustomerCode] = useState("");
+  const [externalCustomerSearch, setExternalCustomerSearch] = useState("");
   const [externalRef, setExternalRef] = useState("");
   const [issueDescription, setIssueDescription] = useState("");
   const [photos, setPhotos] = useState<string[]>([]);
@@ -248,6 +254,24 @@ export function CreateServiceCaseModal({
 
   const { data: soResp } = useCachedJson<{ data?: SalesOrderApi[] }>("/api/sales-orders");
   const { data: coResp } = useCachedJson<{ data?: ConsignmentOrderApi[] }>("/api/consignment-orders");
+  const { data: customersResp } = useCachedJson<{
+    data?: Array<{ id: string; code: string; name: string; phone?: string | null }>;
+  }>(sourceType === "EXTERNAL" ? "/api/customers" : null);
+
+  // Search-then-pick — empty query shows nothing (avoids dropdown of all
+  // customers). Filtered by code OR name. Results capped at 10.
+  const customerMatches = useMemo(() => {
+    if (sourceType !== "EXTERNAL") return [];
+    const q = externalCustomerSearch.trim().toLowerCase();
+    if (!q) return [];
+    return (customersResp?.data ?? [])
+      .filter(
+        (c) =>
+          c.code.toLowerCase().includes(q) ||
+          c.name.toLowerCase().includes(q),
+      )
+      .slice(0, 10);
+  }, [sourceType, externalCustomerSearch, customersResp]);
 
   const sourceOptions: SourceOrderOption[] = useMemo(() => {
     if (sourceType === "SO") {
@@ -277,7 +301,7 @@ export function CreateServiceCaseModal({
 
   const sourceOk =
     sourceType === "EXTERNAL"
-      ? externalCustomerName.trim().length > 0
+      ? !!externalCustomerId && externalCustomerName.trim().length > 0
       : !!sourceId;
 
   // ---- Photo helpers (resize → base64) ----
@@ -317,6 +341,10 @@ export function CreateServiceCaseModal({
         body: JSON.stringify({
           sourceType,
           sourceId: sourceType === "EXTERNAL" ? null : sourceId,
+          // For EXTERNAL we now require a real customer from /api/customers
+          // — backend gets both customerId and customerName (the
+          // snapshot name on the case row). 2026-04-29.
+          customerId: sourceType === "EXTERNAL" ? externalCustomerId : undefined,
           customerName: sourceType === "EXTERNAL" ? externalCustomerName : undefined,
           externalRef: sourceType === "EXTERNAL" ? externalRef || null : undefined,
           issueDescription: issueDescription || null,
@@ -394,13 +422,64 @@ export function CreateServiceCaseModal({
                 </div>
               ) : sourceType === "EXTERNAL" ? (
                 <div className="space-y-1">
-                  <Input
-                    type="text"
-                    value={externalCustomerName}
-                    onChange={(e) => setExternalCustomerName(e.target.value)}
-                    placeholder="Customer name (required)"
-                    className="h-8 text-sm"
-                  />
+                  {/* Customer picker — search by code or name from the
+                      customer master. Once picked, shows as a chip with a
+                      Change button to clear the selection. */}
+                  {externalCustomerId ? (
+                    <div className="flex items-center justify-between rounded border border-[#E2DDD8] bg-[#FAF9F7] px-2 py-1.5 text-sm">
+                      <div className="truncate">
+                        <span className="font-mono">{externalCustomerCode}</span>
+                        <span className="text-[#9CA3AF]"> — </span>
+                        <span>{externalCustomerName}</span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setExternalCustomerId("");
+                          setExternalCustomerName("");
+                          setExternalCustomerCode("");
+                          setExternalCustomerSearch("");
+                        }}
+                        className="ml-2 text-xs text-[#6B5C32] hover:underline"
+                      >
+                        Change
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <Input
+                        type="text"
+                        value={externalCustomerSearch}
+                        onChange={(e) => setExternalCustomerSearch(e.target.value)}
+                        placeholder="Search customer by code or name (required)"
+                        className="h-8 text-sm"
+                      />
+                      {customerMatches.length > 0 && (
+                        <div className="absolute z-10 mt-1 w-full rounded border border-[#E2DDD8] bg-white shadow-sm max-h-48 overflow-auto">
+                          {customerMatches.map((c) => (
+                            <button
+                              key={c.id}
+                              type="button"
+                              onClick={() => {
+                                setExternalCustomerId(c.id);
+                                setExternalCustomerName(c.name);
+                                setExternalCustomerCode(c.code);
+                                setExternalCustomerSearch("");
+                              }}
+                              className="w-full text-left px-2 py-1.5 text-xs hover:bg-[#FAF7F0]"
+                            >
+                              <span className="font-mono text-[#6B5C32]">{c.code}</span>
+                              <span className="text-[#9CA3AF]"> — </span>
+                              <span>{c.name}</span>
+                              {c.phone ? (
+                                <span className="text-[#9CA3AF]"> ({c.phone})</span>
+                              ) : null}
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   <Input
                     type="text"
                     value={externalRef}

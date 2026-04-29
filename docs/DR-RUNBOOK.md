@@ -1,10 +1,11 @@
 # Disaster Recovery Runbook
 
-**Status:** Phase C #7 quick-win scaffold landed 2026-04-25. The cron
-trigger and R2 binding are commented out in `wrangler.toml`; the daily
-backup code is shipped behind runtime guards. The first quarterly
-**drill** is still TODO — read the "What MUST happen" section at the
-bottom.
+**Status:** Phase C #7 quick-win scaffold landed 2026-04-25; rewritten to
+target Supabase Storage (was Cloudflare R2) on 2026-04-29 by the
+storage-supabase-migration. The cron trigger is still commented out in
+`wrangler.toml`; the daily backup code is shipped behind runtime guards.
+The first quarterly **drill** is still TODO — read the "What MUST happen"
+section at the bottom.
 
 ---
 
@@ -20,44 +21,69 @@ bottom.
 > ≤ 1h target requires WAL-shipping and is tracked as Phase C #7
 > finish (post-quick-win).
 
+> **Storage trade-off (2026-04-29):** moving from R2 to Supabase Storage
+> means the daily dump now lives **in the same vendor** as the primary
+> Postgres — a true "Supabase region wipe" event would take both with
+> it. Mitigations: (a) the `.dump` is also a download artifact on every
+> GitHub Actions run for 90 days; (b) Supabase Pro PITR (7 days) covers
+> the most common "oops" failure modes; (c) a quarterly off-vendor
+> snapshot (manual download → 1Password attachment) covers the
+> doomsday case until WAL shipping lands. Document these as you turn
+> them on.
+
 ---
 
 ## What ships in this scaffold
 
-Two complementary backup paths:
+Two complementary backup paths, both writing to **Supabase Storage**
+(bucket `hookka-files`, private):
 
-1. **`scripts/backup-supabase.mjs`** — admin-side `pg_dump -Fc`
-   shelled-out and uploaded to R2. Highest fidelity, requires a host
-   with `pg_dump` installed. Runs ad-hoc or via GitHub Actions on a
-   schedule.
+1. **`.github/workflows/backup.yml`** — GitHub Actions runner that does
+   `pg_dump -Fc` against Supabase prod and `curl`-uploads the .dump to
+   `hookka-files/backups/supabase/`. Highest fidelity. Runs daily at
+   18:00 UTC + on `workflow_dispatch`.
 
-2. **`src/api/cron/daily-backup.ts`** — Workers Cron Trigger
-   that does a logical SELECT-to-JSON-Lines dump and writes
-   `r2://hookka-files/backups/supabase/<date>.json.gz`. Runs entirely
-   inside CF infrastructure, no admin laptop required. Lower fidelity
-   (no constraints, no sequences) but always-on.
+2. **`src/api/cron/daily-backup.ts`** — Workers Cron Trigger that does
+   a logical SELECT-to-JSON-Lines dump and writes
+   `hookka-files/backups/supabase/<date>.json.gz` via the Supabase
+   Storage v1 REST API. Runs entirely inside CF infrastructure, no
+   admin laptop required. Lower fidelity (no constraints, no sequences)
+   but always-on.
 
-Both write to the same R2 prefix:
-`r2://hookka-files/backups/supabase/`. Retention: **90 days**, pruned
-automatically by both paths.
+Both write to the same Storage prefix:
+`hookka-files/backups/supabase/`. Retention: **90 days**, pruned
+automatically by the Workers cron path (Supabase Storage doesn't have
+native lifecycle rules the way Cloudflare R2 did, so the prune is now a
+code-level concern only — see `daily-backup.ts:pruneOldBackups`).
 
 ---
 
 ## Step 0 — Prerequisites
 
-* R2 bucket `hookka-files` provisioned (see `docs/R2-SETUP.md`).
-* Cloudflare R2 API tokens issued for the Node script path:
-  ```bash
-  # In the dashboard: R2 → Manage R2 API Tokens → Create API token
-  # Permissions: Object Read & Write, restricted to hookka-files.
-  ```
-* `pg_dump` installed where you'll run the Node script (PostgreSQL 16
-  client matches Supabase's current major version).
-* `@aws-sdk/client-s3` installed. The script declares this lazily so
-  it doesn't bloat the Worker build:
-  ```bash
-  npm install --save-dev @aws-sdk/client-s3
-  ```
+* **Supabase Storage bucket bootstrap (one-time, manual):**
+  1. Supabase Dashboard → Storage → New bucket
+  2. Name: `hookka-files`
+  3. Visibility: **Private**
+  4. (Optional) Storage → Policies → confirm a `service_role can do
+     anything` policy exists; service_role bypasses RLS but explicit
+     policies make audits cleaner.
+* **GitHub repo secrets** (set BEFORE the daily backup ever fires):
+  * `SUPABASE_PROD_URL` — pooler connection string for `pg_dump`.
+    Supabase dashboard → Project Settings → Database → Pooler URL.
+    MUST include `?sslmode=require`.
+  * `SUPABASE_PROJECT_REF` — slug before `.supabase.co` in your project
+    URL. Not a hard secret on its own but kept here so prod / preview
+    can swap independently.
+  * `SUPABASE_SERVICE_ROLE_KEY` — service_role key from Project
+    Settings → API. Treat like a root password.
+  * `CRON_SECRET` — `openssl rand -hex 32`, mirror to CF Pages.
+* **Wrangler secrets** for the Workers cron path:
+  * `wrangler secret put SUPABASE_SERVICE_KEY` — same service_role key
+    as above. (`SUPABASE_PROJECT_REF` lives in `wrangler.toml [vars]`.)
+* `pg_dump` installed on whichever runner does the .dump path. The
+  GitHub Actions workflow auto-installs `postgresql-client-16`; if you
+  re-introduce a Node script, install it locally (Postgres 16 matches
+  Supabase's current major version).
 
 ---
 
@@ -92,39 +118,23 @@ That gets RPO from 24h to 1h with no other infrastructure change.
 
 ---
 
-## Step 2 — Schedule the Node-side `pg_dump` (optional but recommended)
+## Step 2 — `.github/workflows/backup.yml` is already wired
 
-Add a GitHub Actions job:
+The repo ships the GitHub Actions workflow at
+`.github/workflows/backup.yml`. It runs daily at 18:00 UTC, does
+`pg_dump -Fc -Z 9` against `SUPABASE_PROD_URL`, and POSTs the .dump to
+the Supabase Storage REST endpoint:
 
-```yaml
-# .github/workflows/backup.yml
-name: Daily backup
-on:
-  schedule:
-    - cron: "30 17 * * *"   # 01:30 SGT (30 min before the Workers cron)
-  workflow_dispatch:
-jobs:
-  backup:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: |
-          sudo apt-get update && sudo apt-get install -y postgresql-client-16
-          npm install --save-dev @aws-sdk/client-s3
-      - run: node scripts/backup-supabase.mjs
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: hookka-files
+```
+https://<SUPABASE_PROJECT_REF>.supabase.co/storage/v1/object/hookka-files/backups/supabase/backup-YYYY-MM-DD.dump
 ```
 
-The Workers cron is the always-on safety net; the GitHub Actions cron
-gives you a higher-fidelity `.dump.gz` you can `pg_restore` with one
-command.
+Auth is `Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY`. The
+workflow verifies the upload by HEADing the object info endpoint and
+checking the size sentinel (>1 KB).
+
+The Workers cron is the always-on safety net; this workflow gives you a
+higher-fidelity `.dump` you can `pg_restore` with one command.
 
 ---
 
@@ -152,20 +162,30 @@ npx supabase projects create hookka-erp-recovery \
 
 Capture the new connection string — call it `$RECOVERY_DATABASE_URL`.
 
-**2. Download the most recent backup from R2 (5 min)**
+**2. Download the most recent backup from Supabase Storage (5 min)**
 
-Prefer the `.dump.gz` (highest fidelity) over `.json.gz` (logical
-fallback):
+Prefer the `.dump` (highest fidelity, from `.github/workflows/backup.yml`)
+over `.json.gz` (logical fallback, from the Workers cron):
 
 ```bash
-LATEST_DUMP=$(aws s3 ls s3://hookka-files/backups/supabase/ \
-  --endpoint-url $R2_ENDPOINT \
-  | grep '.dump.gz$' | sort | tail -1 | awk '{print $4}')
+# List the latest dumps via the Supabase Storage v1 list endpoint.
+LIST=$(curl -sS \
+  -X POST "https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/list/hookka-files" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prefix":"backups/supabase","limit":50,"sortBy":{"column":"name","order":"desc"}}')
 
-aws s3 cp s3://hookka-files/backups/supabase/$LATEST_DUMP ./recovery.dump.gz \
-  --endpoint-url $R2_ENDPOINT
+# Pick the newest backup-*.dump filename out of the response.
+LATEST=$(echo "$LIST" | grep -oE '"name":"backup-[0-9-]+\.dump"' \
+  | head -1 | sed -E 's/.*"name":"(.*)".*/\1/')
+echo "Restoring from: $LATEST"
 
-gunzip recovery.dump.gz
+# Download it.
+curl -sS -o ./recovery.dump \
+  "https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/authenticated/hookka-files/backups/supabase/${LATEST}" \
+  -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
+
+ls -lh ./recovery.dump
 ```
 
 **3. Restore via `pg_restore` (45-90 min for current data size)**
@@ -176,6 +196,11 @@ pg_restore --verbose --no-owner --no-acl \
   --dbname=$RECOVERY_DATABASE_URL \
   ./recovery.dump
 ```
+
+(If the GitHub Actions step uploaded a gzipped `.dump.gz` rather than a
+raw `.dump`, `gunzip recovery.dump.gz` first. The current workflow
+ships an already-zlib-compressed custom-format dump — `pg_restore`
+reads that natively.)
 
 If only `.json.gz` is available (cron path, no Node script ran):
 
@@ -272,15 +297,18 @@ support.
 
 ### Required GitHub repo secrets (set BEFORE the daily backup ever fires)
 
-| Secret name           | Where to get it                                                | Notes                                  |
-| --------------------- | -------------------------------------------------------------- | -------------------------------------- |
-| `SUPABASE_PROD_URL`   | Supabase dashboard → Project Settings → Database → Pooler URL  | Must include `?sslmode=require`        |
-| `R2_ACCESS_KEY_ID`    | Cloudflare R2 → Manage R2 API Tokens → Create token            | Scope: Object Read & Write, hookka-files only |
-| `R2_SECRET_ACCESS_KEY`| Same dialog as above (one-time reveal)                         | Store in 1Password "ops-vault"         |
-| `R2_ENDPOINT`         | Cloudflare R2 → bucket details → S3-compatible endpoint URL    | Format: `https://<acct>.r2.cloudflarestorage.com` |
-| `CRON_SECRET`         | Generate via `openssl rand -hex 32` once; mirror to CF Pages   | Required by qc-cron.yml + future MV-refresh worker |
+| Secret name                 | Where to get it                                                | Notes                                  |
+| --------------------------- | -------------------------------------------------------------- | -------------------------------------- |
+| `SUPABASE_PROD_URL`         | Supabase dashboard → Project Settings → Database → Pooler URL  | Must include `?sslmode=require`        |
+| `SUPABASE_PROJECT_REF`      | Slug from your Supabase project URL (`<ref>.supabase.co`)      | Public-ish but kept here for env parity |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase dashboard → Project Settings → API → service_role     | Treat like a root password; bypasses RLS |
+| `CRON_SECRET`               | Generate via `openssl rand -hex 32` once; mirror to CF Pages   | Required by qc-cron.yml + future MV-refresh worker |
 
 `gh secret set <NAME> --body "<value>"` for each.
+
+> **Removed (was on R2):** `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`,
+> `R2_ENDPOINT`. Drop these from the repo / org-level secrets after
+> the migration deploys; they're no longer referenced anywhere.
 
 ### Drill steps (target end-to-end ≤ 4 hours; record actual)
 
@@ -290,19 +318,22 @@ support.
    - Copy the pooler connection string. Set `RECOVERY_DATABASE_URL` in
      your local shell — DO NOT commit it.
 
-2. **Pull the latest backup from R2 (5 min).**
+2. **Pull the latest backup from Supabase Storage (5 min).**
    ```bash
-   export AWS_ACCESS_KEY_ID=$R2_ACCESS_KEY_ID
-   export AWS_SECRET_ACCESS_KEY=$R2_SECRET_ACCESS_KEY
-   export AWS_DEFAULT_REGION=auto
+   # List the .dump files under backups/supabase/.
+   LIST=$(curl -sS \
+     -X POST "https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/list/hookka-files" \
+     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"prefix":"backups/supabase","limit":50,"sortBy":{"column":"name","order":"desc"}}')
 
-   LATEST=$(aws s3 ls s3://hookka-files/backups/supabase/ \
-     --endpoint-url "$R2_ENDPOINT" \
-     | grep '\.dump$' | sort | tail -1 | awk '{print $4}')
+   LATEST=$(echo "$LIST" | grep -oE '"name":"backup-[0-9-]+\.dump"' \
+     | head -1 | sed -E 's/.*"name":"(.*)".*/\1/')
    echo "Restoring from: $LATEST"
 
-   aws s3 cp "s3://hookka-files/backups/supabase/$LATEST" \
-     ./recovery.dump --endpoint-url "$R2_ENDPOINT"
+   curl -sS -o ./recovery.dump \
+     "https://${SUPABASE_PROJECT_REF}.supabase.co/storage/v1/object/authenticated/hookka-files/backups/supabase/${LATEST}" \
+     -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY"
    ```
    Verify the local file is ≥ 1 MB (a silent pg_dump truncation slips
    past the workflow's 1 KB sentinel only when the dataset is tiny).
@@ -389,14 +420,23 @@ then, treat the launch as gated on it.
 
 > **Status:** MUST be enabled in the Supabase dashboard BEFORE the
 > launch checklist closes. PITR is independent of (and complementary
-> to) the R2 dumps in this runbook — Supabase Pro plan provides up to
-> 7 days of WAL retention so you can roll the prod project back to any
-> second within that window without losing the dump-bridge writes.
+> to) the Storage-resident dumps in this runbook — Supabase Pro plan
+> provides up to 7 days of WAL retention so you can roll the prod
+> project back to any second within that window without losing the
+> dump-bridge writes.
 >
-> The R2 dumps are the disaster-recovery floor (the Cloudflare account
-> dies, Supabase dies, or the cron is broken — we still have an
-> off-account copy). PITR is the day-to-day "oops, that migration
-> truncated a column" undo button.
+> The Supabase Storage dumps are the disaster-recovery floor (the cron
+> is broken, a migration corrupts a table, the prior week's backup is
+> the only place a row still exists). PITR is the day-to-day "oops,
+> that migration truncated a column" undo button.
+>
+> **Caveat after the storage-supabase-migration:** the dumps now live
+> on Supabase Storage, in the same vendor as the primary database. A
+> full-vendor outage takes both with it. Mitigations:
+> (a) GitHub Actions retains the .dump as a workflow artifact for 90
+>     days — that's an off-vendor floor accessible via `gh run download`.
+> (b) Plan a quarterly manual download → 1Password attachment for the
+>     deep-doomsday case until WAL-shipping to a third vendor lands.
 
 ### Enable / verify checklist
 
@@ -412,16 +452,18 @@ then, treat the launch as gated on it.
       authorizes the rollback, what the cutoff for "use PITR vs
       reverse the bad write manually" is.
 
-### How PITR vs R2 dumps relate
+### How PITR vs Storage dumps relate
 
-| Failure mode                              | Use PITR              | Use R2 dump           |
-| ----------------------------------------- | --------------------- | --------------------- |
-| Bad migration / dropped column / typo'd UPDATE | Yes (within 7 days) | No (overkill — 24h granularity) |
-| Supabase project hard-deleted / billing lapse | No (data is gone)  | Yes (off-account copy) |
-| Cloudflare account compromise → R2 wipe    | Yes (Supabase intact) | No (R2 is gone too)  |
-| > 7-day-old data corruption notice         | No (out of window)    | Yes (90-day R2 retention) |
+| Failure mode                                  | Use PITR              | Use Storage dump       | GitHub Actions artifact |
+| --------------------------------------------- | --------------------- | ---------------------- | ----------------------- |
+| Bad migration / dropped column / typo'd UPDATE | Yes (within 7 days)  | No (overkill — 24h granularity) | No |
+| > 7-day-old data corruption notice            | No (out of window)    | Yes (90-day retention) | Yes (90 days) |
+| Supabase project hard-deleted / billing lapse | No (data is gone)     | No (Storage is gone too) | Yes — last off-vendor copy |
+| Workflow upload failed silently for a week    | Yes (PITR independent)| Possibly stale         | Yes (artifact still there) |
 
-The two layers cover each other's failure modes; both are required.
+The three layers cover each other's failure modes. The artifact column
+exists *because* Storage now lives in the same vendor as Postgres after
+the storage-supabase-migration — see the caveat above.
 
 ---
 

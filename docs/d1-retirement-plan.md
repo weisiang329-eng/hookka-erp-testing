@@ -24,7 +24,12 @@ Retirement runs AFTER:
    `src/api/lib/d1-compat.ts` comments).
 3. Any cron / external integration that imports from D1 directly has been
    pointed at Supabase.
-4. Final D1 export snapshot archived to R2 (step 2 below).
+4. Final D1 export snapshot archived to off-account object storage
+   (step 2 below; the historical instructions reference R2, which has
+   since been swapped for Supabase Storage by the
+   storage-supabase-migration. The archive itself was a one-time
+   2026-04-27 operation and didn't need re-archiving when the
+   storage backend changed).
 
 ## Execution steps
 
@@ -36,7 +41,15 @@ Retirement runs AFTER:
 echo "true" | wrangler pages secret put D1_WRITE_FROZEN
 ```
 
-### 2. Take final snapshot + archive to R2
+### 2. Take final snapshot + archive to object storage
+
+> **Historical note:** the original 2026-04-27 D1 retirement archived to
+> Cloudflare R2 (`hookka-erp-archives` bucket). After the
+> storage-supabase-migration we use Supabase Storage instead. The
+> commands below are kept as-is for archeological reference; if a
+> future re-archive is needed, replace the `wrangler r2 object put`
+> with a `curl -X POST` to the Supabase Storage object endpoint (see
+> `docs/STORAGE-SETUP.md`).
 
 ```bash
 wrangler d1 export hookka-erp-db --remote --output=d1-final.sql

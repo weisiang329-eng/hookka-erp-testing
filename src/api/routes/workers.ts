@@ -63,16 +63,26 @@ function genId(): string {
 }
 
 // GET /api/workers?departmentId=dept-1
+//   ?departmentCode=FAB_CUT — alternative when caller has the code (e.g.
+//   the Service Case root-cause form picks dept by code, not id).
 app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — workers:read.
   const denied = await requirePermission(c, "workers", "read");
   if (denied) return denied;
   const departmentId = c.req.query("departmentId");
-  const stmt = departmentId
-    ? c.var.DB.prepare(
-        "SELECT * FROM workers WHERE departmentId = ? ORDER BY empNo",
-      ).bind(departmentId)
-    : c.var.DB.prepare("SELECT * FROM workers ORDER BY empNo");
+  const departmentCode = c.req.query("departmentCode");
+  let stmt: D1PreparedStatement;
+  if (departmentId) {
+    stmt = c.var.DB.prepare(
+      "SELECT * FROM workers WHERE departmentId = ? ORDER BY empNo",
+    ).bind(departmentId);
+  } else if (departmentCode) {
+    stmt = c.var.DB.prepare(
+      "SELECT * FROM workers WHERE departmentCode = ? ORDER BY empNo",
+    ).bind(departmentCode);
+  } else {
+    stmt = c.var.DB.prepare("SELECT * FROM workers ORDER BY empNo");
+  }
   const res = await stmt.all<WorkerRow>();
   const data = (res.results ?? []).map(rowToWorker);
   return c.json({ success: true, data, total: data.length });

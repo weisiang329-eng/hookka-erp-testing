@@ -67,6 +67,7 @@ type ServiceCaseRow = {
   rootCauseCategory: RootCauseCategory | null;
   rootCauseNotes: string | null;
   rootCauseDetails: string | null;
+  affectedProductIds: string | null;
   preventionAction: string | null;
   preventionStatus: PreventionStatus | null;
   preventionOwner: string | null;
@@ -146,6 +147,17 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
       /* tolerate */
     }
   }
+  // affected products: array of {productId, code, name, qty?}. Optional —
+  // case can have 0..N products. Migration 0077.
+  let affectedProducts: Array<Record<string, unknown>> = [];
+  if (row.affectedProductIds) {
+    try {
+      const parsed = JSON.parse(row.affectedProductIds);
+      if (Array.isArray(parsed)) affectedProducts = parsed as Array<Record<string, unknown>>;
+    } catch {
+      /* tolerate */
+    }
+  }
   return {
     id: row.id,
     caseNo: row.caseNo,
@@ -159,6 +171,7 @@ function rowToApi(row: ServiceCaseRow, orders: ServiceOrderRow[] = []) {
     issuePhotos: photos,
     actionLog,
     rootCauseDetails,
+    affectedProducts,
     rootCauseCategory: row.rootCauseCategory,
     rootCauseNotes: row.rootCauseNotes ?? "",
     preventionAction: row.preventionAction ?? "",
@@ -339,16 +352,22 @@ app.post("/", async (c) => {
       ? JSON.stringify((body.issuePhotos as unknown[]).map(String))
       : null;
 
+    // Affected products on the case (migration 0077). Stored as JSON array
+    // of {productId, code, name, qty?} — optional, can be 0..N.
+    const affectedProductsJson = Array.isArray(body.affectedProducts)
+      ? JSON.stringify(body.affectedProducts)
+      : null;
+
     await c.var.DB
       .prepare(
         `INSERT INTO service_cases (
            id, caseNo, sourceType, sourceId, sourceNo,
            customerId, customerName, customerState,
-           issueDescription, issuePhotos,
+           issueDescription, issuePhotos, affectedProductIds,
            rootCauseCategory, rootCauseNotes,
            preventionAction, preventionStatus, preventionOwner,
            status, externalRef, createdBy, createdByName, created_at, closedAt, notes
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, NULL, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, NULL, ?)`,
       )
       .bind(
         id,
@@ -361,6 +380,7 @@ app.post("/", async (c) => {
         customerState,
         (body.issueDescription as string) ?? null,
         photosJson,
+        affectedProductsJson,
         rcCategory ?? null,
         (body.rootCauseNotes as string) ?? null,
         (body.preventionAction as string) ?? null,
@@ -443,11 +463,21 @@ app.put("/:id", async (c) => {
           ? null
           : JSON.stringify(body.rootCauseDetails);
 
+    // affectedProducts — JSON array of {productId, code, name, qty?}.
+    // Migration 0077. Optional, undefined = keep existing.
+    const affectedProductsJson =
+      body.affectedProducts === undefined
+        ? existing.affectedProductIds
+        : Array.isArray(body.affectedProducts)
+          ? JSON.stringify(body.affectedProducts)
+          : null;
+
     await c.var.DB
       .prepare(
         `UPDATE service_cases SET
            issueDescription = ?, issuePhotos = ?, notes = ?,
            rootCauseCategory = ?, rootCauseNotes = ?, rootCauseDetails = ?,
+           affectedProductIds = ?,
            preventionAction = ?, preventionStatus = ?, preventionOwner = ?,
            externalRef = ?, actionLog = ?
          WHERE id = ?`,
@@ -465,6 +495,7 @@ app.put("/:id", async (c) => {
           ? ((body.rootCauseNotes as string) ?? null)
           : existing.rootCauseNotes,
         rcDetailsJson,
+        affectedProductsJson,
         body.preventionAction !== undefined
           ? ((body.preventionAction as string) ?? null)
           : existing.preventionAction,

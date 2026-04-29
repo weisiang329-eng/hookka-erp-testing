@@ -50,7 +50,7 @@ const app = new Hono<Env>();
 // ---------------------------------------------------------------------------
 // Row types (mirror migrations/0001_init.sql exactly)
 // ---------------------------------------------------------------------------
-type ProductionOrderRow = {
+export type ProductionOrderRow = {
   id: string;
   poNo: string;
   salesOrderId: string | null;
@@ -92,7 +92,7 @@ type ProductionOrderRow = {
   updatedAt: string | null;
 };
 
-type JobCardRow = {
+export type JobCardRow = {
   id: string;
   productionOrderId: string;
   departmentId: string | null;
@@ -896,7 +896,7 @@ async function nextSOHNumber(db: D1Database): Promise<string> {
 //                   → deriveFGStock() now sees PO.jobCards[UPH].allCompleted
 //                     and surfaces an FG row
 // ---------------------------------------------------------------------------
-async function applyWipInventoryChange(
+export async function applyWipInventoryChange(
   db: D1Database,
   poRow: ProductionOrderRow,
   jcRow: JobCardRow,

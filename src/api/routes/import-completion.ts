@@ -1,0 +1,591 @@
+// ---------------------------------------------------------------------------
+// import-completion.ts — one-shot historical job_card completion importer.
+//
+// Wei Siang is migrating ~3000 historical orders from Google Sheets into the
+// ERP. The source data has, per (custPONo, deptCode), a completion date and
+// up to two short-name PIC tags. This endpoint marks the matching job_cards
+// COMPLETED with the right PIC, completion date, and `actualMinutes`, AND
+// fires the same downstream cascades a normal scan-driven completion would:
+//
+//   1. applyWipInventoryChange  — wip_items rows for upstream consume +
+//      this dept's producer-add (UPHOLSTERY also zeros upstream branch
+//      terminals; PACKING is skipped from this cascade by design).
+//   2. postJobCardLabor         — LABOR_POSTED cost_ledger entry per JC.
+//   3. postProductionOrderCompletion — fires once per PO when ALL its JCs
+//      reach COMPLETED. Generates fg_units, writes fg_batches, runs the
+//      Track F cost cascade (RM FIFO consume → FG cost backfill → WIP
+//      marker). All steps inside this helper are idempotent.
+//
+// Dry-run mode (?dryRun=true on body) returns the same response shape with
+// counts only and zero side effects so the caller can validate match rate
+// before committing.
+//
+// Worker name resolution
+//   The Google Sheets log uses short names ("AUNG", "PHOO", "MIN") that
+//   don't always match workers.name 1:1. WORKER_NAME_MAP below is the
+//   canonical short-name → full-name table (keyed by GS short, value =
+//   workers.name to look up). Two short names ("AUNG KO", "KYAW") have
+//   real ambiguity in the worker roster — we pick the documented first
+//   match and surface a picWarnings entry so the caller can spot-check.
+//
+// Chunking
+//   Default: 100 rows per call. Caller passes ?cursor=<n> to resume from
+//   the next chunk. When `cursor` is omitted, processing starts at row 0
+//   of the rows[] array supplied in the body. Mirrors the cursor pattern
+//   from /api/bom/resync-job-card-times — caller loops until
+//   `cursor.hasMore === false`.
+//
+// Permission
+//   production-orders:update — same gate as the PATCH handler that the
+//   shop-floor app uses to flip JC status. This is intentional: the
+//   importer is a privileged backfill tool, not an end-user surface.
+// ---------------------------------------------------------------------------
+import { Hono } from "hono";
+import type { Env } from "../worker";
+import { requirePermission } from "../lib/rbac";
+import {
+  applyWipInventoryChange,
+  type JobCardRow,
+  type ProductionOrderRow,
+} from "./production-orders";
+import { postJobCardLabor } from "../lib/po-cost-cascade";
+import { postProductionOrderCompletion } from "../lib/fg-completion";
+
+const app = new Hono<Env>();
+
+// ---------------------------------------------------------------------------
+// Worker name map — Google Sheets short name → workers.name lookup value.
+// Embedded in code (not DB) since this is a one-shot import.
+//
+// Ambiguous entries: the GS short matches multiple workers in the roster.
+// We pick the documented first match per Wei Siang's note. The importer
+// surfaces a picWarnings entry for each one so the caller knows which
+// JCs were resolved on the ambiguous branch.
+// ---------------------------------------------------------------------------
+const WORKER_NAME_MAP: Record<string, { name: string; ambiguous?: boolean }> = {
+  PHOO: { name: "EI PHOO WEI" },
+  ZIN: { name: "ZIN MIN NWE" },
+  ANN: { name: "ANN" },
+  YEE: { name: "OO SAN YEE" },
+  PHYU: { name: "PHYU SIN MOE" },
+  KHIN: { name: "KHIN AYE MU" },
+  SHEIN: { name: "OHN MAR SHEIN" },
+  LIN: { name: "KHIN MAUNG LIN" },
+  "KYAW OO": { name: "KYAW OO" },
+  "AUNG KO": { name: "AUNG KO MYINT", ambiguous: true }, // also AUNG KO OO
+  AZAW: { name: "MYINT TUN" },
+  THAR: { name: "NYEIN CHAN AUNG" },
+  "ZAW LIN": { name: "ZAW LIN" },
+  MIN: { name: "HLAING MIN AUNG" },
+  "ZAW MOE": { name: "ZAW MOE TUN" },
+  "YE LI SOE": { name: "YE LI SOE" },
+  KYAW: { name: "KYAW ZIN OO", ambiguous: true }, // also AUNG KYAW SOE
+  AUNG: { name: "AUNG THEIN WIN" },
+  AMANG: { name: "A MANG" },
+};
+
+// ---------------------------------------------------------------------------
+// Request / response shapes
+// ---------------------------------------------------------------------------
+type InputRow = {
+  custPONo: string;
+  deptCode: string;
+  completedDate?: string;
+  pic1Name?: string;
+  pic2Name?: string;
+};
+
+type RequestBody = {
+  dryRun?: boolean;
+  rows: InputRow[];
+};
+
+type PicWarning = {
+  row: number;
+  name: string;
+  reason: string;
+};
+
+type ErrorEntry = {
+  row: number;
+  custPONo: string;
+  message: string;
+};
+
+// In-memory worker name → row cache for one request, so the same short
+// name doesn't re-hit the DB on every input row.
+type WorkerLookupRow = { id: string; name: string };
+type WorkerCache = Map<string, WorkerLookupRow | null>;
+
+async function lookupWorkerByName(
+  db: D1Database,
+  fullName: string,
+  cache: WorkerCache,
+): Promise<WorkerLookupRow | null> {
+  if (cache.has(fullName)) return cache.get(fullName) ?? null;
+  const row = await db
+    .prepare("SELECT id, name FROM workers WHERE name = ? LIMIT 1")
+    .bind(fullName)
+    .first<WorkerLookupRow>();
+  cache.set(fullName, row ?? null);
+  return row ?? null;
+}
+
+// Resolve a Google-Sheets short name → workers row. Returns:
+//   { worker: row|null, warning: optional message }
+// The `warning` is non-null whenever:
+//   - short name is not in WORKER_NAME_MAP (skip-and-warn)
+//   - short name maps to a full name that doesn't exist in workers (skip-and-warn)
+//   - short name is documented as ambiguous (resolve to first match, warn)
+async function resolvePic(
+  db: D1Database,
+  shortName: string,
+  cache: WorkerCache,
+): Promise<{ worker: WorkerLookupRow | null; warning: string | null }> {
+  const trimmed = shortName.trim();
+  if (!trimmed) return { worker: null, warning: null };
+  const upper = trimmed.toUpperCase();
+  const entry = WORKER_NAME_MAP[upper];
+  if (!entry) {
+    return {
+      worker: null,
+      warning: `short name "${trimmed}" not in WORKER_NAME_MAP`,
+    };
+  }
+  const worker = await lookupWorkerByName(db, entry.name, cache);
+  if (!worker) {
+    return {
+      worker: null,
+      warning: `mapped name "${entry.name}" not found in workers table`,
+    };
+  }
+  if (entry.ambiguous) {
+    return {
+      worker,
+      warning: `short name "${trimmed}" is ambiguous — resolved to "${entry.name}" by first-match rule`,
+    };
+  }
+  return { worker, warning: null };
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — load PO + JC rows by salesOrderId / dept, in batches of 1.
+// We don't try to bulk-load across the full input batch because input
+// rows can collide (same custPO appears in multiple rows for different
+// depts), and the per-row processing already fans out across multiple
+// matched SOs/POs/JCs. Within one row we run the queries serially —
+// that's fine since the chunk cap (default 100) keeps the total bounded.
+// ---------------------------------------------------------------------------
+type SalesOrderIdRow = { id: string };
+
+async function findSalesOrderIdsByCustPO(
+  db: D1Database,
+  custPONo: string,
+): Promise<string[]> {
+  const res = await db
+    .prepare("SELECT id FROM sales_orders WHERE customerPO = ?")
+    .bind(custPONo)
+    .all<SalesOrderIdRow>();
+  return (res.results ?? []).map((r) => r.id);
+}
+
+async function findProductionOrdersBySO(
+  db: D1Database,
+  salesOrderId: string,
+): Promise<ProductionOrderRow[]> {
+  const res = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerPOId,
+              customerReference, customerName, customerState, companySOId,
+              consignmentOrderId, companyCOId, productId, productCode,
+              productName, itemCategory, sizeCode, sizeLabel, fabricCode,
+              quantity, gapInches, divanHeightInches, legHeightInches,
+              specialOrder, notes, status, currentDepartment, progress,
+              startDate, targetEndDate, completedDate, rackingNumber,
+              stockedIn, created_at AS createdAt, updated_at AS updatedAt
+         FROM production_orders WHERE salesOrderId = ?`,
+    )
+    .bind(salesOrderId)
+    .all<ProductionOrderRow>();
+  return res.results ?? [];
+}
+
+async function findJobCardsByPO(
+  db: D1Database,
+  productionOrderId: string,
+): Promise<JobCardRow[]> {
+  const res = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentId, departmentCode,
+              departmentName, sequence, status, dueDate, wipKey, wipCode,
+              wipType, wipLabel, wipQty, branchKey, prerequisiteMet,
+              pic1Id, pic1Name, pic2Id, pic2Name, completedDate, estMinutes,
+              actualMinutes, category, productionTimeMinutes, overdue,
+              rackingNumber
+         FROM job_cards WHERE productionOrderId = ?`,
+    )
+    .bind(productionOrderId)
+    .all<JobCardRow>();
+  return res.results ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Per-row processing
+// ---------------------------------------------------------------------------
+type RowResult = {
+  matched: boolean;
+  noSoMatch: boolean;
+  noJcMatch: boolean;
+  jcUpdated: number;
+  posCompleted: number;
+  warnings: PicWarning[];
+  errors: ErrorEntry[];
+};
+
+async function processRow(
+  db: D1Database,
+  rowIndex: number,
+  input: InputRow,
+  workerCache: WorkerCache,
+  dryRun: boolean,
+): Promise<RowResult> {
+  const result: RowResult = {
+    matched: false,
+    noSoMatch: false,
+    noJcMatch: false,
+    jcUpdated: 0,
+    posCompleted: 0,
+    warnings: [],
+    errors: [],
+  };
+
+  if (!input.custPONo || !input.deptCode) {
+    result.errors.push({
+      row: rowIndex,
+      custPONo: input.custPONo ?? "",
+      message: "missing custPONo or deptCode",
+    });
+    return result;
+  }
+
+  const deptCode = input.deptCode.toUpperCase().trim();
+
+  let pic1: WorkerLookupRow | null = null;
+  let pic2: WorkerLookupRow | null = null;
+  if (input.pic1Name) {
+    const r = await resolvePic(db, input.pic1Name, workerCache);
+    pic1 = r.worker;
+    if (r.warning) {
+      result.warnings.push({
+        row: rowIndex,
+        name: input.pic1Name,
+        reason: r.warning,
+      });
+    }
+  }
+  if (input.pic2Name) {
+    const r = await resolvePic(db, input.pic2Name, workerCache);
+    pic2 = r.worker;
+    if (r.warning) {
+      result.warnings.push({
+        row: rowIndex,
+        name: input.pic2Name,
+        reason: r.warning,
+      });
+    }
+  }
+
+  const soIds = await findSalesOrderIdsByCustPO(db, input.custPONo);
+  if (soIds.length === 0) {
+    result.noSoMatch = true;
+    return result;
+  }
+  result.matched = true;
+
+  // Validate completedDate format. Empty string treated as "skip date".
+  const completedDate =
+    input.completedDate && input.completedDate.trim().length > 0
+      ? input.completedDate.trim()
+      : null;
+  if (completedDate && !/^\d{4}-\d{2}-\d{2}$/.test(completedDate)) {
+    result.errors.push({
+      row: rowIndex,
+      custPONo: input.custPONo,
+      message: `completedDate "${completedDate}" not ISO YYYY-MM-DD`,
+    });
+    return result;
+  }
+
+  const setStatus = completedDate !== null;
+
+  // Walk every PO under every matched SO, every matching JC.
+  let jcMatchedAny = false;
+  for (const soId of soIds) {
+    const pos = await findProductionOrdersBySO(db, soId);
+    for (const po of pos) {
+      const allJcs = await findJobCardsByPO(db, po.id);
+      const matchingJcs = allJcs.filter(
+        (j) => (j.departmentCode || "").toUpperCase() === deptCode,
+      );
+      if (matchingJcs.length === 0) continue;
+      jcMatchedAny = true;
+
+      for (const jc of matchingJcs) {
+        // Build the patched JC snapshot.
+        const updated: JobCardRow = { ...jc };
+        if (pic1) {
+          updated.pic1Id = pic1.id;
+          updated.pic1Name = pic1.name;
+        }
+        if (pic2) {
+          updated.pic2Id = pic2.id;
+          updated.pic2Name = pic2.name;
+        }
+
+        const wasDone =
+          jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
+
+        if (setStatus) {
+          updated.status = "COMPLETED";
+          updated.completedDate = completedDate;
+          updated.overdue = "COMPLETED";
+          // Use planned minutes as actual since we don't have real timing.
+          // The labor cascade reads jc.actualMinutes when > 0, otherwise
+          // falls back to productionTimeMinutes / estMinutes — setting
+          // it explicitly here keeps the cost ledger deterministic.
+          updated.actualMinutes = jc.productionTimeMinutes || jc.estMinutes;
+        }
+
+        if (dryRun) {
+          // Counts only — no UPDATE, no cascades.
+          result.jcUpdated++;
+          continue;
+        }
+
+        try {
+          await db
+            .prepare(
+              `UPDATE job_cards SET
+                 status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
+                 pic2Id = ?, pic2Name = ?, actualMinutes = ?, overdue = ?
+               WHERE id = ?`,
+            )
+            .bind(
+              updated.status,
+              updated.completedDate,
+              updated.pic1Id,
+              updated.pic1Name ?? "",
+              updated.pic2Id,
+              updated.pic2Name ?? "",
+              updated.actualMinutes,
+              updated.overdue,
+              updated.id,
+            )
+            .run();
+        } catch (err) {
+          result.errors.push({
+            row: rowIndex,
+            custPONo: input.custPONo,
+            message: `UPDATE job_cards failed for jcId=${jc.id}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+          continue;
+        }
+
+        result.jcUpdated++;
+
+        // Cascades only fire when the JC actually transitioned INTO a DONE
+        // state on this call. PIC-only updates (no completedDate) don't
+        // need them. Defensive try/catch on every cascade — a downstream
+        // failure must not void the JC UPDATE that already committed.
+        if (setStatus && !wasDone) {
+          // Refresh allJcs view so applyWipInventoryChange sees this JC's
+          // new status (sibling/branch lookup looks at allJcs).
+          const refreshed = allJcs.map((j) =>
+            j.id === updated.id ? updated : j,
+          );
+
+          try {
+            await applyWipInventoryChange(
+              db,
+              po,
+              updated,
+              "COMPLETED",
+              refreshed,
+              jc.status,
+            );
+          } catch (err) {
+            console.error("[import-completion] WIP cascade failed", {
+              jcId: jc.id,
+              poId: po.id,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+
+          try {
+            await postJobCardLabor(db, updated.id, po.id);
+          } catch (err) {
+            console.error("[import-completion] postJobCardLabor failed", {
+              jcId: jc.id,
+              poId: po.id,
+              err: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+
+      // After processing this PO's matching JCs, check if ALL its JCs are
+      // now COMPLETED (or TRANSFERRED). If yes, flip the PO row and fire
+      // postProductionOrderCompletion. Idempotent — the helper short-
+      // circuits if fg_units / fg_batches / FG_COMPLETED ledger entry
+      // already exist.
+      if (setStatus) {
+        // Re-query rather than trust the local refreshed map: the PO may
+        // have other dept JCs we didn't touch in this row, and another
+        // import row in the same batch may have moved them.
+        const freshJcs = await findJobCardsByPO(db, po.id);
+        const allDone =
+          freshJcs.length > 0 &&
+          freshJcs.every(
+            (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+          );
+        if (allDone && po.status !== "COMPLETED") {
+          const nowIso = new Date().toISOString();
+          const today = nowIso.split("T")[0];
+          if (!dryRun) {
+            try {
+              await db
+                .prepare(
+                  `UPDATE production_orders SET
+                     status = 'COMPLETED', progress = 100,
+                     currentDepartment = 'PACKING',
+                     completedDate = ?, updated_at = ?
+                   WHERE id = ?`,
+                )
+                .bind(today, nowIso, po.id)
+                .run();
+            } catch (err) {
+              result.errors.push({
+                row: rowIndex,
+                custPONo: input.custPONo,
+                message: `UPDATE production_orders failed for poId=${po.id}: ${
+                  err instanceof Error ? err.message : String(err)
+                }`,
+              });
+              continue;
+            }
+
+            try {
+              await postProductionOrderCompletion(db, po.id);
+            } catch (err) {
+              console.error(
+                "[import-completion] postProductionOrderCompletion failed",
+                {
+                  poId: po.id,
+                  err: err instanceof Error ? err.message : String(err),
+                },
+              );
+            }
+          }
+          result.posCompleted++;
+        }
+      }
+    }
+  }
+
+  if (!jcMatchedAny) {
+    result.noJcMatch = true;
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/import/job-card-completion
+// ---------------------------------------------------------------------------
+app.post("/job-card-completion", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: RequestBody;
+  try {
+    body = (await c.req.json()) as RequestBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+
+  if (!body || !Array.isArray(body.rows)) {
+    return c.json(
+      { success: false, error: "body.rows must be an array" },
+      400,
+    );
+  }
+
+  const dryRun = body.dryRun === true;
+
+  // Cursor + limit: rows are processed sequentially from the supplied
+  // body.rows array. ?cursor=<n> skips the first N rows; default 0.
+  // ?limit=<m> caps the chunk; default 100, hard cap 500. Caller loops
+  // until cursor.hasMore === false.
+  const cursorParam = c.req.query("cursor");
+  const limitParam = c.req.query("limit");
+  const startIdx = cursorParam ? Math.max(0, parseInt(cursorParam, 10) || 0) : 0;
+  const rawLimit = limitParam ? parseInt(limitParam, 10) || 100 : 100;
+  const limit = Math.min(500, Math.max(1, rawLimit));
+  const endIdx = Math.min(body.rows.length, startIdx + limit);
+  const slice = body.rows.slice(startIdx, endIdx);
+
+  const db = c.var.DB;
+  const workerCache: WorkerCache = new Map();
+
+  let matched = 0;
+  let noSoMatch = 0;
+  let noJcMatch = 0;
+  let jcUpdated = 0;
+  let posCompleted = 0;
+  const picWarnings: PicWarning[] = [];
+  const errors: ErrorEntry[] = [];
+
+  for (let i = 0; i < slice.length; i++) {
+    const absoluteIdx = startIdx + i;
+    const r = slice[i];
+    try {
+      const res = await processRow(db, absoluteIdx, r, workerCache, dryRun);
+      if (res.matched) matched++;
+      if (res.noSoMatch) noSoMatch++;
+      if (res.noJcMatch) noJcMatch++;
+      jcUpdated += res.jcUpdated;
+      posCompleted += res.posCompleted;
+      picWarnings.push(...res.warnings);
+      errors.push(...res.errors);
+    } catch (err) {
+      errors.push({
+        row: absoluteIdx,
+        custPONo: r?.custPONo ?? "",
+        message: `unhandled error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      });
+    }
+  }
+
+  const hasMore = endIdx < body.rows.length;
+  const nextCursor = hasMore ? String(endIdx) : null;
+
+  return c.json({
+    success: true,
+    dryRun,
+    totalRows: body.rows.length,
+    matched,
+    noSoMatch,
+    noJcMatch,
+    jcUpdated,
+    picWarnings,
+    posCompleted,
+    errors,
+    cursor: { hasMore, nextCursor },
+  });
+});
+
+export default app;

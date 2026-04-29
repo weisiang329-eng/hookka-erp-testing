@@ -558,6 +558,10 @@ import qcPending from "./routes/qc-pending";
 import rdProjects from "./routes/rd-projects";
 import scheduling from "./routes/scheduling";
 import scanPo from "./routes/scan-po";
+// One-shot historical job_card completion importer (Wei Siang's GS migration).
+// Server-only super-admin tool gated by production-orders:update; see
+// routes/import-completion.ts for the per-row resolution + cascade logic.
+import importCompletion from "./routes/import-completion";
 import serviceOrders from "./routes/service-orders";
 import serviceCases from "./routes/service-cases";
 
@@ -685,6 +689,11 @@ app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
 app.route("/api/scheduling", scheduling);
 app.route("/api/scan-po", scanPo);
+// One-shot historical job_card completion importer. POST
+// /api/import/job-card-completion drives backfill of pre-ERP orders from a
+// Google Sheets export — see routes/import-completion.ts for body shape +
+// cursor pagination.
+app.route("/api/import", importCompletion);
 // Phase 3 — Service Orders (换货服务): customer-reported defects on shipped
 // SOs/COs. Three resolution modes (REPRODUCE / STOCK_SWAP / REPAIR); see
 // routes/service-orders.ts for the full flow.

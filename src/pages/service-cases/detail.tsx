@@ -711,9 +711,14 @@ function CategoryDetailsForm({
     data?: Array<{ supplierId: string; isMainSupplier?: boolean }>;
   }>(category === "MATERIAL" && rmCode ? `/api/supplier-materials?materialCode=${encodeURIComponent(rmCode)}` : null);
 
-  const { data: vehResp } = useCachedJson<{
-    data?: Array<{ id: string; companyName?: string; threePlCompany?: string }>;
-  }>(category === "TRANSPORT" ? "/api/three-pl-vehicles" : null);
+  // 3PL company list. The `drivers` table is the 3PL provider master
+  // (each row = one 3PL company, with `name` as the company name); the
+  // `three_pl_vehicles` table only stores plate numbers and references
+  // a provider via providerId, so vehicles can't surface a company name
+  // on their own.
+  const { data: providersResp } = useCachedJson<{
+    data?: Array<{ id: string; name: string }>;
+  }>(category === "TRANSPORT" ? "/api/drivers" : null);
 
   // Wrap each derived list in useMemo so the empty-array fallback doesn't
   // create a new identity every render (would invalidate downstream useMemos).
@@ -750,16 +755,12 @@ function CategoryDetailsForm({
     return suppliers.filter((s) => ids.has(s.id));
   }, [rmCode, smResp, suppliers]);
 
-  // Distinct 3PL company names from the vehicle list (vehicles share
-  // company; same company may have multiple lorries).
   const threePlCompanies = useMemo(() => {
-    const set = new Set<string>();
-    for (const v of vehResp?.data ?? []) {
-      const name = v.companyName || v.threePlCompany || "";
-      if (name) set.add(name);
-    }
-    return Array.from(set).sort();
-  }, [vehResp]);
+    const names = (providersResp?.data ?? [])
+      .map((p) => p.name)
+      .filter((n): n is string => !!n);
+    return Array.from(new Set(names)).sort();
+  }, [providersResp]);
 
   // Product search box state for DESIGN — empty query shows nothing
   // (avoids dumping the full SKU list).

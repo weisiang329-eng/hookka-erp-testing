@@ -32,6 +32,16 @@ const STATUS_COLOR: Record<CaseStatus, string> = {
   CANCELLED: "bg-[#F5DCDC] text-[#7A2E24]",
 };
 
+const ROOT_CAUSE_COLOR: Record<string, string> = {
+  PRODUCTION: "bg-[#F4EFE3] text-[#6B5C32]",
+  DESIGN: "bg-[#E0EAF4] text-[#3A5670]",
+  MATERIAL: "bg-[#E8D8B2] text-[#6B5C32]",
+  PROCESS: "bg-[#E2DDD8] text-[#5A5550]",
+  CUSTOMER: "bg-[#F5DCDC] text-[#7A2E24]",
+  TRANSPORT: "bg-[#FAF7F0] text-[#6B5C32]",
+  OTHER: "bg-[#F0ECE9] text-[#5A5550]",
+};
+
 // Service CASES can be opened against any source order status — a customer
 // might complain about an order that hasn't shipped yet ("where is it?",
 // "I want to change colour before it ships", "cancel my order"). Only
@@ -50,6 +60,10 @@ type ServiceCaseListItem = {
   customerName: string;
   status: CaseStatus;
   createdAt: string;
+  closedAt: string;
+  rootCauseCategory: string | null;
+  issueDescription: string;
+  affectedProducts: Array<{ productId: string; code: string; name: string; qty?: number | null }>;
   orders: { id: string; serviceOrderNo: string; status: string; mode: string | null }[];
 };
 
@@ -65,6 +79,15 @@ function dateLabel(iso: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return iso;
   return d.toLocaleDateString("en-MY", { year: "numeric", month: "short", day: "2-digit" });
+}
+
+function daysSince(iso: string, until?: string): number {
+  if (!iso) return 0;
+  const start = new Date(iso).getTime();
+  if (isNaN(start)) return 0;
+  const endMs = until ? new Date(until).getTime() : Date.now();
+  const end = isNaN(endMs) ? Date.now() : endMs;
+  return Math.floor((end - start) / 86400000);
 }
 
 export default function ServiceCasesListPage() {
@@ -129,6 +152,10 @@ export default function ServiceCasesListPage() {
                   <th className="py-2 px-3">Case No</th>
                   <th className="py-2 px-3">Customer</th>
                   <th className="py-2 px-3">Source</th>
+                  <th className="py-2 px-3">Root Cause</th>
+                  <th className="py-2 px-3">Issue</th>
+                  <th className="py-2 px-3">Affected</th>
+                  <th className="py-2 px-3">Days Open</th>
                   <th className="py-2 px-3">Orders</th>
                   <th className="py-2 px-3">Status</th>
                   <th className="py-2 px-3">Created</th>
@@ -137,7 +164,7 @@ export default function ServiceCasesListPage() {
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-8 px-3 text-center text-[#9CA3AF] text-xs">
+                    <td colSpan={10} className="py-8 px-3 text-center text-[#9CA3AF] text-xs">
                       {cases.length === 0
                         ? "No service cases yet — click 'New Service Case' to log the first one."
                         : "No cases in this status."}
@@ -154,6 +181,51 @@ export default function ServiceCasesListPage() {
                       <td className="py-2 px-3 text-xs">{c.customerName}</td>
                       <td className="py-2 px-3 text-xs text-[#6B7280]">
                         {c.sourceType} {c.sourceNo}
+                      </td>
+                      <td className="py-2 px-3">
+                        {c.rootCauseCategory ? (
+                          <span
+                            className={`text-[10px] uppercase px-2 py-0.5 rounded ${ROOT_CAUSE_COLOR[c.rootCauseCategory] ?? "bg-[#F0ECE9] text-[#5A5550]"}`}
+                          >
+                            {c.rootCauseCategory}
+                          </span>
+                        ) : (
+                          <span className="text-[#9CA3AF]">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-xs max-w-[280px] truncate">
+                        {c.issueDescription ? (
+                          (() => {
+                            const flat = c.issueDescription.replace(/\s+/g, " ").trim();
+                            return flat.length > 50 ? `${flat.slice(0, 50)}…` : flat;
+                          })()
+                        ) : (
+                          <span className="text-[#9CA3AF]">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-xs">
+                        {c.affectedProducts && c.affectedProducts.length > 0 ? (
+                          <span className="font-mono text-[10px] text-[#6B5C32]">
+                            {c.affectedProducts.length} SKU{c.affectedProducts.length === 1 ? "" : "s"}
+                          </span>
+                        ) : (
+                          <span className="text-[#9CA3AF]">—</span>
+                        )}
+                      </td>
+                      <td className="py-2 px-3 text-xs">
+                        {(() => {
+                          if (c.status === "CANCELLED") {
+                            return <span className="text-[#9CA3AF]">—</span>;
+                          }
+                          if (c.status === "CLOSED") {
+                            const d = daysSince(c.createdAt, c.closedAt || undefined);
+                            return <span className="text-[#9CA3AF]">{d}d</span>;
+                          }
+                          const d = daysSince(c.createdAt);
+                          if (d < 1) return <span className="text-[#6B7280]">today</span>;
+                          const color = d >= 7 ? "text-[#9A3A2D]" : "text-[#6B7280]";
+                          return <span className={color}>{d}d</span>;
+                        })()}
                       </td>
                       <td className="py-2 px-3 text-xs">
                         {c.orders.length === 0 ? (

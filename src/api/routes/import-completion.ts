@@ -953,7 +953,7 @@ type AnchorRow = {
   anchor_seq: number;
   anchor_date: string;
   anchor_dept: string | null;
-  anchor_wipType: string | null;
+  anchorWt: string | null;
 };
 
 type CandidatePlan = {
@@ -1008,6 +1008,11 @@ app.post("/cascade-upstream-completion", async (c) => {
   //      from a query that selects ONLY anchor-side columns (no name
   //      collision with job_cards' own completedDate).
   //   2. Fetch all candidate JCs (every non-done row) and join in JS.
+  // Alias note: anchorWt has NO underscore on purpose — empirically the
+  // underscore-aliased `anchor_wipType` came back as undefined regardless of
+  // camel/snake casing checks (likely a D1 quirk specific to mixed-case
+  // identifiers after an underscore). A no-underscore alias passes through
+  // cleanly.
   const anchorRes = await db
     .prepare(
       `SELECT j.productionOrderId AS productionOrderId,
@@ -1015,7 +1020,7 @@ app.post("/cascade-upstream-completion", async (c) => {
               j.sequence AS anchor_seq,
               j.completedDate AS anchor_date,
               j.departmentCode AS anchor_dept,
-              j.wipType AS anchor_wipType
+              j.wipType AS anchorWt
          FROM job_cards j
          JOIN (
            SELECT productionOrderId,
@@ -1064,17 +1069,14 @@ app.post("/cascade-upstream-completion", async (c) => {
         : typeof raw.anchor_dept === "string"
           ? (raw.anchor_dept as string)
           : null;
-    // D1 alias quirk again: anchor_wipType → anchorWipType on the way out.
-    // The select column itself is also already camelCase (`wipType`), so a
-    // third casing variant is possible too.
+    // anchorWt: no-underscore alias used to dodge the same D1 quirk that hit
+    // anchor_date. Keep both forms as a belt-and-braces fallback.
     const wt =
-      typeof raw.anchorWipType === "string"
-        ? (raw.anchorWipType as string)
-        : typeof raw.anchor_wipType === "string"
-          ? (raw.anchor_wipType as string)
-          : typeof raw.wipType === "string"
-            ? (raw.wipType as string)
-            : null;
+      typeof raw.anchorWt === "string"
+        ? (raw.anchorWt as string)
+        : typeof raw.anchorwt === "string"
+          ? (raw.anchorwt as string)
+          : null;
     if (seq == null || !date) continue;
     const poId =
       typeof raw.productionOrderId === "string"

@@ -521,13 +521,18 @@ export default function BOMPage() {
 
   const totalMinutes = useMemo(() => {
     if (!template) return 0;
+    // WIP `quantity` is per-FG (NOT per-parent) — see commit 1200f76. Each
+    // node's process minutes multiply by THAT node's own quantity only;
+    // multipliers do NOT compound from parent to child. Mirrors the walker
+    // in src/pages/bom.tsx (sumWipTreeMinutes) and src/api/routes/products.ts
+    // (bomTotalMinutes) so this detail page agrees with the products list.
     let total = template.l1Processes.reduce((s, p) => s + p.minutes, 0);
-    function walk(n: WIPComponent, mult: number) {
-      const qty = (n.quantity || 1) * mult;
-      for (const p of n.processes) total += p.minutes * qty;
-      for (const c of n.children || []) walk(c, qty);
+    function walk(n: WIPComponent) {
+      const q = n.quantity || 1;
+      for (const p of n.processes) total += p.minutes * q;
+      for (const c of n.children || []) walk(c);
     }
-    for (const top of template.wipComponents) walk(top, 1);
+    for (const top of template.wipComponents) walk(top);
     return total;
   }, [template]);
 

@@ -615,9 +615,19 @@ app.put("/:id", async (c) => {
     if (!updated) {
       return c.json({ success: false, error: "R&D project not found" }, 404);
     }
+    // Compute the labour-cost summary so the PUT response shape matches GET.
+    // Without this the SPA's setProject(data.data) after a milestone-photo
+    // save (or any other PUT) would clobber the labour summary with the
+    // ZERO_LABOUR_SUMMARY default — flipping the budget card to "RM 0.00"
+    // until a full refetch.
+    const labourSummary = await computeLabourCostSummary(
+      c.var.DB,
+      updated.id,
+      updated.manualLabourCostSen ?? null,
+    );
     return c.json({
       success: true,
-      data: rowToProject(updated, protos.results ?? []),
+      data: rowToProject(updated, protos.results ?? [], labourSummary),
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

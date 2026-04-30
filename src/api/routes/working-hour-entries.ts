@@ -282,12 +282,21 @@ app.get("/production-revenue", async (c) => {
     soNo: string;
   }> = [];
 
+  // Collect normalized PO data for the dept-attribution pass below.
+  type RecognizedPO = {
+    poId: string;
+    category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+    totalPriceSen: number;
+  };
+  const recognizedPOs: RecognizedPO[] = [];
+
   for (const r of rowsRes.results ?? []) {
     if (r.category !== "SOFA" && r.category !== "BEDFRAME" && r.category !== "ACCESSORY") continue;
     const unitPriceSen = Math.round(typeof r.unitPriceSen === "number" ? r.unitPriceSen : Number(r.unitPriceSen) || 0);
     const qty = Math.max(1, Math.round(typeof r.qty === "number" ? r.qty : Number(r.qty) || 1));
     const totalPriceSen = unitPriceSen * qty;
     totals[r.category] += totalPriceSen;
+    recognizedPOs.push({ poId: r.poId, category: r.category, totalPriceSen });
     // completedAt may include time-of-day; the table only needs the date.
     const date = (r.completedAt ?? "").slice(0, 10);
     rows.push({
@@ -303,12 +312,68 @@ app.get("/production-revenue", async (c) => {
     });
   }
 
+  // Per (departmentCode, category) revenue attribution.
+  //
+  // Spec from Wei Siang 2026-04-30: each completed JC's "minute share" of
+  // its parent PO's selling price is the revenue that JC's department
+  // earned. Formula: po_total_revenue × (jc_dept_minutes ÷ po_total_minutes).
+  // Sum per (deptCode, category) so the Labor Cost breakdown table can
+  // show a per-row Category Revenue that reflects each dept's actual
+  // contribution to the period's earnings, instead of the prior naive
+  // copy of the whole-category total into every row.
+  //
+  // Recognition stays per-PO (only POs whose final UPHOLSTERY JC fell in
+  // [from, to] are included), so the slices sum back to the whole-category
+  // totals — the per-dept numbers reconcile exactly with `Total Revenue`.
+  const byDeptCategory: Record<string, number> = {};
+  if (recognizedPOs.length > 0) {
+    // Single grouped query across ALL recognized POs to pull dept minutes.
+    // Uses jobCardMinutes = COALESCE(productionTimeMinutes, estMinutes) so
+    // legacy rows that only populated estMinutes still get attributed.
+    const ids = recognizedPOs.map((p) => p.poId);
+    const placeholders = ids.map(() => "?").join(",");
+    const minutesRes = await c.var.DB
+      .prepare(
+        `SELECT productionOrderId,
+                departmentCode,
+                SUM(COALESCE(productionTimeMinutes, estMinutes, 0)) AS minutes
+           FROM job_cards
+          WHERE productionOrderId IN (${placeholders})
+          GROUP BY productionOrderId, departmentCode`,
+      )
+      .bind(...ids)
+      .all<{ productionOrderId: string; departmentCode: string; minutes: number | string }>();
+
+    type MinRow = { dept: string; min: number };
+    const minutesByPo = new Map<string, MinRow[]>();
+    for (const m of minutesRes.results ?? []) {
+      const min = Number(m.minutes) || 0;
+      if (min <= 0 || !m.departmentCode) continue;
+      const arr = minutesByPo.get(m.productionOrderId) ?? [];
+      arr.push({ dept: m.departmentCode, min });
+      minutesByPo.set(m.productionOrderId, arr);
+    }
+
+    for (const po of recognizedPOs) {
+      const splits = minutesByPo.get(po.poId);
+      if (!splits || splits.length === 0) continue;
+      const totalMin = splits.reduce((s, x) => s + x.min, 0);
+      if (totalMin <= 0) continue;
+      for (const s of splits) {
+        const share = Math.round((po.totalPriceSen * s.min) / totalMin);
+        const key = `${s.dept}|${po.category}`;
+        byDeptCategory[key] = (byDeptCategory[key] ?? 0) + share;
+      }
+    }
+  }
+
   const data = {
     SOFA: totals.SOFA,
     BEDFRAME: totals.BEDFRAME,
     ACCESSORY: totals.ACCESSORY,
     totalSen: totals.SOFA + totals.BEDFRAME + totals.ACCESSORY,
     rows,
+    byDeptCategory,
   };
   return c.json({ success: true, data });
 });

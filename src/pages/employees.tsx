@@ -3407,6 +3407,12 @@ function LaborCostTab({
         customerName: string;
         soNo: string;
       }>;
+      // Per-(deptCode, category) attributed revenue, keyed "DEPT|CATEGORY".
+      // Each dept gets a share of every recognized PO's revenue proportional
+      // to that dept's job-card minutes within the PO. Summed across all
+      // recognized POs in the period. Rolls up to the same SOFA/BEDFRAME/
+      // ACCESSORY totals so the breakdown table reconciles with KPI cards.
+      byDeptCategory?: Record<string, number>;
     };
   }>(prodRevUrl);
 
@@ -3419,11 +3425,12 @@ function LaborCostTab({
   const rows: LaborCostRow[] = useMemo(() => {
     const entries = (entriesResp?.success ? entriesResp.data ?? [] : []) as WorkingHourEntry[];
     const revData = plResp?.success ? plResp.data ?? {} : {};
-    const revenueByCategory: Record<string, number> = {
-      SOFA: Number(revData.SOFA) || 0,
-      BEDFRAME: Number(revData.BEDFRAME) || 0,
-      ACCESSORY: Number(revData.ACCESSORY) || 0,
-    };
+    // Per-(dept, category) attributed revenue from /production-revenue.
+    // Each PO recognized in the period splits its revenue across its depts
+    // weighted by job-card minutes — see endpoint comments. Falls back to
+    // an empty map when the API hasn't returned the new field yet (older
+    // deployments) so the table still renders with zeroes rather than NaN.
+    const byDeptCategory: Record<string, number> = revData.byDeptCategory ?? {};
 
     // Two rates per worker, intentionally asymmetric:
     //  - Regular hourly rate uses calendar-based working days for the
@@ -3509,7 +3516,9 @@ function LaborCostTab({
         category,
         hours: Math.round(b.hours * 100) / 100,
         laborCostSen: Math.round(b.laborCostSen),
-        revenueSen: isProduction && category ? (revenueByCategory[category] ?? 0) : 0,
+        revenueSen: isProduction && category
+          ? (byDeptCategory[`${departmentCode}|${category}`] ?? 0)
+          : 0,
         isProduction,
         isShortfall: departmentCode === "PRODUCTION_SHORTFALL",
         isWarehousing: departmentCode === "WAREHOUSING",
@@ -3667,8 +3676,10 @@ function LaborCostTab({
           )}
           {" "}Total incl. overhead = {formatCurrency(totalLaborCostSen)}.
           {" · "}
-          Revenue is recognized when items complete UPHOLSTERY (production-completion bucket); labor at the day work happens. Treat any
-          single-month ratio as a leading indicator, not a closed P&amp;L.
+          Revenue is recognized when items complete UPHOLSTERY (production-completion bucket); labor at the day work happens.
+          Per-row Category Revenue is each dept's minute-weighted slice of the PO selling price
+          (po_price × dept_minutes ÷ total_PO_minutes), summed across every PO recognized in the period —
+          dept slices add back up to the category total. Treat any single-month ratio as a leading indicator, not a closed P&amp;L.
         </div>
 
         {loading ? (

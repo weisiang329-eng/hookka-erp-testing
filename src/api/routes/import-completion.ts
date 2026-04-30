@@ -72,14 +72,23 @@ const WORKER_NAME_MAP: Record<string, { name: string; ambiguous?: boolean }> = {
   SHEIN: { name: "OHN MAR SHEIN" },
   LIN: { name: "KHIN MAUNG LIN" },
   "KYAW OO": { name: "KYAW OO" },
-  "AUNG KO": { name: "AUNG KO MYINT", ambiguous: true }, // also AUNG KO OO
+  // AUNG KO — disambiguated per dept at extraction time; the data file
+  // sends explicit "AUNG KO OO" for framing rows and "AUNG KO MYINT" for
+  // upholstery rows. The bare "AUNG KO" key still defaults to MYINT in
+  // case any source row leaks through unprocessed.
+  "AUNG KO": { name: "AUNG KO MYINT" },
+  "AUNG KO OO": { name: "AUNG KO OO" },
+  "AUNG KO MYINT": { name: "AUNG KO MYINT" },
   AZAW: { name: "MYINT TUN" },
   THAR: { name: "NYEIN CHAN AUNG" },
   "ZAW LIN": { name: "ZAW LIN" },
+  ZAWLIN: { name: "ZAW LIN" }, // alias for missing-space typo
   MIN: { name: "HLAING MIN AUNG" },
   "ZAW MOE": { name: "ZAW MOE TUN" },
   "YE LI SOE": { name: "YE LI SOE" },
-  KYAW: { name: "KYAW ZIN OO", ambiguous: true }, // also AUNG KYAW SOE
+  "YE LIN SOE": { name: "YE LI SOE" }, // alias for typo
+  "YEE LIN SOE": { name: "YE LI SOE" }, // alias for typo
+  KYAW: { name: "AUNG KYAW SOE" }, // user disambiguation 2026-04-30: KYAW = AUNG KYAW SOE; KYAW OO is its own short name above
   AUNG: { name: "AUNG THEIN WIN" },
   AMANG: { name: "A MANG" },
 };
@@ -693,6 +702,89 @@ app.post("/job-card-completion", async (c) => {
     posCompleted,
     errors,
     cursor: { hasMore, nextCursor },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/clear-future-completions
+//
+// One-shot cleanup: any job_card whose completedDate is strictly > today gets
+// reset (status → WAITING, completedDate → null, actualMinutes → null,
+// pic1/pic2 → null, overdue → null). The historical migration ingested some
+// source rows whose completion date column had been used as a "scheduled"
+// future date by mistake; this endpoint reverses those imports without
+// touching legitimately recent completions.
+//
+// Returns the count of rows reset and a sample.
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+app.post("/clear-future-completions", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Find all jcs with completedDate strictly > today.
+  const sel = await db
+    .prepare(
+      `SELECT id, departmentCode, completedDate, dueDate, status, pic1Name
+         FROM job_cards
+        WHERE completedDate IS NOT NULL AND completedDate > ?`,
+    )
+    .bind(today)
+    .all<{
+      id: string;
+      departmentCode: string | null;
+      completedDate: string | null;
+      dueDate: string | null;
+      status: string;
+      pic1Name: string | null;
+    }>();
+  const rows = sel.results ?? [];
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      today,
+      wouldReset: rows.length,
+      sample: rows.slice(0, 8),
+    });
+  }
+
+  let reset = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+  for (const jc of rows) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET status = 'WAITING', completedDate = NULL,
+                  actualMinutes = NULL,
+                  pic1Id = NULL, pic1Name = '',
+                  pic2Id = NULL, pic2Name = '',
+                  overdue = NULL
+            WHERE id = ?`,
+        )
+        .bind(jc.id)
+        .run();
+      reset++;
+    } catch (err) {
+      errors.push({
+        jcId: jc.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    today,
+    reset,
+    errors,
   });
 });
 

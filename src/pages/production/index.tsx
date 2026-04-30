@@ -3306,7 +3306,29 @@ export default function ProductionPage({
                   : ""} items)
               </span>
             </h2>
-            <div className="ml-auto">
+            <div className="ml-auto flex items-center gap-2">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  // Each dept tab has its own gid in the live Sheet. The map
+                  // is populated once after the sheet is provisioned; until
+                  // then we fall back to the spreadsheet root and the user
+                  // picks the tab manually.
+                  const SHEET_ID = "1hDGUYeKuWHpCXKrZptFI2eIKh9yNdhw7JeKbTjxT-x8";
+                  const GID_BY_DEPT: Record<string, string> = {
+                    // TODO: fill in real gids after sheet provisioning.
+                  };
+                  const gid = GID_BY_DEPT[activeDept.code];
+                  const url = gid
+                    ? `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit#gid=${gid}`
+                    : `https://docs.google.com/spreadsheets/d/${SHEET_ID}/edit`;
+                  window.open(url, "_blank", "noopener,noreferrer");
+                }}
+                title="Open the live Google Sheet (Completion Date / PIC editable there)"
+                className="h-7 text-xs"
+              >
+                Open in Google Sheets
+              </Button>
               <Button
                 variant="outline"
                 onClick={() => {

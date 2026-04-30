@@ -797,12 +797,21 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/import/cascade-upstream-completion
 //
-// Generic upstream cascade-fill: within each (productionOrderId, wipKey)
-// group, if ANY job_card with status IN ('COMPLETED','TRANSFERRED') exists
-// at sequence N, every job_card at sequence < N in the same group must
-// also be COMPLETED (sequence is the per-wipType chain order, so this
-// covers FAB_SEW->FAB_CUT, FRAMING->WOOD_CUT, UPHOLSTERY->WEBBING/FOAM/
-// FAB_SEW, etc. without hard-coding the dept pairs).
+// Anchor-relative cascade-fill: within each (productionOrderId, wipKey)
+// group, find the most-downstream completed JC (the "anchor" — MAX(sequence)
+// among rows whose status IN ('COMPLETED','TRANSFERRED') AND completedDate
+// IS NOT NULL). For every OTHER JC in the same group whose status is not
+// already done, set:
+//   newDate = anchor.completedDate + (jc.sequence - anchor.sequence) days
+// Upstream JCs (sequence < anchor) get earlier dates; downstream JCs
+// (sequence > anchor) get later dates. The latter is important — e.g. if
+// UPHOLSTERY (mid-chain) is marked done on 26 Apr, PACKING (sequence after)
+// should also be considered done, dated relative to the anchor.
+//
+// Clamp: if newDate > 2026-04-30, clamp to 2026-04-30. No early-side floor —
+// historical-looking dates are intentional. The intent is "spread one day
+// per dept, capped at today" so the date histogram doesn't pile every row
+// on a single day.
 //
 // Side-effect policy: this endpoint is a metadata cleanup pass — NOT a
 // workflow event. We deliberately skip applyWipInventoryChange,
@@ -814,10 +823,15 @@ app.post("/clear-future-completions", async (c) => {
 //
 // Query params:
 //   ?dryRun=true|false   default false
-//   ?date=YYYY-MM-DD     default 2026-04-29
+//
+// Response (dryRun): { count, sample, dateHistogram } — histogram is a map
+// of { "YYYY-MM-DD": rowCount, ... } over the resulting newDates so the
+// caller can sanity-check the spread before going live.
 //
 // Permission: production-orders:update.
 // ---------------------------------------------------------------------------
+const CASCADE_DATE_CLAMP = "2026-04-30";
+
 type CandidateRow = {
   id: string;
   productionOrderId: string;
@@ -827,7 +841,27 @@ type CandidateRow = {
   estMinutes: number | null;
   productionTimeMinutes: number | null;
   status: string;
+  completedDate: string | null;
+  anchor_seq: number;
+  anchor_date: string;
 };
+
+type CandidatePlan = {
+  cand: CandidateRow;
+  newDate: string;
+  actualMinutes: number;
+};
+
+function addDaysISO(iso: string, days: number): string {
+  // iso assumed YYYY-MM-DD. Use UTC math to avoid TZ drift.
+  const [y, m, d] = iso.split("-").map((s) => parseInt(s, 10));
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + days);
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getUTCDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
 
 app.post("/cascade-upstream-completion", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
@@ -835,48 +869,82 @@ app.post("/cascade-upstream-completion", async (c) => {
 
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
-  const dateParam = c.req.query("date") || "2026-04-29";
 
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
-    return c.json(
-      { success: false, error: `date "${dateParam}" not ISO YYYY-MM-DD` },
-      400,
-    );
-  }
-
-  // Find every JC that sits upstream of a completed sibling in the same
-  // (productionOrderId, wipKey) group.
+  // Two-CTE candidate query:
+  //   anchor       — MAX(sequence) per group among completed/transferred rows
+  //   anchor_dated — pull the actual completedDate of THAT row (single row,
+  //                  not MAX(completedDate) globally).
+  // Then join back to job_cards to grab every other (non-done) JC in the
+  // same group along with the anchor's seq + date for offset math.
   const sel = await db
     .prepare(
-      `WITH max_completed AS (
+      `WITH anchor AS (
          SELECT productionOrderId,
-                COALESCE(wipKey, '') AS wk,
-                MAX(sequence) AS max_seq
+                COALESCE(wipKey,'') AS wk,
+                MAX(sequence) AS anchor_seq
            FROM job_cards
-          WHERE status IN ('COMPLETED','TRANSFERRED')
-            AND completedDate IS NOT NULL
-          GROUP BY productionOrderId, COALESCE(wipKey, '')
+          WHERE status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL
+          GROUP BY productionOrderId, COALESCE(wipKey,'')
+       ),
+       anchor_dated AS (
+         SELECT a.productionOrderId, a.wk, a.anchor_seq, j.completedDate AS anchor_date
+           FROM anchor a
+           JOIN job_cards j
+             ON j.productionOrderId = a.productionOrderId
+            AND COALESCE(j.wipKey,'') = a.wk
+            AND j.sequence = a.anchor_seq
+            AND j.status IN ('COMPLETED','TRANSFERRED')
+            AND j.completedDate IS NOT NULL
        )
        SELECT j.id, j.productionOrderId, j.departmentCode, j.wipType, j.sequence,
-              j.estMinutes, j.productionTimeMinutes, j.status
+              j.estMinutes, j.productionTimeMinutes, j.status, j.completedDate,
+              a.anchor_seq, a.anchor_date
          FROM job_cards j
-         JOIN max_completed m
-           ON m.productionOrderId = j.productionOrderId
-          AND m.wk = COALESCE(j.wipKey, '')
-          AND j.sequence < m.max_seq
+         JOIN anchor_dated a
+           ON a.productionOrderId = j.productionOrderId
+          AND a.wk = COALESCE(j.wipKey,'')
+          AND j.sequence <> a.anchor_seq
         WHERE (j.status NOT IN ('COMPLETED','TRANSFERRED') OR j.completedDate IS NULL)`,
     )
     .all<CandidateRow>();
 
   const candidates = sel.results ?? [];
-  const sample = candidates.slice(0, 15);
+
+  // Compute per-row newDate + actualMinutes, build histogram alongside.
+  const plans: CandidatePlan[] = [];
+  const dateHistogram: Record<string, number> = {};
+  for (const cand of candidates) {
+    const offset = cand.sequence - cand.anchor_seq;
+    let newDate = addDaysISO(cand.anchor_date, offset);
+    if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
+    const actualMinutes =
+      cand.productionTimeMinutes != null
+        ? cand.productionTimeMinutes
+        : cand.estMinutes != null
+          ? cand.estMinutes
+          : 0;
+    plans.push({ cand, newDate, actualMinutes });
+    dateHistogram[newDate] = (dateHistogram[newDate] ?? 0) + 1;
+  }
+
+  // Stable, easy-to-read 5-row sample with the load-bearing fields.
+  const sample = plans.slice(0, 5).map((p) => ({
+    id: p.cand.id,
+    productionOrderId: p.cand.productionOrderId,
+    departmentCode: p.cand.departmentCode,
+    wipType: p.cand.wipType,
+    sequence: p.cand.sequence,
+    anchor_seq: p.cand.anchor_seq,
+    anchor_date: p.cand.anchor_date,
+    newDate: p.newDate,
+  }));
 
   if (dryRun) {
     return c.json({
       success: true,
       dryRun: true,
-      date: dateParam,
       count: candidates.length,
+      dateHistogram,
       sample,
     });
   }
@@ -884,13 +952,7 @@ app.post("/cascade-upstream-completion", async (c) => {
   let updated = 0;
   const errors: Array<{ jcId: string; message: string }> = [];
 
-  for (const cand of candidates) {
-    const actualMinutes =
-      cand.productionTimeMinutes != null
-        ? cand.productionTimeMinutes
-        : cand.estMinutes != null
-          ? cand.estMinutes
-          : 0;
+  for (const plan of plans) {
     try {
       await db
         .prepare(
@@ -901,12 +963,12 @@ app.post("/cascade-upstream-completion", async (c) => {
                   overdue = 'COMPLETED'
             WHERE id = ?`,
         )
-        .bind(dateParam, actualMinutes, cand.id)
+        .bind(plan.newDate, plan.actualMinutes, plan.cand.id)
         .run();
       updated++;
     } catch (err) {
       errors.push({
-        jcId: cand.id,
+        jcId: plan.cand.id,
         message: err instanceof Error ? err.message : String(err),
       });
     }
@@ -915,10 +977,10 @@ app.post("/cascade-upstream-completion", async (c) => {
   return c.json({
     success: true,
     dryRun: false,
-    date: dateParam,
     count: candidates.length,
     updated,
     errors,
+    dateHistogram,
     sample,
   });
 });

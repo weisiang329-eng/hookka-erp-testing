@@ -863,12 +863,14 @@ export function PhotoCropDialog({
             )}
           </div>
 
-          {/* Zoom slider */}
+          {/* Zoom slider — min is 0.3 so the user can shrink the photo
+              below the contain-fit (zoom < 1 leaves white margins inside
+              the viewport, which the save path bakes into the JPEG). */}
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500 w-12">Zoom</span>
             <input
               type="range"
-              min={1}
+              min={0.3}
               max={4}
               step={0.01}
               value={zoom}
@@ -876,7 +878,7 @@ export function PhotoCropDialog({
               className="flex-1 accent-[#6B5C32]"
               aria-label="Zoom"
             />
-            <span className="text-xs text-gray-500 w-10 text-right tabular-nums">
+            <span className="text-xs text-gray-500 w-12 text-right tabular-nums">
               {zoom.toFixed(2)}x
             </span>
           </div>
@@ -954,7 +956,7 @@ function handlePosition(corner: ResizeCorner): { left: string; top: string } {
 // ── Pure helpers ──────────────────────────────────────────────────────────
 
 function clampZoom(z: number) {
-  return Math.max(1, Math.min(4, z));
+  return Math.max(0.3, Math.min(4, z));
 }
 
 // Resize a crop rect by dragging one of 8 handles. Honors the aspect lock

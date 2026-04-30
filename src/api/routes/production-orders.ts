@@ -2854,18 +2854,22 @@ app.post("/resync-po-numbers", async (c) => {
   }
   const dryRun = body.dryRun !== false; // default safe
 
+  // Postgres folds unquoted aliases to lowercase, which silently breaks the
+  // `r.freshCompanySOId` etc. lookups below (they come back undefined and
+  // every PO ends up with `expectedPoNo: "undefined-01"`). Quote every
+  // alias so the camelCase keys survive the round-trip.
   const rows = await db
     .prepare(
-      `SELECT po.id AS poId,
-              po.poNo AS currentPoNo,
-              po.lineNo AS lineNo,
-              po.salesOrderId AS soId,
-              so.companySOId AS freshCompanySOId
+      `SELECT po.id AS "poId",
+              po."poNo" AS "currentPoNo",
+              po."lineNo" AS "lineNo",
+              po."salesOrderId" AS "soId",
+              so."companySOId" AS "freshCompanySOId"
          FROM production_orders po
-         JOIN sales_orders so ON so.id = po.salesOrderId
-        WHERE po.salesOrderId IS NOT NULL
-          AND so.companySOId IS NOT NULL
-          AND so.companySOId <> ''`,
+         JOIN sales_orders so ON so.id = po."salesOrderId"
+        WHERE po."salesOrderId" IS NOT NULL
+          AND so."companySOId" IS NOT NULL
+          AND so."companySOId" <> ''`,
     )
     .all<{
       poId: string;

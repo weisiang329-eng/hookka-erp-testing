@@ -911,11 +911,26 @@ app.post("/cascade-upstream-completion", async (c) => {
   const candidates = sel.results ?? [];
 
   // Compute per-row newDate + actualMinutes, build histogram alongside.
+  // Defensive: skip any row whose anchor_date came back null/undefined or
+  // doesn't match ISO YYYY-MM-DD — collect them in skipped[] for the
+  // response so we can investigate without 500-ing the whole call.
   const plans: CandidatePlan[] = [];
   const dateHistogram: Record<string, number> = {};
+  const skipped: Array<{ jcId: string; reason: string }> = [];
   for (const cand of candidates) {
+    const anchorDate = cand.anchor_date;
+    if (
+      typeof anchorDate !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)
+    ) {
+      skipped.push({
+        jcId: cand.id,
+        reason: `anchor_date not ISO YYYY-MM-DD: ${JSON.stringify(anchorDate)}`,
+      });
+      continue;
+    }
     const offset = cand.sequence - cand.anchor_seq;
-    let newDate = addDaysISO(cand.anchor_date, offset);
+    let newDate = addDaysISO(anchorDate, offset);
     if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
     const actualMinutes =
       cand.productionTimeMinutes != null
@@ -944,6 +959,8 @@ app.post("/cascade-upstream-completion", async (c) => {
       success: true,
       dryRun: true,
       count: candidates.length,
+      planned: plans.length,
+      skipped,
       dateHistogram,
       sample,
     });
@@ -978,6 +995,8 @@ app.post("/cascade-upstream-completion", async (c) => {
     success: true,
     dryRun: false,
     count: candidates.length,
+    planned: plans.length,
+    skipped,
     updated,
     errors,
     dateHistogram,

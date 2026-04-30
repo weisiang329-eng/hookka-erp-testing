@@ -1270,4 +1270,568 @@ app.post("/cascade-upstream-completion", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/fix-misparsed-jan-dates
+//
+// One-shot fix for the 2026-04-30 CSV import. The earlier importer parsed
+// dates with a "try dd/mm, fall back to mm/dd if future" heuristic. Edge
+// case: a date like `4/1/2026` is past in BOTH interpretations (4 Jan AND
+// 1 Apr) so the heuristic kept `4 Jan` even though the surrounding dataset
+// was clearly March/April. The user spotted rows in the live tracker where
+// Foam/Wood/Framing/Webbing show 3 Jan / 4 Jan / 31 Mar mixed with
+// April-due dates — clearly misparsed as Jan instead of Apr.
+//
+// Conservative fix:
+//   1. Find job_cards where completedDate is 2026-01-xx OR 2026-02-xx, AND
+//      both day and month components are <= 12 (so swap is valid).
+//   2. For each, look at sibling JCs on the same productionOrderId with
+//      completedDate >= '2026-03-15'. If sibling cluster exists, propose
+//      the swap (YYYY-MM-DD → YYYY-DD-MM).
+//   3. Validate swapped date is <= today (2026-04-30) and not in the future.
+//   4. dryRun=true → return count + sample of 10 (current → proposed).
+//   5. dryRun=false → UPDATE job_cards SET completedDate = proposed.
+//
+// Side-effect policy: metadata only — we do NOT re-run cascades. The JCs
+// already fired their cascades when they completed; we're just correcting
+// the date on the existing row.
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+const FIX_DATE_TODAY_CLAMP = "2026-04-30";
+
+type SuspiciousDateRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipKey: string | null;
+  completedDate: string;
+};
+
+type SwapPlan = {
+  jcId: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipKey: string | null;
+  current: string;
+  proposed: string;
+  siblingMaxDate: string;
+  siblingsInMarchAprWindow: number;
+};
+
+app.post("/fix-misparsed-jan-dates", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // Find all JCs whose completedDate is in 2026-01-xx or 2026-02-xx where the
+  // day component is also <= 12 (i.e. the date is swappable).
+  const sus = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, wipKey, completedDate
+         FROM job_cards
+        WHERE completedDate IS NOT NULL
+          AND completedDate >= '2026-01-01'
+          AND completedDate <  '2026-03-01'
+          AND CAST(substr(completedDate, 9, 2) AS INTEGER) BETWEEN 1 AND 12
+          AND CAST(substr(completedDate, 6, 2) AS INTEGER) BETWEEN 1 AND 12`,
+    )
+    .all<SuspiciousDateRow>();
+  const suspects = sus.results ?? [];
+
+  // For each suspect, look up siblings on same productionOrderId with
+  // completedDate >= '2026-03-15'. Group by PO id to amortize the round-trip.
+  const poIds = Array.from(new Set(suspects.map((s) => s.productionOrderId)));
+  const siblingsByPO = new Map<string, { count: number; maxDate: string }>();
+
+  // D1's bind doesn't support array-spread well, so chunk + IN-list.
+  const CHUNK = 50;
+  for (let i = 0; i < poIds.length; i += CHUNK) {
+    const chunk = poIds.slice(i, i + CHUNK);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const sib = await db
+      .prepare(
+        `SELECT productionOrderId,
+                COUNT(*) AS cnt,
+                MAX(completedDate) AS maxDate
+           FROM job_cards
+          WHERE productionOrderId IN (${placeholders})
+            AND completedDate IS NOT NULL
+            AND completedDate >= '2026-03-15'
+          GROUP BY productionOrderId`,
+      )
+      .bind(...chunk)
+      .all<{ productionOrderId: string; cnt: number; maxDate: string }>();
+    for (const r of sib.results ?? []) {
+      siblingsByPO.set(r.productionOrderId, {
+        count: r.cnt,
+        maxDate: r.maxDate,
+      });
+    }
+  }
+
+  const plans: SwapPlan[] = [];
+  const skipped: Array<{ jcId: string; reason: string }> = [];
+  for (const s of suspects) {
+    const sib = siblingsByPO.get(s.productionOrderId);
+    if (!sib || sib.count === 0) {
+      skipped.push({
+        jcId: s.id,
+        reason: "no sibling JC with completedDate >= 2026-03-15 on same PO",
+      });
+      continue;
+    }
+
+    // Swap month <-> day.
+    // Format is YYYY-MM-DD, swap → YYYY-DD-MM (substr 6,2 ↔ substr 9,2).
+    const yyyy = s.completedDate.slice(0, 4);
+    const mm = s.completedDate.slice(5, 7);
+    const dd = s.completedDate.slice(8, 10);
+    const proposed = `${yyyy}-${dd}-${mm}`;
+
+    // Sanity check: swapped date must be a valid date.
+    const ddNum = parseInt(dd, 10);
+    const mmNum = parseInt(mm, 10);
+    if (
+      !Number.isFinite(ddNum) ||
+      !Number.isFinite(mmNum) ||
+      ddNum < 1 ||
+      ddNum > 12 ||
+      mmNum < 1 ||
+      mmNum > 12
+    ) {
+      skipped.push({
+        jcId: s.id,
+        reason: `non-swappable components dd=${dd} mm=${mm}`,
+      });
+      continue;
+    }
+
+    // Swapped date must be <= today and not the same as current.
+    if (proposed > FIX_DATE_TODAY_CLAMP) {
+      skipped.push({
+        jcId: s.id,
+        reason: `swapped date ${proposed} > today clamp ${FIX_DATE_TODAY_CLAMP}`,
+      });
+      continue;
+    }
+    if (proposed === s.completedDate) {
+      skipped.push({
+        jcId: s.id,
+        reason: `swap is identity (palindromic date) for ${s.completedDate}`,
+      });
+      continue;
+    }
+
+    plans.push({
+      jcId: s.id,
+      productionOrderId: s.productionOrderId,
+      departmentCode: s.departmentCode,
+      wipKey: s.wipKey,
+      current: s.completedDate,
+      proposed,
+      siblingMaxDate: sib.maxDate,
+      siblingsInMarchAprWindow: sib.count,
+    });
+  }
+
+  // By-dept and by-(current → proposed) breakdowns for sanity-checking.
+  const byDept: Record<string, number> = {};
+  const byMonthSwap: Record<string, number> = {};
+  for (const p of plans) {
+    const d = p.departmentCode || "UNKNOWN";
+    byDept[d] = (byDept[d] ?? 0) + 1;
+    const swapKey = `${p.current.slice(0, 7)} -> ${p.proposed.slice(0, 7)}`;
+    byMonthSwap[swapKey] = (byMonthSwap[swapKey] ?? 0) + 1;
+  }
+
+  const sample = plans.slice(0, 10).map((p) => ({
+    jcId: p.jcId,
+    productionOrderId: p.productionOrderId,
+    departmentCode: p.departmentCode,
+    wipKey: p.wipKey,
+    current: p.current,
+    proposed: p.proposed,
+    siblingMaxDate: p.siblingMaxDate,
+    siblingsInMarchAprWindow: p.siblingsInMarchAprWindow,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      suspectsFound: suspects.length,
+      planned: plans.length,
+      skipped: skipped.length,
+      skippedSample: skipped.slice(0, 5),
+      byDept,
+      byMonthSwap,
+      sample,
+    });
+  }
+
+  let updated = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+  for (const p of plans) {
+    try {
+      await db
+        .prepare(`UPDATE job_cards SET completedDate = ? WHERE id = ?`)
+        .bind(p.proposed, p.jcId)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: p.jcId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    suspectsFound: suspects.length,
+    planned: plans.length,
+    skipped: skipped.length,
+    updated,
+    byDept,
+    byMonthSwap,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/cascade-leak-pass
+//
+// Companion pass to /cascade-upstream-completion that catches "leaks" — JCs
+// where the cascade missed an upstream because the wipKey grouping was too
+// strict. Live tracker shows rows where UPHOLSTERY is DONE but upstream
+// depts (FAB_CUT, FOAM, WOOD_CUT, FRAMING, WEBBING) are still WAITING.
+//
+// Root cause: the original cascade groups by (productionOrderId,
+// COALESCE(wipKey,'')). Any wipKey mismatch within a PO breaks the group —
+// e.g. UPHOLSTERY JC has wipKey='SOFA_BASE' but the upstream FOAM JC has
+// wipKey='SOFA_CUSHION' (or NULL → ''), so they never join.
+//
+// Relaxed match: treat the entire production_order as ONE group. Pick the
+// most-downstream COMPLETED JC in the PO (regardless of wipKey) as the
+// anchor, and apply the same CASCADE_ALLOWED + leadtime offset rules to
+// every non-done JC in the same PO whose departmentCode is in the anchor's
+// allow-list.
+//
+// Side-effect policy: metadata only (status, completedDate, actualMinutes,
+// overdue) — same as /cascade-upstream-completion. Cascades already fired
+// when each anchor JC originally completed.
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type LeakAnchorRow = {
+  productionOrderId: string;
+  anchor_seq: number;
+  anchor_date: string;
+  anchor_dept: string | null;
+};
+
+type LeakCandidatePlan = {
+  jcId: string;
+  productionOrderId: string;
+  wipKey: string | null;
+  departmentCode: string | null;
+  wipType: string | null;
+  itemCategory: string | null;
+  sequence: number;
+  status: string;
+  currentCompletedDate: string | null;
+  anchor_seq: number;
+  anchor_date: string;
+  anchor_dept: string;
+  newDate: string;
+  actualMinutes: number;
+  offsetDays: number;
+  rawOffsetDays: number;
+  fallback: boolean;
+  clampedToAnchor: boolean;
+};
+
+app.post("/cascade-leak-pass", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  const leadTimes: LeadTimeMap = await loadLeadTimes(db);
+  const ltLookup = (cat: string | null, dept: string | null): number | null => {
+    if (!dept) return null;
+    const normCat = (cat || "").toUpperCase() === "SOFA" ? "SOFA" : "BEDFRAME";
+    const v = leadTimes[normCat]?.[dept];
+    return typeof v === "number" && v >= 0 ? v : null;
+  };
+
+  // Anchor query: most-downstream COMPLETED JC per productionOrderId
+  // (no wipKey grouping). Same MAX(sequence) trick as the strict cascade.
+  const anchorRes = await db
+    .prepare(
+      `SELECT j.productionOrderId AS productionOrderId,
+              j.sequence AS anchor_seq,
+              j.completedDate AS anchor_date,
+              j.departmentCode AS anchor_dept
+         FROM job_cards j
+         JOIN (
+           SELECT productionOrderId,
+                  MAX(sequence) AS max_seq
+             FROM job_cards
+            WHERE status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL
+            GROUP BY productionOrderId
+         ) m
+           ON m.productionOrderId = j.productionOrderId
+          AND m.max_seq = j.sequence
+        WHERE j.status IN ('COMPLETED','TRANSFERRED') AND j.completedDate IS NOT NULL`,
+    )
+    .all<LeakAnchorRow>();
+
+  const anchorByPo = new Map<
+    string,
+    { anchor_seq: number; anchor_date: string; anchor_dept: string }
+  >();
+  for (const a of anchorRes.results ?? []) {
+    const raw = a as unknown as Record<string, unknown>;
+    const seq =
+      typeof raw.anchorSeq === "number"
+        ? (raw.anchorSeq as number)
+        : typeof raw.anchor_seq === "number"
+          ? (raw.anchor_seq as number)
+          : null;
+    const date =
+      typeof raw.anchorDate === "string"
+        ? (raw.anchorDate as string)
+        : typeof raw.anchor_date === "string"
+          ? (raw.anchor_date as string)
+          : null;
+    const dept =
+      typeof raw.anchorDept === "string"
+        ? (raw.anchorDept as string)
+        : typeof raw.anchor_dept === "string"
+          ? (raw.anchor_dept as string)
+          : null;
+    const poId =
+      typeof raw.productionOrderId === "string"
+        ? (raw.productionOrderId as string)
+        : "";
+    if (!poId || seq == null || !date || !dept) continue;
+    // If two JCs share max_seq (shouldn't happen, but defensive), keep first.
+    if (anchorByPo.has(poId)) continue;
+    anchorByPo.set(poId, {
+      anchor_seq: seq,
+      anchor_date: date,
+      anchor_dept: dept.toUpperCase(),
+    });
+  }
+
+  // Fetch every non-done JC.
+  const candRes = await db
+    .prepare(
+      `SELECT j.id AS id, j.productionOrderId AS productionOrderId,
+              j.wipKey AS wipKey, j.departmentCode AS departmentCode,
+              j.wipType AS wipType, j.sequence AS sequence,
+              j.estMinutes AS estMinutes,
+              j.productionTimeMinutes AS productionTimeMinutes,
+              j.status AS status, j.completedDate AS completedDate,
+              po.itemCategory AS itemCategory
+         FROM job_cards j
+         LEFT JOIN production_orders po ON po.id = j.productionOrderId
+        WHERE (j.status NOT IN ('COMPLETED','TRANSFERRED') OR j.completedDate IS NULL)`,
+    )
+    .all<CandidateRow>();
+
+  const allNonDone = candRes.results ?? [];
+
+  const plans: LeakCandidatePlan[] = [];
+  const skipped: Array<{ jcId: string; reason: string }> = [];
+  let groupHadAnchor = 0;
+  let parallelChainSkipped = 0;
+  let fallbackToSequence = 0;
+  let clampedToAnchor = 0;
+  for (const cand of allNonDone) {
+    const anchor = anchorByPo.get(cand.productionOrderId);
+    if (!anchor) continue; // PO has no completed JC — leave alone
+    groupHadAnchor++;
+
+    if (cand.sequence >= anchor.anchor_seq) {
+      // Candidate is at or downstream of the anchor — skip; the cascade only
+      // fills upstream gaps (the rule set is strictly upstream by design).
+      // We allow equality just to be safe; the strict cascade also treated
+      // anchor's own sequence as a guard.
+      parallelChainSkipped++;
+      continue;
+    }
+
+    const anchorDept = anchor.anchor_dept;
+    const targetDept = (cand.departmentCode || "").toUpperCase();
+    const allowedTargets = CASCADE_ALLOWED[anchorDept];
+    if (!allowedTargets || !allowedTargets.includes(targetDept)) {
+      parallelChainSkipped++;
+      continue;
+    }
+
+    const anchorDate = anchor.anchor_date;
+    if (
+      typeof anchorDate !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)
+    ) {
+      skipped.push({
+        jcId: cand.id,
+        reason: `anchor_date not ISO YYYY-MM-DD: ${JSON.stringify(anchorDate)}`,
+      });
+      continue;
+    }
+
+    const ltAnchor = ltLookup(cand.itemCategory, anchorDept);
+    const ltTarget = ltLookup(cand.itemCategory, cand.departmentCode);
+    let rawOffset: number;
+    let fallback = false;
+    if (ltAnchor == null || ltTarget == null) {
+      rawOffset = cand.sequence - anchor.anchor_seq;
+      fallback = true;
+      fallbackToSequence++;
+    } else {
+      rawOffset = ltAnchor - ltTarget;
+    }
+
+    let offset = rawOffset;
+    let clamped = false;
+    if (offset > 0) {
+      offset = 0;
+      clamped = true;
+      clampedToAnchor++;
+    }
+
+    let newDate = addDaysISO(anchorDate, offset);
+    if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
+    const actualMinutes =
+      cand.productionTimeMinutes != null
+        ? cand.productionTimeMinutes
+        : cand.estMinutes != null
+          ? cand.estMinutes
+          : 0;
+
+    plans.push({
+      jcId: cand.id,
+      productionOrderId: cand.productionOrderId,
+      wipKey: cand.wipKey,
+      departmentCode: cand.departmentCode,
+      wipType: cand.wipType,
+      itemCategory: cand.itemCategory,
+      sequence: cand.sequence,
+      status: cand.status,
+      currentCompletedDate: cand.completedDate,
+      anchor_seq: anchor.anchor_seq,
+      anchor_date: anchorDate,
+      anchor_dept: anchorDept,
+      newDate,
+      actualMinutes,
+      offsetDays: offset,
+      rawOffsetDays: rawOffset,
+      fallback,
+      clampedToAnchor: clamped,
+    });
+  }
+
+  // Anchor x target breakdown.
+  const anchorBreakdown: Record<string, Record<string, number>> = {};
+  for (const p of plans) {
+    const a = p.anchor_dept;
+    const t = (p.departmentCode || "UNKNOWN").toUpperCase();
+    if (!anchorBreakdown[a]) anchorBreakdown[a] = {};
+    anchorBreakdown[a][t] = (anchorBreakdown[a][t] ?? 0) + 1;
+  }
+
+  // wipKey-mismatch surface: among the leak candidates, how many have a
+  // wipKey different from the anchor's wipKey on the same PO? We don't have
+  // anchor's wipKey in this query, but we can compare candidate's wipKey to
+  // the most common wipKey of completed siblings on the same PO. Simpler:
+  // just count distinct (PO, wipKey) pairs in the leak set so the user can
+  // see how many wipKey buckets are involved.
+  const distinctPoWipPairs = new Set<string>();
+  for (const p of plans) {
+    distinctPoWipPairs.add(`${p.productionOrderId}||${p.wipKey ?? ""}`);
+  }
+
+  const sample = plans.slice(0, 5).map((p) => ({
+    jcId: p.jcId,
+    productionOrderId: p.productionOrderId,
+    wipKey: p.wipKey,
+    departmentCode: p.departmentCode,
+    wipType: p.wipType,
+    itemCategory: p.itemCategory,
+    sequence: p.sequence,
+    status: p.status,
+    currentCompletedDate: p.currentCompletedDate,
+    anchor_seq: p.anchor_seq,
+    anchor_date: p.anchor_date,
+    anchor_dept: p.anchor_dept,
+    offsetDays: p.offsetDays,
+    rawOffsetDays: p.rawOffsetDays,
+    fallback: p.fallback,
+    clampedToAnchor: p.clampedToAnchor,
+    newDate: p.newDate,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidatesWithAnchor: groupHadAnchor,
+      planned: plans.length,
+      parallelChainSkipped,
+      fallbackToSequence,
+      clampedToAnchor,
+      distinctLeakPoWipPairs: distinctPoWipPairs.size,
+      skipped,
+      anchorBreakdown,
+      sample,
+    });
+  }
+
+  let updated = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+  for (const p of plans) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET status = 'COMPLETED',
+                  completedDate = ?,
+                  actualMinutes = ?,
+                  overdue = 'COMPLETED'
+            WHERE id = ?`,
+        )
+        .bind(p.newDate, p.actualMinutes, p.jcId)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: p.jcId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    candidatesWithAnchor: groupHadAnchor,
+    planned: plans.length,
+    parallelChainSkipped,
+    fallbackToSequence,
+    clampedToAnchor,
+    updated,
+    errors,
+    anchorBreakdown,
+    sample,
+  });
+});
+
 export default app;

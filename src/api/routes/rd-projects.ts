@@ -645,6 +645,69 @@ app.post("/:id/resume", async (c) => {
   });
 });
 
+// POST /api/rd-projects/:id/complete — ACTIVE → COMPLETED
+//
+// Terminal state flip when an R&D project has reached PRODUCTION_READY and the
+// shop owner is ready to ship it out of the active pipeline. Only ACTIVE
+// projects whose currentStage is PRODUCTION_READY are eligible — any earlier
+// stage is rejected with a clear error so the SPA's button-disable logic and
+// the API agree on the rule. Reuses rd-projects:update permission like the
+// other state flips above.
+app.post("/:id/complete", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "ACTIVE") {
+    return c.json(
+      {
+        success: false,
+        error: `Only ACTIVE projects can be completed (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+  if (existing.currentStage !== "PRODUCTION_READY") {
+    return c.json(
+      {
+        success: false,
+        error: `Project must reach Production Ready before it can be completed (current stage: ${existing.currentStage})`,
+      },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    "UPDATE rd_projects SET status = 'COMPLETED' WHERE id = ?",
+  )
+    .bind(id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? []),
+  });
+});
+
 app.post("/:id/move-to-draft", async (c) => {
   const denied = await requirePermission(c, "rd-projects", "update");
   if (denied) return denied;

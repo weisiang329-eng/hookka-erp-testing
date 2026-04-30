@@ -20,6 +20,7 @@ import {
   Archive,
   Play,
   Pencil,
+  CheckCircle2,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
@@ -54,7 +55,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   ACCESSORY: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
 };
 
-type TabId = "drafts" | "projects" | "pipeline" | "reports";
+type TabId = "drafts" | "projects" | "completed" | "pipeline" | "reports";
 
 function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
   const currentIndex = STAGES.indexOf(currentStage);
@@ -936,7 +937,19 @@ export default function RDPage() {
 
   const draftProjects = useMemo(() => projects.filter((p) => p.status === "DRAFT"), [projects]);
   const nonDraftProjects = useMemo(() => projects.filter((p) => p.status !== "DRAFT"), [projects]);
+  // Active = non-draft and non-completed. The Projects tab shows the live
+  // pipeline of in-flight work; Completed gets its own tab below so finished
+  // projects don't crowd the Projects grid.
+  const activeProjects = useMemo(
+    () => projects.filter((p) => p.status !== "DRAFT" && p.status !== "COMPLETED"),
+    [projects],
+  );
+  const completedProjects = useMemo(
+    () => projects.filter((p) => p.status === "COMPLETED"),
+    [projects],
+  );
   const draftCount = draftProjects.length;
+  const completedCount = completedProjects.length;
 
   const handleStartProject = useCallback(
     async (project: RDProject) => {
@@ -970,6 +983,7 @@ export default function RDPage() {
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
     { id: "drafts", label: `Drafts (${draftCount})`, icon: <Archive className="h-4 w-4" /> },
     { id: "projects", label: "Projects", icon: <Lightbulb className="h-4 w-4" /> },
+    { id: "completed", label: `Completed (${completedCount})`, icon: <CheckCircle2 className="h-4 w-4" /> },
     { id: "pipeline", label: "Pipeline", icon: <Layers className="h-4 w-4" /> },
     { id: "reports", label: "Reports", icon: <BarChart3 className="h-4 w-4" /> },
   ];
@@ -1026,12 +1040,24 @@ export default function RDPage() {
           )}
           {activeTab === "projects" && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {nonDraftProjects.map((project) => (
+              {activeProjects.map((project) => (
                 <ProjectCard key={project.id} project={project} />
               ))}
-              {nonDraftProjects.length === 0 && (
+              {activeProjects.length === 0 && (
                 <div className="col-span-3 text-center py-16 text-gray-400">
                   No R&D projects found.
+                </div>
+              )}
+            </div>
+          )}
+          {activeTab === "completed" && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {completedProjects.map((project) => (
+                <ProjectCard key={project.id} project={project} />
+              ))}
+              {completedProjects.length === 0 && (
+                <div className="col-span-3 text-center py-16 text-gray-400 text-sm">
+                  No completed projects yet — projects show up here after they're marked Complete on the detail page.
                 </div>
               )}
             </div>

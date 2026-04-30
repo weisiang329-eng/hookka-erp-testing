@@ -27,7 +27,14 @@ import {
   Play,
   Archive,
 } from "lucide-react";
-import type { RDProject, RDProjectStage, RDPrototypeType, RdMaterialIssuance } from "@/types";
+import type {
+  RDProject,
+  RDProjectStage,
+  RDPrototypeType,
+  RdMaterialIssuance,
+  RDTeamMember,
+  RDLabourHourEntry,
+} from "@/types";
 import type { RawMaterial } from "@/types";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
@@ -73,8 +80,6 @@ const PROTO_TYPE_COLORS: Record<RDPrototypeType, string> = {
   FABRIC_SEWING: "bg-pink-100 text-pink-700",
   FRAMING: "bg-[#FBE4CE] text-[#B8601A]",
 };
-
-const LABOUR_RATE_SEN = 1500; // RM 15/hr
 
 // ─── Issuance line factory ─────────────────────────────────────────────────
 // Module-scope so the body of RDProjectDetailPage stays pure (the
@@ -216,16 +221,23 @@ export default function RDProjectDetailPage() {
     makeBlankIssuanceLine(),
   ]);
 
-  // Labour Hours Log modal
+  // Labour Hours modal — new table-backed flow (rd_labour_hours +
+  // rd_team_members). The legacy `labourLogs` JSON column is no longer
+  // written from this UI; existing rows on it stay readable via the
+  // project payload but aren't surfaced in the new section.
   const [labourOpen, setLabourOpen] = useState(false);
   const [labourSaving, setLabourSaving] = useState(false);
   const [labourForm, setLabourForm] = useState({
-    date: new Date().toISOString().slice(0, 10),
-    workerName: "",
-    department: "R&D",
+    teamMemberId: "",
+    workDate: new Date().toISOString().slice(0, 10),
     hours: 1,
-    description: "",
+    notes: "",
   });
+
+  // Manual labour-cost override modal.
+  const [manualCostOpen, setManualCostOpen] = useState(false);
+  const [manualCostSaving, setManualCostSaving] = useState(false);
+  const [manualCostRM, setManualCostRM] = useState("");
 
   // Stage photos
   const [stagePhotos, setStagePhotos] = useState<Record<string, string[]>>({});
@@ -258,9 +270,12 @@ export default function RDProjectDetailPage() {
   // dedicated GET /:id/issuances endpoint and refresh it after every issuance
   // mutation. See migration 0095 for the JSON→table backfill.
   const issuancesUrl = id ? `/api/rd-projects/${id}/issuances` : null;
+  const labourHoursUrl = id ? `/api/rd-projects/${id}/labour-hours` : null;
   const { data: projectResp, loading, refresh: refreshProjectHook } = useCachedJson<{ data?: RDProject }>(rdUrl);
   const { data: issuancesResp, refresh: refreshIssuancesHook } = useCachedJson<{ data?: RdMaterialIssuance[] }>(issuancesUrl);
   const { data: inventoryResp, refresh: refreshInventoryHook } = useCachedJson<{ data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  const { data: labourHoursResp, refresh: refreshLabourHoursHook } = useCachedJson<{ data?: RDLabourHourEntry[] }>(labourHoursUrl);
+  const { data: teamMembersResp, refresh: refreshTeamMembersHook } = useCachedJson<{ data?: RDTeamMember[] }>("/api/rd-team-members?active=true");
 
   const fetchProject = useCallback(() => {
     if (rdUrl) invalidateCachePrefix(rdUrl);
@@ -278,7 +293,19 @@ export default function RDProjectDetailPage() {
     refreshInventoryHook();
   }, [refreshInventoryHook]);
 
+  const fetchLabourHours = useCallback(() => {
+    if (labourHoursUrl) invalidateCachePrefix(labourHoursUrl);
+    refreshLabourHoursHook();
+  }, [labourHoursUrl, refreshLabourHoursHook]);
+
+  const fetchTeamMembers = useCallback(() => {
+    invalidateCachePrefix("/api/rd-team-members");
+    refreshTeamMembersHook();
+  }, [refreshTeamMembersHook]);
+
   const issuances: RdMaterialIssuance[] = issuancesResp?.data ?? [];
+  const labourHours: RDLabourHourEntry[] = labourHoursResp?.data ?? [];
+  const teamMembers: RDTeamMember[] = teamMembersResp?.data ?? [];
 
   /* eslint-disable react-hooks/set-state-in-effect -- mirror SWR project + inventory data into mutable local state */
   useEffect(() => {
@@ -723,23 +750,27 @@ export default function RDProjectDetailPage() {
     }
   };
 
-  // ─── Labour Hours Log ──────────────────────────────────────────────────
+  // ─── Labour Hours (rd_labour_hours table-backed) ───────────────────────
 
   const openLabourModal = () => {
+    fetchTeamMembers();
     setLabourForm({
-      date: new Date().toISOString().slice(0, 10),
-      workerName: "",
-      department: "R&D",
+      teamMemberId: teamMembers.length > 0 ? teamMembers[0].id : "",
+      workDate: new Date().toISOString().slice(0, 10),
       hours: 1,
-      description: "",
+      notes: "",
     });
     setLabourOpen(true);
   };
 
   const handleLogLabour = async () => {
     if (!project) return;
-    if (!labourForm.workerName.trim()) {
-      toast.warning("Worker name is required");
+    if (!labourForm.teamMemberId) {
+      toast.warning("Team member is required. Add one in R&D Maintenance.");
+      return;
+    }
+    if (!labourForm.workDate) {
+      toast.warning("Work date is required");
       return;
     }
     if (labourForm.hours <= 0) {
@@ -748,29 +779,95 @@ export default function RDProjectDetailPage() {
     }
     setLabourSaving(true);
     try {
-      const res = await fetch(`/api/rd-projects/${id}/labour-log`, {
+      const res = await fetch(`/api/rd-projects/${id}/labour-hours`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({
-          date: labourForm.date,
-          workerName: labourForm.workerName.trim(),
-          department: labourForm.department.trim(),
+          teamMemberId: labourForm.teamMemberId,
+          workDate: labourForm.workDate,
           hours: labourForm.hours,
-          description: labourForm.description.trim(),
+          notes: labourForm.notes.trim() || null,
         }),
       });
-      if (res.ok) {
-        await fetchProject();
-        setLabourOpen(false);
-        toast.success("Labour hours logged successfully");
-      } else {
-        toast.error("Failed to log labour hours");
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j.success) {
+        throw new Error(j.error ?? `HTTP ${res.status}`);
       }
-    } catch {
-      toast.error("Failed to log labour hours");
+      await Promise.all([fetchProject(), fetchLabourHours()]);
+      setLabourOpen(false);
+      toast.success("Labour hours logged");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to log labour hours");
     } finally {
       setLabourSaving(false);
     }
+  };
+
+  const handleRemoveLabourHour = async (logId: string) => {
+    if (!window.confirm("Remove this labour hours row?")) return;
+    try {
+      const res = await fetch(
+        `/api/rd-projects/${id}/labour-hours/${logId}`,
+        { method: "DELETE", credentials: "include" },
+      );
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j.success) {
+        throw new Error(j.error ?? `HTTP ${res.status}`);
+      }
+      await Promise.all([fetchProject(), fetchLabourHours()]);
+      toast.success("Labour hours row removed");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to remove labour hours");
+    }
+  };
+
+  // ─── Manual Labour Cost Override ───────────────────────────────────────
+
+  const openManualCostModal = () => {
+    const existing = project?.manualLabourCostSen;
+    setManualCostRM(
+      typeof existing === "number" ? (existing / 100).toFixed(2) : "",
+    );
+    setManualCostOpen(true);
+  };
+
+  const submitManualCost = async (next: number | null) => {
+    setManualCostSaving(true);
+    try {
+      const res = await fetch(`/api/rd-projects/${id}/labour-cost`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ manualLabourCostSen: next }),
+      });
+      const j = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !j.success) {
+        throw new Error(j.error ?? `HTTP ${res.status}`);
+      }
+      await fetchProject();
+      setManualCostOpen(false);
+      toast.success(next === null ? "Override cleared" : "Labour cost overridden");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to update labour cost");
+    } finally {
+      setManualCostSaving(false);
+    }
+  };
+
+  const handleSaveManualCost = async () => {
+    const rm = parseFloat(manualCostRM);
+    if (!Number.isFinite(rm) || rm < 0) {
+      toast.warning("Labour cost must be a non-negative number");
+      return;
+    }
+    await submitManualCost(Math.round(rm * 100));
+  };
+
+  const handleClearManualCost = async () => {
+    if (!window.confirm("Clear the manual override and revert to the auto-computed labour cost?"))
+      return;
+    await submitManualCost(null);
   };
 
   // ─── Stage Photo Upload ────────────────────────────────────────────────
@@ -1055,11 +1152,18 @@ export default function RDProjectDetailPage() {
     (sum, i) => sum + (typeof i.totalCostSen === "number" ? i.totalCostSen : 0),
     0,
   );
-  const totalLabourHours = project
-    ? (project.labourLogs || []).reduce((sum, l) => sum + l.hours, 0)
-    : 0;
-  const labourCostSen = totalLabourHours * LABOUR_RATE_SEN;
-  const totalRDCostSen = materialCostSen + labourCostSen;
+  // Labour cost summary comes from the server (computed in rd-projects.ts
+  // computeLabourCostSummary). Falls back to a zeroed shape if the project
+  // payload was fetched before migration 0098 landed.
+  const labourSummary = project?.labourCost;
+  const totalLabourHours = labourSummary?.totalLabourHours ?? 0;
+  const autoLabourCostSen = labourSummary?.laborCostSen ?? 0;
+  const partTimeFixedCostSen = labourSummary?.partTimeFixedCostSen ?? 0;
+  const isManualLabourCost = labourSummary?.isManualLabourCost ?? false;
+  const effectiveLabourCostSen =
+    labourSummary?.effectiveLabourCostSen ?? autoLabourCostSen;
+  const totalRDCostSen =
+    materialCostSen + effectiveLabourCostSen + partTimeFixedCostSen;
 
   // ─── Render ─────────────────────────────────────────────────────────────
 
@@ -1630,10 +1734,48 @@ export default function RDProjectDetailPage() {
                   <span className="text-gray-500">Material Cost</span>
                   <span className="font-medium text-[#1F1D1B]">{formatCurrency(materialCostSen)}</span>
                 </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-500">Labour Cost ({totalLabourHours}h x RM 15/hr)</span>
-                  <span className="font-medium text-[#1F1D1B]">{formatCurrency(labourCostSen)}</span>
+                <div className="flex justify-between items-center text-sm">
+                  <span className="text-gray-500 inline-flex items-center gap-1.5">
+                    Labour Cost
+                    {isManualLabourCost ? (
+                      <span className="inline-flex items-center rounded-full bg-[#FAEFCB] text-[#9C6F1E] border border-[#E8D597] px-1.5 py-0.5 text-[10px] font-semibold">
+                        Manual
+                      </span>
+                    ) : (
+                      <span className="text-xs text-gray-400">
+                        ({totalLabourHours}h auto)
+                      </span>
+                    )}
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span className="font-medium text-[#1F1D1B]">{formatCurrency(effectiveLabourCostSen)}</span>
+                    <button
+                      type="button"
+                      onClick={openManualCostModal}
+                      className="rounded p-1 text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9]"
+                      title="Override labour cost"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    {isManualLabourCost && (
+                      <button
+                        type="button"
+                        onClick={handleClearManualCost}
+                        disabled={manualCostSaving}
+                        className="rounded p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 disabled:opacity-50"
+                        title="Clear override"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    )}
+                  </span>
                 </div>
+                {partTimeFixedCostSen > 0 && (
+                  <div className="flex justify-between text-sm">
+                    <span className="text-gray-500">Total Fixed Cost (PT)</span>
+                    <span className="font-medium text-[#1F1D1B]">{formatCurrency(partTimeFixedCostSen)}</span>
+                  </div>
+                )}
                 <div className="flex justify-between text-sm pt-1 border-t border-dashed border-[#E2DDD8]">
                   <span className="font-semibold text-[#1F1D1B]">Total R&D Cost</span>
                   <span className="font-bold text-[#1F1D1B]">{formatCurrency(totalRDCostSen)}</span>
@@ -1821,13 +1963,16 @@ export default function RDProjectDetailPage() {
         </CardContent>
       </Card>
 
-      {/* Labour Hours Log */}
+      {/* Labour Hours \u2014 table-backed (rd_labour_hours), joined to
+          rd_team_members. Auto-cost shown per row uses the FT hourly rate;
+          PT rows show "\u2014" since their cost is the flat per-project fixed
+          line on the budget card. */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between w-full">
             <CardTitle className="text-sm flex items-center gap-2">
               <Clock className="h-4 w-4 text-gray-400" />
-              Labour Hours Log
+              Labour Hours
               {totalLabourHours > 0 && (
                 <span className="text-xs font-normal text-gray-400">
                   ({totalLabourHours}h total)
@@ -1835,14 +1980,19 @@ export default function RDProjectDetailPage() {
               )}
             </CardTitle>
             <Button variant="outline" size="sm" onClick={openLabourModal} className="gap-1.5 text-xs">
-              <Plus className="h-3.5 w-3.5" /> Log Hours
+              <Plus className="h-3.5 w-3.5" /> Add Hours
             </Button>
           </div>
         </CardHeader>
         <CardContent>
-          {(project.labourLogs || []).length === 0 ? (
+          {labourHours.length === 0 ? (
             <div className="text-center py-8 text-gray-300 text-sm">
-              No labour hours logged yet. Log hours to track R&D labour cost.
+              No labour hours logged yet. Add hours to track R&D labour cost.
+              {teamMembers.length === 0 && (
+                <div className="mt-2 text-xs text-gray-400">
+                  Add team members in R&D Maintenance first.
+                </div>
+              )}
             </div>
           ) : (
             <div className="space-y-3">
@@ -1850,27 +2000,46 @@ export default function RDProjectDetailPage() {
                 <thead>
                   <tr className="border-b border-[#E2DDD8]">
                     <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Date</th>
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Worker Name</th>
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Department</th>
+                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Member</th>
+                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Type</th>
                     <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Hours</th>
-                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Description</th>
+                    <th className="text-right py-2 px-2 text-xs font-semibold text-gray-500">Auto Cost</th>
+                    <th className="text-left py-2 px-2 text-xs font-semibold text-gray-500">Notes</th>
+                    <th className="w-8" />
                   </tr>
                 </thead>
                 <tbody>
-                  {(project.labourLogs || []).map((log) => (
-                    <tr key={log.id} className="border-b border-[#E2DDD8]/50 hover:bg-[#F0ECE9]/50">
-                      <td className="py-2 px-2 text-xs text-gray-600">{formatDate(log.date)}</td>
-                      <td className="py-2 px-2 text-sm font-medium text-[#1F1D1B]">{log.workerName}</td>
-                      <td className="py-2 px-2 text-xs text-gray-500">{log.department}</td>
-                      <td className="py-2 px-2 text-right text-sm font-medium">{log.hours}h</td>
-                      <td className="py-2 px-2 text-xs text-gray-600">{log.description || "\u2014"}</td>
+                  {labourHours.map((row) => (
+                    <tr key={row.id} className="border-b border-[#E2DDD8]/50 hover:bg-[#F0ECE9]/50">
+                      <td className="py-2 px-2 text-xs text-gray-600">{formatDate(row.workDate)}</td>
+                      <td className="py-2 px-2 text-sm font-medium text-[#1F1D1B]">{row.memberName}</td>
+                      <td className="py-2 px-2 text-xs text-gray-500">
+                        {row.employmentType === "FULL_TIME" ? "FT" : "PT"}
+                      </td>
+                      <td className="py-2 px-2 text-right text-sm font-medium">{row.hours}h</td>
+                      <td className="py-2 px-2 text-right text-sm">
+                        {row.employmentType === "FULL_TIME"
+                          ? formatCurrency(row.autoCostSen)
+                          : <span className="text-gray-400">\u2014</span>}
+                      </td>
+                      <td className="py-2 px-2 text-xs text-gray-600">{row.notes || "\u2014"}</td>
+                      <td className="py-2 px-1 text-right">
+                        <button
+                          type="button"
+                          onClick={() => handleRemoveLabourHour(row.id)}
+                          className="rounded p-1 text-gray-300 hover:text-red-500 hover:bg-red-50"
+                          title="Remove"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
               <div className="border-t-2 border-[#E2DDD8] pt-3 flex items-center justify-between">
                 <div className="text-sm text-gray-500">
-                  Total Labour Hours ({(project.labourLogs || []).length} entries)
+                  Total Labour Hours ({labourHours.length} entries)
                 </div>
                 <div className="text-lg font-bold text-[#1F1D1B]">
                   {totalLabourHours}h
@@ -2387,37 +2556,51 @@ export default function RDProjectDetailPage() {
         </div>
       </ModalOverlay>
 
-      {/* ─── Log Labour Hours Modal ────────────────────────────────────────── */}
-      <ModalOverlay open={labourOpen} onClose={() => setLabourOpen(false)} title="Log Labour Hours">
+      {/* ─── Log Labour Hours Modal (table-backed) ─────────────────────────
+          Member dropdown is sourced from /api/rd-team-members?active=true.
+          When the list is empty we tell the user to add someone in
+          Maintenance first rather than silently letting them post a 404. */}
+      <ModalOverlay open={labourOpen} onClose={() => setLabourOpen(false)} title="Add Labour Hours">
         <div className="space-y-4">
+          <div>
+            <label className={labelClass}>Team Member</label>
+            {teamMembers.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-[#E2DDD8] bg-[#FBF9F6] px-3 py-3 text-xs text-gray-500">
+                No active team members. Add one in{" "}
+                <a href="/rd/maintenance" className="text-[#6B5C32] underline">
+                  R&D Maintenance
+                </a>
+                .
+              </div>
+            ) : (
+              <select
+                className={selectClass}
+                value={labourForm.teamMemberId}
+                onChange={(e) =>
+                  setLabourForm((f) => ({ ...f, teamMemberId: e.target.value }))
+                }
+              >
+                <option value="" disabled>
+                  Select a member…
+                </option>
+                {teamMembers.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.name} ({m.employmentType === "FULL_TIME"
+                      ? `FT · ${formatCurrency(m.hourlyRateSen ?? 0)}/hr`
+                      : `PT · ${formatCurrency(m.monthlyFixedCostSen ?? 0)}/mo`})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Date</label>
               <input
                 type="date"
                 className={inputClass}
-                value={labourForm.date}
-                onChange={(e) => setLabourForm((f) => ({ ...f, date: e.target.value }))}
-              />
-            </div>
-            <div>
-              <label className={labelClass}>Worker Name</label>
-              <input
-                className={inputClass}
-                value={labourForm.workerName}
-                onChange={(e) => setLabourForm((f) => ({ ...f, workerName: e.target.value }))}
-                placeholder="e.g. Ahmad Razif"
-              />
-            </div>
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass}>Department</label>
-              <input
-                className={inputClass}
-                value={labourForm.department}
-                onChange={(e) => setLabourForm((f) => ({ ...f, department: e.target.value }))}
-                placeholder="e.g. R&D"
+                value={labourForm.workDate}
+                onChange={(e) => setLabourForm((f) => ({ ...f, workDate: e.target.value }))}
               />
             </div>
             <div>
@@ -2433,20 +2616,85 @@ export default function RDProjectDetailPage() {
             </div>
           </div>
           <div>
-            <label className={labelClass}>Description</label>
+            <label className={labelClass}>Notes (optional)</label>
             <textarea
               className={`${inputClass} resize-none`}
               rows={3}
-              value={labourForm.description}
-              onChange={(e) => setLabourForm((f) => ({ ...f, description: e.target.value }))}
+              value={labourForm.notes}
+              onChange={(e) => setLabourForm((f) => ({ ...f, notes: e.target.value }))}
               placeholder="What work was done..."
             />
           </div>
           <div className="flex justify-end gap-2 pt-2 border-t border-[#E2DDD8]">
             <Button variant="ghost" onClick={() => setLabourOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleLogLabour} disabled={labourSaving}>
-              {labourSaving ? "Logging..." : "Log Hours"}
+            <Button
+              variant="primary"
+              onClick={handleLogLabour}
+              disabled={labourSaving || teamMembers.length === 0}
+            >
+              {labourSaving ? "Saving..." : "Add Hours"}
             </Button>
+          </div>
+        </div>
+      </ModalOverlay>
+
+      {/* ─── Manual Labour Cost Override Modal ─────────────────────────────
+          Sets / clears rd_projects.manualLabourCostSen via PATCH
+          /api/rd-projects/:id/labour-cost. When a value is set the budget
+          card shows a "Manual" badge and the auto-computed value is
+          ignored until the override is cleared. */}
+      <ModalOverlay
+        open={manualCostOpen}
+        onClose={() => (manualCostSaving ? null : setManualCostOpen(false))}
+        title="Override Labour Cost"
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-gray-500">
+            Type a number directly to override the auto-computed labour cost.
+            Useful for back-of-the-envelope estimates or one-off projects
+            where you don't want to log every hour.
+          </p>
+          <div>
+            <label className={labelClass}>Labour Cost (RM)</label>
+            <input
+              type="number"
+              inputMode="decimal"
+              min={0}
+              step={0.01}
+              className={inputClass}
+              value={manualCostRM}
+              onChange={(e) => setManualCostRM(e.target.value)}
+              placeholder={
+                typeof autoLabourCostSen === "number"
+                  ? `Auto: ${(autoLabourCostSen / 100).toFixed(2)}`
+                  : "0.00"
+              }
+            />
+            <p className="text-[11px] text-gray-400 mt-1">
+              Auto value: {formatCurrency(autoLabourCostSen)} ({totalLabourHours}h logged).
+              Hours stay logged separately for future reference.
+            </p>
+          </div>
+          <div className="flex justify-between gap-2 pt-2 border-t border-[#E2DDD8]">
+            {isManualLabourCost ? (
+              <Button
+                variant="ghost"
+                onClick={handleClearManualCost}
+                disabled={manualCostSaving}
+              >
+                Clear Override
+              </Button>
+            ) : (
+              <span />
+            )}
+            <div className="flex gap-2">
+              <Button variant="ghost" onClick={() => setManualCostOpen(false)} disabled={manualCostSaving}>
+                Cancel
+              </Button>
+              <Button variant="primary" onClick={handleSaveManualCost} disabled={manualCostSaving}>
+                {manualCostSaving ? "Saving..." : "Save Override"}
+              </Button>
+            </div>
           </div>
         </div>
       </ModalOverlay>

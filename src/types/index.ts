@@ -1157,6 +1157,53 @@ export type RDProject = {
   status: "DRAFT" | "ACTIVE" | "ON_HOLD" | "COMPLETED" | "CANCELLED";
   // Timestamp the project flipped DRAFT → ACTIVE. Null while in DRAFT.
   startedAt?: string | null;
+  // Manual labour-cost override (sen). When set, overrides the
+  // auto-computed value derived from rd_labour_hours rows.
+  manualLabourCostSen?: number | null;
+  // Computed labour-cost summary (returned by GET /api/rd-projects/:id).
+  // Populated server-side; absent on the list endpoint to avoid N+1.
+  labourCost?: RDLabourCostSummary;
+};
+
+// Labour-cost summary surfaced on the project detail GET. The frontend
+// uses `effectiveLabourCostSen` for the budget card and `isManualLabourCost`
+// for the "Manual" badge. See rd-projects.ts computeLabourCostSummary().
+export type RDLabourCostSummary = {
+  laborCostSen: number;
+  partTimeFixedCostSen: number;
+  manualLabourCostSen: number | null;
+  effectiveLabourCostSen: number;
+  isManualLabourCost: boolean;
+  totalLabourHours: number;
+};
+
+// R&D team member — Maintenance module. Distinct from the production-floor
+// `Worker` model: simpler shape, no payroll calc, scoped to R&D-only people.
+export type RDTeamMember = {
+  id: string;
+  name: string;
+  employmentType: "FULL_TIME" | "PART_TIME";
+  hourlyRateSen: number | null;       // FT only
+  monthlyFixedCostSen: number | null; // PT only
+  active: boolean;
+  notes: string;
+  orgId: string;
+  createdAt: string;
+  updatedAt: string | null;
+};
+
+// Single rd_labour_hours row joined to rd_team_members for the auto-cost.
+export type RDLabourHourEntry = {
+  id: string;
+  projectId: string;
+  teamMemberId: string;
+  memberName: string;
+  employmentType: "FULL_TIME" | "PART_TIME";
+  workDate: string;
+  hours: number;
+  notes: string;
+  autoCostSen: number;
+  createdAt: string;
 };
 
 // --- Pricing Config ---

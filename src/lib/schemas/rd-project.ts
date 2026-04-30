@@ -53,6 +53,17 @@ export const RdProjectSchema = z
     // loose z.string() since the API contract is a string-typed column.
     status: z.string().optional(),
     startedAt: z.string().nullable().optional(),
+    manualLabourCostSen: z.number().nullable().optional(),
+    labourCost: z
+      .object({
+        laborCostSen: z.number(),
+        partTimeFixedCostSen: z.number(),
+        manualLabourCostSen: z.number().nullable(),
+        effectiveLabourCostSen: z.number(),
+        isManualLabourCost: z.boolean(),
+        totalLabourHours: z.number(),
+      })
+      .optional(),
   })
   .passthrough();
 

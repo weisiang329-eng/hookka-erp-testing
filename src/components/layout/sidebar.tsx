@@ -137,6 +137,7 @@ const navigationGroups: NavGroup[] = [
     label: "R&D",
     items: [
       { name: "R&D Projects", href: "/rd", icon: Lightbulb },
+      { name: "R&D Maintenance", href: "/rd/maintenance", icon: Wrench },
     ],
   },
   {

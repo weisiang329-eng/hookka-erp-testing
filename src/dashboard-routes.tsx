@@ -95,6 +95,7 @@ const ServiceOrderDetail = lazy(() => import('./pages/service-orders/detail'))
 // R&D
 const RD = lazy(() => import('./pages/rd'))
 const RDDetail = lazy(() => import('./pages/rd/detail'))
+const RDMaintenance = lazy(() => import('./pages/rd/maintenance'))
 
 // Reports, Notifications, Maintenance
 const Reports = lazy(() => import('./pages/reports'))
@@ -311,6 +312,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // R&D
   { path: '/rd', element: <S><RD /></S> },
+  { path: '/rd/maintenance', element: <S><RDMaintenance /></S> },
   { path: '/rd/:id', element: <S><RDDetail /></S> },
 
   // Reports, Notifications, Maintenance

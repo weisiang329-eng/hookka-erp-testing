@@ -591,7 +591,7 @@ function CreateStockPODialog({
 }
 
 // ----- main page -----
-type Worker = { id: string; name: string; departmentCode?: string };
+type Worker = { id: string; name: string; departmentCode?: string; empNo?: string };
 
 // Rendering mode — injected by the per-route wrappers in overview.tsx / dept.tsx.
 //   - full (default): legacy behavior — all tabs visible, starts on Overview.

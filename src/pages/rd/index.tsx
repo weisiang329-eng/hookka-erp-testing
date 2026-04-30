@@ -242,7 +242,7 @@ function ProjectCard({ project }: { project: RDProject }) {
             src={cover}
             alt={`${project.name} cover`}
             onError={() => setCoverFailed(true)}
-            className="w-full h-32 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+            className="w-full aspect-square object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
         )}
         <CardHeader className="pb-3">
@@ -363,7 +363,7 @@ function PipelineView({ projects }: { projects: RDProject[] }) {
                       <img
                         src={cover}
                         alt=""
-                        className="w-full h-20 object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+                        className="w-full aspect-square object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
                       />
                     )}
                     <div className="p-2.5 space-y-2">

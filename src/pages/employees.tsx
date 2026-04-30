@@ -496,24 +496,31 @@ function WorkingHoursTab({
             <Clock className="h-5 w-5 text-[#6B5C32]" /> Daily Working Hours
           </CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
-            <Input
-              type="date"
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              className="w-44"
-              title="Working date — entries are scoped to this day"
-            />
+            {/* Working date — entries on this page are scoped to a SINGLE
+                day at a time (not a range). Per-day editing is intentional:
+                payroll review needs to verify each day's hours discretely.
+                Use the Labor Cost or Department Labor tab for range views. */}
+            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+              <span>Date</span>
+              <Input
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="w-40"
+                title="Working date — entries are scoped to this day"
+              />
+            </label>
             {/* Copy-from date workflow — typical use: payroll operator
                 pulls yesterday's full table, micro-adjusts the rows that
                 differ today, hits Save All. */}
-            <div className="flex items-center gap-1.5">
+            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+              <span>Copy from</span>
               <Input
                 type="date"
                 value={copyFromDate}
                 onChange={(e) => setCopyFromDate(e.target.value)}
                 className="w-40"
                 title="Copy from — pick a source date whose entries will be cloned as drafts on the working date"
-                placeholder="Copy from..."
               />
               <Button
                 variant="outline"
@@ -523,7 +530,7 @@ function WorkingHoursTab({
               >
                 {copying ? "Copying…" : "Copy"}
               </Button>
-            </div>
+            </label>
             <Button variant="outline" onClick={addRow}>
               <Plus className="h-4 w-4" /> Add Row
             </Button>
@@ -3042,36 +3049,25 @@ function workingDaysInMonth(period: string): number {
 
 // Effective working-days denominator for a custom date range. Used to derive
 // the per-worker hourly rate when the range isn't a single calendar month.
-// Algorithm: count Mon–Sat days inside [from, to], then scale up to a full
-// "month" (lastDay-of-from-month days) so the rate doesn't blow up for
-// short ranges (e.g. a 1-day range shouldn't give a worker 1 day's salary).
+//
+// Always returns the calendar working days of the FROM-date's month (Mon-Sat).
+// The hourly rate is a property of the contract month, not the report
+// window — picking a 2-day filter must NOT change a worker's per-hour cost.
+//
+// Bug fix 2026-04-30 per user (Labor Cost vs Revenue showing 480% on a
+// 29-30 Apr filter, 3.2% on a 1-30 Apr filter for the SAME 16.5h of work):
+// the prior implementation counted Mon-Sat days inside [from, to] (so a
+// 2-day window divided monthly salary by 2, inflating the rate ~13x).
+// The OT base rate already used a fixed 26-day denominator at the call
+// site; the regular rate now matches that intent via the FROM month's
+// real Mon-Sat count.
+//
 // Falls back to 26 on unparseable input.
-function workingDaysInRange(from: string, to: string): number {
+function workingDaysInRange(from: string, _to: string): number {
   const fy = Number(from.slice(0, 4));
   const fm = Number(from.slice(5, 7));
-  const fd = Number(from.slice(8, 10));
-  const ty = Number(to.slice(0, 4));
-  const tm = Number(to.slice(5, 7));
-  const td = Number(to.slice(8, 10));
-  if (!fy || !fm || !fd || !ty || !tm || !td) return 26;
-  // If single calendar month, defer to workingDaysInMonth so monthly results
-  // exactly match the existing logic.
-  if (fy === ty && fm === tm) {
-    const lastOfMonth = new Date(Date.UTC(fy, fm, 0)).getUTCDate();
-    if (fd === 1 && td === lastOfMonth) {
-      return workingDaysInMonth(`${fy}-${String(fm).padStart(2, "0")}`);
-    }
-  }
-  // Otherwise count actual Mon–Sat days in the range.
-  const start = new Date(Date.UTC(fy, fm - 1, fd));
-  const end = new Date(Date.UTC(ty, tm - 1, td));
-  if (end.getTime() < start.getTime()) return 26;
-  let count = 0;
-  for (let t = start.getTime(); t <= end.getTime(); t += 86400000) {
-    const dow = new Date(t).getUTCDay();
-    if (dow !== 0) count++;
-  }
-  return Math.max(1, count);
+  if (!fy || !fm) return 26;
+  return workingDaysInMonth(`${fy}-${String(fm).padStart(2, "0")}`);
 }
 
 // Inline panel — create / edit / delete departments. Lives under LaborCostTab

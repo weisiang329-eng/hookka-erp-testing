@@ -214,8 +214,13 @@ function main() {
     // 2. Cascade to every production_orders row derived from this SO.
     //    companySOId → base (matches new SO), customerPOId → base (strip
     //    suffix — line identity lives on production_orders.lineNo).
+    //    poNo → ${toCompany}-NN where NN is the existing line suffix.
+    //    Without the poNo cascade the production page filter (which
+    //    matches against poNo) keeps finding POs by their stale-renumbered
+    //    SO id, which makes the search box look broken — see the
+    //    poNo / companySOId desync incident on 2026-04-30.
     stmts.push(
-      `UPDATE production_orders SET companySOId='${sqlEscape(u.toCompany)}', customerPOId='${sqlEscape(u.toCustPO)}', salesOrderNo='${sqlEscape(u.toCompany)}' WHERE salesOrderId='${sqlEscape(u.id)}';`,
+      `UPDATE production_orders SET companySOId='${sqlEscape(u.toCompany)}', customerPOId='${sqlEscape(u.toCustPO)}', salesOrderNo='${sqlEscape(u.toCompany)}', poNo='${sqlEscape(u.toCompany)}' || '-' || lpad(lineNo::text, 2, '0') WHERE salesOrderId='${sqlEscape(u.id)}';`,
     );
   }
 

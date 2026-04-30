@@ -695,12 +695,23 @@ function Cell({
     >
       {editing ? (
         col === "completedDate" ? (
+          // Native HTML5 date input — browsers render a calendar picker on
+          // focus / icon click. Value/onChange use the same ISO yyyy-mm-dd
+          // string the rest of the spreadsheet works with, so no format
+          // conversion is needed at the boundary.
           <input
             autoFocus
-            type="text"
+            type="date"
             value={draft}
-            placeholder="YYYY-MM-DD"
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              // <input type="date"> always emits ISO yyyy-mm-dd (or "" when
+              // cleared), so we can persist immediately and close — no need
+              // for a separate Enter / blur commit dance.
+              const v = e.target.value;
+              setDraft(v);
+              setEditing(false);
+              onWrite(v);
+            }}
             onBlur={commit}
             onKeyDown={(e) => {
               if (e.key === "Enter") { e.preventDefault(); commit(); }

@@ -70,9 +70,10 @@ function parseJson<T>(raw: string | null, fallback: T): T {
 // when somebody edits the BOM template (qty changes, process additions). Users
 // expect the column to follow the BOM in real time, so /api/products now
 // re-computes it on read by walking the active bom_templates row for that
-// productCode. The walker matches src/pages/bom.tsx exactly: cumulative qty
-// multiplier from root → leaf so child WIPs (foam/frame/wood under a divan
-// qty=2) get counted at ×2.
+// productCode. The walker matches src/pages/bom.tsx exactly: each node's
+// quantity is "per finished good" (NOT per parent), so multipliers do NOT
+// compound from root to leaf. A "Foam x2" inside a "Divan x2" means 2 foams
+// per FG, not 4.
 type WipNode = {
   quantity?: number;
   processes?: { minutes?: number }[];
@@ -80,12 +81,15 @@ type WipNode = {
 };
 type L1Process = { minutes?: number };
 
-function sumWipTreeMinutes(wips: WipNode[], parentMul: number = 1): number {
+function sumWipTreeMinutes(wips: WipNode[]): number {
   let total = 0;
   for (const w of wips) {
-    const mul = parentMul * (w.quantity ?? 1);
-    for (const p of w.processes ?? []) total += (p.minutes ?? 0) * mul;
-    if (w.children?.length) total += sumWipTreeMinutes(w.children, mul);
+    const own = (w.processes ?? []).reduce(
+      (s, p) => s + (p.minutes ?? 0),
+      0,
+    );
+    total += own * (w.quantity ?? 1);
+    if (w.children?.length) total += sumWipTreeMinutes(w.children);
   }
   return total;
 }

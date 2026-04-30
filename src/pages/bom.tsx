@@ -1094,33 +1094,37 @@ function wipToPrintHtml(wip: WIPComponent, level: number, product: Product): str
   `;
 }
 
-// Recursively walk a WIP subtree summing process minutes × the cumulative
-// quantity multiplier from root to current node. (A divan qty=2 with a
-// foam child qty=1 contributes foam_processes × 1 × 2 = ×2 across the
-// product. With nested children of children, each layer compounds.)
-function sumWipTreeMinutes(wips: WIPComponent[], parentMul: number = 1): number {
+// Recursively walk a WIP subtree summing process minutes × node's OWN
+// quantity. Quantity does NOT compound from parent to child — in this
+// codebase a WIP's `quantity` is "how many of this WIP exist in one
+// finished good" (per-FG semantic), not "per parent unit". Top-level
+// already encodes that ("Divan x2" = 2 divans per FG); child WIPs do
+// the same ("Foam x2" = 2 foams per FG, NOT 2 foams per divan). The
+// pre-existing top-level-only sum at this call site multiplied by
+// w.quantity directly, so this walker just extends that semantic to
+// nested children.
+function sumWipTreeMinutes(wips: WIPComponent[]): number {
   let total = 0;
   for (const w of wips) {
-    const mul = parentMul * (w.quantity || 1);
-    for (const p of w.processes || []) total += p.minutes * mul;
-    if (w.children?.length) total += sumWipTreeMinutes(w.children, mul);
+    const own = (w.processes || []).reduce((s, p) => s + p.minutes, 0);
+    total += own * (w.quantity || 1);
+    if (w.children?.length) total += sumWipTreeMinutes(w.children);
   }
   return total;
 }
 
-// Per-dept aggregation matching sumWipTreeMinutes — recursive walk that
-// honours the cumulative quantity multiplier from root to leaf.
+// Per-dept aggregation matching sumWipTreeMinutes — same per-node qty,
+// no compounding.
 function accumulateDeptMinutes(
   wips: WIPComponent[],
   out: Record<string, number>,
-  parentMul: number = 1,
 ): void {
   for (const w of wips) {
-    const mul = parentMul * (w.quantity || 1);
+    const q = w.quantity || 1;
     for (const p of w.processes || []) {
-      out[p.deptCode] = (out[p.deptCode] || 0) + p.minutes * mul;
+      out[p.deptCode] = (out[p.deptCode] || 0) + p.minutes * q;
     }
-    if (w.children?.length) accumulateDeptMinutes(w.children, out, mul);
+    if (w.children?.length) accumulateDeptMinutes(w.children, out);
   }
 }
 

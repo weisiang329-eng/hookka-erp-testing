@@ -2006,6 +2006,35 @@ app.post("/:id/confirm", async (c) => {
     after: order,
   });
 
+  // Google Sheets sync — fire-and-forget. Push every freshly-created JC to
+  // its dept tab so the operator workspace mirrors the new POs the moment
+  // confirm completes. Wrapped in waitUntil so the Sheets round-trip never
+  // blocks the response. Helper silently no-ops when GOOGLE_SHEETS_SA_KEY
+  // is missing — see docs/SHEETS-SYNC.md.
+  if (!preExisting && productionOrders.length > 0) {
+    const ctx = (c as unknown as {
+      executionCtx?: { waitUntil(p: Promise<unknown>): void };
+    }).executionCtx;
+    const pushPromise = pushNewlyCreatedJobCardsToSheet(
+      c.env as unknown as {
+        GOOGLE_SHEETS_SA_KEY?: string;
+        SHEETS_SPREADSHEET_ID?: string;
+      },
+      c.var.DB,
+      productionOrders.map((p) => p.id),
+    ).catch((err) => {
+      console.error(
+        "[sales-orders/confirm] sheets-sync push failed",
+        err instanceof Error ? err.message : err,
+      );
+    });
+    if (ctx?.waitUntil) {
+      ctx.waitUntil(pushPromise);
+    }
+    // If executionCtx isn't available (unit tests / wrangler dev edge cases)
+    // the promise still runs; we just don't await it.
+  }
+
   return c.json({
     success: true,
     data: order,
@@ -2019,6 +2048,92 @@ app.post("/:id/confirm", async (c) => {
     },
   );
 });
+
+// ---------------------------------------------------------------------------
+// Sheets-sync helper — load every JC for the freshly-created POs and push
+// them to the matching dept tab. Lives in this file (instead of the lib)
+// because it joins production_orders + sales_orders + job_cards in one
+// shot, which is specific to the SO-confirm fanout path.
+// ---------------------------------------------------------------------------
+async function pushNewlyCreatedJobCardsToSheet(
+  env: {
+    GOOGLE_SHEETS_SA_KEY?: string;
+    SHEETS_SPREADSHEET_ID?: string;
+  },
+  db: D1Database,
+  poIds: string[],
+): Promise<void> {
+  if (poIds.length === 0) return;
+  const placeholders = poIds.map(() => "?").join(",");
+  const rows = await db
+    .prepare(
+      `SELECT jc.id          AS id,
+              jc.departmentCode AS departmentCode,
+              jc.status      AS status,
+              jc.dueDate     AS dueDate,
+              jc.completedDate AS completedDate,
+              jc.pic1Name    AS pic1Name,
+              jc.pic2Name    AS pic2Name,
+              jc.wipLabel    AS wipLabel,
+              jc.category    AS category,
+              jc.wipQty      AS wipQty,
+              po.poNo        AS poNo,
+              po.customerName AS customerName,
+              po.productCode AS productCode,
+              so.customerPOId AS customerPOId,
+              so.reference   AS soReference
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+    LEFT JOIN sales_orders so ON so.id = po.salesOrderId
+        WHERE po.id IN (${placeholders})`,
+    )
+    .bind(...poIds)
+    .all<{
+      id: string;
+      departmentCode: string | null;
+      status: string | null;
+      dueDate: string | null;
+      completedDate: string | null;
+      pic1Name: string | null;
+      pic2Name: string | null;
+      wipLabel: string | null;
+      category: string | null;
+      wipQty: number | null;
+      poNo: string | null;
+      customerName: string | null;
+      productCode: string | null;
+      customerPOId: string | null;
+      soReference: string | null;
+    }>();
+
+  const { syncJobCardToSheet } = await import("../lib/sheets-sync");
+  for (const r of rows.results ?? []) {
+    await syncJobCardToSheet(
+      env,
+      {
+        id: r.id,
+        departmentCode: r.departmentCode,
+        status: r.status,
+        dueDate: r.dueDate,
+        completedDate: r.completedDate,
+        pic1Name: r.pic1Name,
+        pic2Name: r.pic2Name,
+        wipLabel: r.wipLabel,
+        category: r.category,
+        wipQty: r.wipQty,
+      },
+      {
+        poNo: r.poNo,
+        customerName: r.customerName,
+        productCode: r.productCode,
+      },
+      {
+        customerPOId: r.customerPOId,
+        reference: r.soReference,
+      },
+    );
+  }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/sales-orders/:id — SO + items + statusHistory + priceOverrides

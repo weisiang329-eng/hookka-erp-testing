@@ -2827,6 +2827,113 @@ app.post("/regen-job-cards-bulk", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/production-orders/resync-po-numbers
+//
+// One-shot backfill that re-aligns production_orders.poNo with the parent
+// SO's CURRENT companySOId. Heals the desync introduced by
+// scripts/restore-original-so-ids.ts before its 2026-04-30 fix — that
+// script renumbered companySOId on both sales_orders AND production_orders
+// but left the poNo column stale, so the production page filter (which
+// matches against poNo) kept resolving by the pre-renumber SO id and
+// confused operators looking for a current SO number.
+//
+// Body: { dryRun?: boolean } — defaults to true. Pass { dryRun: false }
+// to actually write. The endpoint returns the desync count + a sample of
+// the diffs in either mode, so the caller can verify scope before
+// committing.
+// ---------------------------------------------------------------------------
+app.post("/resync-po-numbers", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  let body: { dryRun?: boolean } = {};
+  try {
+    body = await c.req.json();
+  } catch {
+    body = {};
+  }
+  const dryRun = body.dryRun !== false; // default safe
+
+  const rows = await db
+    .prepare(
+      `SELECT po.id AS poId,
+              po.poNo AS currentPoNo,
+              po.lineNo AS lineNo,
+              po.salesOrderId AS soId,
+              so.companySOId AS freshCompanySOId
+         FROM production_orders po
+         JOIN sales_orders so ON so.id = po.salesOrderId
+        WHERE po.salesOrderId IS NOT NULL
+          AND so.companySOId IS NOT NULL
+          AND so.companySOId <> ''`,
+    )
+    .all<{
+      poId: string;
+      currentPoNo: string;
+      lineNo: number;
+      soId: string;
+      freshCompanySOId: string;
+    }>();
+
+  const desync: Array<{
+    poId: string;
+    currentPoNo: string;
+    expectedPoNo: string;
+    soId: string;
+  }> = [];
+  for (const r of rows.results ?? []) {
+    const lineSuffix = `-${String(r.lineNo).padStart(2, "0")}`;
+    const expectedPoNo = `${r.freshCompanySOId}${lineSuffix}`;
+    if (r.currentPoNo !== expectedPoNo) {
+      desync.push({
+        poId: r.poId,
+        currentPoNo: r.currentPoNo,
+        expectedPoNo,
+        soId: r.soId,
+      });
+    }
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      desyncCount: desync.length,
+      sample: desync.slice(0, 10),
+    });
+  }
+
+  // Apply in chunks so a single failure (e.g. UNIQUE poNo collision)
+  // surfaces with the exact poId and the rest of the batch still lands.
+  let applied = 0;
+  const errors: Array<{ poId: string; expectedPoNo: string; error: string }> = [];
+  for (const d of desync) {
+    try {
+      await db
+        .prepare("UPDATE production_orders SET poNo = ? WHERE id = ?")
+        .bind(d.expectedPoNo, d.poId)
+        .run();
+      applied += 1;
+    } catch (err) {
+      errors.push({
+        poId: d.poId,
+        expectedPoNo: d.expectedPoNo,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    desyncCount: desync.length,
+    applied,
+    errorCount: errors.length,
+    errors: errors.slice(0, 10),
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/production-orders/:poId/regen-job-cards
 //
 // Single-PO regen: wipes this PO's job_cards and rebuilds them from the

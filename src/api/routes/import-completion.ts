@@ -798,18 +798,19 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/import/cascade-upstream-completion
 //
-// Anchor-relative cascade-fill, RESTRICTED to 3 explicit rules. Within each
+// Anchor-relative cascade-fill, RESTRICTED to 4 explicit rules. Within each
 // (productionOrderId, wipKey) group, find the most-downstream completed JC
 // (the "anchor" — MAX(sequence) among rows where status IN ('COMPLETED',
 // 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's dept is one
-// of the 3 listed below, plan completions for the listed target depts in
+// of the 4 listed below, plan completions for the listed target depts in
 // that group. Any other anchor dept → entire group is skipped.
 //
 //   UPHOLSTERY → FAB_CUT, FAB_SEW, FOAM, WOOD_CUT, FRAMING, WEBBING
 //   WEBBING    → FRAMING, WOOD_CUT
+//   FRAMING    → WOOD_CUT
 //   FAB_SEW    → FAB_CUT
 //
-// FOAM / FRAMING / WOOD_CUT / FAB_CUT / PACKING anchors → no cascade.
+// FOAM / WOOD_CUT / FAB_CUT / PACKING anchors → no cascade.
 //
 // Date math (unchanged):
 //   leadtimes[cat][dept] = days BEFORE customer DD that dept finishes.
@@ -832,11 +833,12 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 const CASCADE_DATE_CLAMP = "2026-04-30";
 
-// The only 3 cascade rules. Anchor dept → list of target depts to plan.
+// The only 4 cascade rules. Anchor dept → list of target depts to plan.
 // Anything not in this map is silently skipped (no rows planned).
 const CASCADE_ALLOWED: Record<string, readonly string[]> = {
   UPHOLSTERY: ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING"],
   WEBBING: ["FRAMING", "WOOD_CUT"],
+  FRAMING: ["WOOD_CUT"],
   FAB_SEW: ["FAB_CUT"],
 };
 
@@ -1039,9 +1041,9 @@ app.post("/cascade-upstream-completion", async (c) => {
     groupHadAnchor++;
     if (cand.sequence === anchor.anchor_seq) continue; // shouldn't happen (anchor row is by definition done) but guard
 
-    // Restricted cascade: only 3 anchor depts trigger fills, and each
+    // Restricted cascade: only 4 anchor depts trigger fills, and each
     // anchor only cascades to a fixed allow-list of target depts. Any
-    // other anchor dept (FOAM, FRAMING, WOOD_CUT, FAB_CUT, PACKING, ...)
+    // other anchor dept (FOAM, WOOD_CUT, FAB_CUT, PACKING, ...)
     // → group skipped, nothing planned.
     const anchorDept = (anchor.anchor_dept || "").toUpperCase();
     const targetDept = (cand.departmentCode || "").toUpperCase();

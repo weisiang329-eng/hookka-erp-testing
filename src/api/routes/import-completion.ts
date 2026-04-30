@@ -794,4 +794,133 @@ app.post("/clear-future-completions", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/cascade-upstream-completion
+//
+// Generic upstream cascade-fill: within each (productionOrderId, wipKey)
+// group, if ANY job_card with status IN ('COMPLETED','TRANSFERRED') exists
+// at sequence N, every job_card at sequence < N in the same group must
+// also be COMPLETED (sequence is the per-wipType chain order, so this
+// covers FAB_SEW->FAB_CUT, FRAMING->WOOD_CUT, UPHOLSTERY->WEBBING/FOAM/
+// FAB_SEW, etc. without hard-coding the dept pairs).
+//
+// Side-effect policy: this endpoint is a metadata cleanup pass — NOT a
+// workflow event. We deliberately skip applyWipInventoryChange,
+// postJobCardLabor, and postProductionOrderCompletion. The downstream JCs
+// already fired their cascades when they originally completed, and re-
+// firing them now (out of order) would double-consume WIP / double-post
+// labor. If a PO needs FG completion, run the dedicated importer or flip
+// it manually after this pass.
+//
+// Query params:
+//   ?dryRun=true|false   default false
+//   ?date=YYYY-MM-DD     default 2026-04-29
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type CandidateRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipType: string | null;
+  sequence: number;
+  estMinutes: number | null;
+  productionTimeMinutes: number | null;
+  status: string;
+};
+
+app.post("/cascade-upstream-completion", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const dateParam = c.req.query("date") || "2026-04-29";
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateParam)) {
+    return c.json(
+      { success: false, error: `date "${dateParam}" not ISO YYYY-MM-DD` },
+      400,
+    );
+  }
+
+  // Find every JC that sits upstream of a completed sibling in the same
+  // (productionOrderId, wipKey) group.
+  const sel = await db
+    .prepare(
+      `WITH max_completed AS (
+         SELECT productionOrderId,
+                COALESCE(wipKey, '') AS wk,
+                MAX(sequence) AS max_seq
+           FROM job_cards
+          WHERE status IN ('COMPLETED','TRANSFERRED')
+            AND completedDate IS NOT NULL
+          GROUP BY productionOrderId, COALESCE(wipKey, '')
+       )
+       SELECT j.id, j.productionOrderId, j.departmentCode, j.wipType, j.sequence,
+              j.estMinutes, j.productionTimeMinutes, j.status
+         FROM job_cards j
+         JOIN max_completed m
+           ON m.productionOrderId = j.productionOrderId
+          AND m.wk = COALESCE(j.wipKey, '')
+          AND j.sequence < m.max_seq
+        WHERE (j.status NOT IN ('COMPLETED','TRANSFERRED') OR j.completedDate IS NULL)`,
+    )
+    .all<CandidateRow>();
+
+  const candidates = sel.results ?? [];
+  const sample = candidates.slice(0, 15);
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      date: dateParam,
+      count: candidates.length,
+      sample,
+    });
+  }
+
+  let updated = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+
+  for (const cand of candidates) {
+    const actualMinutes =
+      cand.productionTimeMinutes != null
+        ? cand.productionTimeMinutes
+        : cand.estMinutes != null
+          ? cand.estMinutes
+          : 0;
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET status = 'COMPLETED',
+                  completedDate = ?,
+                  actualMinutes = ?,
+                  overdue = 'COMPLETED'
+            WHERE id = ?`,
+        )
+        .bind(dateParam, actualMinutes, cand.id)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: cand.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    date: dateParam,
+    count: candidates.length,
+    updated,
+    errors,
+    sample,
+  });
+});
+
 export default app;

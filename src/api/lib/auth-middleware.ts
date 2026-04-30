@@ -34,6 +34,10 @@ export const PUBLIC_PATHS = [
   // must now prove possession of the second factor. No bearer yet.
   "/api/auth/totp/login-verify",
   "/api/health",
+  // Google Sheets onEdit webhook. Apps Script can't carry the dashboard JWT,
+  // so auth boils down to the HMAC signature (SHEETS_SYNC_SECRET) + 5-minute
+  // timestamp window inside the handler. See docs/SHEETS-SYNC.md.
+  "/api/sheets-sync/apps-script-webhook",
 ];
 
 // Prefix-match endpoints that bypass the dashboard auth gate. These cover the

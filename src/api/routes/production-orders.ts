@@ -44,8 +44,74 @@ import {
   buildJobCardEventStatement,
   diffJobCardEvents,
 } from "../lib/job-card-events";
+// Google Sheets sync (fire-and-forget). Helper silently no-ops when
+// GOOGLE_SHEETS_SA_KEY is missing — see docs/SHEETS-SYNC.md.
+import { syncJobCardToSheet } from "../lib/sheets-sync";
 
 const app = new Hono<Env>();
+
+// Local helper — push one JC row to the matching dept tab on the live
+// spreadsheet via fire-and-forget. Joins production_orders + sales_orders
+// for the customerRef / customer columns the sheet expects. Wrapped in
+// try/catch so a Sheets-side failure NEVER voids the primary mutation.
+async function fireAndForgetSyncJc(
+  c: Context<Env>,
+  jc: JobCardRow,
+  po: ProductionOrderRow,
+): Promise<void> {
+  try {
+    const so = po.salesOrderId
+      ? await c.var.DB
+          .prepare(
+            "SELECT customerPOId, reference FROM sales_orders WHERE id = ?",
+          )
+          .bind(po.salesOrderId)
+          .first<{ customerPOId: string | null; reference: string | null }>()
+      : null;
+    await syncJobCardToSheet(
+      c.env as unknown as {
+        GOOGLE_SHEETS_SA_KEY?: string;
+        SHEETS_SPREADSHEET_ID?: string;
+      },
+      {
+        id: jc.id,
+        departmentCode: jc.departmentCode,
+        status: jc.status,
+        dueDate: jc.dueDate,
+        completedDate: jc.completedDate,
+        pic1Name: jc.pic1Name,
+        pic2Name: jc.pic2Name,
+        wipLabel: jc.wipLabel,
+        category: jc.category,
+        wipQty: jc.wipQty,
+      },
+      {
+        poNo: po.poNo,
+        customerName: po.customerName,
+        productCode: po.productCode,
+      },
+      so
+        ? { customerPOId: so.customerPOId, reference: so.reference }
+        : null,
+    );
+  } catch (err) {
+    console.error(
+      "[sheets-sync] fireAndForgetSyncJc failed",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+function scheduleFireAndForget(c: Context<Env>, p: Promise<unknown>): void {
+  const ctx = (c as unknown as {
+    executionCtx?: { waitUntil(p: Promise<unknown>): void };
+  }).executionCtx;
+  if (ctx?.waitUntil) {
+    ctx.waitUntil(p);
+  }
+  // If executionCtx isn't available, the promise still runs — we just don't
+  // hold the request open for it.
+}
 
 // ---------------------------------------------------------------------------
 // Row types (mirror migrations/0001_init.sql exactly)
@@ -1977,6 +2043,12 @@ async function applyPoUpdate(
       )
       .run();
 
+    // Google Sheets sync — fire-and-forget. Push the freshly-updated JC
+    // row to its dept tab so the spreadsheet stays mirror-accurate. Helper
+    // silently no-ops when GOOGLE_SHEETS_SA_KEY is missing; failures are
+    // logged but never void this UPDATE. See docs/SHEETS-SYNC.md.
+    scheduleFireAndForget(c, fireAndForgetSyncJc(c, updated, existing));
+
     // Phase 6 — parallel event log. Diff the JC snapshot before/after and
     // append one row per field that actually changed. `actorUserId` is
     // stashed on the Hono ctx by authMiddleware; for worker-portal calls
@@ -3420,6 +3492,10 @@ app.post("/:id/scan-complete", async (c) => {
       mergedJc.id,
     )
     .run();
+
+  // Google Sheets sync — fire-and-forget. Mirror the scan-complete JC row
+  // to its dept tab. Helper silently no-ops when the SA key is missing.
+  scheduleFireAndForget(c, fireAndForgetSyncJc(c, mergedJc, target.po));
 
   // If JC just completed, emit WIP inventory update.
   if (jcJustCompleted) {

@@ -50,6 +50,7 @@ import {
 } from "./production-orders";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
+import { loadLeadTimes, type LeadTimeMap } from "../lib/lead-times";
 
 const app = new Hono<Env>();
 
@@ -801,17 +802,30 @@ app.post("/clear-future-completions", async (c) => {
 // group, find the most-downstream completed JC (the "anchor" — MAX(sequence)
 // among rows whose status IN ('COMPLETED','TRANSFERRED') AND completedDate
 // IS NOT NULL). For every OTHER JC in the same group whose status is not
-// already done, set:
-//   newDate = anchor.completedDate + (jc.sequence - anchor.sequence) days
-// Upstream JCs (sequence < anchor) get earlier dates; downstream JCs
-// (sequence > anchor) get later dates. The latter is important — e.g. if
-// UPHOLSTERY (mid-chain) is marked done on 26 Apr, PACKING (sequence after)
-// should also be considered done, dated relative to the anchor.
+// already done, derive a `newDate` from the *production lead-times table*
+// (the same data backing the Production Lead Times settings page):
+//
+//   leadtimes[cat][dept] = days BEFORE customer DD that dept finishes.
+//   Upstream depts (e.g. FAB_CUT=10) finish earlier than downstream
+//   (e.g. PACKING=2). So:
+//     offsetDays = ltAnchor - ltTarget
+//     newDate    = anchor_date + offsetDays days
+//   ltAnchor < ltTarget (target is upstream) → offset negative → earlier.
+//   ltAnchor > ltTarget (target is downstream) → offset positive → later.
+//
+// Category lookup: each PO's itemCategory selects the row map. SOFA uses
+// the SOFA values; everything else (BEDFRAME, ACCESSORY, missing) falls
+// back to BEDFRAME — same convention as sales-orders.ts.
+//
+// Fallback: if a (cat, dept) pair has no leadtime row AND no in-file
+// default, we fall back to the prior 1-day-per-sequence-step rule so we
+// never silently skip the candidate. The fallback count is surfaced in
+// the response as `fallbackToSequence` for data-quality monitoring.
 //
 // Clamp: if newDate > 2026-04-30, clamp to 2026-04-30. No early-side floor —
-// historical-looking dates are intentional. The intent is "spread one day
-// per dept, capped at today" so the date histogram doesn't pile every row
-// on a single day.
+// historical-looking dates are intentional. The cap exists so anything that
+// falls off the right edge of the calendar piles at "today" rather than
+// the future.
 //
 // Side-effect policy: this endpoint is a metadata cleanup pass — NOT a
 // workflow event. We deliberately skip applyWipInventoryChange,
@@ -843,6 +857,7 @@ type CandidateRow = {
   productionTimeMinutes: number | null;
   status: string;
   completedDate: string | null;
+  itemCategory: string | null;
 };
 
 type AnchorRow = {
@@ -850,12 +865,19 @@ type AnchorRow = {
   wk: string;
   anchor_seq: number;
   anchor_date: string;
+  anchor_dept: string | null;
 };
 
 type CandidatePlan = {
-  cand: CandidateRow & { anchor_seq: number; anchor_date: string };
+  cand: CandidateRow & {
+    anchor_seq: number;
+    anchor_date: string;
+    anchor_dept: string | null;
+  };
   newDate: string;
   actualMinutes: number;
+  offsetDays: number;
+  fallback: boolean;
 };
 
 function addDaysISO(iso: string, days: number): string {
@@ -876,11 +898,22 @@ app.post("/cascade-upstream-completion", async (c) => {
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
 
+  // Load production_lead_times into the (cat, dept) → days map BEFORE we
+  // start computing offsets. Falls back to in-file defaults for any
+  // missing pair. ACCESSORY POs reuse BEDFRAME values via leadDaysFor.
+  const leadTimes: LeadTimeMap = await loadLeadTimes(db);
+  const ltLookup = (cat: string | null, dept: string | null): number | null => {
+    if (!dept) return null;
+    const normCat = (cat || "").toUpperCase() === "SOFA" ? "SOFA" : "BEDFRAME";
+    const v = leadTimes[normCat]?.[dept];
+    return typeof v === "number" && v >= 0 ? v : null;
+  };
+
   // Two-pass approach (NOT a single CTE join). The single-CTE version
   // tripped a D1 column-aliasing quirk: SELECT j.completedDate AND
   // a.anchor_date from the same underlying column returned anchor_date
   // as undefined for every row. So instead:
-  //   1. Build the anchor map (productionOrderId, wipKey) → {seq, date}
+  //   1. Build the anchor map (productionOrderId, wipKey) → {seq, date, dept}
   //      from a query that selects ONLY anchor-side columns (no name
   //      collision with job_cards' own completedDate).
   //   2. Fetch all candidate JCs (every non-done row) and join in JS.
@@ -889,7 +922,8 @@ app.post("/cascade-upstream-completion", async (c) => {
       `SELECT j.productionOrderId AS productionOrderId,
               COALESCE(j.wipKey,'') AS wk,
               j.sequence AS anchor_seq,
-              j.completedDate AS anchor_date
+              j.completedDate AS anchor_date,
+              j.departmentCode AS anchor_dept
          FROM job_cards j
          JOIN (
            SELECT productionOrderId,
@@ -906,10 +940,13 @@ app.post("/cascade-upstream-completion", async (c) => {
     )
     .all<AnchorRow>();
 
-  // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date}
+  // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date, anchor_dept}
   // D1 quirk: snake_case aliases get camelCased on the way out, so
   // `anchor_date` becomes `anchorDate` in the result row. Try both forms.
-  const anchorMap = new Map<string, { anchor_seq: number; anchor_date: string }>();
+  const anchorMap = new Map<
+    string,
+    { anchor_seq: number; anchor_date: string; anchor_dept: string | null }
+  >();
   for (const a of anchorRes.results ?? []) {
     const raw = a as unknown as Record<string, unknown>;
     const seq =
@@ -924,6 +961,12 @@ app.post("/cascade-upstream-completion", async (c) => {
         : typeof raw.anchor_date === "string"
           ? (raw.anchor_date as string)
           : null;
+    const dept =
+      typeof raw.anchorDept === "string"
+        ? (raw.anchorDept as string)
+        : typeof raw.anchor_dept === "string"
+          ? (raw.anchor_dept as string)
+          : null;
     if (seq == null || !date) continue;
     const poId =
       typeof raw.productionOrderId === "string"
@@ -931,19 +974,27 @@ app.post("/cascade-upstream-completion", async (c) => {
         : "";
     const wk = typeof raw.wk === "string" ? (raw.wk as string) : "";
     const key = `${poId}||${wk}`;
-    anchorMap.set(key, { anchor_seq: seq, anchor_date: date });
+    anchorMap.set(key, { anchor_seq: seq, anchor_date: date, anchor_dept: dept });
   }
 
   // Fetch every non-done JC that lives in a group with an anchor.
   // We pull the full set of non-done rows; any row whose group has no
   // anchor (i.e. nothing completed in that wipKey at all) is filtered
   // out in JS — those are legitimately untouched orders.
+  // JOIN to production_orders to surface itemCategory for the leadtime
+  // category lookup.
   const candRes = await db
     .prepare(
-      `SELECT id, productionOrderId, wipKey, departmentCode, wipType, sequence,
-              estMinutes, productionTimeMinutes, status, completedDate
-         FROM job_cards
-        WHERE (status NOT IN ('COMPLETED','TRANSFERRED') OR completedDate IS NULL)`,
+      `SELECT j.id AS id, j.productionOrderId AS productionOrderId,
+              j.wipKey AS wipKey, j.departmentCode AS departmentCode,
+              j.wipType AS wipType, j.sequence AS sequence,
+              j.estMinutes AS estMinutes,
+              j.productionTimeMinutes AS productionTimeMinutes,
+              j.status AS status, j.completedDate AS completedDate,
+              po.itemCategory AS itemCategory
+         FROM job_cards j
+         LEFT JOIN production_orders po ON po.id = j.productionOrderId
+        WHERE (j.status NOT IN ('COMPLETED','TRANSFERRED') OR j.completedDate IS NULL)`,
     )
     .all<CandidateRow>();
 
@@ -956,6 +1007,7 @@ app.post("/cascade-upstream-completion", async (c) => {
   const dateHistogram: Record<string, number> = {};
   const skipped: Array<{ jcId: string; reason: string }> = [];
   let groupHadAnchor = 0;
+  let fallbackToSequence = 0;
   for (const cand of allNonDone) {
     const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}`;
     const anchor = anchorMap.get(key);
@@ -973,7 +1025,24 @@ app.post("/cascade-upstream-completion", async (c) => {
       });
       continue;
     }
-    const offset = cand.sequence - anchor.anchor_seq;
+
+    // Leadtime-driven offset. ltAnchor < ltTarget → upstream target →
+    // negative offset → earlier date. ltAnchor > ltTarget → downstream
+    // target → positive offset → later date.
+    const ltAnchor = ltLookup(cand.itemCategory, anchor.anchor_dept);
+    const ltTarget = ltLookup(cand.itemCategory, cand.departmentCode);
+    let offset: number;
+    let fallback = false;
+    if (ltAnchor == null || ltTarget == null) {
+      // Missing leadtime data — fall back to 1-day-per-sequence-step so
+      // we never silently skip a candidate.
+      offset = cand.sequence - anchor.anchor_seq;
+      fallback = true;
+      fallbackToSequence++;
+    } else {
+      offset = ltAnchor - ltTarget;
+    }
+
     let newDate = addDaysISO(anchorDate, offset);
     if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
     const actualMinutes =
@@ -983,23 +1052,53 @@ app.post("/cascade-upstream-completion", async (c) => {
           ? cand.estMinutes
           : 0;
     plans.push({
-      cand: { ...cand, anchor_seq: anchor.anchor_seq, anchor_date: anchorDate },
+      cand: {
+        ...cand,
+        anchor_seq: anchor.anchor_seq,
+        anchor_date: anchorDate,
+        anchor_dept: anchor.anchor_dept,
+      },
       newDate,
       actualMinutes,
+      offsetDays: offset,
+      fallback,
     });
     dateHistogram[newDate] = (dateHistogram[newDate] ?? 0) + 1;
   }
   const candidatesCount = groupHadAnchor;
 
+  // Offset summary: min/max/median across plans for a quick sanity check
+  // on the spread of the new dates.
+  let byOffsetSummary: { min: number; max: number; median: number } | null =
+    null;
+  if (plans.length > 0) {
+    const offsets = plans.map((p) => p.offsetDays).sort((a, b) => a - b);
+    const mid = Math.floor(offsets.length / 2);
+    const median =
+      offsets.length % 2 === 0
+        ? Math.round((offsets[mid - 1] + offsets[mid]) / 2)
+        : offsets[mid];
+    byOffsetSummary = {
+      min: offsets[0],
+      max: offsets[offsets.length - 1],
+      median,
+    };
+  }
+
   // Stable, easy-to-read 5-row sample with the load-bearing fields.
   const sample = plans.slice(0, 5).map((p) => ({
     id: p.cand.id,
     productionOrderId: p.cand.productionOrderId,
+    wipKey: p.cand.wipKey,
     departmentCode: p.cand.departmentCode,
     wipType: p.cand.wipType,
+    itemCategory: p.cand.itemCategory,
     sequence: p.cand.sequence,
     anchor_seq: p.cand.anchor_seq,
     anchor_date: p.cand.anchor_date,
+    anchor_dept: p.cand.anchor_dept,
+    offsetDays: p.offsetDays,
+    fallback: p.fallback,
     newDate: p.newDate,
   }));
 
@@ -1009,8 +1108,10 @@ app.post("/cascade-upstream-completion", async (c) => {
       dryRun: true,
       count: candidatesCount,
       planned: plans.length,
+      fallbackToSequence,
       skipped,
       dateHistogram,
+      byOffsetSummary,
       sample,
     });
   }
@@ -1045,10 +1146,12 @@ app.post("/cascade-upstream-completion", async (c) => {
     dryRun: false,
     count: candidatesCount,
     planned: plans.length,
+    fallbackToSequence,
     skipped,
     updated,
     errors,
     dateHistogram,
+    byOffsetSummary,
     sample,
   });
 });

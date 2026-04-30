@@ -1115,10 +1115,11 @@ const SOFA_ROOT_TYPES = new Set([
 function deriveExpectedRoots(
   category: string | null,
   baseModel: string | null,
-): { expected: Set<string> | null; mode: "EXACT" | "SUBSET" | "NONE" } {
+): { expected: Set<string> | null; mode: "EXACT" | "SUBSET" | "NONE" | "ANY" } {
   // mode=EXACT  → actualRoots must equal expected (extra OR missing = drift)
   // mode=SUBSET → actualRoots must be a subset of expected; missing is OK
   // mode=NONE   → no expected roots; any root is contamination
+  // mode=ANY    → no checks; whatever roots the BOM defines are accepted
   const bm = (baseModel ?? "").trim().toUpperCase();
   const cat = (category ?? "").trim().toUpperCase();
 
@@ -1139,7 +1140,12 @@ function deriveExpectedRoots(
     return { expected: new Set(SOFA_ROOT_TYPES), mode: "SUBSET" };
   }
   if (cat === "ACCESSORY") {
-    return { expected: new Set<string>(), mode: "NONE" };
+    // Accessories follow whatever root their BOM defines (e.g. pillows enter
+    // SOFA_CUSHION → FAB_CUT → FAB_SEW → PACKING). The earlier "no roots
+    // allowed" rule was too strict and surfaced legitimate accessory BOMs
+    // as false positives — see the LONG PILLOW / SQUARE PILLOW finding on
+    // 2026-04-30. Switch to ANY: don't compute extras at all, never flag.
+    return { expected: null, mode: "ANY" };
   }
   return { expected: null, mode: "EXACT" };
 }
@@ -1220,6 +1226,13 @@ app.post("/audit-contamination", async (c) => {
       expectedRoots: expected ? Array.from(expected).sort() : [],
     };
 
+    // ANY mode (e.g. ACCESSORY): skip all root-shape checks and mark as OK.
+    // Template falls into `unknown` only when the rule decided "expected is
+    // null AND mode is not ANY" — i.e. truly unclassifiable.
+    if (mode === "ANY") {
+      okCount += 1;
+      continue;
+    }
     if (expected === null) {
       unknown.push(baseEntry);
       continue;

@@ -234,17 +234,31 @@ function ProjectCard({ project }: { project: RDProject }) {
         >
           <Pencil className="h-3.5 w-3.5" />
         </button>
-        {/* Cover photo thumbnail — only renders the banner when there's a
-            real photo. Empty placeholders waste vertical space and made the
-            card look weird; cards without a photo just collapse to the
-            text content (slightly shorter card, cleaner grid). */}
-        {showCover && (
+        {/* Cover photo thumbnail — banner ALWAYS renders (with photo when
+            available, neutral placeholder otherwise) so every card in the
+            grid is the same height. The banner is locked to aspect-[4/3]
+            regardless of the saved JPEG's natural aspect; object-cover
+            crops to fill cleanly. The detail page is where users see the
+            true natural aspect of their photo — the list view prioritises
+            grid consistency. */}
+        {showCover ? (
           <img
             src={cover}
             alt={`${project.name} cover`}
             onError={() => setCoverFailed(true)}
-            className="w-full aspect-square object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+            className="w-full aspect-[4/3] object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
+        ) : (
+          <div
+            className="w-full aspect-[4/3] bg-[#F0ECE9] border-b border-[#E2DDD8] flex items-center justify-center text-gray-300"
+            aria-label="No cover photo"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-10 w-10">
+              <rect x="3" y="3" width="18" height="18" rx="2" />
+              <circle cx="8.5" cy="8.5" r="1.5" />
+              <path d="M21 15l-5-5L5 21" />
+            </svg>
+          </div>
         )}
         <CardHeader className="pb-3">
           <div className="flex items-start justify-between gap-2">

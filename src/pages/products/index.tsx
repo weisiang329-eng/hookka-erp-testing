@@ -1649,7 +1649,14 @@ export default function ProductsPage() {
               {filtered.map((p) => {
                 const cfg = configMap.get(p.code);
                 const isExpanded = expandedId === p.id;
-                const totalMin = cfg ? totalConfigMinutes(cfg) : p.productionTimeMinutes;
+                // /api/products now returns productionTimeMinutes derived
+                // live from the active BOM template, so prefer that over
+                // the legacy product_dept_configs (cfg) snapshot — which
+                // doesn't track BOM edits. cfg is only used when the API
+                // returns 0 (e.g. SKU has no active template yet).
+                const totalMin = p.productionTimeMinutes > 0
+                  ? p.productionTimeMinutes
+                  : (cfg ? totalConfigMinutes(cfg) : 0);
                 const price1Val = p.price1Sen ?? 0;
                 const basePrice = p.basePriceSen ?? p.costPriceSen ?? 0;
                 const modelVariants = variantMap[p.baseModel] || [];

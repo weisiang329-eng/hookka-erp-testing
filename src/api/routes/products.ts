@@ -64,10 +64,45 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   }
 }
 
+// --- BOM-derived production-time helpers -----------------------------------
+// The Products list shows "Total Min" per SKU. Historically this column was
+// the snapshot stored on products.productionTimeMinutes, which doesn't move
+// when somebody edits the BOM template (qty changes, process additions). Users
+// expect the column to follow the BOM in real time, so /api/products now
+// re-computes it on read by walking the active bom_templates row for that
+// productCode. The walker matches src/pages/bom.tsx exactly: cumulative qty
+// multiplier from root → leaf so child WIPs (foam/frame/wood under a divan
+// qty=2) get counted at ×2.
+type WipNode = {
+  quantity?: number;
+  processes?: { minutes?: number }[];
+  children?: WipNode[];
+};
+type L1Process = { minutes?: number };
+
+function sumWipTreeMinutes(wips: WipNode[], parentMul: number = 1): number {
+  let total = 0;
+  for (const w of wips) {
+    const mul = parentMul * (w.quantity ?? 1);
+    for (const p of w.processes ?? []) total += (p.minutes ?? 0) * mul;
+    if (w.children?.length) total += sumWipTreeMinutes(w.children, mul);
+  }
+  return total;
+}
+
+function bomTotalMinutes(
+  l1Processes: L1Process[],
+  wipComponents: WipNode[],
+): number {
+  const l1 = l1Processes.reduce((s, p) => s + (p.minutes ?? 0), 0);
+  return l1 + sumWipTreeMinutes(wipComponents);
+}
+
 function rowToProduct(
   row: ProductRow,
   boms: BomComponentRow[] = [],
   dwts: DeptWorkingTimeRow[] = [],
+  bomMinutesByCode?: Map<string, number>,
 ) {
   const productBoms = boms
     .filter((b) => b.productId === row.id)
@@ -88,6 +123,15 @@ function rowToProduct(
       category: d.category ?? "",
     }));
 
+  // Prefer the BOM-derived total (recursive walk over l1 + wipComponents).
+  // Fall back to the stored snapshot when a product has no active template
+  // yet — keeps newly-created SKUs from rendering 0 min.
+  const bomMin = bomMinutesByCode?.get(row.code);
+  const productionTimeMinutes =
+    typeof bomMin === "number" && bomMin > 0
+      ? bomMin
+      : row.productionTimeMinutes;
+
   const base: Record<string, unknown> = {
     id: row.id,
     code: row.code,
@@ -101,7 +145,7 @@ function rowToProduct(
     unitM3: row.unitM3,
     status: row.status,
     costPriceSen: row.costPriceSen,
-    productionTimeMinutes: row.productionTimeMinutes,
+    productionTimeMinutes,
     subAssemblies: parseJson<string[]>(row.subAssemblies, []),
     bomComponents: productBoms,
     deptWorkingTimes: productDwts,
@@ -148,13 +192,40 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
       .all<DeptWorkingTimeRow>(),
   ]);
   if (!product) return null;
-  return rowToProduct(product, bomsRes.results ?? [], dwtsRes.results ?? []);
+  // Pull the ACTIVE bom_template for this productCode so the response
+  // carries a real-time totalMinutes derived from the current BOM tree
+  // rather than the stored products.productionTimeMinutes snapshot.
+  const tplRow = await db
+    .prepare(
+      `SELECT l1Processes, wipComponents FROM bom_templates
+       WHERE productCode = ? AND UPPER(COALESCE(versionStatus,'DRAFT')) = 'ACTIVE'
+       ORDER BY effectiveFrom DESC NULLS LAST
+       LIMIT 1`,
+    )
+    .bind(product.code)
+    .first<{ l1Processes: string | null; wipComponents: string | null }>();
+  const bomMinutesByCode = new Map<string, number>();
+  if (tplRow) {
+    const l1 = parseJson<L1Process[]>(tplRow.l1Processes, []);
+    const wips = parseJson<WipNode[]>(tplRow.wipComponents, []);
+    bomMinutesByCode.set(product.code, bomTotalMinutes(l1, wips));
+  }
+  return rowToProduct(
+    product,
+    bomsRes.results ?? [],
+    dwtsRes.results ?? [],
+    bomMinutesByCode,
+  );
 }
 
-// GET /api/products — list ACTIVE products with nested BOM + dept times
+// GET /api/products — list ACTIVE products with nested BOM + dept times.
+// Production-time column is computed live from bom_templates so the SPA
+// list doesn't drift away from the source of truth when somebody edits
+// the BOM tree (qty changes, process additions). Falls back to the stored
+// snapshot for SKUs that have no ACTIVE template yet.
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
-  const [products, boms, dwts] = await Promise.all([
+  const [products, boms, dwts, tpls] = await Promise.all([
     c.var.DB.prepare(
       "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
     )
@@ -170,10 +241,32 @@ app.get("/", async (c) => {
     )
       .bind(orgId)
       .all<DeptWorkingTimeRow>(),
+    c.var.DB.prepare(
+      `SELECT productCode, l1Processes, wipComponents, effectiveFrom
+         FROM bom_templates
+        WHERE UPPER(COALESCE(versionStatus,'DRAFT')) = 'ACTIVE'
+        ORDER BY productCode, effectiveFrom DESC NULLS LAST`,
+    ).all<{
+      productCode: string;
+      l1Processes: string | null;
+      wipComponents: string | null;
+      effectiveFrom: string | null;
+    }>(),
   ]);
 
+  // First-write-wins per productCode preserves the most-recent ACTIVE
+  // template (ORDER BY ... effectiveFrom DESC). Tie-break on duplicate
+  // ACTIVE rows is handled by the SELECT order above.
+  const bomMinutesByCode = new Map<string, number>();
+  for (const t of tpls.results ?? []) {
+    if (bomMinutesByCode.has(t.productCode)) continue;
+    const l1 = parseJson<L1Process[]>(t.l1Processes, []);
+    const wips = parseJson<WipNode[]>(t.wipComponents, []);
+    bomMinutesByCode.set(t.productCode, bomTotalMinutes(l1, wips));
+  }
+
   const data = (products.results ?? []).map((p) =>
-    rowToProduct(p, boms.results ?? [], dwts.results ?? []),
+    rowToProduct(p, boms.results ?? [], dwts.results ?? [], bomMinutesByCode),
   );
   return c.json({ success: true, data });
 });

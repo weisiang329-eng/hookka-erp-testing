@@ -1218,17 +1218,22 @@ export default function RDProjectDetailPage() {
   // were two stacked cards — the user found them small and disconnected, so
   // we merge into one substantial panel: cover photo (or "Upload cover
   // photo" placeholder) at the top, Project Info content directly below in
-  // the same card with no separating gap. Photo area uses aspect-square at
-  // the full width of the right column for a glanceable hero. The cover
-  // controls (Edit crop / Replace / Remove) overlay the photo as before.
+  // the same card with no separating gap.
+  //
+  // The image itself drives the container height: `w-full h-auto` lets
+  // every saved JPEG (1:1, 4:3, 16:9, or portrait crop) render at its
+  // natural aspect with NO letterbox bars. A max-h cap of 480px prevents
+  // extreme portrait shots from making the right rail absurdly tall — in
+  // that rare case object-contain shows the whole photo with side bars
+  // rather than cropping content.
   const coverAndInfoCard = (
     <Card className="overflow-hidden">
       {project.coverPhotoUrl ? (
-        <div className="relative">
+        <div className="relative bg-[#FAF9F8]">
           <img
             src={project.coverPhotoUrl}
             alt={`${project.name} cover`}
-            className="w-full aspect-square object-contain bg-[#FAF9F8]"
+            className="block w-full h-auto max-h-[480px] object-contain"
           />
           <div className="absolute top-2 right-2 flex items-center gap-1.5">
             <button
@@ -1443,6 +1448,90 @@ export default function RDProjectDetailPage() {
     </Card>
   );
 
+  // Action buttons row — extracted from the old header block so the banner
+  // can lay out the title + actions on separate lines without nesting tons
+  // of flex containers. Buttons wrap below the title/badges block on narrow
+  // viewports thanks to flex-wrap.
+  const actionButtons = (
+    <div className="flex items-center justify-end flex-wrap gap-2">
+      <Button variant="outline" onClick={openEditModal} className="gap-1.5">
+        <Pencil className="h-4 w-4" /> Edit
+      </Button>
+      {project.status === "ACTIVE" && (
+        <>
+          <Button
+            variant="outline"
+            onClick={handleHold}
+            disabled={statusFlipping !== null}
+            className="gap-1.5"
+          >
+            <Pause className="h-4 w-4" />
+            {statusFlipping === "hold" ? "Holding..." : "Hold"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleMoveToDraft}
+            disabled={statusFlipping !== null}
+            className="gap-1.5"
+          >
+            <Archive className="h-4 w-4" />
+            {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
+          </Button>
+          {/* Complete — only enabled once the project has reached the final
+              stage (PRODUCTION_READY). Earlier stages render the button as
+              disabled with a tooltip explaining the gate. The server
+              enforces the same rule (POST /:id/complete returns 400 if
+              stage is not PRODUCTION_READY). */}
+          <Button
+            variant="outline"
+            onClick={handleComplete}
+            disabled={
+              statusFlipping !== null ||
+              project.currentStage !== "PRODUCTION_READY"
+            }
+            className="gap-1.5"
+            title={
+              project.currentStage !== "PRODUCTION_READY"
+                ? "Project must reach Production Ready before it can be completed"
+                : "Mark this project as completed"
+            }
+          >
+            <CheckCircle2 className="h-4 w-4" />
+            {statusFlipping === "complete" ? "Completing..." : "Complete"}
+          </Button>
+        </>
+      )}
+      {project.status === "ON_HOLD" && (
+        <>
+          <Button
+            variant="outline"
+            onClick={handleResume}
+            disabled={statusFlipping !== null}
+            className="gap-1.5"
+          >
+            <Play className="h-4 w-4" />
+            {statusFlipping === "resume" ? "Resuming..." : "Resume"}
+          </Button>
+          <Button
+            variant="outline"
+            onClick={handleMoveToDraft}
+            disabled={statusFlipping !== null}
+            className="gap-1.5"
+          >
+            <Archive className="h-4 w-4" />
+            {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
+          </Button>
+        </>
+      )}
+      {currentStageIndex < STAGES.length - 1 && project.status === "ACTIVE" && (
+        <Button variant="primary" onClick={handleAdvanceStage} disabled={advancing}>
+          {advancing ? "Advancing..." : `Advance to ${STAGE_LABELS[STAGES[currentStageIndex + 1]]}`}
+          {!advancing && <ChevronRight className="h-4 w-4 ml-1" />}
+        </Button>
+      )}
+    </div>
+  );
+
   return (
     <div className="space-y-6">
       {/* Back button */}
@@ -1450,17 +1539,16 @@ export default function RDProjectDetailPage() {
         <ArrowLeft className="h-4 w-4" /> Back to R&D
       </Button>
 
-      {/* 2-column layout: main content (lg: 2/3) + sticky right rail with
-          cover photo and project info (lg: 1/3). The right rail collapses
-          BELOW the main column on small screens so the cover stays visible. */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
-      <div className="lg:col-span-2 space-y-6">
-      {/* Header — small thumbnail removed: the dedicated cover photo card on
-          the right rail is now the canonical place to see/manage the cover. */}
-      <div className="flex items-start justify-between gap-4">
-        <div className="flex items-start gap-4 flex-1 min-w-0">
-          <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-3 mb-1">
+      {/* Header banner — full-width, sits ABOVE the cover panel + main grid.
+          Two stacked rows: first row is the project code + badges + title +
+          subtitle (left-aligned); second row is the action buttons aligned
+          right. With Complete + Advance now in the row, the previous
+          inline-with-title layout was wrapping awkwardly and squeezing the
+          project code into a vertical strip — separating into two rows
+          gives every element room to breathe. */}
+      <div className="space-y-4">
+        <div className="min-w-0">
+          <div className="flex items-center gap-3 flex-wrap mb-1">
             <span className="text-sm font-mono text-gray-400">{project.code}</span>
             <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
               {project.productCategory}
@@ -1488,88 +1576,20 @@ export default function RDProjectDetailPage() {
               Service Ref: <span className="font-mono font-medium text-[#6B5C32]">{project.serviceId}</span>
             </p>
           )}
-          <p className="text-sm text-gray-500 mt-1">{project.description}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <Button variant="outline" onClick={openEditModal} className="gap-1.5">
-            <Pencil className="h-4 w-4" /> Edit
-          </Button>
-          {project.status === "ACTIVE" && (
-            <>
-              <Button
-                variant="outline"
-                onClick={handleHold}
-                disabled={statusFlipping !== null}
-                className="gap-1.5"
-              >
-                <Pause className="h-4 w-4" />
-                {statusFlipping === "hold" ? "Holding..." : "Hold"}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleMoveToDraft}
-                disabled={statusFlipping !== null}
-                className="gap-1.5"
-              >
-                <Archive className="h-4 w-4" />
-                {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
-              </Button>
-              {/* Complete — only enabled once the project has reached the final
-                  stage (PRODUCTION_READY). Earlier stages render the button as
-                  disabled with a tooltip explaining the gate. The server
-                  enforces the same rule (POST /:id/complete returns 400 if
-                  stage is not PRODUCTION_READY). */}
-              <Button
-                variant="outline"
-                onClick={handleComplete}
-                disabled={
-                  statusFlipping !== null ||
-                  project.currentStage !== "PRODUCTION_READY"
-                }
-                className="gap-1.5"
-                title={
-                  project.currentStage !== "PRODUCTION_READY"
-                    ? "Project must reach Production Ready before it can be completed"
-                    : "Mark this project as completed"
-                }
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                {statusFlipping === "complete" ? "Completing..." : "Complete"}
-              </Button>
-            </>
-          )}
-          {project.status === "ON_HOLD" && (
-            <>
-              <Button
-                variant="outline"
-                onClick={handleResume}
-                disabled={statusFlipping !== null}
-                className="gap-1.5"
-              >
-                <Play className="h-4 w-4" />
-                {statusFlipping === "resume" ? "Resuming..." : "Resume"}
-              </Button>
-              <Button
-                variant="outline"
-                onClick={handleMoveToDraft}
-                disabled={statusFlipping !== null}
-                className="gap-1.5"
-              >
-                <Archive className="h-4 w-4" />
-                {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
-              </Button>
-            </>
-          )}
-          {currentStageIndex < STAGES.length - 1 && project.status === "ACTIVE" && (
-            <Button variant="primary" onClick={handleAdvanceStage} disabled={advancing}>
-              {advancing ? "Advancing..." : `Advance to ${STAGE_LABELS[STAGES[currentStageIndex + 1]]}`}
-              {!advancing && <ChevronRight className="h-4 w-4 ml-1" />}
-            </Button>
+          {project.description && (
+            <p className="text-sm text-gray-500 mt-1">{project.description}</p>
           )}
         </div>
+        {actionButtons}
       </div>
 
+      {/* 2-column layout: main content (lg: 2/3) + sticky right rail with
+          cover photo and project info (lg: 1/3). The right rail collapses
+          BELOW the main column on small screens so the cover stays visible.
+          The header (code/title/badges/actions) lives ABOVE this grid in
+          its own banner — don't duplicate any of that here. */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+      <div className="lg:col-span-2 space-y-6">
       {/* Stage Timeline */}
       <Card>
         <CardHeader>

@@ -148,7 +148,7 @@ export default function RDProjectDetailPage() {
   const [project, setProject] = useState<RDProject | null>(null);
   const [advancing, setAdvancing] = useState(false);
   const [statusFlipping, setStatusFlipping] = useState<
-    null | "hold" | "resume" | "move-to-draft"
+    null | "hold" | "resume" | "move-to-draft" | "complete"
   >(null);
 
   // Edit project modal — projectType + clone-source fields are mirror-
@@ -317,6 +317,42 @@ export default function RDProjectDetailPage() {
       invalidateCachePrefix("/api/rd-projects");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Status update failed");
+    } finally {
+      setStatusFlipping(null);
+    }
+  };
+
+  // ─── Complete (PRODUCTION_READY → COMPLETED) ───────────────────────────
+  // Terminal flip — project leaves the active pipeline and lands on the
+  // Completed tab in /rd. Server enforces that currentStage must be
+  // PRODUCTION_READY (matches the button-disabled rule below). On success
+  // we invalidate the list cache and navigate back to /rd so the user
+  // immediately sees the project on the new Completed tab.
+  const handleComplete = async () => {
+    if (!project) return;
+    if (project.currentStage !== "PRODUCTION_READY") return;
+    if (
+      !window.confirm(
+        "Mark this project as Completed? It will leave the active pipeline and move to the Completed tab.",
+      )
+    )
+      return;
+    setStatusFlipping("complete");
+    try {
+      const r = await fetch(`/api/rd-projects/${id}/complete`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "content-type": "application/json" },
+      });
+      const j = (await r.json()) as { success: boolean; data?: RDProject; error?: string };
+      if (!r.ok || !j.success || !j.data) {
+        throw new Error(j.error ?? `HTTP ${r.status}`);
+      }
+      invalidateCachePrefix("/api/rd-projects");
+      toast.success("Project completed");
+      navigate("/rd");
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Failed to complete project");
     } finally {
       setStatusFlipping(null);
     }
@@ -1075,12 +1111,15 @@ export default function RDProjectDetailPage() {
   // project.coverPhotoUrl is now the single source for the cover image
   // (rendered by coverPhotoCard below).
 
-  // Right-rail cover photo card. Reused inside the 2-col grid below; kept as
-  // a const so the full-width banner removal in Task 2 (#8) doesn't leave a
-  // dangling block. The card lays out the existing upload / replace / remove
-  // controls in a square aspect ratio that fits the sidebar.
-  const coverPhotoCard = (
-    <div className="rounded-xl border border-[#E2DDD8] bg-[#FAF9F8] overflow-hidden mx-auto w-full max-w-[280px]">
+  // Right-rail combined cover-photo + project-info panel. Previously these
+  // were two stacked cards — the user found them small and disconnected, so
+  // we merge into one substantial panel: cover photo (or "Upload cover
+  // photo" placeholder) at the top, Project Info content directly below in
+  // the same card with no separating gap. Photo area uses aspect-square at
+  // the full width of the right column for a glanceable hero. The cover
+  // controls (Edit crop / Replace / Remove) overlay the photo as before.
+  const coverAndInfoCard = (
+    <Card className="overflow-hidden">
       {project.coverPhotoUrl ? (
         <div className="relative">
           <img
@@ -1125,8 +1164,8 @@ export default function RDProjectDetailPage() {
           </div>
         </div>
       ) : (
-        <label className="flex flex-col items-center justify-center aspect-square cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors">
-          <ImagePlus className="h-8 w-8 mb-2" />
+        <label className="flex flex-col items-center justify-center aspect-square cursor-pointer text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9] bg-[#FAF9F8] transition-colors border-b border-[#E2DDD8]">
+          <ImagePlus className="h-10 w-10 mb-2" />
           <span className="text-sm font-medium">
             {coverPhotoSaving ? "Uploading..." : "Upload cover photo"}
           </span>
@@ -1145,16 +1184,12 @@ export default function RDProjectDetailPage() {
           />
         </label>
       )}
-    </div>
-  );
 
-  // Right-rail "Project Info" card — pulls Brand/Supplier out of the
-  // Clone Source 2-col grid and surfaces it alongside the other top-line
-  // facts (target launch, team, service ref). For non-CLONE projects we
-  // simply skip the supplier row.
-  const projectInfoCard = (
-    <Card>
-      <CardHeader>
+      {/* Project Info section — directly below the cover with no gap. The
+          old standalone "Project Info" CardHeader is replaced with a smaller
+          inline title so the merged panel reads as one unit. Brand /
+          Supplier row only renders for CLONE projects. */}
+      <CardHeader className="pb-2 pt-4">
         <CardTitle className="text-sm">Project Info</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
@@ -1272,6 +1307,28 @@ export default function RDProjectDetailPage() {
               >
                 <Archive className="h-4 w-4" />
                 {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
+              </Button>
+              {/* Complete — only enabled once the project has reached the final
+                  stage (PRODUCTION_READY). Earlier stages render the button as
+                  disabled with a tooltip explaining the gate. The server
+                  enforces the same rule (POST /:id/complete returns 400 if
+                  stage is not PRODUCTION_READY). */}
+              <Button
+                variant="outline"
+                onClick={handleComplete}
+                disabled={
+                  statusFlipping !== null ||
+                  project.currentStage !== "PRODUCTION_READY"
+                }
+                className="gap-1.5"
+                title={
+                  project.currentStage !== "PRODUCTION_READY"
+                    ? "Project must reach Production Ready before it can be completed"
+                    : "Mark this project as completed"
+                }
+              >
+                <CheckCircle2 className="h-4 w-4" />
+                {statusFlipping === "complete" ? "Completing..." : "Complete"}
               </Button>
             </>
           )}
@@ -1825,11 +1882,11 @@ export default function RDProjectDetailPage() {
       </Card>
       </div>
 
-      {/* Right rail — sticky cover photo + project info card. Stacks below
-          the main column on small screens (lg breakpoint flips to side-by-side). */}
-      <aside className="lg:col-span-1 lg:sticky lg:top-4 space-y-4 self-start">
-        {coverPhotoCard}
-        {projectInfoCard}
+      {/* Right rail — sticky combined cover photo + project info panel.
+          Stacks below the main column on small screens (lg breakpoint flips
+          to side-by-side). */}
+      <aside className="lg:col-span-1 lg:sticky lg:top-4 self-start">
+        {coverAndInfoCard}
       </aside>
       </div>
 

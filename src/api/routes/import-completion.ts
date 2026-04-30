@@ -798,19 +798,27 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/import/cascade-upstream-completion
 //
-// Anchor-relative cascade-fill, RESTRICTED to 4 explicit rules. Within each
-// (productionOrderId, wipKey) group, find the most-downstream completed JC
-// (the "anchor" — MAX(sequence) among rows where status IN ('COMPLETED',
-// 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's dept is one
-// of the 4 listed below, plan completions for the listed target depts in
-// that group. Any other anchor dept → entire group is skipped.
+// Anchor-relative cascade-fill, RESTRICTED to an explicit rule set. Within
+// each (productionOrderId, wipKey) group, find the most-downstream completed
+// JC (the "anchor" — MAX(sequence) among rows where status IN ('COMPLETED',
+// 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's dept is in
+// the rule set, plan completions for the listed target depts in that group.
+// Any other anchor dept → entire group is skipped.
 //
+// Default rules (apply regardless of wipType):
 //   UPHOLSTERY → FAB_CUT, FAB_SEW, FOAM, WOOD_CUT, FRAMING, WEBBING
 //   WEBBING    → FRAMING, WOOD_CUT
 //   FRAMING    → WOOD_CUT
 //   FAB_SEW    → FAB_CUT
 //
-// FOAM / WOOD_CUT / FAB_CUT / PACKING anchors → no cascade.
+// wipType-specific overrides:
+//   HEADBOARD: FOAM → FAB_SEW, FAB_CUT
+//     (HB foam consumes sewn fabric, which consumes cut fabric. So when an
+//      HB PO has FOAM as the most-downstream completed JC, backfill the
+//      sewing + cutting upstream of it.)
+//
+// FOAM / WOOD_CUT / FAB_CUT / PACKING anchors → no cascade (unless an override
+// above kicks in for the active wipType).
 //
 // Date math (unchanged):
 //   leadtimes[cat][dept] = days BEFORE customer DD that dept finishes.
@@ -833,14 +841,33 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 const CASCADE_DATE_CLAMP = "2026-04-30";
 
-// The only 4 cascade rules. Anchor dept → list of target depts to plan.
-// Anything not in this map is silently skipped (no rows planned).
-const CASCADE_ALLOWED: Record<string, readonly string[]> = {
+// Default rules — fire regardless of wipType.
+const CASCADE_ALLOWED_DEFAULT: Record<string, readonly string[]> = {
   UPHOLSTERY: ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING"],
   WEBBING: ["FRAMING", "WOOD_CUT"],
   FRAMING: ["WOOD_CUT"],
   FAB_SEW: ["FAB_CUT"],
 };
+
+// wipType-specific overrides. Only DIFFERENT entries from default.
+const CASCADE_ALLOWED_BY_WIPTYPE: Record<
+  string,
+  Record<string, readonly string[]>
+> = {
+  HEADBOARD: { FOAM: ["FAB_CUT", "FAB_SEW"] }, // HB foam consumes sewn fabric
+};
+
+function cascadeAllowed(
+  wipType: string | null | undefined,
+  anchorDept: string,
+): readonly string[] {
+  const wt = (wipType ?? "").toUpperCase();
+  return (
+    CASCADE_ALLOWED_BY_WIPTYPE[wt]?.[anchorDept] ??
+    CASCADE_ALLOWED_DEFAULT[anchorDept] ??
+    []
+  );
+}
 
 type CandidateRow = {
   id: string;
@@ -1047,8 +1074,8 @@ app.post("/cascade-upstream-completion", async (c) => {
     // → group skipped, nothing planned.
     const anchorDept = (anchor.anchor_dept || "").toUpperCase();
     const targetDept = (cand.departmentCode || "").toUpperCase();
-    const allowedTargets = CASCADE_ALLOWED[anchorDept];
-    if (!allowedTargets || !allowedTargets.includes(targetDept)) {
+    const allowedTargets = cascadeAllowed(anchor.anchorWt, anchorDept);
+    if (!allowedTargets.length || !allowedTargets.includes(targetDept)) {
       parallelChainSkipped++;
       continue;
     }
@@ -1670,8 +1697,8 @@ app.post("/cascade-leak-pass", async (c) => {
 
     const anchorDept = anchor.anchor_dept;
     const targetDept = (cand.departmentCode || "").toUpperCase();
-    const allowedTargets = CASCADE_ALLOWED[anchorDept];
-    if (!allowedTargets || !allowedTargets.includes(targetDept)) {
+    const allowedTargets = cascadeAllowed(cand.wipType, anchorDept);
+    if (!allowedTargets.length || !allowedTargets.includes(targetDept)) {
       parallelChainSkipped++;
       continue;
     }

@@ -110,9 +110,22 @@ export default function SalesPage() {
     statuses.reduce((n, s) => n + (statsByStatus[s] ?? 0), 0);
   const draftCount = statsByStatus.DRAFT ?? 0;
   const confirmedCount = Math.max(0, statsTotal - draftCount);
-  const outstandingCount = sumStatuses(["CONFIRMED", "IN_PRODUCTION", "READY_TO_SHIP", "SHIPPED"]);
+  // Outstanding = post-DRAFT, pre-CLOSED, not CANCELLED. Everything that
+  // still has work / money outstanding to the business.
+  const outstandingCount = sumStatuses([
+    "CONFIRMED",
+    "IN_PRODUCTION",
+    "READY_TO_SHIP",
+    "SHIPPED",
+    "DELIVERED",
+    "INVOICED",
+    "ON_HOLD",
+  ]);
+  // Pending Delivery = goods ready/in-transit but not yet marked DELIVERED.
   const pendingDeliveryCount = sumStatuses(["READY_TO_SHIP", "SHIPPED"]);
-  const completedCount = sumStatuses(["DELIVERED", "INVOICED", "CLOSED"]);
+  // Completed = fully closed orders (paid + delivered + closed). DELIVERED
+  // and INVOICED still belong to Outstanding because the cycle isn't done.
+  const completedCount = sumStatuses(["CLOSED"]);
   const customers: Customer[] = useMemo(
     () => (customersResp?.data ? customersResp.data : Array.isArray(customersResp) ? customersResp : []),
     [customersResp]
@@ -450,7 +463,12 @@ export default function SalesPage() {
     },
   ];
 
-  const totalRevenue = orders.reduce((sum, o) => sum + o.totalSen, 0);
+  // Revenue card excludes DRAFT and CANCELLED — those orders aren't real
+  // revenue (drafts haven't been confirmed by the customer; cancelled
+  // orders were voided). Including them inflates the headline number.
+  const totalRevenue = orders
+    .filter((o) => o.status !== "DRAFT" && o.status !== "CANCELLED")
+    .reduce((sum, o) => sum + o.totalSen, 0);
   // When any filter is active, show the sum of the currently-visible rows
   // so users can ask "sofa this month — how much?" and read it off the
   // same Revenue card. Falls back to the page-level totalRevenue when no
@@ -504,7 +522,10 @@ export default function SalesPage() {
         <Card><CardContent className="p-2.5"><p className="text-xs text-[#6B7280]">Total Orders</p><p className="text-2xl font-bold">{statsTotal}</p></CardContent></Card>
         <Card>
           <CardContent className="p-2.5">
-            <p className="text-xs text-[#6B7280]">
+            <p
+              className="text-xs text-[#6B7280]"
+              title={hasActiveFilters ? undefined : "Excludes Draft and Cancelled"}
+            >
               {hasActiveFilters ? "Revenue (filtered)" : "Revenue"}
             </p>
             <p className={cn(

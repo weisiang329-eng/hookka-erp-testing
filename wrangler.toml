@@ -202,3 +202,19 @@ SENTRY_DSN = "https://9ad06534a79eed8df457becbe2a2244f@o4511302465814528.ingest.
 # OAUTH_GOOGLE_CLIENT_ID = ""
 # OAUTH_GOOGLE_REDIRECT_URI = "https://hookka-erp-testing.pages.dev/api/auth/oauth/google/callback"
 # OAUTH_GOOGLE_HOSTED_DOMAIN = "hookka.com"
+
+# ---------------------------------------------------------------------------
+# Google Sheets bidirectional sync — see docs/SHEETS-SYNC.md.
+# ---------------------------------------------------------------------------
+# Two secrets + one public id. Until all three are set, every sheets-sync
+# helper silently no-ops and the webhook + backfill routes return 503 — the
+# build is safe to deploy without them.
+#
+# Provision the SA + HMAC secret via:
+#   wrangler pages secret put GOOGLE_SHEETS_SA_KEY    # full SA JSON, stringified
+#   wrangler pages secret put SHEETS_SYNC_SECRET      # openssl rand -hex 32
+# Then uncomment the public spreadsheet id below and redeploy.
+#
+# GOOGLE_SHEETS_SA_KEY = ...   # see docs/SHEETS-SYNC.md
+# SHEETS_SYNC_SECRET = ...
+# SHEETS_SPREADSHEET_ID = "1hDGUYeKuWHpCXKrZptFI2eIKh9yNdhw7JeKbTjxT-x8"

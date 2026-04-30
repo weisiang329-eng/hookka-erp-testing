@@ -105,6 +105,13 @@ function parseCSV(text) {
 
 // "21/4/2026" or "21/04/2026" → "2026-04-21". "29/04/202" → "2026-04-29"
 // (treated as a CSV cell truncation; warned).
+//
+// Locale detection: the user's Google Sheet flipped to mm/dd/yyyy on some
+// rows (US-locale auto-detect after a paste). We assume dd/mm first; if
+// that produces a future date (> today) AND mm/dd gives a date ≤ today,
+// we flip to mm/dd. If both give future, warn + skip.
+const TODAY = "2026-04-30";
+
 function normDate(d, warnings) {
   const s = String(d || "").trim();
   if (!s) return null;
@@ -113,8 +120,6 @@ function normDate(d, warnings) {
     warnings.push(`unparseable date "${s}"`);
     return null;
   }
-  const day = String(parseInt(m[1], 10)).padStart(2, "0");
-  const mon = String(parseInt(m[2], 10)).padStart(2, "0");
   let year = m[3];
   if (year.length === 3 && year === "202") {
     warnings.push(`truncated year "${s}" → assumed 2026`);
@@ -122,7 +127,24 @@ function normDate(d, warnings) {
   } else if (year.length === 2) {
     year = `20${year}`;
   }
-  return `${year}-${mon}-${day}`;
+  const a = parseInt(m[1], 10);
+  const b = parseInt(m[2], 10);
+  const mk = (day, mon) => `${year}-${String(mon).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  const ddmm = mk(a, b);
+  // If 'a' > 12, only ddmm is valid.
+  if (a > 12) return ddmm;
+  // If 'b' > 12, must be mm/dd.
+  if (b > 12) return mk(b, a);
+  // Both ambiguous (≤12). Prefer ddmm, but flip if it lands in the future
+  // and mm/dd gives a sane past date.
+  if (ddmm <= TODAY) return ddmm;
+  const mmdd = mk(b, a);
+  if (mmdd <= TODAY) {
+    warnings.push(`flipped "${s}" from dd/mm (${ddmm}, future) to mm/dd (${mmdd})`);
+    return mmdd;
+  }
+  warnings.push(`date "${s}" is future on both interpretations (dd/mm=${ddmm}, mm/dd=${mmdd}) — skipped`);
+  return null;
 }
 
 function picToShort(name, warnings) {

@@ -907,25 +907,22 @@ app.post("/cascade-upstream-completion", async (c) => {
     .all<AnchorRow>();
 
   // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date}
-  // Defensive: walk all known key forms in case D1 strips the alias.
+  // D1 quirk: snake_case aliases get camelCased on the way out, so
+  // `anchor_date` becomes `anchorDate` in the result row. Try both forms.
   const anchorMap = new Map<string, { anchor_seq: number; anchor_date: string }>();
-  let anchorDebugSample: Record<string, unknown> | null = null;
   for (const a of anchorRes.results ?? []) {
-    if (!anchorDebugSample) {
-      anchorDebugSample = { ...(a as unknown as Record<string, unknown>) };
-    }
     const raw = a as unknown as Record<string, unknown>;
     const seq =
-      typeof raw.anchor_seq === "number"
-        ? (raw.anchor_seq as number)
-        : typeof raw.sequence === "number"
-          ? (raw.sequence as number)
+      typeof raw.anchorSeq === "number"
+        ? (raw.anchorSeq as number)
+        : typeof raw.anchor_seq === "number"
+          ? (raw.anchor_seq as number)
           : null;
     const date =
-      typeof raw.anchor_date === "string"
-        ? (raw.anchor_date as string)
-        : typeof raw.completedDate === "string"
-          ? (raw.completedDate as string)
+      typeof raw.anchorDate === "string"
+        ? (raw.anchorDate as string)
+        : typeof raw.anchor_date === "string"
+          ? (raw.anchor_date as string)
           : null;
     if (seq == null || !date) continue;
     const poId =
@@ -1012,9 +1009,7 @@ app.post("/cascade-upstream-completion", async (c) => {
       dryRun: true,
       count: candidatesCount,
       planned: plans.length,
-      skipped: skipped.slice(0, 10),
-      skippedCount: skipped.length,
-      anchorDebugSample,
+      skipped,
       dateHistogram,
       sample,
     });

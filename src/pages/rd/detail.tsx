@@ -178,9 +178,11 @@ export default function RDProjectDetailPage() {
     sourceNotes: "",
   });
 
-  // Add prototype modal
+  // Add / edit prototype modal. `editingProtoId` is null for Add, the
+  // prototype id when editing — same modal/form is reused for both flows.
   const [protoOpen, setProtoOpen] = useState(false);
   const [protoSaving, setProtoSaving] = useState(false);
+  const [editingProtoId, setEditingProtoId] = useState<string | null>(null);
   const [protoForm, setProtoForm] = useState({
     prototypeType: "FRAMING" as RDPrototypeType,
     version: "",
@@ -247,6 +249,8 @@ export default function RDProjectDetailPage() {
   // stored as a JPEG data URL via @/lib/image-compress.
   const coverPhotoInputRef = useRef<HTMLInputElement>(null);
   const [coverPhotoSaving, setCoverPhotoSaving] = useState(false);
+  // Click-to-zoom lightbox for the cover photo.
+  const [coverZoomOpen, setCoverZoomOpen] = useState(false);
 
   // ── Photo crop dialog state ────────────────────────────────────────────
   // The dialog gates every cover-photo and milestone-photo upload (and any
@@ -541,6 +545,7 @@ export default function RDProjectDetailPage() {
 
   const openProtoModal = (pType: RDPrototypeType) => {
     const nextVersion = getNextVersion(pType);
+    setEditingProtoId(null);
     setProtoForm({
       prototypeType: pType,
       version: nextVersion,
@@ -555,6 +560,25 @@ export default function RDProjectDetailPage() {
     setProtoOpen(true);
   };
 
+  // Edit-mode entry point. Type and version are identity-ish and stay
+  // disabled in the modal (same as Add mode), so we keep the version off
+  // the form's editable fields but populate it for display.
+  const openProtoEditModal = (proto: RDProject["prototypes"][number]) => {
+    setEditingProtoId(proto.id);
+    setProtoForm({
+      prototypeType: proto.prototypeType,
+      version: proto.version,
+      description: proto.description ?? "",
+      labourHours: proto.labourHours ?? 0,
+      testResults: proto.testResults ?? "",
+      feedback: proto.feedback ?? "",
+      improvements: proto.improvements ?? "",
+      defects: proto.defects ?? "",
+      createdDate: (proto.createdDate ?? new Date().toISOString()).slice(0, 10),
+    });
+    setProtoOpen(true);
+  };
+
   const handleProtoSave = async () => {
     if (!project) return;
     if (!protoForm.version.trim()) {
@@ -563,30 +587,49 @@ export default function RDProjectDetailPage() {
     }
     setProtoSaving(true);
     try {
-      const newProto = {
-        id: `proto-${Date.now()}`,
-        projectId: project.id,
-        prototypeType: protoForm.prototypeType,
-        version: protoForm.version.trim(),
-        description: protoForm.description.trim(),
-        materialsCost: 0,
-        labourHours: protoForm.labourHours,
-        testResults: protoForm.testResults.trim(),
-        feedback: protoForm.feedback.trim(),
-        improvements: protoForm.improvements.trim(),
-        defects: protoForm.defects.trim(),
-        createdDate: protoForm.createdDate,
-      };
-      const updatedPrototypes = [...project.prototypes, newProto];
+      let updatedPrototypes;
+      if (editingProtoId) {
+        updatedPrototypes = project.prototypes.map((p) =>
+          p.id === editingProtoId
+            ? {
+                ...p,
+                description: protoForm.description.trim(),
+                labourHours: protoForm.labourHours,
+                testResults: protoForm.testResults.trim(),
+                feedback: protoForm.feedback.trim(),
+                improvements: protoForm.improvements.trim(),
+                defects: protoForm.defects.trim(),
+                createdDate: protoForm.createdDate,
+              }
+            : p,
+        );
+      } else {
+        const newProto = {
+          id: `proto-${Date.now()}`,
+          projectId: project.id,
+          prototypeType: protoForm.prototypeType,
+          version: protoForm.version.trim(),
+          description: protoForm.description.trim(),
+          materialsCost: 0,
+          labourHours: protoForm.labourHours,
+          testResults: protoForm.testResults.trim(),
+          feedback: protoForm.feedback.trim(),
+          improvements: protoForm.improvements.trim(),
+          defects: protoForm.defects.trim(),
+          createdDate: protoForm.createdDate,
+        };
+        updatedPrototypes = [...project.prototypes, newProto];
+      }
       const data = await fetchJson(`/api/rd-projects/${id}`, RDMutationSchema, {
         method: "PUT",
         body: { prototypes: updatedPrototypes },
       });
       if (data.data) setProject(data.data as RDProject);
       setProtoOpen(false);
-      toast.success("Prototype added successfully");
+      setEditingProtoId(null);
+      toast.success(editingProtoId ? "Prototype updated successfully" : "Prototype added successfully");
     } catch {
-      toast.error("Failed to add prototype");
+      toast.error(editingProtoId ? "Failed to update prototype" : "Failed to add prototype");
     } finally {
       setProtoSaving(false);
     }
@@ -1233,7 +1276,8 @@ export default function RDProjectDetailPage() {
           <img
             src={project.coverPhotoUrl}
             alt={`${project.name} cover`}
-            className="block w-full h-auto max-h-[480px] object-contain"
+            onClick={() => setCoverZoomOpen(true)}
+            className="block w-full h-auto max-h-[480px] object-contain cursor-zoom-in"
           />
           <div className="absolute top-2 right-2 flex items-center gap-1.5">
             <button
@@ -1841,8 +1885,8 @@ export default function RDProjectDetailPage() {
                 <div className="space-y-4">
                   {typeProtos.map((proto) => (
                     <div key={proto.id} className="border border-[#E2DDD8] rounded-lg p-4 space-y-3">
-                      <div className="flex items-start justify-between">
-                        <div>
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <span className="inline-flex items-center rounded-full bg-[#6B5C32] text-white px-2.5 py-0.5 text-xs font-semibold">
                               {proto.version}
@@ -1851,6 +1895,14 @@ export default function RDProjectDetailPage() {
                           </div>
                           <p className="text-sm font-medium text-[#1F1D1B] mt-1">{proto.description}</p>
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => openProtoEditModal(proto)}
+                          className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-[#E2DDD8] bg-white px-2 py-1 text-xs font-medium text-gray-500 hover:text-[#6B5C32] hover:border-[#6B5C32]"
+                          title="Edit prototype"
+                        >
+                          <Pencil className="h-3 w-3" /> Edit
+                        </button>
                       </div>
                       <div className="flex items-center gap-2 text-sm">
                         <Clock className="h-3.5 w-3.5 text-gray-400" />
@@ -2239,8 +2291,12 @@ export default function RDProjectDetailPage() {
         </div>
       </ModalOverlay>
 
-      {/* ─── Add Prototype Modal ─────────────────────────────────────────── */}
-      <ModalOverlay open={protoOpen} onClose={() => setProtoOpen(false)} title={`Add ${PROTO_TYPE_LABELS[protoForm.prototypeType]} Prototype`}>
+      {/* ─── Add / Edit Prototype Modal ──────────────────────────────────── */}
+      <ModalOverlay
+        open={protoOpen}
+        onClose={() => { setProtoOpen(false); setEditingProtoId(null); }}
+        title={`${editingProtoId ? "Edit" : "Add"} ${PROTO_TYPE_LABELS[protoForm.prototypeType]} Prototype`}
+      >
         <div className="space-y-4">
           <div className="grid grid-cols-3 gap-4">
             <div>
@@ -2335,9 +2391,11 @@ export default function RDProjectDetailPage() {
             />
           </div>
           <div className="flex justify-end gap-2 pt-2 border-t border-[#E2DDD8]">
-            <Button variant="ghost" onClick={() => setProtoOpen(false)}>Cancel</Button>
+            <Button variant="ghost" onClick={() => { setProtoOpen(false); setEditingProtoId(null); }}>Cancel</Button>
             <Button variant="primary" onClick={handleProtoSave} disabled={protoSaving}>
-              {protoSaving ? "Adding..." : "Add Prototype"}
+              {protoSaving
+                ? (editingProtoId ? "Updating..." : "Adding...")
+                : (editingProtoId ? "Update Prototype" : "Add Prototype")}
             </Button>
           </div>
         </div>
@@ -2715,6 +2773,33 @@ export default function RDProjectDetailPage() {
         onCancel={closeCropDialog}
         onConfirm={(url) => void handleCropConfirm(url)}
       />
+
+      {/* ─── Cover Photo Lightbox ────────────────────────────────────────────
+          Click the rail cover photo to view it at full size. Click anywhere
+          (including the image) or press Escape / the close button to dismiss. */}
+      {coverZoomOpen && project.coverPhotoUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-6 cursor-zoom-out"
+          onClick={() => setCoverZoomOpen(false)}
+          role="dialog"
+          aria-label="Cover photo"
+        >
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setCoverZoomOpen(false); }}
+            className="absolute top-4 right-4 rounded-lg bg-white/10 hover:bg-white/20 text-white p-2"
+            title="Close"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <img
+            src={project.coverPhotoUrl}
+            alt={`${project.name} cover (full size)`}
+            className="max-w-full max-h-full object-contain shadow-2xl"
+          />
+        </div>
+      )}
     </div>
   );
 }

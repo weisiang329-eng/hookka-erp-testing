@@ -2259,10 +2259,11 @@ export default function RDProjectDetailPage() {
                         className={`${inputClass} ${qtyOver ? "border-red-400 focus:border-red-500 focus:ring-red-200" : ""}`}
                         min={0.01}
                         step={0.01}
-                        value={line.qty}
+                        placeholder="0"
+                        value={line.qty === 0 ? "" : line.qty}
                         onChange={(e) =>
                           updateIssuanceLine(line.lineKey, {
-                            qty: parseFloat(e.target.value) || 0,
+                            qty: e.target.value === "" ? 0 : parseFloat(e.target.value) || 0,
                           })
                         }
                       />

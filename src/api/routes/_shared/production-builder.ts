@@ -129,14 +129,16 @@ export async function createProductionOrdersForOrder(
   const hookkaDDBuffer = await loadHookkaDDBuffer(db);
 
   // ---- Idempotency guard (PO-level) ----
-  // If any PO already exists for this source order, return the existing set.
-  // The FK column is determined by sourceType — SO and CO never share a PO.
+  // If any LIVE PO already exists for this source order, return the existing
+  // set. CANCELLED rows are excluded so a cancel + re-confirm cycle (after
+  // an SO edit added new lines) can fan out fresh POs for the new items
+  // instead of being silently no-op'd by the idempotency check.
   const fkColumn =
     order.sourceType === "SO" ? "salesOrderId" : "consignmentOrderId";
   const existing = await db
     .prepare(
       `SELECT id, poNo, productName, quantity, status FROM production_orders
-         WHERE ${fkColumn} = ? ORDER BY lineNo`,
+         WHERE ${fkColumn} = ? AND status <> 'CANCELLED' ORDER BY lineNo`,
     )
     .bind(order.id)
     .all<{

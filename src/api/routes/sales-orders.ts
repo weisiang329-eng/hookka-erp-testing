@@ -1823,16 +1823,23 @@ app.post("/:id/confirm", async (c) => {
     return c.json({ success: false, error: "Order not found" }, 404);
   }
 
-  // DRAFT / PENDING orders are confirmable. Already-CONFIRMED orders are
-  // also allowed through IF they have no production orders yet — this
-  // handles the backfill case (SO was confirmed before the PO cascade
-  // existed, now it's CONFIRMED but missing downstream POs). The PO
-  // creation helper is idempotent, so this is safe.
+  // DRAFT / PENDING orders are confirmable. CONFIRMED or IN_PRODUCTION
+  // orders are also allowed through IF every existing PO is CANCELLED —
+  // this covers two flows:
+  //   1. Backfill: SO was confirmed before the PO cascade existed and is
+  //      sitting at CONFIRMED with zero POs.
+  //   2. Re-cascade: operator cancelled all POs (e.g. because the SO needs
+  //      extra line items) and wants the cascade to fan fresh POs out
+  //      against the current item set without resetting the SO to DRAFT.
+  // The PO creation helper is idempotent and now skips CANCELLED rows in
+  // its existence check, so re-running confirm in either case is safe.
   const allowedStatuses = ["DRAFT", "PENDING"];
+  const fallThroughStatuses = ["CONFIRMED", "IN_PRODUCTION"];
   if (!allowedStatuses.includes(existing.status)) {
-    if (existing.status === "CONFIRMED") {
+    if (fallThroughStatuses.includes(existing.status)) {
       const existingPos = await c.var.DB.prepare(
-        "SELECT id FROM production_orders WHERE salesOrderId = ? LIMIT 1",
+        `SELECT id FROM production_orders
+           WHERE salesOrderId = ? AND status <> 'CANCELLED' LIMIT 1`,
       )
         .bind(id)
         .first<{ id: string }>();
@@ -1840,12 +1847,12 @@ app.post("/:id/confirm", async (c) => {
         return c.json(
           {
             success: false,
-            error: `Order ${existing.companySOId ?? id} is already CONFIRMED and its production orders already exist.`,
+            error: `Order ${existing.companySOId ?? id} is already ${existing.status} with active production orders. Cancel them first to re-cascade.`,
           },
           400,
         );
       }
-      // Fall through: CONFIRMED + zero POs → run cascade to backfill.
+      // Fall through: CONFIRMED/IN_PRODUCTION + zero active POs → run cascade.
     } else {
       return c.json(
         {

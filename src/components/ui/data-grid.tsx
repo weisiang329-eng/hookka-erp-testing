@@ -42,7 +42,8 @@ export type Column<T> = {
   width?: string;
   align?: "left" | "center" | "right";
   sortable?: boolean;
-  hidden?: boolean; // default visibility
+  hidden?: boolean; // context-driven: column is excluded from the toggle list AND from render. Final.
+  defaultHidden?: boolean; // column appears in the Columns toggle list but is OFF by default. User can toggle on.
   render?: (value: any, row: T, index: number) => React.ReactNode;
   type?: "text" | "date" | "currency" | "number" | "docno" | "status";
 };
@@ -760,7 +761,7 @@ export function DataGrid<T extends Record<string, any>>({
         if (orgDefault) return new Set(JSON.parse(orgDefault));
       } catch { /* ignore */ }
     }
-    return new Set(columns.filter(c => !c.hidden).map(c => c.key));
+    return new Set(columns.filter(c => !c.hidden && !c.defaultHidden).map(c => c.key));
   });
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     if (gridId && typeof window !== "undefined") {
@@ -828,7 +829,7 @@ export function DataGrid<T extends Record<string, any>>({
       setVisibleKeys(
         orgCols
           ? new Set(JSON.parse(orgCols) as string[])
-          : new Set(columns.filter(c => !c.hidden).map(c => c.key)),
+          : new Set(columns.filter(c => !c.hidden && !c.defaultHidden).map(c => c.key)),
       );
       setColumnOrder(
         orgOrder
@@ -856,7 +857,7 @@ export function DataGrid<T extends Record<string, any>>({
     for (const c of columns) {
       if (!known.has(c.key)) {
         fresh.push(c.key);
-        if (!c.hidden) newlyVisible.push(c.key);
+        if (!c.hidden && !c.defaultHidden) newlyVisible.push(c.key);
       }
     }
     if (fresh.length === 0) return;

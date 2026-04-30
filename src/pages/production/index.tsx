@@ -755,6 +755,11 @@ export default function ProductionPage({
   const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
   const [fltModel, setFltModel] = useUrlState<string>("model", "");
 
+  // Overview-matrix-only sort. The dept-tab Production Sheet has DataGrid's
+  // built-in sort; this state drives the Overview "Due" header click-to-sort.
+  // null = original order; "asc"/"desc" = sorted by targetEndDate.
+  const [overviewDueSort, setOverviewDueSort] = useState<"asc" | "desc" | null>(null);
+
   // Lazy-load trigger: any filter being non-default flips shouldFetch=true,
   // which arms ordersUrl in the useCachedJson call above. Once fetched the
   // data is cached in localStorage, so subsequent filter changes filter
@@ -1147,11 +1152,25 @@ export default function ProductionPage({
   ]);
 
   const visibleOrders = useMemo(() => {
-    if (activeTab === "ALL") return filteredOrders;
-    return filteredOrders.filter(
-      (o) => cellFor(o, activeTab).state !== "empty",
-    );
-  }, [filteredOrders, activeTab]);
+    let rows = filteredOrders;
+    if (activeTab !== "ALL") {
+      rows = rows.filter((o) => cellFor(o, activeTab).state !== "empty");
+    }
+    // Overview-only Due sort. Empty due dates park at the end regardless
+    // of direction so undated rows don't dominate ascending order.
+    if (activeTab === "ALL" && overviewDueSort) {
+      const dir = overviewDueSort === "asc" ? 1 : -1;
+      rows = [...rows].sort((a, b) => {
+        const av = a.targetEndDate || "";
+        const bv = b.targetEndDate || "";
+        if (!av && !bv) return 0;
+        if (!av) return 1;
+        if (!bv) return -1;
+        return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+      });
+    }
+    return rows;
+  }, [filteredOrders, activeTab, overviewDueSort]);
 
   // Unique customer + state + model options for the filter dropdowns,
   // derived live from the order set so they auto-update when data changes.
@@ -2023,9 +2042,9 @@ export default function ProductionPage({
     },
     // One pill column per department. Each uses a nested "sortKey" path so
     // the grid's dot-notation sort handles overdue > pending > done > none
-    // automatically. Users toggle visibility via the grid's Columns button
-    // — by default we show only the upstream depts for the active tab so
-    // the sheet isn't cluttered.
+    // automatically. Every dept appears in the Columns toggle list so the
+    // user can add downstream-dept visibility on demand; by default we show
+    // only the active dept + its upstreams to keep the sheet uncluttered.
     ...DEPARTMENTS.map((d): Column<DeptRow> => {
       const objKey = `sched_${d.code}` as keyof DeptRow;
       const isActive = d.code === activeTab;
@@ -2036,7 +2055,7 @@ export default function ProductionPage({
         type: "number",
         width: "140px",
         sortable: true,
-        hidden: !(isActive || isUpstream),
+        defaultHidden: !(isActive || isUpstream),
         render: (_v, row) => renderDeptSchedCell(row[objKey] as DeptSched),
       };
     }),
@@ -3459,7 +3478,22 @@ export default function ProductionPage({
           <div className="px-3 py-2.5">Customer</div>
           <div className="px-3 py-2.5">Special Order</div>
           <div className="px-2 py-2.5 text-center">Qty</div>
-          <div className="px-2 py-2.5">Due</div>
+          <button
+            type="button"
+            className="px-2 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] flex items-center gap-1 hover:text-[#1F1D1B] cursor-pointer"
+            onClick={() =>
+              setOverviewDueSort((p) =>
+                p === null ? "asc" : p === "asc" ? "desc" : null,
+              )
+            }
+            title="Sort by due date — click to cycle asc / desc / off"
+          >
+            Due
+            <span className="text-[8px] leading-none flex flex-col">
+              <span className={overviewDueSort === "asc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▲</span>
+              <span className={overviewDueSort === "desc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▼</span>
+            </span>
+          </button>
           {DEPARTMENTS.map((d) => (
             <div
               key={d.code}

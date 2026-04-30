@@ -802,8 +802,9 @@ app.post("/clear-future-completions", async (c) => {
 // group, find the most-downstream completed JC (the "anchor" — MAX(sequence)
 // among rows whose status IN ('COMPLETED','TRANSFERRED') AND completedDate
 // IS NOT NULL). For every OTHER JC in the same group whose status is not
-// already done, derive a `newDate` from the *production lead-times table*
-// (the same data backing the Production Lead Times settings page):
+// already done AND whose dept lies on the SAME sub-chain as the anchor,
+// derive a `newDate` from the *production lead-times table* (the same data
+// backing the Production Lead Times settings page):
 //
 //   leadtimes[cat][dept] = days BEFORE customer DD that dept finishes.
 //   Upstream depts (e.g. FAB_CUT=10) finish earlier than downstream
@@ -812,6 +813,18 @@ app.post("/clear-future-completions", async (c) => {
 //     newDate    = anchor_date + offsetDays days
 //   ltAnchor < ltTarget (target is upstream) → offset negative → earlier.
 //   ltAnchor > ltTarget (target is downstream) → offset positive → later.
+//
+// DAG model (NEW — replaces the previous linear-sequence assumption):
+//   The factory has 3 PARALLEL sub-chains that converge at UPHOLSTERY:
+//     - Fabric chain: FAB_CUT → FAB_SEW
+//     - Wood chain:   WOOD_CUT → FRAMING → WEBBING
+//     - Foam:         FOAM (singleton)
+//   All three feed UPHOLSTERY → PACKING. The previous "linear sequence"
+//   assumption was wrong because finishing FRAMING tells us nothing about
+//   FAB_SEW timing — they're independent paths until UPHOLSTERY. So the
+//   cascade now uses an explicit upstream-set per dept and DROPS any
+//   candidate that isn't on the anchor's sub-chain (tracked as
+//   `parallelChainSkipped`).
 //
 // Category lookup: each PO's itemCategory selects the row map. SOFA uses
 // the SOFA values; everything else (BEDFRAME, ACCESSORY, missing) falls
@@ -838,13 +851,50 @@ app.post("/clear-future-completions", async (c) => {
 // Query params:
 //   ?dryRun=true|false   default false
 //
-// Response (dryRun): { count, sample, dateHistogram } — histogram is a map
-// of { "YYYY-MM-DD": rowCount, ... } over the resulting newDates so the
-// caller can sanity-check the spread before going live.
+// Response (dryRun): { count, sample, dateHistogram, byOffsetSummary,
+// fallbackToSequence, parallelChainSkipped } — histogram is a map of
+// { "YYYY-MM-DD": rowCount, ... } over the resulting newDates so the caller
+// can sanity-check the spread before going live.
 //
 // Permission: production-orders:update.
 // ---------------------------------------------------------------------------
 const CASCADE_DATE_CLAMP = "2026-04-30";
+
+// Explicit DAG: upstream set per dept (depts that must finish before this
+// dept can run). FAB chain and WOOD chain are independent; FOAM is a
+// singleton; UPHOLSTERY converges all three; PACKING follows UPHOLSTERY.
+const STRICT_UPSTREAM: Record<string, readonly string[]> = {
+  FAB_CUT: [],
+  FAB_SEW: ["FAB_CUT"],
+  WOOD_CUT: [],
+  FRAMING: ["WOOD_CUT"],
+  WEBBING: ["WOOD_CUT", "FRAMING"],
+  FOAM: [],
+  UPHOLSTERY: [
+    "FAB_CUT",
+    "FAB_SEW",
+    "WOOD_CUT",
+    "FRAMING",
+    "WEBBING",
+    "FOAM",
+  ],
+  PACKING: [
+    "FAB_CUT",
+    "FAB_SEW",
+    "WOOD_CUT",
+    "FRAMING",
+    "WEBBING",
+    "FOAM",
+    "UPHOLSTERY",
+  ],
+};
+
+// Downstream auto-fill: only UPHOLSTERY → PACKING is safe to infer from a
+// single anchor. Every other dept converges at UPHOLSTERY, so we can't
+// infer downstream completion from one parallel-chain anchor.
+const STRICT_DOWNSTREAM: Record<string, readonly string[]> = {
+  UPHOLSTERY: ["PACKING"],
+};
 
 type CandidateRow = {
   id: string;
@@ -1008,12 +1058,30 @@ app.post("/cascade-upstream-completion", async (c) => {
   const skipped: Array<{ jcId: string; reason: string }> = [];
   let groupHadAnchor = 0;
   let fallbackToSequence = 0;
+  let parallelChainSkipped = 0;
   for (const cand of allNonDone) {
     const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}`;
     const anchor = anchorMap.get(key);
     if (!anchor) continue; // group has no completed sibling — leave alone
     groupHadAnchor++;
     if (cand.sequence === anchor.anchor_seq) continue; // shouldn't happen (anchor row is by definition done) but guard
+
+    // DAG filter: target dept must be upstream OR downstream of anchor on
+    // the SAME sub-chain. Cross-chain candidates (e.g. anchor=FRAMING,
+    // target=FAB_SEW) are skipped — wood-chain progress doesn't tell us
+    // anything about fabric-chain timing.
+    const anchorDept = (anchor.anchor_dept || "").toUpperCase();
+    const targetDept = (cand.departmentCode || "").toUpperCase();
+    const upstreamOfAnchor = STRICT_UPSTREAM[anchorDept] ?? [];
+    const downstreamOfAnchor = STRICT_DOWNSTREAM[anchorDept] ?? [];
+    const onChain =
+      upstreamOfAnchor.includes(targetDept) ||
+      downstreamOfAnchor.includes(targetDept);
+    if (!onChain) {
+      parallelChainSkipped++;
+      continue;
+    }
+
     const anchorDate = anchor.anchor_date;
     if (
       typeof anchorDate !== "string" ||
@@ -1108,6 +1176,7 @@ app.post("/cascade-upstream-completion", async (c) => {
       dryRun: true,
       count: candidatesCount,
       planned: plans.length,
+      parallelChainSkipped,
       fallbackToSequence,
       skipped,
       dateHistogram,
@@ -1146,6 +1215,7 @@ app.post("/cascade-upstream-completion", async (c) => {
     dryRun: false,
     count: candidatesCount,
     planned: plans.length,
+    parallelChainSkipped,
     fallbackToSequence,
     skipped,
     updated,

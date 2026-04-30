@@ -14,8 +14,6 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // 2026-04-26 QA helper the shop owner uses to bulk-reset for re-runs).
 import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
-import { SpreadsheetModal } from "./spreadsheet-modal";
-import type { SpreadsheetEdit } from "./spreadsheet-modal";
 
 // ----- types -----
 type JobCard = {
@@ -815,13 +813,6 @@ export default function ProductionPage({
   // previous dept would briefly filter the QR tile row to an empty set.
   // eslint-disable-next-line react-hooks/set-state-in-effect -- derived: clear stale grid mirror on tab change
   useEffect(() => { setGridFilteredDeptRows(null); }, [activeTab]);
-
-  // Spreadsheet Mode (operator request 2026-04-30): full-screen Sheets-style
-  // editor for the dept Production Sheet. The existing per-cell grid stays
-  // pristine — this opens over it, lets the user range-select / drag-fill /
-  // paste-from-Sheets across Completion Date + PIC 1 + PIC 2, and closes
-  // back to the regular grid on Save / Cancel.
-  const [spreadsheetOpen, setSpreadsheetOpen] = useState(false);
 
   // Batch sticker printing — populated when the user clicks "Print Job Card
   // Stickers" or "Print FG Stickers" in the header. Each entry renders into
@@ -3310,17 +3301,6 @@ export default function ProductionPage({
               {activeDept.name} — Production Sheet
               <span className="ml-2 text-xs font-normal text-[#8A7F73]">({deptRows.length} items)</span>
             </h2>
-            <div className="ml-auto flex items-center gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setSpreadsheetOpen(true)}
-                disabled={deptRows.length === 0}
-                title="Open in Spreadsheet Mode for bulk editing of Completion Date / PIC 1 / PIC 2"
-                className="h-7 text-xs"
-              >
-                Spreadsheet Mode
-              </Button>
-            </div>
           </div>
           <DataGrid<DeptRow>
             key={`dept-grid-${activeDept.code}`}
@@ -3364,52 +3344,6 @@ export default function ProductionPage({
             }}
           />
         </div>
-      )}
-
-      {/* Spreadsheet Mode modal — Sheets-style bulk editor over the dept
-          grid. Mounted only on dept tabs; closes back to the regular grid
-          on Cancel/Save. Dirty edits drain through patchJobCard which the
-          parent grid is already watching, so the close-then-render-the-grid
-          path picks up the new values without a refetch. */}
-      {activeTab !== "ALL" && activeDept && (
-        <SpreadsheetModal
-          open={spreadsheetOpen}
-          onClose={() => setSpreadsheetOpen(false)}
-          deptName={activeDept.name}
-          rows={deptRows.map((r) => ({
-            id: r.id,
-            poId: r.poId,
-            jobCardId: r.jobCardId,
-            rowNo: r.rowNo,
-            soId: r.soId,
-            wip: r.wip,
-            qty: r.qty,
-            completedDate: r.completedDate,
-            pic1: r.pic1,
-            pic2: r.pic2,
-          }))}
-          workers={workers.map((w) => ({ id: w.id, name: w.name, empNo: w.empNo }))}
-          onSave={async (edits: SpreadsheetEdit[]) => {
-            // Each edit fires the same fire-and-forget PATCH the per-cell
-            // grid uses, so the optimistic state lands instantly and the
-            // server writes drain in parallel.
-            for (const e of edits) {
-              const patch: Parameters<typeof patchJobCard>[2] = {};
-              if (e.completedDate !== undefined) {
-                patch.completedDate = e.completedDate;
-                // Mirror the live grid's status-side-effect on completion
-                // stamp/clear so the row pills update too.
-                patch.status = e.completedDate ? "COMPLETED" : "WAITING";
-              }
-              if (e.pic1Id !== undefined) patch.pic1Id = e.pic1Id;
-              if (e.pic1Name !== undefined) patch.pic1Name = e.pic1Name;
-              if (e.pic2Id !== undefined) patch.pic2Id = e.pic2Id;
-              if (e.pic2Name !== undefined) patch.pic2Name = e.pic2Name;
-              patchJobCard(e.poId, e.jobCardId, patch);
-            }
-            toast.success(`Applied ${edits.length} change${edits.length === 1 ? "" : "s"}.`);
-          }}
-        />
       )}
 
       {/* Overview matrix grid (only shown when Overview tab is active) */}

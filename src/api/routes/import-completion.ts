@@ -91,6 +91,12 @@ const WORKER_NAME_MAP: Record<string, { name: string; ambiguous?: boolean }> = {
   KYAW: { name: "AUNG KYAW SOE" }, // user disambiguation 2026-04-30: KYAW = AUNG KYAW SOE; KYAW OO is its own short name above
   AUNG: { name: "AUNG THEIN WIN" },
   AMANG: { name: "A MANG" },
+  // 2026-04-30 prod-CSV import: full-name passthroughs for workers the user
+  // typed verbatim into the per-dept Production Sheet. Self-referencing so
+  // the script can ship full names directly without a reverse map.
+  "KYAR TUN HLA": { name: "KYAR TUN HLA" },
+  "CHAE KO KO": { name: "CHAE KO KO" },
+  "KYAW ZIN OO": { name: "KYAW ZIN OO" },
 };
 
 // ---------------------------------------------------------------------------

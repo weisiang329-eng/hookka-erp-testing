@@ -1094,15 +1094,42 @@ function wipToPrintHtml(wip: WIPComponent, level: number, product: Product): str
   `;
 }
 
+// Recursively walk a WIP subtree summing process minutes × the cumulative
+// quantity multiplier from root to current node. (A divan qty=2 with a
+// foam child qty=1 contributes foam_processes × 1 × 2 = ×2 across the
+// product. With nested children of children, each layer compounds.)
+function sumWipTreeMinutes(wips: WIPComponent[], parentMul: number = 1): number {
+  let total = 0;
+  for (const w of wips) {
+    const mul = parentMul * (w.quantity || 1);
+    for (const p of w.processes || []) total += p.minutes * mul;
+    if (w.children?.length) total += sumWipTreeMinutes(w.children, mul);
+  }
+  return total;
+}
+
+// Per-dept aggregation matching sumWipTreeMinutes — recursive walk that
+// honours the cumulative quantity multiplier from root to leaf.
+function accumulateDeptMinutes(
+  wips: WIPComponent[],
+  out: Record<string, number>,
+  parentMul: number = 1,
+): void {
+  for (const w of wips) {
+    const mul = parentMul * (w.quantity || 1);
+    for (const p of w.processes || []) {
+      out[p.deptCode] = (out[p.deptCode] || 0) + p.minutes * mul;
+    }
+    if (w.children?.length) accumulateDeptMinutes(w.children, out, mul);
+  }
+}
+
 // Builds a self-contained HTML document for printing / save-as-PDF. The
 // browser's print dialog handles the actual PDF conversion so we don't
 // need any extra dependency.
 function buildBOMPrintDoc(template: BOMTemplate, product: Product): string {
   const l1Min = template.l1Processes.reduce((s, p) => s + p.minutes, 0);
-  const wipMin = template.wipComponents.reduce(
-    (s, w) => s + w.processes.reduce((ws, p) => ws + p.minutes, 0) * w.quantity,
-    0
-  );
+  const wipMin = sumWipTreeMinutes(template.wipComponents);
   const totalMin = l1Min + wipMin;
   const l1Procs = template.l1Processes
     .map((p) => `<span class="pill">${p.dept} · ${p.category} · ${p.minutes}m</span>`)
@@ -1197,22 +1224,20 @@ function BOMTreeView({ template, product, onEdit }: { template: BOMTemplate; pro
   const { toast } = useToast();
   const [expanded, setExpanded] = useState(true);
   const l1Min = template.l1Processes.reduce((s, p) => s + p.minutes, 0);
-  const wipMin = template.wipComponents.reduce(
-    (s, w) => s + w.processes.reduce((ws, p) => ws + p.minutes, 0) * w.quantity,
-    0
-  );
+  // Recursive walk so child WIPs (foam/frame/wood/fabric inside divan,
+  // headboard) get counted. Previous code only summed top-level WIPs and
+  // missed every dept that lived on a child node.
+  const wipMin = sumWipTreeMinutes(template.wipComponents);
   const totalMin = l1Min + wipMin;
 
-  // Department breakdown
+  // Department breakdown — same recursion so depts nested under divan /
+  // headboard (Wood Cut, Framing, Webbing, Foam, Fab Sew, Fab Cut) show
+  // up alongside the top-level Upholstery / Packing.
   const deptMinutes: Record<string, number> = {};
   for (const p of template.l1Processes) {
     deptMinutes[p.deptCode] = (deptMinutes[p.deptCode] || 0) + p.minutes;
   }
-  for (const w of template.wipComponents) {
-    for (const p of w.processes) {
-      deptMinutes[p.deptCode] = (deptMinutes[p.deptCode] || 0) + p.minutes * w.quantity;
-    }
-  }
+  accumulateDeptMinutes(template.wipComponents, deptMinutes);
 
   const routingSteps = DEPT_ORDER.filter((d) => deptMinutes[d]).map((code) => ({
     code,

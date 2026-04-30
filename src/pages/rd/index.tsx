@@ -236,21 +236,22 @@ function ProjectCard({ project }: { project: RDProject }) {
         </button>
         {/* Cover photo thumbnail — banner ALWAYS renders (with photo when
             available, neutral placeholder otherwise) so every card in the
-            grid is the same height. The banner is locked to aspect-[4/3]
-            regardless of the saved JPEG's natural aspect; object-cover
-            crops to fill cleanly. The detail page is where users see the
-            true natural aspect of their photo — the list view prioritises
-            grid consistency. */}
+            grid is the same height. The banner is locked to aspect-[16/9]
+            so the photo crops to a wider strip and the meta below has more
+            visual weight. object-cover keeps the photo filling the strip
+            cleanly regardless of the saved JPEG's natural aspect. The
+            detail page is where users see the true natural aspect of their
+            photo — the list view prioritises grid compactness. */}
         {showCover ? (
           <img
             src={cover}
             alt={`${project.name} cover`}
             onError={() => setCoverFailed(true)}
-            className="w-full aspect-[4/3] object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+            className="w-full aspect-[16/9] object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
           />
         ) : (
           <div
-            className="w-full aspect-[4/3] bg-[#F0ECE9] border-b border-[#E2DDD8] flex items-center justify-center text-gray-300"
+            className="w-full aspect-[16/9] bg-[#F0ECE9] border-b border-[#E2DDD8] flex items-center justify-center text-gray-300"
             aria-label="No cover photo"
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-10 w-10">
@@ -373,12 +374,15 @@ function PipelineView({ projects }: { projects: RDProject[] }) {
                 <Link key={project.id} to={`/rd/${project.id}`}>
                   <div className="bg-white rounded-md border border-[#E2DDD8] hover:shadow-md transition-shadow cursor-pointer overflow-hidden">
                     {/* Cover photo thumbnail — banner is hidden entirely when
-                        there's no photo, keeping the kanban card compact. */}
+                        there's no photo, keeping the kanban card compact.
+                        Uses aspect-[16/9] (matches the Projects-tab card)
+                        so the photo is a wider strip rather than dominating
+                        the narrow kanban column. */}
                     {cover && (
                       <img
                         src={cover}
                         alt=""
-                        className="w-full aspect-square object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
+                        className="w-full aspect-[16/9] object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
                       />
                     )}
                     <div className="p-2.5 space-y-2">

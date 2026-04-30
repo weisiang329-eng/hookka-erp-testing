@@ -1074,7 +1074,7 @@ app.post("/cascade-upstream-completion", async (c) => {
     // → group skipped, nothing planned.
     const anchorDept = (anchor.anchor_dept || "").toUpperCase();
     const targetDept = (cand.departmentCode || "").toUpperCase();
-    const allowedTargets = cascadeAllowed(anchor.anchorWt, anchorDept);
+    const allowedTargets = cascadeAllowed(anchor.anchor_wipType, anchorDept);
     if (!allowedTargets.length || !allowedTargets.includes(targetDept)) {
       parallelChainSkipped++;
       continue;

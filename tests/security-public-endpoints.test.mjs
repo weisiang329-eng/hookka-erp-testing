@@ -36,6 +36,10 @@ const EXPECTED_PATHS = [
   // Phase C.6 — TOTP step-2 of password login (no bearer yet).
   "/api/auth/totp/login-verify",
   "/api/health",
+  // Google Sheets onEdit webhook — Apps Script can't carry the dashboard
+  // JWT, so authentication is HMAC (SHEETS_SYNC_SECRET) + 5-minute
+  // timestamp window enforced inside the handler. See docs/SHEETS-SYNC.md.
+  "/api/sheets-sync/apps-script-webhook",
 ];
 
 const EXPECTED_PREFIXES = [

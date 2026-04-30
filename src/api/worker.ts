@@ -74,6 +74,12 @@ export type Env = {
     // Set via `wrangler secret put SENTRY_DSN`. When unset, app.onError
     // logs to wrangler-tail only (no third-party hop).
     SENTRY_DSN?: string;
+    // Google Sheets bidirectional sync (see docs/SHEETS-SYNC.md). All three
+    // are optional — when any is missing the sheets-sync helpers silently
+    // no-op and the webhook + backfill routes return 503.
+    GOOGLE_SHEETS_SA_KEY?: string;     // Full service-account JSON (stringified)
+    SHEETS_SYNC_SECRET?: string;       // HMAC secret shared with Apps Script
+    SHEETS_SPREADSHEET_ID?: string;    // Target spreadsheet id
   };
   // Per-request variables.  DB is the Supabase-backed D1-compat adapter
   // installed by the middleware below; typed as D1Database so existing route
@@ -565,6 +571,11 @@ import scanPo from "./routes/scan-po";
 import importCompletion from "./routes/import-completion";
 import serviceOrders from "./routes/service-orders";
 import serviceCases from "./routes/service-cases";
+// Google Sheets bidirectional sync. Webhook (Sheets -> ERP) + backfill
+// (ERP -> Sheets). Returns 503 silently when GOOGLE_SHEETS_SA_KEY /
+// SHEETS_SPREADSHEET_ID / SHEETS_SYNC_SECRET are missing — see
+// docs/SHEETS-SYNC.md for the GCP provisioning checklist.
+import sheetsSync from "./routes/sheets-sync";
 
 app.route("/api/customers", customers);
 app.route("/api/bom", bom);
@@ -641,6 +652,12 @@ app.route("/api/mdm", mdm);
 // Phase B.4 — file_assets API. Mounted under /api/files. Returns 503 when
 // Supabase Storage credentials are missing; see docs/DR-RUNBOOK.md.
 app.route("/api/files", files);
+// Google Sheets bidirectional sync (Apps Script webhook + admin backfill).
+// Mounted before the /api/* catch-all so the webhook works on a fresh
+// deploy even if the rest of the API is locked down. Auth on the webhook
+// is HMAC-only (Apps Script can't carry a dashboard JWT) — see
+// docs/SHEETS-SYNC.md for the trust boundary.
+app.route("/api/sheets-sync", sheetsSync);
 
 // Below routes were previously in-memory mock-backed (data in
 // src/lib/mock-data.ts); now all D1-persistent. Comment refreshed

@@ -798,139 +798,46 @@ app.post("/clear-future-completions", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/import/cascade-upstream-completion
 //
-// Anchor-relative cascade-fill: within each (productionOrderId, wipKey)
-// group, find the most-downstream completed JC (the "anchor" — MAX(sequence)
-// among rows whose status IN ('COMPLETED','TRANSFERRED') AND completedDate
-// IS NOT NULL). For every OTHER JC in the same group whose status is not
-// already done AND whose dept lies on the SAME sub-chain as the anchor,
-// derive a `newDate` from the *production lead-times table* (the same data
-// backing the Production Lead Times settings page):
+// Anchor-relative cascade-fill, RESTRICTED to 3 explicit rules. Within each
+// (productionOrderId, wipKey) group, find the most-downstream completed JC
+// (the "anchor" — MAX(sequence) among rows where status IN ('COMPLETED',
+// 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's dept is one
+// of the 3 listed below, plan completions for the listed target depts in
+// that group. Any other anchor dept → entire group is skipped.
 //
+//   UPHOLSTERY → FAB_CUT, FAB_SEW, FOAM, WOOD_CUT, FRAMING, WEBBING
+//   WEBBING    → FRAMING, WOOD_CUT
+//   FAB_SEW    → FAB_CUT
+//
+// FOAM / FRAMING / WOOD_CUT / FAB_CUT / PACKING anchors → no cascade.
+//
+// Date math (unchanged):
 //   leadtimes[cat][dept] = days BEFORE customer DD that dept finishes.
-//   Upstream depts (e.g. FAB_CUT=10) finish earlier than downstream
-//   (e.g. PACKING=2). So:
 //     offsetDays = ltAnchor - ltTarget
 //     newDate    = anchor_date + offsetDays days
-//   ltAnchor < ltTarget (target is upstream) → offset negative → earlier.
-//   ltAnchor > ltTarget (target is downstream) → offset positive → later.
+//   if (offsetDays > 0) offsetDays = 0   (anchor-date clamp)
+//   if (newDate > 2026-04-30) newDate = 2026-04-30   (today clamp)
+// Falls back to 1-day-per-sequence-step when leadtime data missing
+// (counted as `fallbackToSequence`). Skips candidates already
+// COMPLETED/TRANSFERRED with a completedDate.
 //
-// DAG model (NEW — replaces the previous linear-sequence assumption):
-//   The factory has 3 PARALLEL sub-chains that converge at UPHOLSTERY:
-//     - Fabric chain: FAB_CUT → FAB_SEW
-//     - Wood chain:   WOOD_CUT → FRAMING → WEBBING
-//     - Foam:         FOAM (singleton)
-//   All three feed UPHOLSTERY → PACKING. The previous "linear sequence"
-//   assumption was wrong because finishing FRAMING tells us nothing about
-//   FAB_SEW timing — they're independent paths until UPHOLSTERY. So the
-//   cascade now uses an explicit upstream-set per dept and DROPS any
-//   candidate that isn't on the anchor's sub-chain (tracked as
-//   `parallelChainSkipped`).
-//
-// Category lookup: each PO's itemCategory selects the row map. SOFA uses
-// the SOFA values; everything else (BEDFRAME, ACCESSORY, missing) falls
-// back to BEDFRAME — same convention as sales-orders.ts.
-//
-// Fallback: if a (cat, dept) pair has no leadtime row AND no in-file
-// default, we fall back to the prior 1-day-per-sequence-step rule so we
-// never silently skip the candidate. The fallback count is surfaced in
-// the response as `fallbackToSequence` for data-quality monitoring.
-//
-// Clamp: if newDate > 2026-04-30, clamp to 2026-04-30. No early-side floor —
-// historical-looking dates are intentional. The cap exists so anything that
-// falls off the right edge of the calendar piles at "today" rather than
-// the future.
-//
-// Side-effect policy: this endpoint is a metadata cleanup pass — NOT a
-// workflow event. We deliberately skip applyWipInventoryChange,
-// postJobCardLabor, and postProductionOrderCompletion. The downstream JCs
-// already fired their cascades when they originally completed, and re-
-// firing them now (out of order) would double-consume WIP / double-post
-// labor. If a PO needs FG completion, run the dedicated importer or flip
-// it manually after this pass.
+// Side-effect policy: metadata cleanup only — no applyWipInventoryChange,
+// postJobCardLabor, or postProductionOrderCompletion. Downstream JCs
+// already fired their cascades when they originally completed.
 //
 // Query params:
 //   ?dryRun=true|false   default false
-//
-// Anchor-date clamp (rule change 2026-04-30): a backfilled completion can
-// never exceed the anchor's own completedDate. Upstream depts have larger
-// leadtimes so their offset is naturally <= 0 and unaffected. The case that
-// triggers is downstream backfill from an UPHOLSTERY anchor — e.g. PACKING
-// in SOFA where lt_UPH=4 and lt_PACKING=3 yields rawOffset=+1; we clamp to 0
-// so PACKING ends up on the same date as UPHOLSTERY rather than +1 day past
-// it. clampedToAnchor counts how many rows hit this clamp.
-//
-// Response (dryRun): { count, sample, dateHistogram, byOffsetSummary,
-// fallbackToSequence, parallelChainSkipped, clampedToAnchor,
-// sofaFoamAnchorSample, clampedToAnchorSample } — histogram is a map of
-// { "YYYY-MM-DD": rowCount, ... } over the resulting newDates so the caller
-// can sanity-check the spread before going live.
 //
 // Permission: production-orders:update.
 // ---------------------------------------------------------------------------
 const CASCADE_DATE_CLAMP = "2026-04-30";
 
-// Explicit DAG: upstream set per dept (depts that must finish before this
-// dept can run). FAB chain and WOOD chain are independent; FOAM is a
-// singleton in the default (HEADBOARD/DIVAN/SOFA_BASE) graph; UPHOLSTERY
-// converges all three; PACKING follows UPHOLSTERY.
-const STRICT_UPSTREAM_DEFAULT: Record<string, readonly string[]> = {
-  FAB_CUT: [],
+// The only 3 cascade rules. Anchor dept → list of target depts to plan.
+// Anything not in this map is silently skipped (no rows planned).
+const CASCADE_ALLOWED: Record<string, readonly string[]> = {
+  UPHOLSTERY: ["FAB_CUT", "FAB_SEW", "FOAM", "WOOD_CUT", "FRAMING", "WEBBING"],
+  WEBBING: ["FRAMING", "WOOD_CUT"],
   FAB_SEW: ["FAB_CUT"],
-  WOOD_CUT: [],
-  FRAMING: ["WOOD_CUT"],
-  WEBBING: ["WOOD_CUT", "FRAMING"],
-  FOAM: [],
-  UPHOLSTERY: [
-    "FAB_CUT",
-    "FAB_SEW",
-    "WOOD_CUT",
-    "FRAMING",
-    "WEBBING",
-    "FOAM",
-  ],
-  PACKING: [
-    "FAB_CUT",
-    "FAB_SEW",
-    "WOOD_CUT",
-    "FRAMING",
-    "WEBBING",
-    "FOAM",
-    "UPHOLSTERY",
-  ],
-};
-
-// Per-wipType overrides for STRICT_UPSTREAM. Only the dept entries that DIFFER
-// from default need to appear. Rationale (per user clarification 2026-04-30):
-// for SOFA_CUSHION / SOFA_HEADREST / SOFA_ARMREST the foam is wrapped onto
-// the framed structure, so FOAM done implies FRAMING (and transitively
-// WOOD_CUT) done. In HEADBOARD / DIVAN / SOFA_BASE foam is independent and
-// the default empty-upstream entry stands.
-const STRICT_UPSTREAM_BY_WIPTYPE: Record<
-  string,
-  Record<string, readonly string[]>
-> = {
-  SOFA_CUSHION: { FOAM: ["WOOD_CUT", "FRAMING"] },
-  SOFA_HEADREST: { FOAM: ["WOOD_CUT", "FRAMING"] },
-  SOFA_ARMREST: { FOAM: ["WOOD_CUT", "FRAMING"] },
-};
-
-function strictUpstream(
-  wipType: string | null | undefined,
-  deptCode: string,
-): readonly string[] {
-  const wt = (wipType ?? "").toUpperCase();
-  return (
-    STRICT_UPSTREAM_BY_WIPTYPE[wt]?.[deptCode] ??
-    STRICT_UPSTREAM_DEFAULT[deptCode] ??
-    []
-  );
-}
-
-// Downstream auto-fill: only UPHOLSTERY → PACKING is safe to infer from a
-// single anchor. Every other dept converges at UPHOLSTERY, so we can't
-// infer downstream completion from one parallel-chain anchor.
-const STRICT_DOWNSTREAM: Record<string, readonly string[]> = {
-  UPHOLSTERY: ["PACKING"],
 };
 
 type CandidateRow = {
@@ -1132,20 +1039,14 @@ app.post("/cascade-upstream-completion", async (c) => {
     groupHadAnchor++;
     if (cand.sequence === anchor.anchor_seq) continue; // shouldn't happen (anchor row is by definition done) but guard
 
-    // DAG filter: target dept must be upstream OR downstream of anchor on
-    // the SAME sub-chain. Cross-chain candidates (e.g. anchor=FRAMING,
-    // target=FAB_SEW) are skipped — wood-chain progress doesn't tell us
-    // anything about fabric-chain timing. Upstream lookup is wipType-aware
-    // (see STRICT_UPSTREAM_BY_WIPTYPE) so SOFA_CUSHION/HEADREST/ARMREST FOAM
-    // anchors correctly imply FRAMING+WOOD_CUT done.
+    // Restricted cascade: only 3 anchor depts trigger fills, and each
+    // anchor only cascades to a fixed allow-list of target depts. Any
+    // other anchor dept (FOAM, FRAMING, WOOD_CUT, FAB_CUT, PACKING, ...)
+    // → group skipped, nothing planned.
     const anchorDept = (anchor.anchor_dept || "").toUpperCase();
     const targetDept = (cand.departmentCode || "").toUpperCase();
-    const upstreamOfAnchor = strictUpstream(anchor.anchor_wipType, anchorDept);
-    const downstreamOfAnchor = STRICT_DOWNSTREAM[anchorDept] ?? [];
-    const onChain =
-      upstreamOfAnchor.includes(targetDept) ||
-      downstreamOfAnchor.includes(targetDept);
-    if (!onChain) {
+    const allowedTargets = CASCADE_ALLOWED[anchorDept];
+    if (!allowedTargets || !allowedTargets.includes(targetDept)) {
       parallelChainSkipped++;
       continue;
     }
@@ -1258,36 +1159,6 @@ app.post("/cascade-upstream-completion", async (c) => {
     newDate: p.newDate,
   }));
 
-  // Targeted sample: rows where the new SOFA_CUSHION/HEADREST/ARMREST FOAM
-  // anchor → FRAMING/WOOD_CUT rule is the reason this row was planned.
-  // Useful for confirming rule change 1 actually fired in production data.
-  const sofaFoamAnchorSample = plans
-    .filter((p) => {
-      const aDept = (p.cand.anchor_dept || "").toUpperCase();
-      const aWt = (p.cand.anchor_wipType || "").toUpperCase();
-      const tDept = (p.cand.departmentCode || "").toUpperCase();
-      return (
-        aDept === "FOAM" &&
-        (aWt === "SOFA_CUSHION" ||
-          aWt === "SOFA_HEADREST" ||
-          aWt === "SOFA_ARMREST") &&
-        (tDept === "FRAMING" || tDept === "WOOD_CUT")
-      );
-    })
-    .slice(0, 3)
-    .map((p) => ({
-      id: p.cand.id,
-      productionOrderId: p.cand.productionOrderId,
-      wipKey: p.cand.wipKey,
-      anchor_dept: p.cand.anchor_dept,
-      anchor_wipType: p.cand.anchor_wipType,
-      anchor_date: p.cand.anchor_date,
-      departmentCode: p.cand.departmentCode,
-      wipType: p.cand.wipType,
-      offsetDays: p.offsetDays,
-      newDate: p.newDate,
-    }));
-
   // Targeted sample: rows where rawOffsetDays was positive and got clamped
   // back to 0 (typically PACKING target on a SOFA UPHOLSTERY anchor).
   const clampedToAnchorSample = plans
@@ -1350,7 +1221,6 @@ app.post("/cascade-upstream-completion", async (c) => {
       byOffsetSummary,
       anchorBreakdown,
       stratifiedSample,
-      sofaFoamAnchorSample,
       clampedToAnchorSample,
       sample,
     });

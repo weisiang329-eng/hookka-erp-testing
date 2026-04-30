@@ -835,6 +835,7 @@ const CASCADE_DATE_CLAMP = "2026-04-30";
 type CandidateRow = {
   id: string;
   productionOrderId: string;
+  wipKey: string | null;
   departmentCode: string | null;
   wipType: string | null;
   sequence: number;
@@ -842,12 +843,17 @@ type CandidateRow = {
   productionTimeMinutes: number | null;
   status: string;
   completedDate: string | null;
+};
+
+type AnchorRow = {
+  productionOrderId: string;
+  wk: string;
   anchor_seq: number;
   anchor_date: string;
 };
 
 type CandidatePlan = {
-  cand: CandidateRow;
+  cand: CandidateRow & { anchor_seq: number; anchor_date: string };
   newDate: string;
   actualMinutes: number;
 };
@@ -870,55 +876,72 @@ app.post("/cascade-upstream-completion", async (c) => {
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
 
-  // Two-CTE candidate query:
-  //   anchor       — MAX(sequence) per group among completed/transferred rows
-  //   anchor_dated — pull the actual completedDate of THAT row (single row,
-  //                  not MAX(completedDate) globally).
-  // Then join back to job_cards to grab every other (non-done) JC in the
-  // same group along with the anchor's seq + date for offset math.
-  const sel = await db
+  // Two-pass approach (NOT a single CTE join). The single-CTE version
+  // tripped a D1 column-aliasing quirk: SELECT j.completedDate AND
+  // a.anchor_date from the same underlying column returned anchor_date
+  // as undefined for every row. So instead:
+  //   1. Build the anchor map (productionOrderId, wipKey) → {seq, date}
+  //      from a query that selects ONLY anchor-side columns (no name
+  //      collision with job_cards' own completedDate).
+  //   2. Fetch all candidate JCs (every non-done row) and join in JS.
+  const anchorRes = await db
     .prepare(
-      `WITH anchor AS (
-         SELECT productionOrderId,
-                COALESCE(wipKey,'') AS wk,
-                MAX(sequence) AS anchor_seq
-           FROM job_cards
-          WHERE status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL
-          GROUP BY productionOrderId, COALESCE(wipKey,'')
-       ),
-       anchor_dated AS (
-         SELECT a.productionOrderId, a.wk, a.anchor_seq, j.completedDate AS anchor_date
-           FROM anchor a
-           JOIN job_cards j
-             ON j.productionOrderId = a.productionOrderId
-            AND COALESCE(j.wipKey,'') = a.wk
-            AND j.sequence = a.anchor_seq
-            AND j.status IN ('COMPLETED','TRANSFERRED')
-            AND j.completedDate IS NOT NULL
-       )
-       SELECT j.id, j.productionOrderId, j.departmentCode, j.wipType, j.sequence,
-              j.estMinutes, j.productionTimeMinutes, j.status, j.completedDate,
-              a.anchor_seq, a.anchor_date
+      `SELECT j.productionOrderId AS productionOrderId,
+              COALESCE(j.wipKey,'') AS wk,
+              j.sequence AS anchor_seq,
+              j.completedDate AS anchor_date
          FROM job_cards j
-         JOIN anchor_dated a
-           ON a.productionOrderId = j.productionOrderId
-          AND a.wk = COALESCE(j.wipKey,'')
-          AND j.sequence <> a.anchor_seq
-        WHERE (j.status NOT IN ('COMPLETED','TRANSFERRED') OR j.completedDate IS NULL)`,
+         JOIN (
+           SELECT productionOrderId,
+                  COALESCE(wipKey,'') AS wk2,
+                  MAX(sequence) AS max_seq
+             FROM job_cards
+            WHERE status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL
+            GROUP BY productionOrderId, COALESCE(wipKey,'')
+         ) m
+           ON m.productionOrderId = j.productionOrderId
+          AND m.wk2 = COALESCE(j.wipKey,'')
+          AND m.max_seq = j.sequence
+        WHERE j.status IN ('COMPLETED','TRANSFERRED') AND j.completedDate IS NOT NULL`,
+    )
+    .all<AnchorRow>();
+
+  // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date}
+  const anchorMap = new Map<string, { anchor_seq: number; anchor_date: string }>();
+  for (const a of anchorRes.results ?? []) {
+    const key = `${a.productionOrderId}||${a.wk ?? ""}`;
+    anchorMap.set(key, { anchor_seq: a.anchor_seq, anchor_date: a.anchor_date });
+  }
+
+  // Fetch every non-done JC that lives in a group with an anchor.
+  // We pull the full set of non-done rows; any row whose group has no
+  // anchor (i.e. nothing completed in that wipKey at all) is filtered
+  // out in JS — those are legitimately untouched orders.
+  const candRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, wipKey, departmentCode, wipType, sequence,
+              estMinutes, productionTimeMinutes, status, completedDate
+         FROM job_cards
+        WHERE (status NOT IN ('COMPLETED','TRANSFERRED') OR completedDate IS NULL)`,
     )
     .all<CandidateRow>();
 
-  const candidates = sel.results ?? [];
+  const allNonDone = candRes.results ?? [];
 
   // Compute per-row newDate + actualMinutes, build histogram alongside.
-  // Defensive: skip any row whose anchor_date came back null/undefined or
-  // doesn't match ISO YYYY-MM-DD — collect them in skipped[] for the
-  // response so we can investigate without 500-ing the whole call.
+  // Defensive: skip rows whose anchor lookup returns nothing OR whose
+  // anchor_date doesn't match ISO YYYY-MM-DD.
   const plans: CandidatePlan[] = [];
   const dateHistogram: Record<string, number> = {};
   const skipped: Array<{ jcId: string; reason: string }> = [];
-  for (const cand of candidates) {
-    const anchorDate = cand.anchor_date;
+  let groupHadAnchor = 0;
+  for (const cand of allNonDone) {
+    const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}`;
+    const anchor = anchorMap.get(key);
+    if (!anchor) continue; // group has no completed sibling — leave alone
+    groupHadAnchor++;
+    if (cand.sequence === anchor.anchor_seq) continue; // shouldn't happen (anchor row is by definition done) but guard
+    const anchorDate = anchor.anchor_date;
     if (
       typeof anchorDate !== "string" ||
       !/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)
@@ -929,7 +952,7 @@ app.post("/cascade-upstream-completion", async (c) => {
       });
       continue;
     }
-    const offset = cand.sequence - cand.anchor_seq;
+    const offset = cand.sequence - anchor.anchor_seq;
     let newDate = addDaysISO(anchorDate, offset);
     if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
     const actualMinutes =
@@ -938,9 +961,14 @@ app.post("/cascade-upstream-completion", async (c) => {
         : cand.estMinutes != null
           ? cand.estMinutes
           : 0;
-    plans.push({ cand, newDate, actualMinutes });
+    plans.push({
+      cand: { ...cand, anchor_seq: anchor.anchor_seq, anchor_date: anchorDate },
+      newDate,
+      actualMinutes,
+    });
     dateHistogram[newDate] = (dateHistogram[newDate] ?? 0) + 1;
   }
+  const candidatesCount = groupHadAnchor;
 
   // Stable, easy-to-read 5-row sample with the load-bearing fields.
   const sample = plans.slice(0, 5).map((p) => ({
@@ -958,7 +986,7 @@ app.post("/cascade-upstream-completion", async (c) => {
     return c.json({
       success: true,
       dryRun: true,
-      count: candidates.length,
+      count: candidatesCount,
       planned: plans.length,
       skipped,
       dateHistogram,
@@ -994,7 +1022,7 @@ app.post("/cascade-upstream-completion", async (c) => {
   return c.json({
     success: true,
     dryRun: false,
-    count: candidates.length,
+    count: candidatesCount,
     planned: plans.length,
     skipped,
     updated,

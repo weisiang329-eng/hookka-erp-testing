@@ -228,24 +228,51 @@ export function PhotoCropDialog({
   }, [zoom, rotation, clampOffset]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  // Fit a crop rectangle of given aspect into the viewport, centered, with
-  // a sensible default size (90% of the smaller axis pair).
-  const fitCropToViewport = useCallback(
-    (lockRatio: number | null, vw: number, vh: number): Rect => {
-      if (vw === 0 || vh === 0) return { x: 0, y: 0, w: 0, h: 0 };
+  // Displayed image bounds in viewport coords (at zoom = 1, contain-fit).
+  // We use these — not the full viewport — to size the initial crop rect so
+  // the user opens the dialog with the whole photo "selected" instead of a
+  // small square in the middle of letterboxed dead space.
+  const displayedImageBounds = useMemo(() => {
+    if (!rotatedNatural || viewport.w === 0 || viewport.h === 0) return null;
+    const dw = rotatedNatural.w * baseScale;
+    const dh = rotatedNatural.h * baseScale;
+    const dx = (viewport.w - dw) / 2;
+    const dy = (viewport.h - dh) / 2;
+    return { x: dx, y: dy, w: dw, h: dh };
+  }, [rotatedNatural, baseScale, viewport.w, viewport.h]);
+
+  // Fit a crop rectangle of given aspect inside a target rect, centered.
+  // When `lockRatio` is null the crop fills the entire target; otherwise we
+  // fit the LARGEST `lockRatio` rect inside the target. The result never
+  // shrinks below `minSide` on its smaller axis (used to keep the initial
+  // crop generously sized when the image's aspect is wildly off the lock).
+  const fitCropToBounds = useCallback(
+    (lockRatio: number | null, target: Rect, minSide: number): Rect => {
+      if (target.w <= 0 || target.h <= 0) return { x: 0, y: 0, w: 0, h: 0 };
       if (lockRatio == null) {
-        const w = vw * 0.9;
-        const h = vh * 0.9;
-        return { x: (vw - w) / 2, y: (vh - h) / 2, w, h };
+        return { x: target.x, y: target.y, w: target.w, h: target.h };
       }
-      // Fit a `lockRatio` rect inside (vw, vh) at ~90% of the limiting axis.
-      let w = vw * 0.9;
+      let w = target.w;
       let h = w / lockRatio;
-      if (h > vh * 0.9) {
-        h = vh * 0.9;
+      if (h > target.h) {
+        h = target.h;
         w = h * lockRatio;
       }
-      return { x: (vw - w) / 2, y: (vh - h) / 2, w, h };
+      // Enforce the minimum size on the smaller axis. We only grow up to the
+      // viewport bounds via the caller's clamp; here we just bump dimensions
+      // and let the outer clamp pull us back if we overflow the viewport.
+      const smallerNow = Math.min(w, h);
+      if (smallerNow < minSide) {
+        const scale = minSide / smallerNow;
+        w *= scale;
+        h *= scale;
+      }
+      return {
+        x: target.x + (target.w - w) / 2,
+        y: target.y + (target.h - h) / 2,
+        w,
+        h,
+      };
     },
     [],
   );
@@ -254,16 +281,40 @@ export function PhotoCropDialog({
   /* eslint-disable react-hooks/set-state-in-effect -- crop rect must follow viewport / aspect changes */
   useEffect(() => {
     if (viewport.w === 0 || viewport.h === 0) return;
+    if (!displayedImageBounds) return;
+    const minSide = Math.min(viewport.w, viewport.h) * 0.7;
     setCrop((prev) => {
-      // First sizing — always fit.
+      // First sizing — match the displayed image bounds. If aspect is locked
+      // and the image's bounds are within 5% of that aspect, fit the rect to
+      // the full image (so the whole photo is "selected"). Otherwise fit the
+      // largest aspect-locked rect inside the displayed image.
       if (prev.w === 0 || prev.h === 0) {
-        return fitCropToViewport(aspectLock, viewport.w, viewport.h);
+        if (aspectLock == null) {
+          return {
+            x: displayedImageBounds.x,
+            y: displayedImageBounds.y,
+            w: displayedImageBounds.w,
+            h: displayedImageBounds.h,
+          };
+        }
+        const dispRatio = displayedImageBounds.w / displayedImageBounds.h;
+        const closeEnough = Math.abs(dispRatio - aspectLock) / aspectLock <= 0.05;
+        if (closeEnough) {
+          return {
+            x: displayedImageBounds.x,
+            y: displayedImageBounds.y,
+            w: displayedImageBounds.w,
+            h: displayedImageBounds.h,
+          };
+        }
+        return fitCropToBounds(aspectLock, displayedImageBounds, minSide);
       }
-      // Aspect changed and we now have a lock — refit centered.
+      // Aspect changed and we now have a lock — refit centered inside the
+      // displayed image bounds.
       if (aspectLock != null) {
         const currentRatio = prev.w / prev.h;
         if (Math.abs(currentRatio - aspectLock) > 0.001) {
-          return fitCropToViewport(aspectLock, viewport.w, viewport.h);
+          return fitCropToBounds(aspectLock, displayedImageBounds, minSide);
         }
       }
       // Still inside viewport? keep it. Otherwise clamp to bounds.
@@ -273,7 +324,7 @@ export function PhotoCropDialog({
       const h = Math.min(prev.h, viewport.h);
       return { x, y, w, h };
     });
-  }, [viewport.w, viewport.h, aspectLock, fitCropToViewport]);
+  }, [viewport.w, viewport.h, aspectLock, displayedImageBounds, fitCropToBounds]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // ── Pointer handlers ──────────────────────────────────────────────────
@@ -443,13 +494,31 @@ export function PhotoCropDialog({
   };
 
   // ── Reset / rotate ────────────────────────────────────────────────────
+  // Reset now falls back to a viewport-only fit if the displayed image
+  // bounds aren't ready yet (defensive — the dialog shouldn't render the
+  // reset button before the image decodes, but we don't want to crash if
+  // the user mashes Reset while the image is still loading).
+  const fallbackBounds: Rect = { x: 0, y: 0, w: viewport.w, h: viewport.h };
+  const minSideForReset = Math.min(viewport.w, viewport.h) * 0.7;
+
   const handleReset = () => {
     setZoom(1);
     setOffset({ x: 0, y: 0 });
     setRotation(0);
     setAspectKey(initialKey);
     const lock = ASPECT_OPTIONS.find((o) => o.key === initialKey)?.ratio ?? null;
-    setCrop(fitCropToViewport(lock, viewport.w, viewport.h));
+    const bounds = displayedImageBounds ?? fallbackBounds;
+    if (lock == null) {
+      setCrop({ x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
+      return;
+    }
+    const dispRatio = bounds.w / bounds.h;
+    const closeEnough = Math.abs(dispRatio - lock) / lock <= 0.05;
+    if (closeEnough) {
+      setCrop({ x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
+      return;
+    }
+    setCrop(fitCropToBounds(lock, bounds, minSideForReset));
   };
 
   const rotateBy = (delta: 90 | -90) => {
@@ -457,10 +526,26 @@ export function PhotoCropDialog({
       const next = ((r + delta) % 360 + 360) % 360;
       return next;
     });
-    // After rotate the visible image bounds change; re-fit crop into
-    // viewport using current aspect lock.
-    setCrop(fitCropToViewport(aspectLock, viewport.w, viewport.h));
+    // After rotate the visible image bounds change; re-fit crop into the
+    // (post-rotate) displayed image using current aspect lock. We can't read
+    // the post-rotate bounds yet (state update is async), so fit against the
+    // current bounds — the init effect re-runs after the rotation lands and
+    // settles to the right size.
+    const bounds = displayedImageBounds ?? fallbackBounds;
+    setCrop(fitCropToBounds(aspectLock, bounds, minSideForReset));
     setOffset({ x: 0, y: 0 });
+  };
+
+  // Aspect button click — picks up the new key. "Free" gets special-cased
+  // so it always snaps the crop rect back to the displayed image bounds
+  // (full photo selected); other aspects fall through to the init effect
+  // which refits the rect for the new lock.
+  const handleAspectClick = (key: AspectKey) => {
+    setAspectKey(key);
+    if (key === "free") {
+      const bounds = displayedImageBounds ?? fallbackBounds;
+      setCrop({ x: bounds.x, y: bounds.y, w: bounds.w, h: bounds.h });
+    }
   };
 
   // ── Save: bake rotation + zoom + pan + crop into a JPEG ───────────────
@@ -631,7 +716,7 @@ export function PhotoCropDialog({
               <button
                 key={opt.key}
                 type="button"
-                onClick={() => setAspectKey(opt.key)}
+                onClick={() => handleAspectClick(opt.key)}
                 className={
                   "px-2.5 py-1 rounded-md text-xs font-medium transition-colors border " +
                   (aspectKey === opt.key

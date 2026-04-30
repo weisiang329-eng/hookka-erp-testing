@@ -9,7 +9,6 @@ import { formatCurrency, formatDate } from "@/lib/utils";
 import {
   ArrowLeft,
   Calendar,
-  Users,
   Beaker,
   Clock,
   CheckCircle2,
@@ -1340,6 +1339,110 @@ export default function RDProjectDetailPage() {
     </Card>
   );
 
+  // Right-rail Budget card. Lives directly under coverAndInfoCard in the
+  // sticky aside. The Target Launch / Team row that used to live at the
+  // bottom of this card has been dropped here because that data is already
+  // surfaced in the Project Info section above (no duplication).
+  const budgetCard = (
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle className="text-sm flex items-center gap-2">
+          <DollarSign className="h-4 w-4 text-gray-400" /> Budget
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <div className="grid grid-cols-3 gap-4">
+          <div className="text-center p-3 rounded-lg bg-[#F0ECE9]">
+            <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(project.totalBudget)}</p>
+            <p className="text-xs text-gray-500">Total Budget</p>
+          </div>
+          <div className="text-center p-3 rounded-lg bg-[#FAEFCB]">
+            <p className="text-lg font-bold text-[#9C6F1E]">{formatCurrency(project.actualCost)}</p>
+            <p className="text-xs text-gray-500">Actual Cost</p>
+          </div>
+          <div className="text-center p-3 rounded-lg" style={{ backgroundColor: remaining >= 0 ? "#F0FDF4" : "#FEF2F2" }}>
+            <p className={`text-lg font-bold ${remaining >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(Math.abs(remaining))}</p>
+            <p className="text-xs text-gray-500">{remaining >= 0 ? "Remaining" : "Over Budget"}</p>
+          </div>
+        </div>
+        <div className="space-y-1">
+          <div className="flex justify-between text-xs">
+            <span className="text-gray-500">Budget Utilisation</span>
+            <span className="font-medium" style={{ color: budgetPct > 90 ? "#DC2626" : budgetPct > 70 ? "#D97706" : "#16A34A" }}>
+              {budgetPct}%
+            </span>
+          </div>
+          <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${Math.min(budgetPct, 100)}%`,
+                backgroundColor: budgetPct > 90 ? "#DC2626" : budgetPct > 70 ? "#D97706" : "#16A34A",
+              }}
+            />
+          </div>
+        </div>
+
+        {/* R&D Cost Breakdown */}
+        <div className="pt-3 border-t border-[#E2DDD8] space-y-2">
+          <p className="text-xs font-semibold text-gray-500">R&D Cost Breakdown</p>
+          <div className="space-y-1">
+            <div className="flex justify-between text-sm">
+              <span className="text-gray-500">Material Cost</span>
+              <span className="font-medium text-[#1F1D1B]">{formatCurrency(materialCostSen)}</span>
+            </div>
+            <div className="flex justify-between items-center text-sm">
+              <span className="text-gray-500 inline-flex items-center gap-1.5">
+                Labour Cost
+                {isManualLabourCost ? (
+                  <span className="inline-flex items-center rounded-full bg-[#FAEFCB] text-[#9C6F1E] border border-[#E8D597] px-1.5 py-0.5 text-[10px] font-semibold">
+                    Manual
+                  </span>
+                ) : (
+                  <span className="text-xs text-gray-400">
+                    ({totalLabourHours}h auto)
+                  </span>
+                )}
+              </span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="font-medium text-[#1F1D1B]">{formatCurrency(effectiveLabourCostSen)}</span>
+                <button
+                  type="button"
+                  onClick={openManualCostModal}
+                  className="rounded p-1 text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9]"
+                  title="Override labour cost"
+                >
+                  <Pencil className="h-3 w-3" />
+                </button>
+                {isManualLabourCost && (
+                  <button
+                    type="button"
+                    onClick={handleClearManualCost}
+                    disabled={manualCostSaving}
+                    className="rounded p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 disabled:opacity-50"
+                    title="Clear override"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </span>
+            </div>
+            {partTimeFixedCostSen > 0 && (
+              <div className="flex justify-between text-sm">
+                <span className="text-gray-500">Total Fixed Cost (PT)</span>
+                <span className="font-medium text-[#1F1D1B]">{formatCurrency(partTimeFixedCostSen)}</span>
+              </div>
+            )}
+            <div className="flex justify-between text-sm pt-1 border-t border-dashed border-[#E2DDD8]">
+              <span className="font-semibold text-[#1F1D1B]">Total R&D Cost</span>
+              <span className="font-bold text-[#1F1D1B]">{formatCurrency(totalRDCostSen)}</span>
+            </div>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+
   return (
     <div className="space-y-6">
       {/* Back button */}
@@ -1558,8 +1661,9 @@ export default function RDProjectDetailPage() {
           </Card>
         )}
 
-      <div className="grid grid-cols-2 gap-6">
-        {/* Milestones */}
+      {/* Milestones — full width main column. The Budget card has been moved
+          to the right rail, so Milestones now spans the entire main column
+          giving the date / photo cells more breathing room. */}
         <Card>
           <CardHeader>
             <CardTitle className="text-sm flex items-center gap-2">
@@ -1685,126 +1789,6 @@ export default function RDProjectDetailPage() {
             </table>
           </CardContent>
         </Card>
-
-        {/* Budget Section */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm flex items-center gap-2">
-              <DollarSign className="h-4 w-4 text-gray-400" /> Budget
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-3 gap-4">
-              <div className="text-center p-3 rounded-lg bg-[#F0ECE9]">
-                <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(project.totalBudget)}</p>
-                <p className="text-xs text-gray-500">Total Budget</p>
-              </div>
-              <div className="text-center p-3 rounded-lg bg-[#FAEFCB]">
-                <p className="text-lg font-bold text-[#9C6F1E]">{formatCurrency(project.actualCost)}</p>
-                <p className="text-xs text-gray-500">Actual Cost</p>
-              </div>
-              <div className="text-center p-3 rounded-lg" style={{ backgroundColor: remaining >= 0 ? "#F0FDF4" : "#FEF2F2" }}>
-                <p className={`text-lg font-bold ${remaining >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>{formatCurrency(Math.abs(remaining))}</p>
-                <p className="text-xs text-gray-500">{remaining >= 0 ? "Remaining" : "Over Budget"}</p>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <div className="flex justify-between text-xs">
-                <span className="text-gray-500">Budget Utilisation</span>
-                <span className="font-medium" style={{ color: budgetPct > 90 ? "#DC2626" : budgetPct > 70 ? "#D97706" : "#16A34A" }}>
-                  {budgetPct}%
-                </span>
-              </div>
-              <div className="h-3 bg-gray-100 rounded-full overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all"
-                  style={{
-                    width: `${Math.min(budgetPct, 100)}%`,
-                    backgroundColor: budgetPct > 90 ? "#DC2626" : budgetPct > 70 ? "#D97706" : "#16A34A",
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* R&D Cost Breakdown */}
-            <div className="pt-3 border-t border-[#E2DDD8] space-y-2">
-              <p className="text-xs font-semibold text-gray-500">R&D Cost Breakdown</p>
-              <div className="space-y-1">
-                <div className="flex justify-between text-sm">
-                  <span className="text-gray-500">Material Cost</span>
-                  <span className="font-medium text-[#1F1D1B]">{formatCurrency(materialCostSen)}</span>
-                </div>
-                <div className="flex justify-between items-center text-sm">
-                  <span className="text-gray-500 inline-flex items-center gap-1.5">
-                    Labour Cost
-                    {isManualLabourCost ? (
-                      <span className="inline-flex items-center rounded-full bg-[#FAEFCB] text-[#9C6F1E] border border-[#E8D597] px-1.5 py-0.5 text-[10px] font-semibold">
-                        Manual
-                      </span>
-                    ) : (
-                      <span className="text-xs text-gray-400">
-                        ({totalLabourHours}h auto)
-                      </span>
-                    )}
-                  </span>
-                  <span className="inline-flex items-center gap-1.5">
-                    <span className="font-medium text-[#1F1D1B]">{formatCurrency(effectiveLabourCostSen)}</span>
-                    <button
-                      type="button"
-                      onClick={openManualCostModal}
-                      className="rounded p-1 text-gray-400 hover:text-[#6B5C32] hover:bg-[#F0ECE9]"
-                      title="Override labour cost"
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </button>
-                    {isManualLabourCost && (
-                      <button
-                        type="button"
-                        onClick={handleClearManualCost}
-                        disabled={manualCostSaving}
-                        className="rounded p-1 text-gray-400 hover:text-red-500 hover:bg-red-50 disabled:opacity-50"
-                        title="Clear override"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    )}
-                  </span>
-                </div>
-                {partTimeFixedCostSen > 0 && (
-                  <div className="flex justify-between text-sm">
-                    <span className="text-gray-500">Total Fixed Cost (PT)</span>
-                    <span className="font-medium text-[#1F1D1B]">{formatCurrency(partTimeFixedCostSen)}</span>
-                  </div>
-                )}
-                <div className="flex justify-between text-sm pt-1 border-t border-dashed border-[#E2DDD8]">
-                  <span className="font-semibold text-[#1F1D1B]">Total R&D Cost</span>
-                  <span className="font-bold text-[#1F1D1B]">{formatCurrency(totalRDCostSen)}</span>
-                </div>
-              </div>
-            </div>
-
-            {/* Team & Info */}
-            <div className="pt-3 border-t border-[#E2DDD8] space-y-3">
-              <div className="flex items-center gap-2 text-sm">
-                <Calendar className="h-4 w-4 text-gray-400" />
-                <span className="text-gray-500">Target Launch:</span>
-                <span className="font-medium">{formatDate(project.targetLaunchDate)}</span>
-              </div>
-              <div className="flex items-start gap-2 text-sm">
-                <Users className="h-4 w-4 text-gray-400 mt-0.5" />
-                <span className="text-gray-500">Team:</span>
-                <div className="flex flex-wrap gap-1">
-                  {project.assignedTeam.map((name) => (
-                    <span key={name} className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-xs text-[#6B5C32]">
-                      {name}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
 
       {/* Prototypes — split by type */}
       {(["FABRIC_SEWING", "FRAMING"] as RDPrototypeType[]).map((pType) => {
@@ -2051,11 +2035,12 @@ export default function RDProjectDetailPage() {
       </Card>
       </div>
 
-      {/* Right rail — sticky combined cover photo + project info panel.
-          Stacks below the main column on small screens (lg breakpoint flips
-          to side-by-side). */}
+      {/* Right rail — sticky combined cover photo + project info panel,
+          followed by the Budget card stacked beneath. Stacks below the main
+          column on small screens (lg breakpoint flips to side-by-side). */}
       <aside className="lg:col-span-1 lg:sticky lg:top-4 self-start">
         {coverAndInfoCard}
+        {budgetCard}
       </aside>
       </div>
 

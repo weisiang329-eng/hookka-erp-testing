@@ -42,6 +42,7 @@ type ProjectRow = {
   createdDate: string | null;
   status: string | null;
   startedAt: string | null;
+  manualLabourCostSen: number | null;
 };
 
 type PrototypeRow = {
@@ -77,7 +78,40 @@ function parseJSON<T>(s: string | null, fallback: T): T {
   }
 }
 
-function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
+// Shape of the labour-cost summary surfaced on every project GET. The
+// frontend consumes `effectiveLabourCostSen` for the budget card and
+// `isManualLabourCost` for the "Manual" badge; the raw inputs (auto, manual,
+// PT fixed) are exposed so the override dialog can reset cleanly.
+type LabourCostSummary = {
+  // Sum of (hours * hourlyRateSen) across FT-member rd_labour_hours rows.
+  laborCostSen: number;
+  // Flat sum across DISTINCT PT members who logged any hours on this
+  // project. PT cost is NOT pro-rated per hour — see the comment on the
+  // computeLabourCostSummary() function for the rule.
+  partTimeFixedCostSen: number;
+  // The user's typed override (sen). null when not overridden.
+  manualLabourCostSen: number | null;
+  // The value the budget card should display: manual override if set,
+  // otherwise laborCostSen.
+  effectiveLabourCostSen: number;
+  isManualLabourCost: boolean;
+  totalLabourHours: number;
+};
+
+const ZERO_LABOUR_SUMMARY: LabourCostSummary = {
+  laborCostSen: 0,
+  partTimeFixedCostSen: 0,
+  manualLabourCostSen: null,
+  effectiveLabourCostSen: 0,
+  isManualLabourCost: false,
+  totalLabourHours: 0,
+};
+
+function rowToProject(
+  row: ProjectRow,
+  prototypes: PrototypeRow[] = [],
+  labourSummary: LabourCostSummary = ZERO_LABOUR_SUMMARY,
+) {
   return {
     id: row.id,
     code: row.code,
@@ -91,6 +125,8 @@ function rowToProject(row: ProjectRow, prototypes: PrototypeRow[] = []) {
     assignedTeam: parseJSON<string[]>(row.assignedTeam, []),
     totalBudget: row.totalBudget,
     actualCost: row.actualCost,
+    manualLabourCostSen: row.manualLabourCostSen ?? null,
+    labourCost: labourSummary,
     milestones: parseJSON<unknown[]>(row.milestones, []),
     productionBOM: row.productionBOM
       ? parseJSON<unknown[]>(row.productionBOM, [])
@@ -170,6 +206,106 @@ type DbBindable = {
     };
   };
 };
+
+// ---------------------------------------------------------------------------
+// computeLabourCostSummary — derive the labour-cost summary for a project
+// from rd_labour_hours + rd_team_members. Cost rules:
+//
+//   * FULL_TIME members: each rd_labour_hours row contributes
+//       hours * teamMember.hourlyRateSen
+//     to laborCostSen. This is the auto-computed labour cost the user
+//     sees on the budget card.
+//
+//   * PART_TIME members: each rd_labour_hours row contributes ZERO to
+//     laborCostSen (the per-hour bucket). PT folks are billed as a flat
+//     monthly retainer, not a per-hour cost — pro-rating their fixed cost
+//     per hour would silently allocate the same monthlyFixedCostSen across
+//     every project they touched in a month, which is exactly the kind of
+//     fake precision the user said they don't want.
+//
+//     Instead, partTimeFixedCostSen is the SUM of monthlyFixedCostSen
+//     across DISTINCT PT members who logged any hours on this project.
+//     This is shown as a separate "Total Fixed Cost" line on the budget
+//     card. (Trade-off: a PT member who logs hours on two projects in the
+//     same month gets counted on both. The user explicitly accepted this:
+//     it's an upper-bound overhead figure, not a precise allocation.)
+//
+//   * Manual override: rd_projects.manual_labour_cost_sen, when not NULL,
+//     wins over laborCostSen for the displayed labour cost. The PATCH
+//     /:id/labour-cost endpoint sets / clears it.
+//
+// Returns ZERO_LABOUR_SUMMARY shape (with manualLabourCostSen propagated)
+// even when the project has no logged hours yet.
+async function computeLabourCostSummary(
+  db: DbBindable,
+  projectId: string,
+  manualLabourCostSen: number | null,
+): Promise<LabourCostSummary> {
+  type RowJoin = {
+    hours: number;
+    employmentType: "FULL_TIME" | "PART_TIME";
+    hourlyRateSen: number | null;
+    monthlyFixedCostSen: number | null;
+    teamMemberId: string;
+  };
+  let rows: { results: RowJoin[] | null } = { results: [] };
+  try {
+    rows = await db
+      .prepare(
+        `SELECT lh.hours        AS "hours",
+                tm.employmentType AS "employmentType",
+                tm.hourlyRateSen  AS "hourlyRateSen",
+                tm.monthlyFixedCostSen AS "monthlyFixedCostSen",
+                lh.teamMemberId   AS "teamMemberId"
+           FROM rd_labour_hours lh
+           JOIN rd_team_members tm ON tm.id = lh.teamMemberId
+          WHERE lh.projectId = ?`,
+      )
+      .bind(projectId)
+      .all<RowJoin>();
+  } catch {
+    // Table missing (migration 0098 not yet applied) → degrade gracefully
+    // to a zeroed summary. The frontend stays usable; once the migration
+    // lands the next request fills in real data.
+    return {
+      ...ZERO_LABOUR_SUMMARY,
+      manualLabourCostSen: manualLabourCostSen ?? null,
+      effectiveLabourCostSen:
+        typeof manualLabourCostSen === "number" ? manualLabourCostSen : 0,
+      isManualLabourCost: manualLabourCostSen !== null,
+    };
+  }
+  let laborCostSen = 0;
+  let totalLabourHours = 0;
+  // Track DISTINCT PT members so each one's fixed cost is counted at most
+  // once per project (see comment block above).
+  const ptMembers = new Map<string, number>();
+  for (const r of rows.results ?? []) {
+    const hrs = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+    totalLabourHours += hrs;
+    if (r.employmentType === "FULL_TIME") {
+      const rate = typeof r.hourlyRateSen === "number" ? r.hourlyRateSen : 0;
+      laborCostSen += Math.round(hrs * rate);
+    } else if (r.employmentType === "PART_TIME") {
+      const fixed =
+        typeof r.monthlyFixedCostSen === "number" ? r.monthlyFixedCostSen : 0;
+      ptMembers.set(r.teamMemberId, fixed);
+    }
+  }
+  let partTimeFixedCostSen = 0;
+  for (const fixed of ptMembers.values()) partTimeFixedCostSen += fixed;
+  const isManual = manualLabourCostSen !== null;
+  return {
+    laborCostSen,
+    partTimeFixedCostSen,
+    manualLabourCostSen: manualLabourCostSen ?? null,
+    effectiveLabourCostSen: isManual
+      ? (manualLabourCostSen ?? 0)
+      : laborCostSen,
+    isManualLabourCost: isManual,
+    totalLabourHours: Math.round(totalLabourHours * 100) / 100,
+  };
+}
 
 async function resolveFifoUnitCostSen(
   db: DbBindable,
@@ -334,9 +470,14 @@ app.get("/:id", async (c) => {
   if (!row) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  const labourSummary = await computeLabourCostSummary(
+    c.var.DB,
+    row.id,
+    row.manualLabourCostSen ?? null,
+  );
   return c.json({
     success: true,
-    data: rowToProject(row, protos.results ?? []),
+    data: rowToProject(row, protos.results ?? [], labourSummary),
   });
 });
 
@@ -1493,6 +1634,280 @@ app.post("/:id/labour-log", async (c) => {
       data: { log, project: rowToProject(updated, protos.results ?? []) },
     });
   } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// rd_labour_hours endpoints — table-backed labour hours per project, joined
+// to rd_team_members for the auto-computed labour cost. The legacy JSON
+// `labourLogs` column on rd_projects is left untouched for back-compat
+// readers; new entries go through these endpoints.
+// ---------------------------------------------------------------------------
+
+type LabourHourRow = {
+  id: string;
+  projectId: string;
+  teamMemberId: string;
+  workDate: string;
+  hours: number;
+  notes: string | null;
+  orgId: string;
+  createdAt: string;
+};
+
+type LabourHourEnrichedRow = LabourHourRow & {
+  memberName: string;
+  employmentType: "FULL_TIME" | "PART_TIME";
+  hourlyRateSen: number | null;
+  monthlyFixedCostSen: number | null;
+};
+
+function rowToLabourHour(r: LabourHourEnrichedRow) {
+  // Auto-cost per row: FT = hours * hourlyRateSen, PT = 0 (per the cost
+  // computation rules; PT contributes a flat fixed cost at the project
+  // level instead of per-hour).
+  const hrs = typeof r.hours === "number" ? r.hours : Number(r.hours) || 0;
+  const autoCostSen =
+    r.employmentType === "FULL_TIME"
+      ? Math.round(hrs * (r.hourlyRateSen ?? 0))
+      : 0;
+  return {
+    id: r.id,
+    projectId: r.projectId,
+    teamMemberId: r.teamMemberId,
+    memberName: r.memberName,
+    employmentType: r.employmentType,
+    workDate: r.workDate,
+    hours: hrs,
+    notes: r.notes ?? "",
+    autoCostSen,
+    createdAt: r.createdAt,
+  };
+}
+
+// GET /api/rd-projects/:id/labour-hours — list rows for a project, newest
+// first, enriched with the member name + employment type so the table can
+// render auto-cost without a second round-trip.
+app.get("/:id/labour-hours", async (c) => {
+  const id = c.req.param("id");
+  try {
+    const res = await c.var.DB.prepare(
+      `SELECT lh.id              AS "id",
+              lh.projectId       AS "projectId",
+              lh.teamMemberId    AS "teamMemberId",
+              lh.workDate        AS "workDate",
+              lh.hours           AS "hours",
+              lh.notes           AS "notes",
+              lh.orgId           AS "orgId",
+              lh.createdAt       AS "createdAt",
+              tm.name            AS "memberName",
+              tm.employmentType  AS "employmentType",
+              tm.hourlyRateSen   AS "hourlyRateSen",
+              tm.monthlyFixedCostSen AS "monthlyFixedCostSen"
+         FROM rd_labour_hours lh
+         JOIN rd_team_members tm ON tm.id = lh.teamMemberId
+        WHERE lh.projectId = ?
+        ORDER BY lh.workDate DESC, lh.createdAt DESC`,
+    )
+      .bind(id)
+      .all<LabourHourEnrichedRow>();
+    return c.json({
+      success: true,
+      data: (res.results ?? []).map(rowToLabourHour),
+    });
+  } catch {
+    // Table missing (migration 0098 not yet applied) — degrade gracefully.
+    return c.json({ success: true, data: [] });
+  }
+});
+
+// POST /api/rd-projects/:id/labour-hours — log hours.
+// Body: { teamMemberId, workDate, hours, notes? }
+app.post("/:id/labour-hours", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "create");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  try {
+    const project = await c.var.DB.prepare(
+      "SELECT * FROM rd_projects WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProjectRow>();
+    if (!project) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+    const body = (await c.req.json()) as Partial<{
+      teamMemberId: string;
+      workDate: string;
+      hours: number;
+      notes: string | null;
+    }>;
+
+    const teamMemberId =
+      typeof body.teamMemberId === "string" ? body.teamMemberId.trim() : "";
+    const workDate =
+      typeof body.workDate === "string" ? body.workDate.trim() : "";
+    const hours = typeof body.hours === "number" ? body.hours : 0;
+    if (!teamMemberId || !workDate || !Number.isFinite(hours) || hours <= 0) {
+      return c.json(
+        {
+          success: false,
+          error: "teamMemberId, workDate, and hours > 0 are required",
+        },
+        400,
+      );
+    }
+
+    const member = await c.var.DB.prepare(
+      "SELECT id FROM rd_team_members WHERE id = ?",
+    )
+      .bind(teamMemberId)
+      .first<{ id: string }>();
+    if (!member) {
+      return c.json({ success: false, error: "Team member not found" }, 404);
+    }
+
+    const logId = `rdlh-${crypto.randomUUID().slice(0, 8)}`;
+    const nowIso = new Date().toISOString();
+    await c.var.DB.prepare(
+      `INSERT INTO rd_labour_hours
+         (id, projectId, teamMemberId, workDate, hours, notes, orgId, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, 'hookka', ?)`,
+    )
+      .bind(
+        logId,
+        id,
+        teamMemberId,
+        workDate,
+        hours,
+        typeof body.notes === "string" ? body.notes : null,
+        nowIso,
+      )
+      .run();
+
+    const inserted = await c.var.DB.prepare(
+      `SELECT lh.id              AS "id",
+              lh.projectId       AS "projectId",
+              lh.teamMemberId    AS "teamMemberId",
+              lh.workDate        AS "workDate",
+              lh.hours           AS "hours",
+              lh.notes           AS "notes",
+              lh.orgId           AS "orgId",
+              lh.createdAt       AS "createdAt",
+              tm.name            AS "memberName",
+              tm.employmentType  AS "employmentType",
+              tm.hourlyRateSen   AS "hourlyRateSen",
+              tm.monthlyFixedCostSen AS "monthlyFixedCostSen"
+         FROM rd_labour_hours lh
+         JOIN rd_team_members tm ON tm.id = lh.teamMemberId
+        WHERE lh.id = ?`,
+    )
+      .bind(logId)
+      .first<LabourHourEnrichedRow>();
+
+    return c.json(
+      {
+        success: true,
+        data: inserted ? rowToLabourHour(inserted) : null,
+      },
+      201,
+    );
+  } catch (err) {
+    console.error("[rd-projects] POST /labour-hours failed:", err);
+    return c.json(
+      { success: false, error: "Failed to log labour hours" },
+      400,
+    );
+  }
+});
+
+// DELETE /api/rd-projects/:id/labour-hours/:logId — remove a row.
+app.delete("/:id/labour-hours/:logId", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "delete");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  const logId = c.req.param("logId");
+  const existing = await c.var.DB.prepare(
+    "SELECT id FROM rd_labour_hours WHERE id = ? AND projectId = ?",
+  )
+    .bind(logId, id)
+    .first<{ id: string }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Labour hours row not found" }, 404);
+  }
+  await c.var.DB.prepare(
+    "DELETE FROM rd_labour_hours WHERE id = ? AND projectId = ?",
+  )
+    .bind(logId, id)
+    .run();
+  return c.json({ success: true, data: { id: logId } });
+});
+
+// PATCH /api/rd-projects/:id/labour-cost — set or clear the manual override.
+// Body: { manualLabourCostSen: number | null }
+//   - number ≥ 0  → store, becomes the displayed labour cost
+//   - null        → clear, fall back to the auto-computed value
+app.patch("/:id/labour-cost", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  try {
+    const project = await c.var.DB.prepare(
+      "SELECT * FROM rd_projects WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProjectRow>();
+    if (!project) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+    const body = (await c.req.json()) as {
+      manualLabourCostSen?: number | null;
+    };
+    const raw = body.manualLabourCostSen;
+    let next: number | null;
+    if (raw === null || raw === undefined) {
+      next = null;
+    } else if (typeof raw === "number" && Number.isFinite(raw) && raw >= 0) {
+      next = Math.round(raw);
+    } else {
+      return c.json(
+        {
+          success: false,
+          error: "manualLabourCostSen must be a non-negative number or null",
+        },
+        400,
+      );
+    }
+
+    await c.var.DB.prepare(
+      "UPDATE rd_projects SET manualLabourCostSen = ? WHERE id = ?",
+    )
+      .bind(next, id)
+      .run();
+
+    const [updated, protos] = await Promise.all([
+      c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+        .bind(id)
+        .first<ProjectRow>(),
+      c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+        .bind(id)
+        .all<PrototypeRow>(),
+    ]);
+    if (!updated) {
+      return c.json({ success: false, error: "R&D project not found" }, 404);
+    }
+    const labourSummary = await computeLabourCostSummary(
+      c.var.DB,
+      updated.id,
+      updated.manualLabourCostSen ?? null,
+    );
+    return c.json({
+      success: true,
+      data: rowToProject(updated, protos.results ?? [], labourSummary),
+    });
+  } catch (err) {
+    console.error("[rd-projects] PATCH /labour-cost failed:", err);
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
 });

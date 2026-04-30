@@ -556,6 +556,7 @@ import qcInspections from "./routes/qc-inspections";
 import qcTemplates from "./routes/qc-templates";
 import qcPending from "./routes/qc-pending";
 import rdProjects from "./routes/rd-projects";
+import rdTeamMembers from "./routes/rd-team-members";
 import scheduling from "./routes/scheduling";
 import scanPo from "./routes/scan-po";
 // One-shot historical job_card completion importer (Wei Siang's GS migration).
@@ -687,6 +688,7 @@ app.route("/api/qc-templates", qcTemplates);
 app.route("/api/qc-pending", qcPending);
 app.route("/api/qc-inspections", qcInspections);
 app.route("/api/rd-projects", rdProjects);
+app.route("/api/rd-team-members", rdTeamMembers);
 app.route("/api/scheduling", scheduling);
 app.route("/api/scan-po", scanPo);
 // One-shot historical job_card completion importer. POST

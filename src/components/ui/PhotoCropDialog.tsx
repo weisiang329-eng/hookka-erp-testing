@@ -56,9 +56,11 @@ type Props = {
   imageDataUrl: string;
   /**
    * Width / height ratio used as the *initial* lock. The user can switch
-   * to any other ratio (or "Free") inside the dialog. Defaults to 1.
+   * to any other ratio (or "Free") inside the dialog. Pass `null` to
+   * default to Free — the whole image is selected and the user can save
+   * the photo as-is without cropping. Number defaults to 1 (1:1).
    */
-  aspectRatio?: number;
+  aspectRatio?: number | null;
   onCancel: () => void;
   onConfirm: (croppedDataUrl: string) => void;
 };
@@ -92,8 +94,13 @@ const HANDLE_CURSORS: Record<ResizeCorner, string> = {
 };
 
 // Pick the closest preset to the incoming aspectRatio prop so the toggle
-// row reflects what the caller asked for. Falls back to 1:1.
-function aspectKeyForRatio(r: number | undefined): AspectKey {
+// row reflects what the caller asked for. `null` selects "Free" (whole
+// image is the initial crop) so callers whose final surface preserves
+// natural aspect (e.g. cover photos rendered with object-contain) can
+// skip forcing a square crop. Numeric falsy values still fall back to
+// 1:1 for legacy callers.
+function aspectKeyForRatio(r: number | null | undefined): AspectKey {
+  if (r === null) return "free";
   if (!r || !Number.isFinite(r) || r <= 0) return "1:1";
   let best: AspectKey = "1:1";
   let bestDiff = Number.POSITIVE_INFINITY;

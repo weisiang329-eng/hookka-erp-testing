@@ -2764,12 +2764,15 @@ export default function RDProjectDetailPage() {
 
       {/* ─── Photo Crop Dialog ───────────────────────────────────────────────
           Gates every cover-photo and milestone-photo upload (and any
-          "Edit crop" re-use of an existing photo). Square output by default
-          since both surfaces render in aspect-square slots. */}
+          "Edit crop" re-use of an existing photo). aspectRatio={null}
+          opens in Free mode with the full image already selected — the
+          cover photo card uses object-contain so any aspect renders fine,
+          and forcing 1:1 made wide phone shots look "auto-zoomed in" with
+          no obvious way to get the whole sofa back. */}
       <PhotoCropDialog
         open={cropOpen}
         imageDataUrl={cropImageUrl}
-        aspectRatio={1}
+        aspectRatio={null}
         onCancel={closeCropDialog}
         onConfirm={(url) => void handleCropConfirm(url)}
       />

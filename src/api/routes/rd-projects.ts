@@ -604,6 +604,52 @@ app.put("/:id", async (c) => {
       )
       .run();
 
+    // Sync rd_prototypes from body.prototypes when provided. Migration moved
+    // prototypes off the JSON column into the dedicated table, but the PUT
+    // handler never wrote to that table — so the SPA's "Add Prototype" call
+    // was dropped on the floor (success toast, no record). Upsert by id so
+    // both add (new id) and edit (existing id) flows land. We don't delete
+    // missing rows because the UI has no delete-prototype affordance.
+    if (Array.isArray(body.prototypes)) {
+      for (const p of body.prototypes as Array<Record<string, unknown>>) {
+        if (!p || typeof p !== "object" || typeof p.id !== "string") continue;
+        await c.var.DB.prepare(
+          `INSERT INTO rd_prototypes
+             (id, projectId, prototypeType, version, description,
+              materialsCost, labourHours, testResults, feedback,
+              improvements, defects, createdDate, orgId)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             prototypeType = excluded.prototypeType,
+             version = excluded.version,
+             description = excluded.description,
+             materialsCost = excluded.materialsCost,
+             labourHours = excluded.labourHours,
+             testResults = excluded.testResults,
+             feedback = excluded.feedback,
+             improvements = excluded.improvements,
+             defects = excluded.defects,
+             createdDate = excluded.createdDate`,
+        )
+          .bind(
+            p.id,
+            id,
+            (p.prototypeType as string | null) ?? "FABRIC_SEWING",
+            (p.version as string | null) ?? "v1",
+            (p.description as string | null) ?? "",
+            typeof p.materialsCost === "number" ? p.materialsCost : 0,
+            typeof p.labourHours === "number" ? p.labourHours : 0,
+            (p.testResults as string | null) ?? "",
+            (p.feedback as string | null) ?? "",
+            (p.improvements as string | null) ?? "",
+            (p.defects as string | null) ?? "",
+            (p.createdDate as string | null) ?? new Date().toISOString().slice(0, 10),
+            "hookka",
+          )
+          .run();
+      }
+    }
+
     const [updated, protos] = await Promise.all([
       c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
         .bind(id)

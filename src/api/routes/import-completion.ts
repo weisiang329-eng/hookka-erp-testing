@@ -907,10 +907,34 @@ app.post("/cascade-upstream-completion", async (c) => {
     .all<AnchorRow>();
 
   // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date}
+  // Defensive: walk all known key forms in case D1 strips the alias.
   const anchorMap = new Map<string, { anchor_seq: number; anchor_date: string }>();
+  let anchorDebugSample: Record<string, unknown> | null = null;
   for (const a of anchorRes.results ?? []) {
-    const key = `${a.productionOrderId}||${a.wk ?? ""}`;
-    anchorMap.set(key, { anchor_seq: a.anchor_seq, anchor_date: a.anchor_date });
+    if (!anchorDebugSample) {
+      anchorDebugSample = { ...(a as unknown as Record<string, unknown>) };
+    }
+    const raw = a as unknown as Record<string, unknown>;
+    const seq =
+      typeof raw.anchor_seq === "number"
+        ? (raw.anchor_seq as number)
+        : typeof raw.sequence === "number"
+          ? (raw.sequence as number)
+          : null;
+    const date =
+      typeof raw.anchor_date === "string"
+        ? (raw.anchor_date as string)
+        : typeof raw.completedDate === "string"
+          ? (raw.completedDate as string)
+          : null;
+    if (seq == null || !date) continue;
+    const poId =
+      typeof raw.productionOrderId === "string"
+        ? (raw.productionOrderId as string)
+        : "";
+    const wk = typeof raw.wk === "string" ? (raw.wk as string) : "";
+    const key = `${poId}||${wk}`;
+    anchorMap.set(key, { anchor_seq: seq, anchor_date: date });
   }
 
   // Fetch every non-done JC that lives in a group with an anchor.
@@ -988,7 +1012,9 @@ app.post("/cascade-upstream-completion", async (c) => {
       dryRun: true,
       count: candidatesCount,
       planned: plans.length,
-      skipped,
+      skipped: skipped.slice(0, 10),
+      skippedCount: skipped.length,
+      anchorDebugSample,
       dateHistogram,
       sample,
     });

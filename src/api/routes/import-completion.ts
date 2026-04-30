@@ -1170,6 +1170,34 @@ app.post("/cascade-upstream-completion", async (c) => {
     newDate: p.newDate,
   }));
 
+  // Stratified sample: one row per (anchor_dept, target_dept) combination
+  // to verify the DAG filter is keeping each anchor on its own sub-chain.
+  // Caller wants to see e.g. WOOD-anchor → wood-chain only, FAB-anchor →
+  // fabric-chain only, UPHOLSTERY-anchor → all upstream depts.
+  const stratifiedMap = new Map<string, CandidatePlan>();
+  for (const p of plans) {
+    const k = `${p.cand.anchor_dept}__${p.cand.departmentCode}`;
+    if (!stratifiedMap.has(k)) stratifiedMap.set(k, p);
+  }
+  const stratifiedSample = Array.from(stratifiedMap.values()).map((p) => ({
+    productionOrderId: p.cand.productionOrderId,
+    wipKey: p.cand.wipKey,
+    anchor_dept: p.cand.anchor_dept,
+    departmentCode: p.cand.departmentCode,
+    offsetDays: p.offsetDays,
+    newDate: p.newDate,
+  }));
+
+  // Anchor-dept breakdown: { [anchor_dept]: { [target_dept]: count } } so
+  // the caller can confirm zero cross-chain leakage.
+  const anchorBreakdown: Record<string, Record<string, number>> = {};
+  for (const p of plans) {
+    const aDept = p.cand.anchor_dept || "UNKNOWN";
+    const tDept = p.cand.departmentCode || "UNKNOWN";
+    if (!anchorBreakdown[aDept]) anchorBreakdown[aDept] = {};
+    anchorBreakdown[aDept][tDept] = (anchorBreakdown[aDept][tDept] ?? 0) + 1;
+  }
+
   if (dryRun) {
     return c.json({
       success: true,
@@ -1181,6 +1209,8 @@ app.post("/cascade-upstream-completion", async (c) => {
       skipped,
       dateHistogram,
       byOffsetSummary,
+      anchorBreakdown,
+      stratifiedSample,
       sample,
     });
   }

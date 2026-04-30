@@ -1084,6 +1084,194 @@ app.post("/resync-job-card-times", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/bom/audit-contamination
+//
+// Read-only audit. Walks every ACTIVE bom_template, derives the EXPECTED set
+// of root wipTypes from the joined product's category + baseModel, then
+// compares against the actual wipComponents[].wipType list to surface drift.
+//
+// Motivated by the DIVAN-only products (baseModel='DIVAN', e.g. DIVAN-(Q))
+// that had stray HEADBOARD root WIPs and had to be cleaned up by hand. We
+// want to know if any other contaminated BOMs slipped through.
+//
+// Body: { dryRun?: boolean } — accepted for API consistency with sibling
+// admin endpoints, but this route is read-only either way (no writes).
+//
+// SQL note: same unquoted-column / quoted-alias pattern as
+// /api/production-orders/resync-po-numbers — supabase-compat rewrites
+// camelCase column refs via column-rename-map.json, but Postgres folds
+// unquoted aliases to lowercase, so aliases must be double-quoted to
+// preserve the camelCase keys the JS mapper relies on.
+// ---------------------------------------------------------------------------
+type AuditVerdict = "OK" | "CONTAMINATED" | "INCOMPLETE";
+
+const SOFA_ROOT_TYPES = new Set([
+  "SOFA_BASE",
+  "SOFA_CUSHION",
+  "SOFA_ARMREST",
+  "SOFA_HEADREST",
+]);
+
+function deriveExpectedRoots(
+  category: string | null,
+  baseModel: string | null,
+): { expected: Set<string> | null; mode: "EXACT" | "SUBSET" | "NONE" } {
+  // mode=EXACT  → actualRoots must equal expected (extra OR missing = drift)
+  // mode=SUBSET → actualRoots must be a subset of expected; missing is OK
+  // mode=NONE   → no expected roots; any root is contamination
+  const bm = (baseModel ?? "").trim().toUpperCase();
+  const cat = (category ?? "").trim().toUpperCase();
+
+  if (bm.startsWith("DIVAN")) {
+    return { expected: new Set(["DIVAN"]), mode: "EXACT" };
+  }
+  if (bm.startsWith("HEADBOARD")) {
+    return { expected: new Set(["HEADBOARD"]), mode: "EXACT" };
+  }
+  if (cat === "BEDFRAME") {
+    // Numeric-prefixed model (e.g. 1007, 1013, 5531) is a full bedframe SKU.
+    if (/^\d/.test(bm)) {
+      return { expected: new Set(["DIVAN", "HEADBOARD"]), mode: "EXACT" };
+    }
+    return { expected: null, mode: "EXACT" };
+  }
+  if (cat === "SOFA") {
+    return { expected: new Set(SOFA_ROOT_TYPES), mode: "SUBSET" };
+  }
+  if (cat === "ACCESSORY") {
+    return { expected: new Set<string>(), mode: "NONE" };
+  }
+  return { expected: null, mode: "EXACT" };
+}
+
+app.post("/audit-contamination", async (c) => {
+  const denied = await requirePermission(c, "bom", "update");
+  if (denied) return denied;
+
+  // dryRun is accepted for parity with sibling admin endpoints but ignored;
+  // this route is read-only regardless.
+  try {
+    await c.req.json();
+  } catch {
+    // body optional
+  }
+
+  type AuditRow = {
+    templateId: string;
+    productCode: string;
+    productCategory: string | null;
+    productBaseModel: string | null;
+    templateBaseModel: string | null;
+    templateCategory: string | null;
+    wipComponents: string | null;
+  };
+  const rows = await c.var.DB
+    .prepare(
+      `SELECT bt.id              AS "templateId",
+              bt.productCode     AS "productCode",
+              p.category         AS "productCategory",
+              p.baseModel        AS "productBaseModel",
+              bt.baseModel       AS "templateBaseModel",
+              bt.category        AS "templateCategory",
+              bt.wipComponents   AS "wipComponents"
+         FROM bom_templates bt
+         LEFT JOIN products p ON p.code = bt.productCode
+        WHERE UPPER(COALESCE(bt.versionStatus, '')) = 'ACTIVE'`,
+    )
+    .all<AuditRow>();
+
+  type Entry = {
+    templateId: string;
+    productCode: string;
+    baseModel: string;
+    category: string;
+    actualRoots: string[];
+    expectedRoots: string[];
+    extraRoots?: string[];
+    missingRoots?: string[];
+  };
+  const contaminated: Entry[] = [];
+  const incomplete: Entry[] = [];
+  const unknown: Entry[] = [];
+  let okCount = 0;
+
+  for (const r of rows.results ?? []) {
+    const wips = safeParse<Array<{ wipType?: string }>>(r.wipComponents, []);
+    const actualRoots = Array.from(
+      new Set(
+        wips
+          .map((w) => (w && typeof w.wipType === "string" ? w.wipType : ""))
+          .filter((s) => s.length > 0),
+      ),
+    ).sort();
+
+    // Prefer the joined product fields; fall back to the template's own
+    // category/baseModel when there's no matching product row (legacy data).
+    const category = r.productCategory ?? r.templateCategory;
+    const baseModel = r.productBaseModel ?? r.templateBaseModel;
+    const { expected, mode } = deriveExpectedRoots(category, baseModel);
+
+    const baseEntry = {
+      templateId: r.templateId,
+      productCode: r.productCode,
+      baseModel: baseModel ?? "",
+      category: category ?? "",
+      actualRoots,
+      expectedRoots: expected ? Array.from(expected).sort() : [],
+    };
+
+    if (expected === null) {
+      unknown.push(baseEntry);
+      continue;
+    }
+
+    const extra = actualRoots.filter((t) => !expected.has(t));
+    const missing =
+      mode === "EXACT"
+        ? Array.from(expected).filter((t) => !actualRoots.includes(t)).sort()
+        : [];
+
+    let verdict: AuditVerdict = "OK";
+    if (extra.length > 0) verdict = "CONTAMINATED";
+    else if (missing.length > 0) verdict = "INCOMPLETE";
+
+    if (verdict === "CONTAMINATED") {
+      contaminated.push({ ...baseEntry, extraRoots: extra });
+    } else if (verdict === "INCOMPLETE") {
+      incomplete.push({ ...baseEntry, missingRoots: missing });
+    } else {
+      okCount += 1;
+    }
+  }
+
+  const cap = 100;
+  const truncate = <T>(arr: T[]) => ({
+    list: arr.slice(0, cap),
+    truncated: arr.length > cap,
+  });
+  const cTrunc = truncate(contaminated);
+  const iTrunc = truncate(incomplete);
+  const uTrunc = truncate(unknown);
+
+  return c.json({
+    success: true,
+    scannedTemplates: rows.results?.length ?? 0,
+    summary: {
+      ok: okCount,
+      contaminated: contaminated.length,
+      incomplete: incomplete.length,
+      unknown: unknown.length,
+    },
+    contaminated: cTrunc.list,
+    contaminatedTruncated: cTrunc.truncated,
+    incomplete: iTrunc.list,
+    incompleteTruncated: iTrunc.truncated,
+    unknown: uTrunc.list,
+    unknownTruncated: uTrunc.truncated,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // bom_versions dynamic-id routes — MUST come AFTER /templates
 // ---------------------------------------------------------------------------
 

@@ -2854,22 +2854,28 @@ app.post("/resync-po-numbers", async (c) => {
   }
   const dryRun = body.dryRun !== false; // default safe
 
-  // Postgres folds unquoted aliases to lowercase, which silently breaks the
-  // `r.freshCompanySOId` etc. lookups below (they come back undefined and
-  // every PO ends up with `expectedPoNo: "undefined-01"`). Quote every
-  // alias so the camelCase keys survive the round-trip.
+  // Two layers in play here:
+  //   1. supabase-compat.ts rewrites camelCase identifiers → snake_case
+  //      via column-rename-map.json. Identifiers MUST be unquoted for the
+  //      walker to see them (quoted identifiers are passed through verbatim
+  //      and Postgres rejects them as "column does not exist").
+  //   2. Postgres folds unquoted aliases to lowercase, which would silently
+  //      break the JS-side `r.freshCompanySOId` etc. lookups (every row
+  //      comes back as expectedPoNo: "undefined-NN").
+  // So: leave column refs unquoted (let the shim rewrite them) and quote
+  // only the aliases (preserve the camelCase the result mapper expects).
   const rows = await db
     .prepare(
       `SELECT po.id AS "poId",
-              po."poNo" AS "currentPoNo",
-              po."lineNo" AS "lineNo",
-              po."salesOrderId" AS "soId",
-              so."companySOId" AS "freshCompanySOId"
+              po.poNo AS "currentPoNo",
+              po.lineNo AS "lineNo",
+              po.salesOrderId AS "soId",
+              so.companySOId AS "freshCompanySOId"
          FROM production_orders po
-         JOIN sales_orders so ON so.id = po."salesOrderId"
-        WHERE po."salesOrderId" IS NOT NULL
-          AND so."companySOId" IS NOT NULL
-          AND so."companySOId" <> ''`,
+         JOIN sales_orders so ON so.id = po.salesOrderId
+        WHERE po.salesOrderId IS NOT NULL
+          AND so.companySOId IS NOT NULL
+          AND so.companySOId <> ''`,
     )
     .all<{
       poId: string;

@@ -1150,13 +1150,15 @@ export async function applyWipInventoryChange(
   // early `return`) and again at COMPLETED (consume fires AGAIN, then
   // falls through to the producer-add). Net effect: -2 consumes + 1
   // producer = -1 leak per JC that touched both transitions, accruing
-  // negative wip_items rows on the upstream sibling. Fix: only consume
-  // on the FIRST active transition by gating on !wasActive.
-  const wasActive =
-    prevStatus === "IN_PROGRESS" ||
-    prevStatus === "COMPLETED" ||
-    prevStatus === "TRANSFERRED";
-  if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive && !wasActive) {
+  // negative wip_items rows on the upstream sibling. Fix: skip the
+  // consume when the JC was already active before this transition
+  // (i.e. IN_PROGRESS→COMPLETED), but still allow the IN_PROGRESS
+  // early-return so COMPLETED falls through to the producer-add below.
+  if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
+    const wasActive =
+      prevStatus === "IN_PROGRESS" ||
+      prevStatus === "COMPLETED" ||
+      prevStatus === "TRANSFERRED";
     // Per-component upstream consume — sibling lookup is now BOM-branch
     // aware (BUG-2026-04-27 fix, migration 0058). Within one wipKey
     // ("DIVAN" / "HEADBOARD" / "SOFA_*") the BOM has parallel branches
@@ -1166,7 +1168,7 @@ export async function applyWipInventoryChange(
     // wrongly consumed Fab Sew stock (Wei Siang report 2026-04-27).
     // Filter siblings by (wipKey, branchKey) so each branch's consume
     // only reaches its own true upstream.
-    if (wipKey) {
+    if (!wasActive && wipKey) {
       const myBranch = jcRow.branchKey ?? "";
       const children = allJcRows
         .filter(

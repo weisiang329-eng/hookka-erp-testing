@@ -1861,4 +1861,212 @@ app.post("/cascade-leak-pass", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/fix-misparsed-dates
+//
+// One-shot fix for misparsed completedDate values from the 2026-04-30 CSV
+// import (`import-prod-completions-2026-04-30.mjs`). The importer parsed CSV
+// dates like `4/1/2026` ambiguously: it tried dd/mm first and kept that if
+// the result was <= today. Edge case — when BOTH interpretations are past
+// (e.g. `4/1/2026` is 4 Jan AND 1 Apr 2026), dd/mm wins by default. Result:
+// many JCs that should be 2026-04-01 landed as 2026-01-04.
+//
+// User has eyeballed the live tracker and confirmed dates in 2026-01-xx and
+// 2026-02-xx clusters are anomalous against same-PO siblings landing in
+// 2026-03/04. This endpoint proposes (and optionally applies) a month/day
+// swap on every JC where the heuristic confirms the early date is an
+// outlier vs the dominant March/April cluster on the same PO.
+//
+// Heuristic:
+//   1. Candidates: completedDate IS NOT NULL, in [2026-01-01, 2026-03-01),
+//      with both day AND month components <= 12 (so the swap is valid).
+//   2. Propose: YYYY-MM-DD -> YYYY-DD-MM. Skip if proposed > today (clamp).
+//   3. Confirm via siblings: count JCs on the same productionOrderId
+//      (excluding the candidate) whose completedDate >= '2026-03-15'. If
+//      siblingsInLateCluster >= 1, the early date is an outlier — swap is
+//      justified. Otherwise skip — early dates may be legitimate for that
+//      PO.
+//
+// CAVEAT: This is a one-shot endpoint for the 2026-04-30 CSV import only.
+// It deliberately mirrors the existing /fix-misparsed-jan-dates handler
+// but uses the spec-defined response shape (totalCandidates / wouldSwap /
+// skippedNoSiblings / sample of 20) so the user can do a final spot-check
+// across the whole window before flipping dryRun=false.
+//
+// Side-effect policy: metadata only — we update completedDate + updated_at
+// and do NOT re-run cascades. The JCs already fired their cascades when
+// they completed; we're just correcting the stored date.
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type FixDatesCandidateRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  completedDate: string;
+};
+
+type FixDatesPlan = {
+  jcId: string;
+  poId: string;
+  departmentCode: string | null;
+  current: string;
+  proposed: string;
+  siblingsInLateCluster: number;
+};
+
+app.post("/fix-misparsed-dates", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") !== "false";
+
+  // 1. Pull every JC in the 2026-01/2026-02 window where day & month are
+  //    both <= 12 (i.e. the swap produces a valid date).
+  const candRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, completedDate
+         FROM job_cards
+        WHERE completedDate IS NOT NULL
+          AND completedDate >= '2026-01-01'
+          AND completedDate <  '2026-03-01'
+          AND CAST(substr(completedDate, 9, 2) AS INTEGER) BETWEEN 1 AND 12
+          AND CAST(substr(completedDate, 6, 2) AS INTEGER) BETWEEN 1 AND 12`,
+    )
+    .all<FixDatesCandidateRow>();
+  const candidates = candRes.results ?? [];
+
+  // 2. Lookup sibling counts on the same PO with completedDate >= 2026-03-15.
+  //    Exclude the candidate itself from the count via id != ?.
+  const poIds = Array.from(new Set(candidates.map((c) => c.productionOrderId)));
+  const siblingsByPO = new Map<string, number>();
+
+  const CHUNK = 50;
+  for (let i = 0; i < poIds.length; i += CHUNK) {
+    const chunk = poIds.slice(i, i + CHUNK);
+    if (chunk.length === 0) continue;
+    const placeholders = chunk.map(() => "?").join(",");
+    const sib = await db
+      .prepare(
+        `SELECT productionOrderId, COUNT(*) AS cnt
+           FROM job_cards
+          WHERE productionOrderId IN (${placeholders})
+            AND completedDate IS NOT NULL
+            AND completedDate >= '2026-03-15'
+          GROUP BY productionOrderId`,
+      )
+      .bind(...chunk)
+      .all<{ productionOrderId: string; cnt: number }>();
+    for (const r of sib.results ?? []) {
+      siblingsByPO.set(r.productionOrderId, r.cnt);
+    }
+  }
+
+  // 3. Build per-candidate plan. Subtract 1 if the candidate itself happens
+  //    to fall in the late cluster (it shouldn't, since it's in 2026-01/02,
+  //    but guard anyway).
+  const plans: FixDatesPlan[] = [];
+  let skippedNoSiblings = 0;
+  let skippedOther = 0;
+  for (const cand of candidates) {
+    const yyyy = cand.completedDate.slice(0, 4);
+    const mm = cand.completedDate.slice(5, 7);
+    const dd = cand.completedDate.slice(8, 10);
+    const proposed = `${yyyy}-${dd}-${mm}`;
+
+    const ddNum = parseInt(dd, 10);
+    const mmNum = parseInt(mm, 10);
+    if (
+      !Number.isFinite(ddNum) ||
+      !Number.isFinite(mmNum) ||
+      ddNum < 1 ||
+      ddNum > 12 ||
+      mmNum < 1 ||
+      mmNum > 12
+    ) {
+      skippedOther++;
+      continue;
+    }
+    if (proposed > FIX_DATE_TODAY_CLAMP) {
+      skippedOther++;
+      continue;
+    }
+    if (proposed === cand.completedDate) {
+      // palindromic (e.g. 2026-02-02) — nothing to swap
+      skippedOther++;
+      continue;
+    }
+
+    const siblingsInLateCluster = siblingsByPO.get(cand.productionOrderId) ?? 0;
+    if (siblingsInLateCluster < 1) {
+      skippedNoSiblings++;
+      continue;
+    }
+
+    plans.push({
+      jcId: cand.id,
+      poId: cand.productionOrderId,
+      departmentCode: cand.departmentCode,
+      current: cand.completedDate,
+      proposed,
+      siblingsInLateCluster,
+    });
+  }
+
+  const sample = plans.slice(0, 20).map((p) => ({
+    jcId: p.jcId,
+    poId: p.poId,
+    departmentCode: p.departmentCode,
+    current: p.current,
+    proposed: p.proposed,
+    siblingsInLateCluster: p.siblingsInLateCluster,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      totalCandidates: candidates.length,
+      wouldSwap: plans.length,
+      skippedNoSiblings,
+      skippedOther,
+      sample,
+    });
+  }
+
+  // 4. Live: update each row's completedDate + updated_at.
+  const nowIso = new Date().toISOString();
+  let updated = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+  for (const p of plans) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards SET completedDate = ?, updated_at = ? WHERE id = ?`,
+        )
+        .bind(p.proposed, nowIso, p.jcId)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: p.jcId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    totalCandidates: candidates.length,
+    wouldSwap: plans.length,
+    skippedNoSiblings,
+    skippedOther,
+    updated,
+    errors,
+    sample,
+  });
+});
+
 export default app;

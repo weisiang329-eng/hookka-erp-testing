@@ -154,7 +154,7 @@ export default function RDProjectDetailPage() {
   const [project, setProject] = useState<RDProject | null>(null);
   const [advancing, setAdvancing] = useState(false);
   const [statusFlipping, setStatusFlipping] = useState<
-    null | "hold" | "resume" | "move-to-draft" | "complete"
+    null | "hold" | "resume" | "move-to-draft" | "complete" | "reopen"
   >(null);
 
   // Edit project modal — projectType + clone-source fields are mirror-

@@ -2820,4 +2820,307 @@ app.post("/refund-backfill-overconsume", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// /backfill-fab-cut-merge — one-shot retroactive Option C consolidation.
+//
+// New SOs created after the Option C deploy (commit a871743) emit one merged
+// FAB_CUT JC per (companySOId, baseModel, fabricCode). Pre-existing SOs
+// still have per-piece FAB_CUT JCs from the legacy BOM cascade. This
+// endpoint walks every existing FAB_CUT JC, groups them by the same merge
+// key, and collapses each group into one merged row matching the
+// production-builder.ts `aggregateFcSlots` output. Per-piece children get
+// deleted; the anchor JC's id is reused as the merged row's id so any
+// existing references (cost_ledger, scan_override_audit) stay valid.
+//
+// Idempotent: groups that already have a merged row (scopeLevel='SO' style
+// wipKey or single-JC group) are skipped. Re-running the endpoint after a
+// successful run is a no-op.
+//
+// Always run with `?dryRun=true` first. The dry-run path executes zero
+// writes and returns a per-group plan so the operator can sanity-check
+// the merge before committing.
+// ---------------------------------------------------------------------------
+type FcRow = {
+  id: string;
+  productionOrderId: string;
+  wipKey: string;
+  wipLabel: string;
+  wipCode: string;
+  wipType: string;
+  wipQty: number;
+  status: string;
+  completedDate: string | null;
+  dueDate: string | null;
+  sequence: number;
+  branchKey: string | null;
+  category: string | null;
+  productionTimeMinutes: number | null;
+  estMinutes: number | null;
+  pic1Id: string | null;
+  pic1Name: string | null;
+  pic2Id: string | null;
+  pic2Name: string | null;
+  // Joined PO context
+  poProductCode: string | null;
+  poFabricCode: string | null;
+  poSizeLabel: string | null;
+  poGapInches: number | null;
+  poDivanHeightInches: number | null;
+  poLegHeightInches: number | null;
+  poItemCategory: string | null;
+  poCompanySOId: string | null;
+  poSalesOrderId: string | null;
+  bomBaseModel: string | null;
+};
+
+function joinModelLabel(productCodes: string[]): string {
+  const unique = [...new Set(productCodes.filter(Boolean))];
+  if (unique.length === 0) return "";
+  if (unique.length === 1) return unique[0];
+  const firstDash = unique[0].indexOf("-");
+  if (firstDash > 0) {
+    const prefix = unique[0].slice(0, firstDash + 1);
+    if (unique.every((m) => m.startsWith(prefix))) {
+      return prefix + unique.map((m) => m.slice(prefix.length)).join("+");
+    }
+  }
+  return unique.join("+");
+}
+
+function buildFcWipLabel(
+  modelLabel: string,
+  sizeLabel: string,
+  totalH: number,
+  divanHeightInches: number | null,
+  fabricCode: string,
+  isBF: boolean,
+): string {
+  return [
+    modelLabel,
+    sizeLabel ? `(${sizeLabel})` : "",
+    isBF && totalH > 0 ? `(${totalH}")` : "",
+    isBF && divanHeightInches ? `(DV ${divanHeightInches}")` : "",
+    fabricCode || "",
+    "(FC)",
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+app.post("/backfill-fab-cut-merge", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // Pull every FAB_CUT JC with its PO context + bom_templates baseModel in
+  // one query. The LEFT JOIN tolerates orphan POs / missing BOM rows
+  // (legacy seed data) — we fall back to productCode as baseModel below.
+  const rowsRes = await db
+    .prepare(
+      `SELECT
+         jc.id, jc.productionOrderId, jc.wipKey, jc.wipLabel, jc.wipCode,
+         jc.wipType, jc.wipQty, jc.status, jc.completedDate, jc.dueDate,
+         jc.sequence, jc.branchKey, jc.category, jc.productionTimeMinutes,
+         jc.estMinutes, jc.pic1Id, jc.pic1Name, jc.pic2Id, jc.pic2Name,
+         po.productCode AS poProductCode,
+         po.fabricCode  AS poFabricCode,
+         po.sizeLabel   AS poSizeLabel,
+         po.gapInches   AS poGapInches,
+         po.divanHeightInches AS poDivanHeightInches,
+         po.legHeightInches   AS poLegHeightInches,
+         po.itemCategory      AS poItemCategory,
+         po.companySOId       AS poCompanySOId,
+         po.salesOrderId      AS poSalesOrderId,
+         bt.baseModel         AS bomBaseModel
+       FROM job_cards jc
+       JOIN production_orders po ON po.id = jc.productionOrderId
+       LEFT JOIN bom_templates bt
+         ON bt.productCode = po.productCode
+        AND bt.versionStatus = 'ACTIVE'
+       WHERE jc.departmentCode = 'FAB_CUT'`,
+    )
+    .all<FcRow>();
+  const allRows = rowsRes.results ?? [];
+
+  // Group by (companySOId, baseModel, fabricCode). Skip rows with missing
+  // companySOId — those are legacy/orphan and can't be merged safely.
+  const groups = new Map<string, FcRow[]>();
+  let skippedNoSO = 0;
+  for (const row of allRows) {
+    const companySOId = row.poCompanySOId ?? row.poSalesOrderId ?? "";
+    if (!companySOId) {
+      skippedNoSO++;
+      continue;
+    }
+    const baseModel = row.bomBaseModel || row.poProductCode || "";
+    const fabric = row.poFabricCode ?? "";
+    const key = `${companySOId}::${baseModel}::${fabric}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(row);
+  }
+
+  // Plan per group. Single-JC groups are no-ops; multi-JC groups become a
+  // merge: anchor = first row (ordered by createdAt via id sort), the rest
+  // get deleted, anchor gets UPDATE-d to merged values.
+  type Plan = {
+    mergeKey: string;
+    anchorJcId: string;
+    siblingJcIds: string[];
+    newWipKey: string;
+    newWipLabel: string;
+    newWipQty: number;
+    newProdTime: number;
+    completedDate: string | null;
+    status: string;
+    dueDate: string | null;
+    pieceCount: number;
+  };
+  const plans: Plan[] = [];
+  let alreadyMerged = 0;
+  for (const [mergeKey, group] of groups.entries()) {
+    if (group.length === 0) continue;
+    if (group.length === 1) {
+      // Single-JC group — already-merged shape OR a one-piece BF SOID. No-op
+      // either way.
+      alreadyMerged++;
+      continue;
+    }
+    // Pick anchor = lowest-id row (deterministic). Sort siblings same way.
+    const sorted = [...group].sort((a, b) => a.id.localeCompare(b.id));
+    const anchor = sorted[0];
+    const siblings = sorted.slice(1);
+    const totalProdTime = sorted.reduce(
+      (sum, r) => sum + (r.productionTimeMinutes ?? r.estMinutes ?? 0),
+      0,
+    );
+    // Sets-count = anchor.wipQty (mirrors aggregateFcSlots). For BF this
+    // is 1 per piece-PO (correct since each BF SOID is a separate set);
+    // for sofa with line qty=N it's N (line qty).
+    const newWipQty = anchor.wipQty;
+    const productCodes = sorted.map((r) => r.poProductCode ?? "");
+    const modelLabel = joinModelLabel(productCodes);
+    const totalH =
+      (anchor.poGapInches ?? 0) +
+      (anchor.poDivanHeightInches ?? 0) +
+      (anchor.poLegHeightInches ?? 0);
+    const isBF = (anchor.poItemCategory ?? "") === "BEDFRAME";
+    const newWipLabel = buildFcWipLabel(
+      modelLabel,
+      anchor.poSizeLabel ?? "",
+      totalH,
+      anchor.poDivanHeightInches,
+      anchor.poFabricCode ?? "",
+      isBF,
+    );
+    const baseModel = anchor.bomBaseModel || anchor.poProductCode || "";
+    const newWipKey = `${anchor.poCompanySOId ?? anchor.poSalesOrderId}::${baseModel}::${anchor.poFabricCode ?? ""}::FAB_CUT`;
+    // If ANY child already DONE, the merged JC carries that DONE state +
+    // earliest completedDate. Otherwise WAITING.
+    const doneRows = sorted.filter(
+      (r) => r.status === "COMPLETED" || r.status === "TRANSFERRED",
+    );
+    const status = doneRows.length === sorted.length ? "COMPLETED" : "WAITING";
+    const completedDate =
+      status === "COMPLETED"
+        ? doneRows
+            .map((r) => r.completedDate)
+            .filter((d): d is string => !!d)
+            .sort()[0] ?? null
+        : null;
+    const dueDate =
+      sorted
+        .map((r) => r.dueDate)
+        .filter((d): d is string => !!d)
+        .sort()[0] ?? null;
+    plans.push({
+      mergeKey,
+      anchorJcId: anchor.id,
+      siblingJcIds: siblings.map((r) => r.id),
+      newWipKey,
+      newWipLabel,
+      newWipQty,
+      newProdTime: totalProdTime,
+      completedDate,
+      status,
+      dueDate,
+      pieceCount: sorted.length,
+    });
+  }
+
+  if (dryRun) {
+    return c.json({
+      mode: "dry-run",
+      totalFcJcs: allRows.length,
+      skippedNoSO,
+      groupsTotal: groups.size,
+      groupsAlreadyMerged: alreadyMerged,
+      groupsToMerge: plans.length,
+      jcsToDelete: plans.reduce((s, p) => s + p.siblingJcIds.length, 0),
+      sample: plans.slice(0, 10),
+    });
+  }
+
+  // Execute. UPDATE each anchor with merged fields + DELETE all siblings.
+  // Wrap each group's writes in a single batch so a partial failure
+  // doesn't leave a half-merged group.
+  let mergedGroups = 0;
+  let deletedSiblings = 0;
+  const errors: { mergeKey: string; error: string }[] = [];
+  for (const plan of plans) {
+    try {
+      const stmts: D1PreparedStatement[] = [
+        db
+          .prepare(
+            `UPDATE job_cards
+                SET wipKey = ?, wipLabel = ?, wipQty = ?,
+                    productionTimeMinutes = ?, estMinutes = ?,
+                    actualMinutes = ?,
+                    status = ?, completedDate = ?, dueDate = ?,
+                    sequence = 0, prerequisiteMet = 1,
+                    branchKey = ''
+              WHERE id = ?`,
+          )
+          .bind(
+            plan.newWipKey,
+            plan.newWipLabel,
+            plan.newWipQty,
+            plan.newProdTime,
+            plan.newProdTime,
+            plan.status === "COMPLETED" ? plan.newProdTime : null,
+            plan.status,
+            plan.completedDate,
+            plan.dueDate,
+            plan.anchorJcId,
+          ),
+      ];
+      for (const id of plan.siblingJcIds) {
+        stmts.push(
+          db.prepare("DELETE FROM job_cards WHERE id = ?").bind(id),
+        );
+      }
+      await db.batch(stmts);
+      mergedGroups++;
+      deletedSiblings += plan.siblingJcIds.length;
+    } catch (err) {
+      errors.push({
+        mergeKey: plan.mergeKey,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    mode: "executed",
+    totalFcJcs: allRows.length,
+    skippedNoSO,
+    groupsTotal: groups.size,
+    groupsAlreadyMerged: alreadyMerged,
+    groupsToMerge: plans.length,
+    mergedGroups,
+    deletedSiblings,
+    errors,
+  });
+});
+
 export default app;

@@ -847,7 +847,16 @@ const wipColumns: Column<WIPItem>[] = [
   {
     key: "relatedProduct",
     label: "Product",
-    render: (_v, row) => <span className="doc-number text-[#4B5563]">{row.relatedProduct}</span>,
+    render: (_v, row) => {
+      // Sofa display: strip variant suffix to base model (e.g.
+      // "5531-2A(LHF)" → "5531") matching how Wei Siang refers to sofas.
+      // BF/ACC keep the full productCode since the variant IS the model
+      // identity for those categories.
+      const display = row.category === "SOFA"
+        ? (row.relatedProduct || "").split("-")[0]
+        : (row.relatedProduct || "");
+      return <span className="doc-number text-[#4B5563]">{display}</span>;
+    },
   },
   {
     key: "completedBy",

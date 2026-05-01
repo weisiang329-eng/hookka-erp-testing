@@ -40,6 +40,10 @@ const STAGE_COLORS: Record<RDProjectStage, string> = {
   PRODUCTION_READY: "#06B6D4",
 };
 
+// Default labels (DEVELOPMENT). Other project types override the early
+// stages — see getStageLabels below. Stage CODES in the DB stay the same
+// (CONCEPT, DESIGN, ...) regardless of type so the kanban / API stay
+// stable; only the user-facing label changes.
 const STAGE_LABELS: Record<RDProjectStage, string> = {
   CONCEPT: "Concept",
   DESIGN: "Design",
@@ -49,6 +53,26 @@ const STAGE_LABELS: Record<RDProjectStage, string> = {
   PRODUCTION_READY: "Production Ready",
 };
 
+// Per-type stage labels — see notes on the parallel helper in detail.tsx.
+function getStageLabels(
+  projectType: RDProjectType | undefined,
+): Record<RDProjectStage, string> {
+  if (projectType === "IMPROVEMENT") {
+    return {
+      ...STAGE_LABELS,
+      CONCEPT: "Issue Analysis",
+      DESIGN: "Fix Design",
+    };
+  }
+  if (projectType === "CLONE") {
+    return {
+      ...STAGE_LABELS,
+      CONCEPT: "Source Analysis",
+    };
+  }
+  return STAGE_LABELS;
+}
+
 const CATEGORY_COLORS: Record<string, string> = {
   SOFA: "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]",
   BEDFRAME: "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]",
@@ -57,8 +81,15 @@ const CATEGORY_COLORS: Record<string, string> = {
 
 type TabId = "drafts" | "projects" | "completed" | "pipeline" | "reports";
 
-function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
+function StageProgressBar({
+  currentStage,
+  projectType,
+}: {
+  currentStage: RDProjectStage;
+  projectType?: RDProjectType;
+}) {
   const currentIndex = STAGES.indexOf(currentStage);
+  const labels = getStageLabels(projectType);
   return (
     <div className="flex items-center gap-1 w-full">
       {STAGES.map((stage, i) => (
@@ -71,7 +102,7 @@ function StageProgressBar({ currentStage }: { currentStage: RDProjectStage }) {
             }}
           />
           <span className="text-[9px] text-gray-400 truncate w-full text-center">
-            {STAGE_LABELS[stage].slice(0, 4)}
+            {labels[stage].slice(0, 4)}
           </span>
         </div>
       ))}
@@ -298,11 +329,11 @@ function ProjectCard({ project }: { project: RDProject }) {
               className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
               style={{ backgroundColor: STAGE_COLORS[project.currentStage] }}
             >
-              {STAGE_LABELS[project.currentStage]}
+              {getStageLabels(project.projectType)[project.currentStage]}
             </span>
           </div>
 
-          <StageProgressBar currentStage={project.currentStage} />
+          <StageProgressBar currentStage={project.currentStage} projectType={project.projectType} />
 
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="flex items-center gap-1 text-gray-500">
@@ -599,7 +630,7 @@ function ReportsView({ projects }: { projects: RDProject[] }) {
                           className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
                           style={{ backgroundColor: STAGE_COLORS[p.currentStage] }}
                         >
-                          {STAGE_LABELS[p.currentStage]}
+                          {getStageLabels(p.projectType)[p.currentStage]}
                         </span>
                       </td>
                       <td className="py-2 px-2 text-right text-xs">{formatCurrency(p.totalBudget)}</td>

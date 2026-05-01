@@ -29,6 +29,7 @@ import {
 import type {
   RDProject,
   RDProjectStage,
+  RDProjectType,
   RDPrototypeType,
   RdMaterialIssuance,
   RDTeamMember,
@@ -53,6 +54,10 @@ const STAGE_COLORS: Record<RDProjectStage, string> = {
   PRODUCTION_READY: "#06B6D4",
 };
 
+// Default labels (DEVELOPMENT). Other project types override the early
+// stages — see getStageLabels below. Stage CODES in the DB stay the same
+// (CONCEPT, DESIGN, ...) regardless of type so the kanban / API stay
+// stable; only the user-facing label changes.
 const STAGE_LABELS: Record<RDProjectStage, string> = {
   CONCEPT: "Concept",
   DESIGN: "Design",
@@ -61,6 +66,29 @@ const STAGE_LABELS: Record<RDProjectStage, string> = {
   APPROVED: "Approved",
   PRODUCTION_READY: "Production Ready",
 };
+
+// Per-type stage labels. Only the first two stages change because the
+// downstream physical work (build / test / approve / ship) is the same no
+// matter why we're doing this project. Returning a Record keeps callers
+// drop-in compatible with the static STAGE_LABELS.
+function getStageLabels(
+  projectType: RDProjectType | undefined,
+): Record<RDProjectStage, string> {
+  if (projectType === "IMPROVEMENT") {
+    return {
+      ...STAGE_LABELS,
+      CONCEPT: "Issue Analysis",
+      DESIGN: "Fix Design",
+    };
+  }
+  if (projectType === "CLONE") {
+    return {
+      ...STAGE_LABELS,
+      CONCEPT: "Source Analysis",
+    };
+  }
+  return STAGE_LABELS;
+}
 
 const CATEGORY_COLORS: Record<string, string> = {
   SOFA: "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]",
@@ -434,7 +462,7 @@ export default function RDProjectDetailPage() {
         body: { currentStage: nextStage, milestones: updatedMilestones },
       });
       if (data.data) setProject(data.data as RDProject);
-      toast.success(`Advanced to ${STAGE_LABELS[nextStage]}`);
+      toast.success(`Advanced to ${getStageLabels(project.projectType)[nextStage]}`);
     } catch {
       toast.error("Failed to advance stage");
     } finally {
@@ -1590,7 +1618,7 @@ export default function RDProjectDetailPage() {
       )}
       {currentStageIndex < STAGES.length - 1 && project.status === "ACTIVE" && (
         <Button variant="primary" onClick={handleAdvanceStage} disabled={advancing}>
-          {advancing ? "Advancing..." : `Advance to ${STAGE_LABELS[STAGES[currentStageIndex + 1]]}`}
+          {advancing ? "Advancing..." : `Advance to ${getStageLabels(project.projectType)[STAGES[currentStageIndex + 1]]}`}
           {!advancing && <ChevronRight className="h-4 w-4 ml-1" />}
         </Button>
       )}
@@ -1690,7 +1718,7 @@ export default function RDProjectDetailPage() {
                     className="text-[10px] font-medium mt-1 text-center"
                     style={{ color: isFuture ? "#9CA3AF" : STAGE_COLORS[stage] }}
                   >
-                    {STAGE_LABELS[stage]}
+                    {getStageLabels(project.projectType)[stage]}
                   </p>
                 </div>
               );
@@ -1784,7 +1812,7 @@ export default function RDProjectDetailPage() {
                           className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
                           style={{ backgroundColor: STAGE_COLORS[m.stage] }}
                         >
-                          {STAGE_LABELS[m.stage]}
+                          {getStageLabels(project.projectType)[m.stage]}
                         </span>
                       </td>
                       <td className="py-2 text-xs">
@@ -1814,7 +1842,7 @@ export default function RDProjectDetailPage() {
                               <div key={idx} className="relative group/photo">
                                 <img
                                   src={photo}
-                                  alt={`${STAGE_LABELS[m.stage]} photo ${idx + 1}`}
+                                  alt={`${getStageLabels(project.projectType)[m.stage]} photo ${idx + 1}`}
                                   className={`h-10 w-10 rounded-md object-cover border cursor-pointer hover:ring-2 hover:ring-[#6B5C32]/40 ${
                                     isFirst ? "border-[#6B5C32] ring-1 ring-[#6B5C32]/30" : "border-[#E2DDD8]"
                                   }`}
@@ -1861,7 +1889,7 @@ export default function RDProjectDetailPage() {
                           <button
                             onClick={() => handlePhotoUpload(m.stage)}
                             className="flex h-10 w-10 items-center justify-center rounded-md border border-dashed border-[#D0C9C0] text-gray-400 hover:border-[#6B5C32] hover:text-[#6B5C32] hover:bg-[#F0ECE9] transition-colors"
-                            title={`Add photo for ${STAGE_LABELS[m.stage]}`}
+                            title={`Add photo for ${getStageLabels(project.projectType)[m.stage]}`}
                           >
                             <ImagePlus className="h-4 w-4" />
                           </button>

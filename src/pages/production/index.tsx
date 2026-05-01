@@ -1523,7 +1523,15 @@ export default function ProductionPage({
           customerRef: o.customerReference || "",
           customerName: o.customerName || "",
           customerState: o.customerState || "",
-          model: o.productCode || "",
+          // Model column display rule: sofa drops the variant suffix
+          // ("5531-2A(LHF)" → "5531") because the merged FAB_CUT row joins
+          // multiple variants into the WIP column already, and a Model
+          // value of just "5531" matches how Wei Siang refers to sofas
+          // ("5531/5535/..." base). BF/ACC keep the full productCode
+          // (e.g. "1013-(Q)") since the variant IS the model identity.
+          model: o.itemCategory === "SOFA"
+            ? (o.productCode || "").split("-")[0]
+            : (o.productCode || ""),
           wip: jc.wipLabel || jc.wipCode || (() => {
             // Derive WIP code from PO data when job card doesn't carry it
             if (o.itemCategory === "BEDFRAME") {
@@ -2001,7 +2009,14 @@ export default function ProductionPage({
     { key: "customerState", label: "State",          type: "text",   width: "70px",  sortable: true },
     { key: "category",      label: "Category",       type: "text",   width: "90px",  sortable: true },
     { key: "model",         label: "Model",          type: "text",   width: "110px", sortable: true },
-    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true },
+    // Type column (HEADBOARD / DIVAN / BASE / CUSHION / ARMREST / etc.) —
+    // post Option C the FAB_CUT merge collapses multiple piece types into
+    // one row so the anchor's wipType is misleading on a merged row.
+    // Hide by default on FAB_CUT tab; other dept tabs keep it visible
+    // since each row is still per-piece for them. Wei Siang explicitly
+    // asked to hide on Fab Cut: "type 的话你可能需要换掉了。要不然我们就直接
+    // hide 起来吧".
+    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true, defaultHidden: activeTab === "FAB_CUT" },
     { key: "wip",           label: "WIP",            type: "text",   width: "220px", sortable: true },
     { key: "size",          label: "Size",           type: "text",   width: "70px",  sortable: true },
     { key: "colour",        label: "Colour",         type: "text",   width: "100px", sortable: true },

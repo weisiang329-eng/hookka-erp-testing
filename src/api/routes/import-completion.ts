@@ -2820,4 +2820,250 @@ app.post("/refund-backfill-overconsume", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/normalize-fullwidth-parens
+//
+// One-shot data fix: BEDFRAME BOM master templates were authored with the
+// full-width Chinese parentheses "（FC）" instead of "(FC)" on the FAB_CUT
+// branch wipCode. That typo cascaded into:
+//   - bom_master_templates.data (JSON tree, 2 templates)
+//   - bom_templates.wipComponents (JSON tree, ~153 product BOMs)
+//   - job_cards.wipCode + wipLabel (every FAB_CUT JC built from those BOMs)
+//   - wip_items.code (rows produced/consumed under the typo'd label)
+//
+// Because UPH/FAB_SEW consume looks up the half-width "(FC)" form (after
+// resolveWipTokens runs `.replace(/\s+/g, " ").trim()` — the full-width
+// parens survive), wip_items splits into two rows per (productCode, label):
+// one with full-width that received the FAB_CUT producer-add, one with
+// half-width that absorbed the downstream consume → residual negatives.
+//
+// Fix pattern mirrors migration 0059 (s/Faom/Foam/) but extended:
+//   1. bom_master_templates.data  REPLACE both （ and ）
+//   2. bom_templates.wipComponents REPLACE both
+//   3. job_cards.wipCode + wipLabel + branchKey REPLACE both
+//   4. wip_items merge pairs: SUM stockQty into the half-width row, DELETE
+//      the full-width row. Orphan full-width rows (no half-width sibling)
+//      get renamed in place via REPLACE.
+//
+// dryRun=true → SELECT counts + 10-row pair sample, no writes.
+// dryRun=false → run the full sequence as a single db.batch().
+//
+// Permission: production-orders:update (matches the other one-shot import
+// endpoints; this is a privileged backfill, not a user-facing surface).
+// ---------------------------------------------------------------------------
+app.post("/normalize-fullwidth-parens", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // ----- Step 1 — bom_master_templates count -----
+  const bomMasterCountRes = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM bom_master_templates
+        WHERE data LIKE '%（%' OR data LIKE '%）%'`,
+    )
+    .first<{ n: number }>();
+  const bomMasterCount = bomMasterCountRes?.n ?? 0;
+
+  // ----- Step 2 — bom_templates count -----
+  const bomTemplatesCountRes = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM bom_templates
+        WHERE wipComponents LIKE '%（%' OR wipComponents LIKE '%）%'`,
+    )
+    .first<{ n: number }>();
+  const bomTemplatesCount = bomTemplatesCountRes?.n ?? 0;
+
+  // ----- Step 3 — job_cards count (wipCode / wipLabel / branchKey) -----
+  const jobCardsCountRes = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM job_cards
+        WHERE wipCode    LIKE '%（%' OR wipCode    LIKE '%）%'
+           OR wipLabel   LIKE '%（%' OR wipLabel   LIKE '%）%'
+           OR branchKey  LIKE '%（%' OR branchKey  LIKE '%）%'`,
+    )
+    .first<{ n: number }>();
+  const jobCardsCount = jobCardsCountRes?.n ?? 0;
+
+  // Per-dept breakdown — confirms the typo is FAB_CUT-only as expected.
+  const jobCardsByDeptRes = await db
+    .prepare(
+      `SELECT departmentCode AS dept, COUNT(*) AS n FROM job_cards
+        WHERE wipCode  LIKE '%（%' OR wipCode  LIKE '%）%'
+           OR wipLabel LIKE '%（%' OR wipLabel LIKE '%）%'
+        GROUP BY departmentCode
+        ORDER BY n DESC`,
+    )
+    .all<{ dept: string; n: number }>();
+  const jobCardsByDept = jobCardsByDeptRes.results ?? [];
+
+  // ----- Step 4 — wip_items full-width rows + pair detection -----
+  // Row count
+  const wipItemsFullwidthCountRes = await db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM wip_items
+        WHERE code LIKE '%（%' OR code LIKE '%）%'`,
+    )
+    .first<{ n: number }>();
+  const wipItemsFullwidthCount = wipItemsFullwidthCountRes?.n ?? 0;
+
+  // Pair detection: a wip_items row with full-width parens "pairs" with a
+  // half-width row when (relatedProduct, half-width-version-of-code) match.
+  // SQLite REPLACE() chains cleanly inside the JOIN.
+  type PairRow = {
+    fwId: string;
+    fwCode: string;
+    fwQty: number;
+    fwRelated: string | null;
+    hwId: string;
+    hwCode: string;
+    hwQty: number;
+  };
+  const pairsRes = await db
+    .prepare(
+      `SELECT b.id AS fwId, b.code AS fwCode, b.stockQty AS fwQty,
+              b.relatedProduct AS fwRelated,
+              a.id AS hwId, a.code AS hwCode, a.stockQty AS hwQty
+         FROM wip_items b
+         JOIN wip_items a
+           ON a.code = REPLACE(REPLACE(b.code, '（', '('), '）', ')')
+          AND COALESCE(a.relatedProduct, '') = COALESCE(b.relatedProduct, '')
+        WHERE (b.code LIKE '%（%' OR b.code LIKE '%）%')
+          AND b.id != a.id`,
+    )
+    .all<PairRow>();
+  const pairs = pairsRes.results ?? [];
+  const pairedFullwidthIds = new Set(pairs.map((p) => p.fwId));
+  const orphanCount = wipItemsFullwidthCount - pairedFullwidthIds.size;
+
+  const samplePairs = pairs.slice(0, 10).map((p) => ({
+    relatedProduct: p.fwRelated,
+    fullwidth: { id: p.fwId, code: p.fwCode, stockQty: p.fwQty },
+    halfwidth: { id: p.hwId, code: p.hwCode, stockQty: p.hwQty },
+    summed: (p.fwQty || 0) + (p.hwQty || 0),
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      summary: {
+        bomMasterTemplates: bomMasterCount,
+        bomTemplates: bomTemplatesCount,
+        jobCards: jobCardsCount,
+        jobCardsByDept,
+        wipItemsFullwidth: wipItemsFullwidthCount,
+        wipItemsPaired: pairedFullwidthIds.size,
+        wipItemsOrphan: orphanCount,
+      },
+      samplePairs,
+    });
+  }
+
+  // ----- Live mode — run all steps as a single db.batch() -----
+  // D1 batches are atomic: every statement in the array commits together
+  // or none do. That gives us the "single transaction" semantic without
+  // BEGIN/COMMIT (which D1 doesn't expose).
+  const stmts: D1PreparedStatement[] = [];
+
+  // 1) BOM master templates — JSON blob in `data` column.
+  stmts.push(
+    db.prepare(
+      `UPDATE bom_master_templates
+          SET data = REPLACE(REPLACE(data, '（', '('), '）', ')')
+        WHERE data LIKE '%（%' OR data LIKE '%）%'`,
+    ),
+  );
+
+  // 2) BOM product templates — JSON blob in `wipComponents` column.
+  stmts.push(
+    db.prepare(
+      `UPDATE bom_templates
+          SET wipComponents = REPLACE(REPLACE(wipComponents, '（', '('), '）', ')')
+        WHERE wipComponents LIKE '%（%' OR wipComponents LIKE '%）%'`,
+    ),
+  );
+
+  // 3) job_cards — wipCode + wipLabel + branchKey. Three separate UPDATEs
+  // so the WHERE filter is column-scoped (SQLite doesn't fold these into
+  // one efficient pass).
+  stmts.push(
+    db.prepare(
+      `UPDATE job_cards
+          SET wipCode = REPLACE(REPLACE(wipCode, '（', '('), '）', ')')
+        WHERE wipCode LIKE '%（%' OR wipCode LIKE '%）%'`,
+    ),
+  );
+  stmts.push(
+    db.prepare(
+      `UPDATE job_cards
+          SET wipLabel = REPLACE(REPLACE(wipLabel, '（', '('), '）', ')')
+        WHERE wipLabel LIKE '%（%' OR wipLabel LIKE '%）%'`,
+    ),
+  );
+  stmts.push(
+    db.prepare(
+      `UPDATE job_cards
+          SET branchKey = REPLACE(REPLACE(branchKey, '（', '('), '）', ')')
+        WHERE branchKey LIKE '%（%' OR branchKey LIKE '%）%'`,
+    ),
+  );
+
+  // 4a) wip_items pair merge — sum full-width stockQty into the half-width
+  // sibling row, then DELETE the full-width row. We bind one statement per
+  // pair so each row is targeted by primary key — robust against future
+  // shape changes and lets us count exact effects per pair.
+  for (const p of pairs) {
+    stmts.push(
+      db
+        .prepare(
+          `UPDATE wip_items SET stockQty = stockQty + ? WHERE id = ?`,
+        )
+        .bind(p.fwQty, p.hwId),
+    );
+    stmts.push(
+      db.prepare(`DELETE FROM wip_items WHERE id = ?`).bind(p.fwId),
+    );
+  }
+
+  // 4b) Orphan full-width rows — no half-width sibling, so just rename in
+  // place. The WHERE clause excludes rows we already DELETEd above by
+  // re-checking that they still match the LIKE filter (deleted rows can't
+  // match anything).
+  stmts.push(
+    db.prepare(
+      `UPDATE wip_items
+          SET code = REPLACE(REPLACE(code, '（', '('), '）', ')')
+        WHERE code LIKE '%（%' OR code LIKE '%）%'`,
+    ),
+  );
+
+  const batchResults = await db.batch(stmts);
+
+  // Each batchResults[i] has .meta.changes (D1 standard).
+  // Indices: 0=bomMaster, 1=bomTemplates, 2=jcWipCode, 3=jcWipLabel,
+  // 4=jcBranchKey, then per-pair (UPDATE+DELETE pairs), then orphan rename.
+  const changes = batchResults.map((r) => r.meta?.changes ?? 0);
+  const pairUpdates = pairs.length;
+  const orphanRenameIdx = 5 + pairUpdates * 2;
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    summary: {
+      bomMasterTemplatesUpdated: changes[0] ?? 0,
+      bomTemplatesUpdated: changes[1] ?? 0,
+      jobCardsWipCodeUpdated: changes[2] ?? 0,
+      jobCardsWipLabelUpdated: changes[3] ?? 0,
+      jobCardsBranchKeyUpdated: changes[4] ?? 0,
+      wipItemsPairUpdates: pairUpdates,
+      wipItemsPairDeletes: pairUpdates,
+      wipItemsOrphanRenames: changes[orphanRenameIdx] ?? 0,
+    },
+    samplePairs,
+  });
+});
+
 export default app;

@@ -2269,9 +2269,26 @@ app.post("/backfill-cascade-wip-producers", async (c) => {
   // - overdue = 'COMPLETED'  (cascade always set this literal)
   // - actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
   //   The cascade endpoint computed actualMinutes from exactly that
-  //   COALESCE; equality is a strong cascade fingerprint.
+  //   COALESCE; equality is a strong cascade fingerprint. BUT the CSV
+  //   importer (/job-card-completion line 504) ALSO computes
+  //   actualMinutes from the same COALESCE, so this clause alone matches
+  //   ~3,182 rows including ~1,800 CSV-completed JCs that already had
+  //   their producer-add fired correctly. Backfilling those would
+  //   double-credit wip_items.
   // - departmentCode != 'UPHOLSTERY'  (UPH consumed correctly)
   // - departmentCode != 'PACKING'     (no WIP terminal)
+  // - pic1Id IS NULL AND COALESCE(pic1Name,'') = ''
+  //   The cascade UPDATE never touched PIC fields (see
+  //   /cascade-upstream-completion's UPDATE clause — only sets status,
+  //   completedDate, actualMinutes, overdue). The CSV importer
+  //   unconditionally writes pic1Id/pic1Name in its UPDATE (line 517).
+  //   So a JC with empty PIC fields was either never CSV-touched (pure
+  //   cascade-completed) or CSV-touched with a row that had no PIC
+  //   supplied. The latter case is rare (CSV rows generally include
+  //   a PIC) and even if hit, that path also fires applyWipInventoryChange
+  //   correctly — so the residual false-positive rate is small.
+  // - completedDate window 2026-01-01 to 2026-04-30
+  //   The full cascade run footprint by user's account.
   //
   // We do NOT exclude FAB_CUT or WOOD_CUT here — they are producer-only
   // raw-material entry depts; their producer-add is exactly what
@@ -2288,16 +2305,28 @@ app.post("/backfill-cascade-wip-producers", async (c) => {
           AND overdue = 'COMPLETED'
           AND UPPER(COALESCE(departmentCode,'')) != 'UPHOLSTERY'
           AND UPPER(COALESCE(departmentCode,'')) != 'PACKING'
-          AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)`,
+          AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
+          AND pic1Id IS NULL
+          AND COALESCE(pic1Name,'') = ''
+          AND completedDate >= '2026-01-01'
+          AND completedDate <= '2026-04-30'`,
     )
     .all<CascadeBackfillRow>();
   const candidates = candRes.results ?? [];
 
-  // Department distribution + sample (computed regardless of dryRun).
+  // Department distribution + wipQty totals + sample (computed regardless
+  // of dryRun). wipQty totals let us cross-validate against the audit's
+  // 517 negative wip_items rows totalling -1,506: deptWipQtyTotals['<dept>']
+  // should be >= the audit's negative magnitude per dept for a complete fix.
   const deptCounts: Record<string, number> = {};
+  const deptWipQtyTotals: Record<string, number> = {};
+  let totalWipQty = 0;
   for (const r of candidates) {
     const d = (r.departmentCode || "UNKNOWN").toUpperCase();
     deptCounts[d] = (deptCounts[d] ?? 0) + 1;
+    const q = typeof r.wipQty === "number" ? r.wipQty : 0;
+    deptWipQtyTotals[d] = (deptWipQtyTotals[d] ?? 0) + q;
+    totalWipQty += q;
   }
   const sample = candidates.slice(0, 10).map((r) => ({
     jcId: r.id,
@@ -2315,7 +2344,9 @@ app.post("/backfill-cascade-wip-producers", async (c) => {
       success: true,
       dryRun: true,
       candidateCount: candidates.length,
+      totalWipQty,
       deptCounts,
+      deptWipQtyTotals,
       sample,
     });
   }
@@ -2398,11 +2429,13 @@ app.post("/backfill-cascade-wip-producers", async (c) => {
     success: true,
     dryRun: false,
     candidateCount: candidates.length,
+    totalWipQty,
     posted,
     skippedNoPo,
     skippedNoJc,
     errors,
     deptCounts,
+    deptWipQtyTotals,
     sample,
   });
 });

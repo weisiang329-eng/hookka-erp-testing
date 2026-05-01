@@ -48,13 +48,6 @@ export type Env = {
     SUPABASE_URL?: string;
     SUPABASE_SERVICE_KEY?: string;
     HYPERDRIVE: Hyperdrive;
-    // Staging Hyperdrive (Option C, 2026-05-01). Bound on every deploy
-    // alongside the prod HYPERDRIVE binding so worker code can route
-    // based on c.env.ENVIRONMENT — Pages doesn't honor [env.preview]
-    // wrangler.toml overrides, so per-env DB switching has to happen at
-    // runtime. ENVIRONMENT="preview" → use staging; anything else →
-    // use prod. See pickHyperdriveUrl() below.
-    HYPERDRIVE_STAGING?: Hyperdrive;
     // Shared secret expected on /api/internal/* routes that are meant to
     // be invoked by cron / ops tooling only (not public traffic).
     CRON_SECRET?: string;
@@ -204,20 +197,6 @@ app.use("*", async (c, next) => {
 
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
 // adapter and exposes it as `c.var.DB`.  Routes use this instead of raw D1.
-// Pick the right Hyperdrive connection string for this deploy environment.
-// Cloudflare Pages applies the same top-level [[hyperdrive]] bindings to
-// every deploy regardless of branch, so per-env switching has to happen at
-// runtime. We bind BOTH the prod and the staging Hyperdrive configs in
-// wrangler.toml; ENVIRONMENT="preview" routes to staging, anything else
-// uses prod. Falls back to DATABASE_URL for local dev (no Hyperdrive).
-function pickHyperdriveUrl(env: Env): string | undefined {
-  const isPreview = env.ENVIRONMENT === "preview";
-  if (isPreview && env.HYPERDRIVE_STAGING?.connectionString) {
-    return env.HYPERDRIVE_STAGING.connectionString;
-  }
-  return env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
-}
-
 // Must run before authMiddleware (which itself hits the DB to verify tokens).
 // The adapter is further wrapped in instrumentD1 so every prepare/all/first/
 // run/batch emits a [slow-query] line when it exceeds SLOW_QUERY_MS.
@@ -227,7 +206,7 @@ app.use("/api/*", async (c, next) => {
   const { instrumentD1 } = await import("./lib/observability");
   // Prefer Hyperdrive binding (production / preview on Cloudflare).  Fall
   // back to DATABASE_URL env var only for local dev without Hyperdrive.
-  const url = pickHyperdriveUrl(c.env);
+  const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
   const adapter = new SupabaseAdapter(getSql(url)) as unknown as D1Database;
   const timer = c.get("dbTimer"); // set by timingMiddleware
@@ -255,7 +234,7 @@ app.get("/api/health", (c) =>
 app.get("/api/pg-ping", async (c) => {
   try {
     const { getSql } = await import("./lib/db-pg");
-    const url = pickHyperdriveUrl(c.env);
+    const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
     if (!url) throw new Error("No database connection string");
     const sql = getSql(url);
     const t0 = Date.now();

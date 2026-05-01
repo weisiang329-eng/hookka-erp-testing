@@ -951,6 +951,64 @@ app.post("/:id/move-to-draft", async (c) => {
   });
 });
 
+// POST /api/rd-projects/:id/reopen — COMPLETED → ACTIVE
+//
+// Inverse of /complete. The shop owner sometimes marks a project Complete by
+// mistake (or wants to revisit a "shipped" project to record more iterations
+// before officially closing it). This flip moves it back into the active
+// pipeline at PRODUCTION_READY (its currentStage was already there since
+// /complete only flips status, not stage). Reuses rd-projects:update perm.
+app.post("/:id/reopen", async (c) => {
+  const denied = await requirePermission(c, "rd-projects", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT * FROM rd_projects WHERE id = ?",
+  )
+    .bind(id)
+    .first<ProjectRow>();
+  if (!existing) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  if (existing.status !== "COMPLETED") {
+    return c.json(
+      {
+        success: false,
+        error: `Only COMPLETED projects can be reopened (current: ${existing.status})`,
+      },
+      400,
+    );
+  }
+
+  await c.var.DB.prepare(
+    "UPDATE rd_projects SET status = 'ACTIVE' WHERE id = ?",
+  )
+    .bind(id)
+    .run();
+
+  const [updated, protos] = await Promise.all([
+    c.var.DB.prepare("SELECT * FROM rd_projects WHERE id = ?")
+      .bind(id)
+      .first<ProjectRow>(),
+    c.var.DB.prepare("SELECT * FROM rd_prototypes WHERE projectId = ?")
+      .bind(id)
+      .all<PrototypeRow>(),
+  ]);
+  if (!updated) {
+    return c.json({ success: false, error: "R&D project not found" }, 404);
+  }
+  const labourSummary = await computeLabourCostSummary(
+    c.var.DB,
+    updated.id,
+    updated.manualLabourCostSen ?? null,
+  );
+  return c.json({
+    success: true,
+    data: rowToProject(updated, protos.results ?? [], labourSummary),
+  });
+});
+
 // POST /api/rd-projects/:id/issue-material
 app.post("/:id/issue-material", async (c) => {
   const denied = await requirePermission(c, "rd-projects", "create");

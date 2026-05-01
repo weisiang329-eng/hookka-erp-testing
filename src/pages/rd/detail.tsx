@@ -121,10 +121,12 @@ function ModalOverlay({ open, onClose, title, children, wide }: {
 }) {
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={onClose}>
+    // Backdrop click does NOT close the modal — the user has lost too much
+    // half-typed work to stray clicks. Use the X icon, Cancel button, or
+    // Escape (handled where applicable) to dismiss.
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
       <div
         className={`relative w-full ${wide ? "max-w-2xl" : "max-w-lg"} rounded-xl bg-white border border-[#E2DDD8] shadow-xl max-h-[90vh] overflow-y-auto`}
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-[#E2DDD8] px-6 py-4">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">{title}</h2>
@@ -325,7 +327,7 @@ export default function RDProjectDetailPage() {
   // operator can pause an active project, resume it, or send it back to
   // the Drafts backlog without going through SQL or the network tab.
   const flipStatus = async (
-    action: "hold" | "resume" | "move-to-draft",
+    action: "hold" | "resume" | "move-to-draft" | "reopen",
     confirmMsg: string,
     successMsg: string,
   ) => {
@@ -396,6 +398,12 @@ export default function RDProjectDetailPage() {
     );
   const handleResume = () =>
     flipStatus("resume", "Resume this project back to ACTIVE?", "Project resumed");
+  const handleReopen = () =>
+    flipStatus(
+      "reopen",
+      "Reopen this completed project? It will return to the active Pipeline at Production Ready.",
+      "Project reopened",
+    );
   const handleMoveToDraft = () =>
     flipStatus(
       "move-to-draft",
@@ -1566,6 +1574,19 @@ export default function RDProjectDetailPage() {
             {statusFlipping === "move-to-draft" ? "Moving..." : "Move to Drafts"}
           </Button>
         </>
+      )}
+      {/* COMPLETED: only Reopen — moves the project back to ACTIVE so the
+          user can record more iterations or undo an accidental complete. */}
+      {project.status === "COMPLETED" && (
+        <Button
+          variant="outline"
+          onClick={handleReopen}
+          disabled={statusFlipping !== null}
+          className="gap-1.5"
+        >
+          <Play className="h-4 w-4" />
+          {statusFlipping === "reopen" ? "Reopening..." : "Reopen"}
+        </Button>
       )}
       {currentStageIndex < STAGES.length - 1 && project.status === "ACTIVE" && (
         <Button variant="primary" onClick={handleAdvanceStage} disabled={advancing}>

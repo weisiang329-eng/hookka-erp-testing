@@ -43,14 +43,10 @@ function ModalOverlay({
 }) {
   if (!open) return null;
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onClick={onClose}
-    >
-      <div
-        className="relative w-full max-w-lg rounded-xl bg-white border border-[#E2DDD8] shadow-xl max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
+    // Backdrop click does NOT close the modal — strays clicks should not
+    // wipe a half-typed form. Use the X icon to dismiss.
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="relative w-full max-w-lg rounded-xl bg-white border border-[#E2DDD8] shadow-xl max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between border-b border-[#E2DDD8] px-6 py-4">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">{title}</h2>
           <button

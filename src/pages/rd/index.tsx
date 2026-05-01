@@ -942,7 +942,9 @@ function CreateProjectDialog({
 }
 
 export default function RDPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("drafts");
+  // Land on Projects (the live pipeline) by default — most operators come
+  // here to look at in-flight work, not to triage drafts.
+  const [activeTab, setActiveTab] = useState<TabId>("projects");
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const { toast } = useToast();
 
@@ -1080,7 +1082,12 @@ export default function RDPage() {
               )}
             </div>
           )}
-          {activeTab === "pipeline" && <PipelineView projects={nonDraftProjects} />}
+          {/* Pipeline shows in-flight work only — exclude DRAFT (not started)
+              and COMPLETED (already shipped). A completed project's
+              currentStage is still PRODUCTION_READY in the row, so without
+              this filter the kanban kept showing the same card in the
+              right-most column even after the user marked it Complete. */}
+          {activeTab === "pipeline" && <PipelineView projects={activeProjects} />}
           {activeTab === "reports" && <ReportsView projects={nonDraftProjects} />}
         </>
       )}

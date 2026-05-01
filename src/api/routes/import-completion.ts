@@ -3279,18 +3279,23 @@ app.post("/dedupe-wip-items", async (c) => {
   }
 
   // ----- Pre/post stats over the WHOLE wip_items table -----
-  const beforeStatsRes = await db
+  // Three separate queries — the combined SUM(CASE)+COUNT(*) variant came
+  // back with NULL fields under D1 in dry-run #1 (likely an alias quoting
+  // quirk), so split for robustness.
+  const totalRowsRes = await db
+    .prepare(`SELECT COUNT(*) AS n FROM wip_items`)
+    .first<{ n: number }>();
+  const totalRowsBefore = totalRowsRes?.n ?? 0;
+  const negRowsRes = await db
+    .prepare(`SELECT COUNT(*) AS n FROM wip_items WHERE stockQty < 0`)
+    .first<{ n: number }>();
+  const negRowsBefore = negRowsRes?.n ?? 0;
+  const negTotalRes = await db
     .prepare(
-      `SELECT
-         SUM(CASE WHEN stockQty < 0 THEN 1 ELSE 0 END) AS negRows,
-         SUM(CASE WHEN stockQty < 0 THEN stockQty ELSE 0 END) AS negTotal,
-         COUNT(*) AS totalRows
-       FROM wip_items`,
+      `SELECT COALESCE(SUM(stockQty), 0) AS n FROM wip_items WHERE stockQty < 0`,
     )
-    .first<{ negRows: number; negTotal: number; totalRows: number }>();
-  const negRowsBefore = beforeStatsRes?.negRows ?? 0;
-  const negTotalBefore = beforeStatsRes?.negTotal ?? 0;
-  const totalRowsBefore = beforeStatsRes?.totalRows ?? 0;
+    .first<{ n: number }>();
+  const negTotalBefore = negTotalRes?.n ?? 0;
 
   // Predicted residual:
   //   - rows: totalRowsBefore - rowsToMerge (we DELETE rowsToMerge rows;

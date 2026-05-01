@@ -55,6 +55,26 @@ pages_build_output_dir = "dist"
 binding = "HYPERDRIVE"
 id = "b0fc9d10217c42bfa793b050d1abed65"
 
+# ---------------------------------------------------------------------------
+# Staging Hyperdrive (Option C, 2026-05-01).
+#
+# Cloudflare Pages locks dashboard binding edits whenever wrangler.toml
+# defines `[[hyperdrive]]` at the top level — the dashboard tooltip on
+# 2026-05-02 explicitly said so ("Bindings for this project are being
+# managed through wrangler.toml"). That means we cannot have prod and
+# preview Pages envs each pointing at a different Hyperdrive id from
+# the dashboard alone — both envs receive the same top-level binding.
+#
+# Workaround: bind BOTH prod and staging Hyperdrive at the top level
+# (HYPERDRIVE + HYPERDRIVE_STAGING). Worker.ts picks at runtime based
+# on c.env.ENVIRONMENT — `preview` → staging, anything else → prod.
+# Set ENVIRONMENT=preview on the Pages dashboard's Preview env decklist
+# (Production env keeps ENVIRONMENT=production).
+# ---------------------------------------------------------------------------
+[[hyperdrive]]
+binding = "HYPERDRIVE_STAGING"
+id = "759227c0381a4a19ab7537ea48a1560f"
+
 # SESSION_CACHE — KV for per-request hot data.  Primary use: auth session
 # lookup (saves ~15ms DB round trip on every authenticated request).  Also
 # used by Phase 4 for BOM / SKU / permission cache.

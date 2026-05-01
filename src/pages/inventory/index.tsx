@@ -466,32 +466,32 @@ function deriveWIPFromPO(
           card.wipType ||
           (wipKey.includes("::") ? wipKey.split("::")[2] || "" : wipKey) ||
           "";
-        // For Fab Cut we compute the condensed WIP label on the fly from
-        // PO fields so the Inventory column matches the Production page's
-        // `fabCutWIP` helper (src/pages/production/index.tsx ~L1288) —
-        // shape: `{product} | ({size}) | ({totalH}) | {fabric} | (FC)`
-        // with the total-height segment omitted when no BF heights exist.
-        // Sofa consumption math relies on this code equalling the Fab Cut
-        // wipLabel so stock codes line up downstream.
+        // For Fab Cut we prefer the JC's stored wipLabel (Option C carries
+        // the merged form e.g. "5535-2A(LHF)+L(RHF) | (24) | M2402-5 | (FC)"
+        // when several variants share a baseModel + fabric within the SO).
+        // Fall back to per-PO recomputation only when the JC didn't store
+        // one — legacy data from before the wipLabel field was reliably
+        // populated. Recompute mirrors production-builder.ts buildFcWipLabel
+        // and the pre-77ba23c frontend fabCutWIP() helper.
         let wipCodeStr: string;
         if (card.departmentCode === "FAB_CUT") {
-          const totalH =
-            (po.gapInches || 0) +
-            (po.divanHeightInches || 0) +
-            (po.legHeightInches || 0);
-          const isBF = po.itemCategory === "BEDFRAME";
-          wipCodeStr = [
-            po.productCode,
-            po.sizeLabel ? `(${po.sizeLabel})` : "",
-            // BF-only: total height first, Divan height after. Kept in
-            // lockstep with Production page's fabCutWIP() helper so
-            // Inventory WIP codes match exactly what operators see on the
-            // Fab Cut tab.
-            isBF && totalH > 0 ? `(${totalH}")` : "",
-            isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
-            po.fabricCode || "",
-            "(FC)",
-          ].filter(Boolean).join(" | ");
+          if (card.wipLabel) {
+            wipCodeStr = card.wipLabel;
+          } else {
+            const totalH =
+              (po.gapInches || 0) +
+              (po.divanHeightInches || 0) +
+              (po.legHeightInches || 0);
+            const isBF = po.itemCategory === "BEDFRAME";
+            wipCodeStr = [
+              po.productCode,
+              po.sizeLabel ? `(${po.sizeLabel})` : "",
+              isBF && totalH > 0 ? `(${totalH}")` : "",
+              isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
+              po.fabricCode || "",
+              "(FC)",
+            ].filter(Boolean).join(" | ");
+          }
         } else {
           wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || wipKey;
         }

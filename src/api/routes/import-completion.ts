@@ -316,6 +316,30 @@ async function findJobCardsByPO(
   return res.results ?? [];
 }
 
+// Load a single production_orders row by id. Used by cascade-upstream-
+// completion to reconstruct (po, allJcs) per cascade target so the WIP
+// producer-add can fire — applyWipInventoryChange needs both.
+async function loadProductionOrderById(
+  db: D1Database,
+  productionOrderId: string,
+): Promise<ProductionOrderRow | null> {
+  const res = await db
+    .prepare(
+      `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerPOId,
+              customerReference, customerName, customerState, companySOId,
+              consignmentOrderId, companyCOId, productId, productCode,
+              productName, itemCategory, sizeCode, sizeLabel, fabricCode,
+              quantity, gapInches, divanHeightInches, legHeightInches,
+              specialOrder, notes, status, currentDepartment, progress,
+              startDate, targetEndDate, completedDate, rackingNumber,
+              stockedIn, created_at AS createdAt, updated_at AS updatedAt
+         FROM production_orders WHERE id = ?`,
+    )
+    .bind(productionOrderId)
+    .first<ProductionOrderRow>();
+  return res ?? null;
+}
+
 // ---------------------------------------------------------------------------
 // Per-row processing
 // ---------------------------------------------------------------------------
@@ -830,9 +854,16 @@ app.post("/clear-future-completions", async (c) => {
 // (counted as `fallbackToSequence`). Skips candidates already
 // COMPLETED/TRANSFERRED with a completedDate.
 //
-// Side-effect policy: metadata cleanup only — no applyWipInventoryChange,
-// postJobCardLabor, or postProductionOrderCompletion. Downstream JCs
-// already fired their cascades when they originally completed.
+// Side-effect policy: each WAITING → COMPLETED transition fires the same
+// producer-side cascades a normal completion would — applyWipInventoryChange
+// (for the producer-add into wip_items) and postJobCardLabor (cost ledger
+// LABOR_POSTED entry). UPHOLSTERY is skipped here because its consumer-side
+// already fired earlier (when downstream finished), and PACKING is skipped
+// because it has no WIP terminal of its own. The earlier "metadata only"
+// stance was wrong: UPH-side consumes ran when downstream completed but
+// upstream producer-adds never ran (those JCs were still WAITING), leaving
+// ~1300 negative wip_items rows. postProductionOrderCompletion is still
+// NOT fired here — PO-flip is governed by /job-card-completion's pass.
 //
 // Query params:
 //   ?dryRun=true|false   default false
@@ -1258,6 +1289,16 @@ app.post("/cascade-upstream-completion", async (c) => {
   let updated = 0;
   const errors: Array<{ jcId: string; message: string }> = [];
 
+  // Per-PO cache so we only fetch (po, allJcs) once even when multiple
+  // candidates in the same PO get cascaded in this run. allJcs is mutated
+  // in place as each candidate's status flips so subsequent siblings see
+  // the updated view (mirrors the refresh-then-apply pattern in
+  // /job-card-completion).
+  const poCache = new Map<
+    string,
+    { po: ProductionOrderRow; allJcs: JobCardRow[] }
+  >();
+
   for (const plan of plans) {
     try {
       await db
@@ -1277,6 +1318,92 @@ app.post("/cascade-upstream-completion", async (c) => {
         jcId: plan.cand.id,
         message: err instanceof Error ? err.message : String(err),
       });
+      continue;
+    }
+
+    // BUG-2026-04-30 fix: this endpoint used to be metadata-only, leaving
+    // ~1300 phantom UPH consumes without compensating producer-adds because
+    // upstream JCs were WAITING when downstream completed. Now mirror the
+    // /job-card-completion flow: after the JC UPDATE commits, fire the
+    // producer-add (applyWipInventoryChange) and labor ledger
+    // (postJobCardLabor) for each WAITING → COMPLETED transition.
+    // Skip UPHOLSTERY (its consume already fired earlier) and PACKING
+    // (no WIP terminal). Best-effort with defensive try/catch — a cascade
+    // failure must NOT roll back the JC UPDATE that already committed.
+    const targetDept = (plan.cand.departmentCode || "").toUpperCase();
+    if (targetDept === "UPHOLSTERY" || targetDept === "PACKING") continue;
+
+    const poId = plan.cand.productionOrderId;
+    let cached = poCache.get(poId);
+    if (!cached) {
+      try {
+        const po = await loadProductionOrderById(db, poId);
+        if (!po) {
+          console.error(
+            "[cascade-upstream-completion] PO not found for cascade",
+            { jcId: plan.cand.id, poId },
+          );
+          continue;
+        }
+        const allJcs = await findJobCardsByPO(db, poId);
+        cached = { po, allJcs };
+        poCache.set(poId, cached);
+      } catch (err) {
+        console.error(
+          "[cascade-upstream-completion] PO/JC load failed",
+          {
+            jcId: plan.cand.id,
+            poId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+        );
+        continue;
+      }
+    }
+
+    // Build the post-UPDATE JC snapshot. Re-use the canonical row from
+    // findJobCardsByPO so applyWipInventoryChange gets the full JobCardRow
+    // shape (branchKey, dueDate, etc.) — CandidateRow drops several fields.
+    const idx = cached.allJcs.findIndex((j) => j.id === plan.cand.id);
+    if (idx === -1) continue;
+    const prevStatus = cached.allJcs[idx].status;
+    const updatedJc: JobCardRow = {
+      ...cached.allJcs[idx],
+      status: "COMPLETED",
+      completedDate: plan.newDate,
+      actualMinutes: plan.actualMinutes,
+      overdue: "COMPLETED",
+    };
+    cached.allJcs[idx] = updatedJc;
+
+    try {
+      await applyWipInventoryChange(
+        db,
+        cached.po,
+        updatedJc,
+        "COMPLETED",
+        cached.allJcs,
+        prevStatus,
+      );
+    } catch (err) {
+      console.error("[cascade-upstream-completion] WIP cascade failed", {
+        jcId: plan.cand.id,
+        poId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    try {
+      await postJobCardLabor(db, plan.cand.id, poId);
+    } catch (err) {
+      console.error(
+        "[cascade-upstream-completion] postJobCardLabor failed",
+        {
+          jcId: plan.cand.id,
+          poId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+      );
     }
   }
 

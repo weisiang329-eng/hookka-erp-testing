@@ -2945,6 +2945,70 @@ app.post("/normalize-fullwidth-parens", async (c) => {
     summed: (p.fwQty || 0) + (p.hwQty || 0),
   }));
 
+  // Orphan-row sample + stockQty distribution. With 0 pairs the orphan list
+  // IS the full picture — knowing how many orphans are positive vs negative
+  // vs zero tells us whether the rename is harmless rebadge or whether it
+  // would re-collide with an existing half-width row that wasn't picked up
+  // by the pair join (e.g. relatedProduct mismatch).
+  type OrphanRow = {
+    id: string;
+    code: string;
+    relatedProduct: string | null;
+    stockQty: number;
+  };
+  const orphansRes = await db
+    .prepare(
+      `SELECT id, code, relatedProduct, stockQty FROM wip_items
+        WHERE (code LIKE '%（%' OR code LIKE '%）%')
+        ORDER BY stockQty DESC`,
+    )
+    .all<OrphanRow>();
+  const orphanRows = orphansRes.results ?? [];
+  let orphanPositive = 0,
+    orphanNegative = 0,
+    orphanZero = 0,
+    orphanPosTotal = 0,
+    orphanNegTotal = 0;
+  for (const o of orphanRows) {
+    const q = o.stockQty || 0;
+    if (q > 0) {
+      orphanPositive++;
+      orphanPosTotal += q;
+    } else if (q < 0) {
+      orphanNegative++;
+      orphanNegTotal += q;
+    } else {
+      orphanZero++;
+    }
+  }
+
+  // Detect rename-collisions: a full-width row whose half-width form
+  // already exists in wip_items, but with a DIFFERENT relatedProduct
+  // (or null vs ""). The pair join above would have missed those —
+  // surfacing them here lets us decide manually if any need merging.
+  const renameCollisionRes = await db
+    .prepare(
+      `SELECT b.id AS fwId, b.code AS fwCode, b.relatedProduct AS fwRelated,
+              b.stockQty AS fwQty,
+              a.id AS hwId, a.code AS hwCode, a.relatedProduct AS hwRelated,
+              a.stockQty AS hwQty
+         FROM wip_items b
+         JOIN wip_items a
+           ON a.code = REPLACE(REPLACE(b.code, '（', '('), '）', ')')
+        WHERE (b.code LIKE '%（%' OR b.code LIKE '%）%')
+          AND b.id != a.id
+          AND COALESCE(a.relatedProduct, '') != COALESCE(b.relatedProduct, '')`,
+    )
+    .all<PairRow & { hwRelated: string | null }>();
+  const renameCollisions = renameCollisionRes.results ?? [];
+
+  const sampleOrphans = orphanRows.slice(0, 10).map((o) => ({
+    id: o.id,
+    code: o.code,
+    relatedProduct: o.relatedProduct,
+    stockQty: o.stockQty,
+  }));
+
   if (dryRun) {
     return c.json({
       success: true,
@@ -2957,7 +3021,17 @@ app.post("/normalize-fullwidth-parens", async (c) => {
         wipItemsFullwidth: wipItemsFullwidthCount,
         wipItemsPaired: pairedFullwidthIds.size,
         wipItemsOrphan: orphanCount,
+        orphanStockQty: {
+          positive: orphanPositive,
+          positiveTotal: orphanPosTotal,
+          negative: orphanNegative,
+          negativeTotal: orphanNegTotal,
+          zero: orphanZero,
+        },
+        renameCollisions: renameCollisions.length,
       },
+      sampleOrphans,
+      sampleRenameCollisions: renameCollisions.slice(0, 10),
       samplePairs,
     });
   }

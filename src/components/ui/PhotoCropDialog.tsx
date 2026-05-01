@@ -777,6 +777,22 @@ export function PhotoCropDialog({
             onPointerCancel={onPointerUp}
             onWheel={onWheel}
           >
+            {/* Image rendering has two regimes:
+                - "Settled" (imgNatural set AND viewport measured): explicit
+                  pixel sizing = naturalSize × baseScale × zoom, with
+                  maxWidth/Height: none so zoom > 1 can overflow the
+                  viewport for panning.
+                - "Unsettled" (initial frames before onLoad fires or before
+                  ResizeObserver measures the viewport): width:100% +
+                  height:100% + objectFit:contain so the image is ALWAYS
+                  contained inside the viewport. Without this guard the
+                  img has no width/height and `maxWidth: none` defeats the
+                  browser's default `img { max-width: 100% }`, so a 4032px
+                  phone photo renders at native size centered in a 464px
+                  viewport — only the middle slice visible. That looked
+                  like an "auto-zoomed-in" image with no way to zoom out
+                  (the slider can't help when the geometry was wrong from
+                  frame one). */}
             <img
               src={imageDataUrl}
               alt="Crop preview"
@@ -785,17 +801,28 @@ export function PhotoCropDialog({
                 const el = e.currentTarget;
                 setImgNatural({ w: el.naturalWidth, h: el.naturalHeight });
               }}
-              style={{
-                position: "absolute",
-                left: "50%",
-                top: "50%",
-                width: imgNatural ? `${imgNatural.w * baseScale * zoom}px` : undefined,
-                height: imgNatural ? `${imgNatural.h * baseScale * zoom}px` : undefined,
-                transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px)) rotate(${rotation}deg)`,
-                pointerEvents: "none",
-                maxWidth: "none",
-                transformOrigin: "center center",
-              }}
+              style={
+                imgNatural && viewport.w > 0 && viewport.h > 0
+                  ? {
+                      position: "absolute",
+                      left: "50%",
+                      top: "50%",
+                      width: `${imgNatural.w * baseScale * zoom}px`,
+                      height: `${imgNatural.h * baseScale * zoom}px`,
+                      transform: `translate(calc(-50% + ${offset.x}px), calc(-50% + ${offset.y}px)) rotate(${rotation}deg)`,
+                      pointerEvents: "none",
+                      maxWidth: "none",
+                      transformOrigin: "center center",
+                    }
+                  : {
+                      position: "absolute",
+                      inset: 0,
+                      width: "100%",
+                      height: "100%",
+                      objectFit: "contain",
+                      pointerEvents: "none",
+                    }
+              }
             />
 
             {/* Dim the area outside the crop rect with a 4-segment overlay */}
@@ -870,14 +897,16 @@ export function PhotoCropDialog({
             )}
           </div>
 
-          {/* Zoom slider — min is 0.3 so the user can shrink the photo
-              below the contain-fit (zoom < 1 leaves white margins inside
-              the viewport, which the save path bakes into the JPEG). */}
+          {/* Zoom slider — min 0.1 so the user has enough shrink room even
+              when the initial render briefly mis-sized the image; max 4 for
+              when they want to zoom in for a tight crop. zoom < 1 leaves
+              white margins inside the viewport, which the save path bakes
+              into the JPEG. */}
           <div className="flex items-center gap-3">
             <span className="text-xs text-gray-500 w-12">Zoom</span>
             <input
               type="range"
-              min={0.3}
+              min={0.1}
               max={4}
               step={0.01}
               value={zoom}
@@ -963,7 +992,7 @@ function handlePosition(corner: ResizeCorner): { left: string; top: string } {
 // ── Pure helpers ──────────────────────────────────────────────────────────
 
 function clampZoom(z: number) {
-  return Math.max(0.3, Math.min(4, z));
+  return Math.max(0.1, Math.min(4, z));
 }
 
 // Resize a crop rect by dragging one of 8 handles. Honors the aspect lock

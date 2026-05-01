@@ -3140,4 +3140,284 @@ app.post("/normalize-fullwidth-parens", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// /dedupe-wip-items — Layer 4 cleanup pass.
+//
+// Background. After Layer 1 (backfill), Layer 2 (refund), Layer 3 (fullwidth
+// paren normalize), residual state is 1,118 wip_items rows / 209 negative
+// rows / -316 magnitude. A trace agent identified that 112 of those 209
+// negative rows have a sibling positive row at the SAME `code` (different
+// `id`) — i.e. the producer-add wrote to one row and the consume-decrement
+// wrote to another instead of upserting onto the same row. Net 84% of
+// residual magnitude is "same-code duplicates".
+//
+// Root cause. wip_items has no UNIQUE constraint on `code` (PK is `id`,
+// `code` only carries the non-UNIQUE idx_wip_items_code from migration
+// 0037). applyWipInventoryChange (production-orders.ts ~1071-1351) does a
+// SELECT-by-code → if NULL INSERT a new row, otherwise UPDATE by id. Two
+// concurrent JC PATCHes for the same code can both see NULL and both
+// INSERT, producing two rows that diverge (one accumulates +qty from the
+// producer side, one accumulates -qty from the consume side). Earlier
+// rollback paths use `UPDATE ... WHERE code = ?` which then mass-updates
+// every dup row simultaneously, compounding drift.
+//
+// What this endpoint does. Pure SQL — does NOT call applyWipInventoryChange.
+//   1. Find groups of wip_items rows sharing the same `code` (COUNT > 1).
+//   2. For each group: pick a canonical row (prefer non-PENDING deptStatus,
+//      then non-empty relatedProduct, ties broken by lowest id).
+//   3. Sum stockQty across all rows in the group → set canonical.stockQty
+//      to that sum.
+//   4. DELETE the non-canonical rows.
+//
+// Dry-run returns full counts + 10-row sample. Live-mode runs the merge
+// inside a single db.batch() (D1's atomic-batch primitive — "transaction"
+// without BEGIN/COMMIT, mirrors /normalize-fullwidth-parens above).
+// ---------------------------------------------------------------------------
+app.post("/dedupe-wip-items", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  type WipRow = {
+    id: string;
+    code: string;
+    type: string;
+    relatedProduct: string | null;
+    deptStatus: string | null;
+    stockQty: number;
+    status: string;
+  };
+
+  // ----- Step 1 — find dup-code groups -----
+  // Inner query: codes where COUNT(*) > 1.
+  // Outer fetch: every row whose code is in that set, with all the
+  // columns we need to pick a canonical and report the sample.
+  const dupCodesRes = await db
+    .prepare(
+      `SELECT code, COUNT(*) AS n, SUM(stockQty) AS netQty
+         FROM wip_items
+        GROUP BY code
+       HAVING COUNT(*) > 1`,
+    )
+    .all<{ code: string; n: number; netQty: number }>();
+  const dupCodes = dupCodesRes.results ?? [];
+
+  if (dupCodes.length === 0) {
+    return c.json({
+      success: true,
+      dryRun,
+      groupCount: 0,
+      rowsToMerge: 0,
+      rowsToUpdate: 0,
+      message: "No duplicate-code groups found in wip_items.",
+    });
+  }
+
+  // Pull every row in every dup-code group in one query. SQLite's IN
+  // clause with bound list keeps this clean for the typical N≈100 groups.
+  const codesList = dupCodes.map((d) => d.code);
+  const placeholders = codesList.map(() => "?").join(",");
+  const rowsRes = await db
+    .prepare(
+      `SELECT id, code, type, relatedProduct, deptStatus, stockQty, status
+         FROM wip_items
+        WHERE code IN (${placeholders})`,
+    )
+    .bind(...codesList)
+    .all<WipRow>();
+  const allRows = rowsRes.results ?? [];
+
+  // Group by code.
+  const byCode = new Map<string, WipRow[]>();
+  for (const r of allRows) {
+    const list = byCode.get(r.code) ?? [];
+    list.push(r);
+    byCode.set(r.code, list);
+  }
+
+  // ----- Step 2 — pick canonical + plan merges -----
+  // Canonical preference: non-PENDING deptStatus > non-empty relatedProduct
+  // > lowest id. Score each row, pick the lowest score.
+  function canonicalScore(r: WipRow): [number, number, string] {
+    const deptStatusScore =
+      (r.deptStatus || "").toUpperCase() === "PENDING" ? 1 : 0;
+    const relatedScore = (r.relatedProduct ?? "").trim() === "" ? 1 : 0;
+    return [deptStatusScore, relatedScore, r.id];
+  }
+  function pickCanonical(rows: WipRow[]): WipRow {
+    return rows.slice().sort((a, b) => {
+      const sa = canonicalScore(a);
+      const sb = canonicalScore(b);
+      if (sa[0] !== sb[0]) return sa[0] - sb[0];
+      if (sa[1] !== sb[1]) return sa[1] - sb[1];
+      return sa[2] < sb[2] ? -1 : sa[2] > sb[2] ? 1 : 0;
+    })[0];
+  }
+
+  type Plan = {
+    code: string;
+    canonical: WipRow;
+    rows: WipRow[];
+    netSum: number;
+    nonCanonicalIds: string[];
+  };
+  const plan: Plan[] = [];
+  let predictedNegativeAfter = 0;
+  let rowsToMerge = 0;
+
+  for (const [code, rows] of byCode) {
+    const canonical = pickCanonical(rows);
+    const netSum = rows.reduce((acc, r) => acc + (r.stockQty || 0), 0);
+    const nonCanonicalIds = rows
+      .filter((r) => r.id !== canonical.id)
+      .map((r) => r.id);
+    rowsToMerge += nonCanonicalIds.length;
+    if (netSum < 0) predictedNegativeAfter += 1;
+    plan.push({ code, canonical, rows, netSum, nonCanonicalIds });
+  }
+
+  // ----- Pre/post stats over the WHOLE wip_items table -----
+  const beforeStatsRes = await db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN stockQty < 0 THEN 1 ELSE 0 END) AS negRows,
+         SUM(CASE WHEN stockQty < 0 THEN stockQty ELSE 0 END) AS negTotal,
+         COUNT(*) AS totalRows
+       FROM wip_items`,
+    )
+    .first<{ negRows: number; negTotal: number; totalRows: number }>();
+  const negRowsBefore = beforeStatsRes?.negRows ?? 0;
+  const negTotalBefore = beforeStatsRes?.negTotal ?? 0;
+  const totalRowsBefore = beforeStatsRes?.totalRows ?? 0;
+
+  // Predicted residual:
+  //   - rows: totalRowsBefore - rowsToMerge (we DELETE rowsToMerge rows;
+  //     canonical updates don't change row count).
+  //   - negative rows: count groups where netSum < 0, plus any rows
+  //     OUTSIDE dup-code groups that are already negative. Since
+  //     non-dup negatives stay untouched, the post count =
+  //     (negRowsBefore − negativeRowsInDupGroups) + predictedNegativeAfter.
+  let negativeRowsInDupGroupsBefore = 0;
+  let negativeMagnitudeInDupGroupsBefore = 0;
+  for (const [, rows] of byCode) {
+    for (const r of rows) {
+      if ((r.stockQty || 0) < 0) {
+        negativeRowsInDupGroupsBefore += 1;
+        negativeMagnitudeInDupGroupsBefore += r.stockQty || 0;
+      }
+    }
+  }
+  // Sum of netSum for groups where netSum < 0 — magnitude of negatives that
+  // SURVIVE the dedupe (groups that net out positive contribute 0 to neg
+  // total post-dedupe).
+  let predictedNegativeMagnitudeAfter = 0;
+  for (const p of plan) {
+    if (p.netSum < 0) predictedNegativeMagnitudeAfter += p.netSum;
+  }
+
+  const predictedNegRowsTotalAfter =
+    negRowsBefore - negativeRowsInDupGroupsBefore + predictedNegativeAfter;
+  const predictedNegTotalAfter =
+    negTotalBefore -
+    negativeMagnitudeInDupGroupsBefore +
+    predictedNegativeMagnitudeAfter;
+
+  // ----- Sample for the dry-run response -----
+  const sampleGroups = plan.slice(0, 10).map((p) => ({
+    code: p.code,
+    rows: p.rows.map((r) => ({
+      id: r.id,
+      stockQty: r.stockQty,
+      deptStatus: r.deptStatus,
+      relatedProduct: r.relatedProduct,
+      status: r.status,
+    })),
+    canonical: p.canonical.id,
+    canonicalReason:
+      ((p.canonical.deptStatus || "").toUpperCase() !== "PENDING"
+        ? "non-PENDING deptStatus"
+        : "PENDING (no non-PENDING in group)") +
+      ((p.canonical.relatedProduct ?? "").trim() !== ""
+        ? " + non-empty relatedProduct"
+        : " + empty relatedProduct") +
+      " + lowest id tiebreak",
+    netSum: p.netSum,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      groupCount: plan.length,
+      rowsToMerge,
+      rowsToUpdate: plan.length,
+      negativeMagnitudeBefore: negTotalBefore,
+      negativeRowsBefore: negRowsBefore,
+      totalRowsBefore,
+      predictedNegativeAfter: predictedNegRowsTotalAfter,
+      predictedNegativeMagnitudeAfter: predictedNegTotalAfter,
+      predictedTotalRowsAfter: totalRowsBefore - rowsToMerge,
+      negativeRowsInDupGroupsBefore,
+      negativeMagnitudeInDupGroupsBefore,
+      sampleGroups,
+    });
+  }
+
+  // ----- Live mode — single atomic batch -----
+  // Per-group: 1 UPDATE (canonical.stockQty := netSum) + N DELETEs (where
+  // N = nonCanonicalIds.length). D1 batch is atomic, so partial state
+  // can't leak.
+  const stmts: D1PreparedStatement[] = [];
+  for (const p of plan) {
+    stmts.push(
+      db
+        .prepare(`UPDATE wip_items SET stockQty = ? WHERE id = ?`)
+        .bind(p.netSum, p.canonical.id),
+    );
+    for (const id of p.nonCanonicalIds) {
+      stmts.push(db.prepare(`DELETE FROM wip_items WHERE id = ?`).bind(id));
+    }
+  }
+
+  let batchOk = true;
+  let batchError: string | null = null;
+  let updatesApplied = 0;
+  let deletesApplied = 0;
+  try {
+    const batchResults = await db.batch(stmts);
+    let i = 0;
+    for (const p of plan) {
+      const upd = batchResults[i++];
+      if ((upd?.meta?.changes ?? 0) > 0) updatesApplied += 1;
+      for (const _id of p.nonCanonicalIds) {
+        const del = batchResults[i++];
+        if ((del?.meta?.changes ?? 0) > 0) deletesApplied += 1;
+      }
+    }
+  } catch (e) {
+    batchOk = false;
+    batchError = e instanceof Error ? e.message : String(e);
+  }
+
+  return c.json({
+    success: batchOk,
+    dryRun: false,
+    groupCount: plan.length,
+    rowsToMerge,
+    rowsToUpdate: plan.length,
+    updatesApplied,
+    deletesApplied,
+    negativeMagnitudeBefore: negTotalBefore,
+    negativeRowsBefore: negRowsBefore,
+    totalRowsBefore,
+    predictedNegativeAfter: predictedNegRowsTotalAfter,
+    predictedNegativeMagnitudeAfter: predictedNegTotalAfter,
+    predictedTotalRowsAfter: totalRowsBefore - rowsToMerge,
+    sampleGroups,
+    batchError,
+  });
+});
+
 export default app;

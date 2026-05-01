@@ -1462,8 +1462,14 @@ export default function ProductionPage({
       const poDeptIndex = pickerIndex.get(o.id);
       for (const jc of o.jobCards) {
         // F4: O(1) picker lookup against the pre-built (deptCode, wipKey)
-        // index. Falls back to the "*" entry when no wipKey-matched card
-        // exists, matching the original picker's two-pass behaviour.
+        // index. wipKey-strict only — NO cross-wipKey fallback. Previously
+        // a `byDept.get("*")` fallback returned "any wipKey" JC on this PO
+        // when no exact wipKey match existed, which leaked HEADBOARD's
+        // FOAM JC into DIVAN rows' FOAM column (DIVAN has no FOAM JC in
+        // its wipKey, so the fallback picked HB's FOAM date and showed it
+        // in the wrong row). Reported by Wei Siang 2026-04-30. Now an
+        // empty cell appears when this row's wipKey doesn't include the
+        // queried dept — accurate to the BOM.
         const picker = (code: string): JobCard | null => {
           const byDept = poDeptIndex?.get(code);
           if (!byDept) return null;
@@ -1471,7 +1477,7 @@ export default function ProductionPage({
             const exact = byDept.get(jc.wipKey);
             if (exact) return exact;
           }
-          return byDept.get("*") || null;
+          return null;
         };
 
         // Pass the full PO JC list to buildSched — it filters siblings by

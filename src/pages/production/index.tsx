@@ -1477,6 +1477,36 @@ export default function ProductionPage({
             const exact = byDept.get(jc.wipKey);
             if (exact) return exact;
           }
+          // Option C FAB_CUT lookup: post-merge there's at most one FC JC
+          // per PO (BF/ACC) or per merged (SO+baseModel+fabric) group
+          // (SOFA). FAB_SEW (and other downstream) rows still have their
+          // per-piece wipKey, which won't match the merged FC's wipKey,
+          // so the strict per-wipKey lookup above misses. Restore the
+          // "any FC on this PO" fallback ONLY for FAB_CUT — safe now
+          // because per-piece FC JCs were collapsed into one.
+          if (code === "FAB_CUT") {
+            const samePoAnyFc = byDept.get("*");
+            if (samePoAnyFc) return samePoAnyFc;
+            // SOFA cross-PO: merged FC may live on the anchor PO of the
+            // group, while this row is on a sibling PO. Scan POs of the
+            // same SO that share baseModel + fabric.
+            if (o.itemCategory === "SOFA") {
+              const myBase = (o.productCode || "").split("-")[0];
+              const myFabric = o.fabricCode || "";
+              const mySoId = o.companySOId || o.salesOrderId || "";
+              if (myBase && myFabric && mySoId) {
+                for (const sib of filteredOrders) {
+                  if (sib.id === o.id) continue;
+                  if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+                  if ((sib.fabricCode || "") !== myFabric) continue;
+                  const sibBase = (sib.productCode || "").split("-")[0];
+                  if (sibBase !== myBase) continue;
+                  const fc = sib.jobCards.find((j) => j.departmentCode === "FAB_CUT");
+                  if (fc) return fc;
+                }
+              }
+            }
+          }
           return null;
         };
 

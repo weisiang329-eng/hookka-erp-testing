@@ -92,6 +92,15 @@ test('producer dept upsert path runs for non-UPH on COMPLETED', () => {
     /INSERT INTO wip_items \(id, code, type, relatedProduct, deptStatus, stockQty, status\)/,
     'upsert path should INSERT into wip_items when no row exists',
   );
+  // BUG-2026-04-30-001: dupe-code race fix — every wip_items INSERT must be
+  // an atomic ON CONFLICT (org_id, code) DO UPDATE so concurrent PATCHes
+  // can't write two rows with the same code. Migration 0100 added the
+  // matching UNIQUE(org_id, code) so the conflict target has an arbiter.
+  assert.match(
+    src,
+    /ON CONFLICT \(org_id, code\) DO UPDATE SET/,
+    'producer-add upsert must be atomic (race-safe against concurrent PATCHes)',
+  );
 });
 
 test('Fab Sew atomic consume on (salesOrderId, fabricCode) is unchanged', () => {

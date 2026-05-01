@@ -1171,33 +1171,28 @@ export async function applyWipInventoryChange(
         // the upstream JC was skipped / never completed), INSERT one
         // with stock_qty = -consumeQty so the negative number surfaces
         // the missed dept on the WIP board.
-        const upstream = await db
-          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-          .bind(child.wipLabel)
-          .first<{ id: string; stockQty: number }>();
-        if (upstream) {
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
-            )
-            .bind(consumeQty, upstream.id)
-            .run();
-        } else {
-          await db
-            .prepare(
-              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
-            )
-            .bind(
-              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-              child.wipLabel,
-              shortType,
-              poRow.productCode ?? "",
-              "PENDING",
-              -consumeQty,
-            )
-            .run();
-        }
+        // BUG-2026-04-30-001: SELECT-then-(UPDATE-or-INSERT) raced under
+        // concurrent PATCHes for the same wipKey — both legs saw "no row"
+        // and both INSERTed, producing duplicate codes (329 dup-groups
+        // accumulated by 2026-04-30). Migration 0100 added
+        // UNIQUE(org_id, code); this is the matching atomic upsert. On
+        // conflict we DECREMENT (EXCLUDED.stockQty is already negative).
+        await db
+          .prepare(
+            `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+             ON CONFLICT (org_id, code) DO UPDATE SET
+               stockQty = wip_items.stockQty + EXCLUDED.stockQty`,
+          )
+          .bind(
+            `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+            child.wipLabel,
+            shortType,
+            poRow.productCode ?? "",
+            "PENDING",
+            -consumeQty,
+          )
+          .run();
       }
     }
     // For IN_PROGRESS-only we stop here — COMPLETED falls through to
@@ -1246,33 +1241,24 @@ export async function applyWipInventoryChange(
           // MAX clamp). If the upstream wip_items row doesn't exist
           // (upstream dept was skipped), INSERT one with negative qty
           // so the WIP board surfaces the missed dept.
-          const upstream = await db
-            .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-            .bind(label)
-            .first<{ id: string; stockQty: number }>();
-          if (upstream) {
-            await db
-              .prepare(
-                "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
-              )
-              .bind(consumeQty, upstream.id)
-              .run();
-          } else {
-            await db
-              .prepare(
-                `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-                 VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
-              )
-              .bind(
-                `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-                label,
-                shortType,
-                poRow.productCode ?? "",
-                "PENDING",
-                -consumeQty,
-              )
-              .run();
-          }
+          // BUG-2026-04-30-001: race-safe atomic upsert — see migration
+          // 0100 + sibling site at the non-UPH consume above.
+          await db
+            .prepare(
+              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+               ON CONFLICT (org_id, code) DO UPDATE SET
+                 stockQty = wip_items.stockQty + EXCLUDED.stockQty`,
+            )
+            .bind(
+              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+              label,
+              shortType,
+              poRow.productCode ?? "",
+              "PENDING",
+              -consumeQty,
+            )
+            .run();
         }
       }
       // Add UPH's own wip_items row (treat UPH like every other producer
@@ -1281,73 +1267,55 @@ export async function applyWipInventoryChange(
       // upsert is idempotent so multiple UPH JCs in the same wipKey
       // accumulate correctly.
       if (wipLabel) {
-        const existingUph = await db
-          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-          .bind(wipLabel)
-          .first<{ id: string; stockQty: number }>();
-        if (existingUph) {
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = ?, deptStatus = ?, status = 'COMPLETED' WHERE id = ?",
-            )
-            .bind(
-              (existingUph.stockQty || 0) + consumeQty,
-              "UPHOLSTERY",
-              existingUph.id,
-            )
-            .run();
-        } else {
-          await db
-            .prepare(
-              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED')`,
-            )
-            .bind(
-              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-              wipLabel,
-              shortType,
-              poRow.productCode ?? "",
-              "UPHOLSTERY",
-              consumeQty,
-            )
-            .run();
-        }
+        // BUG-2026-04-30-001: race-safe atomic upsert (see migration 0100).
+        // Original SELECT-then-(UPDATE-or-INSERT) accumulated dupes under
+        // concurrent PATCHes. UPDATE leg was additive: existing.stockQty +
+        // consumeQty — preserved here as wip_items.stockQty + EXCLUDED.stockQty.
+        await db
+          .prepare(
+            `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED')
+             ON CONFLICT (org_id, code) DO UPDATE SET
+               stockQty = wip_items.stockQty + EXCLUDED.stockQty,
+               deptStatus = EXCLUDED.deptStatus,
+               status = 'COMPLETED'`,
+          )
+          .bind(
+            `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+            wipLabel,
+            shortType,
+            poRow.productCode ?? "",
+            "UPHOLSTERY",
+            consumeQty,
+          )
+          .run();
       }
       return;
     }
 
     // Non-UPH dept: upsert-by-code, accumulate stock on each completion.
-    const existing = await db
-      .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-      .bind(wipLabel)
-      .first<{ id: string; stockQty: number }>();
-    if (existing) {
-      await db
-        .prepare(
-          "UPDATE wip_items SET stockQty = ?, deptStatus = ?, status = 'COMPLETED' WHERE id = ?",
-        )
-        .bind(
-          (existing.stockQty || 0) + wipQty,
-          jcRow.departmentCode ?? "",
-          existing.id,
-        )
-        .run();
-    } else {
-      await db
-        .prepare(
-          `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-           VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED')`,
-        )
-        .bind(
-          `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-          wipLabel,
-          shortType,
-          poRow.productCode ?? "",
-          jcRow.departmentCode ?? "",
-          wipQty,
-        )
-        .run();
-    }
+    // BUG-2026-04-30-001: race-safe atomic upsert (see migration 0100).
+    // Original SELECT-then-(UPDATE-or-INSERT) accumulated dupes under
+    // concurrent PATCHes. UPDATE leg was additive: existing.stockQty + wipQty
+    // — preserved here as wip_items.stockQty + EXCLUDED.stockQty.
+    await db
+      .prepare(
+        `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'COMPLETED')
+         ON CONFLICT (org_id, code) DO UPDATE SET
+           stockQty = wip_items.stockQty + EXCLUDED.stockQty,
+           deptStatus = EXCLUDED.deptStatus,
+           status = 'COMPLETED'`,
+      )
+      .bind(
+        `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+        wipLabel,
+        shortType,
+        poRow.productCode ?? "",
+        jcRow.departmentCode ?? "",
+        wipQty,
+      )
+      .run();
     return;
   }
 

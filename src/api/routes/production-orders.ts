@@ -1117,23 +1117,59 @@ export async function applyWipInventoryChange(
     // wipKey but never each other's upstream/downstream (BUG-2026-04-27:
     // Wood Cut completion was wrongly consuming Fab Sew stock because the
     // old wipKey-only filter pulled siblings from both branches).
-    if (!isFabCut && !isWoodCut && wipKey) {
-      const myBranch = jcRow.branchKey ?? "";
-      const children = allJcRows
-        .filter(
-          (j) =>
-            j.wipKey === wipKey &&
-            (j.branchKey ?? "") === myBranch &&
-            j.sequence < jcRow.sequence,
-        )
-        .sort((a, b) => b.sequence - a.sequence);
-      const child = children[0];
-      if (child?.wipLabel) {
+    if (!isFabCut && !isWoodCut) {
+      let refundLabel: string | null = null;
+      if (wipKey) {
+        const myBranch = jcRow.branchKey ?? "";
+        const children = allJcRows
+          .filter(
+            (j) =>
+              j.wipKey === wipKey &&
+              (j.branchKey ?? "") === myBranch &&
+              j.sequence < jcRow.sequence,
+          )
+          .sort((a, b) => b.sequence - a.sequence);
+        if (children[0]?.wipLabel) {
+          refundLabel = children[0].wipLabel;
+        }
+      }
+      // Option C fallback (mirror of forward consume) — refund the SO-level
+      // merged FC wip_items row when no per-PO sibling found.
+      if (!refundLabel && deptUpper === "FAB_SEW") {
+        const companySOId =
+          poRow.companySOId || poRow.salesOrderId || "";
+        const fabricCode = poRow.fabricCode || "";
+        if (companySOId && fabricCode) {
+          const bomLookup = await db
+            .prepare(
+              `SELECT baseModel FROM bom_templates
+               WHERE productCode = ?
+               ORDER BY effectiveFrom DESC LIMIT 1`,
+            )
+            .bind(poRow.productCode ?? "")
+            .first<{ baseModel: string | null }>();
+          const baseModel =
+            bomLookup?.baseModel || poRow.productCode || "";
+          const expectedWipKey = `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`;
+          const mergedFc = await db
+            .prepare(
+              `SELECT wipLabel FROM job_cards
+               WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
+               LIMIT 1`,
+            )
+            .bind(expectedWipKey)
+            .first<{ wipLabel: string }>();
+          if (mergedFc?.wipLabel) {
+            refundLabel = mergedFc.wipLabel;
+          }
+        }
+      }
+      if (refundLabel) {
         await db
           .prepare(
             "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
           )
-          .bind(refundQty, child.wipLabel)
+          .bind(refundQty, refundLabel)
           .run();
       }
     }
@@ -1153,6 +1189,7 @@ export async function applyWipInventoryChange(
     // wrongly consumed Fab Sew stock (Wei Siang report 2026-04-27).
     // Filter siblings by (wipKey, branchKey) so each branch's consume
     // only reaches its own true upstream.
+    let upstreamLabel: string | null = null;
     if (wipKey) {
       const myBranch = jcRow.branchKey ?? "";
       const children = allJcRows
@@ -1163,41 +1200,75 @@ export async function applyWipInventoryChange(
             j.sequence < jcRow.sequence,
         )
         .sort((a, b) => b.sequence - a.sequence);
-      const child = children[0];
-      if (child?.wipLabel) {
-        const consumeQty = jcRow.wipQty || poRow.quantity || 1;
-        // BUG-2026-04-27-013: cascade consume always decrements (no MAX
-        // clamp). If the upstream wip_items row doesn't exist (because
-        // the upstream JC was skipped / never completed), INSERT one
-        // with stock_qty = -consumeQty so the negative number surfaces
-        // the missed dept on the WIP board.
-        const upstream = await db
-          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-          .bind(child.wipLabel)
-          .first<{ id: string; stockQty: number }>();
-        if (upstream) {
-          await db
-            .prepare(
-              "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
-            )
-            .bind(consumeQty, upstream.id)
-            .run();
-        } else {
-          await db
-            .prepare(
-              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-               VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
-            )
-            .bind(
-              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-              child.wipLabel,
-              shortType,
-              poRow.productCode ?? "",
-              "PENDING",
-              -consumeQty,
-            )
-            .run();
+      if (children[0]?.wipLabel) {
+        upstreamLabel = children[0].wipLabel;
+      }
+    }
+    // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
+    // the same PO — it's the SO-level merged FC JC keyed by
+    // `{companySOId}::{baseModel}::{fabric}::FAB_CUT`. Look it up by
+    // querying job_cards directly when the per-PO sibling search misses.
+    if (!upstreamLabel && deptUpper === "FAB_SEW") {
+      const companySOId = poRow.companySOId || poRow.salesOrderId || "";
+      const fabricCode = poRow.fabricCode || "";
+      if (companySOId && fabricCode) {
+        const bomLookup = await db
+          .prepare(
+            `SELECT baseModel FROM bom_templates
+             WHERE productCode = ?
+             ORDER BY effectiveFrom DESC LIMIT 1`,
+          )
+          .bind(poRow.productCode ?? "")
+          .first<{ baseModel: string | null }>();
+        const baseModel =
+          bomLookup?.baseModel || poRow.productCode || "";
+        const expectedWipKey = `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`;
+        const mergedFc = await db
+          .prepare(
+            `SELECT wipLabel FROM job_cards
+             WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(expectedWipKey)
+          .first<{ wipLabel: string }>();
+        if (mergedFc?.wipLabel) {
+          upstreamLabel = mergedFc.wipLabel;
         }
+      }
+    }
+    if (upstreamLabel) {
+      const consumeQty = jcRow.wipQty || poRow.quantity || 1;
+      // BUG-2026-04-27-013: cascade consume always decrements (no MAX
+      // clamp). If the upstream wip_items row doesn't exist (because
+      // the upstream JC was skipped / never completed), INSERT one
+      // with stock_qty = -consumeQty so the negative number surfaces
+      // the missed dept on the WIP board.
+      const upstream = await db
+        .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
+        .bind(upstreamLabel)
+        .first<{ id: string; stockQty: number }>();
+      if (upstream) {
+        await db
+          .prepare(
+            "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
+          )
+          .bind(consumeQty, upstream.id)
+          .run();
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+             VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
+          )
+          .bind(
+            `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+            upstreamLabel,
+            shortType,
+            poRow.productCode ?? "",
+            "PENDING",
+            -consumeQty,
+          )
+          .run();
       }
     }
     // For IN_PROGRESS-only we stop here — COMPLETED falls through to

@@ -3779,16 +3779,56 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
     return deptCode || "WIP";
   };
 
+  // BUG-2026-04-30-003 mirror: Plan B "UPH-all-done subtract".
+  // Pre-compute the set of POs where EVERY UPH JC is COMPLETED/TRANSFERRED.
+  // In production-orders.ts:1346-1381, when an UPH JC transitions to DONE
+  // and ALL UPH JCs in the PO are now DONE, the cascade subtracts each
+  // UPH JC's +wipQty from its own wipLabel (WIP→FG transition).
+  //
+  // Net effect for an UPH JC in a fully-UPH-complete PO:
+  //   producer-add (+wipQty) + Plan B subtract (-wipQty) = 0
+  //
+  // Simpler form: SKIP the producer-add for UPH JCs whose PO is fully
+  // UPH-complete. Both forms are equivalent; skipping is cleaner.
+  // Reverse symmetry (production-orders.ts:1067-1102) is structurally
+  // mirrored too: a partially-UPH-done PO sees its DONE UPH JCs producer-add
+  // normally (because Plan B subtract has not fired and Plan B reverse
+  // does not apply), which matches the live ledger state.
+  const fullUphPoIds = new Set<string>();
+  {
+    type UphCounts = { total: number; done: number };
+    const perPo = new Map<string, UphCounts>();
+    for (const jc of allJcs) {
+      const dept = (jc.departmentCode ?? "").toUpperCase();
+      if (dept !== "UPHOLSTERY") continue;
+      const slot = perPo.get(jc.productionOrderId) ?? { total: 0, done: 0 };
+      slot.total += 1;
+      const st = (jc.status ?? "").toUpperCase();
+      if (st === "COMPLETED" || st === "TRANSFERRED") slot.done += 1;
+      perPo.set(jc.productionOrderId, slot);
+    }
+    for (const [poId, c] of perPo) {
+      if (c.total > 0 && c.done === c.total) fullUphPoIds.add(poId);
+    }
+  }
+
   // 5a — producer-add: every JC with status DONE, dept != PACKING, label
   // non-empty contributes +effQty to its own wipLabel.
   // 5b — UPH self-add is just the same loop (UPH falls through with
   // dept!=PACKING and gets its own row written too — see line 1284-1306).
+  // BUG-2026-04-30-003 mirror: skip producer-add for UPH JCs in
+  // fully-UPH-complete POs (their net contribution is 0 after Plan B
+  // subtract).
   for (const jc of allJcs) {
     const dept = (jc.departmentCode ?? "").toUpperCase();
     if (dept === "PACKING") continue;
     const status = (jc.status ?? "").toUpperCase();
     const isDone = status === "COMPLETED" || status === "TRANSFERRED";
     if (!isDone) continue;
+    // BUG-2026-04-30-003 mirror: UPH in fully-UPH-done PO → net 0, skip.
+    if (dept === "UPHOLSTERY" && fullUphPoIds.has(jc.productionOrderId)) {
+      continue;
+    }
     const po = poById.get(jc.productionOrderId);
     const label = synthLabel(jc, po);
     if (!label) continue;
@@ -4071,6 +4111,7 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
       totalDriftBefore,
       totalDriftAfter,
       sofaFabCutZeroedLabelCount: zeroedFabCutLabels.size,
+      fullUphPoCount: fullUphPoIds.size,
       byDept,
       sample,
     });

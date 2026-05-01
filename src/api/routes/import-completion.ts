@@ -2440,4 +2440,384 @@ app.post("/backfill-cascade-wip-producers", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/refund-backfill-overconsume
+//
+// Layer-2 fix for the residual negative WIP after the Layer-1
+// /backfill-cascade-wip-producers run.
+//
+// Investigation (2026-04-30, Frame -66 case):
+//   wipLabel "8\" Divan- 5FT Frame" stockQty = -66 in wip_items.
+//     - 91 FRAMING JCs (producer of this label across 5FT BEDFRAME POs)
+//         52 with no PIC (cascade-completed) → backfill produced +104
+//         39 with PIC      (CSV-completed via /job-card-completion)
+//                          → already produced +78 at CSV time
+//     - 87 WEBBING JCs in same wipKey/branchKey (consumer)
+//         87 with no PIC (cascade-completed) → backfill consumed -174
+//                          (Frame's downstream is WEBBING; backfill
+//                           applyWipInventoryChange on WEBBING fires the
+//                           non-UPH per-component upstream consume, see
+//                           production-orders.ts line ~1146-1206.)
+//
+//   Net (excl. unaccounted history): +78 + 104 - 174 = +8
+//   Actual: -66 → ~74 of pre-backfill historical drift on this label
+//                  (e.g. earlier audits / reverts) is independent of the
+//                  refund logic.
+//
+//   The 35 PO group where FRAMING was CSV-completed (PIC) and WEBBING was
+//   cascade-completed (no PIC, in backfill) is the OVER-CONSUME pattern:
+//   CSV-FRAMING produced Frame at CSV time; backfill-WEBBING then consumed
+//   Frame -2 at backfill time. CSV-WEBBING never fired (it didn't exist
+//   in the CSV), so the consume was first-time-correct — UNTIL we realise
+//   the IMPORT path WOULD have fired CSV-WEBBING's consume too if the
+//   CSV had included it. That consume is the duplicate we want to undo:
+//   the WEBBING consume only "double-counts" when its upstream FRAMING
+//   was already CSV-completed (i.e. its produce went into wip_items via
+//   the original CSV path) AND the WEBBING JC was synthetic-cascade
+//   completed (no PIC, picked up by backfill).
+//
+//   Wait — that's not double-counting on Frame. Re-trace:
+//     CSV-FRAMING:    Frame +2,    (WD) -2
+//     backfill-WEBBING: Foam +2,   Frame -2   (this is the consume)
+//   Net Frame = 0. Correct.
+//
+//   So Model A (refund every backfill-consume blindly) would over-refund
+//   the 52-PO group where FRAMING was ALSO in backfill:
+//     backfill-FRAMING: Frame +2, (WD) -2
+//     backfill-WEBBING: Foam +2,  Frame -2
+//   Net Frame = 0. Refunding +2 here pushes Frame to +2 → over-refund.
+//
+//   Model B refunds ONLY when upstream sibling is NOT in the backfill
+//   set (i.e. upstream was CSV-completed → already produced upstream's
+//   own producer-add but NOT its forward consume). For the Frame -66
+//   case Model B refunds 0 (since CSV-FRAMING already balanced
+//   backfill-WEBBING). That leaves -66 mostly untouched — the residual
+//   is from pre-backfill history.
+//
+//   HOLD ON. Let me re-derive the actual pathology that Model B targets.
+//   The user's framing: "when upstream U is in backfill, D's consume
+//   balances U's produce (don't refund). When U is CSV-completed, D's
+//   backfill DOUBLE-CONSUMED → refund." The "double consume" only
+//   makes sense if we accept that CSV-D's hypothetical consume was
+//   already present. But CSV-D is NOT present in this dataset (D is
+//   cascade-completed, no PIC, hence in backfill).
+//
+//   The actual pattern that causes over-consume:
+//     - U (upstream, e.g. FRAMING) is CSV-completed → Frame +2.
+//     - The original CSV ALSO had an entry for the corresponding D
+//       (WEBBING). At CSV-import time, applyWipInventoryChange fired
+//       for D too, consuming Frame -2.
+//     - LATER, the cascade-upstream-completion endpoint MARKED THE
+//       DOWNSTREAM JC AGAIN (overwriting status to COMPLETED). It did
+//       NOT re-fire applyWipInventoryChange (metadata-only by design).
+//     - But because the cascade UPDATE cleared pic1Id/pic1Name (or
+//       because the JC was always pic-less), the JC now LOOKS like a
+//       cascade-no-PIC candidate to our backfill filter.
+//     - Backfill fires applyWipInventoryChange a SECOND time on the
+//       same JC. The producer-add lands on a fresh row (Foam +2) but
+//       the upstream consume hits Frame AGAIN -2.
+//     - Net Frame = +2 (CSV-U) - 2 (CSV-D, already fired) - 2
+//                   (backfill-D, double-fired) = -2 per PO.
+//
+//   THIS is what Model B refunds. The trigger: "D was CSV-touched
+//   originally but later got cascade-overwritten" — detectable as
+//   "D's UPSTREAM is CSV-completed (PIC present), AND D itself is in
+//   backfill (PIC missing)". Same signature as the 35-PO group.
+//
+//   Refund rule: for each backfill-D where upstream-U has PIC1
+//   (CSV-completed), refund +wipQty to U's wipLabel.
+//
+// Side-effect policy: ONLY direct UPDATE on wip_items.
+// Do NOT call applyWipInventoryChange (that's what got us into trouble).
+//
+// Query params:
+//   ?dryRun=true|false   default false
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type RefundCandidateRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipKey: string | null;
+  wipLabel: string | null;
+  wipQty: number | null;
+  completedDate: string | null;
+  branchKey: string | null;
+  sequence: number;
+  estMinutes: number | null;
+  productionTimeMinutes: number | null;
+  actualMinutes: number | null;
+  overdue: string | null;
+};
+
+type RefundSiblingRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipKey: string | null;
+  wipLabel: string | null;
+  wipQty: number | null;
+  branchKey: string | null;
+  sequence: number;
+  status: string;
+  pic1Id: string | null;
+  pic1Name: string | null;
+  actualMinutes: number | null;
+  productionTimeMinutes: number | null;
+  estMinutes: number | null;
+  overdue: string | null;
+  completedDate: string | null;
+};
+
+app.post("/refund-backfill-overconsume", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // Refund candidates: cascade-backfilled DOWNSTREAM consumer JCs.
+  //
+  // Restrict to the depts that consume an upstream sibling in
+  // applyWipInventoryChange (production-orders.ts line ~1146-1206):
+  //   FAB_SEW    — consumes upstream FAB_CUT '(FC)'
+  //   FRAMING    — consumes upstream WOOD_CUT '(WD)'  (no over-consume of
+  //                Frame itself, but in chains where WOOD_CUT is CSV
+  //                AND FRAMING is backfilled, FRAMING-backfill consumes
+  //                (WD) -2 a second time too — same Model-B logic
+  //                applies to refund (WD).)
+  //   WEBBING    — consumes upstream FRAMING 'Frame'
+  //   FOAM       — consumes upstream FRAMING 'Frame' (HEADBOARD chain
+  //                where FOAM follows FRAMING; covered by the same
+  //                generic per-component consume rule).
+  //
+  // FAB_CUT and WOOD_CUT are producer-only (no upstream consume) — skip.
+  // UPHOLSTERY consumed correctly originally — skip.
+  // PACKING is metadata-only — skip.
+  //
+  // Filter signature mirrors /backfill-cascade-wip-producers exactly so
+  // we hit the same JC set the backfill processed.
+  const candRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, wipKey, wipLabel,
+              wipQty, completedDate, branchKey, sequence, estMinutes,
+              productionTimeMinutes, actualMinutes, overdue
+         FROM job_cards
+        WHERE status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate IS NOT NULL
+          AND overdue = 'COMPLETED'
+          AND UPPER(COALESCE(departmentCode,''))
+              IN ('FAB_SEW','FRAMING','WEBBING','FOAM')
+          AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
+          AND pic1Id IS NULL
+          AND COALESCE(pic1Name,'') = ''
+          AND completedDate >= '2026-01-01'
+          AND completedDate <= '2026-04-30'`,
+    )
+    .all<RefundCandidateRow>();
+  const candidates = candRes.results ?? [];
+
+  // Group candidates by PO so we can fetch siblings once per PO.
+  const byPo = new Map<string, RefundCandidateRow[]>();
+  for (const r of candidates) {
+    const list = byPo.get(r.productionOrderId) ?? [];
+    list.push(r);
+    byPo.set(r.productionOrderId, list);
+  }
+
+  // Plan list — entries we'd actually UPDATE.
+  type RefundPlan = {
+    jcId: string;
+    poId: string;
+    dept: string;
+    wipQty: number;
+    upstreamWipLabel: string;
+    upstreamDept: string;
+    upstreamPic: string | null; // for sample only — confirms CSV
+  };
+  const plan: RefundPlan[] = [];
+  const skipReasons: Record<string, number> = {
+    noWipKey: 0,
+    noWipQty: 0,
+    noUpstreamSibling: 0,
+    upstreamNoPicTooBackfill: 0,
+    upstreamNoLabel: 0,
+  };
+
+  for (const [poId, cands] of byPo) {
+    // Load every sibling in the PO once. A "sibling" here is any JC in
+    // the same productionOrderId — we then filter by (wipKey, branchKey,
+    // sequence < cand.sequence) to find the per-component upstream that
+    // applyWipInventoryChange would have consumed from.
+    const sibsRes = await db
+      .prepare(
+        `SELECT id, productionOrderId, departmentCode, wipKey, wipLabel,
+                wipQty, branchKey, sequence, status, pic1Id, pic1Name,
+                actualMinutes, productionTimeMinutes, estMinutes,
+                overdue, completedDate
+           FROM job_cards
+          WHERE productionOrderId = ?`,
+      )
+      .bind(poId)
+      .all<RefundSiblingRow>();
+    const sibs = sibsRes.results ?? [];
+
+    for (const cand of cands) {
+      if (!cand.wipKey) {
+        skipReasons.noWipKey++;
+        continue;
+      }
+      const wipQty = cand.wipQty ?? 0;
+      if (!wipQty) {
+        skipReasons.noWipQty++;
+        continue;
+      }
+      const myBranch = cand.branchKey ?? "";
+      // Mirror production-orders.ts line 1158-1166: same wipKey, same
+      // branchKey, sequence < own, take highest. This is the JC whose
+      // wipLabel applyWipInventoryChange consumed from at backfill time.
+      const upstreams = sibs
+        .filter(
+          (s) =>
+            s.wipKey === cand.wipKey &&
+            (s.branchKey ?? "") === myBranch &&
+            s.sequence < cand.sequence,
+        )
+        .sort((a, b) => b.sequence - a.sequence);
+      const upstream = upstreams[0];
+      if (!upstream) {
+        skipReasons.noUpstreamSibling++;
+        continue;
+      }
+      if (!upstream.wipLabel) {
+        skipReasons.upstreamNoLabel++;
+        continue;
+      }
+
+      // Model B gate: refund only when upstream is NOT in the backfill
+      // set. "In backfill" matches the same filter used by
+      // /backfill-cascade-wip-producers: pic1Id IS NULL AND pic1Name=''.
+      // If upstream has PIC, it was CSV-completed → its produce already
+      // landed at CSV time; the backfill-D's consume is then the only
+      // consume on its label, no double-count, no refund.
+      //
+      // BUT: that's the OPPOSITE of what we want. Re-read the trace in
+      // the header. The "double consume" arises when CSV-D's consume
+      // ALREADY FIRED (CSV had a row for D), then cascade overwrote D's
+      // metadata, then backfill picked D up and fired D's consume AGAIN.
+      // The signature for that case is "D's upstream U has PIC (was
+      // also in CSV)" — implying CSV had pairs of (U,D) entries that
+      // both fired at CSV time, and only D got cascade-overwritten.
+      //
+      // The cleanest detector is: "upstream U has PIC". That's what we
+      // gate on.
+      const upPicId = (upstream.pic1Id ?? "").trim();
+      const upPicName = (upstream.pic1Name ?? "").trim();
+      const upHasPic = upPicId !== "" || upPicName !== "";
+      if (!upHasPic) {
+        skipReasons.upstreamNoPicTooBackfill++;
+        continue;
+      }
+
+      plan.push({
+        jcId: cand.id,
+        poId,
+        dept: (cand.departmentCode || "").toUpperCase(),
+        wipQty,
+        upstreamWipLabel: upstream.wipLabel,
+        upstreamDept: (upstream.departmentCode || "").toUpperCase(),
+        upstreamPic: upPicName || upPicId || null,
+      });
+    }
+  }
+
+  // Aggregate stats
+  const deptCounts: Record<string, number> = {};
+  const upstreamLabelTotals: Record<string, number> = {};
+  let totalRefundQty = 0;
+  for (const p of plan) {
+    deptCounts[p.dept] = (deptCounts[p.dept] ?? 0) + 1;
+    upstreamLabelTotals[p.upstreamWipLabel] =
+      (upstreamLabelTotals[p.upstreamWipLabel] ?? 0) + p.wipQty;
+    totalRefundQty += p.wipQty;
+  }
+  const sample = plan.slice(0, 10);
+
+  // Top 10 labels by refund magnitude (for cross-check vs current
+  // negative wip_items magnitudes).
+  const topRefundLabels = Object.entries(upstreamLabelTotals)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 10)
+    .map(([wipLabel, refundQty]) => ({ wipLabel, refundQty }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidateCount: candidates.length,
+      planCount: plan.length,
+      totalRefundQty,
+      deptCounts,
+      topRefundLabels,
+      skipReasons,
+      sample,
+    });
+  }
+
+  // Live mode: direct UPDATE on wip_items only.
+  // INSERT is unnecessary — every upstream wipLabel in our plan came
+  // from a CSV-completed upstream JC, which means applyWipInventoryChange
+  // already inserted/upserted that label's row at CSV time. We just
+  // adjust stockQty.
+  let updated = 0;
+  let skippedRowMissing = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+
+  for (const p of plan) {
+    try {
+      const exists = await db
+        .prepare("SELECT id FROM wip_items WHERE code = ?")
+        .bind(p.upstreamWipLabel)
+        .first<{ id: string }>();
+      if (!exists) {
+        // Defensive: if the upstream label genuinely has no row, skip
+        // rather than INSERT a positive stub (would mis-attribute on the
+        // FE wip view, which keys negative rows by missing-producer
+        // semantics). A missing row means our model is wrong about the
+        // CSV-produce having fired — investigate manually.
+        skippedRowMissing++;
+        continue;
+      }
+      await db
+        .prepare(
+          `UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`,
+        )
+        .bind(p.wipQty, p.upstreamWipLabel)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: p.jcId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    candidateCount: candidates.length,
+    planCount: plan.length,
+    totalRefundQty,
+    updated,
+    skippedRowMissing,
+    deptCounts,
+    topRefundLabels,
+    skipReasons,
+    errors,
+    sample,
+  });
+});
+
 export default app;

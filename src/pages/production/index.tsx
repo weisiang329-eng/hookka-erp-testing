@@ -1944,13 +1944,17 @@ export default function ProductionPage({
   // parent setState → back here. Dept code is the only thing that changes
   // the column set meaningfully (activeTab).
   const deptColumns: Column<DeptRow>[] = useMemo(() => [
-    { key: "rowNo",         label: "#",              type: "number", width: "50px",  align: "right", sortable: true },
+    // rowNo + soId are frozen to the left so operators always know which
+    // row they're scanning when the grid is scrolled horizontally — this
+    // sheet has 30+ columns and the SO ID falls off-screen quickly.
+    { key: "rowNo",         label: "#",              type: "number", width: "50px",  align: "right", sortable: true, sticky: true },
     {
       key: "soId",
       label: "SO ID",
       type: "docno",
       width: "170px",
       sortable: true,
+      sticky: true,
       // Append an ON HOLD / CANCELLED pill when the parent PO is paused or
       // cancelled so operators can see at-a-glance why the row looks different.
       render: (_v, row) => {

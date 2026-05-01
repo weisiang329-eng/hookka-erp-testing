@@ -46,6 +46,15 @@ export type Column<T> = {
   defaultHidden?: boolean; // column appears in the Columns toggle list but is OFF by default. User can toggle on.
   render?: (value: any, row: T, index: number) => React.ReactNode;
   type?: "text" | "date" | "currency" | "number" | "docno" | "status";
+  // Freeze this column to the left edge so it stays visible during horizontal
+  // scroll. Sticky columns must appear contiguously at the start of the
+  // visible-column order (after the optional `selectable` checkbox column),
+  // and each sticky column REQUIRES an explicit pixel `width` so the runtime
+  // can compute cumulative left offsets. Body cells force a solid background
+  // (zebra / selected / rowClassName) so non-sticky cells scrolling underneath
+  // do not bleed through. Defaults to false — fully opt-in, every other grid
+  // in the codebase keeps its existing behaviour.
+  sticky?: boolean;
 };
 
 export type ContextMenuItem = {
@@ -893,6 +902,28 @@ export function DataGrid<T extends Record<string, any>>({
       .sort((a, b) => (orderMap.get(a.key) ?? 999) - (orderMap.get(b.key) ?? 999));
   }, [columns, visibleKeys, columnOrder]);
 
+  // Cumulative `left` offsets for sticky columns. We walk the leading run of
+  // sticky columns (each requires an explicit pixel width) and accumulate
+  // their widths. The optional `selectable` checkbox column is treated as the
+  // first 32px when present so a freeze can sit beside it. Non-sticky columns
+  // and any sticky column appearing after the leading run are ignored — the
+  // freeze must be a contiguous left-edge group, otherwise <td> stacking
+  // breaks. Returns a map: column key → left offset in pixels.
+  const stickyOffsets = useMemo(() => {
+    const out = new Map<string, number>();
+    let acc = selectable ? 32 : 0;
+    for (const col of visibleColumns) {
+      if (!col.sticky) break; // contiguous leading run only
+      out.set(col.key, acc);
+      // Parse a pixel width like "170px"; if the column lacks one, give up
+      // freezing later columns to avoid mis-aligned offsets.
+      const m = col.width ? /^(\d+(?:\.\d+)?)px$/.exec(col.width) : null;
+      if (!m) break;
+      acc += parseFloat(m[1]);
+    }
+    return out;
+  }, [visibleColumns, selectable]);
+
   // ── Search / Filter ──
   // Persisted in sessionStorage keyed by gridId so the search text and
   // column-filter selections survive tab switches within the same browser
@@ -1560,14 +1591,24 @@ export function DataGrid<T extends Record<string, any>>({
                 const hasValueFilter = columnValueFilters[col.key] != null;
                 const hasTextFilter = !!columnFilters[col.key];
                 const hasFilter = hasValueFilter || hasTextFilter;
+                const stickyLeft = stickyOffsets.get(col.key);
+                const isSticky = stickyLeft !== undefined;
                 return (
                   <th
                     key={col.key}
                     className={cn(
                       "whitespace-nowrap px-2 py-1.5 text-[11px] font-semibold text-[#333] relative",
                       alignClass(col),
-                      "select-none"
+                      "select-none",
+                      // Sticky header cells need bg-[#F0ECE9] explicitly; the
+                      // parent <thead>/<tr>'s class doesn't paint <th> boxes,
+                      // so without this scrolled body content shows through.
+                      // z-20 sits above the body's sticky cells (z-10) AND
+                      // above stickyHeader's z-10, keeping the corner cell on
+                      // top during simultaneous H+V scroll.
+                      isSticky && "sticky bg-[#F0ECE9] z-20",
                     )}
+                    style={isSticky ? { left: `${stickyLeft}px` } : undefined}
                   >
                     <span
                       className={cn(
@@ -1671,11 +1712,35 @@ export function DataGrid<T extends Record<string, any>>({
                       )}
                       {visibleColumns.map(col => {
                         const value = getNestedValue(row, col.key);
+                        const stickyLeft = stickyOffsets.get(col.key);
+                        const isSticky = stickyLeft !== undefined;
                         return (
                           <td
                             key={col.key}
-                            className={cn("whitespace-nowrap px-2 py-[3px]", alignClass(col))}
-                            style={{ height: "26px", lineHeight: "20px" }}
+                            className={cn(
+                              "whitespace-nowrap px-2 py-[3px]",
+                              alignClass(col),
+                              // Sticky body cells must paint an opaque
+                              // background that mirrors the row's bg state
+                              // (zebra / rowClassName / selected) — <tr>
+                              // backgrounds do not paint into child <td>
+                              // boxes, so without this the cells go
+                              // transparent and non-sticky cells scroll
+                              // visibly underneath. We deliberately skip
+                              // hover bg-tint on the sticky cell because
+                              // hover styles target the <tr>, not its
+                              // children; the static row colors are enough
+                              // to keep the column readable during scroll.
+                              isSticky && "sticky z-10 bg-white",
+                              isSticky && isEven && "bg-[#FAFAFA]",
+                              isSticky && rowClassName?.(row),
+                              isSticky && isSelected && "!bg-[#CCE0FF]",
+                            )}
+                            style={{
+                              height: "26px",
+                              lineHeight: "20px",
+                              ...(isSticky ? { left: `${stickyLeft}px` } : {}),
+                            }}
                           >
                             <DefaultCellRenderer column={col} value={value} row={row} index={index} />
                           </td>

@@ -2196,4 +2196,215 @@ app.post("/fix-misparsed-dates", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-cascade-wip-producers
+//
+// Layer-1 fix for the WIP-leak introduced by /cascade-upstream-completion.
+//
+// Investigation summary (mental model — confirmed before coding):
+//   1. applyWipInventoryChange(db, po, jc, "COMPLETED", refreshed, "WAITING")
+//      is the producer-add: for non-UPH non-PACKING depts it does
+//      "UPDATE wip_items SET stockQty = stockQty + wipQty WHERE code =
+//      jc.wipLabel" (insert if missing). UPH instead consumes branch-
+//      terminal wip_items + adds its own row.
+//   2. /cascade-upstream-completion was metadata-only — see its big header:
+//      "Side-effect policy: metadata cleanup only — no
+//      applyWipInventoryChange". Status, completedDate, actualMinutes,
+//      overdue='COMPLETED' got UPDATEd but the producer-add never fired.
+//   3. Meanwhile UPH (the cascade anchor) DID consume the branch-terminal
+//      wip_items when it originally completed via the scan-complete path,
+//      but its upstream branch-terminal JC was still WAITING at that
+//      moment, so the upstream JC's eventual cascade-COMPLETED never
+//      produced its row. Result: -212 phantom on labels like
+//      "8\" Divan-5FT Foam".
+//   4. We fix by re-firing applyWipInventoryChange for every cascade-
+//      completed JC with prevStatus='WAITING' newStatus='COMPLETED'. UPH
+//      is excluded (its original consume was correct). PACKING is
+//      excluded (no WIP terminal). FAB_CUT and WOOD_CUT are PRODUCER-ONLY
+//      raw-material entry depts — they ALSO need the producer-add.
+//   5. Cascade signature: status IN COMPLETED/TRANSFERRED + completedDate
+//      NOT NULL + overdue='COMPLETED' + actualMinutes = COALESCE(
+//      productionTimeMinutes, estMinutes, 0). The cascade endpoint set
+//      actualMinutes from exactly that COALESCE, so the equality identifies
+//      cascade-set rows. (Real scan-completed JCs almost always have
+//      actualMinutes != that value because the operator's elapsed time
+//      diverged from the plan.)
+//
+// Side-effect policy: ONLY applyWipInventoryChange. We do NOT post labor
+// (postJobCardLabor was already fired by other paths or is irrelevant for
+// this WIP fix), and we do NOT touch the PO completion state. The point
+// is to credit the missing producer-add so wip_items reflects reality.
+//
+// Query params:
+//   ?dryRun=true|false   default false
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type CascadeBackfillRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  wipKey: string | null;
+  wipLabel: string | null;
+  wipQty: number | null;
+  completedDate: string | null;
+  status: string;
+  sequence: number;
+  estMinutes: number | null;
+  productionTimeMinutes: number | null;
+  actualMinutes: number | null;
+  overdue: string | null;
+};
+
+app.post("/backfill-cascade-wip-producers", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // Cascade signature query.
+  // - status COMPLETED or TRANSFERRED
+  // - completedDate NOT NULL
+  // - overdue = 'COMPLETED'  (cascade always set this literal)
+  // - actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)
+  //   The cascade endpoint computed actualMinutes from exactly that
+  //   COALESCE; equality is a strong cascade fingerprint.
+  // - departmentCode != 'UPHOLSTERY'  (UPH consumed correctly)
+  // - departmentCode != 'PACKING'     (no WIP terminal)
+  //
+  // We do NOT exclude FAB_CUT or WOOD_CUT here — they are producer-only
+  // raw-material entry depts; their producer-add is exactly what
+  // populates the early WIP rows that downstream FRAMING/FAB_SEW then
+  // consume from.
+  const candRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, wipKey, wipLabel,
+              wipQty, completedDate, status, sequence, estMinutes,
+              productionTimeMinutes, actualMinutes, overdue
+         FROM job_cards
+        WHERE status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate IS NOT NULL
+          AND overdue = 'COMPLETED'
+          AND UPPER(COALESCE(departmentCode,'')) != 'UPHOLSTERY'
+          AND UPPER(COALESCE(departmentCode,'')) != 'PACKING'
+          AND actualMinutes = COALESCE(productionTimeMinutes, estMinutes, 0)`,
+    )
+    .all<CascadeBackfillRow>();
+  const candidates = candRes.results ?? [];
+
+  // Department distribution + sample (computed regardless of dryRun).
+  const deptCounts: Record<string, number> = {};
+  for (const r of candidates) {
+    const d = (r.departmentCode || "UNKNOWN").toUpperCase();
+    deptCounts[d] = (deptCounts[d] ?? 0) + 1;
+  }
+  const sample = candidates.slice(0, 10).map((r) => ({
+    jcId: r.id,
+    productionOrderId: r.productionOrderId,
+    departmentCode: r.departmentCode,
+    wipKey: r.wipKey,
+    wipLabel: r.wipLabel,
+    wipQty: r.wipQty,
+    completedDate: r.completedDate,
+    sequence: r.sequence,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidateCount: candidates.length,
+      deptCounts,
+      sample,
+    });
+  }
+
+  // Live mode: per candidate, load po + sibling JCs, fire
+  // applyWipInventoryChange with prevStatus=WAITING newStatus=COMPLETED.
+  // Cache (po, sibling JCs) per productionOrderId — multiple candidates
+  // share the PO, and applyWipInventoryChange only writes to wip_items
+  // (not job_cards) so the cached sibling list stays valid for every
+  // candidate within the same PO.
+  const poCache = new Map<string, ProductionOrderRow>();
+  const jcCache = new Map<string, JobCardRow[]>();
+  let posted = 0;
+  let skippedNoPo = 0;
+  let skippedNoJc = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+
+  for (const cand of candidates) {
+    try {
+      let po = poCache.get(cand.productionOrderId);
+      if (!po) {
+        const poRow = await db
+          .prepare(
+            `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerPOId,
+                    customerReference, customerName, customerState, companySOId,
+                    consignmentOrderId, companyCOId, productId, productCode,
+                    productName, itemCategory, sizeCode, sizeLabel, fabricCode,
+                    quantity, gapInches, divanHeightInches, legHeightInches,
+                    specialOrder, notes, status, currentDepartment, progress,
+                    startDate, targetEndDate, completedDate, rackingNumber,
+                    stockedIn, created_at AS createdAt, updated_at AS updatedAt
+               FROM production_orders WHERE id = ?`,
+          )
+          .bind(cand.productionOrderId)
+          .first<ProductionOrderRow>();
+        if (!poRow) {
+          skippedNoPo++;
+          continue;
+        }
+        po = poRow;
+        poCache.set(po.id, po);
+      }
+
+      let allJcs = jcCache.get(po.id);
+      if (!allJcs) {
+        allJcs = await findJobCardsByPO(db, po.id);
+        jcCache.set(po.id, allJcs);
+      }
+
+      const updated = allJcs.find((j) => j.id === cand.id);
+      if (!updated) {
+        skippedNoJc++;
+        continue;
+      }
+
+      // Mirror import-completion's cascade-firing pattern:
+      //   applyWipInventoryChange(db, po, updated, "COMPLETED",
+      //                           refreshed, prevStatus="WAITING")
+      // prevStatus="WAITING" → forward (becomingActive + producer-upsert)
+      // path. updated.status is already "COMPLETED" in the row so
+      // newStatus="COMPLETED" matches reality.
+      await applyWipInventoryChange(
+        db,
+        po,
+        updated,
+        "COMPLETED",
+        allJcs,
+        "WAITING",
+      );
+      posted++;
+    } catch (err) {
+      errors.push({
+        jcId: cand.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    candidateCount: candidates.length,
+    posted,
+    skippedNoPo,
+    skippedNoJc,
+    errors,
+    deptCounts,
+    sample,
+  });
+});
+
 export default app;

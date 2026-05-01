@@ -204,9 +204,46 @@ type WorkingHourEntry = {
 // recorded. Backend auto-creates the parent attendance_records row on first
 // POST per (worker, date), so there's no separate clock-in step in this UI.
 
+// Clickable column header used by the Working Hours table — shows the
+// active sort indicator (↑ / ↓) when the column matches sortColumn,
+// otherwise a faint dotted ↕ to advertise that the column is sortable.
+function SortableHeader({
+  label,
+  column,
+  sortColumn,
+  sortDir,
+  onClick,
+  width,
+}: {
+  label: string;
+  column: SortColumn;
+  sortColumn: SortColumn | null;
+  sortDir: SortDir;
+  onClick: (col: SortColumn) => void;
+  width?: string;
+}) {
+  const active = sortColumn === column;
+  const arrow = !active ? "↕" : sortDir === "asc" ? "↑" : "↓";
+  return (
+    <th
+      onClick={() => onClick(column)}
+      className={`h-10 px-3 text-left font-medium cursor-pointer select-none transition-colors ${
+        active ? "text-[#1F1D1B] bg-[#E5DED4]" : "text-[#374151] hover:bg-[#E5DED4]"
+      } ${width ?? ""}`}
+      title={`Sort by ${label}`}
+    >
+      <span className="inline-flex items-center gap-1.5">
+        {label}
+        <span className={active ? "text-[#6B5C32]" : "text-[#9CA3AF]"}>{arrow}</span>
+      </span>
+    </th>
+  );
+}
+
 type EntryDraft = {
   id?: string;                 // undefined = new draft; defined = persisted
   workerId: string;
+  date: string;                // ISO YYYY-MM-DD; defaults to dateFrom for new rows
   departmentCode: string;
   category: Category;
   hours: number;
@@ -215,6 +252,11 @@ type EntryDraft = {
   saved: boolean;
   saveError?: string;
 };
+
+// Sortable columns. We keep the column key list small and tied to actual
+// table columns — no kitchen-sink sort menu.
+type SortColumn = "date" | "employee" | "department" | "category" | "hours";
+type SortDir = "asc" | "desc";
 
 function WorkingHoursTab({
   workers,
@@ -233,28 +275,47 @@ function WorkingHoursTab({
   // dept added via the Manage Departments UI on Labor Cost shows up here too.
   const allDepts = departments.length > 0 ? departments : ALL_DEPARTMENTS;
   const prodCodes = productionDeptCodes.size > 0 ? productionDeptCodes : PRODUCTION_DEPT_CODES;
-  const [selectedDate, setSelectedDate] = useState(todayStr());
+  // Date range — both default to today, so the page opens in single-day
+  // mode (same view as before the range refactor). When dateFrom < dateTo
+  // the table fetches every entry in the range, the table grows a Date
+  // column, and new rows default their date to dateFrom (operator can
+  // change per row). When dateFrom > dateTo we silently swap.
+  const [dateFrom, setDateFrom] = useState(todayStr());
+  const [dateTo, setDateTo] = useState(todayStr());
+  const isMultiDay = dateFrom !== dateTo;
   const [rows, setRows] = useState<EntryDraft[]>([]);
   const [loading, setLoading] = useState(false);
   const [bulkSaving, setBulkSaving] = useState(false);
   // "Copy from" workflow — operator picks a source date, hits Copy, and
-  // every entry from that date becomes a fresh DRAFT row on the current
-  // date. No backend write yet — the rows land unsaved so the operator
-  // can micro-adjust hours/notes and click Save All. Bulk-day copy
-  // mirrors how a 100-worker payroll table would otherwise demand 100
-  // individual Add Row clicks.
+  // every entry from that date becomes a fresh DRAFT row on dateFrom. No
+  // backend write yet — the rows land unsaved so the operator can
+  // micro-adjust hours/notes and click Save All. Bulk-day copy mirrors
+  // how a 100-worker payroll table would otherwise demand 100 individual
+  // Add Row clicks.
   const [copyFromDate, setCopyFromDate] = useState<string>("");
   const [copying, setCopying] = useState(false);
   const [copyError, setCopyError] = useState<string>("");
+  // Sort state — null sortColumn means "preserve insertion order" (new
+  // rows added via Add Row / Copy from stay at the bottom). Click a
+  // column header to set a sort; click again to flip direction; click a
+  // third time to clear.
+  const [sortColumn, setSortColumn] = useState<SortColumn | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`/api/working-hour-entries?date=${selectedDate}`);
+      // Always use ?from=...&to=... — when from===to the route returns the
+      // same single-day result it would've returned for ?date=. Cuts a
+      // branch on the client and keeps multi-day fetch trivial.
+      const lo = dateFrom <= dateTo ? dateFrom : dateTo;
+      const hi = dateFrom <= dateTo ? dateTo : dateFrom;
+      const res = await fetch(`/api/working-hour-entries?from=${lo}&to=${hi}`);
       const j = (await res.json()) as { success?: boolean; data?: WorkingHourEntry[] };
       const drafts: EntryDraft[] = (j?.data ?? []).map((e) => ({
         id: e.id,
         workerId: e.workerId,
+        date: e.date,
         departmentCode: e.departmentCode,
         category: e.category,
         hours: e.hours,
@@ -266,7 +327,7 @@ function WorkingHoursTab({
     } finally {
       setLoading(false);
     }
-  }, [selectedDate]);
+  }, [dateFrom, dateTo]);
 
   // One-shot sync of server entries into local EntryDraft rows on date
   // change. setState here is intentional — the source is external (fetch).
@@ -299,6 +360,7 @@ function WorkingHoursTab({
       ...prev,
       {
         workerId: "",
+        date: dateFrom,
         departmentCode: "",
         category: "",
         hours: 0,
@@ -307,7 +369,7 @@ function WorkingHoursTab({
         saved: false,
       },
     ]);
-  }, []);
+  }, [dateFrom]);
 
   // Copy every entry from `copyFromDate` and append them as fresh DRAFT
   // rows on the currently-selected date. Skips workers that already have
@@ -320,7 +382,7 @@ function WorkingHoursTab({
       setCopyError("Pick a source date first");
       return;
     }
-    if (copyFromDate === selectedDate) {
+    if (copyFromDate === dateFrom) {
       setCopyError("Source date can't equal target date");
       return;
     }
@@ -335,21 +397,23 @@ function WorkingHoursTab({
         return;
       }
       // Dedup: skip a source row if the same (workerId, departmentCode,
-      // category) tuple already exists on the current date — saved or
-      // not. Multiple segments per worker are allowed (operator might
-      // legitimately have a saved Fab Cut row but want a copied
+      // category) tuple already exists on the target date (dateFrom) —
+      // saved or not. Multiple segments per worker are allowed (operator
+      // might legitimately have a saved Fab Cut row but want a copied
       // Upholstery row added).
       const existingKeys = new Set(
         rows
-          .filter((r) => r.workerId)
+          .filter((r) => r.workerId && r.date === dateFrom)
           .map((r) => `${r.workerId}|${r.departmentCode}|${r.category}`),
       );
       const newDrafts: EntryDraft[] = src
         .filter((e) => !existingKeys.has(`${e.workerId}|${e.departmentCode}|${e.category}`))
         .map((e) => ({
-          // No id — these are unsaved on the new date and will POST when
-          // the operator clicks Save All.
+          // No id — these are unsaved on the target date and will POST
+          // when the operator clicks Save All. New rows always land on
+          // dateFrom (the "left" of the range).
           workerId: e.workerId,
+          date: dateFrom,
           departmentCode: e.departmentCode,
           category: e.category,
           hours: e.hours,
@@ -368,7 +432,7 @@ function WorkingHoursTab({
     } finally {
       setCopying(false);
     }
-  }, [copyFromDate, selectedDate, rows]);
+  }, [copyFromDate, dateFrom, rows]);
 
   const duplicateRow = useCallback((idx: number) => {
     setRows((prev) => {
@@ -376,9 +440,11 @@ function WorkingHoursTab({
       if (!src) return prev;
       const copy = [...prev];
       // Insert a new draft right after the source row, pre-filled with the
-      // same worker — common case is "same person, different segment".
+      // same worker AND date — common case is "same person on the same
+      // day, different segment".
       copy.splice(idx + 1, 0, {
         workerId: src.workerId,
+        date: src.date,
         departmentCode: "",
         category: "",
         hours: 0,
@@ -430,7 +496,9 @@ function WorkingHoursTab({
         ? { departmentCode: row.departmentCode, category: row.category, hours: row.hours, notes: row.notes }
         : {
             workerId: row.workerId,
-            date: selectedDate,
+            // Each row carries its own date — multi-day mode lets the
+            // operator log e.g. Mon for one row and Tue for the next.
+            date: row.date,
             departmentCode: row.departmentCode,
             category: row.category,
             hours: row.hours,
@@ -452,14 +520,14 @@ function WorkingHoursTab({
       });
       // Auto-create on POST may have created an attendance row; refresh
       // the parent attendance list so any clock-in/out summary stays in sync.
-      if (!row.id) refreshAttendance(selectedDate);
+      if (!row.id) refreshAttendance(row.date);
     } catch (e) {
       patchRow(idx, {
         saving: false,
         saveError: e instanceof Error ? e.message : "Save failed",
       });
     }
-  }, [rows, selectedDate, patchRow, refreshAttendance, prodCodes]);
+  }, [rows, patchRow, refreshAttendance, prodCodes]);
 
   const saveAll = useCallback(async () => {
     setBulkSaving(true);
@@ -488,6 +556,62 @@ function WorkingHoursTab({
 
   const dirtyCount = rows.filter((r) => !r.saved && r.workerId).length;
 
+  // Click a column header to sort the table by that column. The first
+  // click sets ascending; clicking the same column again flips to
+  // descending; a third click clears the sort and goes back to insertion
+  // order (so newly-added rows stay at the bottom). Indices for editing
+  // run through the sorted view — see displayRows below.
+  const cycleSort = useCallback((col: SortColumn) => {
+    if (sortColumn !== col) {
+      setSortColumn(col);
+      setSortDir("asc");
+      return;
+    }
+    if (sortDir === "asc") {
+      setSortDir("desc");
+      return;
+    }
+    setSortColumn(null);
+    setSortDir("asc");
+  }, [sortColumn, sortDir]);
+
+  // Pre-resolve worker names so the Employee sort is alphabetical by
+  // displayed name rather than internal worker id.
+  const workerNameById = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const w of workers) m.set(w.id, w.name);
+    return m;
+  }, [workers]);
+
+  // Sorted view: each item carries its original index so input handlers
+  // patch the right row in `rows` even after a sort scrambles display
+  // order. When sortColumn is null we keep insertion order.
+  const displayRows = useMemo(() => {
+    const indexed = rows.map((row, originalIdx) => ({ row, originalIdx }));
+    if (!sortColumn) return indexed;
+    const dir = sortDir === "asc" ? 1 : -1;
+    const cmp = (a: { row: EntryDraft }, b: { row: EntryDraft }) => {
+      switch (sortColumn) {
+        case "date":
+          return (a.row.date || "").localeCompare(b.row.date || "") * dir;
+        case "employee": {
+          const an = workerNameById.get(a.row.workerId) ?? "";
+          const bn = workerNameById.get(b.row.workerId) ?? "";
+          return an.localeCompare(bn) * dir;
+        }
+        case "department":
+          return (a.row.departmentCode || "").localeCompare(b.row.departmentCode || "") * dir;
+        case "category":
+          return (a.row.category || "").localeCompare(b.row.category || "") * dir;
+        case "hours":
+          return ((Number(a.row.hours) || 0) - (Number(b.row.hours) || 0)) * dir;
+        default:
+          return 0;
+      }
+    };
+    return [...indexed].sort(cmp);
+  }, [rows, sortColumn, sortDir, workerNameById]);
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -496,18 +620,29 @@ function WorkingHoursTab({
             <Clock className="h-5 w-5 text-[#6B5C32]" /> Daily Working Hours
           </CardTitle>
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Working date — entries on this page are scoped to a SINGLE
-                day at a time (not a range). Per-day editing is intentional:
-                payroll review needs to verify each day's hours discretely.
-                Use the Labor Cost or Department Labor tab for range views. */}
+            {/* Working date range — leave both equal for single-day editing
+                (the historical default). Set From earlier than To to pull a
+                multi-day view; the table grows a Date column and rows can
+                live on different days. New rows always start on the From
+                date but each row's date is editable per-row. */}
             <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
-              <span>Date</span>
+              <span>From</span>
               <Input
                 type="date"
-                value={selectedDate}
-                onChange={(e) => setSelectedDate(e.target.value)}
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
                 className="w-40"
-                title="Working date — entries are scoped to this day"
+                title="Start of working-date range — new rows default to this date"
+              />
+            </label>
+            <label className="flex items-center gap-1.5 text-xs text-[#6B7280]">
+              <span>To</span>
+              <Input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className="w-40"
+                title="End of working-date range (inclusive). Set equal to From for single-day mode."
               />
             </label>
             {/* Copy-from date workflow — typical use: payroll operator
@@ -571,33 +706,80 @@ function WorkingHoursTab({
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                <th className="h-10 px-3 text-left font-medium text-[#374151]">Employee</th>
-                <th className="h-10 px-3 text-left font-medium text-[#374151]">Department</th>
-                <th className="h-10 px-3 text-left font-medium text-[#374151]">Category</th>
-                <th className="h-10 px-3 text-left font-medium text-[#374151] w-24">Hours</th>
+                {/* Date column only renders in multi-day mode — single-day
+                    keeps the original 6-column layout to avoid wasted width. */}
+                {isMultiDay && (
+                  <SortableHeader
+                    label="Date"
+                    column="date"
+                    sortColumn={sortColumn}
+                    sortDir={sortDir}
+                    onClick={cycleSort}
+                    width="w-32"
+                  />
+                )}
+                <SortableHeader
+                  label="Employee"
+                  column="employee"
+                  sortColumn={sortColumn}
+                  sortDir={sortDir}
+                  onClick={cycleSort}
+                />
+                <SortableHeader
+                  label="Department"
+                  column="department"
+                  sortColumn={sortColumn}
+                  sortDir={sortDir}
+                  onClick={cycleSort}
+                />
+                <SortableHeader
+                  label="Category"
+                  column="category"
+                  sortColumn={sortColumn}
+                  sortDir={sortDir}
+                  onClick={cycleSort}
+                />
+                <SortableHeader
+                  label="Hours"
+                  column="hours"
+                  sortColumn={sortColumn}
+                  sortDir={sortDir}
+                  onClick={cycleSort}
+                  width="w-24"
+                />
                 <th className="h-10 px-3 text-left font-medium text-[#374151]">Notes</th>
                 <th className="h-10 px-3 text-left font-medium text-[#374151] w-44">Action</th>
               </tr>
             </thead>
             <tbody>
               {loading && rows.length === 0 && (
-                <tr><td colSpan={6} className="h-20 text-center text-[#9CA3AF]">Loading…</td></tr>
+                <tr><td colSpan={isMultiDay ? 7 : 6} className="h-20 text-center text-[#9CA3AF]">Loading…</td></tr>
               )}
               {!loading && rows.length === 0 && (
                 <tr>
-                  <td colSpan={6} className="h-20 text-center text-[#9CA3AF]">
-                    No entries for {selectedDate}. Click <span className="font-medium">+ Add Row</span> to start.
+                  <td colSpan={isMultiDay ? 7 : 6} className="h-20 text-center text-[#9CA3AF]">
+                    No entries for {isMultiDay ? `${dateFrom} → ${dateTo}` : dateFrom}. Click <span className="font-medium">+ Add Row</span> to start.
                   </td>
                 </tr>
               )}
-              {rows.map((row, idx) => {
+              {displayRows.map(({ row, originalIdx }) => {
                 const isProd = prodCodes.has(row.departmentCode);
                 return (
-                  <tr key={row.id ?? `new-${idx}`} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                  <tr key={row.id ?? `new-${originalIdx}`} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] transition-colors">
+                    {isMultiDay && (
+                      <td className="px-3 py-1.5">
+                        <Input
+                          type="date"
+                          value={row.date}
+                          onChange={(e) => updateField(originalIdx, { date: e.target.value })}
+                          className="h-8 w-32 text-xs"
+                        />
+                      </td>
+                    )}
                     <td className="px-3 py-1.5">
                       <select
                         value={row.workerId}
-                        onChange={(e) => updateField(idx, { workerId: e.target.value })}
+                        onChange={(e) => updateField(originalIdx, { workerId: e.target.value })}
                         className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
                       >
                         <option value="">— select worker —</option>
@@ -611,7 +793,7 @@ function WorkingHoursTab({
                     <td className="px-3 py-1.5">
                       <select
                         value={row.departmentCode}
-                        onChange={(e) => updateField(idx, { departmentCode: e.target.value })}
+                        onChange={(e) => updateField(originalIdx, { departmentCode: e.target.value })}
                         className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
                       >
                         <option value="">— select dept —</option>
@@ -623,7 +805,7 @@ function WorkingHoursTab({
                     <td className="px-3 py-1.5">
                       <select
                         value={row.category}
-                        onChange={(e) => updateField(idx, { category: e.target.value as Category })}
+                        onChange={(e) => updateField(originalIdx, { category: e.target.value as Category })}
                         disabled={!isProd}
                         className="h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
                         title={isProd ? "Production category" : "Non-production dept — no category"}
@@ -640,14 +822,14 @@ function WorkingHoursTab({
                         min={0}
                         step={0.5}
                         value={row.hours}
-                        onChange={(e) => updateField(idx, { hours: Number(e.target.value) })}
+                        onChange={(e) => updateField(originalIdx, { hours: Number(e.target.value) })}
                         className="h-8 w-20 text-xs"
                       />
                     </td>
                     <td className="px-3 py-1.5">
                       <Input
                         value={row.notes}
-                        onChange={(e) => updateField(idx, { notes: e.target.value })}
+                        onChange={(e) => updateField(originalIdx, { notes: e.target.value })}
                         placeholder="e.g. PO-1234"
                         className="h-8 text-xs"
                       />
@@ -657,7 +839,7 @@ function WorkingHoursTab({
                         <Button
                           variant="outline"
                           size="sm"
-                          onClick={() => saveRow(idx)}
+                          onClick={() => saveRow(originalIdx)}
                           disabled={row.saving}
                           className={row.saved ? "border-[#C6DBA8] text-[#4F7C3A]" : ""}
                         >
@@ -665,7 +847,7 @@ function WorkingHoursTab({
                         </Button>
                         <button
                           type="button"
-                          onClick={() => duplicateRow(idx)}
+                          onClick={() => duplicateRow(originalIdx)}
                           className="inline-flex items-center justify-center h-7 w-7 rounded text-[#6B5C32] hover:bg-[#F0ECE9]"
                           title="Duplicate (same worker, new segment)"
                           aria-label="Duplicate row"
@@ -674,7 +856,7 @@ function WorkingHoursTab({
                         </button>
                         <button
                           type="button"
-                          onClick={() => void removeRow(idx)}
+                          onClick={() => void removeRow(originalIdx)}
                           className="inline-flex items-center justify-center h-7 w-7 rounded text-[#9A3A2D] hover:bg-[#F9E1DA]"
                           title={row.id ? "Delete entry" : "Discard draft"}
                           aria-label="Remove row"

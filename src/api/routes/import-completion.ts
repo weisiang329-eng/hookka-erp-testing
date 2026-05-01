@@ -3447,4 +3447,85 @@ app.post("/dedupe-wip-items", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/zero-out-negative-wips
+//
+// One-shot cleanup for the residual ~96 negative wip_items rows accumulated
+// by BUG-2026-04-30-002 (double-consume on WAITING→IN_PROGRESS→COMPLETED;
+// the code-side fix landed in production-orders.ts in the same deploy).
+// These negatives are bug artifacts, not legitimate "missed dept"
+// visibility signals — the user wants them zeroed out.
+//
+// Logic: find every wip_items row with stockQty < 0 and set its stockQty
+// to 0 in a single UPDATE. This endpoint deliberately does NOT call
+// applyWipInventoryChange — it's a pure raw-SQL cleanup, no cascades, no
+// labor entries, no fg_units side effects. The double-consume code fix
+// must already be deployed when this runs live so no NEW negatives accrue
+// during the cleanup window.
+//
+// Dry-run mode (?dryRun=true): SELECT only, returns count + magnitude +
+// sample 10. Live mode (?dryRun=false): single UPDATE statement.
+// Permission gate: production-orders:update (same as the rest of this
+// file's privileged backfill endpoints).
+// ---------------------------------------------------------------------------
+app.post("/zero-out-negative-wips", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // Pre-stats: count + total magnitude of all currently-negative rows.
+  const countRes = await db
+    .prepare(`SELECT COUNT(*) AS n FROM wip_items WHERE stockQty < 0`)
+    .first<{ n: number }>();
+  const negativeRowsBefore = countRes?.n ?? 0;
+  const magnitudeRes = await db
+    .prepare(
+      `SELECT COALESCE(SUM(stockQty), 0) AS n FROM wip_items WHERE stockQty < 0`,
+    )
+    .first<{ n: number }>();
+  const totalMagnitudeBefore = magnitudeRes?.n ?? 0;
+
+  // Sample 10 for spot-check visibility in the dry-run response.
+  const sampleRes = await db
+    .prepare(
+      `SELECT code, stockQty, deptStatus
+         FROM wip_items
+        WHERE stockQty < 0
+        ORDER BY stockQty ASC
+        LIMIT 10`,
+    )
+    .all<{ code: string; stockQty: number; deptStatus: string | null }>();
+  const sample = (sampleRes.results ?? []).map((r) => ({
+    code: r.code,
+    qty: r.stockQty,
+    deptStatus: r.deptStatus,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      rowsAffected: negativeRowsBefore,
+      totalMagnitudeBefore,
+      sample,
+    });
+  }
+
+  // Live: single UPDATE. D1 reports affected row count via meta.changes.
+  const updRes = await db
+    .prepare(`UPDATE wip_items SET stockQty = 0 WHERE stockQty < 0`)
+    .run();
+  const rowsAffected = updRes.meta?.changes ?? 0;
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    rowsAffected,
+    totalMagnitudeBefore,
+    sample,
+  });
+});
+
 export default app;

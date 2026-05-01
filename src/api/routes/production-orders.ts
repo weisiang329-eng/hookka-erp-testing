@@ -1143,7 +1143,20 @@ export async function applyWipInventoryChange(
   // FAB_CUT and WOOD_CUT are producer-only stages — nothing upstream to
   // consume. UPH has its own consume-all-upstream logic in the COMPLETED
   // branch below.
-  if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive) {
+  //
+  // BUG-2026-04-30-002 — double-consume guard. The original gate fired
+  // on `becomingActive` alone, so a JC on the WAITING→IN_PROGRESS→COMPLETED
+  // path entered this branch TWICE: once at IN_PROGRESS (consume fires +
+  // early `return`) and again at COMPLETED (consume fires AGAIN, then
+  // falls through to the producer-add). Net effect: -2 consumes + 1
+  // producer = -1 leak per JC that touched both transitions, accruing
+  // negative wip_items rows on the upstream sibling. Fix: only consume
+  // on the FIRST active transition by gating on !wasActive.
+  const wasActive =
+    prevStatus === "IN_PROGRESS" ||
+    prevStatus === "COMPLETED" ||
+    prevStatus === "TRANSFERRED";
+  if (!isFabCut && !isWoodCut && !isUpholstery && becomingActive && !wasActive) {
     // Per-component upstream consume — sibling lookup is now BOM-branch
     // aware (BUG-2026-04-27 fix, migration 0058). Within one wipKey
     // ("DIVAN" / "HEADBOARD" / "SOFA_*") the BOM has parallel branches

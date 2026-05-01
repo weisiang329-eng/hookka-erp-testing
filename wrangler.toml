@@ -56,21 +56,21 @@ binding = "SESSION_CACHE"
 id = "8f4c4b7ac1f142ff8378eada4602458a"
 
 # ---------------------------------------------------------------------------
-# Preview environment override — staging Hyperdrive (Option C, 2026-05-01).
+# Staging Hyperdrive — separate top-level binding (Option C, 2026-05-01).
 #
-# Cloudflare Pages applies these overrides to non-production deploys
-# (branches != main). Staging Supabase project is hookka-erp-staging
-# (Tokyo, project_ref zaxygxwadidiqcphibma) — cloned from prod data on
-# 2026-05-01 so backfill testing can run against real-shaped data
-# without touching the live DB.
+# Cloudflare Pages does NOT honor [env.preview.*] overrides in
+# wrangler.toml — both production and preview deploys read the same
+# top-level binding set. To get staging isolation, expose BOTH
+# Hyperdrive configs as separate bindings, then have worker.ts route
+# based on c.env.ENVIRONMENT (set per-env in the Pages dashboard:
+# Production env = "production", Preview env = "preview").
+#
+# Staging Supabase: hookka-erp-staging (Tokyo, ref zaxygxwadidiqcphibma)
+# cloned from prod 2026-05-01 for backfill / scenario testing.
 # ---------------------------------------------------------------------------
-[[env.preview.hyperdrive]]
-binding = "HYPERDRIVE"
+[[hyperdrive]]
+binding = "HYPERDRIVE_STAGING"
 id = "759227c0381a4a19ab7537ea48a1560f"
-
-[[env.preview.kv_namespaces]]
-binding = "SESSION_CACHE"
-id = "8f4c4b7ac1f142ff8378eada4602458a"
 
 # ---------------------------------------------------------------------------
 # ERP_METRICS — Cloudflare Analytics Engine dataset (Phase 6 / P6.2-P6.3).

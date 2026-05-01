@@ -823,11 +823,23 @@ app.post("/clear-future-completions", async (c) => {
 // POST /api/import/cascade-upstream-completion
 //
 // Anchor-relative cascade-fill, RESTRICTED to an explicit rule set. Within
-// each (productionOrderId, wipKey) group, find the most-downstream completed
-// JC (the "anchor" — MAX(sequence) among rows where status IN ('COMPLETED',
-// 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's dept is in
-// the rule set, plan completions for the listed target depts in that group.
-// Any other anchor dept → entire group is skipped.
+// each (productionOrderId, wipKey, branchKey) group, find the most-downstream
+// completed JC (the "anchor" — MAX(sequence) among rows where status IN
+// ('COMPLETED', 'TRANSFERRED') AND completedDate IS NOT NULL). If the anchor's
+// dept is in the rule set, plan completions for the listed target depts in
+// that group. Any other anchor dept → entire group is skipped.
+//
+// Why per-branchKey, not just per-wipKey: each (PO, wipKey) typically has
+// TWO BOM sub-branches that must cascade independently. E.g. SOFA_BASE has
+// a fabric branch (FAB_CUT → FAB_SEW) and a wood branch (WOOD_CUT → FRAMING
+// → WEBBING → FOAM). If we group by (PO, wipKey) only, MAX(sequence) picks
+// the higher of the two branch heads — e.g. WOOD_CUT (seq=2) outranks
+// FAB_SEW (seq=1) — and since WOOD_CUT has no upstream cascade rule, the
+// fabric-branch FAB_CUT is left WAITING even though FAB_SEW (its anchor)
+// is complete. Grouping by branchKey too gives each branch its own anchor
+// and lets each cascade fire on its own rule. applyWipInventoryChange's
+// sibling lookup is already (wipKey, branchKey)-scoped (production-orders.ts
+// L1121, L1157, L1373), so per-branch is the natural granularity here too.
 //
 // Default rules (apply regardless of wipType):
 //   UPHOLSTERY → FAB_CUT, FAB_SEW, FOAM, WOOD_CUT, FRAMING, WEBBING
@@ -904,6 +916,7 @@ type CandidateRow = {
   id: string;
   productionOrderId: string;
   wipKey: string | null;
+  branchKey: string | null;
   departmentCode: string | null;
   wipType: string | null;
   sequence: number;
@@ -917,6 +930,7 @@ type CandidateRow = {
 type AnchorRow = {
   productionOrderId: string;
   wk: string;
+  bk: string;
   anchor_seq: number;
   anchor_date: string;
   anchor_dept: string | null;
@@ -984,6 +998,7 @@ app.post("/cascade-upstream-completion", async (c) => {
     .prepare(
       `SELECT j.productionOrderId AS productionOrderId,
               COALESCE(j.wipKey,'') AS wk,
+              COALESCE(j.branchKey,'') AS bk,
               j.sequence AS anchor_seq,
               j.completedDate AS anchor_date,
               j.departmentCode AS anchor_dept,
@@ -992,19 +1007,23 @@ app.post("/cascade-upstream-completion", async (c) => {
          JOIN (
            SELECT productionOrderId,
                   COALESCE(wipKey,'') AS wk2,
+                  COALESCE(branchKey,'') AS bk2,
                   MAX(sequence) AS max_seq
              FROM job_cards
             WHERE status IN ('COMPLETED','TRANSFERRED') AND completedDate IS NOT NULL
-            GROUP BY productionOrderId, COALESCE(wipKey,'')
+            GROUP BY productionOrderId, COALESCE(wipKey,''), COALESCE(branchKey,'')
          ) m
            ON m.productionOrderId = j.productionOrderId
           AND m.wk2 = COALESCE(j.wipKey,'')
+          AND m.bk2 = COALESCE(j.branchKey,'')
           AND m.max_seq = j.sequence
         WHERE j.status IN ('COMPLETED','TRANSFERRED') AND j.completedDate IS NOT NULL`,
     )
     .all<AnchorRow>();
 
-  // Build a map: "<poId>||<wk>" → {anchor_seq, anchor_date, anchor_dept}
+  // Build a map: "<poId>||<wk>||<bk>" → {anchor_seq, anchor_date, anchor_dept}
+  // Per-branchKey scoping so each BOM sub-branch (e.g. fabric vs wood under
+  // SOFA_BASE) gets its own anchor and cascades independently.
   // D1 quirk: snake_case aliases get camelCased on the way out, so
   // `anchor_date` becomes `anchorDate` in the result row. Try both forms.
   const anchorMap = new Map<
@@ -1050,7 +1069,8 @@ app.post("/cascade-upstream-completion", async (c) => {
         ? (raw.productionOrderId as string)
         : "";
     const wk = typeof raw.wk === "string" ? (raw.wk as string) : "";
-    const key = `${poId}||${wk}`;
+    const bk = typeof raw.bk === "string" ? (raw.bk as string) : "";
+    const key = `${poId}||${wk}||${bk}`;
     anchorMap.set(key, {
       anchor_seq: seq,
       anchor_date: date,
@@ -1068,7 +1088,8 @@ app.post("/cascade-upstream-completion", async (c) => {
   const candRes = await db
     .prepare(
       `SELECT j.id AS id, j.productionOrderId AS productionOrderId,
-              j.wipKey AS wipKey, j.departmentCode AS departmentCode,
+              j.wipKey AS wipKey, j.branchKey AS branchKey,
+              j.departmentCode AS departmentCode,
               j.wipType AS wipType, j.sequence AS sequence,
               j.estMinutes AS estMinutes,
               j.productionTimeMinutes AS productionTimeMinutes,
@@ -1093,9 +1114,9 @@ app.post("/cascade-upstream-completion", async (c) => {
   let parallelChainSkipped = 0;
   let clampedToAnchor = 0;
   for (const cand of allNonDone) {
-    const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}`;
+    const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}||${cand.branchKey ?? ""}`;
     const anchor = anchorMap.get(key);
-    if (!anchor) continue; // group has no completed sibling — leave alone
+    if (!anchor) continue; // branch has no completed sibling — leave alone
     groupHadAnchor++;
     if (cand.sequence === anchor.anchor_seq) continue; // shouldn't happen (anchor row is by definition done) but guard
 
@@ -1204,6 +1225,7 @@ app.post("/cascade-upstream-completion", async (c) => {
     id: p.cand.id,
     productionOrderId: p.cand.productionOrderId,
     wipKey: p.cand.wipKey,
+    branchKey: p.cand.branchKey,
     departmentCode: p.cand.departmentCode,
     wipType: p.cand.wipType,
     itemCategory: p.cand.itemCategory,

@@ -103,6 +103,11 @@ type FcSlotInfo = {
   fabricCode: string;
   sizeLabel: string;
   isBF: boolean;
+  // itemCategory — drives the aggregator group key (SOFA cross-PO merge,
+  // BF/ACC per-PO). Distinct from `processCategory` which is what the JC
+  // table's category column actually stores (BOM-process classification).
+  itemCategory: string;
+  processCategory: string;
   totalH: number;
   divanHeightInches: number | null;
   // JC fields (would have been used for the per-piece INSERT)
@@ -111,7 +116,6 @@ type FcSlotInfo = {
   deptName: string;
   sequence: number;
   dueDate: string;
-  category: string;
   minutes: number;
   wipQty: number;
   wipKey: string;
@@ -181,15 +185,23 @@ function joinModelLabel(productCodes: string[]): string {
   return unique.join("+");
 }
 
-// Aggregator — group FAB_CUT slots by (baseModel, fabricCode) within the SO.
-// Returns one merged JC per group with totals + composite wipLabel.
+// Aggregator — category-aware grouping per the pre-77ba23c frontend rule:
+//   SOFA  → (companySOId, baseModel, fabricCode)  cross-PO merge within SO
+//   BF/ACC → (poId)                               per-PO, never cross-line
+// Each BF set already lives on its own line-suffixed po_no so two sets of
+// the same model+fabric in the same parent SO MUST stay separate. Sofa
+// configurations span multiple lines that cutter physically cuts together,
+// so they collapse across POs into one merged JC.
 function aggregateFcSlots(
   slots: FcSlotInfo[],
   companySOId: string,
 ): FcMergedJc[] {
   const groups = new Map<string, FcSlotInfo[]>();
   for (const slot of slots) {
-    const key = `${slot.baseModel || slot.productCode}::${slot.fabricCode}`;
+    const key =
+      slot.itemCategory === "SOFA"
+        ? `SOFA::${companySOId}::${slot.baseModel || slot.productCode}::${slot.fabricCode}`
+        : `PO::${slot.poId}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(slot);
   }
@@ -211,11 +223,20 @@ function aggregateFcSlots(
       anchor.fabricCode,
       anchor.isBF,
     );
-    const wipKey = `${companySOId}::${anchor.baseModel || modelLabel}::${anchor.fabricCode}::FAB_CUT`;
+    // Category-aware wipKey: SOFA merges across POs so the key must be
+    // SO-scoped. BF/ACC merge stays inside one PO so embed poId to keep
+    // multi-set SOs (e.g. 2 BF lines of same baseModel + fabric) cleanly
+    // separated.
+    const wipKey =
+      anchor.itemCategory === "SOFA"
+        ? `${companySOId}::${anchor.baseModel || modelLabel}::${anchor.fabricCode}::FAB_CUT`
+        : `${anchor.poId}::${anchor.baseModel || modelLabel}::${anchor.fabricCode}::FAB_CUT`;
+    const jcIdSeed =
+      anchor.itemCategory === "SOFA"
+        ? `jc-fc-so-${companySOId}-${anchor.baseModel || modelLabel}-${anchor.fabricCode}`
+        : `jc-fc-po-${anchor.poId}`;
     merged.push({
-      jcId: `jc-fc-${companySOId}-${anchor.baseModel || modelLabel}-${anchor.fabricCode}`
-        .replace(/[^a-zA-Z0-9_-]/g, "_")
-        .slice(0, 128),
+      jcId: jcIdSeed.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128),
       poId: anchor.poId,
       deptId: anchor.deptId,
       deptCode: "FAB_CUT",
@@ -227,7 +248,7 @@ function aggregateFcSlots(
       wipLabel,
       wipType: anchor.wipType,
       wipQty: anchor.wipQty,
-      category: anchor.category,
+      category: anchor.processCategory,
       minutes: totalMinutes,
       branchKey: "",
     });
@@ -616,7 +637,11 @@ export async function createProductionOrdersForOrder(
             deptName: p.deptName,
             sequence: p.sequence,
             dueDate: p.dueDate,
-            category: p.category,
+            // SOFA / BEDFRAME / ACCESSORY drives the merge key; pass the
+            // item's itemCategory rather than the BOM-process category
+            // which is something else entirely (sub-assembly classification).
+            itemCategory: category,
+            processCategory: p.category,
             minutes: p.minutes,
             wipQty: p.wipQty,
             wipKey: p.wipKey,

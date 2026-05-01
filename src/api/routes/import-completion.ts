@@ -2943,19 +2943,26 @@ app.post("/backfill-fab-cut-merge", async (c) => {
     .all<FcRow>();
   const allRows = rowsRes.results ?? [];
 
-  // Group by (companySOId, baseModel, fabricCode). Skip rows with missing
-  // companySOId — those are legacy/orphan and can't be merged safely.
+  // Category-aware grouping (mirrors production-builder.ts aggregateFcSlots).
+  //   SOFA  → cross-PO merge by (companySOId, baseModel, fabric)
+  //   BF/ACC → per-PO merge (each set already has its own line-suffixed
+  //            po_no — distinct sets must NOT collapse just because they
+  //            share baseModel + fabric, e.g. 2 BF lines of same model in
+  //            same SO are 2 different cutting jobs).
   const groups = new Map<string, FcRow[]>();
   let skippedNoSO = 0;
   for (const row of allRows) {
     const companySOId = row.poCompanySOId ?? row.poSalesOrderId ?? "";
-    if (!companySOId) {
+    const baseModel = row.bomBaseModel || row.poProductCode || "";
+    const fabric = row.poFabricCode ?? "";
+    const isSofa = (row.poItemCategory ?? "") === "SOFA";
+    if (isSofa && !companySOId) {
       skippedNoSO++;
       continue;
     }
-    const baseModel = row.bomBaseModel || row.poProductCode || "";
-    const fabric = row.poFabricCode ?? "";
-    const key = `${companySOId}::${baseModel}::${fabric}`;
+    const key = isSofa
+      ? `SOFA::${companySOId}::${baseModel}::${fabric}`
+      : `PO::${row.productionOrderId}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(row);
   }
@@ -3014,7 +3021,10 @@ app.post("/backfill-fab-cut-merge", async (c) => {
       isBF,
     );
     const baseModel = anchor.bomBaseModel || anchor.poProductCode || "";
-    const newWipKey = `${anchor.poCompanySOId ?? anchor.poSalesOrderId}::${baseModel}::${anchor.poFabricCode ?? ""}::FAB_CUT`;
+    const isSofa = (anchor.poItemCategory ?? "") === "SOFA";
+    const newWipKey = isSofa
+      ? `${anchor.poCompanySOId ?? anchor.poSalesOrderId}::${baseModel}::${anchor.poFabricCode ?? ""}::FAB_CUT`
+      : `${anchor.productionOrderId}::${baseModel}::${anchor.poFabricCode ?? ""}::FAB_CUT`;
     // If ANY child already DONE, the merged JC carries that DONE state +
     // earliest completedDate. Otherwise WAITING.
     const doneRows = sorted.filter(

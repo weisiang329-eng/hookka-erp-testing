@@ -122,8 +122,16 @@ export function PhotoCropDialog({
   onCancel,
   onConfirm,
 }: Props) {
-  // Source image dimensions captured once after decode.
+  // Source image dimensions captured once after decode. We can't rely on
+  // <img onLoad> alone — for data-URL or cached images the load event fires
+  // before React attaches the listener (and `load` doesn't bubble, so React's
+  // root delegation can't catch it either). Net effect: imgNatural stayed
+  // null forever, the geometry never settled, the crop rect stayed at
+  // {0,0,0,0}, aspect-ratio buttons appeared dead, and Save Crop was disabled
+  // because `disabled={!imgNatural}`. The imgRef + post-mount useEffect
+  // below covers the racing case by polling img.complete on every render.
   const [imgNatural, setImgNatural] = useState<{ w: number; h: number } | null>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   // Viewport sizing. We measure with a ResizeObserver so the box can
   // grow / shrink with the dialog.
@@ -179,6 +187,31 @@ export function PhotoCropDialog({
       setCrop({ x: 0, y: 0, w: 0, h: 0 });
     }
   }, [open, imageDataUrl, initialKey]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Capture naturalWidth/Height even when the load event already fired
+  // before React attached its synthetic listener (cached / data-URL images).
+  // `load` doesn't bubble, so React's root delegation can't catch it either —
+  // for these images the event is gone before we hear about it. We re-run
+  // whenever the source URL or `open` flips, then poll img.complete and fall
+  // back to a one-shot native listener if the image is still decoding.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot capture of natural image dimensions */
+  useEffect(() => {
+    if (!open) return;
+    const img = imgRef.current;
+    if (!img) return;
+    if (img.complete && img.naturalWidth > 0) {
+      setImgNatural({ w: img.naturalWidth, h: img.naturalHeight });
+      return;
+    }
+    const onLoaded = () => {
+      if (img.naturalWidth > 0) {
+        setImgNatural({ w: img.naturalWidth, h: img.naturalHeight });
+      }
+    };
+    img.addEventListener("load", onLoaded);
+    return () => img.removeEventListener("load", onLoaded);
+  }, [open, imageDataUrl]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Measure viewport after layout / on resize.
@@ -794,6 +827,7 @@ export function PhotoCropDialog({
                   (the slider can't help when the geometry was wrong from
                   frame one). */}
             <img
+              ref={imgRef}
               src={imageDataUrl}
               alt="Crop preview"
               draggable={false}

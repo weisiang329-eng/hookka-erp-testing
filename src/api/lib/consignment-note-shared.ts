@@ -831,40 +831,13 @@ export async function updateConsignmentNoteById(
           .run();
       }
 
-      // BUG-2026-04-27-021 (CN side): decrement wip_items.stockQty for
-      // every UPH wipLabel produced by these POs. Same reasoning as the
-      // DO branch — once the CN dispatch flips fg_units LOADED, the FG
-      // view drops the PO and the residual +qty on wip_items has no
-      // backing view, so we balance the books here. Idempotent via the
-      // stampedOnDispatch outer gate (ACTIVE → PARTIALLY_SOLD edge only).
-      const uphRowsRes = await db
-        .prepare(
-          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
-             WHERE productionOrderId IN (${ph})
-               AND departmentCode = 'UPHOLSTERY'
-               AND wipLabel IS NOT NULL
-               AND wipLabel != ''`,
-        )
-        .bind(...itemPoIds)
-        .all<{
-          productionOrderId: string;
-          wipLabel: string;
-          wipQty: number | null;
-        }>();
-      const uphRows = uphRowsRes.results ?? [];
-      const poById = new Map(poRows.map((p) => [p.id, p]));
-      for (const u of uphRows) {
-        const po = poById.get(u.productionOrderId);
-        if (!po) continue;
-        const dec = Number(u.wipQty) || Number(po.quantity) || 0;
-        if (dec === 0) continue;
-        await db
-          .prepare(
-            `UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?`,
-          )
-          .bind(dec, u.wipLabel)
-          .run();
-      }
+      // BUG-2026-04-30-003: removed wip_items decrement (formerly
+      // BUG-2026-04-27-021 CN side). UPH +N is now subtracted at
+      // UPH-all-done in applyWipInventoryChange (production-orders.ts,
+      // Plan B). By the time CN dispatch fires, wip_items has already
+      // been zeroed for these UPH labels — so the dispatch-time
+      // decrement here is redundant and would drive stockQty negative.
+      // CN dispatch only updates fg_units / stock_movements now.
     }
   }
 
@@ -946,50 +919,11 @@ export async function updateConsignmentNoteById(
         .run();
     }
 
-    // BUG-2026-04-27-021 (CN reverse): re-credit wip_items.stockQty for
-    // every UPH wipLabel produced by these POs. Symmetric inverse of the
-    // dispatch decrement above — gated on PARTIALLY_SOLD → ACTIVE so a
-    // CN that never reached PARTIALLY_SOLD never enters this branch.
-    if (stampedPoIds.length > 0) {
-      const ph = stampedPoIds.map(() => "?").join(",");
-      const reverseRes = await db
-        .prepare(
-          `SELECT productionOrderId, wipLabel, wipQty FROM job_cards
-             WHERE productionOrderId IN (${ph})
-               AND departmentCode = 'UPHOLSTERY'
-               AND wipLabel IS NOT NULL
-               AND wipLabel != ''`,
-        )
-        .bind(...stampedPoIds)
-        .all<{
-          productionOrderId: string;
-          wipLabel: string;
-          wipQty: number | null;
-        }>();
-      const reverseRows = reverseRes.results ?? [];
-      const poQtyByIdRes = await db
-        .prepare(
-          `SELECT id, quantity FROM production_orders WHERE id IN (${ph})`,
-        )
-        .bind(...stampedPoIds)
-        .all<{ id: string; quantity: number | null }>();
-      const poQtyById = new Map(
-        (poQtyByIdRes.results ?? []).map((r) => [r.id, r.quantity]),
-      );
-      for (const u of reverseRows) {
-        const inc =
-          Number(u.wipQty) ||
-          Number(poQtyById.get(u.productionOrderId)) ||
-          0;
-        if (inc === 0) continue;
-        await db
-          .prepare(
-            `UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?`,
-          )
-          .bind(inc, u.wipLabel)
-          .run();
-      }
-    }
+    // BUG-2026-04-30-003: removed wip_items re-credit (formerly
+    // BUG-2026-04-27-021 CN reverse). Forward decrement was removed
+    // (UPH +N is now subtracted at UPH-all-done in
+    // applyWipInventoryChange), so the reverse credit is no longer
+    // needed. fg_units rollback above remains intact.
   }
 
   // -------------------------------------------------------------------

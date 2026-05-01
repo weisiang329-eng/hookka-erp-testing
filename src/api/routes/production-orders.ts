@@ -1064,6 +1064,43 @@ export async function applyWipInventoryChange(
   if (wasDone && !isDone) {
     const refundQty = wipQty;
     if (isUpholstery) {
+      // BUG-2026-04-30-003 reverse symmetry: if PO was previously
+      // all-UPH-done (Plan B subtract had fired in the forward COMPLETED
+      // branch), reverting one UPH JC means the goods are back as WIP.
+      // Add back +wipQty for every UPH JC in this PO. Net effect:
+      //   - reverting JC's own wipLabel: +wipQty (here) - wipQty (subtract
+      //     below) = 0   ← correct, this UPH is no longer producing
+      //   - other UPH JCs (still COMPLETED): +wipQty (here) only, no
+      //     subtract applies → restored as WIP since PO is no longer
+      //     fully UPH-complete.
+      // wasAllUphDone is true iff every UPH JC in this PO is currently
+      // COMPLETED/TRANSFERRED EXCEPT the reverting one — and we know the
+      // reverting one was previously COMPLETED (wasDone=true).
+      const poUphJcs = allJcRows.filter(
+        (j) =>
+          j.productionOrderId === poRow.id &&
+          (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
+      );
+      const wasAllUphDone =
+        poUphJcs.length > 0 &&
+        poUphJcs.every((j) =>
+          j.id === jcRow.id
+            ? true // wasDone=true, this JC was COMPLETED before
+            : j.status === "COMPLETED" || j.status === "TRANSFERRED",
+        );
+      if (wasAllUphDone) {
+        for (const uphJc of poUphJcs) {
+          if (!uphJc.wipLabel) continue;
+          const addQty = uphJc.wipQty || poRow.quantity || 1;
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+            )
+            .bind(addQty, uphJc.wipLabel)
+            .run();
+        }
+      }
+
       // Subtract UPH's own row.
       // BUG-2026-04-27-013: no MAX(0) clamp — symmetric with the forward
       // consume; a rollback before any completion can go negative as a
@@ -1304,6 +1341,43 @@ export async function applyWipInventoryChange(
             consumeQty,
           )
           .run();
+      }
+
+      // BUG-2026-04-30-003 (Plan B): WIP→FG transition mirrors frontend
+      // `deriveFGStock` rule (src/pages/inventory/index.tsx:307-322). When
+      // ALL UPH JCs in this PO are COMPLETED/TRANSFERRED, the goods
+      // conceptually transition to FG. Subtract every UPH JC's +wipQty
+      // from wip_items so the ledger no longer carries phantom WIP for
+      // goods that the frontend treats as FG. Symmetric with the rollback
+      // branch above (BUG-2026-04-30-003 reverse). After this fires the
+      // DO LOADED / CN dispatch wip_items writes become redundant and have
+      // been removed (see delivery-orders.ts + consignment-note-shared.ts).
+      //
+      // PER-PO trigger: BEDFRAME has DIVAN+HB UPH JCs in one PO; SOFA has
+      // BASE+CUSHION+ARMREST UPH JCs in one PO (see _shared/production-builder
+      // SOFA-set logic). Accessory: same. allJcRows already reflects the
+      // post-update state (refreshed at the call site).
+      const poUphJcs = allJcRows.filter(
+        (j) =>
+          j.productionOrderId === poRow.id &&
+          (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
+      );
+      const allUphDone =
+        poUphJcs.length > 0 &&
+        poUphJcs.every(
+          (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+        );
+      if (allUphDone) {
+        for (const uphJc of poUphJcs) {
+          if (!uphJc.wipLabel) continue;
+          const subQty = uphJc.wipQty || poRow.quantity || 1;
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty - ? WHERE code = ?",
+            )
+            .bind(subQty, uphJc.wipLabel)
+            .run();
+        }
       }
       return;
     }

@@ -337,89 +337,16 @@ app.get("/", async (c) => {
     else jcsByLabel.set(label, [jc]);
   }
 
-  // ---- BUG-2026-04-27-017 follow-up: conditional UPH hide -----------
-  // Pre-compute "PO is fully UPH-complete" once per PO: TRUE iff the PO
-  // has at least one UPH JC AND every UPH JC is COMPLETED/TRANSFERRED.
-  // A PO with no UPH JCs at all (e.g. accessory) is NOT considered
-  // fully UPH-complete — but its wip_items rows wouldn't carry
-  // deptStatus='UPHOLSTERY' anyway, so the flag is only consulted for
-  // POs that did write a UPH producer row.
-  const poFullyUphComplete = new Map<string, boolean>();
-  for (const po of pos) {
-    const myJcs = jcsByPo.get(po.id) ?? [];
-    const uphJcs = myJcs.filter(
-      (j) => (j.departmentCode || "").toUpperCase() === "UPHOLSTERY",
-    );
-    if (uphJcs.length === 0) {
-      poFullyUphComplete.set(po.id, false);
-      continue;
-    }
-    poFullyUphComplete.set(
-      po.id,
-      uphJcs.every(
-        (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
-      ),
-    );
-  }
-
-  // BUG-2026-04-27-033 ("double entry" — user-reported): when all UPH JCs
-  // of a PO are COMPLETED, the PO transitions to FG via `deriveFGStock`
-  // (Layer 1: pure status, no writes). The cascade in production-orders.ts
-  // (Layer 2: inventory bookkeeping) writes UPH +N producer rows for the
-  // same goods. Layer 1 surfaces the goods on the FG board; Layer 2's
-  // UPH +N row, if also shown on WIP, double-counts the same goods.
-  //
-  // Fix: hide UPHOLSTERY-tagged wip_items rows whose every linked PO is
-  // fully UPH-complete — those goods are FG, not WIP.
-  //
-  // PENDING (-N) stub rows from BUG-2026-04-27-013 (cascade tried to
-  // consume a missing upstream wip_items row) STAY VISIBLE — they are
-  // an audit signal ("you skipped a dept"), independent of the
-  // FG/double-entry concern. The user explicitly wants these visible
-  // for reconcile, even after the PO is FG. The cascade keeps writing
-  // them; the read filter does not hide them.
-  //
-  // Multi-PO mixed (BUG-2026-04-27-018, partial vs fully): the row stays
-  // visible at the full ledger qty if any contributing PO is not yet FG;
-  // the FG portion is correctly surfaced via deriveFGStock. Documented
-  // in `docs/INVENTORY-WIP-FLOW.md` § 7.
-  //
-  // Orphan rows (no linking JC at all — legacy / migration residue /
-  // external entry, BUG-2026-04-27-019) → show as-is so the user can
-  // spot and reconcile.
-  const wipItemRows: WipItemRow[] = wipItemRowsAll.filter((w) => {
-    if ((w.deptStatus || "").toUpperCase() !== "UPHOLSTERY") return true;
-    // BUG-2026-04-27-033 v2: a single UPH wip_label is SHARED across every
-    // PO whose product variant produces that label (e.g. wip_label
-    // "1007-(Q) -HB 22\"" matches every 1007-(Q) BF PO ever planned —
-    // 263+ rows in our case). The previous filter required EVERY linked
-    // UPH JC's PO (including those still WAITING in other POs) to be
-    // fully UPH-complete, which is essentially never true once the row
-    // is shared. Result: UPH +N rows for fully-complete POs stayed
-    // visible on WIP while the same goods also surfaced on FG via
-    // `deriveFGStock` → user-reported "double entry".
-    //
-    // Correct rule: only the UPH JCs that have already COMPLETED have
-    // contributed to this row's stockQty. Hide iff ALL of those
-    // contributing JCs' POs are fully UPH-complete (i.e. the entire
-    // current stockQty is FG, not WIP). Other POs whose UPH is still
-    // WAITING haven't written to this row yet — they'll add their share
-    // later, at which point the filter re-evaluates with them included.
-    const linkedCompletedUphJcs = (jcsByLabel.get(w.code) ?? []).filter(
-      (jc) =>
-        (jc.departmentCode || "").toUpperCase() === "UPHOLSTERY" &&
-        (jc.status === "COMPLETED" || jc.status === "TRANSFERRED"),
-    );
-    if (
-      linkedCompletedUphJcs.length > 0 &&
-      linkedCompletedUphJcs.every((jc) =>
-        poFullyUphComplete.get(jc.productionOrderId),
-      )
-    ) {
-      return false; // hide — every contributing PO is now FG
-    }
-    return true;
-  });
+  // BUG-2026-04-30-003: removed the UPH-row hide filter (formerly
+  // BUG-2026-04-27-033 v2). The backend ledger (`wip_items`) now
+  // correctly subtracts UPH +N when all UPH JCs in a PO are done — see
+  // applyWipInventoryChange's UPH COMPLETED branch in
+  // src/api/routes/production-orders.ts (Plan B). Once that subtract
+  // fires, the row's stockQty falls to zero on its own, so frontend
+  // masking is no longer needed. The pre-computed
+  // `poFullyUphComplete` map (sole consumer was this filter) was also
+  // removed.
+  const wipItemRows: WipItemRow[] = wipItemRowsAll;
 
   const today = new Date();
   const todayLaborRatePerMinSen = laborRateForDate(today);

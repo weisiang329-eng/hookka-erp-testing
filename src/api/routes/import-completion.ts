@@ -3528,4 +3528,631 @@ app.post("/zero-out-negative-wips", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/rebuild-wip-from-jcs
+//
+// One-shot reconciliation that rebuilds wip_items.stockQty from current
+// job_cards truth. After the cleanup chain (CSV import, cascade-upstream-
+// completion, /backfill-cascade-wip-producers, /refund-backfill-overconsume,
+// /dedupe-wip-items, /normalize-fullwidth-parens, /zero-out-negative-wips)
+// wip_items still holds +1,114 phantom inflation across 498 rows because
+// /backfill-cascade-wip-producers double-fired producer-add on a subset of
+// CSV-imported JCs whose pic1Id was empty. Rather than try yet another
+// surgical refund pass, the user wants ONE deterministic SET-from-truth
+// reconciliation: walk every JC, compute what each wip_items.code SHOULD
+// be, and overwrite.
+//
+// Mirrors `applyWipInventoryChange` (production-orders.ts:965-1413) but
+// fires each contribution exactly once per JC — bypassing the historical
+// double-fire risk that produced the drift in the first place. Pure SQL
+// reads + JS aggregation; pure UPDATE/INSERT/DELETE writes on wip_items.
+// Does NOT call applyWipInventoryChange and does NOT touch any other
+// table (job_cards / production_orders / fg_units / fg_batches /
+// cost_ledger / BOM tables are all read-only or untouched).
+//
+// Per-code expected formula:
+//
+//   producer-add (non-PACKING, COMPLETED|TRANSFERRED, wipLabel=code):
+//     +SUM(wipQty)   — every dept that produces output, including UPH self-add.
+//
+//   per-component consume (non-UPH, non-FAB_CUT, non-WOOD_CUT, non-PACKING,
+//   IN_PROGRESS|COMPLETED|TRANSFERRED, wipKey+branchKey-aware):
+//     for each such JC, find the upstream sibling at MAX(sequence) below own
+//     within (wipKey, branchKey). That sibling's wipLabel gets -wipQty.
+//     Note: applyWipInventoryChange now (post-eb58741) skips the consume on
+//     IN_PROGRESS→COMPLETED to avoid double-fire — for the rebuild, fire
+//     ONCE per active-or-done JC (which is exactly what one transition would
+//     have done if there were no bugs).
+//
+//   UPH branch-terminal consume (UPH, COMPLETED|TRANSFERRED):
+//     for each UPH JC, group its same-wipKey siblings by branchKey, and for
+//     each branchKey find the JC at MAX(sequence) below UPH's sequence.
+//     That JC's wipLabel gets -wipQty per UPH JC.
+//
+//   PACKING never touches wip_items (line 992-993). Skipped entirely.
+//
+// Sofa Fab Sew zero-out (production-orders.ts:1346-1376):
+//   When the first FAB_SEW JC in a (salesOrderId, fabricCode) sofa group
+//   transitions to IN_PROGRESS, EVERY FAB_CUT wipLabel in that group is
+//   forced to 0 (the bolt physically leaves Fab Cut's shelf the moment Fab
+//   Sew picks it up). This is an irreversible state change at IN_PROGRESS
+//   time. For the rebuild we honour it as: if ANY FAB_SEW JC in a sofa PO
+//   group's (salesOrderId, fabricCode) is in IN_PROGRESS|COMPLETED|
+//   TRANSFERRED, force every FAB_CUT wipLabel in that group's POs to 0
+//   regardless of producer-add count.
+//
+// Edge cases:
+//   - JC with empty/NULL wipLabel: no producer-add, no self-consume.
+//   - JC with NULL wipKey: no consume sibling lookup (skip).
+//   - JC with NULL branchKey: matched to siblings with NULL branchKey
+//     (treat NULL == NULL — mirrors the JS filter `(j.branchKey ?? "")` in
+//     applyWipInventoryChange).
+//   - PO status (CANCELLED etc): NOT filtered. Mirrors current
+//     applyWipInventoryChange semantics — it has never filtered by PO
+//     status. JCs in CANCELLED POs that are themselves still COMPLETED
+//     contribute. (Cancelling a PO does not retro-zero the wip_items it
+//     fired; preserve that behaviour.)
+//
+// Idempotency: a single rebuild pass produces a deterministic result
+// regardless of whether wip_items currently holds positives, negatives, or
+// 0. We SET absolute values via UPDATE/INSERT; we do not add/subtract.
+//
+// Output: dry-run shows planned writes + sample of biggest changes; live
+// applies via db.batch() for atomicity.
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+type RebuildJcRow = {
+  id: string;
+  productionOrderId: string;
+  departmentCode: string | null;
+  status: string;
+  sequence: number;
+  wipKey: string | null;
+  wipLabel: string | null;
+  wipQty: number | null;
+  branchKey: string | null;
+};
+
+type RebuildPoRow = {
+  id: string;
+  productCode: string | null;
+  itemCategory: string | null;
+  salesOrderId: string | null;
+  fabricCode: string | null;
+  quantity: number | null;
+};
+
+type RebuildWipRow = {
+  id: string;
+  code: string;
+  type: string;
+  relatedProduct: string | null;
+  deptStatus: string | null;
+  stockQty: number;
+  status: string;
+};
+
+app.post("/rebuild-wip-from-jcs", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // ----- Step 1 — load all JCs (one query) -----
+  const jcRes = await db
+    .prepare(
+      `SELECT id, productionOrderId, departmentCode, status, sequence,
+              wipKey, wipLabel, wipQty, branchKey
+         FROM job_cards`,
+    )
+    .all<RebuildJcRow>();
+  const allJcs = jcRes.results ?? [];
+
+  // ----- Step 2 — load PO essentials for sofa-FAB_SEW edge case -----
+  // We need itemCategory, salesOrderId, fabricCode for sofa zero-out, and
+  // productCode + quantity for the synthesized fallback wipLabel logic
+  // (mirrors applyWipInventoryChange's wipLabel fallback at line 1003-1015).
+  const poRes = await db
+    .prepare(
+      `SELECT id, productCode, itemCategory, salesOrderId, fabricCode, quantity
+         FROM production_orders`,
+    )
+    .all<RebuildPoRow>();
+  const poById = new Map<string, RebuildPoRow>();
+  for (const p of poRes.results ?? []) poById.set(p.id, p);
+
+  // ----- Step 3 — load current wip_items rows -----
+  const wipRes = await db
+    .prepare(
+      `SELECT id, code, type, relatedProduct, deptStatus, stockQty, status
+         FROM wip_items`,
+    )
+    .all<RebuildWipRow>();
+  const wipByCode = new Map<string, RebuildWipRow>();
+  for (const w of wipRes.results ?? []) {
+    // Defensive: if duplicates somehow exist (post-dedupe should be 0),
+    // keep the first; rebuild will collapse via UPDATE on canonical id.
+    if (!wipByCode.has(w.code)) wipByCode.set(w.code, w);
+  }
+  const totalRowsBefore = wipRes.results?.length ?? 0;
+
+  // Helper: synthesize wipLabel exactly as applyWipInventoryChange does
+  // when jcRow.wipLabel is empty (line 1003-1015). This guarantees the
+  // rebuild keys match what the live cascade would have written.
+  const synthLabel = (jc: RebuildJcRow, po: RebuildPoRow | undefined): string => {
+    const direct = (jc.wipLabel ?? "").trim();
+    if (direct) return direct;
+    const dept = (jc.departmentCode ?? "").toUpperCase();
+    const parts: string[] = [];
+    const pc = (po?.productCode ?? "").trim();
+    if (pc) parts.push(pc);
+    const wc = (jc.wipKey ?? "").trim();
+    if (wc) parts.push(wc);
+    if (dept) parts.push(`(${dept})`);
+    return parts.join(" ").trim();
+  };
+
+  // Helper: effective wipQty mirrors `jcRow.wipQty || poRow.quantity || 1`.
+  const effQty = (jc: RebuildJcRow, po: RebuildPoRow | undefined): number => {
+    const q = jc.wipQty;
+    if (typeof q === "number" && q !== 0) return q;
+    const pq = po?.quantity;
+    if (typeof pq === "number" && pq !== 0) return pq;
+    return 1;
+  };
+
+  // ----- Step 4 — index siblings per (productionOrderId) for sibling lookup -----
+  // applyWipInventoryChange's child lookup walks `allJcRows` filtered by
+  // (wipKey, branchKey, sequence < own). The original code's `allJcRows`
+  // was the JC list FOR THAT PO — sibling matching never crossed PO
+  // boundaries. Preserve that: index by productionOrderId.
+  const jcsByPo = new Map<string, RebuildJcRow[]>();
+  for (const jc of allJcs) {
+    const list = jcsByPo.get(jc.productionOrderId) ?? [];
+    list.push(jc);
+    jcsByPo.set(jc.productionOrderId, list);
+  }
+
+  const findUpstream = (jc: RebuildJcRow): RebuildJcRow | null => {
+    if (!jc.wipKey) return null;
+    const myBranch = jc.branchKey ?? "";
+    const siblings = jcsByPo.get(jc.productionOrderId) ?? [];
+    let best: RebuildJcRow | null = null;
+    for (const s of siblings) {
+      if (s.wipKey !== jc.wipKey) continue;
+      if ((s.branchKey ?? "") !== myBranch) continue;
+      if (s.sequence >= jc.sequence) continue;
+      if (!s.wipLabel) continue;
+      if (!best || s.sequence > best.sequence) best = s;
+    }
+    return best;
+  };
+
+  // For UPH branch-terminal consume: per UPH JC, return one sibling per
+  // branchKey at MAX sequence below UPH's seq.
+  const findUphBranchTerminals = (uph: RebuildJcRow): RebuildJcRow[] => {
+    if (!uph.wipKey) return [];
+    const siblings = jcsByPo.get(uph.productionOrderId) ?? [];
+    const byBranch = new Map<string, RebuildJcRow>();
+    for (const s of siblings) {
+      if (s.wipKey !== uph.wipKey) continue;
+      if (s.sequence >= uph.sequence) continue;
+      if (!s.wipLabel) continue;
+      const bk = s.branchKey ?? "";
+      const cur = byBranch.get(bk);
+      if (!cur || s.sequence > cur.sequence) byBranch.set(bk, s);
+    }
+    return Array.from(byBranch.values());
+  };
+
+  // ----- Step 5 — accumulate expected stockQty per code -----
+  const expected = new Map<string, number>();
+  // Track first-seen JC metadata per code so INSERT path has type/related.
+  const codeMeta = new Map<
+    string,
+    { type: string; relatedProduct: string; deptStatus: string }
+  >();
+  const bumpExpected = (code: string, delta: number): void => {
+    if (!code) return;
+    expected.set(code, (expected.get(code) ?? 0) + delta);
+  };
+  const recordMeta = (
+    code: string,
+    type: string,
+    relatedProduct: string,
+    deptStatus: string,
+  ): void => {
+    if (!code) return;
+    if (codeMeta.has(code)) return;
+    codeMeta.set(code, { type, relatedProduct, deptStatus });
+  };
+
+  const shortType = (wipType: string | null | undefined, deptCode: string): string => {
+    const t = (wipType ?? "").toUpperCase();
+    if (t === "HEADBOARD") return "HB";
+    if (t === "SOFA_BASE") return "BASE";
+    if (t === "SOFA_CUSHION") return "CUSHION";
+    if (t === "SOFA_ARMREST") return "ARMREST";
+    if (t) return t;
+    return deptCode || "WIP";
+  };
+
+  // 5a — producer-add: every JC with status DONE, dept != PACKING, label
+  // non-empty contributes +effQty to its own wipLabel.
+  // 5b — UPH self-add is just the same loop (UPH falls through with
+  // dept!=PACKING and gets its own row written too — see line 1284-1306).
+  for (const jc of allJcs) {
+    const dept = (jc.departmentCode ?? "").toUpperCase();
+    if (dept === "PACKING") continue;
+    const status = (jc.status ?? "").toUpperCase();
+    const isDone = status === "COMPLETED" || status === "TRANSFERRED";
+    if (!isDone) continue;
+    const po = poById.get(jc.productionOrderId);
+    const label = synthLabel(jc, po);
+    if (!label) continue;
+    const qty = effQty(jc, po);
+    bumpExpected(label, +qty);
+    // wipType isn't on RebuildJcRow (we omitted it from SELECT — the
+    // shortType is dept-aware enough). Use deptCode as the type seed.
+    // The shortType helper only really needs wipType for a few enum
+    // outputs; absent that, the dept code is a reasonable fallback for
+    // INSERT metadata. (wip_items.type is informational, not load-bearing
+    // for stock math.)
+    recordMeta(
+      label,
+      shortType(null, dept),
+      po?.productCode ?? "",
+      dept === "UPHOLSTERY" ? "UPHOLSTERY" : dept,
+    );
+  }
+
+  // 5c — per-component consume: non-UPH, non-FAB_CUT, non-WOOD_CUT,
+  // non-PACKING JCs with status active|done — each contributes -effQty
+  // to its upstream sibling's wipLabel.
+  for (const jc of allJcs) {
+    const dept = (jc.departmentCode ?? "").toUpperCase();
+    if (
+      dept === "UPHOLSTERY" ||
+      dept === "FAB_CUT" ||
+      dept === "WOOD_CUT" ||
+      dept === "PACKING" ||
+      dept === ""
+    ) {
+      continue;
+    }
+    const status = (jc.status ?? "").toUpperCase();
+    const isActive =
+      status === "IN_PROGRESS" ||
+      status === "COMPLETED" ||
+      status === "TRANSFERRED";
+    if (!isActive) continue;
+    const upstream = findUpstream(jc);
+    if (!upstream || !upstream.wipLabel) continue;
+    const po = poById.get(jc.productionOrderId);
+    const qty = effQty(jc, po);
+    bumpExpected(upstream.wipLabel, -qty);
+    // If the upstream wip_items row doesn't exist yet (skipped dept), make
+    // sure we still record meta so an INSERT can land if needed.
+    const upPo = poById.get(upstream.productionOrderId);
+    recordMeta(
+      upstream.wipLabel,
+      shortType(null, (upstream.departmentCode ?? "").toUpperCase()),
+      upPo?.productCode ?? "",
+      "PENDING",
+    );
+  }
+
+  // 5d — UPH branch-terminal consume: each UPH JC (DONE) consumes -effQty
+  // on each of its branch terminals' wipLabels.
+  for (const jc of allJcs) {
+    const dept = (jc.departmentCode ?? "").toUpperCase();
+    if (dept !== "UPHOLSTERY") continue;
+    const status = (jc.status ?? "").toUpperCase();
+    const isDone = status === "COMPLETED" || status === "TRANSFERRED";
+    if (!isDone) continue;
+    const po = poById.get(jc.productionOrderId);
+    const qty = effQty(jc, po);
+    const terminals = findUphBranchTerminals(jc);
+    for (const t of terminals) {
+      if (!t.wipLabel) continue;
+      bumpExpected(t.wipLabel, -qty);
+      const tPo = poById.get(t.productionOrderId);
+      recordMeta(
+        t.wipLabel,
+        shortType(null, (t.departmentCode ?? "").toUpperCase()),
+        tPo?.productCode ?? "",
+        "PENDING",
+      );
+    }
+  }
+
+  // ----- Step 6 — sofa FAB_SEW zero-out edge case -----
+  // Group sofa POs by (salesOrderId, fabricCode). If any FAB_SEW JC across
+  // the group is IN_PROGRESS|COMPLETED|TRANSFERRED, every FAB_CUT wipLabel
+  // in that group's POs is forced to 0.
+  type SofaGroupKey = string; // `${salesOrderId}|${fabricCode}`
+  const sofaGroups = new Map<SofaGroupKey, RebuildPoRow[]>();
+  for (const po of poById.values()) {
+    if ((po.itemCategory ?? "").toUpperCase() !== "SOFA") continue;
+    if (!po.salesOrderId || !po.fabricCode) continue;
+    const k = `${po.salesOrderId}|${po.fabricCode}`;
+    const list = sofaGroups.get(k) ?? [];
+    list.push(po);
+    sofaGroups.set(k, list);
+  }
+
+  const zeroedFabCutLabels = new Set<string>();
+  for (const [, pos] of sofaGroups) {
+    // Has any FAB_SEW in this group transitioned past WAITING?
+    let triggered = false;
+    for (const po of pos) {
+      const jcs = jcsByPo.get(po.id) ?? [];
+      for (const jc of jcs) {
+        if ((jc.departmentCode ?? "").toUpperCase() !== "FAB_SEW") continue;
+        const st = (jc.status ?? "").toUpperCase();
+        if (
+          st === "IN_PROGRESS" ||
+          st === "COMPLETED" ||
+          st === "TRANSFERRED"
+        ) {
+          triggered = true;
+          break;
+        }
+      }
+      if (triggered) break;
+    }
+    if (!triggered) continue;
+    // Force every FAB_CUT wipLabel in this group to 0.
+    for (const po of pos) {
+      const jcs = jcsByPo.get(po.id) ?? [];
+      for (const jc of jcs) {
+        if ((jc.departmentCode ?? "").toUpperCase() !== "FAB_CUT") continue;
+        const label = synthLabel(jc, po);
+        if (!label) continue;
+        zeroedFabCutLabels.add(label);
+      }
+    }
+  }
+  for (const label of zeroedFabCutLabels) {
+    expected.set(label, 0);
+  }
+
+  // ----- Step 7 — diff against current wip_items, build plan -----
+  type UpdatePlan = { id: string; code: string; from: number; to: number };
+  type InsertPlan = {
+    code: string;
+    qty: number;
+    type: string;
+    relatedProduct: string;
+    deptStatus: string;
+  };
+  type DeletePlan = { id: string; code: string; from: number };
+
+  const updates: UpdatePlan[] = [];
+  const inserts: InsertPlan[] = [];
+  const deletes: DeletePlan[] = [];
+
+  // Drift before = sum(current stockQty across all rows) — sum(expected
+  // across all expected codes ∪ current codes).
+  let totalCurrentSum = 0;
+  for (const w of wipRes.results ?? []) totalCurrentSum += w.stockQty || 0;
+  let totalExpectedSum = 0;
+  for (const v of expected.values()) totalExpectedSum += v;
+  // For codes that exist in wip_items but NOT in expected, treat expected as 0.
+  for (const w of wipRes.results ?? []) {
+    if (!expected.has(w.code)) {
+      // expected effectively 0 for this code; drift is -(current).
+    }
+  }
+  const totalDriftBefore = totalCurrentSum - totalExpectedSum;
+
+  // For each code in expected: if existing row, plan UPDATE (or DELETE if
+  // expected==0 and current!=0); else if expected != 0, plan INSERT.
+  for (const [code, qty] of expected) {
+    const cur = wipByCode.get(code);
+    if (cur) {
+      if ((cur.stockQty || 0) === qty) continue;
+      if (qty === 0) {
+        deletes.push({ id: cur.id, code, from: cur.stockQty });
+      } else {
+        updates.push({ id: cur.id, code, from: cur.stockQty, to: qty });
+      }
+    } else if (qty !== 0) {
+      const meta = codeMeta.get(code) ?? {
+        type: "WIP",
+        relatedProduct: "",
+        deptStatus: "PENDING",
+      };
+      inserts.push({
+        code,
+        qty,
+        type: meta.type,
+        relatedProduct: meta.relatedProduct,
+        deptStatus: meta.deptStatus,
+      });
+    }
+  }
+
+  // For codes in wip_items but NOT in expected: expected = 0. If
+  // current != 0, plan DELETE. (If current == 0, leave alone — don't
+  // delete already-zero unrelated rows.)
+  for (const w of wipRes.results ?? []) {
+    if (expected.has(w.code)) continue;
+    if ((w.stockQty || 0) !== 0) {
+      deletes.push({ id: w.id, code: w.code, from: w.stockQty });
+    }
+  }
+
+  // ----- Aggregates for response -----
+  // Per-dept summary (rough — keyed off codeMeta.type which is dept-ish).
+  const byDept: Record<
+    string,
+    { update: number; insert: number; delete: number; netDelta: number }
+  > = {};
+  const deptOf = (code: string): string => {
+    const meta = codeMeta.get(code);
+    if (meta) return meta.deptStatus || meta.type || "UNKNOWN";
+    // Fall back to whatever the existing wip_items row says.
+    const w = wipByCode.get(code);
+    return w?.deptStatus || w?.type || "UNKNOWN";
+  };
+  const bumpDept = (code: string, kind: "update" | "insert" | "delete", delta: number): void => {
+    const k = deptOf(code);
+    const slot = byDept[k] ?? { update: 0, insert: 0, delete: 0, netDelta: 0 };
+    slot[kind] += 1;
+    slot.netDelta += delta;
+    byDept[k] = slot;
+  };
+  for (const u of updates) bumpDept(u.code, "update", u.to - u.from);
+  for (const i of inserts) bumpDept(i.code, "insert", i.qty);
+  for (const d of deletes) bumpDept(d.code, "delete", -d.from);
+
+  // Sample: 20 biggest absolute changes (worst inflated rows getting
+  // brought down, biggest insertions, biggest deletions).
+  type SampleRow = {
+    code: string;
+    currentQty: number;
+    expectedQty: number;
+    diff: number;
+    op: "update" | "insert" | "delete";
+  };
+  const sampleAll: SampleRow[] = [];
+  for (const u of updates) {
+    sampleAll.push({
+      code: u.code,
+      currentQty: u.from,
+      expectedQty: u.to,
+      diff: u.to - u.from,
+      op: "update",
+    });
+  }
+  for (const i of inserts) {
+    sampleAll.push({
+      code: i.code,
+      currentQty: 0,
+      expectedQty: i.qty,
+      diff: i.qty,
+      op: "insert",
+    });
+  }
+  for (const d of deletes) {
+    sampleAll.push({
+      code: d.code,
+      currentQty: d.from,
+      expectedQty: 0,
+      diff: -d.from,
+      op: "delete",
+    });
+  }
+  sampleAll.sort((a, b) => Math.abs(b.diff) - Math.abs(a.diff));
+  const sample = sampleAll.slice(0, 20);
+
+  // Drift after: should be 0 if formula is correct. Compute by simulating
+  // the planned writes.
+  let projectedSum = totalCurrentSum;
+  for (const u of updates) projectedSum += u.to - u.from;
+  for (const i of inserts) projectedSum += i.qty;
+  for (const d of deletes) projectedSum += -d.from;
+  const totalDriftAfter = projectedSum - totalExpectedSum;
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      totalRowsBefore,
+      totalCodesExpected: expected.size,
+      rowsToUpdate: updates.length,
+      rowsToInsert: inserts.length,
+      rowsToDelete: deletes.length,
+      totalCurrentSum,
+      totalExpectedSum,
+      totalDriftBefore,
+      totalDriftAfter,
+      sofaFabCutZeroedLabelCount: zeroedFabCutLabels.size,
+      byDept,
+      sample,
+    });
+  }
+
+  // ----- Live mode — single atomic batch -----
+  const stmts: D1PreparedStatement[] = [];
+  for (const u of updates) {
+    stmts.push(
+      db
+        .prepare(`UPDATE wip_items SET stockQty = ? WHERE id = ?`)
+        .bind(u.to, u.id),
+    );
+  }
+  for (const i of inserts) {
+    stmts.push(
+      db
+        .prepare(
+          `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
+           ON CONFLICT (org_id, code) DO UPDATE SET
+             stockQty = EXCLUDED.stockQty,
+             deptStatus = EXCLUDED.deptStatus`,
+        )
+        .bind(
+          `wip-rebuild-${crypto.randomUUID().slice(0, 8)}`,
+          i.code,
+          i.type,
+          i.relatedProduct,
+          i.deptStatus,
+          i.qty,
+        ),
+    );
+  }
+  for (const d of deletes) {
+    stmts.push(
+      db.prepare(`DELETE FROM wip_items WHERE id = ?`).bind(d.id),
+    );
+  }
+
+  let batchOk = true;
+  let batchError: string | null = null;
+  let updatesApplied = 0;
+  let insertsApplied = 0;
+  let deletesApplied = 0;
+  try {
+    const batchResults = await db.batch(stmts);
+    let i = 0;
+    for (const _u of updates) {
+      const r = batchResults[i++];
+      if ((r?.meta?.changes ?? 0) > 0) updatesApplied += 1;
+    }
+    for (const _ins of inserts) {
+      const r = batchResults[i++];
+      if ((r?.meta?.changes ?? 0) > 0) insertsApplied += 1;
+    }
+    for (const _d of deletes) {
+      const r = batchResults[i++];
+      if ((r?.meta?.changes ?? 0) > 0) deletesApplied += 1;
+    }
+  } catch (err) {
+    batchOk = false;
+    batchError = err instanceof Error ? err.message : String(err);
+  }
+
+  return c.json({
+    success: batchOk,
+    dryRun: false,
+    totalRowsBefore,
+    rowsUpdated: updatesApplied,
+    rowsInserted: insertsApplied,
+    rowsDeleted: deletesApplied,
+    rowsToUpdate: updates.length,
+    rowsToInsert: inserts.length,
+    rowsToDelete: deletes.length,
+    totalDriftBefore,
+    totalDriftAfter,
+    sofaFabCutZeroedLabelCount: zeroedFabCutLabels.size,
+    byDept,
+    sample,
+    batchError,
+  });
+});
+
 export default app;

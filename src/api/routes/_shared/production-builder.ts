@@ -259,7 +259,15 @@ function aggregateFcSlots(
       // cascade → wip_items.type → Inventory Type column shows
       // "Bedframe" / "Sofa" / "Accessory").
       wipType: anchor.itemCategory || anchor.wipType,
-      wipQty: anchor.wipQty,
+      // wipQty = SET count for the merge group, NOT a per-piece quantity.
+      // BF pieces have varying multipliers (HB qty=1, DV qty=2 per BOM
+      // divanMultiplier) so anchor.wipQty randomly picks one of those
+      // depending on sort order. Use min(slot.wipQty) which always
+      // equals the set-count regardless of which piece sorts first:
+      //   BF line qty=1: HB=1 + DV=2 → min=1 (1 set) ✓
+      //   BF line qty=N: HB=N + DV=2N → min=N (N sets) ✓
+      //   SOFA line qty=N: each piece multiplier=1 → all = N → min=N ✓
+      wipQty: Math.min(...group.map((s) => s.wipQty)),
       category: anchor.processCategory,
       minutes: totalMinutes,
       branchKey: "",

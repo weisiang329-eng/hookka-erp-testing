@@ -3006,10 +3006,13 @@ app.post("/backfill-fab-cut-merge", async (c) => {
       (sum, r) => sum + (r.productionTimeMinutes ?? r.estMinutes ?? 0),
       0,
     );
-    // Sets-count = anchor.wipQty (mirrors aggregateFcSlots). For BF this
-    // is 1 per piece-PO (correct since each BF SOID is a separate set);
-    // for sofa with line qty=N it's N (line qty).
-    const newWipQty = anchor.wipQty;
+    // Sets-count = min(slot.wipQty) across the group. The anchor's
+    // wipQty randomly picks one piece's qty which may be inflated by a
+    // BOM multiplier (BF Divan qty = 2 × set-count). Using min always
+    // gives the true set-count regardless of which piece sorts first.
+    const newWipQty = Math.min(
+      ...sorted.map((r) => r.wipQty || 1),
+    );
     const productCodes = sorted.map((r) => r.poProductCode ?? "");
     const modelLabel = joinModelLabel(productCodes);
     const totalH =

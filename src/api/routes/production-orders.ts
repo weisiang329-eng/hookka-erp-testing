@@ -1333,38 +1333,96 @@ export async function applyWipInventoryChange(
       }
     }
     if (upstreamLabel) {
-      const consumeQty = jcRow.wipQty || poRow.quantity || 1;
-      // BUG-2026-04-27-013: cascade consume always decrements (no MAX
-      // clamp). If the upstream wip_items row doesn't exist (because
-      // the upstream JC was skipped / never completed), INSERT one
-      // with stock_qty = -consumeQty so the negative number surfaces
-      // the missed dept on the WIP board.
-      const upstream = await db
-        .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-        .bind(upstreamLabel)
-        .first<{ id: string; stockQty: number }>();
-      if (upstream) {
-        await db
-          .prepare(
-            "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
-          )
-          .bind(consumeQty, upstream.id)
-          .run();
-      } else {
-        await db
-          .prepare(
-            `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
-             VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
-          )
-          .bind(
-            `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-            upstreamLabel,
-            shortType,
-            poRow.productCode ?? "",
-            "PENDING",
-            -consumeQty,
-          )
-          .run();
+      // Option C — when the upstream is a MERGED FC ("X | (FC)" label),
+      // multiple per-piece downstream siblings (HB SEW + DV SEW for BF;
+      // 2A_LHF / L_RHF / CNR sofa-piece SEWs for sofa) all want to
+      // consume from the same upstream wip_items row. Per-piece consume
+      // doesn't balance because per-piece wipQty has BOM multipliers
+      // (BF DV multiplier=2) so the merged FC stock_qty (= set count)
+      // can never reach 0. Use SET-LEVEL dedup: only the FIRST DONE
+      // sibling triggers the consume; subsequent siblings no-op. The
+      // FC's producer-add of +set_count then balances the row to 0.
+      const isMergedFcUpstream =
+        deptUpper === "FAB_SEW" && upstreamLabel.endsWith("(FC)");
+      let consumeQty = jcRow.wipQty || poRow.quantity || 1;
+      if (isMergedFcUpstream) {
+        // Count siblings in the same merge group already DONE (excluding
+        // self). For BF/ACC the group is bounded by productionOrderId.
+        // For SOFA cross-PO the group spans all sibling POs sharing the
+        // same companySOId + fabricCode.
+        const isSofa = (poRow.itemCategory || "") === "SOFA";
+        const sibQ = isSofa
+          ? await db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM job_cards jc2
+                   JOIN production_orders po2 ON po2.id = jc2.productionOrderId
+                  WHERE jc2.id != ?
+                    AND jc2.departmentCode = 'FAB_SEW'
+                    AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
+                    AND po2.companySOId = ?
+                    AND po2.fabricCode = ?`,
+              )
+              .bind(
+                jcRow.id,
+                poRow.companySOId ?? "",
+                poRow.fabricCode ?? "",
+              )
+              .first<{ n: number }>()
+          : await db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM job_cards
+                  WHERE id != ?
+                    AND productionOrderId = ?
+                    AND departmentCode = 'FAB_SEW'
+                    AND (status = 'COMPLETED' OR status = 'TRANSFERRED')`,
+              )
+              .bind(jcRow.id, jcRow.productionOrderId)
+              .first<{ n: number }>();
+        const siblingDone = Number(sibQ?.n ?? 0) > 0;
+        if (siblingDone) {
+          // Already consumed by an earlier sibling. Skip — cascade is
+          // idempotent at the merge-group level.
+          consumeQty = 0;
+        } else {
+          // First sibling to finish. Use 1 set unit, NOT per-piece
+          // wipQty (per-piece would over-decrement by the BOM
+          // multiplier).
+          consumeQty = 1;
+        }
+      }
+      if (consumeQty > 0) {
+        // BUG-2026-04-27-013: cascade consume always decrements (no MAX
+        // clamp). If the upstream wip_items row doesn't exist (because
+        // the upstream JC was skipped / never completed), INSERT one
+        // with stock_qty = -consumeQty so the negative number surfaces
+        // the missed dept on the WIP board.
+        const upstream = await db
+          .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
+          .bind(upstreamLabel)
+          .first<{ id: string; stockQty: number }>();
+        if (upstream) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty - ? WHERE id = ?",
+            )
+            .bind(consumeQty, upstream.id)
+            .run();
+        } else {
+          await db
+            .prepare(
+              `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
+               VALUES (?, ?, ?, ?, ?, ?, 'PENDING')`,
+            )
+            .bind(
+              `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
+              upstreamLabel,
+              shortType,
+              poRow.productCode ?? "",
+              "PENDING",
+              -consumeQty,
+            )
+            .run();
+        }
       }
     }
     // For IN_PROGRESS-only we stop here — COMPLETED falls through to

@@ -3454,6 +3454,13 @@ export default function ProductionPage({
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
             onFilteredDataChange={setGridFilteredDeptRows}
+            // Hide already-completed / transferred dept cards by default
+            // so the operator opens the page and immediately sees only
+            // the live work in front of them. They can re-tick
+            // COMPLETED / TRANSFERRED in the Status filter to see
+            // history. Mirrors the operator's request: fewer rows
+            // means faster page open and a more focused live view.
+            defaultExcludedValues={{ status: ["COMPLETED", "TRANSFERRED"] }}
             // Fab Sew dept routinely renders 1,200+ rows; without
             // windowing this contributed to ~383k DOM elements + ~525MB
             // heap on the live perf test (2026-04-25). Virtualization

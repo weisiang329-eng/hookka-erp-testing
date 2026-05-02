@@ -95,6 +95,16 @@ export type DataGridProps<T> = {
   // active, virtualization is automatically skipped because group headers
   // and per-group collapse make a single linear-list virtualizer awkward.
   virtualize?: boolean;
+  // First-load defaults for the per-column value filter (the "(All)"
+  // dropdown). Map of columnKey → list of values to EXCLUDE on first
+  // render. Used to hide already-completed / shipped rows from the
+  // default view without forcing the API to omit them — operator can
+  // tick those values back in to see the full set. Only applied once,
+  // after data loads, when no saved filter state exists in localStorage
+  // for this gridId — once the user has any saved state we honour their
+  // explicit filter choice rather than re-applying the default. Pass an
+  // empty object / undefined to skip.
+  defaultExcludedValues?: Record<string, string[]>;
 };
 
 type SavedView = {
@@ -749,6 +759,7 @@ export function DataGrid<T extends Record<string, any>>({
   viewStorageKey,
   onFilteredDataChange,
   virtualize = false,
+  defaultExcludedValues,
 }: DataGridProps<T>) {
   // ── Column visibility & order ──
   // Two-tier persistence per gridId:
@@ -959,6 +970,39 @@ export function DataGrid<T extends Record<string, any>>({
       return out;
     },
   );
+  // Track whether the operator has any saved filter state OR has touched
+  // any value-filter dropdown. While both are false, we keep applying the
+  // caller's defaultExcludedValues whenever new data arrives — so the
+  // default "hide COMPLETED rows" behaviour kicks in on every fresh load.
+  // Once they touch a filter, we stop overriding their choice.
+  const hasInitialFilterState = !!seeded?.columnValueFilters && Object.keys(seeded.columnValueFilters).length > 0;
+  const [valueFilterTouched, setValueFilterTouched] = useState<boolean>(hasInitialFilterState);
+
+  // Apply defaultExcludedValues once after data loads (and again whenever
+  // data shape changes, e.g. a new status value appears) — but only if
+  // the operator hasn't manually touched the value filters in this grid.
+  // We compute the allowed-values Set as (all values currently in data)
+  // minus (the caller's excluded list), so e.g. excluding "COMPLETED" on
+  // the Status column ticks every other status box on by default.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot seed of value filters */
+  useEffect(() => {
+    if (valueFilterTouched) return;
+    if (!defaultExcludedValues || data.length === 0) return;
+    const next: Record<string, Set<string>> = {};
+    for (const [colKey, excluded] of Object.entries(defaultExcludedValues)) {
+      const allValues = new Set<string>();
+      for (const row of data) {
+        allValues.add(String(getNestedValue(row, colKey) ?? ""));
+      }
+      for (const e of excluded) allValues.delete(e);
+      // Skip the column entirely if no values remain — an all-excluded
+      // filter would hide every row, the inverse of what we want.
+      if (allValues.size > 0) next[colKey] = allValues;
+    }
+    setColumnValueFilters(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally re-runs only when data/defaults change
+  }, [data, defaultExcludedValues, valueFilterTouched]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   // Push state changes back to sessionStorage on every change so a tab
   // switch picks up the latest snapshot.
   useEffect(() => {
@@ -983,6 +1027,7 @@ export function DataGrid<T extends Record<string, any>>({
   }, []);
 
   const setColValueFilter = useCallback((key: string, values: Set<string> | null) => {
+    setValueFilterTouched(true);
     setColumnValueFilters(prev => {
       const next = { ...prev };
       if (!values) delete next[key];
@@ -992,6 +1037,7 @@ export function DataGrid<T extends Record<string, any>>({
   }, []);
 
   const clearColFilter = useCallback((key: string) => {
+    setValueFilterTouched(true);
     setColumnFilters(prev => { const n = { ...prev }; delete n[key]; return n; });
     setColumnValueFilters(prev => { const n = { ...prev }; delete n[key]; return n; });
   }, []);
@@ -1061,6 +1107,7 @@ export function DataGrid<T extends Record<string, any>>({
   }, [searchText, columnFilters, columnValueFilters, sortKey, sortDir, groupEnabled, groupFilter, savedViews, persistViews]);
 
   const applyView = useCallback((view: SavedView) => {
+    setValueFilterTouched(true);
     const f = view.filters;
     setSearchText(f.searchText);
     setColumnFilters(f.columnFilters);
@@ -1081,6 +1128,7 @@ export function DataGrid<T extends Record<string, any>>({
   }, [savedViews, persistViews]);
 
   const resetAllFilters = useCallback(() => {
+    setValueFilterTouched(true);
     setSearchText("");
     setColumnFilters({});
     setColumnValueFilters({});
@@ -1324,7 +1372,7 @@ export function DataGrid<T extends Record<string, any>>({
         {activeFilterCount > 0 && (
           <button
             className="flex items-center gap-1 text-[11px] text-[#6B5C32] hover:text-[#4D4224] font-medium"
-            onClick={() => { setSearchText(""); setColumnFilters({}); setColumnValueFilters({}); }}
+            onClick={() => { setValueFilterTouched(true); setSearchText(""); setColumnFilters({}); setColumnValueFilters({}); }}
           >
             <svg className="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}><path d="M18 6 6 18M6 6l12 12" /></svg>
             Clear {activeFilterCount} filter{activeFilterCount > 1 ? "s" : ""}

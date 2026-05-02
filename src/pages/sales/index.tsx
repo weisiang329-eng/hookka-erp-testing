@@ -803,6 +803,16 @@ export default function SalesPage() {
             contextMenuItems={getContextMenuItems}
             selectable
             onSelectionChange={setSelectedRows}
+            gridId="sales-orders-list"
+            // Hide already-shipped / delivered / closed / cancelled rows
+            // by default — once an SO has left the active funnel the
+            // operator rarely needs to see it day-to-day. Tick them
+            // back in via the Status filter to see history. The Status
+            // chips above the grid still show the raw counts so the
+            // hidden rows aren't invisible at a glance.
+            defaultExcludedValues={{
+              status: ["SHIPPED", "DELIVERED", "CLOSED", "CANCELLED"],
+            }}
             rowClassName={(row) =>
               row.status === "DRAFT"
                 ? "!bg-[#FAEFCB]/60 border-l-2 border-l-amber-400"

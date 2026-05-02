@@ -21,11 +21,22 @@ import {
   Play,
   Pencil,
   CheckCircle2,
+  AlertTriangle,
+  Activity,
+  DollarSign,
+  Clock,
 } from "lucide-react";
 import type { RDProject, RDProjectStage, RDProjectType } from "@/types";
 import { fetchJson, FetchJsonError } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
+import {
+  getProjectHealth,
+  getMilestoneHealth,
+  PROJECT_SCHEDULE_CHIP,
+  PROJECT_BUDGET_CHIP,
+  type ProjectHealth,
+} from "./health";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
 
@@ -79,7 +90,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   ACCESSORY: "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]",
 };
 
-type TabId = "drafts" | "projects" | "completed" | "pipeline" | "reports";
+type TabId = "summary" | "drafts" | "projects" | "completed" | "pipeline" | "reports";
 
 function StageProgressBar({
   currentStage,
@@ -105,6 +116,61 @@ function StageProgressBar({
             {labels[stage].slice(0, 4)}
           </span>
         </div>
+      ))}
+    </div>
+  );
+}
+
+// Compact chip strip showing schedule + budget alerts. Used by both
+// project cards (Drafts / Projects tabs) and the Summary tab's project
+// rows. We hide chips when there's nothing alarming to say (On Track +
+// budget OK) so the card stays uncluttered for the healthy majority.
+function ProjectHealthChips({
+  health,
+  alwaysShow,
+}: {
+  health: ProjectHealth;
+  // alwaysShow=true forces an "On Track" / "OK Budget" chip to render too —
+  // used in the Summary tab where a project landing in the "needs attention"
+  // list deserves an explicit reason.
+  alwaysShow?: boolean;
+}) {
+  const chips: Array<{ key: string; label: string; cls: string; title?: string }> = [];
+  if (health.schedule && (health.schedule !== "on-track" || alwaysShow)) {
+    const def = PROJECT_SCHEDULE_CHIP[health.schedule];
+    let label = def.label;
+    if (health.schedule === "overdue" && health.daysToTarget !== null) {
+      label = `Overdue ${Math.abs(health.daysToTarget)}d`;
+    } else if (health.schedule === "at-risk" && health.daysToTarget !== null) {
+      label = `Due in ${health.daysToTarget}d`;
+    }
+    chips.push({ key: "schedule", label, cls: def.cls });
+  }
+  if (health.budget !== "ok") {
+    const def = PROJECT_BUDGET_CHIP[health.budget];
+    chips.push({
+      key: "budget",
+      label: `${def.label} (${Math.round(health.budgetPct)}%)`,
+      cls: def.cls,
+    });
+  } else if (alwaysShow && health.budgetPct > 0) {
+    chips.push({
+      key: "budget",
+      label: `Budget ${Math.round(health.budgetPct)}%`,
+      cls: "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8]",
+    });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${c.cls}`}
+          title={c.title}
+        >
+          {c.label}
+        </span>
       ))}
     </div>
   );
@@ -229,6 +295,7 @@ function DraftCard({
 function ProjectCard({ project }: { project: RDProject }) {
   const budgetPct = project.totalBudget > 0 ? Math.round((project.actualCost / project.totalBudget) * 100) : 0;
   const budgetColor = budgetPct > 90 ? "text-[#9A3A2D]" : budgetPct > 70 ? "text-[#9C6F1E]" : "text-[#4F7C3A]";
+  const health = getProjectHealth(project);
   const cover = getCoverPhoto(project);
   // If the cover URL resolves but the browser can't render it (404, truncated
   // base64, decode failure), swap to the neutral placeholder instead of
@@ -333,6 +400,11 @@ function ProjectCard({ project }: { project: RDProject }) {
             </span>
           </div>
 
+          {/* Health chips — schedule + budget. Only render when a chip
+              actually has something to say (we hide On Track + OK to keep
+              the card uncluttered for the common case). */}
+          <ProjectHealthChips health={health} />
+
           <StageProgressBar currentStage={project.currentStage} projectType={project.projectType} />
 
           <div className="grid grid-cols-2 gap-2 text-xs">
@@ -381,6 +453,247 @@ function ProjectCard({ project }: { project: RDProject }) {
         </CardContent>
       </Card>
     </Link>
+  );
+}
+
+// SummaryView — top-level health dashboard the operator opens to answer
+// "what needs attention right now?" in one glance. Three sections, zero
+// scrolling on a 1080p laptop:
+//
+// 1. KPI strip — Overdue / At Risk / Over Budget / Total Spend.
+// 2. "Needs attention" project list, sorted by urgency.
+// 3. Per-milestone overdue list, scoped to active projects.
+//
+// Everything is computed client-side from the existing /api/rd-projects
+// payload — no extra network calls.
+function SummaryView({ projects }: { projects: RDProject[] }) {
+  // Compute health once per project; reuse below for the lists.
+  const enriched = useMemo(
+    () => projects.map((p) => ({ project: p, health: getProjectHealth(p) })),
+    [projects],
+  );
+
+  const overdueProjects = enriched.filter((x) => x.health.schedule === "overdue");
+  const atRiskProjects = enriched.filter((x) => x.health.schedule === "at-risk");
+  const overBudgetProjects = enriched.filter((x) => x.health.budget === "over-budget");
+
+  // Total budget + spend across active projects. We compute % util on the
+  // sum (not the average) so a single big project's overrun doesn't get
+  // diluted by ten smaller ones still under budget.
+  const totalBudgetSen = projects.reduce((s, p) => s + (p.totalBudget || 0), 0);
+  const totalSpendSen = projects.reduce((s, p) => s + (p.actualCost || 0), 0);
+  const totalUtilPct = totalBudgetSen > 0 ? (totalSpendSen / totalBudgetSen) * 100 : 0;
+
+  // Needs-attention: union of (overdue ∪ at-risk ∪ over-budget ∪
+  // near-budget) sorted so the most-urgent (most-overdue, then highest
+  // budget %) bubbles to the top. A single project can land here for
+  // multiple reasons — render its full chip set so the operator sees
+  // every concern at once.
+  const needsAttention = useMemo(() => {
+    const flagged = enriched.filter(
+      (x) =>
+        x.health.schedule === "overdue" ||
+        x.health.schedule === "at-risk" ||
+        x.health.budget !== "ok",
+    );
+    return [...flagged].sort((a, b) => {
+      // 1. Overdue projects first, sorted by most overdue.
+      const aOver = a.health.schedule === "overdue" ? Math.abs(a.health.daysToTarget ?? 0) : -1;
+      const bOver = b.health.schedule === "overdue" ? Math.abs(b.health.daysToTarget ?? 0) : -1;
+      if (aOver !== bOver) return bOver - aOver;
+      // 2. Over-budget next (descending util).
+      const aOB = a.health.budget === "over-budget" ? a.health.budgetPct : -1;
+      const bOB = b.health.budget === "over-budget" ? b.health.budgetPct : -1;
+      if (aOB !== bOB) return bOB - aOB;
+      // 3. At-risk by closest target.
+      const aDays = a.health.schedule === "at-risk" ? a.health.daysToTarget ?? Infinity : Infinity;
+      const bDays = b.health.schedule === "at-risk" ? b.health.daysToTarget ?? Infinity : Infinity;
+      return aDays - bDays;
+    });
+  }, [enriched]);
+
+  // Per-milestone overdue list — flatten across projects so the operator
+  // can see exactly which checkpoints have slipped, without drilling into
+  // individual project pages.
+  const overdueMilestones = useMemo(() => {
+    const items: { project: RDProject; stage: string; targetDate: string; daysOverdue: number }[] = [];
+    for (const p of projects) {
+      for (const m of p.milestones) {
+        const h = getMilestoneHealth({ targetDate: m.targetDate, actualDate: m.actualDate });
+        if (h.state === "overdue") {
+          items.push({
+            project: p,
+            stage: m.stage,
+            targetDate: m.targetDate ?? "",
+            daysOverdue: Math.abs(h.daysToTarget ?? 0),
+          });
+        }
+      }
+    }
+    return items.sort((a, b) => b.daysOverdue - a.daysOverdue);
+  }, [projects]);
+
+  return (
+    <div className="space-y-6">
+      {/* KPI strip — 4 stat cards. Each one is colour-coded so the eye
+          jumps to a non-zero red number immediately. */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <KpiCard
+          label="Overdue"
+          value={overdueProjects.length}
+          tone={overdueProjects.length > 0 ? "danger" : "ok"}
+          icon={<AlertTriangle className="h-5 w-5" />}
+          sub={overdueProjects.length === 1 ? "project past target" : "projects past target"}
+        />
+        <KpiCard
+          label="At Risk"
+          value={atRiskProjects.length}
+          tone={atRiskProjects.length > 0 ? "warning" : "ok"}
+          icon={<Clock className="h-5 w-5" />}
+          sub="≤ 7 days to target"
+        />
+        <KpiCard
+          label="Over Budget"
+          value={overBudgetProjects.length}
+          tone={overBudgetProjects.length > 0 ? "danger" : "ok"}
+          icon={<DollarSign className="h-5 w-5" />}
+          sub={`${formatCurrency(totalSpendSen)} / ${formatCurrency(totalBudgetSen)}`}
+        />
+        <KpiCard
+          label="Budget Utilization"
+          value={`${Math.round(totalUtilPct)}%`}
+          tone={totalUtilPct >= 100 ? "danger" : totalUtilPct >= 80 ? "warning" : "ok"}
+          icon={<TrendingUp className="h-5 w-5" />}
+          sub="aggregate spend / budget"
+        />
+      </div>
+
+      {/* Needs Attention list */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-[#9C6F1E]" />
+            Needs Attention ({needsAttention.length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {needsAttention.length === 0 ? (
+            <div className="text-center py-8 text-sm text-[#4F7C3A]">
+              All active projects are on track and within budget. ✓
+            </div>
+          ) : (
+            <div className="divide-y divide-[#E2DDD8]">
+              {needsAttention.map(({ project, health }) => (
+                <Link
+                  key={project.id}
+                  to={`/rd/${project.id}`}
+                  className="flex items-center justify-between gap-3 py-3 hover:bg-[#FAF9F7] -mx-2 px-2 rounded transition-colors"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-mono text-gray-400">{project.code}</span>
+                      <span className="text-sm font-medium text-[#1F1D1B] truncate">{project.name}</span>
+                    </div>
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <ProjectHealthChips health={health} />
+                      <span className="text-xs text-gray-500">
+                        Target: {formatDate(project.targetLaunchDate)} · {getStageLabels(project.projectType)[project.currentStage]}
+                      </span>
+                    </div>
+                  </div>
+                  <ArrowRight className="h-4 w-4 text-gray-300 shrink-0" />
+                </Link>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Per-milestone overdue list */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Clock className="h-4 w-4 text-[#9A3A2D]" />
+            Overdue Milestones ({overdueMilestones.length})
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
+          {overdueMilestones.length === 0 ? (
+            <div className="text-center py-8 text-sm text-[#4F7C3A]">
+              No milestones are past their target date. ✓
+            </div>
+          ) : (
+            <div className="divide-y divide-[#E2DDD8]">
+              {overdueMilestones.map((item, i) => (
+                <Link
+                  key={`${item.project.id}-${item.stage}-${i}`}
+                  to={`/rd/${item.project.id}`}
+                  className="flex items-center justify-between gap-3 py-2.5 hover:bg-[#FAF9F7] -mx-2 px-2 rounded transition-colors text-sm"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-xs font-mono text-gray-400">{item.project.code}</span>
+                    <span className="font-medium text-[#1F1D1B] truncate">{item.project.name}</span>
+                    <span
+                      className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+                      style={{ backgroundColor: STAGE_COLORS[item.stage as RDProjectStage] ?? "#6B7280" }}
+                    >
+                      {getStageLabels(item.project.projectType)[item.stage as RDProjectStage] ?? item.stage}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-xs text-gray-500">target {formatDate(item.targetDate)}</span>
+                    <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border bg-[#FAE5E0] text-[#9A3A2D] border-[#E8B5AB]">
+                      Overdue {item.daysOverdue}d
+                    </span>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// Reusable stat card for the Summary KPI strip. tone drives both the
+// number colour and the icon background tint.
+function KpiCard({
+  label,
+  value,
+  sub,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: string | number;
+  sub?: string;
+  tone: "ok" | "warning" | "danger";
+  icon: React.ReactNode;
+}) {
+  const numCls =
+    tone === "danger" ? "text-[#9A3A2D]" : tone === "warning" ? "text-[#9C6F1E]" : "text-[#1F1D1B]";
+  const iconWrap =
+    tone === "danger"
+      ? "bg-[#FAE5E0] text-[#9A3A2D]"
+      : tone === "warning"
+        ? "bg-[#FAEFCB] text-[#9C6F1E]"
+        : "bg-[#EEF3E4] text-[#4F7C3A]";
+  return (
+    <Card>
+      <CardContent className="pt-5 pb-4">
+        <div className="flex items-center gap-3">
+          <div className={`shrink-0 inline-flex h-10 w-10 items-center justify-center rounded-lg ${iconWrap}`}>
+            {icon}
+          </div>
+          <div className="min-w-0">
+            <p className="text-xs text-gray-500">{label}</p>
+            <p className={`text-2xl font-bold mt-0.5 ${numCls}`}>{value}</p>
+            {sub && <p className="text-[10px] text-gray-400 mt-0.5 truncate">{sub}</p>}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1031,7 +1344,25 @@ export default function RDPage() {
     [fetchProjects, toast],
   );
 
+  // Compute aggregate health for the Summary tab badge — show a count of
+  // projects that need attention (overdue OR over-budget OR near-budget OR
+  // at-risk in next 7 days). One number, eyeballable.
+  const attentionCount = useMemo(() => {
+    let n = 0;
+    for (const p of activeProjects) {
+      const h = getProjectHealth(p);
+      if (h.schedule === "overdue" || h.schedule === "at-risk") n++;
+      else if (h.budget !== "ok") n++;
+    }
+    return n;
+  }, [activeProjects]);
+
   const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
+    {
+      id: "summary",
+      label: attentionCount > 0 ? `Summary (${attentionCount})` : "Summary",
+      icon: <Activity className="h-4 w-4" />,
+    },
     { id: "drafts", label: `Drafts (${draftCount})`, icon: <Archive className="h-4 w-4" /> },
     { id: "projects", label: "Projects", icon: <Lightbulb className="h-4 w-4" /> },
     { id: "completed", label: `Completed (${completedCount})`, icon: <CheckCircle2 className="h-4 w-4" /> },
@@ -1077,6 +1408,7 @@ export default function RDPage() {
         </div>
       ) : (
         <>
+          {activeTab === "summary" && <SummaryView projects={activeProjects} />}
           {activeTab === "drafts" && (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
               {draftProjects.map((project) => (

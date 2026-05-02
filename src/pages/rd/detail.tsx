@@ -40,6 +40,7 @@ import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
+import { getMilestoneHealth, MILESTONE_CHIP } from "./health";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
 
@@ -139,6 +140,47 @@ function makeBlankIssuanceLine(): IssuanceLine {
 }
 
 // ─── Modal Overlay ──────────────────────────────────────────────────────────
+
+// Per-milestone status chip — Done / Overdue / Due Soon / Upcoming.
+// Mirrors the project-card health chip vocabulary so operators learn one
+// colour scheme (red bad / amber warning / green done / neutral upcoming).
+function MilestoneStatusChip({
+  targetDate,
+  actualDate,
+}: {
+  targetDate: string | null;
+  actualDate: string | null;
+}) {
+  const { state, daysToTarget } = getMilestoneHealth({ targetDate, actualDate });
+  if (!state) return <span className="text-gray-300 text-xs">--</span>;
+  const def = MILESTONE_CHIP[state];
+  let label = "";
+  switch (state) {
+    case "done":
+      label = daysToTarget === null
+        ? "Done"
+        : daysToTarget < 0
+          ? `Done ${Math.abs(daysToTarget)}d early`
+          : daysToTarget > 0
+            ? `Done ${daysToTarget}d late`
+            : "Done on time";
+      break;
+    case "overdue":
+      label = `Overdue ${Math.abs(daysToTarget ?? 0)}d`;
+      break;
+    case "due-soon":
+      label = (daysToTarget ?? 0) === 0 ? "Due today" : `Due in ${daysToTarget}d`;
+      break;
+    case "upcoming":
+      label = `${daysToTarget}d to go`;
+      break;
+  }
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${def.cls}`}>
+      {label}
+    </span>
+  );
+}
 
 function ModalOverlay({ open, onClose, title, children, wide }: {
   open: boolean;
@@ -1798,6 +1840,7 @@ export default function RDProjectDetailPage() {
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Stage</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Target</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Actual</th>
+                  <th className="text-left py-2 text-xs font-semibold text-gray-500">Status</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Approved By</th>
                   <th className="text-left py-2 text-xs font-semibold text-gray-500">Photos</th>
                 </tr>
@@ -1831,6 +1874,12 @@ export default function RDProjectDetailPage() {
                         ) : (
                           <span className="text-gray-300">--</span>
                         )}
+                      </td>
+                      <td className="py-2">
+                        <MilestoneStatusChip
+                          targetDate={m.targetDate ?? null}
+                          actualDate={m.actualDate ?? null}
+                        />
                       </td>
                       <td className="py-2 text-xs text-gray-600">{m.approvedBy || <span className="text-gray-300">--</span>}</td>
                       <td className="py-2">

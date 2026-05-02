@@ -22,6 +22,18 @@ import {
 } from "@/lib/kv-config";
 
 // ---------- Types matching mock-data ----------
+// Sofa fabric price tier — drives the products-page tier toggle and matches
+// the canonical priceTier values on fabric_tracking. The legacy two-tier set
+// (PRICE_1 / PRICE_2) maps to P1 / P2; P3 is a new tier added to the matrix
+// for higher-end fabrics.
+type SofaTier = "P1" | "P2" | "P3";
+const SOFA_TIERS: SofaTier[] = ["P1", "P2", "P3"];
+
+// Legacy entries without a tier field were stored as the company's default
+// (Price 2) before the matrix existed. Pin the default here so the read path
+// stays in one place — every height/tier comparison runs through this helper.
+const entryTier = (t: SofaTier | undefined): SofaTier => t ?? "P2";
+
 type DeptWorkingTime = {
   departmentCode: string;
   minutes: number;
@@ -43,7 +55,10 @@ type Product = {
   costPriceSen: number;
   basePriceSen?: number;
   price1Sen?: number;
-  seatHeightPrices?: { height: string; priceSen: number }[];
+  // Sofa price matrix: each entry is one (height, fabric tier) cell. Legacy
+  // entries without `tier` are treated as P2 so existing data keeps rendering
+  // in the default tier view without a backfill.
+  seatHeightPrices?: { height: string; priceSen: number; tier?: SofaTier }[];
   productionTimeMinutes: number;
   subAssemblies: string[];
   deptWorkingTimes: DeptWorkingTime[];
@@ -1279,6 +1294,22 @@ export default function ProductsPage() {
   const [editingSeatPrices, setEditingSeatPrices] = useState<string | null>(null);
   const [seatPriceInputs, setSeatPriceInputs] = useState<Record<string, string>>({});
 
+  // Sofa price-matrix tier view. Switching the tier re-renders the same five
+  // height columns with that tier's prices — the table layout is unchanged.
+  // Persists to localStorage so the operator returns to whichever tier they
+  // were last reviewing without having to re-pick on every page load.
+  const [sofaTier, setSofaTierState] = useState<SofaTier>(() => {
+    if (typeof window === "undefined") return "P2";
+    const saved = window.localStorage.getItem("hookka.products.sofaTier");
+    return saved === "P1" || saved === "P3" ? saved : "P2";
+  });
+  const setSofaTier = (t: SofaTier) => {
+    setSofaTierState(t);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("hookka.products.sofaTier", t);
+    }
+  };
+
   // Master price-history dialog. Holds the product whose history is open;
   // null when the dialog is closed.
   const [scheduleProductId, setScheduleProductId] = useState<string | null>(
@@ -1588,6 +1619,34 @@ export default function ProductsPage() {
               disabled={importing}
             />
           </label>
+          {/* Tier switcher — only meaningful for sofas (5 height columns
+              are tier-aware). Renders as a single segmented control so the
+              row-per-row table layout is preserved; clicking a tier re-renders
+              the same cells with that tier's price (legacy entries default to
+              P2). Hidden for BF/ACCESSORY where one price per SKU is the rule. */}
+          {categoryFilter === "SOFA" && (
+            <>
+              <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+              <span className="text-[11px] text-[#6B7280] uppercase tracking-wide">
+                Tier
+              </span>
+              <div className="inline-flex rounded-md border border-[#E5E7EB] overflow-hidden">
+                {SOFA_TIERS.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => setSofaTier(t)}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                      sofaTier === t
+                        ? "bg-[#6B5C32] text-white"
+                        : "bg-white text-[#6B7280] hover:bg-[#F3F4F6]"
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
         )}
       </div>
@@ -1774,8 +1833,15 @@ export default function ProductsPage() {
                               // miss that caused the Products page to show blank sofa prices
                               // and produced duplicate entries on edit.
                               const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
-                              const sh = (p.seatHeightPrices || []).find((s) => norm(s.height) === hNum);
-                              const editKey = `${p.id}__${h}`;
+                              // Cell read: scope by (height, current tier). Legacy
+                              // entries with no `tier` resolve to P2 via entryTier(),
+                              // so an old SKU that only has flat per-height prices
+                              // shows up under the P2 toggle and looks empty under
+                              // P1 / P3 until those cells are first edited.
+                              const sh = (p.seatHeightPrices || []).find(
+                                (s) => norm(s.height) === hNum && entryTier(s.tier) === sofaTier,
+                              );
+                              const editKey = `${p.id}__${h}__${sofaTier}`;
                               const isEditingThis = editingSeatPrices === editKey;
                               return (
                                 <div key={h} className="px-3 py-1.5 text-right" onClick={(e) => e.stopPropagation()}>
@@ -1791,16 +1857,19 @@ export default function ProductsPage() {
                                         setEditingSeatPrices(null);
                                         const hN = h.replace('"', '');
                                         let arr = p.seatHeightPrices || [];
-                                        // Same normalisation rule as the read path so we never
-                                        // accidentally append a duplicate entry (string "28"
-                                        // next to int 28, or '28"' next to "28"). The canonical
-                                        // stored form is the plain string "24".."35" — set by
-                                        // migration 0031 and maintained on every write below.
-                                        if (!arr.find((s) => norm(s.height) === hN)) {
-                                          arr = [...arr, { height: hN, priceSen: val }];
+                                        // Match by BOTH height and current tier so editing
+                                        // P1 doesn't overwrite an existing P2 cell and vice
+                                        // versa. Legacy untiered entries match the P2 view
+                                        // (entryTier defaults), so a P2 edit will upgrade
+                                        // an old `{height,priceSen}` row in place by adding
+                                        // an explicit `tier:'P2'` field to it.
+                                        const matches = (s: typeof arr[number]) =>
+                                          norm(s.height) === hN && entryTier(s.tier) === sofaTier;
+                                        if (!arr.find(matches)) {
+                                          arr = [...arr, { height: hN, priceSen: val, tier: sofaTier }];
                                         }
                                         const updated = arr.map((s) =>
-                                          norm(s.height) === hN ? { ...s, height: hN, priceSen: val } : s
+                                          matches(s) ? { height: hN, priceSen: val, tier: sofaTier } : s
                                         );
                                         setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, seatHeightPrices: updated } : pr));
                                         fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {

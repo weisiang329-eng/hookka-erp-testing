@@ -49,8 +49,18 @@ export const ProductSchema = z
       .object({ count: z.number(), names: z.array(z.string()) })
       .nullable()
       .optional(),
+    // Each entry now optionally carries a fabric `tier` so a sofa SKU can
+    // hold its full price matrix (5 heights × {P1,P2,P3}). Legacy entries
+    // without a tier field are treated as P2 by every reader (kept the
+    // historical default to avoid a one-shot data migration).
     seatHeightPrices: z
-      .array(z.object({ height: z.string(), priceSen: z.number() }))
+      .array(
+        z.object({
+          height: z.string(),
+          priceSen: z.number(),
+          tier: z.enum(["P1", "P2", "P3"]).optional(),
+        }),
+      )
       .optional(),
   })
   .passthrough();

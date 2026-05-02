@@ -148,8 +148,19 @@ function rowToProject(
     coverPhotoUrl: row.coverPhotoUrl ?? null,
     // Pricing targets — null means "not set" so the SPA renders a dash
     // instead of "RM 0.00" (which would imply a real zero-budget plan).
-    targetSellingPriceSen: row.targetSellingPriceSen ?? null,
-    targetMaterialCostSen: row.targetMaterialCostSen ?? null,
+    // Read both camelCase and snake_case keys defensively: Postgres
+    // returns snake_case columns and the transform.column.from in
+    // db-pg.ts converts to camelCase via the rename map. If the bundle
+    // somehow ships without the new map entries, falling back to the
+    // snake_case key keeps the read working until the next deploy.
+    targetSellingPriceSen:
+      row.targetSellingPriceSen ??
+      (row as unknown as { target_selling_price_sen?: number | null }).target_selling_price_sen ??
+      null,
+    targetMaterialCostSen:
+      row.targetMaterialCostSen ??
+      (row as unknown as { target_material_cost_sen?: number | null }).target_material_cost_sen ??
+      null,
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -456,11 +467,16 @@ app.post("/", async (c) => {
 
     // Pricing targets — best-effort write. Skipped silently if the
     // columns don't exist yet (migration 0101 unapplied) so prod keeps
-    // working until ops runs `npm run db:migrate:supabase`.
+    // working until ops runs `npm run db:migrate:supabase`. Use the
+    // raw snake_case column names directly so the supabase-compat
+    // identifier rewriter doesn't have to know these tokens — any
+    // rename-map drift between the JSON and the deployed bundle would
+    // leave camelCase tokens unmapped and the UPDATE would silently
+    // fail. Snake_case matches what Postgres actually has.
     if (body.targetSellingPriceSen !== undefined || body.targetMaterialCostSen !== undefined) {
       try {
         await c.var.DB.prepare(
-          "UPDATE rd_projects SET targetSellingPriceSen = ?, targetMaterialCostSen = ? WHERE id = ?",
+          "UPDATE rd_projects SET target_selling_price_sen = ?, target_material_cost_sen = ? WHERE id = ?",
         )
           .bind(
             body.targetSellingPriceSen ?? null,
@@ -648,16 +664,15 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    // Pricing targets — best-effort. If migration 0101 hasn't run on
-    // prod yet, the column doesn't exist and this UPDATE throws; we
-    // swallow so the rest of the edit (which already committed) sticks.
+    // Pricing targets — best-effort. Snake_case in the SQL so the
+    // identifier rewriter is a no-op (see twin POST handler comment).
     if (
       body.targetSellingPriceSen !== undefined ||
       body.targetMaterialCostSen !== undefined
     ) {
       try {
         await c.var.DB.prepare(
-          "UPDATE rd_projects SET targetSellingPriceSen = ?, targetMaterialCostSen = ? WHERE id = ?",
+          "UPDATE rd_projects SET target_selling_price_sen = ?, target_material_cost_sen = ? WHERE id = ?",
         )
           .bind(
             merged.targetSellingPriceSen,

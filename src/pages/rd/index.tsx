@@ -248,18 +248,20 @@ function DraftCard({
                 <p className="text-xs text-gray-500 line-clamp-3">{project.description}</p>
               )}
             </div>
-            <div className="relative flex-shrink-0">
+            {/* Thumbnail box hugs the image's natural aspect: max 128 high
+                and max 176 wide, the image fills whichever dimension is
+                tighter, the OTHER side shrinks to whatever the natural
+                aspect produces. Wide phone shots render as a horizontal
+                strip; portrait posters as a tall column; squares stay
+                128×128. The relative wrapper uses `w-fit` so the DRAFT
+                badge anchors to the image's actual top-right, not a
+                phantom 128×128 box. */}
+            <div className="relative flex-shrink-0 w-fit">
               {cover ? (
                 <img
                   src={cover}
                   alt={`${project.name} cover`}
-                  // object-contain preserves the saved JPEG's aspect ratio
-                  // — wider phone shots no longer get the top + bottom
-                  // cropped off the way object-cover did. Lets letterbox
-                  // bars fill against the same neutral bg the empty
-                  // placeholder uses, so the seam between photos and
-                  // no-photo cards stays consistent.
-                  className="h-32 w-32 rounded-md object-contain bg-[#FAF9F8] border border-[#E2DDD8]"
+                  className="block max-h-32 max-w-44 rounded-md bg-[#FAF9F8] border border-[#E2DDD8]"
                 />
               ) : (
                 <div

@@ -46,6 +46,11 @@ export type Column<T> = {
   defaultHidden?: boolean; // column appears in the Columns toggle list but is OFF by default. User can toggle on.
   render?: (value: any, row: T, index: number) => React.ReactNode;
   type?: "text" | "date" | "currency" | "number" | "docno" | "status";
+  // Optional accessor used when computing the column's filter dropdown
+  // values. Defaults to row[key] which fails for object/array columns
+  // (gives "[object Object]"). Provide a string-returning function to
+  // surface a meaningful filter label.
+  filterValue?: (row: T) => string | number | null;
 };
 
 export type ContextMenuItem = {
@@ -252,6 +257,7 @@ function ColumnFilterDropdown<T>({
   onClear,
   onClose,
   anchorRect,
+  filterValue,
 }: {
   columnKey: string;
   columnType?: "text" | "date" | "currency" | "number" | "docno" | "status";
@@ -263,6 +269,7 @@ function ColumnFilterDropdown<T>({
   onClear: () => void;
   onClose: () => void;
   anchorRect: { left: number; top: number };
+  filterValue?: (row: T) => string | number | null;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<"values" | "text">("values");
@@ -273,15 +280,20 @@ function ColumnFilterDropdown<T>({
     return m ? m[1] : "contains";
   });
 
-  // Compute unique values for this column
+  // Compute unique values for this column. Prefer column.filterValue
+  // accessor when given (lets callers stringify object/array column
+  // values so the dropdown doesn't render "[object Object]").
   const uniqueValues = useMemo(() => {
     const vals = new Map<string, number>();
     allData.forEach(row => {
-      const v = String(getNestedValue(row as any, columnKey) ?? "");
+      const raw = filterValue
+        ? filterValue(row)
+        : getNestedValue(row as any, columnKey);
+      const v = String(raw ?? "");
       vals.set(v, (vals.get(v) || 0) + 1);
     });
     return Array.from(vals.entries()).sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-  }, [allData, columnKey]);
+  }, [allData, columnKey, filterValue]);
 
   const filteredValues = useMemo(() => {
     if (!search) return uniqueValues;
@@ -1850,6 +1862,7 @@ export function DataGrid<T extends Record<string, any>>({
           onClear={() => clearColFilter(filterDropdown.key)}
           onClose={() => setFilterDropdown(null)}
           anchorRect={filterDropdown.rect}
+          filterValue={columns.find(c => c.key === filterDropdown.key)?.filterValue}
         />
       )}
 

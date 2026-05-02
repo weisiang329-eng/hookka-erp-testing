@@ -895,6 +895,9 @@ const wipColumns: Column<WIPItem>[] = [
     key: "sources",
     label: "Source POs",
     align: "right",
+    // Filter dropdown shows the count (matches what the cell renders)
+    // instead of "[object Object]" from stringifying the array.
+    filterValue: (row) => row.sources.length,
     render: (_v, row) => (
       <span
         className="text-sm text-[#6B7280]"

@@ -2897,9 +2897,8 @@ function buildFcWipLabel(
 ): string {
   return [
     modelLabel,
-    // size segment only for BF — sofa's sizeLabel is the productCode
-    // suffix ("2A(LHF)") which duplicates modelLabel.
-    isBF && sizeLabel ? `(${sizeLabel})` : "",
+    // BF: "5FT" frame size; SOFA: "28" seat width. Both meaningful.
+    sizeLabel ? `(${sizeLabel})` : "",
     isBF && totalH > 0 ? `(${totalH}")` : "",
     isBF && divanHeightInches ? `(DV ${divanHeightInches}")` : "",
     fabricCode || "",

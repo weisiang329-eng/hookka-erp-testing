@@ -156,12 +156,10 @@ function buildFcWipLabel(
 ): string {
   return [
     modelLabel,
-    // Size segment is only meaningful for BF (5FT / 6FT / etc). SOFA's
-    // sizeLabel field carries the productCode-derived "2A(LHF)" / "L(RHF)"
-    // string which is already inside modelLabel, so showing it here would
-    // print "(2A(LHF))" twice. Gate behind isBF for parity with the totalH
-    // and divanHeight segments below.
-    isBF && sizeLabel ? `(${sizeLabel})` : "",
+    // Size segment: BF uses leg/frame size like "5FT", SOFA uses seat
+    // width in inches like "28". Both are meaningful — show
+    // unconditionally whenever sizeLabel has a value.
+    sizeLabel ? `(${sizeLabel})` : "",
     isBF && totalH > 0 ? `(${totalH}")` : "",
     isBF && divanHeightInches ? `(DV ${divanHeightInches}")` : "",
     fabricCode || "",

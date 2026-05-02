@@ -1176,44 +1176,104 @@ export async function applyWipInventoryChange(
           refundLabel = children[0].wipLabel;
         }
       }
-      // Option C fallback (mirror of forward consume) — refund the SO-level
-      // merged FC wip_items row when no per-PO sibling found.
+      // Option C fallback (mirror of forward consume) — refund the merged
+      // FC wip_items row when no per-PO sibling found. Try both wipKey
+      // shapes (BF per-PO, SOFA cross-PO).
       if (!refundLabel && deptUpper === "FAB_SEW") {
         const companySOId =
           poRow.companySOId || poRow.salesOrderId || "";
         const fabricCode = poRow.fabricCode || "";
-        if (companySOId && fabricCode) {
-          const bomLookup = await db
-            .prepare(
-              `SELECT baseModel FROM bom_templates
-               WHERE productCode = ?
-               ORDER BY effectiveFrom DESC LIMIT 1`,
-            )
-            .bind(poRow.productCode ?? "")
-            .first<{ baseModel: string | null }>();
-          const baseModel =
-            bomLookup?.baseModel || poRow.productCode || "";
-          const expectedWipKey = `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`;
+        const bomLookup = await db
+          .prepare(
+            `SELECT baseModel FROM bom_templates
+             WHERE productCode = ?
+             ORDER BY effectiveFrom DESC LIMIT 1`,
+          )
+          .bind(poRow.productCode ?? "")
+          .first<{ baseModel: string | null }>();
+        const baseModel = bomLookup?.baseModel || poRow.productCode || "";
+        const candidates: string[] = [
+          `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
+        ];
+        if (companySOId) {
+          candidates.push(
+            `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+          );
+        }
+        for (const cand of candidates) {
           const mergedFc = await db
             .prepare(
               `SELECT wipLabel FROM job_cards
                WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
                LIMIT 1`,
             )
-            .bind(expectedWipKey)
+            .bind(cand)
             .first<{ wipLabel: string }>();
           if (mergedFc?.wipLabel) {
             refundLabel = mergedFc.wipLabel;
+            break;
           }
         }
       }
       if (refundLabel) {
-        await db
-          .prepare(
-            "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
-          )
-          .bind(refundQty, refundLabel)
-          .run();
+        // Option C dedup-aware refund: forward consume only fired ONCE
+        // per merge group (first DONE sibling). Refund must mirror that:
+        // ONLY refund when this rollback leaves zero DONE siblings —
+        // otherwise the merge group is still partly consumed and the
+        // upstream stub stays.
+        let actualRefund = refundQty;
+        const isMergedFcUpstream = refundLabel.endsWith("(FC)");
+        if (isMergedFcUpstream && deptUpper === "FAB_SEW") {
+          // Count DONE siblings remaining in the merge group (jcRow has
+          // already been UPDATEd to non-DONE by the PATCH handler, so
+          // the COUNT excludes self by virtue of status filter).
+          const isSofa = (poRow.itemCategory || "") === "SOFA";
+          const sibQ = isSofa
+            ? await db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM job_cards jc2
+                     JOIN production_orders po2 ON po2.id = jc2.productionOrderId
+                    WHERE jc2.id != ?
+                      AND jc2.departmentCode = 'FAB_SEW'
+                      AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
+                      AND po2.companySOId = ?
+                      AND po2.fabricCode = ?`,
+                )
+                .bind(
+                  jcRow.id,
+                  poRow.companySOId ?? "",
+                  poRow.fabricCode ?? "",
+                )
+                .first<{ n: number }>()
+            : await db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM job_cards
+                    WHERE id != ?
+                      AND productionOrderId = ?
+                      AND departmentCode = 'FAB_SEW'
+                      AND (status = 'COMPLETED' OR status = 'TRANSFERRED')`,
+                )
+                .bind(jcRow.id, jcRow.productionOrderId)
+                .first<{ n: number }>();
+          const stillDoneSibling = Number(sibQ?.n ?? 0) > 0;
+          if (stillDoneSibling) {
+            // Other sibling still DONE — merge group is still consumed.
+            // Don't refund (consume stays).
+            actualRefund = 0;
+          } else {
+            // No other DONE sibling — this rollback leaves the group
+            // fully un-consumed. Refund 1 set (mirrors forward consume).
+            actualRefund = 1;
+          }
+        }
+        if (actualRefund > 0) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+            )
+            .bind(actualRefund, refundLabel)
+            .run();
+        }
       }
     }
     return;

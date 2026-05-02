@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { Link, useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1296,8 +1296,36 @@ export default function RDPage() {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const { toast } = useToast();
 
+  // Page-level category filter. "ALL" shows every project across all
+  // categories; otherwise only that productCategory. Persists in
+  // localStorage so the operator's last filter survives a refresh —
+  // most shops live in either Sofa or Bedframe, not both day-to-day.
+  type CatFilter = "ALL" | "SOFA" | "BEDFRAME" | "ACCESSORY";
+  const [categoryFilter, setCategoryFilter] = useState<CatFilter>(() => {
+    if (typeof localStorage === "undefined") return "ALL";
+    const saved = localStorage.getItem("rd_category_filter");
+    if (saved === "SOFA" || saved === "BEDFRAME" || saved === "ACCESSORY" || saved === "ALL") return saved;
+    return "ALL";
+  });
+  useEffect(() => {
+    if (typeof localStorage !== "undefined") {
+      localStorage.setItem("rd_category_filter", categoryFilter);
+    }
+  }, [categoryFilter]);
+
   const { data: rdResp, loading, refresh: refreshRdHook } = useCachedJson<{ data?: RDProject[] }>("/api/rd-projects");
-  const projects: RDProject[] = useMemo(() => rdResp?.data ?? [], [rdResp]);
+  const allProjects: RDProject[] = useMemo(() => rdResp?.data ?? [], [rdResp]);
+  // Apply the page-level category filter once at the top — every
+  // downstream list (drafts / active / completed / KPIs) reads from
+  // here so the filter is consistent across tabs without repeating
+  // the predicate.
+  const projects = useMemo(
+    () =>
+      categoryFilter === "ALL"
+        ? allProjects
+        : allProjects.filter((p) => p.productCategory === categoryFilter),
+    [allProjects, categoryFilter],
+  );
   const fetchProjects = useCallback(() => {
     invalidateCachePrefix("/api/rd-projects");
     refreshRdHook();
@@ -1318,6 +1346,19 @@ export default function RDPage() {
   );
   const draftCount = draftProjects.length;
   const completedCount = completedProjects.length;
+
+  // Category-tab counts run off allProjects (NOT the filtered set), so
+  // the All / Sofa / Bedframe / Accessory pills show "real" totals
+  // regardless of which one is active.
+  const categoryCounts = useMemo(() => {
+    const m: Record<CatFilter, number> = { ALL: allProjects.length, SOFA: 0, BEDFRAME: 0, ACCESSORY: 0 };
+    for (const p of allProjects) {
+      if (p.productCategory === "SOFA") m.SOFA++;
+      else if (p.productCategory === "BEDFRAME") m.BEDFRAME++;
+      else if (p.productCategory === "ACCESSORY") m.ACCESSORY++;
+    }
+    return m;
+  }, [allProjects]);
 
   const handleStartProject = useCallback(
     async (project: RDProject) => {
@@ -1385,6 +1426,43 @@ export default function RDPage() {
         <Button variant="primary" onClick={() => setShowCreateDialog(true)}>
           <Plus className="h-4 w-4" /> New Project
         </Button>
+      </div>
+
+      {/* Category filter pills — applies to every tab below. We put them
+          above the tab strip so the filter persists when the operator
+          jumps between Drafts / Projects / Pipeline / Summary. The
+          counts come from allProjects (unfiltered) so each pill reads
+          like "what would I see if I clicked this". */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {(["ALL", "SOFA", "BEDFRAME", "ACCESSORY"] as const).map((cat) => {
+          const active = categoryFilter === cat;
+          const label = cat === "ALL"
+            ? "All"
+            : cat === "SOFA" ? "Sofa" : cat === "BEDFRAME" ? "Bedframe" : "Accessory";
+          return (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setCategoryFilter(cat)}
+              className={
+                "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-colors " +
+                (active
+                  ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                  : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
+              }
+              aria-pressed={active}
+            >
+              {label}
+              <span
+                className={`rounded-full px-1.5 py-0 text-[10px] ${
+                  active ? "bg-white/25 text-white" : "bg-[#F0ECE9] text-gray-500"
+                }`}
+              >
+                {categoryCounts[cat]}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {/* Tabs */}

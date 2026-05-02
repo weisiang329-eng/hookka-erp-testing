@@ -959,6 +959,24 @@ export default function ProductionPage({
     refreshOrders();
   }, [refreshOrders]);
 
+  // Auto-refresh on tab focus / visibility return. Mirrors the inventory
+  // page fix — when the user comes back from another tab (or another
+  // browser window), pull the latest production_orders so JC status
+  // changes made elsewhere (other operator, scanner, batch importer) are
+  // reflected without a manual refresh.
+  useEffect(() => {
+    const onFocus = () => fetchOrders();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") fetchOrders();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [fetchOrders]);
+
   // Sync cached orders response into local state so optimistic PATCHes keep working.
   const [lastSeenOrdersResp, setLastSeenOrdersResp] = useState<typeof ordersResp>(null);
   if (ordersResp !== lastSeenOrdersResp) {

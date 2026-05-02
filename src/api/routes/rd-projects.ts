@@ -407,14 +407,20 @@ app.post("/", async (c) => {
 
     const id = genId("rd");
 
+    // Main insert — does NOT touch the pricing-target columns so this
+    // path keeps working even when migration 0101 hasn't been applied
+    // yet against prod. Pricing targets are written via a separate
+    // UPDATE below, wrapped in try/catch so a missing column degrades
+    // to "create succeeds, targets not persisted" instead of "create
+    // fails entirely". Once migration 0101 lands the targets persist
+    // normally.
     await c.var.DB.prepare(
       `INSERT INTO rd_projects (id, code, name, description, projectType, productCategory,
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
          milestones, productionBOM, materialIssuances, labourLogs,
          sourceProductName, sourceBrand, sourcePurchaseRef, sourcePriceSen,
-         sourceNotes, coverPhotoUrl, createdDate, status,
-         targetSellingPriceSen, targetMaterialCostSen)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         sourceNotes, coverPhotoUrl, createdDate, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -445,12 +451,27 @@ app.post("/", async (c) => {
         // tab to flip status DRAFT→ACTIVE, which is when it enters the
         // live Pipeline kanban.
         "DRAFT",
-        // Pricing targets — optional at creation time. The Edit modal
-        // surfaces both fields so the operator can fill them in later.
-        body.targetSellingPriceSen ?? null,
-        body.targetMaterialCostSen ?? null,
       )
       .run();
+
+    // Pricing targets — best-effort write. Skipped silently if the
+    // columns don't exist yet (migration 0101 unapplied) so prod keeps
+    // working until ops runs `npm run db:migrate:supabase`.
+    if (body.targetSellingPriceSen !== undefined || body.targetMaterialCostSen !== undefined) {
+      try {
+        await c.var.DB.prepare(
+          "UPDATE rd_projects SET targetSellingPriceSen = ?, targetMaterialCostSen = ? WHERE id = ?",
+        )
+          .bind(
+            body.targetSellingPriceSen ?? null,
+            body.targetMaterialCostSen ?? null,
+            id,
+          )
+          .run();
+      } catch {
+        // Column missing — migration not applied yet. Swallow.
+      }
+    }
 
     const created = await c.var.DB.prepare(
       "SELECT * FROM rd_projects WHERE id = ?",
@@ -588,6 +609,8 @@ app.put("/:id", async (c) => {
           : existing.targetMaterialCostSen,
     };
 
+    // Main update — pricing-target columns split out below for the same
+    // "migration 0101 maybe not applied yet" reason as the create POST.
     await c.var.DB.prepare(
       `UPDATE rd_projects SET
          name = ?, description = ?, projectType = ?, serviceId = ?,
@@ -596,8 +619,7 @@ app.put("/:id", async (c) => {
          milestones = ?, productionBOM = ?, materialIssuances = ?,
          labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
          sourcePurchaseRef = ?, sourcePriceSen = ?, sourceNotes = ?,
-         coverPhotoUrl = ?, status = ?,
-         targetSellingPriceSen = ?, targetMaterialCostSen = ?
+         coverPhotoUrl = ?, status = ?
        WHERE id = ?`,
     )
       .bind(
@@ -622,11 +644,31 @@ app.put("/:id", async (c) => {
         merged.sourceNotes,
         merged.coverPhotoUrl,
         merged.status,
-        merged.targetSellingPriceSen,
-        merged.targetMaterialCostSen,
         id,
       )
       .run();
+
+    // Pricing targets — best-effort. If migration 0101 hasn't run on
+    // prod yet, the column doesn't exist and this UPDATE throws; we
+    // swallow so the rest of the edit (which already committed) sticks.
+    if (
+      body.targetSellingPriceSen !== undefined ||
+      body.targetMaterialCostSen !== undefined
+    ) {
+      try {
+        await c.var.DB.prepare(
+          "UPDATE rd_projects SET targetSellingPriceSen = ?, targetMaterialCostSen = ? WHERE id = ?",
+        )
+          .bind(
+            merged.targetSellingPriceSen,
+            merged.targetMaterialCostSen,
+            id,
+          )
+          .run();
+      } catch {
+        // Column missing — migration not applied yet. Swallow.
+      }
+    }
 
     // Sync rd_prototypes from body.prototypes when provided. Migration moved
     // prototypes off the JSON column into the dedicated table, but the PUT

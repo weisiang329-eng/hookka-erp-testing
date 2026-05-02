@@ -212,16 +212,43 @@ function DraftCard({
     <Link to={`/rd/${project.id}`}>
       <Card className="hover:shadow-md transition-shadow cursor-pointer h-full border-dashed border-[#D0C9C0] bg-[#FBF9F6]">
         <CardHeader className="pb-3">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-mono text-gray-400">{project.code}</p>
-              <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+          {/* Left column packs all the textual meta (code, title, type
+              chips, description) so its visual height matches the
+              128×128 photo on the right — eliminates the dead-space gap
+              that appeared when the photo was bigger than the title-only
+              left column. DRAFT badge moved to an absolute overlay on
+              the photo so it costs zero column height. */}
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0 space-y-2">
+              <div>
+                <p className="text-xs font-mono text-gray-400">{project.code}</p>
+                <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+                  {project.productCategory}
+                </span>
+                <span
+                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
+                    project.projectType === "IMPROVEMENT"
+                      ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                      : project.projectType === "CLONE"
+                      ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
+                      : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
+                  }`}
+                >
+                  {project.projectType === "IMPROVEMENT"
+                    ? "Improvement"
+                    : project.projectType === "CLONE"
+                    ? "Clone"
+                    : "Research"}
+                </span>
+              </div>
+              {project.description && (
+                <p className="text-xs text-gray-500 line-clamp-3">{project.description}</p>
+              )}
             </div>
-            {/* Top-right thumbnail block — bumped from 48×48 → 128×128 so
-                the photo is actually readable. The right rail of the
-                draft card had lots of dead space; the bigger thumbnail
-                fills it without crowding the title/code on the left. */}
-            <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
+            <div className="relative flex-shrink-0">
               {cover ? (
                 <img
                   src={cover}
@@ -241,35 +268,13 @@ function DraftCard({
                   </svg>
                 </div>
               )}
-              <Badge variant="status" status="DRAFT">DRAFT</Badge>
+              <span className="absolute top-1.5 right-1.5">
+                <Badge variant="status" status="DRAFT">DRAFT</Badge>
+              </span>
             </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
-              {project.productCategory}
-            </span>
-            <span
-              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
-                project.projectType === "IMPROVEMENT"
-                  ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
-                  : project.projectType === "CLONE"
-                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
-                  : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
-              }`}
-            >
-              {project.projectType === "IMPROVEMENT"
-                ? "Improvement"
-                : project.projectType === "CLONE"
-                ? "Clone"
-                : "Research"}
-            </span>
-          </div>
-
-          {project.description && (
-            <p className="text-xs text-gray-500 line-clamp-2">{project.description}</p>
-          )}
+        <CardContent className="space-y-3 pt-0">
 
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="flex items-center gap-1 text-gray-500">

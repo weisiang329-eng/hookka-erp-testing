@@ -55,6 +55,14 @@ export type Column<T> = {
   // do not bleed through. Defaults to false — fully opt-in, every other grid
   // in the codebase keeps its existing behaviour.
   sticky?: boolean;
+  // Optional value-filter accessor — when defined, the per-column value-
+  // filter dropdown (the "(All)" checkbox panel) reads from this fn
+  // instead of `getNestedValue(row, key)`. Use it when the column's
+  // `key` resolves to a sort number (e.g. dept-status sortKey 0..3) but
+  // the filter UI should show human-readable labels (Pending / Overdue
+  // / Done / —). Sort still uses `key` so sortable: true keeps its
+  // original ordering.
+  filterAccessor?: (row: T) => string;
 };
 
 export type ContextMenuItem = {
@@ -263,6 +271,7 @@ function ContextMenu({
 function ColumnFilterDropdown<T>({
   columnKey,
   columnType: _columnType,
+  filterAccessor,
   allData,
   activeValues,
   textFilter,
@@ -274,6 +283,7 @@ function ColumnFilterDropdown<T>({
 }: {
   columnKey: string;
   columnType?: "text" | "date" | "currency" | "number" | "docno" | "status";
+  filterAccessor?: (row: T) => string;
   allData: T[];
   activeValues: Set<string> | null;
   textFilter: string;
@@ -292,15 +302,20 @@ function ColumnFilterDropdown<T>({
     return m ? m[1] : "contains";
   });
 
-  // Compute unique values for this column
+  // Compute unique values for this column. When the column defines a
+  // filterAccessor, route through it so the dropdown shows human labels
+  // (e.g. "Pending / Overdue / Done") instead of the raw sort number
+  // the column.key resolves to.
   const uniqueValues = useMemo(() => {
     const vals = new Map<string, number>();
     allData.forEach(row => {
-      const v = String(getNestedValue(row as any, columnKey) ?? "");
+      const v = filterAccessor
+        ? String(filterAccessor(row) ?? "")
+        : String(getNestedValue(row as any, columnKey) ?? "");
       vals.set(v, (vals.get(v) || 0) + 1);
     });
     return Array.from(vals.entries()).sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
-  }, [allData, columnKey]);
+  }, [allData, columnKey, filterAccessor]);
 
   const filteredValues = useMemo(() => {
     if (!search) return uniqueValues;
@@ -990,9 +1005,13 @@ export function DataGrid<T extends Record<string, any>>({
     if (!defaultExcludedValues || data.length === 0) return;
     const next: Record<string, Set<string>> = {};
     for (const [colKey, excluded] of Object.entries(defaultExcludedValues)) {
+      const col = columns.find((c) => c.key === colKey);
       const allValues = new Set<string>();
       for (const row of data) {
-        allValues.add(String(getNestedValue(row, colKey) ?? ""));
+        const v = col?.filterAccessor
+          ? String(col.filterAccessor(row) ?? "")
+          : String(getNestedValue(row, colKey) ?? "");
+        allValues.add(v);
       }
       for (const e of excluded) allValues.delete(e);
       // Skip the column entirely if no values remain — an all-excluded
@@ -1196,12 +1215,17 @@ export function DataGrid<T extends Record<string, any>>({
       );
     }
 
-    // Per-column value filters (checkbox-based)
+    // Per-column value filters (checkbox-based). filterAccessor on the
+    // column wins over the raw key so e.g. dept-status columns can store
+    // a sort number on .key but filter on a "Pending/Overdue/Done" label.
     const activeValueFilters = Object.entries(columnValueFilters);
     if (activeValueFilters.length > 0) {
       result = result.filter(row =>
         activeValueFilters.every(([key, allowedValues]) => {
-          const v = String(getNestedValue(row, key) ?? "");
+          const col = columns.find((c) => c.key === key);
+          const v = col?.filterAccessor
+            ? String(col.filterAccessor(row) ?? "")
+            : String(getNestedValue(row, key) ?? "");
           return allowedValues.has(v);
         })
       );
@@ -1952,6 +1976,7 @@ export function DataGrid<T extends Record<string, any>>({
         <ColumnFilterDropdown
           columnKey={filterDropdown.key}
           columnType={columns.find(c => c.key === filterDropdown.key)?.type}
+          filterAccessor={columns.find(c => c.key === filterDropdown.key)?.filterAccessor}
           allData={data}
           activeValues={columnValueFilters[filterDropdown.key] ?? null}
           textFilter={columnFilters[filterDropdown.key] || ""}

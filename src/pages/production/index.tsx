@@ -2067,6 +2067,21 @@ export default function ProductionPage({
         sortable: true,
         defaultHidden: !(isActive || isUpstream),
         render: (_v, row) => renderDeptSchedCell(row[objKey] as DeptSched),
+        // The filter dropdown for a dept column shows status labels
+        // (Pending / Overdue / Done / —) instead of the sortKey number,
+        // so the operator can tick "show only Overdue Fab Sew rows" the
+        // same way they'd tick a Status column anywhere else. Sort still
+        // runs off the numeric sortKey via column.key, so the existing
+        // overdue→pending→done→none sort order is unchanged.
+        filterAccessor: (row) => {
+          const s = row[objKey] as DeptSched;
+          switch (s.state) {
+            case "overdue": return "Overdue";
+            case "pending": return "Pending";
+            case "done":    return "Done";
+            default:        return "—";
+          }
+        },
       };
     }),
     // Due stays plain text (user's preference). Completion is a clickable
@@ -3479,6 +3494,33 @@ export default function ProductionPage({
               return "";
             }}
           />
+          {/* Totals strip — sum of Prod Time + Qty across the rows
+              currently visible in the grid (after filters). Mirrors
+              gridFilteredDeptRows so a "show only Overdue" filter
+              immediately reflects the total time budget for the
+              filtered subset. Falls back to the unfiltered set when
+              the grid hasn't reported filtered rows yet. */}
+          {(() => {
+            // Cast back to DeptRow — the gridFilteredDeptRows mirror is
+            // typed loosely (id/poId/jobCardId) but the runtime objects
+            // are full DeptRow instances passed straight through from the
+            // grid via onFilteredDataChange.
+            const visible = (gridFilteredDeptRows as unknown as DeptRow[] | null) ?? deptRows;
+            const totalProdTime = visible.reduce((sum, r) => sum + (Number(r.prodTime) || 0), 0);
+            const totalQty = visible.reduce((sum, r) => sum + (Number(r.qty) || 0), 0);
+            return (
+              <div className="border-t-2 border-[#E6E0D9] bg-[#FAF8F4] px-4 py-2.5 flex flex-wrap items-center gap-x-6 gap-y-1 text-xs">
+                <span className="font-semibold text-[#1F1D1B]">Total ({visible.length} rows)</span>
+                <span className="text-[#6B7280]">
+                  Prod Time: <span className="font-semibold text-[#1F1D1B] tabular-nums">{totalProdTime.toLocaleString()} min</span>
+                  <span className="text-[#9CA3AF] ml-1">({(totalProdTime / 60).toFixed(1)} h)</span>
+                </span>
+                <span className="text-[#6B7280]">
+                  Qty: <span className="font-semibold text-[#1F1D1B] tabular-nums">{totalQty.toLocaleString()}</span>
+                </span>
+              </div>
+            );
+          })()}
         </div>
       )}
 

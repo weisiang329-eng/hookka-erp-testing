@@ -23,6 +23,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { resolveProductPriceAsOf } from "./products";
 
 const app = new Hono<Env>();
 
@@ -138,6 +139,7 @@ app.get("/", async (c) => {
 
   const cpRows = res.results ?? [];
   const cpIds = cpRows.map((r) => r.id);
+  const productIds = Array.from(new Set(cpRows.map((r) => r.productId)));
 
   // Batch-load history once so the list stays one round-trip per customer.
   const activeHistoryByCp = new Map<string, CustomerProductPriceRow>();
@@ -162,19 +164,81 @@ app.get("/", async (c) => {
     }
   }
 
+  // Batch-load master price overlays for the unique products in the result.
+  // Mirrors the pattern in products.ts:loadPriceOverlays — first active row
+  // per productId wins (DESC sort), and we surface a flag for the earliest
+  // pending master change so the UI can warn that this customer's inherited
+  // price will move on a known date.
+  const masterActiveByProduct = new Map<
+    string,
+    {
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPricesRaw: string | null;
+    }
+  >();
+  const masterPendingByProduct = new Map<string, string>();
+  if (productIds.length > 0) {
+    const placeholders = productIds.map(() => "?").join(",");
+    const ppRes = await c.var.DB.prepare(
+      `SELECT productId, basePriceSen, price1Sen, seatHeightPrices,
+              effectiveFrom, created_at
+         FROM product_prices
+        WHERE productId IN (${placeholders})
+        ORDER BY productId, effectiveFrom DESC, created_at DESC`,
+    )
+      .bind(...productIds)
+      .all<{
+        productId: string;
+        basePriceSen: number | null;
+        price1Sen: number | null;
+        seatHeightPrices: string | null;
+        effectiveFrom: string;
+      }>();
+    for (const r of ppRes.results ?? []) {
+      if (r.effectiveFrom > today) {
+        const cur = masterPendingByProduct.get(r.productId);
+        if (!cur || r.effectiveFrom < cur) {
+          masterPendingByProduct.set(r.productId, r.effectiveFrom);
+        }
+      } else if (!masterActiveByProduct.has(r.productId)) {
+        masterActiveByProduct.set(r.productId, {
+          basePriceSen: r.basePriceSen,
+          price1Sen: r.price1Sen,
+          seatHeightPricesRaw: r.seatHeightPrices,
+        });
+      }
+    }
+  }
+
   const data = cpRows.map((r) => {
     const hist = activeHistoryByCp.get(r.id);
     // History row wins over legacy cp overrides when present.
     const baseOverride = hist ? hist.basePriceSen : r.basePriceSen;
     const price1Override = hist ? hist.price1Sen : r.price1Sen;
     const seatOverride = hist ? hist.seatHeightPrices : r.seatHeightPrices;
+    // Master baseline: prefer effective-dated master row, fall back to the
+    // raw products table column. Resolver semantics unchanged.
+    const masterActive = masterActiveByProduct.get(r.productId);
+    const masterBase =
+      masterActive && masterActive.basePriceSen !== null
+        ? masterActive.basePriceSen
+        : r.productBasePriceSen;
+    const masterP1 =
+      masterActive && masterActive.price1Sen !== null
+        ? masterActive.price1Sen
+        : r.productPrice1Sen;
+    const masterSeat =
+      masterActive && masterActive.seatHeightPricesRaw !== null
+        ? masterActive.seatHeightPricesRaw
+        : r.productSeatHeightPrices;
     const prices = resolvePrices(
       baseOverride,
       price1Override,
       seatOverride,
-      r.productBasePriceSen,
-      r.productPrice1Sen,
-      r.productSeatHeightPrices,
+      masterBase,
+      masterP1,
+      masterSeat,
     );
     return {
       id: r.id,
@@ -188,6 +252,11 @@ app.get("/", async (c) => {
       seatHeightPrices: prices.seatHeightPrices,
       notes: r.notes ?? "",
       hasPendingPriceChange: pendingCpIds.has(r.id),
+      // Master-side pending change can also affect this customer when no
+      // customer override exists (snapshot mode normally sets one, but
+      // legacy/inherit rows still flow through here).
+      masterPendingEffectiveFrom:
+        masterPendingByProduct.get(r.productId) ?? null,
     };
   });
 
@@ -672,49 +741,50 @@ app.post("/bulk-assign", async (c) => {
 // callers that already have the customer-products router mounted don't need
 // a separate base URL.
 // ---------------------------------------------------------------------------
-type PriceResolutionRow = {
-  productBasePriceSen: number | null;
-  productPrice1Sen: number | null;
-  productSeatHeightPrices: string | null;
-  cpId: string | null;
-  cpBasePriceSen: number | null;
-  cpPrice1Sen: number | null;
-  cpSeatHeightPrices: string | null;
-};
-
 async function resolveCustomerPriceAsOf(
   db: D1Database,
   productId: string,
   customerId: string,
   isoDate: string,
 ) {
-  // Step 1: product + assignment row (legacy overrides kept as fallback).
+  // Step 1: customer assignment + legacy overrides. The product's master
+  // baseline is no longer pulled from the products table directly — we
+  // resolve it through resolveProductPriceAsOf so that effective-dated
+  // master price changes (migration 0066) are honored on the fallback
+  // path. Snapshot copy (Phase 2) usually populates concrete customer
+  // overrides anyway, but inheritance still happens for legacy rows
+  // and direct API users.
   const row = await db
     .prepare(
-      `SELECT p.basePriceSen     AS "productBasePriceSen",
-              p.price1Sen        AS "productPrice1Sen",
-              p.seatHeightPrices AS "productSeatHeightPrices",
-              cp.id              AS "cpId",
+      `SELECT cp.id              AS "cpId",
               cp.basePriceSen    AS "cpBasePriceSen",
               cp.price1Sen       AS "cpPrice1Sen",
               cp.seatHeightPrices AS "cpSeatHeightPrices"
-         FROM products p
-         LEFT JOIN customer_products cp
-           ON cp.productId = p.id AND cp.customerId = ?
-         WHERE p.id = ?`,
+         FROM customer_products cp
+         WHERE cp.productId = ? AND cp.customerId = ?`,
     )
-    .bind(customerId, productId)
-    .first<PriceResolutionRow>();
+    .bind(productId, customerId)
+    .first<{
+      cpId: string | null;
+      cpBasePriceSen: number | null;
+      cpPrice1Sen: number | null;
+      cpSeatHeightPrices: string | null;
+    }>();
 
-  if (!row) return null;
+  // Master baseline — drives the inheritance fallback. Returns null only
+  // when the product itself doesn't exist, which is what the caller
+  // signals back as a 404.
+  const master = await resolveProductPriceAsOf(db, productId, isoDate);
+  if (!master) return null;
 
-  // Step 2: newest history row where effectiveFrom <= isoDate wins over the
-  // legacy customer_products columns. Falls back gracefully when no history.
+  // Step 2: newest customer_product_prices row where effectiveFrom <= isoDate
+  // wins over the legacy customer_products columns. Falls back gracefully
+  // when no history.
   let histBase: number | null = null;
   let histPrice1: number | null = null;
   let histSeat: string | null = null;
   let hasHistory = false;
-  if (row.cpId) {
+  if (row?.cpId) {
     const hist = await db
       .prepare(
         `SELECT basePriceSen, price1Sen, seatHeightPrices
@@ -738,23 +808,31 @@ async function resolveCustomerPriceAsOf(
     }
   }
 
-  const baseOverride = hasHistory ? histBase : row.cpBasePriceSen;
-  const price1Override = hasHistory ? histPrice1 : row.cpPrice1Sen;
-  const seatOverride = hasHistory ? histSeat : row.cpSeatHeightPrices;
+  const baseOverride = hasHistory ? histBase : (row?.cpBasePriceSen ?? null);
+  const price1Override = hasHistory ? histPrice1 : (row?.cpPrice1Sen ?? null);
+  const seatOverride = hasHistory ? histSeat : (row?.cpSeatHeightPrices ?? null);
+
+  // Master baseline is already resolved (numbers + parsed seat tiers);
+  // re-stringify the seat tiers so resolvePrices sees the same TEXT shape
+  // it was built for. Cheap, keeps the helper signature stable.
+  const masterSeatRaw =
+    master.seatHeightPrices.length > 0
+      ? JSON.stringify(master.seatHeightPrices)
+      : null;
 
   const prices = resolvePrices(
     baseOverride,
     price1Override,
     seatOverride,
-    row.productBasePriceSen,
-    row.productPrice1Sen,
-    row.productSeatHeightPrices,
+    master.basePriceSen,
+    master.price1Sen,
+    masterSeatRaw,
   );
 
   return {
     productId,
     customerId,
-    hasCustomerOverride: row.cpId !== null,
+    hasCustomerOverride: row?.cpId != null,
     basePriceSen: prices.basePriceSen,
     price1Sen: prices.price1Sen,
     seatHeightPrices: prices.seatHeightPrices,

@@ -3,10 +3,11 @@ import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cac
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, Trash2, Save, AlertCircle, Check } from "lucide-react";
+import { Plus, Trash2, Save, AlertCircle, Check, Calendar } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
+import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 
 const ProductMutationSchema = mutationWithData(ProductSchema);
 import {
@@ -46,6 +47,11 @@ type Product = {
   productionTimeMinutes: number;
   subAssemblies: string[];
   deptWorkingTimes: DeptWorkingTime[];
+  // Set by /api/products when a future-dated row exists in product_prices.
+  // Surfaced as a "Pending" badge next to the price columns so the operator
+  // sees a scheduled change at a glance (countdown UI in MasterPriceHistoryDialog).
+  hasPendingPriceChange?: boolean;
+  pendingEffectiveFrom?: string;
 };
 
 type VariantOption = {
@@ -1273,6 +1279,28 @@ export default function ProductsPage() {
   const [editingSeatPrices, setEditingSeatPrices] = useState<string | null>(null);
   const [seatPriceInputs, setSeatPriceInputs] = useState<Record<string, string>>({});
 
+  // Master price-history dialog. Holds the product whose history is open;
+  // null when the dialog is closed.
+  const [scheduleProductId, setScheduleProductId] = useState<string | null>(
+    null,
+  );
+  const scheduleProduct = useMemo(
+    () => products.find((p) => p.id === scheduleProductId) ?? null,
+    [products, scheduleProductId],
+  );
+
+  // Reload products when a price change is scheduled or deleted so the
+  // Pending badge + currently-effective price reflect the latest history.
+  // Reuses the same cached endpoint the initial load uses so a future
+  // background refresh sees the freshest data on its next read too.
+  const reloadProductsAfterSchedule = async () => {
+    invalidateCachePrefix("/api/products");
+    const pData = await cachedFetchJson<{ success?: boolean; data?: Product[] }>(
+      "/api/products",
+    ).catch(() => null);
+    if (pData?.success) setProducts((pData.data as Product[]) ?? []);
+  };
+
   // ---------- CSV helpers ----------
   function csvEscape(val: string | number | undefined | null): string {
     const s = val == null ? "" : String(val);
@@ -1679,6 +1707,55 @@ export default function ProductsPage() {
                             <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
                           </svg>
                           <span className="text-xs font-mono font-medium text-[#111827] whitespace-nowrap">{p.code}</span>
+                          {/* Schedule master price change. Same dialog drives the whole
+                              row (works for BF Price 2/Price 1 and Sofa seat tiers).
+                              stopPropagation so the click doesn't toggle the row's
+                              expansion state. */}
+                          <button
+                            type="button"
+                            title="Schedule price change"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setScheduleProductId(p.id);
+                            }}
+                            className={`p-1 rounded flex-shrink-0 ${
+                              p.hasPendingPriceChange
+                                ? "text-[#B8601A] hover:bg-[#FBE4CE]"
+                                : "text-[#9CA3AF] hover:text-[#6B5C32] hover:bg-[#F4F0E8]"
+                            }`}
+                          >
+                            <Calendar className="h-3.5 w-3.5" />
+                          </button>
+                          {p.hasPendingPriceChange && (
+                            <span
+                              title={
+                                p.pendingEffectiveFrom
+                                  ? `Next price change effective ${p.pendingEffectiveFrom}`
+                                  : "A future-dated price change is queued"
+                              }
+                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setScheduleProductId(p.id);
+                              }}
+                            >
+                              Pending
+                              {p.pendingEffectiveFrom &&
+                                (() => {
+                                  const t = new Date(
+                                    new Date().toISOString().slice(0, 10) +
+                                      "T00:00:00Z",
+                                  ).getTime();
+                                  const d = new Date(
+                                    p.pendingEffectiveFrom + "T00:00:00Z",
+                                  ).getTime();
+                                  const days = Math.round(
+                                    (d - t) / 86400000,
+                                  );
+                                  return ` · ${days}d`;
+                                })()}
+                            </span>
+                          )}
                         </div>
                         <div className="px-3 py-1.5 min-w-0">
                           <span className="text-xs text-[#111827] truncate block">{p.name}</span>
@@ -2024,6 +2101,13 @@ export default function ProductsPage() {
           onSave={(v) => setVariantMap((prev) => ({ ...prev, [editingVariant.baseModel]: v }))}
         />
       )}
+
+      {/* Master price history — schedule effective-dated price changes */}
+      <MasterPriceHistoryDialog
+        product={scheduleProduct}
+        onClose={() => setScheduleProductId(null)}
+        onSaved={reloadProductsAfterSchedule}
+      />
     </div>
   );
 }

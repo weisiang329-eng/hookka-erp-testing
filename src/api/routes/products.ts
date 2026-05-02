@@ -102,11 +102,24 @@ function bomTotalMinutes(
   return l1 + sumWipTreeMinutes(wipComponents);
 }
 
+// Per-product overlay computed from product_prices. When an active history
+// row exists for a product, its non-NULL price columns win over the
+// products table columns. `pendingEffectiveFrom` is set when at least one
+// future-dated row is queued.
+type ProductPriceOverlay = {
+  basePriceSen: number | null;
+  price1Sen: number | null;
+  seatHeightPricesRaw: string | null;
+  hasPendingPriceChange: boolean;
+  pendingEffectiveFrom: string | null;
+};
+
 function rowToProduct(
   row: ProductRow,
   boms: BomComponentRow[] = [],
   dwts: DeptWorkingTimeRow[] = [],
   bomMinutesByCode?: Map<string, number>,
+  priceOverlay?: ProductPriceOverlay,
 ) {
   const productBoms = boms
     .filter((b) => b.productId === row.id)
@@ -155,8 +168,25 @@ function rowToProduct(
     deptWorkingTimes: productDwts,
   };
 
-  if (row.basePriceSen !== null) base.basePriceSen = row.basePriceSen;
-  if (row.price1Sen !== null) base.price1Sen = row.price1Sen;
+  // Coalesce price columns through the overlay so products list/get always
+  // surface the currently-effective master price (history row wins over the
+  // raw products table value when present). Pending flag rides along so the
+  // UI can show a countdown badge without a second round-trip.
+  const baseRaw =
+    priceOverlay && priceOverlay.basePriceSen !== null
+      ? priceOverlay.basePriceSen
+      : row.basePriceSen;
+  const p1Raw =
+    priceOverlay && priceOverlay.price1Sen !== null
+      ? priceOverlay.price1Sen
+      : row.price1Sen;
+  const seatRaw =
+    priceOverlay && priceOverlay.seatHeightPricesRaw !== null
+      ? priceOverlay.seatHeightPricesRaw
+      : row.seatHeightPrices;
+
+  if (baseRaw !== null) base.basePriceSen = baseRaw;
+  if (p1Raw !== null) base.price1Sen = p1Raw;
   if (row.skuCode !== null) base.skuCode = row.skuCode;
   if (row.fabricColor !== null) base.fabricColor = row.fabricColor;
   if (row.pieces !== null) {
@@ -165,14 +195,83 @@ function rowToProduct(
       null,
     );
   }
-  if (row.seatHeightPrices !== null) {
+  if (seatRaw !== null) {
     base.seatHeightPrices = parseJson<{ height: string; priceSen: number }[]>(
-      row.seatHeightPrices,
+      seatRaw,
       [],
     );
   }
+  if (priceOverlay) {
+    base.hasPendingPriceChange = priceOverlay.hasPendingPriceChange;
+    if (priceOverlay.pendingEffectiveFrom) {
+      base.pendingEffectiveFrom = priceOverlay.pendingEffectiveFrom;
+    }
+  }
 
   return base;
+}
+
+// Batch-load product_prices and return a Map keyed by productId. Single
+// query, in-memory bucketing — keeps the products list endpoint to one
+// extra round-trip even with hundreds of SKUs. `today` controls the
+// active-vs-pending split.
+async function loadPriceOverlays(
+  db: D1Database,
+  today: string,
+): Promise<Map<string, ProductPriceOverlay>> {
+  const res = await db
+    .prepare(
+      `SELECT productId, basePriceSen, price1Sen, seatHeightPrices,
+              effectiveFrom, created_at
+         FROM product_prices
+        ORDER BY productId, effectiveFrom DESC, created_at DESC`,
+    )
+    .all<{
+      productId: string;
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPrices: string | null;
+      effectiveFrom: string;
+    }>();
+
+  const overlays = new Map<string, ProductPriceOverlay>();
+  // Tracks which productIds have already had their active row picked, so
+  // we don't overwrite with an older active row. NULL price columns are
+  // valid (= inherit), so we can't use "all null" as the sentinel.
+  const activePicked = new Set<string>();
+  for (const r of res.results ?? []) {
+    let overlay = overlays.get(r.productId);
+    if (!overlay) {
+      overlay = {
+        basePriceSen: null,
+        price1Sen: null,
+        seatHeightPricesRaw: null,
+        hasPendingPriceChange: false,
+        pendingEffectiveFrom: null,
+      };
+      overlays.set(r.productId, overlay);
+    }
+    if (r.effectiveFrom > today) {
+      // Rows arrive DESC, so we may see later pending dates first. Keep
+      // the earliest pending date (the next change the customer will
+      // experience).
+      if (
+        !overlay.pendingEffectiveFrom ||
+        r.effectiveFrom < overlay.pendingEffectiveFrom
+      ) {
+        overlay.pendingEffectiveFrom = r.effectiveFrom;
+      }
+      overlay.hasPendingPriceChange = true;
+    } else if (!activePicked.has(r.productId)) {
+      // First active row encountered (DESC order) is the most recent one
+      // that's currently in effect.
+      overlay.basePriceSen = r.basePriceSen;
+      overlay.price1Sen = r.price1Sen;
+      overlay.seatHeightPricesRaw = r.seatHeightPrices;
+      activePicked.add(r.productId);
+    }
+  }
+  return overlays;
 }
 
 function genProductId(): string {
@@ -184,7 +283,8 @@ function genBomId(): string {
 }
 
 async function fetchProductWithChildren(db: D1Database, id: string) {
-  const [product, bomsRes, dwtsRes] = await Promise.all([
+  const today = new Date().toISOString().slice(0, 10);
+  const [product, bomsRes, dwtsRes, priceOverlays] = await Promise.all([
     db.prepare("SELECT * FROM products WHERE id = ?").bind(id).first<ProductRow>(),
     db
       .prepare("SELECT * FROM bom_components WHERE productId = ?")
@@ -194,6 +294,24 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
       .prepare("SELECT * FROM dept_working_times WHERE productId = ?")
       .bind(id)
       .all<DeptWorkingTimeRow>(),
+    // Overlay query is scoped to one product but reuses the batch helper —
+    // the WHERE clause keeps the row count tiny.
+    db
+      .prepare(
+        `SELECT productId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, created_at
+           FROM product_prices
+          WHERE productId = ?
+          ORDER BY effectiveFrom DESC, created_at DESC`,
+      )
+      .bind(id)
+      .all<{
+        productId: string;
+        basePriceSen: number | null;
+        price1Sen: number | null;
+        seatHeightPrices: string | null;
+        effectiveFrom: string;
+      }>(),
   ]);
   if (!product) return null;
   // Pull the ACTIVE bom_template for this productCode so the response
@@ -214,11 +332,42 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
     const wips = parseJson<WipNode[]>(tplRow.wipComponents, []);
     bomMinutesByCode.set(product.code, bomTotalMinutes(l1, wips));
   }
+  // Build the single-product overlay manually from the result set —
+  // mirrors loadPriceOverlays(), just one product so we open-code it.
+  let overlay: ProductPriceOverlay | undefined;
+  let activePicked = false;
+  for (const r of priceOverlays.results ?? []) {
+    if (!overlay) {
+      overlay = {
+        basePriceSen: null,
+        price1Sen: null,
+        seatHeightPricesRaw: null,
+        hasPendingPriceChange: false,
+        pendingEffectiveFrom: null,
+      };
+    }
+    if (r.effectiveFrom > today) {
+      if (
+        !overlay.pendingEffectiveFrom ||
+        r.effectiveFrom < overlay.pendingEffectiveFrom
+      ) {
+        overlay.pendingEffectiveFrom = r.effectiveFrom;
+      }
+      overlay.hasPendingPriceChange = true;
+    } else if (!activePicked) {
+      overlay.basePriceSen = r.basePriceSen;
+      overlay.price1Sen = r.price1Sen;
+      overlay.seatHeightPricesRaw = r.seatHeightPrices;
+      activePicked = true;
+    }
+  }
+
   return rowToProduct(
     product,
     bomsRes.results ?? [],
     dwtsRes.results ?? [],
     bomMinutesByCode,
+    overlay,
   );
 }
 
@@ -229,7 +378,8 @@ async function fetchProductWithChildren(db: D1Database, id: string) {
 // snapshot for SKUs that have no ACTIVE template yet.
 app.get("/", async (c) => {
   const orgId = getOrgId(c);
-  const [products, boms, dwts, tpls] = await Promise.all([
+  const today = new Date().toISOString().slice(0, 10);
+  const [products, boms, dwts, tpls, priceOverlays] = await Promise.all([
     c.var.DB.prepare(
       "SELECT * FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY code",
     )
@@ -256,6 +406,7 @@ app.get("/", async (c) => {
       wipComponents: string | null;
       effectiveFrom: string | null;
     }>(),
+    loadPriceOverlays(c.var.DB, today),
   ]);
 
   // First-write-wins per productCode preserves the most-recent ACTIVE
@@ -270,7 +421,13 @@ app.get("/", async (c) => {
   }
 
   const data = (products.results ?? []).map((p) =>
-    rowToProduct(p, boms.results ?? [], dwts.results ?? [], bomMinutesByCode),
+    rowToProduct(
+      p,
+      boms.results ?? [],
+      dwts.results ?? [],
+      bomMinutesByCode,
+      priceOverlays.get(p.id),
+    ),
   );
   return c.json({ success: true, data });
 });
@@ -613,4 +770,226 @@ app.delete("/:id", async (c) => {
   return c.json({ success: true, data: updated });
 });
 
+// ---------------------------------------------------------------------------
+// Master price history (product_prices, migration 0066).
+//
+// Mirrors customer_product_prices: append-only, NULL columns inherit from
+// the products table itself, and the resolver picks the newest row where
+// effectiveFrom <= asOf. Future-dated rows sit dormant until their date
+// passes — this is what lets the company schedule a 2026-06-01 price hike
+// in advance.
+// ---------------------------------------------------------------------------
+type SeatHeightPrice = { height: string; priceSen: number };
+
+type ProductPriceRow = {
+  id: string;
+  productId: string;
+  basePriceSen: number | null;
+  price1Sen: number | null;
+  seatHeightPrices: string | null;
+  effectiveFrom: string;
+  notes: string | null;
+  createdAt: string;
+  createdBy: string | null;
+};
+
+function genPriceRowId(): string {
+  return `pp-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+}
+
+// Resolve the master price for a product as of a given ISO date. Returns
+// concrete numbers (never null on the price fields), with the products row
+// columns acting as the final fallback when no product_prices row applies.
+async function resolveProductPriceAsOf(
+  db: D1Database,
+  productId: string,
+  isoDate: string,
+): Promise<{
+  basePriceSen: number | null;
+  price1Sen: number | null;
+  seatHeightPrices: SeatHeightPrice[];
+  hasPendingPriceChange: boolean;
+  pendingEffectiveFrom: string | null;
+} | null> {
+  const prod = await db
+    .prepare(
+      `SELECT basePriceSen, price1Sen, seatHeightPrices FROM products WHERE id = ?`,
+    )
+    .bind(productId)
+    .first<{
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPrices: string | null;
+    }>();
+  if (!prod) return null;
+
+  const hist = await db
+    .prepare(
+      `SELECT basePriceSen, price1Sen, seatHeightPrices
+         FROM product_prices
+        WHERE productId = ?
+          AND effectiveFrom <= ?
+        ORDER BY effectiveFrom DESC, created_at DESC
+        LIMIT 1`,
+    )
+    .bind(productId, isoDate)
+    .first<{
+      basePriceSen: number | null;
+      price1Sen: number | null;
+      seatHeightPrices: string | null;
+    }>();
+
+  const pending = await db
+    .prepare(
+      `SELECT effectiveFrom FROM product_prices
+        WHERE productId = ? AND effectiveFrom > ?
+        ORDER BY effectiveFrom ASC
+        LIMIT 1`,
+    )
+    .bind(productId, isoDate)
+    .first<{ effectiveFrom: string }>();
+
+  const baseRaw = hist?.basePriceSen ?? prod.basePriceSen;
+  const p1Raw = hist?.price1Sen ?? prod.price1Sen;
+  const seatRaw = hist?.seatHeightPrices ?? prod.seatHeightPrices;
+
+  return {
+    basePriceSen: baseRaw,
+    price1Sen: p1Raw,
+    seatHeightPrices: parseJson<SeatHeightPrice[]>(seatRaw, []),
+    hasPendingPriceChange: !!pending,
+    pendingEffectiveFrom: pending?.effectiveFrom ?? null,
+  };
+}
+
+// GET /api/products/:productId/price-history — full history (past + pending)
+app.get("/:productId/price-history", async (c) => {
+  const productId = c.req.param("productId");
+  const res = await c.var.DB.prepare(
+    `SELECT * FROM product_prices
+      WHERE productId = ?
+      ORDER BY effectiveFrom DESC, created_at DESC`,
+  )
+    .bind(productId)
+    .all<ProductPriceRow>();
+  const data = (res.results ?? []).map((r) => ({
+    id: r.id,
+    basePriceSen: r.basePriceSen,
+    price1Sen: r.price1Sen,
+    seatHeightPrices: parseJson<SeatHeightPrice[]>(r.seatHeightPrices, []),
+    effectiveFrom: r.effectiveFrom,
+    notes: r.notes ?? "",
+    createdAt: r.createdAt,
+  }));
+  return c.json({ success: true, data });
+});
+
+// POST /api/products/:productId/prices — append a new effective-dated row.
+app.post("/:productId/prices", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
+  const productId = c.req.param("productId");
+  try {
+    const parent = await c.var.DB.prepare("SELECT id FROM products WHERE id = ?")
+      .bind(productId)
+      .first<{ id: string }>();
+    if (!parent) {
+      return c.json({ success: false, error: "Product not found" }, 404);
+    }
+
+    const body = await c.req.json();
+    const effectiveFrom = String(body.effectiveFrom ?? "").trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return c.json(
+        {
+          success: false,
+          error: "effectiveFrom (YYYY-MM-DD) is required",
+        },
+        400,
+      );
+    }
+
+    const id = genPriceRowId();
+    const seatJson =
+      body.seatHeightPrices === undefined || body.seatHeightPrices === null
+        ? null
+        : JSON.stringify(body.seatHeightPrices);
+
+    await c.var.DB.prepare(
+      `INSERT INTO product_prices
+         (id, productId, basePriceSen, price1Sen, seatHeightPrices,
+          effectiveFrom, notes, createdBy)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        id,
+        productId,
+        body.basePriceSen ?? null,
+        body.price1Sen ?? null,
+        seatJson,
+        effectiveFrom,
+        body.notes ?? null,
+        body.createdBy ?? null,
+      )
+      .run();
+
+    const row = await c.var.DB.prepare(
+      "SELECT * FROM product_prices WHERE id = ?",
+    )
+      .bind(id)
+      .first<ProductPriceRow>();
+    if (!row) {
+      return c.json(
+        { success: false, error: "Failed to create price history row" },
+        500,
+      );
+    }
+    return c.json(
+      {
+        success: true,
+        data: {
+          id: row.id,
+          productId: row.productId,
+          basePriceSen: row.basePriceSen,
+          price1Sen: row.price1Sen,
+          seatHeightPrices: parseJson<SeatHeightPrice[]>(
+            row.seatHeightPrices,
+            [],
+          ),
+          effectiveFrom: row.effectiveFrom,
+          notes: row.notes ?? "",
+          createdAt: row.createdAt,
+        },
+      },
+      201,
+    );
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// DELETE /api/products/price-row/:priceRowId — remove a history entry
+// (typically used to cancel a not-yet-effective scheduled change).
+app.delete("/price-row/:priceRowId", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
+  const id = c.req.param("priceRowId");
+  const existing = await c.var.DB.prepare(
+    "SELECT id, productId FROM product_prices WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; productId: string }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Price row not found" }, 404);
+  }
+  await c.var.DB.prepare("DELETE FROM product_prices WHERE id = ?")
+    .bind(id)
+    .run();
+  return c.json({
+    success: true,
+    data: { id: existing.id, productId: existing.productId },
+  });
+});
+
 export default app;
+export { resolveProductPriceAsOf };

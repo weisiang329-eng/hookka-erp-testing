@@ -335,103 +335,89 @@ function ProjectCard({ project }: { project: RDProject }) {
 
   return (
     <Link to={`/rd/${project.id}`}>
-      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full overflow-hidden relative">
-        {/* Edit affordance — sits above the cover banner in the top-right
-            corner of the card. Routes to detail page with ?edit=1 so the
-            detail view can auto-open its edit modal. We use a <button> +
-            programmatic navigate() because nesting <Link>/<a> inside the
-            outer card <Link> would be invalid HTML. */}
-        <button
-          type="button"
-          onClick={handleEditClick}
-          aria-label={`Edit ${project.name}`}
-          className="absolute top-2 right-2 z-10 inline-flex items-center justify-center h-7 w-7 rounded-md bg-white/90 backdrop-blur-sm border border-[#E2DDD8] text-gray-500 hover:bg-white hover:text-[#6B5C32] hover:border-[#6B5C32] transition-colors shadow-sm"
-        >
-          <Pencil className="h-3.5 w-3.5" />
-        </button>
-        {/* Cover photo thumbnail — banner ALWAYS renders (with photo when
-            available, neutral placeholder otherwise) so every card in the
-            grid is the same height. The banner is locked to aspect-[16/9]
-            so the photo crops to a wider strip and the meta below has more
-            visual weight. object-cover keeps the photo filling the strip
-            cleanly regardless of the saved JPEG's natural aspect. The
-            detail page is where users see the true natural aspect of their
-            photo — the list view prioritises grid compactness. */}
-        {/* Banner now adapts to the photo's natural aspect — same idea as
-            DraftCard's right-rail thumbnail, just at full card width.
-            The wrapper carries the bg + border so any pillar bars (when
-            a portrait photo doesn't fill the card width) blend with the
-            same neutral cream as the no-photo placeholder. The image
-            itself is centered and capped at 16rem (256px) tall so wide
-            sofa shots look familiar but a tall poster doesn't make the
-            card balloon to 600px. */}
-        {showCover ? (
-          <div className="w-full bg-[#FAF9F8] border-b border-[#E2DDD8] flex justify-center">
-            <img
-              src={cover}
-              alt={`${project.name} cover`}
-              onError={() => setCoverFailed(true)}
-              className="block max-h-64 max-w-full"
-            />
-          </div>
-        ) : (
-          <div
-            className="w-full aspect-[16/9] bg-[#F0ECE9] border-b border-[#E2DDD8] flex items-center justify-center text-gray-300"
-            aria-label="No cover photo"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-10 w-10">
-              <rect x="3" y="3" width="18" height="18" rx="2" />
-              <circle cx="8.5" cy="8.5" r="1.5" />
-              <path d="M21 15l-5-5L5 21" />
-            </svg>
-          </div>
-        )}
+      <Card className="hover:shadow-md transition-shadow cursor-pointer h-full">
+        {/* Compact layout mirrors DraftCard so Drafts / Projects /
+            Completed all read at the same density: photo lives as a
+            top-right thumbnail (sized to the photo's natural aspect)
+            instead of a full-width banner, and every textual meta sits
+            in the CardHeader left column. Status badge + Edit button
+            both anchor to the photo's top edge as absolute overlays. */}
         <CardHeader className="pb-3">
-          <div className="flex items-start justify-between gap-2">
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-mono text-gray-400">{project.code}</p>
-              <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex-1 min-w-0 space-y-2">
+              <div>
+                <p className="text-xs font-mono text-gray-400">{project.code}</p>
+                <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
+              </div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
+                  {project.productCategory}
+                </span>
+                <span
+                  className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
+                    project.projectType === "IMPROVEMENT"
+                      ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                      : project.projectType === "CLONE"
+                      ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
+                      : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
+                  }`}
+                >
+                  {project.projectType === "IMPROVEMENT"
+                    ? "Improvement"
+                    : project.projectType === "CLONE"
+                    ? "Clone"
+                    : "Research"}
+                </span>
+                <span
+                  className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
+                  style={{ backgroundColor: STAGE_COLORS[project.currentStage] }}
+                >
+                  {getStageLabels(project.projectType)[project.currentStage]}
+                </span>
+              </div>
+              {/* Health chips — schedule + budget. Hidden when nothing's
+                  alarming so the card stays uncluttered for healthy projects. */}
+              <ProjectHealthChips health={health} />
             </div>
-            {/* Status badge — the full-width cover banner sits above the
-                CardHeader (added by the cover-photo feature), so we drop
-                the tiny top-right thumbnail that landed in 3e8dbf0 to
-                avoid showing the same image twice in one card. */}
-            <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+            <div className="relative flex-shrink-0 w-fit">
+              {showCover ? (
+                <img
+                  src={cover}
+                  alt={`${project.name} cover`}
+                  onError={() => setCoverFailed(true)}
+                  className="block max-h-32 max-w-44 rounded-md bg-[#FAF9F8] border border-[#E2DDD8]"
+                />
+              ) : (
+                <div
+                  className="h-32 w-32 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
+                  aria-label="No cover photo"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-10 w-10">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <circle cx="8.5" cy="8.5" r="1.5" />
+                    <path d="M21 15l-5-5L5 21" />
+                  </svg>
+                </div>
+              )}
+              {/* Status badge in top-right of photo (mirrors DraftCard's
+                  DRAFT placement). Edit pencil floats top-LEFT so it
+                  doesn't crash into the badge — tiny target but the
+                  photo is also clickable through to the detail page. */}
+              <span className="absolute top-1.5 right-1.5">
+                <Badge variant="status" status={project.status}>{project.status.replace(/_/g, " ")}</Badge>
+              </span>
+              <button
+                type="button"
+                onClick={handleEditClick}
+                aria-label={`Edit ${project.name}`}
+                className="absolute top-1.5 left-1.5 inline-flex items-center justify-center h-6 w-6 rounded-md bg-white/95 backdrop-blur-sm border border-[#E2DDD8] text-gray-500 hover:bg-white hover:text-[#6B5C32] hover:border-[#6B5C32] transition-colors shadow-sm"
+              >
+                <Pencil className="h-3 w-3" />
+              </button>
+            </div>
           </div>
         </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex items-center gap-2">
-            <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${CATEGORY_COLORS[project.productCategory]}`}>
-              {project.productCategory}
-            </span>
-            <span
-              className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold border ${
-                project.projectType === "IMPROVEMENT"
-                  ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
-                  : project.projectType === "CLONE"
-                  ? "bg-[#F1E6F0] text-[#6B4A6D] border-[#D1B7D0]"
-                  : "bg-[#E0EDF0] text-[#3E6570] border-[#A8CAD2]"
-              }`}
-            >
-              {project.projectType === "IMPROVEMENT"
-                ? "Improvement"
-                : project.projectType === "CLONE"
-                ? "Clone"
-                : "Research"}
-            </span>
-            <span
-              className="inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold text-white"
-              style={{ backgroundColor: STAGE_COLORS[project.currentStage] }}
-            >
-              {getStageLabels(project.projectType)[project.currentStage]}
-            </span>
-          </div>
-
-          {/* Health chips — schedule + budget. Only render when a chip
-              actually has something to say (we hide On Track + OK to keep
-              the card uncluttered for the common case). */}
-          <ProjectHealthChips health={health} />
-
+        <CardContent className="space-y-3 pt-0">
           <StageProgressBar currentStage={project.currentStage} projectType={project.projectType} />
 
           <div className="grid grid-cols-2 gap-2 text-xs">
@@ -465,18 +451,20 @@ function ProjectCard({ project }: { project: RDProject }) {
             </div>
           </div>
 
-          <div className="flex flex-wrap gap-1">
-            {project.assignedTeam.slice(0, 3).map((name) => (
-              <span key={name} className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
-                {name.split(" ")[0]}
-              </span>
-            ))}
-            {project.assignedTeam.length > 3 && (
-              <span className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
-                +{project.assignedTeam.length - 3}
-              </span>
-            )}
-          </div>
+          {project.assignedTeam.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {project.assignedTeam.slice(0, 3).map((name) => (
+                <span key={name} className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
+                  {name.split(" ")[0]}
+                </span>
+              ))}
+              {project.assignedTeam.length > 3 && (
+                <span className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-[10px] text-[#6B5C32]">
+                  +{project.assignedTeam.length - 3}
+                </span>
+              )}
+            </div>
+          )}
         </CardContent>
       </Card>
     </Link>

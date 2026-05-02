@@ -241,6 +241,11 @@ export default function RDProjectDetailPage() {
     productCategory: "BEDFRAME" as RDProject["productCategory"],
     targetLaunchDate: "",
     totalBudget: 0,
+    // Pricing targets — RM strings (not numbers) so an empty input shows
+    // up as blank instead of "0". Converted to sen on save; empty string
+    // becomes null on the server side ("not set").
+    targetSellingPriceRM: "",
+    targetMaterialCostRM: "",
     assignedTeamStr: "",
     status: "ACTIVE" as RDProject["status"],
     sourceProductName: "",
@@ -523,6 +528,14 @@ export default function RDProjectDetailPage() {
       productCategory: project.productCategory,
       targetLaunchDate: project.targetLaunchDate,
       totalBudget: project.totalBudget / 100, // sen to RM
+      targetSellingPriceRM:
+        typeof project.targetSellingPriceSen === "number"
+          ? (project.targetSellingPriceSen / 100).toString()
+          : "",
+      targetMaterialCostRM:
+        typeof project.targetMaterialCostSen === "number"
+          ? (project.targetMaterialCostSen / 100).toString()
+          : "",
       assignedTeamStr: project.assignedTeam.join(", "),
       status: project.status,
       sourceProductName: project.sourceProductName ?? "",
@@ -572,6 +585,20 @@ export default function RDProjectDetailPage() {
         productCategory: editForm.productCategory,
         targetLaunchDate: editForm.targetLaunchDate,
         totalBudget: Math.round(editForm.totalBudget * 100), // RM to sen
+        // Pricing targets — empty string → null (clears the cap on server).
+        // Otherwise RM → sen with the same convention as totalBudget.
+        targetSellingPriceSen: (() => {
+          const t = editForm.targetSellingPriceRM.trim().replace(/,/g, "");
+          if (!t) return null;
+          const rm = parseFloat(t);
+          return Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+        })(),
+        targetMaterialCostSen: (() => {
+          const t = editForm.targetMaterialCostRM.trim().replace(/,/g, "");
+          if (!t) return null;
+          const rm = parseFloat(t);
+          return Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : null;
+        })(),
         assignedTeam: editForm.assignedTeamStr.split(",").map((s) => s.trim()).filter(Boolean),
         status: editForm.status,
       };
@@ -1470,6 +1497,29 @@ export default function RDProjectDetailPage() {
   // sticky aside. The Target Launch / Team row that used to live at the
   // bottom of this card has been dropped here because that data is already
   // surfaced in the Project Info section above (no duplication).
+  // Pricing-target derived figures used in the Budget card. Selling price
+  // and material cost are sen on the project; margin = price - cost. A
+  // null/zero target collapses the section so it doesn't shout at projects
+  // that haven't been priced yet.
+  const sellingPriceSen = project.targetSellingPriceSen ?? null;
+  const materialTargetSen = project.targetMaterialCostSen ?? null;
+  const targetedMarginSen =
+    sellingPriceSen !== null && materialTargetSen !== null
+      ? sellingPriceSen - materialTargetSen
+      : null;
+  const targetedMarginPct =
+    sellingPriceSen !== null && sellingPriceSen > 0 && targetedMarginSen !== null
+      ? (targetedMarginSen / sellingPriceSen) * 100
+      : null;
+  // Material-vs-target health: how the actual R&D material spend so far
+  // (materialCostSen) compares to the production cap. If it's already
+  // 100%+ during R&D the production BOM is doomed; if 80%+ it's a
+  // warning to redesign before approving for production.
+  const materialVsTargetPct =
+    materialTargetSen !== null && materialTargetSen > 0
+      ? (materialCostSen / materialTargetSen) * 100
+      : null;
+
   const budgetCard = (
     <Card className="mt-6">
       <CardHeader>
@@ -1478,6 +1528,79 @@ export default function RDProjectDetailPage() {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {/* Pricing Targets — the commercial envelope set up front by the
+            operator. Drives every BOM decision the R&D team makes. Hidden
+            entirely when neither target is set so the card doesn't grow
+            empty rows for legacy projects. */}
+        {(sellingPriceSen !== null || materialTargetSen !== null) && (
+          <div className="rounded-lg bg-[#F8F4ED] border border-[#E2DDD8] p-3 space-y-2">
+            <div className="text-xs font-semibold text-[#6B5C32] uppercase tracking-wide">
+              Pricing Targets
+            </div>
+            <div className="grid grid-cols-3 gap-3 text-center">
+              <div>
+                <p className="text-xs text-gray-500">Selling Price</p>
+                <p className="text-base font-bold text-[#1F1D1B]">
+                  {sellingPriceSen !== null ? formatCurrency(sellingPriceSen) : <span className="text-gray-300">—</span>}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Material Cap</p>
+                <p className="text-base font-bold text-[#1F1D1B]">
+                  {materialTargetSen !== null ? formatCurrency(materialTargetSen) : <span className="text-gray-300">—</span>}
+                </p>
+              </div>
+              <div>
+                <p className="text-xs text-gray-500">Margin</p>
+                <p className={`text-base font-bold ${targetedMarginSen !== null && targetedMarginSen < 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"}`}>
+                  {targetedMarginSen !== null
+                    ? `${formatCurrency(targetedMarginSen)}${targetedMarginPct !== null ? ` (${Math.round(targetedMarginPct)}%)` : ""}`
+                    : <span className="text-gray-300">—</span>}
+                </p>
+              </div>
+            </div>
+            {/* Material-vs-target gauge — only renders when a material
+                cap is set. Shows the operator how close the R&D BOM is
+                running to the production ceiling. */}
+            {materialVsTargetPct !== null && (
+              <div className="space-y-1 pt-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-gray-500">R&D Material vs Target</span>
+                  <span
+                    className="font-semibold"
+                    style={{
+                      color:
+                        materialVsTargetPct >= 100 ? "#9A3A2D" : materialVsTargetPct >= 80 ? "#9C6F1E" : "#4F7C3A",
+                    }}
+                  >
+                    {Math.round(materialVsTargetPct)}%
+                  </span>
+                </div>
+                <div className="h-2 bg-white border border-[#E2DDD8] rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(materialVsTargetPct, 100)}%`,
+                      backgroundColor:
+                        materialVsTargetPct >= 100 ? "#9A3A2D" : materialVsTargetPct >= 80 ? "#9C6F1E" : "#4F7C3A",
+                    }}
+                  />
+                </div>
+                {materialVsTargetPct >= 100 && (
+                  <p className="text-xs text-[#9A3A2D] font-medium">
+                    R&D material spend is at or above the production cap — redesign before approving for production.
+                  </p>
+                )}
+                {materialVsTargetPct >= 80 && materialVsTargetPct < 100 && (
+                  <p className="text-xs text-[#9C6F1E]">
+                    R&D material spend is approaching the production cap. Watch the BOM.
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="grid grid-cols-3 gap-4">
           <div className="text-center p-3 rounded-lg bg-[#F0ECE9]">
             <p className="text-lg font-bold text-[#1F1D1B]">{formatCurrency(project.totalBudget)}</p>
@@ -2360,7 +2483,7 @@ export default function RDProjectDetailPage() {
               />
             </div>
             <div>
-              <label className={labelClass}>Budget (RM)</label>
+              <label className={labelClass}>R&D Budget (RM)</label>
               <input
                 type="number"
                 className={inputClass}
@@ -2368,6 +2491,39 @@ export default function RDProjectDetailPage() {
                 step={0.01}
                 value={editForm.totalBudget}
                 onChange={(e) => setEditForm((f) => ({ ...f, totalBudget: parseFloat(e.target.value) || 0 }))}
+                title="Total R&D project cost cap — material + labour"
+              />
+            </div>
+          </div>
+          {/* Pricing targets — set up front so R&D engineers the product to
+              the commercial envelope. Selling price drives margin; the
+              material cost cap is the BOM ceiling production must hit. Both
+              are optional (leave blank to skip). */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Target Selling Price (RM)</label>
+              <input
+                type="number"
+                className={inputClass}
+                min={0}
+                step={0.01}
+                value={editForm.targetSellingPriceRM}
+                onChange={(e) => setEditForm((f) => ({ ...f, targetSellingPriceRM: e.target.value }))}
+                placeholder="e.g. 500.00"
+                title="Planned retail / wholesale price for the finished product"
+              />
+            </div>
+            <div>
+              <label className={labelClass}>Target Material Cost (RM)</label>
+              <input
+                type="number"
+                className={inputClass}
+                min={0}
+                step={0.01}
+                value={editForm.targetMaterialCostRM}
+                onChange={(e) => setEditForm((f) => ({ ...f, targetMaterialCostRM: e.target.value }))}
+                placeholder="e.g. 200.00"
+                title="Upper bound for raw-material cost in production. R&D treats this as the BOM ceiling."
               />
             </div>
           </div>

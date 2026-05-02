@@ -43,6 +43,10 @@ type ProjectRow = {
   status: string | null;
   startedAt: string | null;
   manualLabourCostSen: number | null;
+  // Pricing targets — added in migration 0101. Nullable so legacy rows
+  // and not-yet-priced drafts come back as null and the SPA shows a dash.
+  targetSellingPriceSen: number | null;
+  targetMaterialCostSen: number | null;
 };
 
 type PrototypeRow = {
@@ -142,6 +146,10 @@ function rowToProject(
     sourcePriceSen: row.sourcePriceSen ?? null,
     sourceNotes: row.sourceNotes ?? "",
     coverPhotoUrl: row.coverPhotoUrl ?? null,
+    // Pricing targets — null means "not set" so the SPA renders a dash
+    // instead of "RM 0.00" (which would imply a real zero-budget plan).
+    targetSellingPriceSen: row.targetSellingPriceSen ?? null,
+    targetMaterialCostSen: row.targetMaterialCostSen ?? null,
     prototypes: prototypes
       .filter((p) => p.projectId === row.id)
       .map((p) => ({
@@ -404,8 +412,9 @@ app.post("/", async (c) => {
          serviceId, currentStage, targetLaunchDate, assignedTeam, totalBudget, actualCost,
          milestones, productionBOM, materialIssuances, labourLogs,
          sourceProductName, sourceBrand, sourcePurchaseRef, sourcePriceSen,
-         sourceNotes, coverPhotoUrl, createdDate, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         sourceNotes, coverPhotoUrl, createdDate, status,
+         targetSellingPriceSen, targetMaterialCostSen)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
       .bind(
         id,
@@ -436,6 +445,10 @@ app.post("/", async (c) => {
         // tab to flip status DRAFT→ACTIVE, which is when it enters the
         // live Pipeline kanban.
         "DRAFT",
+        // Pricing targets — optional at creation time. The Edit modal
+        // surfaces both fields so the operator can fill them in later.
+        body.targetSellingPriceSen ?? null,
+        body.targetMaterialCostSen ?? null,
       )
       .run();
 
@@ -565,6 +578,14 @@ app.put("/:id", async (c) => {
           ? body.coverPhotoUrl
           : existing.coverPhotoUrl,
       status: body.status ?? existing.status,
+      targetSellingPriceSen:
+        body.targetSellingPriceSen !== undefined
+          ? body.targetSellingPriceSen
+          : existing.targetSellingPriceSen,
+      targetMaterialCostSen:
+        body.targetMaterialCostSen !== undefined
+          ? body.targetMaterialCostSen
+          : existing.targetMaterialCostSen,
     };
 
     await c.var.DB.prepare(
@@ -575,7 +596,8 @@ app.put("/:id", async (c) => {
          milestones = ?, productionBOM = ?, materialIssuances = ?,
          labourLogs = ?, sourceProductName = ?, sourceBrand = ?,
          sourcePurchaseRef = ?, sourcePriceSen = ?, sourceNotes = ?,
-         coverPhotoUrl = ?, status = ?
+         coverPhotoUrl = ?, status = ?,
+         targetSellingPriceSen = ?, targetMaterialCostSen = ?
        WHERE id = ?`,
     )
       .bind(
@@ -600,6 +622,8 @@ app.put("/:id", async (c) => {
         merged.sourceNotes,
         merged.coverPhotoUrl,
         merged.status,
+        merged.targetSellingPriceSen,
+        merged.targetMaterialCostSen,
         id,
       )
       .run();

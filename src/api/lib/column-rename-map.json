@@ -718,6 +718,8 @@
   "taggedByName": "tagged_by_name",
   "targetEndDate": "target_end_date",
   "targetLaunchDate": "target_launch_date",
+  "targetMaterialCostSen": "target_material_cost_sen",
+  "targetSellingPriceSen": "target_selling_price_sen",
   "taxAmount": "tax_amount",
   "taxEntityTin": "tax_entity_tin",
   "teamMemberId": "team_member_id",

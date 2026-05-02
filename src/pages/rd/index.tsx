@@ -217,20 +217,24 @@ function DraftCard({
               <p className="text-xs font-mono text-gray-400">{project.code}</p>
               <CardTitle className="text-base mt-0.5 truncate">{project.name}</CardTitle>
             </div>
+            {/* Top-right thumbnail block — bumped from 48×48 → 128×128 so
+                the photo is actually readable. The right rail of the
+                draft card had lots of dead space; the bigger thumbnail
+                fills it without crowding the title/code on the left. */}
             <div className="flex flex-col items-end gap-1.5 flex-shrink-0">
               {cover ? (
                 <img
                   src={cover}
                   alt={`${project.name} cover`}
-                  className="h-12 w-12 rounded-md object-contain bg-[#FAF9F8] border border-[#E2DDD8]"
+                  className="h-32 w-32 rounded-md object-cover bg-[#FAF9F8] border border-[#E2DDD8]"
                 />
               ) : (
                 <div
-                  className="h-12 w-12 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
+                  className="h-32 w-32 rounded-md border border-dashed border-[#D0C9C0] bg-[#F0ECE9] flex items-center justify-center text-gray-300"
                   title="No photo yet"
                   aria-label="No cover photo"
                 >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-10 w-10">
                     <rect x="3" y="3" width="18" height="18" rx="2" />
                     <circle cx="8.5" cy="8.5" r="1.5" />
                     <path d="M21 15l-5-5L5 21" />

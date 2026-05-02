@@ -1136,6 +1136,17 @@ export type RDProject = {
   milestones: { stage: RDProjectStage; targetDate: string; actualDate: string | null; approvedBy: string | null; photos?: string[] }[];
   totalBudget: number;
   actualCost: number;
+  // Pricing targets — set up front by the operator so the R&D team
+  // engineers the product to a known commercial envelope. Both nullable
+  // because legacy projects didn't capture them and not every project
+  // needs a hard cap (some are pure exploration). All values in sen.
+  //   targetSellingPriceSen — what we plan to sell the product for
+  //   targetMaterialCostSen — upper bound on raw-material cost in
+  //                            production. R&D treats this as the BOM
+  //                            ceiling; if a prototype blows past it,
+  //                            redesign before approving for production.
+  targetSellingPriceSen?: number | null;
+  targetMaterialCostSen?: number | null;
   prototypes: RDPrototype[];
   productionBOM?: RDBOMItem[];
   materialIssuances?: RDMaterialIssuance[];

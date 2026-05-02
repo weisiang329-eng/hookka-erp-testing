@@ -156,7 +156,12 @@ function buildFcWipLabel(
 ): string {
   return [
     modelLabel,
-    sizeLabel ? `(${sizeLabel})` : "",
+    // Size segment is only meaningful for BF (5FT / 6FT / etc). SOFA's
+    // sizeLabel field carries the productCode-derived "2A(LHF)" / "L(RHF)"
+    // string which is already inside modelLabel, so showing it here would
+    // print "(2A(LHF))" twice. Gate behind isBF for parity with the totalH
+    // and divanHeight segments below.
+    isBF && sizeLabel ? `(${sizeLabel})` : "",
     isBF && totalH > 0 ? `(${totalH}")` : "",
     isBF && divanHeightInches ? `(DV ${divanHeightInches}")` : "",
     fabricCode || "",
@@ -246,7 +251,14 @@ function aggregateFcSlots(
       wipKey,
       wipCode: anchor.wipCode,
       wipLabel,
-      wipType: anchor.wipType,
+      // Merged FC wipType = itemCategory (BEDFRAME / SOFA / ACCESSORY)
+      // rather than the anchor's per-piece wipType ("DIVAN", "SOFA_BASE",
+      // ...). The merged JC covers EVERY piece in the group so naming it
+      // after one randomly-sorted anchor piece is misleading. Stamping the
+      // category keeps the merged-set semantics visible end-to-end (JC →
+      // cascade → wip_items.type → Inventory Type column shows
+      // "Bedframe" / "Sofa" / "Accessory").
+      wipType: anchor.itemCategory || anchor.wipType,
       wipQty: anchor.wipQty,
       category: anchor.processCategory,
       minutes: totalMinutes,

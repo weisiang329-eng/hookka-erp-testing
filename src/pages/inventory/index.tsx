@@ -485,7 +485,10 @@ function deriveWIPFromPO(
             const isBF = po.itemCategory === "BEDFRAME";
             wipCodeStr = [
               po.productCode,
-              po.sizeLabel ? `(${po.sizeLabel})` : "",
+              // size segment only for BF — sofa's sizeLabel is already
+              // inside the productCode (e.g. "5530-2A(LHF)"), showing it
+              // again as "(2A(LHF))" would duplicate.
+              isBF && po.sizeLabel ? `(${po.sizeLabel})` : "",
               isBF && totalH > 0 ? `(${totalH}")` : "",
               isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
               po.fabricCode || "",

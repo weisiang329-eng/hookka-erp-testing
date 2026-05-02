@@ -2897,7 +2897,9 @@ function buildFcWipLabel(
 ): string {
   return [
     modelLabel,
-    sizeLabel ? `(${sizeLabel})` : "",
+    // size segment only for BF — sofa's sizeLabel is the productCode
+    // suffix ("2A(LHF)") which duplicates modelLabel.
+    isBF && sizeLabel ? `(${sizeLabel})` : "",
     isBF && totalH > 0 ? `(${totalH}")` : "",
     isBF && divanHeightInches ? `(DV ${divanHeightInches}")` : "",
     fabricCode || "",
@@ -2976,6 +2978,9 @@ app.post("/backfill-fab-cut-merge", async (c) => {
     siblingJcIds: string[];
     newWipKey: string;
     newWipLabel: string;
+    // Merged FC wipType = itemCategory so cascade stamps wip_items.type
+    // with the set-level category instead of the anchor's per-piece type.
+    newWipType: string;
     newWipQty: number;
     newProdTime: number;
     completedDate: string | null;
@@ -3049,6 +3054,11 @@ app.post("/backfill-fab-cut-merge", async (c) => {
       siblingJcIds: siblings.map((r) => r.id),
       newWipKey,
       newWipLabel,
+      // BEDFRAME / SOFA / ACCESSORY — set-level category. Falls back to
+      // the anchor's wipType only when itemCategory is somehow missing
+      // (legacy seed without proper category).
+      newWipType:
+        anchor.poItemCategory ?? anchor.wipType ?? "FAB_CUT",
       newWipQty,
       newProdTime: totalProdTime,
       completedDate,
@@ -3083,7 +3093,7 @@ app.post("/backfill-fab-cut-merge", async (c) => {
         db
           .prepare(
             `UPDATE job_cards
-                SET wipKey = ?, wipLabel = ?, wipQty = ?,
+                SET wipKey = ?, wipLabel = ?, wipType = ?, wipQty = ?,
                     productionTimeMinutes = ?, estMinutes = ?,
                     actualMinutes = ?,
                     status = ?, completedDate = ?, dueDate = ?,
@@ -3094,6 +3104,7 @@ app.post("/backfill-fab-cut-merge", async (c) => {
           .bind(
             plan.newWipKey,
             plan.newWipLabel,
+            plan.newWipType,
             plan.newWipQty,
             plan.newProdTime,
             plan.newProdTime,

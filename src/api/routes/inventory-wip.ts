@@ -94,6 +94,13 @@ const WIP_TYPE_LABELS: Record<string, string> = {
   SOFA_CUSHION: "Cushion",
   SOFA_ARMREST: "Armrest",
   SOFA_HEADREST: "Headrest",
+  // Option C — merged FAB_CUT JC carries the set-level itemCategory
+  // (BEDFRAME / SOFA / ACCESSORY) instead of a per-piece type. Add the
+  // human-readable display labels so the Inventory Type column renders
+  // "Bedframe" / "Sofa" / "Accessory" for these merged set rows.
+  BEDFRAME: "Bedframe",
+  SOFA: "Sofa",
+  ACCESSORY: "Accessory",
 };
 
 // Strip the trailing "-NN" line-number suffix from a PO code

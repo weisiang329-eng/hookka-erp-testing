@@ -1248,34 +1248,87 @@ export async function applyWipInventoryChange(
       }
     }
     // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
-    // the same PO — it's the SO-level merged FC JC keyed by
-    // `{companySOId}::{baseModel}::{fabric}::FAB_CUT`. Look it up by
-    // querying job_cards directly when the per-PO sibling search misses.
+    // the same PO — it's the merged FC JC. Two wipKey shapes depending on
+    // category:
+    //   SOFA   → `{companySOId}::{baseModel}::{fabric}::FAB_CUT` (cross-PO
+    //            merge across same SO).
+    //   BF/ACC → `{productionOrderId}::{baseModel}::{fabric}::FAB_CUT`
+    //            (per-PO merge inside one set's POs).
+    //
+    // Try both shapes; whichever matches a real FC JC wins. Falling back
+    // to a plain "any FC JC on this PO" lookup catches the BF case where
+    // the bom_templates baseModel doesn't match the productCode prefix
+    // exactly (legacy BOMs sometimes use different baseModel strings).
     if (!upstreamLabel && deptUpper === "FAB_SEW") {
       const companySOId = poRow.companySOId || poRow.salesOrderId || "";
       const fabricCode = poRow.fabricCode || "";
-      if (companySOId && fabricCode) {
-        const bomLookup = await db
-          .prepare(
-            `SELECT baseModel FROM bom_templates
-             WHERE productCode = ?
-             ORDER BY effectiveFrom DESC LIMIT 1`,
-          )
-          .bind(poRow.productCode ?? "")
-          .first<{ baseModel: string | null }>();
-        const baseModel =
-          bomLookup?.baseModel || poRow.productCode || "";
-        const expectedWipKey = `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`;
+      const bomLookup = await db
+        .prepare(
+          `SELECT baseModel FROM bom_templates
+           WHERE productCode = ?
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+        )
+        .bind(poRow.productCode ?? "")
+        .first<{ baseModel: string | null }>();
+      const baseModel = bomLookup?.baseModel || poRow.productCode || "";
+      const candidates: string[] = [];
+      // BF / ACC: per-PO merge.
+      candidates.push(
+        `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
+      );
+      // SOFA: cross-PO merge keyed by companySOId.
+      if (companySOId) {
+        candidates.push(
+          `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+        );
+      }
+      for (const cand of candidates) {
         const mergedFc = await db
           .prepare(
             `SELECT wipLabel FROM job_cards
              WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
              LIMIT 1`,
           )
-          .bind(expectedWipKey)
+          .bind(cand)
           .first<{ wipLabel: string }>();
         if (mergedFc?.wipLabel) {
           upstreamLabel = mergedFc.wipLabel;
+          break;
+        }
+      }
+      // Last-resort fallback: any FC JC on this PO. Catches the BF case
+      // where the constructed wipKey above doesn't match (legacy baseModel
+      // mismatch). Safe because Option C guarantees at most one FC JC
+      // per PO.
+      if (!upstreamLabel) {
+        const anyFc = await db
+          .prepare(
+            `SELECT wipLabel FROM job_cards
+             WHERE productionOrderId = ? AND departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(jcRow.productionOrderId)
+          .first<{ wipLabel: string }>();
+        if (anyFc?.wipLabel) {
+          upstreamLabel = anyFc.wipLabel;
+        }
+      }
+      // For SOFA cross-PO: when this SEW row is on a sibling PO of a
+      // merged sofa group, the FC JC may live on the anchor PO (different
+      // productionOrderId). Walk same-SO siblings.
+      if (!upstreamLabel && companySOId) {
+        const sibFc = await db
+          .prepare(
+            `SELECT jc.wipLabel FROM job_cards jc
+             JOIN production_orders po ON po.id = jc.productionOrderId
+             WHERE po.companySOId = ?
+               AND jc.departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(companySOId)
+          .first<{ wipLabel: string }>();
+        if (sibFc?.wipLabel) {
+          upstreamLabel = sibFc.wipLabel;
         }
       }
     }

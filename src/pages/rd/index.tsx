@@ -357,13 +357,23 @@ function ProjectCard({ project }: { project: RDProject }) {
             cleanly regardless of the saved JPEG's natural aspect. The
             detail page is where users see the true natural aspect of their
             photo — the list view prioritises grid compactness. */}
+        {/* Banner now adapts to the photo's natural aspect — same idea as
+            DraftCard's right-rail thumbnail, just at full card width.
+            The wrapper carries the bg + border so any pillar bars (when
+            a portrait photo doesn't fill the card width) blend with the
+            same neutral cream as the no-photo placeholder. The image
+            itself is centered and capped at 16rem (256px) tall so wide
+            sofa shots look familiar but a tall poster doesn't make the
+            card balloon to 600px. */}
         {showCover ? (
-          <img
-            src={cover}
-            alt={`${project.name} cover`}
-            onError={() => setCoverFailed(true)}
-            className="w-full aspect-[16/9] object-cover bg-[#FAF9F8] border-b border-[#E2DDD8]"
-          />
+          <div className="w-full bg-[#FAF9F8] border-b border-[#E2DDD8] flex justify-center">
+            <img
+              src={cover}
+              alt={`${project.name} cover`}
+              onError={() => setCoverFailed(true)}
+              className="block max-h-64 max-w-full"
+            />
+          </div>
         ) : (
           <div
             className="w-full aspect-[16/9] bg-[#F0ECE9] border-b border-[#E2DDD8] flex items-center justify-center text-gray-300"

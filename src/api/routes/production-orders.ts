@@ -584,10 +584,34 @@ async function fetchFilteredPOs(
   // frontend picker find the full chain.
   // Dept-narrowing: orgId scopes the inner subqueries too — otherwise the
   // wipKey-grouped lookup could return JC ids from another tenant.
+  //
+  // Option-C addendum (4th OR clause): the merged FAB_CUT JC has a brand-new
+  // wipKey schema (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) that
+  // never coincides with any per-piece downstream wipKey. The original
+  // wipKey-IN clause therefore strips it out, and the deptFilter='FAB_SEW'
+  // request returns 13 of 14 JCs — the FC JC is missing. Without it the
+  // frontend picker has nothing to fall back to and the Fab Cut column
+  // renders "—" on every Fab Sew (and Frame / Webbing / etc.) row.
+  //
+  // Add FAB_CUT JCs whose PO is either:
+  //   (a) the same PO as a deptFilter JC  → BF / ACCESSORY case (FC merges
+  //       per-PO so SEW + FC live on the same productionOrderId).
+  //   (b) on a sibling PO sharing the same companySOId → SOFA case (FC
+  //       merges cross-PO and lives on the anchor PO; sibling SEW POs
+  //       don't have FC of their own).
   const jcWhereDept = deptFilter
     ? ` WHERE orgId = ? AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NOT NULL)
           OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NULL))
-          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG'))`
+          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG')
+          OR (departmentCode = 'FAB_CUT' AND productionOrderId IN (
+                SELECT po.id FROM production_orders po
+                WHERE po.orgId = ?
+                  AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
+                       OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                            SELECT po2.companySOId FROM production_orders po2
+                            JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                            WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL)))
+              )))`
     : "";
 
   if (!includeJobCards) {
@@ -606,10 +630,15 @@ async function fetchFilteredPOs(
     if (deptFilter) {
       // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
       // payload bounded. Leave it untouched.
-      // Sprint 4: 7 bind slots = orgId outer + (orgId,dept) x 3 inner subqueries.
+      // Bind slots: 7 from the original 3 wipKey/PO subqueries (orgId outer +
+      // (orgId,dept) × 3) + 5 new from the Option-C FC clause (orgId outer-PO
+      // + (orgId,dept) × 2 inner) = 12 total.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+        .bind(
+          orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter,
+          orgId, orgId, deptFilter, orgId, deptFilter,
+        );
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -651,9 +680,13 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
+    // Bind slots: 12 = 7 (original 3 subqueries) + 5 (Option-C FC clause).
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+      .bind(
+        orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter,
+        orgId, orgId, deptFilter, orgId, deptFilter,
+      );
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -807,12 +840,31 @@ async function fetchPaginatedPOs(
           // aggregate completedDate across the merged set. Without this,
           // the wipKey IN (...FG only...) clause would strip the upstream
           // chain and the Packing tab's date columns render "—".
+          // 4th OR clause (Option-C addendum) — see fetchFilteredPOs for the
+          // detailed rationale. The merged FAB_CUT JC has a new wipKey
+          // schema that doesn't share keys with any per-piece downstream
+          // JC, so the original wipKey-IN strip drops it. Re-add FAB_CUT
+          // JCs whose PO is in the requested-dept's PO set (BF/ACC) or
+          // whose PO sits on a sibling sharing companySOId (SOFA cross-PO
+          // merge anchor).
           const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${ph}))
             OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph})))
-            OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG' AND productionOrderId IN (${ph})))`;
+            OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG' AND productionOrderId IN (${ph}))
+            OR (departmentCode = 'FAB_CUT' AND productionOrderId IN (
+                SELECT po.id FROM production_orders po
+                WHERE po.id IN (${ph})
+                  AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND productionOrderId IN (${ph}))
+                       OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                            SELECT po2.companySOId FROM production_orders po2
+                            JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                            WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph}))))
+              )))`;
           return db
             .prepare(sql)
-            .bind(...chunk, deptFilter, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
+            .bind(
+              ...chunk, deptFilter, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk,
+              ...chunk, deptFilter, ...chunk, deptFilter, ...chunk,
+            )
             .all<JobCardRow>();
         }),
       );

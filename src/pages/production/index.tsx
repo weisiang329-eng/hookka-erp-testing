@@ -2707,6 +2707,23 @@ export default function ProductionPage({
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
+      // The current dept's pill state for this row (Overdue / Pending /
+      // Done / —). Mirrors what the on-screen Production Sheet shows in
+      // the dept-name pill column. Falls back to "—" for rows that have
+      // no JC for the active dept (e.g. SOFA sibling PO with no FC).
+      const deptKey = `sched_${activeTab}` as const;
+      const renderPill = (r: typeof printRows[number]) => {
+        const sched = (r as unknown as Record<string, DeptSched>)[deptKey];
+        if (!sched || sched.state === "none") return "—";
+        const word =
+          sched.state === "done" ? "DONE" :
+          sched.state === "overdue" ? "OVERDUE" :
+          "PENDING";
+        const date = sched.state === "done"
+          ? sched.completed || sched.due
+          : sched.due;
+        return `<span class="pill ${sched.state}">${word}${date ? " " + fmt(date) : ""}</span>`;
+      };
       const rowsHtml = printRows.map((r) => {
         return `<tr>
           <td class="num">${r.rowNo}</td>
@@ -2723,7 +2740,11 @@ export default function ProductionPage({
           <td class="num">${r.divan || ""}</td>
           <td class="num">${r.leg || ""}</td>
           <td class="num">${r.qty || ""}</td>
+          <td>${renderPill(r)}</td>
           <td>${fmt(r.dueDate)}</td>
+          <td>${fmt(r.completedDate)}</td>
+          <td>${r.pic1 || ""}</td>
+          <td>${r.pic2 || ""}</td>
           <td>${r.status || ""}</td>
         </tr>`;
       }).join("");
@@ -2745,7 +2766,11 @@ export default function ProductionPage({
               <th class="num">Divan</th>
               <th class="num">Leg</th>
               <th class="num">Qty</th>
+              <th>${activeDept?.name || "Status"}</th>
               <th>Due</th>
+              <th>Completion</th>
+              <th>PIC 1</th>
+              <th>PIC 2</th>
               <th>Status</th>
             </tr>
           </thead>
@@ -2815,6 +2840,14 @@ export default function ProductionPage({
     td.m.pending { background: #fff; color: #000; font-style: italic; }
     td.m.overdue { background: #fff; color: #000; font-weight: 700; text-decoration: underline; }
     td.m.empty   { background: #fff; }
+    /* Dept-pill rendering inside the dept-tab print template. Print-friendly
+       (B/W) — done = bold, overdue = bold + underlined, pending = italic.
+       Mirrors the screen pill semantics without colour so it stays readable
+       on greyscale printers. */
+    span.pill          { font-size: 7px; padding: 1px 3px; white-space: nowrap; }
+    span.pill.done     { font-weight: 700; }
+    span.pill.overdue  { font-weight: 700; text-decoration: underline; }
+    span.pill.pending  { font-style: italic; }
     tr { page-break-inside: avoid; }
     thead { display: table-header-group; }
     .footer {

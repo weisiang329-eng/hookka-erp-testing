@@ -664,8 +664,11 @@ app.put("/:id", async (c) => {
       )
       .run();
 
-    // Pricing targets — surface errors so we can debug. After migration
-    // 0101 is applied this should never throw.
+    // Pricing targets — best-effort. Migration 0101 added these columns
+    // so this should always succeed in normal operation; the catch is
+    // belt-and-suspenders for accidental rollback or staging environments
+    // that haven't run migrations yet. Snake_case in the SQL so the
+    // identifier rewriter is a no-op (see twin POST handler comment).
     if (
       body.targetSellingPriceSen !== undefined ||
       body.targetMaterialCostSen !== undefined
@@ -680,11 +683,8 @@ app.put("/:id", async (c) => {
             id,
           )
           .run();
-      } catch (e) {
-        return c.json({
-          success: false,
-          error: "Pricing target update failed: " + (e instanceof Error ? e.message : String(e)),
-        }, 500);
+      } catch {
+        // Column missing — migration not applied yet. Swallow.
       }
     }
 

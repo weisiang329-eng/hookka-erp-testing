@@ -1484,12 +1484,27 @@ export default function ProductionPage({
           // so the strict per-wipKey lookup above misses. Restore the
           // "any FC on this PO" fallback ONLY for FAB_CUT — safe now
           // because per-piece FC JCs were collapsed into one.
-          if (code === "FAB_CUT") {
-            const samePoAnyFc = byDept.get("*");
-            if (samePoAnyFc) return samePoAnyFc;
-            // Cross-PO merged FC lookup. The merged FC JC sits on ONE
-            // anchor PO of the merge group; sibling POs lose theirs in
-            // backfill. Scan POs of the same companySOId for an FC JC.
+          // Option-C-aware fallback. Two symmetric directions:
+          //   (A) Looking UP at FAB_CUT from any non-FC row. The merged FC
+          //       JC has a new wipKey schema that doesn't match per-piece
+          //       downstream wipKeys, so the strict lookup above misses.
+          //       Restore the "*" fallback ONLY for FAB_CUT — safe now
+          //       because per-piece FC JCs were collapsed into one merged
+          //       JC per group. If still missing on the same PO (SOFA
+          //       case where FC lives on the anchor PO), scan sibling POs.
+          //   (B) Looking DOWN at any dept from a FAB_CUT row. The FC row
+          //       represents a merged group; per-piece downstream JCs
+          //       (FAB_SEW / FRAME / etc.) on this PO have wipKeys that
+          //       don't match the merged FC's wipKey. Allow "*" fallback
+          //       for any dept so the FC row can surface downstream
+          //       progress. For SOFA cross-PO merge, scan sibling POs of
+          //       the same companySOId for that dept's JC.
+          const lookingForFc = code === "FAB_CUT";
+          const fromFcRow = jc.departmentCode === "FAB_CUT";
+          if (lookingForFc || fromFcRow) {
+            const samePoAny = byDept.get("*");
+            if (samePoAny) return samePoAny;
+            // Cross-PO scan for the merge group's siblings.
             //   SOFA  → group key is (companySOId + baseModel + fabricCode);
             //           sibling POs span multiple modules of the same sofa.
             //   BF/ACC → group key is companySOId itself (each set already
@@ -1514,8 +1529,8 @@ export default function ProductionPage({
                   const sibBase = (sib.productCode || "").split("-")[0];
                   if (sibBase !== myBase) continue;
                 }
-                const fc = sib.jobCards.find((j) => j.departmentCode === "FAB_CUT");
-                if (fc) return fc;
+                const sibJc = sib.jobCards.find((j) => j.departmentCode === code);
+                if (sibJc) return sibJc;
               }
             }
           }

@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useTimeout } from "@/lib/scheduler";
+import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -853,6 +854,9 @@ export default function InvoiceDetailPage() {
           </div>
         </div>
       )}
+
+      {/* Audit trail for this invoice */}
+      {invoice && <AuditHistoryPanel resource="invoices" resourceId={invoice.id} />}
     </div>
   );
 }

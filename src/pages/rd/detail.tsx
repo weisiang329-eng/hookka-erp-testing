@@ -40,6 +40,7 @@ import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { RdProjectSchema } from "@/lib/schemas/rd-project";
 import { PhotoCropDialog } from "@/components/ui/PhotoCropDialog";
+import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { getMilestoneHealth, MILESTONE_CHIP } from "./health";
 
 const RDMutationSchema = mutationWithData(RdProjectSchema);
@@ -2336,6 +2337,28 @@ export default function RDProjectDetailPage() {
         {budgetCard}
       </aside>
       </div>
+
+      {/* Per-record audit trail — surfaces every status flip / edit / save
+          on this RD project. Empty until the rd-projects route starts
+          emitting audit_events; the panel handles the empty state. */}
+      <AuditHistoryPanel
+        resource="rd-projects"
+        resourceId={project.id}
+        fieldLabels={{
+          name: "Name",
+          description: "Description",
+          projectType: "Project Type",
+          productCategory: "Category",
+          currentStage: "Stage",
+          status: "Status",
+          targetLaunchDate: "Target Launch",
+          totalBudget: "R&D Budget (sen)",
+          targetSellingPriceSen: "Target Selling Price (sen)",
+          targetMaterialCostSen: "Target Material Cost (sen)",
+          coverPhotoUrl: "Cover Photo",
+          assignedTeam: "Team",
+        }}
+      />
 
       {/* ─── Edit Project Modal ──────────────────────────────────────────── */}
       <ModalOverlay open={editOpen} onClose={() => setEditOpen(false)} title="Edit Project">

@@ -20,6 +20,7 @@ import { CreateServiceCaseModal } from "@/pages/service-cases";
 // generateSOPdf is dynamic-imported at the click handler so the 1MB jspdf
 // vendor chunk only ships when the user actually prints.
 import DocumentFlowDiagram, { type DocNode } from "@/components/ui/document-flow-diagram";
+import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { getCurrentUser } from "@/lib/auth";
@@ -1301,6 +1302,30 @@ export default function SalesOrderDetailPage() {
         crossLinks={linkedPOs.length > 0 ? [
           { fromRow: "sales", fromIdx: 0, toRow: "purchase", toIdx: 0, type: "full" },
         ] : undefined}
+      />
+
+      {/* Per-record audit trail — feeds off audit_events. Status flips,
+          field edits, item-list changes all show up here with the actor,
+          a timestamp, and an expandable field-level diff. */}
+      <AuditHistoryPanel
+        resource="sales-orders"
+        resourceId={order.id}
+        fieldLabels={{
+          companySOId: "SO Number",
+          customerId: "Customer",
+          customerPO: "Customer PO",
+          poDate: "PO Date",
+          deliveryDate: "Delivery Date",
+          processingDate: "Processing Date",
+          totalSen: "Total (sen)",
+          balanceSen: "Balance (sen)",
+          depositSen: "Deposit (sen)",
+          status: "Status",
+          remarks: "Remarks",
+          items: "Items",
+          shippingAddress: "Shipping Address",
+        }}
+        ignoredFields={["lastSyncedAt", "syncedAt", "updatedBy"]}
       />
     </div>
   );

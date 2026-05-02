@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -346,6 +347,9 @@ export default function PurchaseOrderDetailPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* Audit trail for this PO */}
+      {po && <AuditHistoryPanel resource="purchase-orders" resourceId={po.id} />}
     </div>
   );
 }

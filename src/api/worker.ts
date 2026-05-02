@@ -517,6 +517,9 @@ import admin from "./routes/admin";
 import adminHealth from "./routes/admin-health";
 // Phase 6 — job_card_events audit log read endpoint.
 import jobCards from "./routes/job-cards";
+// Universal audit_events read endpoint — feeds AuditHistoryPanel on every
+// detail page so the operator can see "who changed what and when" per record.
+import auditEvents from "./routes/audit-events";
 // Phase C #5 quick-win — homepage revenue chart from mv_revenue_by_month_by_org.
 import dashboardRevenue from "./routes/dashboard-revenue";
 // Phase C #4 quick-win — MDM duplicate-detection review queue.
@@ -640,6 +643,7 @@ app.route("/api/admin", admin);
 // Phase 6 — job_card_events read surface. Only /:id/events for now;
 // future PATCH/DELETE audit screens can mount here.
 app.route("/api/job-cards", jobCards);
+app.route("/api/audit-events", auditEvents);
 // Phase C #5 quick-win — revenue chart from mv_revenue_by_month_by_org.
 // MUST be mounted BEFORE the catch-all /api/* stub at the bottom and
 // AFTER authMiddleware so the orgId scope is in place.

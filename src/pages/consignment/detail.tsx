@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from "react";
 import { useToast } from "@/components/ui/toast";
+import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { useNavigate, useParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1233,6 +1234,9 @@ export default function SalesOrderDetailPage() {
           { fromRow: "sales", fromIdx: 0, toRow: "purchase", toIdx: 0, type: "full" },
         ] : undefined}
       />
+
+      {/* Audit trail for this consignment order */}
+      <AuditHistoryPanel resource="consignment-orders" resourceId={order.id} />
     </div>
   );
 }

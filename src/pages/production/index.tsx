@@ -1487,23 +1487,35 @@ export default function ProductionPage({
           if (code === "FAB_CUT") {
             const samePoAnyFc = byDept.get("*");
             if (samePoAnyFc) return samePoAnyFc;
-            // SOFA cross-PO: merged FC may live on the anchor PO of the
-            // group, while this row is on a sibling PO. Scan POs of the
-            // same SO that share baseModel + fabric.
-            if (o.itemCategory === "SOFA") {
+            // Cross-PO merged FC lookup. The merged FC JC sits on ONE
+            // anchor PO of the merge group; sibling POs lose theirs in
+            // backfill. Scan POs of the same companySOId for an FC JC.
+            //   SOFA  → group key is (companySOId + baseModel + fabricCode);
+            //           sibling POs span multiple modules of the same sofa.
+            //   BF/ACC → group key is companySOId itself (each set already
+            //            has its own line-suffixed SOID, so siblings within
+            //            the same SOID are the HB / DV / piece-fan-out of
+            //            the same set). Don't constrain by baseModel because
+            //            HB-piece and DV-piece POs may have different
+            //            productCodes (HB-Q-22 vs DV-5FT) but share the
+            //            set's SOID.
+            const mySoId = o.companySOId || o.salesOrderId || "";
+            if (mySoId) {
+              const isSofa = o.itemCategory === "SOFA";
               const myBase = (o.productCode || "").split("-")[0];
               const myFabric = o.fabricCode || "";
-              const mySoId = o.companySOId || o.salesOrderId || "";
-              if (myBase && myFabric && mySoId) {
-                for (const sib of filteredOrders) {
-                  if (sib.id === o.id) continue;
-                  if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+              for (const sib of filteredOrders) {
+                if (sib.id === o.id) continue;
+                if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+                // SOFA must also match baseModel + fabric since multiple
+                // sofa products can coexist in one SO.
+                if (isSofa) {
                   if ((sib.fabricCode || "") !== myFabric) continue;
                   const sibBase = (sib.productCode || "").split("-")[0];
                   if (sibBase !== myBase) continue;
-                  const fc = sib.jobCards.find((j) => j.departmentCode === "FAB_CUT");
-                  if (fc) return fc;
                 }
+                const fc = sib.jobCards.find((j) => j.departmentCode === "FAB_CUT");
+                if (fc) return fc;
               }
             }
           }

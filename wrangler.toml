@@ -24,17 +24,11 @@ compatibility_flags = ["nodejs_compat"]
 # Pages project (SPA + Pages Functions)
 pages_build_output_dir = "dist"
 
-# Default plaintext vars — applied to every deploy. The Pages dashboard
-# locks variable edits whenever wrangler.toml is involved (the dashboard
-# tooltip on 2026-05-02 said: "Environment variables for this project are
-# being managed through wrangler.toml. Only Secrets (encrypted variables)
-# can be managed via the Dashboard."), so per-env overrides have to live
-# here too. See [env.preview.vars] further down for the preview override.
-[vars]
-ENVIRONMENT = "production"
-
-[env.preview.vars]
-ENVIRONMENT = "preview"
+# NOTE: vars are defined further down at line ~229 (existing [vars] block).
+# Don't duplicate them here — Pages rejects the deploy with
+# "trying to redefine an already defined table" if [vars] appears twice.
+# The hostname-based pickDbUrl in worker.ts uses request URL, not
+# ENVIRONMENT, so we don't strictly need a per-env override anyway.
 
 # D1 database binding — REMOVED 2026-04-27 (Phase 7 retire). All reads/
 # writes flow through the D1Compat adapter to Supabase Postgres via

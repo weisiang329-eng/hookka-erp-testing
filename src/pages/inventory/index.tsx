@@ -1336,6 +1336,46 @@ export default function InventoryPage() {
     return () => { cancelled = true; };
   }, []);
 
+  // Re-fetch wip_items when the tab regains focus. Fixes the stale-data
+  // problem where the user marks JCs complete (or clears all completion
+  // dates) on the Production page, navigates back to Inventory, and the
+  // page still shows the pre-mutation snapshot. cachedFetchJson's
+  // localStorage entry was already invalidated by the Production page's
+  // PATCH cascade, so this background refetch picks up the fresh data
+  // without a full reload.
+  useEffect(() => {
+    let cancelled = false;
+    const refetch = async () => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: BackendWipRow[];
+          _stub?: boolean;
+        }>("/api/inventory/wip");
+        if (
+          !cancelled &&
+          json &&
+          json.success &&
+          Array.isArray(json.data) &&
+          !json._stub
+        ) {
+          setBackendWipRows(json.data as BackendWipRow[]);
+        }
+      } catch { /* swallow */ }
+    };
+    const onFocus = () => refetch();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+
   // Derived inventory — recomputed whenever the fetches resolve.
   const fgItems = useMemo<FGItem[]>(
     () => deriveFGStock(products, poData, poToDOState),

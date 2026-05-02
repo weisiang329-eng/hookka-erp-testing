@@ -13,6 +13,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 
 const app = new Hono<Env>();
 
@@ -500,7 +501,14 @@ app.post("/", async (c) => {
         500,
       );
     }
-    return c.json({ success: true, data: rowToProject(created, []) }, 201);
+    const createdProject = rowToProject(created, []);
+    await emitAudit(c, {
+      resource: "rd-projects",
+      resourceId: id,
+      action: "create",
+      after: createdProject,
+    });
+    return c.json({ success: true, data: createdProject }, 201);
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }
@@ -755,9 +763,19 @@ app.put("/:id", async (c) => {
       updated.id,
       updated.manualLabourCostSen ?? null,
     );
+    const updatedProject = rowToProject(updated, protos.results ?? [], labourSummary);
+    // Audit trail — pre vs post snapshot so the History panel renders
+    // field-level diffs (Total / Status / Selling Price etc.).
+    await emitAudit(c, {
+      resource: "rd-projects",
+      resourceId: id,
+      action: "update",
+      before: rowToProject(existing, []),
+      after: updatedProject,
+    });
     return c.json({
       success: true,
-      data: rowToProject(updated, protos.results ?? [], labourSummary),
+      data: updatedProject,
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
@@ -816,6 +834,13 @@ app.post("/:id/start", async (c) => {
   if (!updated) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "start",
+    before: { status: existing.status },
+    after: { status: "ACTIVE", startedAt: now },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? []),
@@ -874,6 +899,13 @@ app.post("/:id/hold", async (c) => {
   if (!updated) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "hold",
+    before: { status: existing.status },
+    after: { status: "ON_HOLD" },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? []),
@@ -920,6 +952,13 @@ app.post("/:id/resume", async (c) => {
   if (!updated) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "resume",
+    before: { status: existing.status },
+    after: { status: "ACTIVE" },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? []),
@@ -983,6 +1022,13 @@ app.post("/:id/complete", async (c) => {
   if (!updated) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "complete",
+    before: { status: existing.status },
+    after: { status: "COMPLETED" },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? []),
@@ -1029,6 +1075,13 @@ app.post("/:id/move-to-draft", async (c) => {
   if (!updated) {
     return c.json({ success: false, error: "R&D project not found" }, 404);
   }
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "move-to-draft",
+    before: { status: existing.status },
+    after: { status: "DRAFT" },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? []),
@@ -1087,6 +1140,13 @@ app.post("/:id/reopen", async (c) => {
     updated.id,
     updated.manualLabourCostSen ?? null,
   );
+  await emitAudit(c, {
+    resource: "rd-projects",
+    resourceId: id,
+    action: "reopen",
+    before: { status: existing.status },
+    after: { status: "ACTIVE" },
+  });
   return c.json({
     success: true,
     data: rowToProject(updated, protos.results ?? [], labourSummary),

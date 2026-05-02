@@ -4293,6 +4293,12 @@ app.post("/backfill-fab-cut-merge", async (c) => {
   // Pull every FAB_CUT JC with its PO context + bom_templates baseModel in
   // one query. The LEFT JOIN tolerates orphan POs / missing BOM rows
   // (legacy seed data) — we fall back to productCode as baseModel below.
+  // Use double-quoted AS aliases so Postgres preserves the camelCase
+  // exactly as written. Unquoted aliases get folded to all-lowercase
+  // (`poProductCode` → `poproductcode`) and the db-pg snake→camel
+  // transform can't resurrect them. Bug: dry-run reported 1380 FC JCs
+  // but every newWipKey came out as `pord-XXX::::::FAB_CUT` (empty
+  // baseModel + fabric) because row.poProductCode was undefined.
   const rowsRes = await db
     .prepare(
       `SELECT
@@ -4300,16 +4306,16 @@ app.post("/backfill-fab-cut-merge", async (c) => {
          jc.wipType, jc.wipQty, jc.status, jc.completedDate, jc.dueDate,
          jc.sequence, jc.branchKey, jc.category, jc.productionTimeMinutes,
          jc.estMinutes, jc.pic1Id, jc.pic1Name, jc.pic2Id, jc.pic2Name,
-         po.productCode AS poProductCode,
-         po.fabricCode  AS poFabricCode,
-         po.sizeLabel   AS poSizeLabel,
-         po.gapInches   AS poGapInches,
-         po.divanHeightInches AS poDivanHeightInches,
-         po.legHeightInches   AS poLegHeightInches,
-         po.itemCategory      AS poItemCategory,
-         po.companySOId       AS poCompanySOId,
-         po.salesOrderId      AS poSalesOrderId,
-         bt.baseModel         AS bomBaseModel
+         po.productCode       AS "poProductCode",
+         po.fabricCode        AS "poFabricCode",
+         po.sizeLabel         AS "poSizeLabel",
+         po.gapInches         AS "poGapInches",
+         po.divanHeightInches AS "poDivanHeightInches",
+         po.legHeightInches   AS "poLegHeightInches",
+         po.itemCategory      AS "poItemCategory",
+         po.companySOId       AS "poCompanySOId",
+         po.salesOrderId      AS "poSalesOrderId",
+         bt.baseModel         AS "bomBaseModel"
        FROM job_cards jc
        JOIN production_orders po ON po.id = jc.productionOrderId
        LEFT JOIN bom_templates bt

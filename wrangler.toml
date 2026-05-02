@@ -24,6 +24,12 @@ compatibility_flags = ["nodejs_compat"]
 # Pages project (SPA + Pages Functions)
 pages_build_output_dir = "dist"
 
+# NOTE: vars are defined further down at line ~229 (existing [vars] block).
+# Don't duplicate them here — Pages rejects the deploy with
+# "trying to redefine an already defined table" if [vars] appears twice.
+# The hostname-based pickDbUrl in worker.ts uses request URL, not
+# ENVIRONMENT, so we don't strictly need a per-env override anyway.
+
 # D1 database binding — REMOVED 2026-04-27 (Phase 7 retire). All reads/
 # writes flow through the D1Compat adapter to Supabase Postgres via
 # Hyperdrive (see [[hyperdrive]] below). The legacy D1 instance was empty
@@ -37,9 +43,43 @@ pages_build_output_dir = "dist"
 # edge connection pooling. Without this, postgres wire-protocol round trips
 # blow through the Workers subrequest budget on the first query.
 # Connection string stored on the Hyperdrive config itself (set at creation).
+#
+# Production deploys use the prod Hyperdrive id below. Preview deploys
+# (any non-main branch) override this via [env.preview] further down so
+# that staging tests don't touch production data — see also
+# `staging-secrets.local.txt` for the staging Supabase project ref and
+# the Cloudflare Pages "Choose Environment: Preview" dropdown which
+# surfaces the override binding.
+#
+# Per-env routing (Option C, 2026-05-01): the Cloudflare Pages dashboard
+# is the source of truth for which Hyperdrive each deploy uses. Production
+# env binding HYPERDRIVE → hookka-erp-supabase (prod), Preview env
+# binding HYPERDRIVE → hookka-erp-staging (staging). The id below is just
+# the static fallback for `wrangler dev` / first-time pushes; dashboard
+# overrides it per-env at deploy time.
 [[hyperdrive]]
 binding = "HYPERDRIVE"
 id = "b0fc9d10217c42bfa793b050d1abed65"
+
+# ---------------------------------------------------------------------------
+# Staging Hyperdrive (Option C, 2026-05-01).
+#
+# Cloudflare Pages locks dashboard binding edits whenever wrangler.toml
+# defines `[[hyperdrive]]` at the top level — the dashboard tooltip on
+# 2026-05-02 explicitly said so ("Bindings for this project are being
+# managed through wrangler.toml"). That means we cannot have prod and
+# preview Pages envs each pointing at a different Hyperdrive id from
+# the dashboard alone — both envs receive the same top-level binding.
+#
+# Workaround: bind BOTH prod and staging Hyperdrive at the top level
+# (HYPERDRIVE + HYPERDRIVE_STAGING). Worker.ts picks at runtime based
+# on c.env.ENVIRONMENT — `preview` → staging, anything else → prod.
+# Set ENVIRONMENT=preview on the Pages dashboard's Preview env decklist
+# (Production env keeps ENVIRONMENT=production).
+# ---------------------------------------------------------------------------
+[[hyperdrive]]
+binding = "HYPERDRIVE_STAGING"
+id = "759227c0381a4a19ab7537ea48a1560f"
 
 # SESSION_CACHE — KV for per-request hot data.  Primary use: auth session
 # lookup (saves ~15ms DB round trip on every authenticated request).  Also

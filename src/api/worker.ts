@@ -48,6 +48,10 @@ export type Env = {
     SUPABASE_URL?: string;
     SUPABASE_SERVICE_KEY?: string;
     HYPERDRIVE: Hyperdrive;
+    // Staging Hyperdrive — bound on every deploy alongside prod. Worker
+    // routes to it when c.env.ENVIRONMENT === 'preview'. See
+    // wrangler.toml comment for why this is necessary.
+    HYPERDRIVE_STAGING?: Hyperdrive;
     // Shared secret expected on /api/internal/* routes that are meant to
     // be invoked by cron / ops tooling only (not public traffic).
     CRON_SECRET?: string;
@@ -197,6 +201,38 @@ app.use("*", async (c, next) => {
 
 // DB injection — wraps the Hyperdrive-pooled Supabase client in a D1-compatible
 // adapter and exposes it as `c.var.DB`.  Routes use this instead of raw D1.
+// Per-env Hyperdrive routing (Option C, 2026-05-01).
+//
+// Cloudflare Pages locks BOTH `[[hyperdrive]]` and plaintext `[vars]`
+// to wrangler.toml top-level once it's involved — confirmed
+// 2026-05-02 by dashboard tooltips ("Bindings managed through
+// wrangler.toml" + "Only Secrets can be managed via the Dashboard").
+// `[env.preview.vars]` overrides are also silently ignored: a deploy
+// of commit 2d60ab2 still returned env="production" from /api/health.
+//
+// So neither dashboard nor [env.preview.*] can flip ENVIRONMENT per
+// deploy. The only reliable runtime signal is the request hostname —
+// production is `hookka-erp-testing.pages.dev` exactly; preview deploys
+// are `<commit-hash>.hookka-erp-testing.pages.dev` or
+// `<branch-alias>.hookka-erp-testing.pages.dev`. Detect from there.
+function isPreviewHostname(requestUrl: string): boolean {
+  try {
+    const host = new URL(requestUrl).hostname.toLowerCase();
+    if (host === "hookka-erp-testing.pages.dev") return false; // prod
+    if (host.endsWith(".hookka-erp-testing.pages.dev")) return true; // preview
+    return false; // custom domain → treat as prod
+  } catch {
+    return false;
+  }
+}
+
+function pickDbUrl(env: Env, requestUrl: string): string | undefined {
+  if (isPreviewHostname(requestUrl) && env.HYPERDRIVE_STAGING?.connectionString) {
+    return env.HYPERDRIVE_STAGING.connectionString;
+  }
+  return env.HYPERDRIVE?.connectionString ?? env.DATABASE_URL;
+}
+
 // Must run before authMiddleware (which itself hits the DB to verify tokens).
 // The adapter is further wrapped in instrumentD1 so every prepare/all/first/
 // run/batch emits a [slow-query] line when it exceeds SLOW_QUERY_MS.
@@ -206,7 +242,7 @@ app.use("/api/*", async (c, next) => {
   const { instrumentD1 } = await import("./lib/observability");
   // Prefer Hyperdrive binding (production / preview on Cloudflare).  Fall
   // back to DATABASE_URL env var only for local dev without Hyperdrive.
-  const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
+  const url = pickDbUrl(c.env, c.req.url);
   if (!url) throw new Error("No database connection string available (HYPERDRIVE or DATABASE_URL)");
   const adapter = new SupabaseAdapter(getSql(url)) as unknown as D1Database;
   const timer = c.get("dbTimer"); // set by timingMiddleware
@@ -224,6 +260,8 @@ app.get("/api/health", (c) =>
     ok: true,
     runtime: "cloudflare-workers",
     env: c.env.ENVIRONMENT,
+    isPreview: isPreviewHostname(c.req.url),
+    host: new URL(c.req.url).hostname,
     ts: Date.now(),
   }),
 );
@@ -234,7 +272,7 @@ app.get("/api/health", (c) =>
 app.get("/api/pg-ping", async (c) => {
   try {
     const { getSql } = await import("./lib/db-pg");
-    const url = c.env.HYPERDRIVE?.connectionString ?? c.env.DATABASE_URL;
+    const url = pickDbUrl(c.env, c.req.url);
     if (!url) throw new Error("No database connection string");
     const sql = getSql(url);
     const t0 = Date.now();

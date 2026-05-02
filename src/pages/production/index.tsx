@@ -93,8 +93,38 @@ function fmtShortDate(iso: string): string {
   return `${d.getDate()} ${mm}`;
 }
 
-function cellFor(order: ProductionOrder, deptCode: string): Cell {
-  const cards = order.jobCards.filter((j) => j.departmentCode === deptCode);
+function cellFor(
+  order: ProductionOrder,
+  deptCode: string,
+  allOrders?: ProductionOrder[],
+): Cell {
+  let cards = order.jobCards.filter((j) => j.departmentCode === deptCode);
+  // Option C — for FAB_CUT, the merged JC may live on the anchor PO of a
+  // SOFA cross-PO group; this PO is a sibling and has zero FC JCs of its
+  // own. Walk same-companySOId / same-baseModel / same-fabric siblings
+  // and surface the anchor's FC so the Overview cell isn't blank.
+  if (deptCode === "FAB_CUT" && cards.length === 0 && allOrders) {
+    const mySoId = order.companySOId || order.salesOrderId || "";
+    if (mySoId) {
+      const isSofa = order.itemCategory === "SOFA";
+      const myBase = (order.productCode || "").split("-")[0];
+      const myFabric = order.fabricCode || "";
+      for (const sib of allOrders) {
+        if (sib.id === order.id) continue;
+        if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+        if (isSofa) {
+          if ((sib.fabricCode || "") !== myFabric) continue;
+          const sibBase = (sib.productCode || "").split("-")[0];
+          if (sibBase !== myBase) continue;
+        }
+        const sibFc = sib.jobCards.filter((j) => j.departmentCode === "FAB_CUT");
+        if (sibFc.length > 0) {
+          cards = sibFc;
+          break;
+        }
+      }
+    }
+  }
   if (cards.length === 0) {
     return { state: "empty", totalCards: 0, doneCards: 0, earliestDue: "", latestCompleted: "" };
   }
@@ -929,6 +959,24 @@ export default function ProductionPage({
     refreshOrders();
   }, [refreshOrders]);
 
+  // Auto-refresh on tab focus / visibility return. Mirrors the inventory
+  // page fix — when the user comes back from another tab (or another
+  // browser window), pull the latest production_orders so JC status
+  // changes made elsewhere (other operator, scanner, batch importer) are
+  // reflected without a manual refresh.
+  useEffect(() => {
+    const onFocus = () => fetchOrders();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") fetchOrders();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [fetchOrders]);
+
   // Sync cached orders response into local state so optimistic PATCHes keep working.
   const [lastSeenOrdersResp, setLastSeenOrdersResp] = useState<typeof ordersResp>(null);
   if (ordersResp !== lastSeenOrdersResp) {
@@ -1049,7 +1097,7 @@ export default function ProductionPage({
       let done = 0;
       let total = 0;
       for (const o of orders) {
-        const c = cellFor(o, d.code);
+        const c = cellFor(o, d.code, orders);
         if (c.state === "empty") continue;
         total += c.totalCards;
         done += c.doneCards;
@@ -1154,7 +1202,9 @@ export default function ProductionPage({
   const visibleOrders = useMemo(() => {
     let rows = filteredOrders;
     if (activeTab !== "ALL") {
-      rows = rows.filter((o) => cellFor(o, activeTab).state !== "empty");
+      rows = rows.filter(
+        (o) => cellFor(o, activeTab, filteredOrders).state !== "empty",
+      );
     }
     // Overview-only Due sort. Empty due dates park at the end regardless
     // of direction so undated rows don't dominate ascending order.
@@ -1472,10 +1522,73 @@ export default function ProductionPage({
         // queried dept — accurate to the BOM.
         const picker = (code: string): JobCard | null => {
           const byDept = poDeptIndex?.get(code);
-          if (!byDept) return null;
-          if (jc.wipKey) {
+          if (byDept && jc.wipKey) {
             const exact = byDept.get(jc.wipKey);
             if (exact) return exact;
+          }
+          // Option C FAB_CUT lookup: post-merge there's at most one FC JC
+          // per PO (BF/ACC) or per merged (SO+baseModel+fabric) group
+          // (SOFA). FAB_SEW (and other downstream) rows still have their
+          // per-piece wipKey, which won't match the merged FC's wipKey,
+          // so the strict per-wipKey lookup above misses. Restore the
+          // "any FC on this PO" fallback ONLY for FAB_CUT — safe now
+          // because per-piece FC JCs were collapsed into one.
+          //
+          // CRITICAL: do NOT bail on `if (!byDept) return null;` before
+          // running the cross-PO scan. The merged-FC-on-anchor case (SOFA
+          // sibling POs that have ZERO FC JCs of their own) needs the
+          // cross-PO scan to walk the SO and find the anchor's FC, but
+          // bailing on undefined byDept short-circuits before the scan
+          // ever runs — the row would render "—" indefinitely.
+          // Option-C-aware fallback. Two symmetric directions:
+          //   (A) Looking UP at FAB_CUT from any non-FC row. The merged FC
+          //       JC has a new wipKey schema that doesn't match per-piece
+          //       downstream wipKeys, so the strict lookup above misses.
+          //       Restore the "*" fallback ONLY for FAB_CUT — safe now
+          //       because per-piece FC JCs were collapsed into one merged
+          //       JC per group. If still missing on the same PO (SOFA
+          //       case where FC lives on the anchor PO), scan sibling POs.
+          //   (B) Looking DOWN at any dept from a FAB_CUT row. The FC row
+          //       represents a merged group; per-piece downstream JCs
+          //       (FAB_SEW / FRAME / etc.) on this PO have wipKeys that
+          //       don't match the merged FC's wipKey. Allow "*" fallback
+          //       for any dept so the FC row can surface downstream
+          //       progress. For SOFA cross-PO merge, scan sibling POs of
+          //       the same companySOId for that dept's JC.
+          const lookingForFc = code === "FAB_CUT";
+          const fromFcRow = jc.departmentCode === "FAB_CUT";
+          if (lookingForFc || fromFcRow) {
+            const samePoAny = byDept ? byDept.get("*") : undefined;
+            if (samePoAny) return samePoAny;
+            // Cross-PO scan for the merge group's siblings.
+            //   SOFA  → group key is (companySOId + baseModel + fabricCode);
+            //           sibling POs span multiple modules of the same sofa.
+            //   BF/ACC → group key is companySOId itself (each set already
+            //            has its own line-suffixed SOID, so siblings within
+            //            the same SOID are the HB / DV / piece-fan-out of
+            //            the same set). Don't constrain by baseModel because
+            //            HB-piece and DV-piece POs may have different
+            //            productCodes (HB-Q-22 vs DV-5FT) but share the
+            //            set's SOID.
+            const mySoId = o.companySOId || o.salesOrderId || "";
+            if (mySoId) {
+              const isSofa = o.itemCategory === "SOFA";
+              const myBase = (o.productCode || "").split("-")[0];
+              const myFabric = o.fabricCode || "";
+              for (const sib of filteredOrders) {
+                if (sib.id === o.id) continue;
+                if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+                // SOFA must also match baseModel + fabric since multiple
+                // sofa products can coexist in one SO.
+                if (isSofa) {
+                  if ((sib.fabricCode || "") !== myFabric) continue;
+                  const sibBase = (sib.productCode || "").split("-")[0];
+                  if (sibBase !== myBase) continue;
+                }
+                const sibJc = sib.jobCards.find((j) => j.departmentCode === code);
+                if (sibJc) return sibJc;
+              }
+            }
           }
           return null;
         };
@@ -1523,7 +1636,15 @@ export default function ProductionPage({
           customerRef: o.customerReference || "",
           customerName: o.customerName || "",
           customerState: o.customerState || "",
-          model: o.productCode || "",
+          // Model column display rule: sofa drops the variant suffix
+          // ("5531-2A(LHF)" → "5531") because the merged FAB_CUT row joins
+          // multiple variants into the WIP column already, and a Model
+          // value of just "5531" matches how Wei Siang refers to sofas
+          // ("5531/5535/..." base). BF/ACC keep the full productCode
+          // (e.g. "1013-(Q)") since the variant IS the model identity.
+          model: o.itemCategory === "SOFA"
+            ? (o.productCode || "").split("-")[0]
+            : (o.productCode || ""),
           wip: jc.wipLabel || jc.wipCode || (() => {
             // Derive WIP code from PO data when job card doesn't carry it
             if (o.itemCategory === "BEDFRAME") {
@@ -2005,7 +2126,14 @@ export default function ProductionPage({
     { key: "customerState", label: "State",          type: "text",   width: "70px",  sortable: true },
     { key: "category",      label: "Category",       type: "text",   width: "90px",  sortable: true },
     { key: "model",         label: "Model",          type: "text",   width: "110px", sortable: true },
-    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true },
+    // Type column (HEADBOARD / DIVAN / BASE / CUSHION / ARMREST / etc.) —
+    // post Option C the FAB_CUT merge collapses multiple piece types into
+    // one row so the anchor's wipType is misleading on a merged row.
+    // Hide by default on FAB_CUT tab; other dept tabs keep it visible
+    // since each row is still per-piece for them. Wei Siang explicitly
+    // asked to hide on Fab Cut: "type 的话你可能需要换掉了。要不然我们就直接
+    // hide 起来吧".
+    { key: "wipType",       label: "Type",           type: "text",   width: "90px",  sortable: true, defaultHidden: activeTab === "FAB_CUT" },
     { key: "wip",           label: "WIP",            type: "text",   width: "220px", sortable: true },
     { key: "size",          label: "Size",           type: "text",   width: "70px",  sortable: true },
     { key: "colour",        label: "Colour",         type: "text",   width: "100px", sortable: true },
@@ -2534,7 +2662,7 @@ export default function ProductionPage({
       // Overview matrix: one row per filtered order × 8 dept columns.
       const rowsHtml = visibleOrders.map((o) => {
         const cells = DEPARTMENTS.map((d) => {
-          const c = cellFor(o, d.code);
+          const c = cellFor(o, d.code, visibleOrders);
           if (c.state === "empty") return `<td class="m empty"></td>`;
           if (c.state === "done") {
             return `<td class="m done">✓<br/><small>${fmt(c.latestCompleted || c.earliestDue)}</small></td>`;
@@ -3647,7 +3775,7 @@ export default function ProductionPage({
                 title="Click to change due date"
               >{fmtShortDate(order.targetEndDate)}</div>
               {DEPARTMENTS.map((d) => {
-                const c = cellFor(order, d.code);
+                const c = cellFor(order, d.code, visibleOrders);
                 const isActiveCol = false; // inside ALL view, no column highlighted
                 const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
                   if (c.state === "empty") return;

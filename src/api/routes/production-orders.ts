@@ -582,36 +582,43 @@ async function fetchFilteredPOs(
   // wipKey-grouped variant keeps the JC-row payload down (only loads
   // wipKeys that the active dept actually touches) while letting the
   // frontend picker find the full chain.
-  // Dept-narrowing: orgId scopes the inner subqueries too — otherwise the
-  // wipKey-grouped lookup could return JC ids from another tenant.
+  // Dept-narrowing — Option-C-aware symmetric filter.
   //
-  // Option-C addendum (4th OR clause): the merged FAB_CUT JC has a brand-new
-  // wipKey schema (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) that
-  // never coincides with any per-piece downstream wipKey. The original
-  // wipKey-IN clause therefore strips it out, and the deptFilter='FAB_SEW'
-  // request returns 13 of 14 JCs — the FC JC is missing. Without it the
-  // frontend picker has nothing to fall back to and the Fab Cut column
-  // renders "—" on every Fab Sew (and Frame / Webbing / etc.) row.
+  // Pre-Option-C this used a wipKey-IN strip: include only JCs whose wipKey
+  // appears in the deptFilter dept's wipKey set. That worked because all
+  // depts on the same piece shared the same wipKey schema. After Option C
+  // the merged FAB_CUT JC has a brand-new wipKey
+  // (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) that never coincides
+  // with any per-piece downstream wipKey, so the strip dropped it — and
+  // /production/fab-sew on SO-2604-347-01 returned 13 of 14 JCs (no FC),
+  // leaving the Fab Cut column rendering "—" everywhere.
   //
-  // Add FAB_CUT JCs whose PO is either:
-  //   (a) the same PO as a deptFilter JC  → BF / ACCESSORY case (FC merges
-  //       per-PO so SEW + FC live on the same productionOrderId).
-  //   (b) on a sibling PO sharing the same companySOId → SOFA case (FC
-  //       merges cross-PO and lives on the anchor PO; sibling SEW POs
-  //       don't have FC of their own).
+  // New rule (symmetric, both directions):
+  //   include every JC whose PO is related to the deptFilter's PO set, where
+  //   "related" = same productionOrderId OR same companySOId.
+  //     - same productionOrderId   → BF / ACC case (FC + per-piece SEW/etc.
+  //                                  live on the same PO; deptFilter='FAB_CUT'
+  //                                  also pulls downstream siblings on this
+  //                                  PO).
+  //     - same companySOId         → SOFA case (FC on anchor PO; per-piece
+  //                                  SEW on sibling POs of same SO; both
+  //                                  directions need to see across).
+  //
+  // Performance note: for typical SOs this returns ~14 JCs/PO × 1-3 POs.
+  // The strict wipKey-IN strip was tighter (~7 JCs/PO) but broke under
+  // Option C. The companySOId scan only widens within a SO, which is
+  // bounded — production dataset has ~432 POs across ~340 SOs so the
+  // upper bound on JC payload is well within Hyperdrive's response budget.
   const jcWhereDept = deptFilter
-    ? ` WHERE orgId = ? AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NOT NULL)
-          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NULL))
-          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG')
-          OR (departmentCode = 'FAB_CUT' AND productionOrderId IN (
-                SELECT po.id FROM production_orders po
-                WHERE po.orgId = ?
-                  AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
-                       OR (po.companySOId IS NOT NULL AND po.companySOId IN (
-                            SELECT po2.companySOId FROM production_orders po2
-                            JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
-                            WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL)))
-              )))`
+    ? ` WHERE orgId = ? AND productionOrderId IN (
+          SELECT po.id FROM production_orders po
+          WHERE po.orgId = ?
+            AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
+                 OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                      SELECT po2.companySOId FROM production_orders po2
+                      JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                      WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL)))
+        )`
     : "";
 
   if (!includeJobCards) {
@@ -628,17 +635,11 @@ async function fetchFilteredPOs(
   // ~530 PO / ~9k JC response.
   if (minimal) {
     if (deptFilter) {
-      // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
-      // payload bounded. Leave it untouched.
-      // Bind slots: 7 from the original 3 wipKey/PO subqueries (orgId outer +
-      // (orgId,dept) × 3) + 5 new from the Option-C FC clause (orgId outer-PO
-      // + (orgId,dept) × 2 inner) = 12 total.
+      // Bind slots: 6 = orgId (outer JC scope) + orgId (po.orgId) + orgId
+      // (inner jc subquery) + deptFilter + orgId (jc2 subquery) + deptFilter.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(
-          orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter,
-          orgId, orgId, deptFilter, orgId, deptFilter,
-        );
+        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -680,13 +681,10 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
-    // Bind slots: 12 = 7 (original 3 subqueries) + 5 (Option-C FC clause).
+    // Bind slots: 6 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(
-        orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter,
-        orgId, orgId, deptFilter, orgId, deptFilter,
-      );
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -840,31 +838,24 @@ async function fetchPaginatedPOs(
           // aggregate completedDate across the merged set. Without this,
           // the wipKey IN (...FG only...) clause would strip the upstream
           // chain and the Packing tab's date columns render "—".
-          // 4th OR clause (Option-C addendum) — see fetchFilteredPOs for the
-          // detailed rationale. The merged FAB_CUT JC has a new wipKey
-          // schema that doesn't share keys with any per-piece downstream
-          // JC, so the original wipKey-IN strip drops it. Re-add FAB_CUT
-          // JCs whose PO is in the requested-dept's PO set (BF/ACC) or
-          // whose PO sits on a sibling sharing companySOId (SOFA cross-PO
-          // merge anchor).
-          const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${ph}))
-            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph})))
-            OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG' AND productionOrderId IN (${ph}))
-            OR (departmentCode = 'FAB_CUT' AND productionOrderId IN (
-                SELECT po.id FROM production_orders po
-                WHERE po.id IN (${ph})
-                  AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND productionOrderId IN (${ph}))
-                       OR (po.companySOId IS NOT NULL AND po.companySOId IN (
-                            SELECT po2.companySOId FROM production_orders po2
-                            JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
-                            WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph}))))
-              )))`;
+          // Symmetric Option-C-aware dept narrowing — see jcWhereDept in
+          // fetchFilteredPOs for the rationale. Include every JC whose PO
+          // is in the requested-dept's PO set OR shares companySOId with
+          // such a PO. This handles both directions: SEW row sees merged
+          // FC (BF same-PO; SOFA anchor PO via companySOId) AND FC row
+          // sees per-piece downstream SEW/FRAME/etc. (BF same-PO; SOFA
+          // sibling POs via companySOId).
+          const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND productionOrderId IN (
+            SELECT po.id FROM production_orders po
+            WHERE po.id IN (${ph})
+              AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND productionOrderId IN (${ph}))
+                   OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                        SELECT po2.companySOId FROM production_orders po2
+                        JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                        WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph})))))`;
           return db
             .prepare(sql)
-            .bind(
-              ...chunk, deptFilter, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk,
-              ...chunk, deptFilter, ...chunk, deptFilter, ...chunk,
-            )
+            .bind(...chunk, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
             .all<JobCardRow>();
         }),
       );

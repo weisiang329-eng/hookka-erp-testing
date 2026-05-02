@@ -1396,6 +1396,15 @@ export async function applyWipInventoryChange(
         // the upstream JC was skipped / never completed), INSERT one
         // with stock_qty = -consumeQty so the negative number surfaces
         // the missed dept on the WIP board.
+        //
+        // Type for the stub: when upstream is a merged FC, the stub
+        // represents the FC's WIP, NOT this SEW JC's piece. Use
+        // itemCategory (BEDFRAME / SOFA / ACCESSORY) so the inventory
+        // Type column shows the correct set-level label. Falls back to
+        // shortType (SEW's wipType) for the legacy non-FC upstream case.
+        const stubType = isMergedFcUpstream
+          ? (poRow.itemCategory || shortType)
+          : shortType;
         const upstream = await db
           .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
           .bind(upstreamLabel)
@@ -1416,7 +1425,7 @@ export async function applyWipInventoryChange(
             .bind(
               `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
               upstreamLabel,
-              shortType,
+              stubType,
               poRow.productCode ?? "",
               "PENDING",
               -consumeQty,

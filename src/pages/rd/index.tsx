@@ -253,7 +253,13 @@ function DraftCard({
                 <img
                   src={cover}
                   alt={`${project.name} cover`}
-                  className="h-32 w-32 rounded-md object-cover bg-[#FAF9F8] border border-[#E2DDD8]"
+                  // object-contain preserves the saved JPEG's aspect ratio
+                  // — wider phone shots no longer get the top + bottom
+                  // cropped off the way object-cover did. Lets letterbox
+                  // bars fill against the same neutral bg the empty
+                  // placeholder uses, so the seam between photos and
+                  // no-photo cards stays consistent.
+                  className="h-32 w-32 rounded-md object-contain bg-[#FAF9F8] border border-[#E2DDD8]"
                 />
               ) : (
                 <div

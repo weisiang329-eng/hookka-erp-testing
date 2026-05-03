@@ -194,11 +194,23 @@ function CreateSalesOrderPage() {
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
   const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
-  const { data: fabricTrackingsResp } = useCachedJson<{ data?: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3"}[] }>("/api/fabric-tracking");
+  const { data: fabricTrackingsResp } = useCachedJson<{ data?: {
+    id: string;
+    fabricCode: string;
+    priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3";
+    sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+    bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  }[] }>("/api/fabric-tracking");
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
-  const fabricTrackings: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3"}[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
+  const fabricTrackings: {
+    id: string;
+    fabricCode: string;
+    priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3";
+    sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+    bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  }[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
   const [saving, setSaving] = useState(false);
   const [isClone, setIsClone] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED" | "CONFIRMING">("DRAFT");
@@ -719,10 +731,11 @@ function CreateSalesOrderPage() {
   };
 
   // Resolve a sofa line's tier-aware price from its current (height, tier)
-  // pair. Tier comes from fabric_tracking.priceTier (defaults to PRICE_2
-  // when fabric is unset or untagged). Legacy seatHeightPrices entries
-  // without a tier field also resolve as PRICE_2 — keeps behaviour stable
-  // for SKUs that pre-date the matrix.
+  // pair. Tier comes from fabric_tracking.sofaPriceTier (split off from the
+  // legacy priceTier in migration 0069), falling back to priceTier and then
+  // PRICE_2 when both are unset. Legacy seatHeightPrices entries without a
+  // tier field also resolve as PRICE_2 — keeps behaviour stable for SKUs
+  // that pre-date the matrix.
   const resolveSofaTierPrice = (
     seatHeightPrices: { height: string; priceSen: number; tier?: "PRICE_1" | "PRICE_2" | "PRICE_3" }[] | undefined,
     seatHeight: string,
@@ -730,7 +743,8 @@ function CreateSalesOrderPage() {
   ): number | null => {
     if (!seatHeightPrices || seatHeightPrices.length === 0 || !seatHeight) return null;
     const tracking = fabricTrackings.find((ft) => ft.fabricCode === fabricCode);
-    const tier = tracking?.priceTier ?? "PRICE_2";
+    const tier =
+      tracking?.sofaPriceTier ?? tracking?.priceTier ?? "PRICE_2";
     const cell = seatHeightPrices.find(
       (s) => s.height === seatHeight && (s.tier ?? "PRICE_2") === tier,
     );
@@ -762,9 +776,12 @@ function CreateSalesOrderPage() {
         ...(newPrice !== null ? { basePriceSen: newPrice } : {}),
       });
     } else if (item?.itemCategory === "BEDFRAME" && item.productId) {
-      // Look up fabric priceTier from tracking data
+      // Look up fabric priceTier from tracking data — bedframe context uses
+      // the bedframePriceTier split column (migration 0069), falling back to
+      // the legacy priceTier and then PRICE_2.
       const tracking = fabricTrackings.find(ft => ft.fabricCode === fab.code);
-      const priceTier = tracking?.priceTier || "PRICE_2";
+      const priceTier =
+        tracking?.bedframePriceTier ?? tracking?.priceTier ?? "PRICE_2";
       const prod = products.find(p => p.id === item.productId);
       let newPrice = item.basePriceSen;
       if (prod) {
@@ -988,8 +1005,11 @@ function CreateSalesOrderPage() {
     return (groups as string[][]).every((g) => g.some((v) => sizeSet.has(v)));
   };
   const lineFabricTier = (line: LineItem): "PRICE_1" | "PRICE_2" | "PRICE_3" | null => {
+    // Combo detection only fires for sofa lines, so resolve via the
+    // sofaPriceTier split column (migration 0069). Falls back to the legacy
+    // priceTier so old data still matches.
     const tracking = fabricTrackings.find((ft) => ft.fabricCode === line.fabricCode);
-    return tracking?.priceTier ?? null;
+    return tracking?.sofaPriceTier ?? tracking?.priceTier ?? null;
   };
   const comboMatches: ComboMatch[] = useMemo(() => {
     const out: ComboMatch[] = [];

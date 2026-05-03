@@ -1322,7 +1322,12 @@ export type FabricTracking = {
   fabricCategory: "B.M-FABR" | "S-FABR" | "S.M-FABR" | "LINING" | "WEBBING";
   // Tier extended to PRICE_3 in migration 0067 (sofa price matrix uses three
   // fabric tiers; bedframe still effectively uses just PRICE_1/PRICE_2).
+  // Migration 0069 split priceTier into per-context columns. The legacy
+  // priceTier is kept as the back-compat fallback when the split columns
+  // are NULL. Accessories piggyback on sofaPriceTier.
   priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3";
+  sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
   price: number;
   soh: number;
   poOutstanding: number;

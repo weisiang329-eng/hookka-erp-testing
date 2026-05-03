@@ -16,7 +16,14 @@ type FabricTrackingRow = {
   fabricCode: string;
   fabricDescription: string | null;
   fabricCategory: "B.M-FABR" | "S-FABR" | "S.M-FABR" | "LINING" | "WEBBING" | null;
+  // Legacy single-tier column. Kept for back-compat — older code paths still
+  // read it, and the resolver helper falls back to it when the split columns
+  // are NULL.
   priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  // Split per-context tiers (migration 0069). sofaPriceTier covers SOFA AND
+  // ACCESSORY contexts; bedframePriceTier covers BEDFRAME only.
+  sofaPriceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  bedframePriceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
   price: number;
   soh: number;
   poOutstanding: number;
@@ -37,6 +44,8 @@ function rowToTracking(r: FabricTrackingRow) {
     fabricDescription: r.fabricDescription ?? "",
     fabricCategory: r.fabricCategory ?? "B.M-FABR",
     priceTier: r.priceTier ?? "PRICE_1",
+    sofaPriceTier: r.sofaPriceTier ?? null,
+    bedframePriceTier: r.bedframePriceTier ?? null,
     price: r.price,
     soh: r.soh,
     poOutstanding: r.poOutstanding,
@@ -49,6 +58,27 @@ function rowToTracking(r: FabricTrackingRow) {
     supplier: r.supplier ?? "",
     leadTimeDays: r.leadTimeDays,
   };
+}
+
+/**
+ * Resolve the effective fabric tier for a given product context. SOFA and
+ * ACCESSORY both use sofaPriceTier; BEDFRAME uses bedframePriceTier. Falls
+ * back to the legacy priceTier when the split column is NULL (legacy rows
+ * pre-migration-0069), then to PRICE_2 as a final default.
+ */
+export function effectiveTierForCategory(
+  fabric: {
+    sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+    bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+    priceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  } | null | undefined,
+  category: "SOFA" | "ACCESSORY" | "BEDFRAME",
+): "PRICE_1" | "PRICE_2" | "PRICE_3" {
+  if (!fabric) return "PRICE_2";
+  if (category === "BEDFRAME") {
+    return fabric.bedframePriceTier ?? fabric.priceTier ?? "PRICE_2";
+  }
+  return fabric.sofaPriceTier ?? fabric.priceTier ?? "PRICE_2";
 }
 
 // GET /api/fabric-tracking?category=B.M-FABR&shortageOnly=true
@@ -81,6 +111,8 @@ type FabricTrackingBody = {
   fabricDescription?: string | null;
   fabricCategory?: FabricTrackingRow["fabricCategory"];
   priceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3";
+  sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
+  bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
   price?: number;
   soh?: number;
   poOutstanding?: number;
@@ -130,13 +162,19 @@ app.post("/", async (c) => {
   }
   const fabricCategory = body.fabricCategory ?? "B.M-FABR";
   const priceTier = body.priceTier ?? "PRICE_2";
+  // Seed both split columns from the legacy priceTier when the caller didn't
+  // supply them explicitly — keeps newly-created rows behaving identically
+  // to legacy rows until the operator splits them in the UI.
+  const sofaPriceTier = body.sofaPriceTier ?? priceTier;
+  const bedframePriceTier = body.bedframePriceTier ?? priceTier;
   const id = genTrackingId();
   await c.var.DB.prepare(
     `INSERT INTO fabric_trackings
        (id, fabricCode, fabricDescription, fabricCategory, priceTier,
+        sofaPriceTier, bedframePriceTier,
         price, soh, poOutstanding, lastMonthUsage, oneWeekUsage,
         twoWeeksUsage, oneMonthUsage, shortage, reorderPoint, supplier, leadTimeDays)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
     .bind(
       id,
@@ -144,6 +182,8 @@ app.post("/", async (c) => {
       body.fabricDescription ?? null,
       fabricCategory,
       priceTier,
+      sofaPriceTier,
+      bedframePriceTier,
       Number(body.price) || 0,
       Number(body.soh) || 0,
       Number(body.poOutstanding) || 0,
@@ -214,15 +254,28 @@ app.put("/:id", async (c) => {
   try {
     const body = await c.req.json();
 
+    const isValidTier = (
+      v: unknown,
+    ): v is "PRICE_1" | "PRICE_2" | "PRICE_3" =>
+      v === "PRICE_1" || v === "PRICE_2" || v === "PRICE_3";
+
     let priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null = existing.priceTier;
-    if (body.priceTier !== undefined) {
-      if (
-        body.priceTier === "PRICE_1" ||
-        body.priceTier === "PRICE_2" ||
-        body.priceTier === "PRICE_3"
-      ) {
-        priceTier = body.priceTier;
-      }
+    if (body.priceTier !== undefined && isValidTier(body.priceTier)) {
+      priceTier = body.priceTier;
+    }
+    let sofaPriceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null =
+      existing.sofaPriceTier;
+    if (body.sofaPriceTier !== undefined) {
+      sofaPriceTier = isValidTier(body.sofaPriceTier)
+        ? body.sofaPriceTier
+        : null;
+    }
+    let bedframePriceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null =
+      existing.bedframePriceTier;
+    if (body.bedframePriceTier !== undefined) {
+      bedframePriceTier = isValidTier(body.bedframePriceTier)
+        ? body.bedframePriceTier
+        : null;
     }
     const price = body.price !== undefined ? Number(body.price) : existing.price;
     const soh = body.soh !== undefined ? Number(body.soh) : existing.soh;
@@ -232,10 +285,20 @@ app.put("/:id", async (c) => {
         : existing.reorderPoint;
 
     await c.var.DB.prepare(
-      `UPDATE fabric_trackings SET priceTier = ?, price = ?, soh = ?, reorderPoint = ?
+      `UPDATE fabric_trackings
+         SET priceTier = ?, sofaPriceTier = ?, bedframePriceTier = ?,
+             price = ?, soh = ?, reorderPoint = ?
        WHERE id = ?`,
     )
-      .bind(priceTier, price, soh, reorderPoint, id)
+      .bind(
+        priceTier,
+        sofaPriceTier,
+        bedframePriceTier,
+        price,
+        soh,
+        reorderPoint,
+        id,
+      )
       .run();
 
     const updated = await c.var.DB.prepare(

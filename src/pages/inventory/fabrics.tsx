@@ -148,12 +148,12 @@ export default function FabricsPage() {
           setSearch={setSearch}
           categoryFilter={categoryFilter}
           setCategoryFilter={setCategoryFilter}
-          onPriceTierChange={async (id, tier) => {
+          onPriceTierChange={async (id, field, tier) => {
             try {
               const res = await fetch(`/api/fabric-tracking/${id}`, {
                 method: "PUT",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ priceTier: tier }),
+                body: JSON.stringify({ [field]: tier }),
               });
               if (res.ok) {
                 invalidateCachePrefix("/api/fabric-tracking");
@@ -207,7 +207,11 @@ function InventoryTab({
   setSearch: (v: string) => void;
   categoryFilter: string;
   setCategoryFilter: (v: string) => void;
-  onPriceTierChange: (id: string, tier: "PRICE_1" | "PRICE_2" | "PRICE_3") => void;
+  onPriceTierChange: (
+    id: string,
+    field: "sofaPriceTier" | "bedframePriceTier",
+    tier: "PRICE_1" | "PRICE_2" | "PRICE_3",
+  ) => void;
 }) {
   return (
     <div className="space-y-4">
@@ -247,7 +251,13 @@ function InventoryTab({
               <th className="px-3 py-3 text-left font-semibold text-gray-600">Fabric Code</th>
               <th className="px-3 py-3 text-left font-semibold text-gray-600">Description</th>
               <th className="px-3 py-3 text-left font-semibold text-gray-600">Category</th>
-              <th className="px-3 py-3 text-center font-semibold text-gray-600">Price Tier</th>
+              <th className="px-3 py-3 text-center font-semibold text-gray-600">
+                Sofa Price Tier
+                <div className="text-[10px] font-normal text-gray-400 mt-0.5">Sofa &amp; Accessory</div>
+              </th>
+              <th className="px-3 py-3 text-center font-semibold text-gray-600">
+                Bedframe Price Tier
+              </th>
               <th className="px-3 py-3 text-right font-semibold text-gray-600">Price</th>
               <th className="px-3 py-3 text-right font-semibold text-gray-600">SOH</th>
               <th className="px-3 py-3 text-right font-semibold text-gray-600">PO Outstanding</th>
@@ -261,7 +271,7 @@ function InventoryTab({
           <tbody className="divide-y divide-gray-100">
             {fabrics.length === 0 ? (
               <tr>
-                <td colSpan={12} className="px-3 py-8 text-center text-gray-400">
+                <td colSpan={13} className="px-3 py-8 text-center text-gray-400">
                   No fabrics found
                 </td>
               </tr>
@@ -285,26 +295,20 @@ function InventoryTab({
                       </span>
                     </td>
                     <td className="px-3 py-2 text-center">
-                      <select
-                        value={f.priceTier || "PRICE_2"}
-                        onChange={(e) =>
-                          onPriceTierChange(
-                            f.id,
-                            e.target.value as "PRICE_1" | "PRICE_2" | "PRICE_3"
-                          )
+                      <PriceTierSelect
+                        value={f.sofaPriceTier ?? f.priceTier ?? "PRICE_2"}
+                        onChange={(t) =>
+                          onPriceTierChange(f.id, "sofaPriceTier", t)
                         }
-                        className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${
-                          f.priceTier === "PRICE_1"
-                            ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
-                            : f.priceTier === "PRICE_3"
-                              ? "bg-[#F0E5F8] border-[#C9A8E0] text-[#5E3D80]"
-                              : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
-                        }`}
-                      >
-                        <option value="PRICE_1">Price 1</option>
-                        <option value="PRICE_2">Price 2</option>
-                        <option value="PRICE_3">Price 3</option>
-                      </select>
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-center">
+                      <PriceTierSelect
+                        value={f.bedframePriceTier ?? f.priceTier ?? "PRICE_2"}
+                        onChange={(t) =>
+                          onPriceTierChange(f.id, "bedframePriceTier", t)
+                        }
+                      />
                     </td>
                     <td className="px-3 py-2 text-right text-gray-700">
                       {formatCurrency(f.price)}
@@ -364,3 +368,31 @@ function InventoryTab({
   );
 }
 
+/* ─── Price Tier dropdown (shared) ────────────────────────────────── */
+function PriceTierSelect({
+  value,
+  onChange,
+}: {
+  value: "PRICE_1" | "PRICE_2" | "PRICE_3";
+  onChange: (t: "PRICE_1" | "PRICE_2" | "PRICE_3") => void;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) =>
+        onChange(e.target.value as "PRICE_1" | "PRICE_2" | "PRICE_3")
+      }
+      className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${
+        value === "PRICE_1"
+          ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
+          : value === "PRICE_3"
+            ? "bg-[#F0E5F8] border-[#C9A8E0] text-[#5E3D80]"
+            : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
+      }`}
+    >
+      <option value="PRICE_1">Price 1</option>
+      <option value="PRICE_2">Price 2</option>
+      <option value="PRICE_3">Price 3</option>
+    </select>
+  );
+}

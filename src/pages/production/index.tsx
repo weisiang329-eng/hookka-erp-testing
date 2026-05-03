@@ -14,6 +14,7 @@ import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 // 2026-04-26 QA helper the shop owner uses to bulk-reset for re-runs).
 import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
+import { getCurrentUser } from "@/lib/auth";
 
 // ----- types -----
 type JobCard = {
@@ -2707,13 +2708,54 @@ export default function ProductionPage({
       const printRows = gridFilterIdSet
         ? deptRows.filter((r) => gridFilterIdSet.has(r.id))
         : deptRows;
-      // The current dept's pill state for this row (Overdue / Pending /
-      // Done / —). Mirrors what the on-screen Production Sheet shows in
-      // the dept-name pill column. Falls back to "—" for rows that have
-      // no JC for the active dept (e.g. SOFA sibling PO with no FC).
-      const deptKey = `sched_${activeTab}` as const;
-      const renderPill = (r: typeof printRows[number]) => {
-        const sched = (r as unknown as Record<string, DeptSched>)[deptKey];
+      // ---- Dynamic column resolution: print whatever the user has visible ----
+      // Read the user's column visibility + order from localStorage (same
+      // keys the DataGrid writes to). Falls back to defaultHidden=false
+      // columns if no personal layout is saved yet. Print template now
+      // mirrors the on-screen sheet 1:1 — toggle a column off in the UI,
+      // it disappears from the printout.
+      const gridId = `production-dept-${activeTab.toLowerCase()}`;
+      // Match data-grid.tsx userKey() — same fallback to "anon".
+      const userEmailLc = (() => {
+        try {
+          const u = getCurrentUser();
+          return u?.email ? u.email.toLowerCase() : "anon";
+        } catch { return "anon"; }
+      })();
+      const readJson = (key: string): unknown => {
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : null;
+        } catch { return null; }
+      };
+      const visibleSetRaw =
+        readJson(`datagrid-cols-${gridId}-${userEmailLc}`) ??
+        readJson(`datagrid-cols-${gridId}-org-default`);
+      const visibleSet = Array.isArray(visibleSetRaw)
+        ? new Set<string>(visibleSetRaw as string[])
+        : new Set<string>(deptColumns.filter((c) => !c.hidden && !c.defaultHidden).map((c) => c.key));
+      const orderRaw =
+        readJson(`datagrid-colorder-${gridId}-${userEmailLc}`) ??
+        readJson(`datagrid-colorder-${gridId}-org-default`);
+      const order: string[] = Array.isArray(orderRaw)
+        ? (orderRaw as string[])
+        : deptColumns.map((c) => c.key);
+      const orderedColumns = order
+        .map((k) => deptColumns.find((c) => c.key === k))
+        .filter((c): c is Column<DeptRow> => !!c && !c.hidden && visibleSet.has(c.key));
+
+      // Per-column HTML renderer for the print export. Given (column, row)
+      // returns the inner cell HTML. Special-cases the few columns that
+      // need formatting (dept pill, due, completion, PIC, sticker
+      // badges); everything else falls through to the row's plain value.
+      const escapeHtml = (s: string) =>
+        s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+      const renderPillFor = (
+        r: DeptRow,
+        deptCode: string,
+      ): string => {
+        const objKey = `sched_${deptCode}` as keyof DeptRow;
+        const sched = r[objKey] as DeptSched | undefined;
         if (!sched || sched.state === "none") return "—";
         const word =
           sched.state === "done" ? "DONE" :
@@ -2724,56 +2766,39 @@ export default function ProductionPage({
           : sched.due;
         return `<span class="pill ${sched.state}">${word}${date ? " " + fmt(date) : ""}</span>`;
       };
+      const renderCell = (col: Column<DeptRow>, r: DeptRow): string => {
+        const key = col.key;
+        // Dept pill columns — keys look like "sched_FAB_CUT.sortKey".
+        const deptMatch = key.match(/^sched_([A-Z_]+)\.sortKey$/);
+        if (deptMatch) return renderPillFor(r, deptMatch[1]);
+        // Date columns get formatted.
+        if (key === "dueDate") return fmt(r.dueDate);
+        if (key === "completedDate") return fmt(r.completedDate);
+        // Generic string cell. Look up the value off the row.
+        const raw = (r as unknown as Record<string, unknown>)[key];
+        if (raw == null || raw === "") return "";
+        return escapeHtml(String(raw));
+      };
+      const cellClassFor = (col: Column<DeptRow>): string => {
+        if (col.align === "right" || col.type === "number") return "num";
+        if (col.key === "soId") return "so";
+        return "";
+      };
+      const headerCellsHtml = orderedColumns
+        .map((c) => `<th${cellClassFor(c) ? ` class="${cellClassFor(c)}"` : ""}>${escapeHtml(c.label)}</th>`)
+        .join("");
       const rowsHtml = printRows.map((r) => {
-        return `<tr>
-          <td class="num">${r.rowNo}</td>
-          <td class="so">${r.soId}</td>
-          <td>${r.customerPOId || ""}</td>
-          <td>${r.customerRef || ""}</td>
-          <td>${r.customerName}</td>
-          <td>${r.customerState}</td>
-          <td><b>${r.model}</b></td>
-          <td>${r.wip}</td>
-          <td>${r.size}</td>
-          <td>${r.colour}</td>
-          <td class="num">${r.gap || ""}</td>
-          <td class="num">${r.divan || ""}</td>
-          <td class="num">${r.leg || ""}</td>
-          <td class="num">${r.qty || ""}</td>
-          <td>${renderPill(r)}</td>
-          <td>${fmt(r.dueDate)}</td>
-          <td>${fmt(r.completedDate)}</td>
-          <td>${r.pic1 || ""}</td>
-          <td>${r.pic2 || ""}</td>
-          <td>${r.status || ""}</td>
-        </tr>`;
+        const cells = orderedColumns
+          .map((c) => {
+            const cls = cellClassFor(c);
+            return `<td${cls ? ` class="${cls}"` : ""}>${renderCell(c, r)}</td>`;
+          })
+          .join("");
+        return `<tr>${cells}</tr>`;
       }).join("");
       body = `
         <table class="schedule">
-          <thead>
-            <tr>
-              <th class="num">#</th>
-              <th>SO ID</th>
-              <th>Customer PO ID</th>
-              <th>Customer Ref</th>
-              <th>Customer Name</th>
-              <th>State</th>
-              <th>Model</th>
-              <th>WIP</th>
-              <th>Size</th>
-              <th>Colour</th>
-              <th class="num">Gap</th>
-              <th class="num">Divan</th>
-              <th class="num">Leg</th>
-              <th class="num">Qty</th>
-              <th>${activeDept?.name || "Status"}</th>
-              <th>Due</th>
-              <th>Completion</th>
-              <th>PIC 1</th>
-              <th>PIC 2</th>
-              <th>Status</th>
-            </tr>
-          </thead>
+          <thead><tr>${headerCellsHtml}</tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
     }
@@ -2889,7 +2914,8 @@ export default function ProductionPage({
     w.document.write(html);
     w.document.close();
   }, [
-    activeTab, activeDept, visibleOrders, deptRows, filteredOrders.length,
+    activeTab, activeDept, visibleOrders, deptRows, deptColumns,
+    filteredOrders.length,
     fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
   ]);
 

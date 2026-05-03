@@ -51,6 +51,7 @@ import {
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { loadLeadTimes, type LeadTimeMap } from "../lib/lead-times";
+import { createProductionOrdersForOrder } from "./_shared/production-builder";
 
 const app = new Hono<Env>();
 
@@ -4528,5 +4529,307 @@ app.post("/backfill-fab-cut-merge", async (c) => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// /backfill-split-multi-qty — one-shot retroactive SO→PO split repair.
+//
+// Background: production-builder.ts:412-414 added the SO→PO split-by-quantity
+// rule on 2026-04-28 (commit a95d91f). For non-SOFA items, a line with
+// quantity=N now fans out to N separate POs each quantity=1 (e.g. SO-X-01,
+// SO-X-02). SOs confirmed BEFORE that deploy went through the legacy path
+// which created ONE PO carrying the full line quantity. Downstream BOM
+// expansion then inflated wipQty across every dept (Option-C merged FAB_CUT
+// JC = min(group.wipQty), so the merged JC inherits the inflated set count).
+// /backfill-fab-cut-merge only consolidates existing FC JCs — it cannot
+// reverse the missed split.
+//
+// This endpoint walks production_orders for non-SOFA POs with quantity>1,
+// groups them by salesOrderId, and for each affected SO:
+//   1. Pre-flight — every PO of that SO must be PENDING with no JC ever
+//      scanned (pic1Id / pic2Id null) and no cost_ledger entry referencing
+//      any of those POs. Anything in progress is SKIPPED (audit data wins).
+//   2. Hard-delete the affected SO's POs. job_cards CASCADE on
+//      productionOrderId, piece_pics CASCADE on jobCardId, so JC + piece
+//      data goes with them. fg_units / fg_batches are only created on
+//      PO completion, which the PENDING guard already excludes.
+//   3. Re-run createProductionOrdersForOrder against the SO's current items.
+//      The modern split logic fans out one PO per piece (quantity=1) and
+//      Option-C aggregator emits a single FC JC per PO with wipQty=1.
+//
+// dryRun=true returns the per-SO plan without writes — same convention as
+// /backfill-fab-cut-merge. Idempotent: re-runs are no-ops once every PO
+// has quantity<=1 (or every multi-qty PO has been touched, in which case
+// the pre-flight skips it).
+// ---------------------------------------------------------------------------
+type SplitCandidatePo = {
+  poId: string;
+  poNo: string;
+  salesOrderId: string | null;
+  consignmentOrderId: string | null;
+  status: string;
+  quantity: number;
+  itemCategory: string | null;
+};
+
+app.post("/backfill-split-multi-qty", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Find all non-SOFA POs with quantity > 1. Sofa stays single-PO by
+  //    design (one set per line), so its quantity carries through unchanged.
+  const candRes = await db
+    .prepare(
+      `SELECT id AS "poId", poNo, salesOrderId, consignmentOrderId,
+              status, quantity, itemCategory
+         FROM production_orders
+        WHERE itemCategory <> 'SOFA'
+          AND quantity > 1`,
+    )
+    .all<SplitCandidatePo>();
+  const candidates = candRes.results ?? [];
+
+  // 2. Group by source-order id (SO or CO). The cascade re-run operates
+  //    at the order level — one rebuild emits all the order's POs together,
+  //    so we can't split SO-A and SO-B work independently if both happen
+  //    to need the fix.
+  const bySource = new Map<string, SplitCandidatePo[]>();
+  for (const p of candidates) {
+    const sourceId = p.salesOrderId ?? p.consignmentOrderId ?? "";
+    if (!sourceId) continue; // Orphan PO — skip; nothing to re-cascade.
+    if (!bySource.has(sourceId)) bySource.set(sourceId, []);
+    bySource.get(sourceId)!.push(p);
+  }
+
+  type Plan = {
+    sourceType: "SO" | "CO";
+    sourceId: string;
+    sourceNumber: string | null;
+    affectedPoNos: string[];
+    skipReason?: string;
+  };
+  const plans: Plan[] = [];
+
+  for (const [sourceId, pos] of bySource.entries()) {
+    const sourceType: "SO" | "CO" = pos[0].salesOrderId ? "SO" : "CO";
+    const sourceNumber = pos[0].poNo.replace(/-\d+$/, "");
+
+    // Pre-flight A: all POs of this SO must be PENDING. Any IN_PROGRESS /
+    // COMPLETED / CANCELLED row means hand-edits or partial work — skip.
+    const allPosForSource = await db
+      .prepare(
+        `SELECT id, status FROM production_orders
+          WHERE ${sourceType === "SO" ? "salesOrderId" : "consignmentOrderId"} = ?`,
+      )
+      .bind(sourceId)
+      .all<{ id: string; status: string }>();
+    const allPos = allPosForSource.results ?? [];
+    const nonPending = allPos.filter((p) => p.status !== "PENDING");
+    if (nonPending.length > 0) {
+      plans.push({
+        sourceType,
+        sourceId,
+        sourceNumber,
+        affectedPoNos: pos.map((p) => p.poNo),
+        skipReason: `${nonPending.length} non-PENDING PO(s) on this order — skipping to preserve in-flight work`,
+      });
+      continue;
+    }
+    const allPoIds = allPos.map((p) => p.id);
+    const placeholders = allPoIds.map(() => "?").join(", ");
+
+    // Pre-flight B: no JC has been scanned (pic1Id or pic2Id set).
+    if (allPoIds.length > 0) {
+      const scannedRes = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM job_cards
+            WHERE productionOrderId IN (${placeholders})
+              AND (pic1Id IS NOT NULL OR pic2Id IS NOT NULL)`,
+        )
+        .bind(...allPoIds)
+        .first<{ n: number }>();
+      if ((scannedRes?.n ?? 0) > 0) {
+        plans.push({
+          sourceType,
+          sourceId,
+          sourceNumber,
+          affectedPoNos: pos.map((p) => p.poNo),
+          skipReason: `${scannedRes?.n} job card(s) already scanned — pic data would be lost`,
+        });
+        continue;
+      }
+    }
+
+    // Pre-flight C: no cost_ledger entry references any of these POs.
+    if (allPoIds.length > 0) {
+      const ledgerRes = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM cost_ledger
+            WHERE refType = 'PRODUCTION_ORDER'
+              AND refId IN (${placeholders})`,
+        )
+        .bind(...allPoIds)
+        .first<{ n: number }>();
+      if ((ledgerRes?.n ?? 0) > 0) {
+        plans.push({
+          sourceType,
+          sourceId,
+          sourceNumber,
+          affectedPoNos: pos.map((p) => p.poNo),
+          skipReason: `${ledgerRes?.n} cost_ledger entries reference these POs — refusing to delete`,
+        });
+        continue;
+      }
+    }
+
+    plans.push({
+      sourceType,
+      sourceId,
+      sourceNumber,
+      affectedPoNos: pos.map((p) => p.poNo),
+    });
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidatePoCount: candidates.length,
+      affectedSourceCount: bySource.size,
+      plans,
+    });
+  }
+
+  // Execute. Per-source rebuild: hard-delete all POs (cascade kills JCs +
+  // piece_pics), then call createProductionOrdersForOrder which fans out
+  // fresh POs through the modern split path.
+  const executed: Array<{
+    sourceId: string;
+    sourceNumber: string | null;
+    deletedPoCount: number;
+    createdPoNos: string[];
+  }> = [];
+  const skipped: Plan[] = [];
+
+  for (const plan of plans) {
+    if (plan.skipReason) {
+      skipped.push(plan);
+      continue;
+    }
+    if (plan.sourceType !== "SO") {
+      skipped.push({ ...plan, skipReason: "CO re-cascade not implemented in this backfill" });
+      continue;
+    }
+
+    // Re-load SO header + items.
+    const so = await db
+      .prepare(`SELECT * FROM sales_orders WHERE id = ?`)
+      .bind(plan.sourceId)
+      .first<{
+        id: string;
+        companySOId: string | null;
+        companySODate: string | null;
+        customerPOId: string | null;
+        reference: string | null;
+        customerName: string;
+        customerState: string | null;
+        hookkaExpectedDD: string | null;
+        customerDeliveryDate: string | null;
+      }>();
+    if (!so) {
+      skipped.push({ ...plan, skipReason: "Source SO not found" });
+      continue;
+    }
+    const itemsRes = await db
+      .prepare(`SELECT * FROM sales_order_items WHERE salesOrderId = ?`)
+      .bind(plan.sourceId)
+      .all<{
+        lineNo: number;
+        productId: string | null;
+        productCode: string | null;
+        productName: string | null;
+        itemCategory: string | null;
+        sizeCode: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        quantity: number;
+        gapInches: number | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        specialOrder: string | null;
+        notes: string | null;
+      }>();
+    const items = itemsRes.results ?? [];
+    if (items.length === 0) {
+      skipped.push({ ...plan, skipReason: "Source SO has no items" });
+      continue;
+    }
+
+    // Delete all POs of this SO. CASCADE handles job_cards + piece_pics.
+    // Done as a single statement so partial failure leaves no half-deleted
+    // state. Idempotency: production-builder's existence check ignores
+    // CANCELLED rows, but we hard-delete here so deterministic poIds
+    // (pord-{soId}-NN) are free for reuse by the new fan-out.
+    await db
+      .prepare(`DELETE FROM production_orders WHERE salesOrderId = ?`)
+      .bind(plan.sourceId)
+      .run();
+
+    // Re-run cascade. The builder builds a list of statements; we batch them.
+    const built = await createProductionOrdersForOrder(
+      db,
+      {
+        id: so.id,
+        sourceType: "SO",
+        companyOrderId: so.companySOId ?? "",
+        companyOrderDate: so.companySODate,
+        customerPOId: so.customerPOId,
+        reference: so.reference,
+        customerName: so.customerName,
+        customerState: so.customerState,
+        hookkaExpectedDD: so.hookkaExpectedDD,
+        customerDeliveryDate: so.customerDeliveryDate,
+      },
+      items.map((it) => ({
+        lineNo: it.lineNo,
+        productId: it.productId,
+        productCode: it.productCode,
+        productName: it.productName,
+        itemCategory: it.itemCategory,
+        sizeCode: it.sizeCode,
+        sizeLabel: it.sizeLabel,
+        fabricCode: it.fabricCode,
+        quantity: it.quantity,
+        gapInches: it.gapInches,
+        divanHeightInches: it.divanHeightInches,
+        legHeightInches: it.legHeightInches,
+        specialOrder: it.specialOrder,
+        notes: it.notes,
+      })),
+    );
+    if (built.statements.length > 0) {
+      await db.batch(built.statements);
+    }
+
+    executed.push({
+      sourceId: plan.sourceId,
+      sourceNumber: plan.sourceNumber,
+      deletedPoCount: plan.affectedPoNos.length,
+      createdPoNos: built.created.map((c) => c.poNo),
+    });
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    candidatePoCount: candidates.length,
+    affectedSourceCount: bySource.size,
+    executedCount: executed.length,
+    skippedCount: skipped.length,
+    executed,
+    skipped,
+  });
+});
 
 export default app;

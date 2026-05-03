@@ -82,6 +82,10 @@ type ProductionOrderRow = {
   legHeightInches: number | null;
   sizeCode: string | null;
   sizeLabel: string | null;
+  // SO line fabric snapshot. Fabric raw materials live in raw_materials
+  // keyed by itemCode === fabricCode (e.g. "PC151-01"), so this drives
+  // the autoDetect=FABRIC substitution at consumption time.
+  fabricCode: string | null;
 };
 
 type BomVersionRow = {
@@ -108,6 +112,13 @@ type MaterialLine = {
   qtyPerUnit: number;
   wastePct: number;          // 0..100
   inventoryCode?: string;    // preferred mapping to raw_materials.itemCode
+  // When set, this BOM line is bound to a per-SO field rather than a
+  // fixed inventory item. resolveBomMaterials substitutes inventoryCode
+  // with the PO's snapshotted SO value before FIFO lookup runs:
+  //   "FABRIC" → po.fabricCode (raw_materials.itemCode === fabricCode)
+  //   "LEG"    → no current schema mapping → falls through to shortage
+  //              report with the original "Leg (from order)" name.
+  autoDetect?: "FABRIC" | "LEG";
 };
 
 // Walk a BOM tree JSON node and gather every `materials[]` entry across all
@@ -141,13 +152,21 @@ function collectTreeMaterials(
           : Number(row.wastePct) || 0;
       const inventoryCode =
         typeof row.inventoryCode === "string" ? row.inventoryCode : undefined;
-      if (scaledQty > 0 && (code || name)) {
+      const autoDetect =
+        row.autoDetect === "FABRIC" || row.autoDetect === "LEG"
+          ? row.autoDetect
+          : undefined;
+      // autoDetect lines may have empty code/name at authoring time — keep
+      // them so the substitution step downstream can resolve them. The
+      // (code || name) guard would otherwise drop them silently.
+      if (scaledQty > 0 && (code || name || autoDetect)) {
         out.push({
           code: code || name,
-          name,
+          name: name || (autoDetect === "FABRIC" ? "Fabric (from order)" : autoDetect === "LEG" ? "Leg (from order)" : ""),
           qtyPerUnit: scaledQty,
           wastePct: waste,
           inventoryCode,
+          autoDetect,
         });
       }
     }
@@ -206,7 +225,7 @@ async function resolveBomMaterials(
       const parsed = JSON.parse(version.tree);
       const acc: MaterialLine[] = [];
       collectTreeMaterials(parsed, acc, dims);
-      if (acc.length > 0) return acc;
+      if (acc.length > 0) return substituteAutoDetectMaterials(acc, po);
     } catch {
       // fall through to bom_components
     }
@@ -231,6 +250,27 @@ async function resolveBomMaterials(
     }
   }
   return [];
+}
+
+// Bind autoDetect lines to a concrete inventory key from the PO snapshot.
+//   FABRIC: po.fabricCode IS raw_materials.itemCode for the SO's chosen
+//           fabric — set inventoryCode and let the normal lookup chain run.
+//   LEG:    no current schema maps leg height → raw_materials, so we leave
+//           inventoryCode empty. resolveRmFromBom will return null and the
+//           caller will record a shortage entry, which is the right signal
+//           until leg inventory is modeled.
+// Lines without an autoDetect tag are passed through unchanged.
+function substituteAutoDetectMaterials(
+  lines: MaterialLine[],
+  po: ProductionOrderRow,
+): MaterialLine[] {
+  return lines.map((line) => {
+    if (!line.autoDetect) return line;
+    if (line.autoDetect === "FABRIC" && po.fabricCode) {
+      return { ...line, inventoryCode: po.fabricCode, code: po.fabricCode };
+    }
+    return line;
+  });
 }
 
 // Resolve a BOM material line to a raw_materials row id. Tries:
@@ -302,7 +342,7 @@ export async function consumeRawMaterialsForPO(
     .prepare(
       `SELECT id, poNo, productId, productCode, quantity, completedDate,
               itemCategory, gapInches, divanHeightInches, legHeightInches,
-              sizeCode, sizeLabel
+              sizeCode, sizeLabel, fabricCode
          FROM production_orders WHERE id = ?`,
     )
     .bind(poId)

@@ -504,6 +504,7 @@ import products from "./routes/products";
 import productConfigs from "./routes/product-configs";
 import workers from "./routes/workers";
 import workerAuth from "./routes/worker-auth";
+import workerPortal from "./routes/worker";
 import departments from "./routes/departments";
 import customerHubs from "./routes/customer-hubs";
 import customerProducts from "./routes/customer-products";
@@ -628,6 +629,10 @@ app.route("/api/products", products);
 app.route("/api/product-configs", productConfigs);
 app.route("/api/workers", workers);
 app.route("/api/worker-auth", workerAuth);
+// Worker portal (mobile /worker pages). MUST mount AFTER /api/worker-auth so
+// the more-specific prefix wins matching — `/api/worker-auth/login` would
+// otherwise be a prefix-match for `/api/worker` if order flipped.
+app.route("/api/worker", workerPortal);
 app.route("/api/departments", departments);
 app.route("/api/customer-hubs", customerHubs);
 app.route("/api/customer-products", customerProducts);

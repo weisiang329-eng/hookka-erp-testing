@@ -909,6 +909,57 @@ app.post("/:productId/prices", async (c) => {
       );
     }
 
+    // Auto-baseline: when scheduling the FIRST product_prices row for a SKU
+    // and the new effective_from is in the future, capture the SKU's
+    // current live price (from products) as a row dated today. Otherwise
+    // when the future date kicks in there's no record of "what the price
+    // used to be" — Wei Siang flagged this as a recurring "what was the
+    // old price?" gap.
+    //
+    // Skip the auto-baseline when:
+    //   - product_prices already has any row for this productId
+    //     (the most recent existing row already plays the baseline role)
+    //   - the new row is back-dated or effective today
+    //     (the new row itself is the source of truth from today onward)
+    const today = new Date().toISOString().slice(0, 10);
+    if (effectiveFrom > today) {
+      const existingHistory = await c.var.DB.prepare(
+        "SELECT id FROM product_prices WHERE productId = ? LIMIT 1",
+      )
+        .bind(productId)
+        .first<{ id: string }>();
+      if (!existingHistory) {
+        const masterRow = await c.var.DB.prepare(
+          "SELECT basePriceSen, price1Sen, seatHeightPrices FROM products WHERE id = ?",
+        )
+          .bind(productId)
+          .first<{
+            basePriceSen: number | null;
+            price1Sen: number | null;
+            seatHeightPrices: string | null;
+          }>();
+        if (masterRow) {
+          await c.var.DB.prepare(
+            `INSERT INTO product_prices
+               (id, productId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+            .bind(
+              genPriceRowId(),
+              productId,
+              masterRow.basePriceSen,
+              masterRow.price1Sen,
+              masterRow.seatHeightPrices,
+              today,
+              "Auto-baseline (captured before scheduled change)",
+              body.createdBy ?? null,
+            )
+            .run();
+        }
+      }
+    }
+
     const id = genPriceRowId();
     const seatJson =
       body.seatHeightPrices === undefined || body.seatHeightPrices === null

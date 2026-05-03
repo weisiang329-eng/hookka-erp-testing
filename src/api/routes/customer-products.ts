@@ -456,6 +456,72 @@ app.post("/:customerProductId/prices", async (c) => {
       );
     }
 
+    // Auto-baseline: when scheduling the FIRST customer_product_prices row
+    // for a cp + the new effective_from is in the future, capture today's
+    // resolved customer price (snapshot or master fallback) as a row dated
+    // today. Mirrors the master-side product_prices auto-baseline so that
+    // when a future-dated price kicks in, the previously-charged price is
+    // still preserved in history (Wei Siang: "old price needs to be
+    // recorded too, otherwise we'll forget").
+    const today = todayIso();
+    if (effectiveFrom > today) {
+      const existingHistory = await c.var.DB.prepare(
+        "SELECT id FROM customer_product_prices WHERE customerProductId = ? LIMIT 1",
+      )
+        .bind(cpId)
+        .first<{ id: string }>();
+      if (!existingHistory) {
+        // Read the cp + master to compute today's effective price using
+        // the same coalesce chain the resolver uses.
+        const cpRow = await c.var.DB.prepare(
+          `SELECT cp.basePriceSen   AS "cpBase",
+                  cp.price1Sen      AS "cpPrice1",
+                  cp.seatHeightPrices AS "cpSeat",
+                  cp.productId      AS "productId"
+             FROM customer_products cp
+             WHERE cp.id = ?`,
+        )
+          .bind(cpId)
+          .first<{
+            cpBase: number | null;
+            cpPrice1: number | null;
+            cpSeat: string | null;
+            productId: string;
+          }>();
+        if (cpRow) {
+          const master = await resolveProductPriceAsOf(
+            c.var.DB,
+            cpRow.productId,
+            today,
+          );
+          const baseSnap = cpRow.cpBase ?? master?.basePriceSen ?? null;
+          const p1Snap = cpRow.cpPrice1 ?? master?.price1Sen ?? null;
+          const seatSnap =
+            cpRow.cpSeat ??
+            (master && master.seatHeightPrices.length > 0
+              ? JSON.stringify(master.seatHeightPrices)
+              : null);
+          await c.var.DB.prepare(
+            `INSERT INTO customer_product_prices
+               (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+            .bind(
+              genPriceRowId(),
+              cpId,
+              baseSnap,
+              p1Snap,
+              seatSnap,
+              today,
+              "Auto-baseline (captured before scheduled change)",
+              body.createdBy ?? null,
+            )
+            .run();
+        }
+      }
+    }
+
     const id = genPriceRowId();
     const seatJson =
       body.seatHeightPrices === undefined || body.seatHeightPrices === null

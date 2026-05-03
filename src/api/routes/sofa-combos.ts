@@ -59,21 +59,41 @@ function parseJson<T>(raw: string | null, fallback: T): T {
   }
 }
 
-// Canonicalise componentSizes: dedupe + sort ascending so "L+2A" and "2A+L"
-// hash to the same JSON. Sorted lexicographically — the values are short
-// SKU size codes ("2A", "3A", "L", "CNR", "OTT", ...) and lexicographic
-// order is stable across writes/reads.
-function canonicalSizes(input: unknown): string[] | null {
+// Canonicalise componentSizes. Storage shape is now an array of OR-groups:
+//
+//   [["2A(LHF)","2A(RHF)"], ["L(LHF)","L(RHF)"]]
+//
+// Each group is "any-of": at SO-detection time the cart needs at least one
+// module matching some entry in each group. Groups together are "all-of".
+// Lets a single rule cover all four handedness variants of a 2A+L deal.
+//
+// Backwards-compat: if the caller posts a flat string[] (legacy shape used
+// by the first iteration of this UI), each element is wrapped into its own
+// 1-element group. Sorted within groups + across groups so equivalent
+// shapes hash to the same JSON.
+function canonicalSizes(input: unknown): string[][] | null {
   if (!Array.isArray(input)) return null;
-  const cleaned: string[] = [];
-  for (const v of input) {
-    if (typeof v !== "string") return null;
-    const t = v.trim();
-    if (!t) continue;
-    cleaned.push(t);
+  // Detect legacy flat shape (string[]) and wrap to grouped shape.
+  const groups: unknown[] =
+    input.length > 0 && typeof input[0] === "string"
+      ? input.map((v) => [v])
+      : input;
+  const cleaned: string[][] = [];
+  for (const g of groups) {
+    if (!Array.isArray(g)) return null;
+    const inner: string[] = [];
+    for (const v of g) {
+      if (typeof v !== "string") return null;
+      const t = v.trim();
+      if (!t) continue;
+      if (!inner.includes(t)) inner.push(t);
+    }
+    if (inner.length === 0) continue;
+    cleaned.push(inner.slice().sort());
   }
   if (cleaned.length === 0) return null;
-  return Array.from(new Set(cleaned)).sort();
+  cleaned.sort((a, b) => a[0].localeCompare(b[0]));
+  return cleaned;
 }
 
 function isValidPricesByHeight(input: unknown): input is Record<string, number> {
@@ -124,7 +144,7 @@ app.get("/", async (c) => {
   const data = (res.results ?? []).map((r) => ({
     id: r.id,
     baseModel: r.baseModel,
-    componentSizes: parseJson<string[]>(r.componentSizes, []),
+    componentSizes: parseJson<string[][]>(r.componentSizes, []),
     fabricTier: r.fabricTier,
     pricesByHeight: parseJson<Record<string, number>>(r.pricesByHeight, {}),
     customerId: r.customerId,
@@ -254,7 +274,7 @@ app.post("/", async (c) => {
         data: {
           id: row.id,
           baseModel: row.baseModel,
-          componentSizes: parseJson<string[]>(row.componentSizes, []),
+          componentSizes: parseJson<string[][]>(row.componentSizes, []),
           fabricTier: row.fabricTier,
           pricesByHeight: parseJson<Record<string, number>>(
             row.pricesByHeight,

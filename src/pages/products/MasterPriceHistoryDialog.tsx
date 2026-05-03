@@ -73,10 +73,46 @@ export function MasterPriceHistoryDialog({
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
   const [baseRm, setBaseRm] = useState("");
   const [price1Rm, setPrice1Rm] = useState("");
-  const [seatJson, setSeatJson] = useState("");
   const [notes, setNotes] = useState("");
 
   const isSofa = product?.category === "SOFA";
+
+  // Sofa price matrix: 5 heights × 3 fabric tiers. Stored here as RM-string
+  // inputs (so blank = "no price for this cell" instead of "RM 0"). Save
+  // builds the sparse seatHeightPrices array from the non-blank cells.
+  const SOFA_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+  const SOFA_TIERS = ["PRICE_1", "PRICE_2", "PRICE_3"] as const;
+  type SofaTier = (typeof SOFA_TIERS)[number];
+  type SofaHeight = (typeof SOFA_HEIGHTS)[number];
+  const blankGrid = (): Record<SofaHeight, Record<SofaTier, string>> => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const h of SOFA_HEIGHTS) {
+      out[h] = { PRICE_1: "", PRICE_2: "", PRICE_3: "" };
+    }
+    return out as Record<SofaHeight, Record<SofaTier, string>>;
+  };
+  const [seatGrid, setSeatGrid] = useState<
+    Record<SofaHeight, Record<SofaTier, string>>
+  >(blankGrid());
+
+  // Load product's existing seatHeightPrices into the grid. Legacy entries
+  // without a `tier` field default to PRICE_2 (matches every reader's
+  // behavior elsewhere).
+  const seedGridFromProduct = (
+    rows: { height: string; priceSen: number; tier?: string }[] | undefined,
+  ): Record<SofaHeight, Record<SofaTier, string>> => {
+    const g = blankGrid();
+    if (!rows) return g;
+    const norm = (v: string) => String(v ?? "").replace('"', "").trim();
+    for (const r of rows) {
+      const h = norm(r.height) as SofaHeight;
+      if (!SOFA_HEIGHTS.includes(h)) continue;
+      const t = (r.tier ?? "PRICE_2") as SofaTier;
+      if (!SOFA_TIERS.includes(t)) continue;
+      g[h][t] = (r.priceSen / 100).toFixed(2);
+    }
+    return g;
+  };
 
   // Reset the form whenever a different product is opened. State is
   // user-editable while the dialog is open so we can't derive these from
@@ -94,11 +130,7 @@ export function MasterPriceHistoryDialog({
     setPrice1Rm(
       product.price1Sen != null ? (product.price1Sen / 100).toFixed(2) : "",
     );
-    setSeatJson(
-      product.seatHeightPrices && product.seatHeightPrices.length > 0
-        ? JSON.stringify(product.seatHeightPrices)
-        : "",
-    );
+    setSeatGrid(seedGridFromProduct(product.seatHeightPrices));
     setNotes("");
     void loadHistory(product.id);
   }, [product]);
@@ -142,15 +174,25 @@ export function MasterPriceHistoryDialog({
       if (price1Rm !== "")
         body.price1Sen = Math.round(Number(price1Rm) * 100);
       else body.price1Sen = null;
-      if (seatJson.trim()) {
-        try {
-          body.seatHeightPrices = JSON.parse(seatJson);
-        } catch {
-          alert(
-            'Seat-height prices must be valid JSON (e.g. [{"height":"24","priceSen":51700}]).',
-          );
-          return;
+      if (isSofa) {
+        // Build sparse seatHeightPrices from the grid. Each non-blank cell
+        // becomes one entry; blank cells are omitted so the resolver
+        // falls back to whatever was previously effective for that
+        // (height, tier) pair.
+        const rows: { height: string; priceSen: number; tier: SofaTier }[] = [];
+        for (const h of SOFA_HEIGHTS) {
+          for (const t of SOFA_TIERS) {
+            const raw = (seatGrid[h]?.[t] ?? "").trim();
+            if (!raw) continue;
+            const num = Number(raw);
+            if (!Number.isFinite(num) || num < 0) {
+              alert(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
+              return;
+            }
+            rows.push({ height: h, priceSen: Math.round(num * 100), tier: t });
+          }
         }
+        body.seatHeightPrices = rows.length > 0 ? rows : null;
       } else {
         body.seatHeightPrices = null;
       }
@@ -288,16 +330,63 @@ export function MasterPriceHistoryDialog({
               )}
               {isSofa && (
                 <div className="sm:col-span-2">
-                  <label className="block text-xs text-[#6B7280] mb-1">
-                    Seat-height prices (JSON)
+                  <label className="block text-xs text-[#6B7280] mb-2">
+                    Seat-height × fabric tier (RM)
                   </label>
-                  <textarea
-                    value={seatJson}
-                    onChange={(e) => setSeatJson(e.target.value)}
-                    rows={3}
-                    className="w-full text-xs font-mono border border-[#E2DDD8] rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/20"
-                    placeholder='[{"height":"24","priceSen":51700},{"height":"28","priceSen":56000}]'
-                  />
+                  <p className="text-[10px] text-[#9CA3AF] mb-2">
+                    Leave a cell blank to keep the previously-effective price
+                    for that (height × tier). Filled cells become the new
+                    price from {effectiveFrom} onwards.
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="text-xs border-collapse">
+                      <thead>
+                        <tr>
+                          <th className="px-2 py-1.5 text-left text-[#6B7280] font-medium">
+                            Height
+                          </th>
+                          {SOFA_TIERS.map((t) => (
+                            <th
+                              key={t}
+                              className="px-2 py-1.5 text-right text-[#6B7280] font-medium"
+                            >
+                              {t === "PRICE_1"
+                                ? "P1"
+                                : t === "PRICE_2"
+                                  ? "P2"
+                                  : "P3"}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {SOFA_HEIGHTS.map((h) => (
+                          <tr key={h}>
+                            <td className="px-2 py-1 text-[#1F1D1B] font-medium">
+                              {h}&quot;
+                            </td>
+                            {SOFA_TIERS.map((t) => (
+                              <td key={t} className="px-1 py-1">
+                                <Input
+                                  type="number"
+                                  step="0.01"
+                                  value={seatGrid[h]?.[t] ?? ""}
+                                  onChange={(e) =>
+                                    setSeatGrid((g) => ({
+                                      ...g,
+                                      [h]: { ...g[h], [t]: e.target.value },
+                                    }))
+                                  }
+                                  className="h-8 text-right w-24"
+                                  placeholder="—"
+                                />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
             </div>

@@ -157,6 +157,11 @@ export default function SofaCombosPage() {
     }
     return [...set].sort();
   }, [sofaProducts]);
+  // Keep handedness in the size code — "2A(LHF)" and "2A(RHF)" stay
+  // separate so combo definitions match the product master 1:1. Operator
+  // creates a distinct combo per handedness pair. Reverted from a brief
+  // attempt to dedupe — that would have decoupled combo codes from the
+  // canonical product code structure.
   const sizesByBaseModel = useMemo(() => {
     const m: Record<string, string[]> = {};
     for (const p of sofaProducts) {
@@ -469,11 +474,36 @@ function CreateComboDialog({
       return;
     }
 
+    // Auto-group by base size: handedness variants of the same base
+    // (2A(LHF) and 2A(RHF), L(LHF) and L(RHF), …) collapse into ONE
+    // OR-group so a single combo rule covers all 4 orientations of a
+    // 2A+L deal. Sizes without handedness (CNR, STOOL, 1S/2S/3S, 1NA/2NA)
+    // each form their own one-element group.
+    //
+    // Storage shape on componentSizes is now string[][]:
+    //   [["2A(LHF)","2A(RHF)"], ["L(LHF)","L(RHF)"]]
+    // Detection on the CS Order side requires every group to have at
+    // least one matching module on the cart (any-of within a group,
+    // all-of across groups).
+    const stripHandedness = (s: string): string =>
+      s.replace(/\s*\((?:LHF|RHF)\)\s*/i, "").trim();
+    const groupedByBase = new Map<string, string[]>();
+    for (const sz of selectedSizes) {
+      const base = stripHandedness(sz) || sz;
+      const arr = groupedByBase.get(base) ?? [];
+      if (!arr.includes(sz)) arr.push(sz);
+      groupedByBase.set(base, arr);
+    }
+    const componentSizeGroups: string[][] = Array.from(groupedByBase.values()).map(
+      (g) => g.slice().sort(),
+    );
+    componentSizeGroups.sort((a, b) => a[0].localeCompare(b[0]));
+
     setSaving(true);
     try {
       const body = {
         baseModel,
-        componentSizes: selectedSizes,
+        componentSizes: componentSizeGroups,
         fabricTier,
         pricesByHeight,
         customerId: customerId || null,

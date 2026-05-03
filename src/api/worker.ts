@@ -551,6 +551,7 @@ import users from "./routes/users";
 import presence from "./routes/presence";
 import bomMasterTemplates from "./routes/bom-master-templates";
 import kvConfig from "./routes/kv-config";
+import maintenanceConfig from "./routes/maintenance-config";
 // Phase 5 — admin maintenance endpoints (archive/run, etc.)
 import admin from "./routes/admin";
 // Phase 6 / P6.4 — health KPI endpoint feeding /admin/health.
@@ -675,6 +676,7 @@ app.route("/api/users", users);
 app.route("/api/presence", presence);
 app.route("/api/bom-master-templates", bomMasterTemplates);
 app.route("/api/kv-config", kvConfig);
+app.route("/api/maintenance-config", maintenanceConfig);
 // Phase 5 — admin maintenance (archive/run). Behind the normal auth gate.
 // MUST mount /api/admin/health BEFORE /api/admin so the more-specific
 // subapp wins route matching (Hono picks the first registered subapp

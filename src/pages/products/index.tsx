@@ -3,7 +3,7 @@ import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cac
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, Trash2, Save, AlertCircle, Check, Calendar, History } from "lucide-react";
+import { Plus, Trash2, Check, Calendar, History, Pencil } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
@@ -11,7 +11,27 @@ import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 import {
   MaintenanceConfigHistoryDialog,
   MaintenanceConfigSaveModal,
+  type MaintenanceHistoryRow,
 } from "./MaintenanceConfigHistoryDialog";
+import {
+  MaintenanceItemHistoryDialog,
+  type PricedItemKey,
+} from "./MaintenanceItemHistoryDialog";
+
+// Keys whose entries carry a priceSen field (and therefore have a
+// per-row history dialog). Non-priced keys like gaps / sofaSizes don't
+// surface the calendar icon. Mirrors PricedItemKey in
+// MaintenanceItemHistoryDialog.tsx.
+const PRICED_ITEM_KEYS: readonly PricedItemKey[] = [
+  "divanHeights",
+  "legHeights",
+  "totalHeights",
+  "specials",
+  "sofaLegHeights",
+  "sofaSpecials",
+];
+const isPricedItemKey = (k: string): k is PricedItemKey =>
+  (PRICED_ITEM_KEYS as readonly string[]).includes(k);
 
 const ProductMutationSchema = mutationWithData(ProductSchema);
 import {
@@ -19,7 +39,6 @@ import {
   getVariantsConfigSync,
   patchVariantsConfig,
   subscribeKvConfig,
-  subscribeKvConfigSaveError,
   flushKvConfig,
   VARIANTS_CONFIG_KEY,
   type VariantsConfig,
@@ -825,8 +844,11 @@ function saveMaintenanceConfig(cfg: MaintenanceConfig) {
 }
 
 function MaintenanceView() {
+  // savedConfig = the last persisted snapshot (the "clean" state). config =
+  // the editable working copy. They diverge only while edit mode is on; when
+  // edit mode is off, the inline RM inputs render as read-only text.
+  const [savedConfig, setSavedConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
   const [config, setConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
-  const [savedSnapshot, setSavedSnapshot] = useState<string>("");
   const [tab, setTab] = useState<MaintenanceTab>("divanHeights");
   const [newValue, setNewValue] = useState("");
   const [newPriceSen, setNewPriceSen] = useState(0);
@@ -834,14 +856,12 @@ function MaintenanceView() {
   const [editingValue, setEditingValue] = useState("");
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMsg, setToastMsg] = useState("Saved");
-  // Server-side save state. Before this flag existed the UI flipped to
-  // "Auto-saved" as soon as setKvConfig returned — which is before the PUT
-  // even leaves the browser — so a 401 / 500 on the actual request left
-  // the badge green while the server still held the old value. Users
-  // would add a dozen gaps, see "Auto-saved", refresh, and find only the
-  // original 7. saveError is set from kv-config's error listener and
-  // cleared on the next successful save.
-  const [saveError, setSaveError] = useState<string>("");
+
+  // Edit / Save / Cancel mode. Mirrors the SKU Master pattern at the top of
+  // ProductsPage. When false, inline RM inputs are read-only text and Add /
+  // Trash controls are hidden — the page is a safe browse view. Save opens
+  // the effective-date modal; Cancel reverts to savedConfig.
+  const [editMode, setEditMode] = useState(false);
 
   // Fabrics from API
   const [fabricsList, setFabricsList] = useState<FabricTrackingItem[]>([]);
@@ -849,104 +869,53 @@ function MaintenanceView() {
   const [fabricSearch, setFabricSearch] = useState("");
 
   // Effective-dated history workflow. The legacy kv_config('variants-config')
-  // write path stays live (many readers across BOM, Sales, Production rely on
-  // it) — these dialogs are an additional audit/effective-date layer on top
-  // of it. Save Snapshot writes a row to /api/maintenance-config/changes;
-  // View History opens the listing dialog.
+  // write path is still triggered inside the save flow when the new snapshot
+  // is effective today (so existing live readers across BOM, Sales,
+  // Production immediately see the change) — but it's no longer auto-fired
+  // on every keystroke. Save Snapshot writes a row to
+  // /api/maintenance-config/changes; View History opens the listing dialog.
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showHistoryDialog, setShowHistoryDialog] = useState(false);
+
+  // Per-row item history. Populated on demand when the user clicks the
+  // calendar icon on a priced row. The dialog reuses the full history list
+  // (one fetch covers every row in the snapshot).
+  const [historyList, setHistoryList] = useState<MaintenanceHistoryRow[]>([]);
+  const [itemHistoryFor, setItemHistoryFor] = useState<{ key: PricedItemKey; value: string; label: string } | null>(null);
 
   /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of kv-config + subscription to cross-tab updates */
   useEffect(() => {
     // Render immediately from whatever the shared kv-config cache already has
     // (prevents a flash of defaults when bouncing between pages). Then fetch
-    // fresh from D1 and overwrite — the snapshot keeps auto-save from
-    // re-pushing the hydrated value straight back to the server.
+    // fresh from D1 and overwrite.
     const cached = parseMaintenanceConfig(getVariantsConfigSync());
     setConfig(cached);
-    setSavedSnapshot(JSON.stringify(cached));
+    setSavedConfig(cached);
 
     let cancelled = false;
     void fetchVariantsConfig().then((v) => {
       if (cancelled) return;
       const fresh = parseMaintenanceConfig(v);
       setConfig(fresh);
-      setSavedSnapshot(JSON.stringify(fresh));
+      setSavedConfig(fresh);
     });
 
-    // Pick up writes from other tabs/pages (e.g. BOM's ProductionTimesDialog)
-    // so the Maintenance view never drifts from what's actually saved.
+    // Pick up writes from other tabs/pages (e.g. BOM's ProductionTimesDialog).
+    // We never overwrite uncommitted edits — if the user is mid-edit, the
+    // background blob update only refreshes the savedConfig baseline so a
+    // subsequent Cancel reverts to the freshest server state.
     const off = subscribeKvConfig(VARIANTS_CONFIG_KEY, (v) => {
       const latest = parseMaintenanceConfig(v as VariantsConfig | null);
-      setConfig(latest);
-      setSavedSnapshot(JSON.stringify(latest));
-    });
-    // Server rejected the PUT — flip the badge from green "Auto-saved" to
-    // amber "Save failed" and surface the HTTP error so the user knows
-    // their edits haven't actually persisted yet. Cleared on next
-    // successful flush below.
-    const offErr = subscribeKvConfigSaveError(VARIANTS_CONFIG_KEY, (e) => {
-      setSaveError(e.message);
+      setSavedConfig(latest);
+      setConfig((prev) => (editMode ? prev : latest));
     });
     return () => {
       cancelled = true;
       off();
-      offErr();
-    };
-  }, []);
-  /* eslint-enable react-hooks/set-state-in-effect */
-
-  // Auto-save: push every config change to D1 and wait for server
-  // confirmation before marking the snapshot as saved. The previous
-  // implementation optimistically advanced savedSnapshot the instant the
-  // setTimeout fired, which meant a rejected PUT (expired auth, 500,
-  // offline) silently dropped changes while the UI still said
-  // "Auto-saved". Now: schedule a 500ms debounce, write to the in-memory
-  // cache via patchVariantsConfig, then flushKvConfig to force the
-  // pending PUT and await the HTTP response. Only on ok=true do we move
-  // the snapshot forward; on failure the saveError listener flips the
-  // badge to amber and leaves isDirty true so the user can retry.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const snap = JSON.stringify(config);
-    if (snap === savedSnapshot) return;
-    let cancelled = false;
-    // Debounce + per-effect cancellation flag: useTimeout's ref-based
-    // latest-fn capture and shared `fired` semantics don't compose cleanly
-    // with the local `cancelled` closure used to discard a stale flush
-    // when `config` changes again before 500ms elapses. Keep raw + disable.
-    // eslint-disable-next-line no-restricted-syntax -- debounced autosave with per-effect cancellation closure
-    const t = setTimeout(async () => {
-      saveMaintenanceConfig(config);
-      const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
-      if (cancelled) return;
-      if (ok) {
-        setSavedSnapshot(snap);
-        setSaveError("");
-      }
-    }, 500);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [config]);
-
-  // Best-effort flush of any pending save when the user navigates away or
-  // closes the tab while we still have dirty state. Without this, a quick
-  // add-then-refresh loses the add because the 500ms debounce never fires.
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const handler = () => {
-      if (JSON.stringify(config) !== savedSnapshot) {
-        // Fire-and-forget; the browser usually gives us enough time for a
-        // small JSON PUT. We can't await here — unload is synchronous.
-        void flushKvConfig(VARIANTS_CONFIG_KEY);
-      }
-    };
-    window.addEventListener("beforeunload", handler);
-    return () => window.removeEventListener("beforeunload", handler);
-  }, [config, savedSnapshot]);
+  }, []);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Fetch fabrics when tab switches to fabrics
   /* eslint-disable react-hooks/set-state-in-effect -- lazy load + loading flag toggle on tab switch */
@@ -968,7 +937,10 @@ function MaintenanceView() {
     setTimeout(() => setToastVisible(false), 2000);
   }
 
-  const isDirty = useMemo(() => JSON.stringify(config) !== savedSnapshot, [config, savedSnapshot]);
+  const isDirty = useMemo(
+    () => JSON.stringify(config) !== JSON.stringify(savedConfig),
+    [config, savedConfig],
+  );
 
   const isFabricsTab = tab === "fabrics";
   const meta = MAINTENANCE_TABS.find((t) => t.key === tab)!;
@@ -977,7 +949,7 @@ function MaintenanceView() {
   const currentPricedList = !isFabricsTab && isPricedTab ? (config[tab as MaintenanceListKey] as PricedOption[]) : [];
 
   function addEntry() {
-    if (isFabricsTab) return;
+    if (isFabricsTab || !editMode) return;
     const k = tab as MaintenanceListKey;
     const v = newValue.trim();
     if (!v) return;
@@ -995,7 +967,7 @@ function MaintenanceView() {
   }
 
   function removeEntry(idx: number) {
-    if (isFabricsTab) return;
+    if (isFabricsTab || !editMode) return;
     const k = tab as MaintenanceListKey;
     setConfig(prev => ({
       ...prev,
@@ -1004,7 +976,7 @@ function MaintenanceView() {
   }
 
   function updatePrice(idx: number, priceSen: number) {
-    if (isFabricsTab) return;
+    if (isFabricsTab || !editMode) return;
     const k = tab as MaintenanceListKey;
     setConfig(prev => ({
       ...prev,
@@ -1013,7 +985,7 @@ function MaintenanceView() {
   }
 
   function updateEntryValue(idx: number, newVal: string) {
-    if (isFabricsTab) return;
+    if (isFabricsTab || !editMode) return;
     if (!newVal.trim()) return;
     const k = tab as MaintenanceListKey;
     if (isPricedTab) {
@@ -1030,6 +1002,7 @@ function MaintenanceView() {
   }
 
   function startEditing(idx: number, currentVal: string) {
+    if (!editMode) return;
     setEditingIdx(idx);
     setEditingValue(currentVal);
   }
@@ -1040,56 +1013,60 @@ function MaintenanceView() {
     setEditingValue("");
   }
 
-  async function handleSave() {
-    saveMaintenanceConfig(config);
-    const ok = await flushKvConfig(VARIANTS_CONFIG_KEY);
-    if (ok) {
-      setSavedSnapshot(JSON.stringify(config));
-      setSaveError("");
-      showToast("Variants saved");
-    } else {
-      showToast("Save failed — check your connection and try again");
+  function handleCancel() {
+    if (
+      isDirty &&
+      !window.confirm("Discard your unsaved Maintenance edits?")
+    ) {
+      return;
     }
+    setConfig(savedConfig);
+    setEditMode(false);
+    setEditingIdx(null);
+    setEditingValue("");
+    setNewValue("");
+    setNewPriceSen(0);
   }
 
-  function handleReset() {
-    if (!window.confirm("Reset all variants to factory defaults? Unsaved changes will be lost.")) return;
-    setConfig(DEFAULT_MAINTENANCE_CONFIG);
+  function handleSaveClick() {
+    if (!isDirty) {
+      // Nothing to commit — just exit edit mode quietly.
+      setEditMode(false);
+      return;
+    }
+    setShowSaveModal(true);
+  }
+
+  // Open the per-row item history dialog. Fetches the full history list on
+  // demand (one fetch covers every row), then surfaces the dialog scoped to
+  // the (key, value) tuple the user clicked.
+  async function openItemHistory(key: PricedItemKey, value: string, label: string) {
+    try {
+      const res = await fetch(
+        `/api/maintenance-config/history?scope=master`,
+      );
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: MaintenanceHistoryRow[];
+      };
+      setHistoryList(j.success && j.data ? j.data : []);
+    } catch {
+      setHistoryList([]);
+    }
+    setItemHistoryFor({ key, value, label });
   }
 
   return (
     <div className="space-y-4">
-      {/* Save / Reset bar */}
+      {/* Edit / Save / Cancel bar — mirrors SKU Master. The dual-write to
+          kv_config('variants-config') happens INSIDE the modal's onSaved
+          handler when effectiveFrom <= today, so live readers immediately
+          see the change without a round-trip through the history fetch. */}
       <div className="flex items-center justify-between">
         <p className="text-xs text-[#6B7280]">
           Centralized master data for product variants. Used by BOM, Sales Orders, and Production.
         </p>
         <div className="flex items-center gap-2">
-          {saveError ? (
-            <span
-              className="inline-flex items-center gap-1.5 text-xs text-[#9A3A2D] bg-[#F9E1DA] border border-[#E4B3A7] rounded-md px-2 py-1"
-              title={saveError}
-            >
-              <AlertCircle className="w-3.5 h-3.5" />
-              Save failed — click Save Changes
-            </span>
-          ) : isDirty ? (
-            <span className="inline-flex items-center gap-1.5 text-xs text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D597] rounded-md px-2 py-1">
-              <AlertCircle className="w-3.5 h-3.5" />
-              Saving...
-            </span>
-          ) : savedSnapshot !== JSON.stringify(DEFAULT_MAINTENANCE_CONFIG) ? (
-            <span className="inline-flex items-center gap-1.5 text-xs text-[#4F7C3A] bg-[#EEF3E4] border border-[#C6DBA8] rounded-md px-2 py-1">
-              <Check className="w-3.5 h-3.5" />
-              Auto-saved
-            </span>
-          ) : null}
-          <button
-            onClick={handleReset}
-            className="text-xs px-3 py-1.5 border border-[#E2DDD8] rounded-md text-gray-600 hover:bg-[#FAF9F7]"
-          >
-            Reset to defaults
-          </button>
           <button
             onClick={() => setShowHistoryDialog(true)}
             className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-[#E2DDD8] rounded-md text-gray-600 hover:bg-[#FAF9F7]"
@@ -1098,26 +1075,41 @@ function MaintenanceView() {
             <History className="w-3.5 h-3.5" />
             View History
           </button>
-          <button
-            onClick={() => setShowSaveModal(true)}
-            className="inline-flex items-center gap-1.5 text-sm px-4 py-2 border border-[#6B5C32] text-[#6B5C32] bg-white rounded-md hover:bg-[#FAEFCB] disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Save current values as an effective-dated history snapshot"
-          >
-            <Calendar className="w-4 h-4" />
-            Save Snapshot
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={!isDirty}
-            className="inline-flex items-center gap-1.5 text-sm px-4 py-2 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <Save className="w-4 h-4" />
-            Save Changes
-          </button>
+          {!editMode ? (
+            <button
+              onClick={() => setEditMode(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+            >
+              <Pencil className="w-3.5 h-3.5" />
+              Edit
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={handleSaveClick}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  isDirty
+                    ? "bg-[#6B5C32] text-white hover:bg-[#5A4E2A]"
+                    : "bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6]"
+                }`}
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                Save
+              </button>
+              <button
+                onClick={handleCancel}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+              >
+                Cancel
+              </button>
+            </>
+          )}
         </div>
       </div>
 
-      {/* Effective-date snapshot modal */}
+      {/* Effective-date snapshot modal — POSTs to /api/maintenance-config/changes
+          and, on success for a today-or-earlier date, mirrors the snapshot to
+          kv_config('variants-config') so live readers see the new values. */}
       <MaintenanceConfigSaveModal
         open={showSaveModal}
         scope="master"
@@ -1125,18 +1117,16 @@ function MaintenanceView() {
         onClose={() => setShowSaveModal(false)}
         onSaved={async (effectiveFrom) => {
           setShowSaveModal(false);
-          // Mirror the today-effective snapshot into the legacy
-          // kv_config('variants-config') key so existing readers (BOM,
-          // sales/create, sales/edit, consignment, etc.) immediately see
-          // the same values. Skipped for future-dated snapshots — those
-          // belong only in the history table until their day arrives.
+          // Dual-write to kv_config only for snapshots effective today or
+          // earlier. Future-dated snapshots stay in the history table until
+          // their day arrives, at which point the resolver picks them up.
           if (effectiveFrom <= todayIso()) {
             saveMaintenanceConfig(config);
             await flushKvConfig(VARIANTS_CONFIG_KEY);
-            setSavedSnapshot(JSON.stringify(config));
-            setSaveError("");
           }
-          showToast("Snapshot saved to history");
+          setSavedConfig(config);
+          setEditMode(false);
+          showToast("Maintenance config saved");
         }}
       />
 
@@ -1147,6 +1137,21 @@ function MaintenanceView() {
         title="Master Maintenance — config history"
         onClose={() => setShowHistoryDialog(false)}
       />
+
+      {/* Per-row item history dialog — opens when the user clicks the
+          calendar icon on a priced row. Read-only timeline. To schedule a
+          new entry the operator clicks Edit on the page, changes the RM
+          input, then Save (which opens the effective-date modal). */}
+      {itemHistoryFor && (
+        <MaintenanceItemHistoryDialog
+          open={itemHistoryFor !== null}
+          itemKey={itemHistoryFor.key}
+          itemValue={itemHistoryFor.value}
+          itemLabel={`${meta.section ? meta.section + " " : ""}${meta.label}`}
+          history={historyList}
+          onClose={() => setItemHistoryFor(null)}
+        />
+      )}
 
       {/* Tabs + Content */}
       <div className="bg-white rounded-lg border border-[#E2DDD8] overflow-hidden">
@@ -1273,8 +1278,9 @@ function MaintenanceView() {
           ) : (
             /* ── Normal list tabs ── */
             <>
-              {/* Add row */}
-              <div className="flex gap-2 mb-4">
+              {/* Add row — only visible while editing. */}
+              {editMode && (
+                <div className="flex gap-2 mb-4">
                   <input
                     value={newValue}
                     onChange={(e) => setNewValue(e.target.value)}
@@ -1306,14 +1312,15 @@ function MaintenanceView() {
                     <Plus className="w-4 h-4" />
                     Add
                   </button>
-              </div>
+                </div>
+              )}
 
               {/* List */}
               <div className="space-y-1.5">
                 {isPricedTab ? (
                   currentPricedList.length === 0 ? (
                     <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
-                      No entries yet. Add one above to get started.
+                      {editMode ? "No entries yet. Add one above to get started." : "No entries."}
                     </div>
                   ) : (
                     currentPricedList.map((entry, idx) => (
@@ -1322,11 +1329,26 @@ function MaintenanceView() {
                         className="flex items-center justify-between px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                       >
                         <div
-                          className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
-                          onClick={() => { if (editingIdx !== idx) startEditing(idx, entry.value); }}
+                          className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
+                          onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry.value); }}
                         >
+                          {/* Per-row history icon — only on priced lists. Click
+                              opens a read-only timeline of this row's RM across
+                              snapshots. Shown in both browse + edit mode. */}
+                          {isPricedItemKey(tab) && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void openItemHistory(tab, entry.value, meta.label);
+                              }}
+                              className="p-0.5 text-[#9CA3AF] hover:text-[#6B5C32] hover:bg-[#F4F0E8] rounded flex-shrink-0"
+                              title="View this item's price history"
+                            >
+                              <History className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                           <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                          {editingIdx === idx ? (
+                          {editMode && editingIdx === idx ? (
                             <input
                               autoFocus
                               value={editingValue}
@@ -1340,7 +1362,7 @@ function MaintenanceView() {
                               className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
                             />
                           ) : (
-                            <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                            <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
                               {entry.value}
                             </span>
                           )}
@@ -1348,21 +1370,29 @@ function MaintenanceView() {
                         <div className="flex items-center gap-3 flex-shrink-0">
                           <div className="flex items-center gap-1">
                             <span className="text-xs text-gray-400">RM</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              value={entry.priceSen / 100}
-                              onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
-                              className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
-                            />
+                            {editMode ? (
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={entry.priceSen / 100}
+                                onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
+                                className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
+                              />
+                            ) : (
+                              <span className="w-20 text-right text-sm tabular-nums text-[#111827] font-medium">
+                                {(entry.priceSen / 100).toFixed(2)}
+                              </span>
+                            )}
                           </div>
-                          <button
-                            onClick={() => removeEntry(idx)}
-                            className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
-                            title="Remove"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
+                          {editMode && (
+                            <button
+                              onClick={() => removeEntry(idx)}
+                              className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                              title="Remove"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </div>
                     ))
@@ -1370,7 +1400,7 @@ function MaintenanceView() {
                 ) : (
                   currentStringList.length === 0 ? (
                     <div className="text-center py-10 text-sm text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
-                      No entries yet. Add one above to get started.
+                      {editMode ? "No entries yet. Add one above to get started." : "No entries."}
                     </div>
                   ) : (
                     currentStringList.map((entry, idx) => (
@@ -1379,11 +1409,11 @@ function MaintenanceView() {
                         className="flex items-center justify-between px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                       >
                         <div
-                          className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
-                          onClick={() => { if (editingIdx !== idx) startEditing(idx, entry); }}
+                          className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
+                          onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry); }}
                         >
                           <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                          {editingIdx === idx ? (
+                          {editMode && editingIdx === idx ? (
                             <input
                               autoFocus
                               value={editingValue}
@@ -1397,18 +1427,20 @@ function MaintenanceView() {
                               className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
                             />
                           ) : (
-                            <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                            <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
                               {entry}
                             </span>
                           )}
                         </div>
-                        <button
-                          onClick={() => removeEntry(idx)}
-                          className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
-                          title="Remove"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        {editMode && (
+                          <button
+                            onClick={() => removeEntry(idx)}
+                            className="p-1.5 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                            title="Remove"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     ))
                   )

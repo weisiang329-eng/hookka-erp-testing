@@ -32,11 +32,32 @@ import {
   ChevronDown,
   ChevronRight,
   History,
+  // Pencil already imported above for SKU edit. Used here as the Edit-mode
+  // toggle icon on the customer Maintenance panel.
 } from "lucide-react";
 import {
   MaintenanceConfigHistoryDialog,
   MaintenanceConfigSaveModal,
+  type MaintenanceHistoryRow,
 } from "./products/MaintenanceConfigHistoryDialog";
+import {
+  MaintenanceItemHistoryDialog,
+  type PricedItemKey,
+} from "./products/MaintenanceItemHistoryDialog";
+
+// Mirrors PricedItemKey in MaintenanceItemHistoryDialog.tsx — kept inline
+// here because Fast Refresh disallows mixing component + value exports
+// from the same module.
+const PRICED_ITEM_KEYS: readonly PricedItemKey[] = [
+  "divanHeights",
+  "legHeights",
+  "totalHeights",
+  "specials",
+  "sofaLegHeights",
+  "sofaSpecials",
+];
+const isPricedItemKey = (k: string): k is PricedItemKey =>
+  (PRICED_ITEM_KEYS as readonly string[]).includes(k);
 import {
   SofaComboHistoryDialog,
   type SofaComboHistoryRule,
@@ -1254,10 +1275,12 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   // yet hydrated; "missing" sentinel via `seeded` flag tells us whether the
   // customer has had Copy from Master run.
   const [seeded, setSeeded] = useState<boolean | null>(null);
+  // savedConfig = last persisted snapshot. config = the editable working
+  // copy. They diverge only inside edit mode; outside edit mode the inline
+  // RM inputs render as read-only text.
+  const [savedConfig, setSavedConfig] = useState<CustMaintConfig | null>(null);
   const [config, setConfig] = useState<CustMaintConfig | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [savedSnapshot, setSavedSnapshot] = useState<string>("");
   const [tab, setTab] = useState<CustMaintTab>("divanHeights");
   const [newValue, setNewValue] = useState("");
   const [newPriceSen, setNewPriceSen] = useState(0);
@@ -1270,12 +1293,17 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   const [errorMsg, setErrorMsg] = useState<string>("");
   // Collapsed by default — operator can expand the panel they want to inspect.
   const [collapsed, setCollapsed] = useState(true);
-  // Effective-dated history workflow. Mirrors the master Maintenance page —
-  // the legacy kv_config('variants-config:<id>') write path stays so live
-  // readers (sales/create.tsx, sales/edit.tsx, consignment) keep working;
-  // these dialogs add an audit/effective-date layer on top.
+  // Edit / Save / Cancel mode — mirrors SKU Master + master Maintenance.
+  const [editMode, setEditMode] = useState(false);
+  // Effective-dated history workflow. The dual-write to
+  // kv_config('variants-config:<id>') is now triggered INSIDE the save flow
+  // when effectiveFrom <= today (so live readers stay current); it is no
+  // longer fired on every keystroke.
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [showHistoryDialog, setShowHistoryDialog] = useState(false);
+  // Per-row item history.
+  const [historyList, setHistoryList] = useState<MaintenanceHistoryRow[]>([]);
+  const [itemHistoryFor, setItemHistoryFor] = useState<{ key: PricedItemKey; value: string; label: string } | null>(null);
 
   const customerKey = `variants-config:${customerId}`;
   const scope = `customer:${customerId}`;
@@ -1293,13 +1321,13 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
         if (j?.success && j.data) {
           const cfg = parseCustMaintConfig(j.data);
           setConfig(cfg);
-          setSavedSnapshot(JSON.stringify(cfg));
+          setSavedConfig(cfg);
           setSeeded(true);
         } else {
           // No customer-keyed blob yet — show the "not seeded" CTA.
           setSeeded(false);
           setConfig(null);
-          setSavedSnapshot("");
+          setSavedConfig(null);
         }
       })
       .catch(() => {
@@ -1329,8 +1357,8 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const isDirty = useMemo(
-    () => config != null && JSON.stringify(config) !== savedSnapshot,
-    [config, savedSnapshot],
+    () => config != null && JSON.stringify(config) !== JSON.stringify(savedConfig),
+    [config, savedConfig],
   );
 
   const meta = CUST_MAINT_TABS.find((t) => t.key === tab)!;
@@ -1366,7 +1394,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
       if (rj?.success && rj.data) {
         const cfg = parseCustMaintConfig(rj.data);
         setConfig(cfg);
-        setSavedSnapshot(JSON.stringify(cfg));
+        setSavedConfig(cfg);
         setSeeded(true);
       }
     } catch (e) {
@@ -1376,40 +1404,51 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
     }
   };
 
-  const handleSave = async () => {
+  const handleSaveClick = () => {
     if (!config) return;
-    setSaving(true);
-    setErrorMsg("");
-    try {
-      const res = await fetch(`/api/kv-config/${encodeURIComponent(customerKey)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(config),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        setErrorMsg((j as { error?: string })?.error || `Save failed (HTTP ${res.status})`);
-        return;
-      }
-      setSavedSnapshot(JSON.stringify(config));
-    } catch (e) {
-      setErrorMsg(e instanceof Error ? e.message : "Network error");
-    } finally {
-      setSaving(false);
+    if (!isDirty) {
+      // Nothing to commit — just exit edit mode quietly.
+      setEditMode(false);
+      return;
     }
+    setShowSaveModal(true);
   };
 
   const handleCancel = () => {
-    if (!savedSnapshot) return;
-    try {
-      setConfig(JSON.parse(savedSnapshot));
-    } catch {
-      // ignore
+    if (
+      isDirty &&
+      !window.confirm("Discard your unsaved Maintenance edits?")
+    ) {
+      return;
     }
+    setConfig(savedConfig);
+    setEditMode(false);
+    setEditingIdx(null);
+    setEditingValue("");
+    setNewValue("");
+    setNewPriceSen(0);
   };
 
+  // Open the per-row item history dialog. One fetch covers every row in the
+  // customer's snapshot timeline.
+  async function openItemHistory(key: PricedItemKey, value: string, label: string) {
+    try {
+      const res = await fetch(
+        `/api/maintenance-config/history?scope=${encodeURIComponent(scope)}`,
+      );
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: MaintenanceHistoryRow[];
+      };
+      setHistoryList(j.success && j.data ? j.data : []);
+    } catch {
+      setHistoryList([]);
+    }
+    setItemHistoryFor({ key, value, label });
+  }
+
   const addEntry = () => {
-    if (!config || isFabricsTab) return;
+    if (!config || isFabricsTab || !editMode) return;
     const v = newValue.trim();
     if (!v) return;
     const k = tab as CustMaintListKey;
@@ -1427,14 +1466,14 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   };
 
   const removeEntry = (idx: number) => {
-    if (!config || isFabricsTab) return;
+    if (!config || isFabricsTab || !editMode) return;
     const k = tab as CustMaintListKey;
     const list = config[k] as (string | CustMaintPriced)[];
     setConfig({ ...config, [k]: list.filter((_, i) => i !== idx) });
   };
 
   const updatePrice = (idx: number, priceSen: number) => {
-    if (!config || isFabricsTab || !isPricedTab) return;
+    if (!config || isFabricsTab || !isPricedTab || !editMode) return;
     const k = tab as CustMaintListKey;
     const list = config[k] as CustMaintPriced[];
     setConfig({
@@ -1444,7 +1483,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   };
 
   const updateEntryValue = (idx: number, newVal: string) => {
-    if (!config || isFabricsTab) return;
+    if (!config || isFabricsTab || !editMode) return;
     if (!newVal.trim()) return;
     const k = tab as CustMaintListKey;
     if (isPricedTab) {
@@ -1463,6 +1502,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   };
 
   const startEditing = (idx: number, currentVal: string) => {
+    if (!editMode) return;
     setEditingIdx(idx);
     setEditingValue(currentVal);
   };
@@ -1508,33 +1548,40 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                   <History className="h-3.5 w-3.5 mr-1" />
                   View History
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setShowSaveModal(true)}
-                  disabled={!config}
-                  title="Save current values as an effective-dated history snapshot"
-                >
-                  <Calendar className="h-3.5 w-3.5 mr-1" />
-                  Save Snapshot
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={handleCancel}
-                  disabled={!isDirty || saving}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={handleSave}
-                  disabled={!isDirty || saving}
-                >
-                  {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Check className="h-4 w-4 mr-1" />}
-                  Save
-                </Button>
+                {/* Edit / Save / Cancel — Save opens the effective-date
+                    modal. Dual-write to kv_config('variants-config:<id>')
+                    happens INSIDE that modal's onSaved handler when the
+                    snapshot is effective today. */}
+                {!editMode ? (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEditMode(true)}
+                    disabled={!config}
+                  >
+                    <Pencil className="h-3.5 w-3.5 mr-1" />
+                    Edit
+                  </Button>
+                ) : (
+                  <>
+                    <Button
+                      variant={isDirty ? "primary" : "outline"}
+                      size="sm"
+                      onClick={handleSaveClick}
+                      disabled={!config}
+                    >
+                      <Calendar className="h-3.5 w-3.5 mr-1" />
+                      Save
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={handleCancel}
+                    >
+                      Cancel
+                    </Button>
+                  </>
+                )}
               </>
             )}
             <Button
@@ -1669,37 +1716,39 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
               </div>
             ) : (
               <>
-                {/* Add row */}
-                <div className="flex gap-2">
-                  <input
-                    value={newValue}
-                    onChange={(e) => setNewValue(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntry(); } }}
-                    placeholder={`Add new ${meta.label.toLowerCase().replace(/s$/, "")}...`}
-                    className="flex-1 text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
-                  />
-                  {isPricedTab && (
-                    <div className="flex items-center gap-1">
-                      <span className="text-xs text-gray-500">RM</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={newPriceSen / 100}
-                        onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
-                        className="w-24 text-right text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
-                        placeholder="0.00"
-                      />
-                    </div>
-                  )}
-                  <Button
-                    variant="primary"
-                    size="sm"
-                    onClick={addEntry}
-                    disabled={!newValue.trim()}
-                  >
-                    <Plus className="h-4 w-4 mr-1" /> Add
-                  </Button>
-                </div>
+                {/* Add row — only visible while editing. */}
+                {editMode && (
+                  <div className="flex gap-2">
+                    <input
+                      value={newValue}
+                      onChange={(e) => setNewValue(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntry(); } }}
+                      placeholder={`Add new ${meta.label.toLowerCase().replace(/s$/, "")}...`}
+                      className="flex-1 text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                    />
+                    {isPricedTab && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-xs text-gray-500">RM</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          value={newPriceSen / 100}
+                          onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
+                          className="w-24 text-right text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                          placeholder="0.00"
+                        />
+                      </div>
+                    )}
+                    <Button
+                      variant="primary"
+                      size="sm"
+                      onClick={addEntry}
+                      disabled={!newValue.trim()}
+                    >
+                      <Plus className="h-4 w-4 mr-1" /> Add
+                    </Button>
+                  </div>
+                )}
 
                 {/* List */}
                 <div className="space-y-1.5">
@@ -1715,11 +1764,24 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                           className="flex items-center justify-between px-3 py-1.5 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                         >
                           <div
-                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
-                            onClick={() => { if (editingIdx !== idx) startEditing(idx, entry.value); }}
+                            className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
+                            onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry.value); }}
                           >
+                            {/* Per-row history icon — priced rows only. */}
+                            {isPricedItemKey(tab) && (
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void openItemHistory(tab, entry.value, meta.label);
+                                }}
+                                className="p-0.5 text-[#9CA3AF] hover:text-[#6B5C32] hover:bg-[#F4F0E8] rounded flex-shrink-0"
+                                title="View this item's price history"
+                              >
+                                <History className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                             <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                            {editingIdx === idx ? (
+                            {editMode && editingIdx === idx ? (
                               <input
                                 autoFocus
                                 value={editingValue}
@@ -1733,7 +1795,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                                 className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
                               />
                             ) : (
-                              <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                              <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
                                 {entry.value}
                               </span>
                             )}
@@ -1741,21 +1803,29 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                           <div className="flex items-center gap-3 flex-shrink-0">
                             <div className="flex items-center gap-1">
                               <span className="text-xs text-gray-400">RM</span>
-                              <input
-                                type="number"
-                                step="0.01"
-                                value={entry.priceSen / 100}
-                                onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
-                                className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
-                              />
+                              {editMode ? (
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={entry.priceSen / 100}
+                                  onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
+                                  className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
+                                />
+                              ) : (
+                                <span className="w-20 text-right text-sm tabular-nums text-[#111827] font-medium">
+                                  {(entry.priceSen / 100).toFixed(2)}
+                                </span>
+                              )}
                             </div>
-                            <button
-                              onClick={() => removeEntry(idx)}
-                              className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
-                              title="Remove"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
+                            {editMode && (
+                              <button
+                                onClick={() => removeEntry(idx)}
+                                className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                                title="Remove"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))
@@ -1772,11 +1842,11 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                           className="flex items-center justify-between px-3 py-1.5 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                         >
                           <div
-                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
-                            onClick={() => { if (editingIdx !== idx) startEditing(idx, entry); }}
+                            className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
+                            onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry); }}
                           >
                             <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                            {editingIdx === idx ? (
+                            {editMode && editingIdx === idx ? (
                               <input
                                 autoFocus
                                 value={editingValue}
@@ -1790,18 +1860,20 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                                 className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
                               />
                             ) : (
-                              <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                              <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
                                 {entry}
                               </span>
                             )}
                           </div>
-                          <button
-                            onClick={() => removeEntry(idx)}
-                            className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
-                            title="Remove"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
+                          {editMode && (
+                            <button
+                              onClick={() => removeEntry(idx)}
+                              className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                              title="Remove"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          )}
                         </div>
                       ))
                     )
@@ -1834,11 +1906,12 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(config),
               });
-              setSavedSnapshot(JSON.stringify(config));
             } catch {
               // Non-fatal — the history row was saved successfully.
             }
           }
+          if (config) setSavedConfig(config);
+          setEditMode(false);
         }}
       />
 
@@ -1849,6 +1922,20 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
         title={`${customerName} — Maintenance config history`}
         onClose={() => setShowHistoryDialog(false)}
       />
+
+      {/* Per-row item history dialog — read-only timeline. To schedule a
+          new entry the operator clicks Edit on the panel, edits the RM
+          input, then Save (which opens the effective-date modal). */}
+      {itemHistoryFor && (
+        <MaintenanceItemHistoryDialog
+          open={itemHistoryFor !== null}
+          itemKey={itemHistoryFor.key}
+          itemValue={itemHistoryFor.value}
+          itemLabel={`${meta.section ? meta.section + " " : ""}${itemHistoryFor.label}`}
+          history={historyList}
+          onClose={() => setItemHistoryFor(null)}
+        />
+      )}
     </Card>
   );
 }

@@ -225,7 +225,7 @@ async function resolveBomMaterials(
       const parsed = JSON.parse(version.tree);
       const acc: MaterialLine[] = [];
       collectTreeMaterials(parsed, acc, dims);
-      if (acc.length > 0) return substituteAutoDetectMaterials(acc, po);
+      if (acc.length > 0) return await substituteAutoDetectMaterials(db, acc, po);
     } catch {
       // fall through to bom_components
     }
@@ -255,22 +255,47 @@ async function resolveBomMaterials(
 // Bind autoDetect lines to a concrete inventory key from the PO snapshot.
 //   FABRIC: po.fabricCode IS raw_materials.itemCode for the SO's chosen
 //           fabric — set inventoryCode and let the normal lookup chain run.
-//   LEG:    no current schema maps leg height → raw_materials, so we leave
-//           inventoryCode empty. resolveRmFromBom will return null and the
-//           caller will record a shortage entry, which is the right signal
-//           until leg inventory is modeled.
+//   LEG:    SO line carries legHeightInches; the shop names leg inventory
+//           with the inch height inline (e.g. `SOFA LEG PLASTIC (ROUND) 2"`).
+//           Match raw_materials.description LIKE `%<N>"%` AND `%LEG%`,
+//           case-insensitive, first by itemCode ASC. Misses fall through
+//           and the caller records a shortage with the original name.
 // Lines without an autoDetect tag are passed through unchanged.
-function substituteAutoDetectMaterials(
+async function substituteAutoDetectMaterials(
+  db: D1Database,
   lines: MaterialLine[],
   po: ProductionOrderRow,
-): MaterialLine[] {
-  return lines.map((line) => {
-    if (!line.autoDetect) return line;
-    if (line.autoDetect === "FABRIC" && po.fabricCode) {
-      return { ...line, inventoryCode: po.fabricCode, code: po.fabricCode };
+): Promise<MaterialLine[]> {
+  const out: MaterialLine[] = [];
+  for (const line of lines) {
+    if (!line.autoDetect) {
+      out.push(line);
+      continue;
     }
-    return line;
-  });
+    if (line.autoDetect === "FABRIC" && po.fabricCode) {
+      out.push({ ...line, inventoryCode: po.fabricCode, code: po.fabricCode });
+      continue;
+    }
+    if (line.autoDetect === "LEG" && po.legHeightInches != null && po.legHeightInches > 0) {
+      const heightStr = `${po.legHeightInches}"`;
+      const hit = await db
+        .prepare(
+          `SELECT itemCode FROM raw_materials
+             WHERE isActive = 1
+               AND description LIKE ? COLLATE NOCASE
+               AND description LIKE '%LEG%' COLLATE NOCASE
+             ORDER BY itemCode ASC LIMIT 1`,
+        )
+        .bind(`%${heightStr}%`)
+        .first<{ itemCode: string }>();
+      if (hit) {
+        out.push({ ...line, inventoryCode: hit.itemCode, code: hit.itemCode });
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out;
 }
 
 // Resolve a BOM material line to a raw_materials row id. Tries:

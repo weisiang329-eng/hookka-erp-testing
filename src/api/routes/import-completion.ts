@@ -4683,6 +4683,55 @@ app.post("/backfill-split-multi-qty", async (c) => {
       }
     }
 
+    // Pre-flight D: every fg_unit on these POs must still be PENDING.
+    // fg_units rows are stubbed at PO-fan-out time (one per piece) so any
+    // PO will have rows; only PENDING means no physical FG exists yet.
+    // PACKED / LOADED / DELIVERED / RETURNED / UPHOLSTERED means real-world
+    // work the operator should not lose. fg_scan_history CASCADEs on
+    // fg_unit_id so deleting PENDING fg_units cleans its history too.
+    if (allPoIds.length > 0) {
+      const fguRes = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM fg_units
+            WHERE po_id IN (${placeholders}) AND status <> 'PENDING'`,
+        )
+        .bind(...allPoIds)
+        .first<{ n: number }>();
+      if ((fguRes?.n ?? 0) > 0) {
+        plans.push({
+          sourceType,
+          sourceId,
+          sourceNumber,
+          affectedPoNos: pos.map((p) => p.poNo),
+          skipReason: `${fguRes?.n} fg_unit(s) past PENDING — refusing to delete (real FG exists)`,
+        });
+        continue;
+      }
+    }
+
+    // Pre-flight E: no fg_batches row points at these POs. Only created
+    // on PO completion which the PENDING guard above already excludes,
+    // but a stray row would FK-block the DELETE.
+    if (allPoIds.length > 0) {
+      const fgbRes = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM fg_batches
+            WHERE production_order_id IN (${placeholders})`,
+        )
+        .bind(...allPoIds)
+        .first<{ n: number }>();
+      if ((fgbRes?.n ?? 0) > 0) {
+        plans.push({
+          sourceType,
+          sourceId,
+          sourceNumber,
+          affectedPoNos: pos.map((p) => p.poNo),
+          skipReason: `${fgbRes?.n} fg_batches row(s) reference these POs — refusing to delete`,
+        });
+        continue;
+      }
+    }
+
     plans.push({
       sourceType,
       sourceId,
@@ -4804,10 +4853,21 @@ app.post("/backfill-split-multi-qty", async (c) => {
       })),
       { forceRebuild: true },
     );
-    const deleteStmt = db
+    // Delete order matters: fg_units → production_orders. fg_units.po_id is
+    // a NOT-NULL FK with no CASCADE, so it has to come out first or the
+    // PO DELETE FK-fails. fg_scan_history CASCADEs on fg_unit_id and
+    // job_cards CASCADE on productionOrderId (piece_pics in turn CASCADE
+    // on jobCardId), so those subtrees clean up by themselves.
+    const deleteFgUnitsStmt = db
+      .prepare(
+        `DELETE FROM fg_units WHERE po_id IN (
+           SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+      )
+      .bind(plan.sourceId);
+    const deletePosStmt = db
       .prepare(`DELETE FROM production_orders WHERE salesOrderId = ?`)
       .bind(plan.sourceId);
-    await db.batch([deleteStmt, ...built.statements]);
+    await db.batch([deleteFgUnitsStmt, deletePosStmt, ...built.statements]);
 
     executed.push({
       sourceId: plan.sourceId,

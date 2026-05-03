@@ -157,7 +157,7 @@ function StateBadge({ state }: { state: string }) {
 //     dialog (CustomerPriceHistoryDialog).
 //   - Pending badge surfaces when a future-dated history row exists.
 // =====================================================================
-function CustomerProductsPanel({ customerId, customerName, customer }: { customerId: string; customerName: string; customer: Customer }) {
+function CustomerProductsPanel({ customerId, customerName, customer: _customer }: { customerId: string; customerName: string; customer: Customer }) {
   const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CustomerProduct[] }>(
     customerId ? `/api/customer-products?customerId=${customerId}` : null
   );
@@ -412,50 +412,79 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
     }
   };
 
-  // Exports the full assignment list (ignores the category tab + search filter)
-  // because a quotation is per-customer contract scope, not UI view.
-  // Cross-references /api/products (already cached on this page for the Assign
-  // modal) to fill in sizeCode/unitM3/fabricUsage/productionTimeMinutes — the
-  // customer_products response only coalesces price columns, so these SKU
-  // master fields come from the global product record.
-  const handleExportQuotation = async () => {
-    const defaultHub = customer.deliveryHubs?.find((h) => h.isDefault) ?? customer.deliveryHubs?.[0];
-    const productByCode = new Map(allProducts.map((p) => [p.code, p]));
-    const { default: generateCustomerQuotationPdf } = await import("@/lib/generate-customer-quotation-pdf");
-    const doc = generateCustomerQuotationPdf({
-      customer: {
-        name: customer.name,
-        address: defaultHub?.address ?? customer.companyAddress ?? null,
-        phone: defaultHub?.phone ?? customer.phone ?? null,
-        email: defaultHub?.email ?? customer.email ?? null,
-      },
-      products: rows.map((r) => {
-        const g = productByCode.get(r.productCode);
-        return {
-          code: r.productCode,
-          name: r.productName,
-          category: r.category,
-          basePriceSen: r.basePriceSen,
-          price1Sen: r.price1Sen,
-          seatHeightPrices: r.seatHeightPrices,
-          sizeCode: g?.sizeCode ?? null,
-          sizeLabel: g?.sizeLabel ?? null,
-          baseModel: g?.baseModel ?? null,
-          unitM3: g?.unitM3 ?? null,
-          fabricUsage: g?.fabricUsage ?? null,
-          productionTimeMinutes: g?.productionTimeMinutes ?? null,
-          // gap/divan/leg only live on sales_order_lines — no per-product
-          // default today, but the field is accepted for forward-compat.
-          gapInches: null,
-          divanHeightInches: null,
-          legHeightInches: null,
-        };
-      }),
-    });
-    const d = new Date();
-    const yyyymmdd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
-    const safeName = customerName.replace(/[^a-zA-Z0-9_-]+/g, "_");
-    doc.save(`Quotation-${safeName}-${yyyymmdd}.pdf`);
+  // Date the operator wants prices resolved to. Defaults to today; past dates
+  // back-date a quote to a historical price, future dates preview a scheduled
+  // price hike. Plumbed straight into /api/customer-quotation?asOf=.
+  const [quotationAsOf, setQuotationAsOf] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [exportingQuotation, setExportingQuotation] = useState(false);
+
+  // Date-aware export. Fetches the combined envelope (products + sofa combos
+  // + maintenance config + letterhead-resolved customer block) and hands it
+  // to the v2 generator. Filename embeds the customer code + asOf so multiple
+  // exports for the same customer don't collide on disk.
+  const handleExportQuotationV2 = async () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(quotationAsOf)) {
+      alert("Effective date must be YYYY-MM-DD.");
+      return;
+    }
+    setExportingQuotation(true);
+    try {
+      const res = await fetch(
+        `/api/customer-quotation?customerId=${encodeURIComponent(customerId)}&asOf=${encodeURIComponent(quotationAsOf)}`,
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert(
+          (j as { error?: string }).error ||
+            `Failed to fetch quotation (HTTP ${res.status})`,
+        );
+        return;
+      }
+      const json = (await res.json()) as
+        | { success: true; data: import("@/lib/generate-customer-quotation-pdf-v2").QuotationEnvelope }
+        | { success: false; error?: string };
+      if (!json.success) {
+        alert(json.error || "Quotation API returned an error.");
+        return;
+      }
+      // Optional: pull a kv_config('org-letterhead') override so the PDF
+      // header can show the live company branding without bumping the API.
+      let letterhead: import("@/lib/generate-customer-quotation-pdf-v2").LetterheadConfig =
+        null;
+      try {
+        const lhRes = await fetch("/api/kv-config/org-letterhead");
+        if (lhRes.ok) {
+          const lhJson = (await lhRes.json()) as { success: boolean; data: unknown };
+          if (lhJson.success && lhJson.data && typeof lhJson.data === "object") {
+            letterhead = lhJson.data as import("@/lib/generate-customer-quotation-pdf-v2").LetterheadConfig;
+          } else {
+            console.log(
+              "[Quotation] No org-letterhead kv_config — using fallback. Configure letterhead in Settings.",
+            );
+          }
+        }
+      } catch {
+        console.log(
+          "[Quotation] org-letterhead fetch failed — using fallback.",
+        );
+      }
+      const { default: generateCustomerQuotationPdfV2 } = await import(
+        "@/lib/generate-customer-quotation-pdf-v2"
+      );
+      const doc = generateCustomerQuotationPdfV2({
+        ...json.data,
+        letterhead,
+      });
+      const safeCode = (json.data.customer.code || customerName).replace(
+        /[^a-zA-Z0-9_-]+/g,
+        "_",
+      );
+      doc.save(`Quotation-${safeCode}-${quotationAsOf}.pdf`);
+    } finally {
+      setExportingQuotation(false);
+    }
   };
 
   // ---------- Layout helpers (mirror Products page) ----------
@@ -497,8 +526,34 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             Customer Products — {customerName} ({rows.length})
           </button>
           <div className="flex items-center gap-2 flex-wrap">
-            <Button variant="outline" size="sm" disabled={rows.length === 0} onClick={handleExportQuotation}>
-              <FileDown className="h-4 w-4 mr-1" />
+            {/* Date-aware quotation: operator picks the asOf date the prices
+                should resolve to (today / past / future scheduled rate). */}
+            <div className="flex items-center gap-1">
+              <label
+                htmlFor={`quote-asof-${customerId}`}
+                className="text-[11px] text-[#6B7280] font-medium"
+              >
+                Effective
+              </label>
+              <input
+                id={`quote-asof-${customerId}`}
+                type="date"
+                value={quotationAsOf}
+                onChange={(e) => setQuotationAsOf(e.target.value)}
+                className="h-8 px-2 text-xs border border-[#E2DDD8] rounded-md bg-white text-[#1F1D1B] focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              />
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={rows.length === 0 || exportingQuotation}
+              onClick={handleExportQuotationV2}
+            >
+              {exportingQuotation ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <FileDown className="h-4 w-4 mr-1" />
+              )}
               Export Quotation PDF
             </Button>
             <Button

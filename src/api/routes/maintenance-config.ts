@@ -60,44 +60,80 @@ function parseScope(raw: string | undefined): string | null {
   return null;
 }
 
-// GET /api/maintenance-config/resolved?scope=...
+// Shared resolver — used by /resolved and by the customer-quotation envelope
+// endpoint. Picks the newest history row WHERE effectiveFrom <= asOf and
+// returns the parsed config + a flag/date for the next pending change.
+async function resolveMaintenanceConfigAsOf(
+  db: D1Database,
+  scope: string,
+  asOf: string,
+): Promise<{
+  config: unknown;
+  effectiveFrom: string | null;
+  hasPendingPriceChange: boolean;
+  pendingEffectiveFrom: string | null;
+}> {
+  const row = await db
+    .prepare(
+      `SELECT id, scope, config, effectiveFrom, notes, createdAt, createdBy
+         FROM maintenance_config_history
+        WHERE scope = ? AND effectiveFrom <= ?
+        ORDER BY effectiveFrom DESC, createdAt DESC
+        LIMIT 1`,
+    )
+    .bind(scope, asOf)
+    .first<Row>();
+  if (!row) {
+    return {
+      config: null,
+      effectiveFrom: null,
+      hasPendingPriceChange: false,
+      pendingEffectiveFrom: null,
+    };
+  }
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(row.config);
+  } catch {
+    parsed = null;
+  }
+  const pending = await db
+    .prepare(
+      `SELECT effectiveFrom FROM maintenance_config_history
+        WHERE scope = ? AND effectiveFrom > ?
+        ORDER BY effectiveFrom ASC LIMIT 1`,
+    )
+    .bind(scope, asOf)
+    .first<{ effectiveFrom: string }>();
+  return {
+    config: parsed,
+    effectiveFrom: row.effectiveFrom,
+    hasPendingPriceChange: !!pending,
+    pendingEffectiveFrom: pending?.effectiveFrom ?? null,
+  };
+}
+
+// GET /api/maintenance-config/resolved?scope=...&asOf=YYYY-MM-DD
+// asOf defaults to today; lets callers preview future-dated configs and
+// (more usefully here) lets the customer-quotation envelope serve a
+// historical/future date with the same resolver semantics.
 app.get("/resolved", async (c) => {
   const scope = parseScope(c.req.query("scope"));
   if (!scope) {
     return c.json({ success: false, error: "scope is required" }, 400);
   }
-  const today = todayIso();
-  const row = await c.var.DB.prepare(
-    `SELECT id, scope, config, effectiveFrom, notes, createdAt, createdBy
-       FROM maintenance_config_history
-      WHERE scope = ? AND effectiveFrom <= ?
-      ORDER BY effectiveFrom DESC, createdAt DESC
-      LIMIT 1`,
-  )
-    .bind(scope, today)
-    .first<Row>();
-  if (!row) return c.json({ success: true, data: null });
-  let parsed: unknown = null;
-  try {
-    parsed = JSON.parse(row.config);
-  } catch {
+  const asOfRaw = (c.req.query("asOf") ?? "").trim();
+  const asOf = /^\d{4}-\d{2}-\d{2}$/.test(asOfRaw) ? asOfRaw : todayIso();
+  const resolved = await resolveMaintenanceConfigAsOf(c.var.DB, scope, asOf);
+  if (resolved.config === null && resolved.effectiveFrom === null) {
     return c.json({ success: true, data: null });
   }
-  // Surface a pending-future flag so the UI can warn the operator that a
-  // scheduled change is queued up.
-  const pending = await c.var.DB.prepare(
-    `SELECT effectiveFrom FROM maintenance_config_history
-      WHERE scope = ? AND effectiveFrom > ?
-      ORDER BY effectiveFrom ASC LIMIT 1`,
-  )
-    .bind(scope, today)
-    .first<{ effectiveFrom: string }>();
   return c.json({
     success: true,
-    data: parsed,
-    effectiveFrom: row.effectiveFrom,
-    hasPendingPriceChange: !!pending,
-    pendingEffectiveFrom: pending?.effectiveFrom ?? null,
+    data: resolved.config,
+    effectiveFrom: resolved.effectiveFrom,
+    hasPendingPriceChange: resolved.hasPendingPriceChange,
+    pendingEffectiveFrom: resolved.pendingEffectiveFrom,
   });
 });
 
@@ -209,3 +245,4 @@ app.delete("/changes/:id", async (c) => {
 });
 
 export default app;
+export { resolveMaintenanceConfigAsOf };

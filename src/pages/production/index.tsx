@@ -2659,6 +2659,7 @@ export default function ProductionPage({
       state === "pending" ? "pending" : "empty";
 
     let body = "";
+    let columnCount = 0;
     if (activeTab === "ALL") {
       // Overview matrix: one row per filtered order × 8 dept columns.
       const rowsHtml = visibleOrders.map((o) => {
@@ -2699,6 +2700,8 @@ export default function ProductionPage({
           </thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
+      // 5 fixed columns (SO ID, Product, Customer, Qty, Due) + 8 dept matrix columns.
+      columnCount = 5 + DEPARTMENTS.length;
     } else {
       // Dept sub-tab: print template mirrors the on-screen Production Sheet
       // columns 1:1 so the operator sees the same data on paper. Trimmed to
@@ -2801,7 +2804,33 @@ export default function ProductionPage({
           <thead><tr>${headerCellsHtml}</tr></thead>
           <tbody>${rowsHtml}</tbody>
         </table>`;
+      columnCount = orderedColumns.length;
     }
+
+    // Tier-based font/padding scaling so the printout fills A4 landscape
+    // regardless of how many columns the user has visible. Few columns →
+    // larger, easier-to-read text. Many columns → tighter, fits without
+    // wrapping. Tiers picked empirically on A4 landscape (281mm usable
+    // after 8mm margin):
+    //   lg (≤6 cols)   → 10px table, 5×7 padding   — legible from arm's length
+    //   md (7-9 cols)  → 8.5px table, 4×5 padding  — comfortable mid-density
+    //   sm (≥10 cols)  → 7.5px table, 3×4 padding  — original, dense fit
+    const tier =
+      columnCount <= 6 ? "lg" :
+      columnCount <= 9 ? "md" : "sm";
+    const sizes = tier === "lg" ? {
+      body: 11, table: 10, th: 9, small: 8.5, pill: 9,
+      padY: 5, padX: 7, mWidth: 65, mPad: 3,
+      filters: 9, footer: 8, brand: 16, brandSmall: 8, metaT: 11.5, meta: 9,
+    } : tier === "md" ? {
+      body: 9.5, table: 8.5, th: 8, small: 7.5, pill: 8,
+      padY: 4, padX: 5, mWidth: 60, mPad: 2.5,
+      filters: 8, footer: 7, brand: 15, brandSmall: 7.5, metaT: 10.5, meta: 8.5,
+    } : {
+      body: 8.5, table: 7.5, th: 7, small: 6.5, pill: 7,
+      padY: 3, padX: 4, mWidth: 55, mPad: 2,
+      filters: 7.5, footer: 6.5, brand: 14, brandSmall: 7, metaT: 10, meta: 8,
+    };
 
     const deptPrintCount = gridFilterIdSet
       ? deptRows.filter((r) => gridFilterIdSet.has(r.id)).length
@@ -2820,7 +2849,7 @@ export default function ProductionPage({
     body {
       font-family: "Segoe UI", Helvetica, Arial, sans-serif;
       color: #000;
-      font-size: 8.5px;
+      font-size: ${sizes.body}px;
       margin: 0;
       padding: 0;
     }
@@ -2829,38 +2858,38 @@ export default function ProductionPage({
       border-bottom: 1.5px solid #000; padding-bottom: 5px; margin-bottom: 6px;
     }
     .brand {
-      font-size: 14px; font-weight: 700; color: #000; letter-spacing: 0.5px;
+      font-size: ${sizes.brand}px; font-weight: 700; color: #000; letter-spacing: 0.5px;
     }
     .brand small {
-      display: block; font-size: 7px; font-weight: 500; color: #555;
+      display: block; font-size: ${sizes.brandSmall}px; font-weight: 500; color: #555;
       letter-spacing: 1px; text-transform: uppercase;
     }
-    .meta { text-align: right; font-size: 8px; color: #333; }
-    .meta .t { font-size: 10px; font-weight: 700; color: #000; }
+    .meta { text-align: right; font-size: ${sizes.meta}px; color: #333; }
+    .meta .t { font-size: ${sizes.metaT}px; font-weight: 700; color: #000; }
     .filters {
-      margin-bottom: 4px; font-size: 7.5px; color: #333;
+      margin-bottom: 4px; font-size: ${sizes.filters}px; color: #333;
       padding: 2px 5px; background: #fff; border-left: 2px solid #000;
     }
     table.schedule {
-      width: 100%; border-collapse: collapse; font-size: 7.5px;
+      width: 100%; border-collapse: collapse; font-size: ${sizes.table}px;
       table-layout: auto; background: #ffffff;
     }
     table.schedule th {
       background: #ffffff; color: #000; font-weight: 700;
-      text-align: left; padding: 3px 4px; border: 0.75px solid #000;
-      text-transform: uppercase; font-size: 7px; letter-spacing: 0.3px;
+      text-align: left; padding: ${sizes.padY}px ${sizes.padX}px; border: 0.75px solid #000;
+      text-transform: uppercase; font-size: ${sizes.th}px; letter-spacing: 0.3px;
     }
     table.schedule td {
-      padding: 3px 4px; border: 0.5px solid #333; vertical-align: middle;
+      padding: ${sizes.padY}px ${sizes.padX}px; border: 0.5px solid #333; vertical-align: middle;
       background: #ffffff; color: #000;
     }
     table.schedule td.num, table.schedule th.num { text-align: right; }
     table.schedule td.m, table.schedule th.m {
-      text-align: center; width: 55px; padding: 2px;
+      text-align: center; width: ${sizes.mWidth}px; padding: ${sizes.mPad}px;
     }
     table.schedule td.so { font-weight: 700; white-space: nowrap; }
     table.schedule td.prod small,
-    table.schedule tbody small { color: #555; font-size: 6.5px; }
+    table.schedule tbody small { color: #555; font-size: ${sizes.small}px; }
     td.m.done    { background: #fff; color: #000; font-weight: 700; }
     td.m.pending { background: #fff; color: #000; font-style: italic; }
     td.m.overdue { background: #fff; color: #000; font-weight: 700; text-decoration: underline; }
@@ -2869,7 +2898,7 @@ export default function ProductionPage({
        (B/W) — done = bold, overdue = bold + underlined, pending = italic.
        Mirrors the screen pill semantics without colour so it stays readable
        on greyscale printers. */
-    span.pill          { font-size: 7px; padding: 1px 3px; white-space: nowrap; }
+    span.pill          { font-size: ${sizes.pill}px; padding: 1px 3px; white-space: nowrap; }
     span.pill.done     { font-weight: 700; }
     span.pill.overdue  { font-weight: 700; text-decoration: underline; }
     span.pill.pending  { font-style: italic; }
@@ -2877,7 +2906,7 @@ export default function ProductionPage({
     thead { display: table-header-group; }
     .footer {
       margin-top: 8px; padding-top: 3px; border-top: 0.5px solid #666;
-      font-size: 6.5px; color: #333; text-align: center;
+      font-size: ${sizes.footer}px; color: #333; text-align: center;
     }
     @media print {
       .no-print { display: none !important; }

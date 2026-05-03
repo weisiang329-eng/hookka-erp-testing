@@ -17,7 +17,15 @@ import { Input } from "@/components/ui/input";
 import { Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
 
-type SeatHeightTier = { height: string; priceSen: number };
+type SeatHeightTier = {
+  height: string;
+  priceSen: number;
+  // Optional fabric tier that matches fabric_tracking.priceTier so a sofa
+  // line in CS Order can resolve its price by direct lookup once Phase 3c
+  // ships. Legacy entries without a tier are treated as PRICE_2 by every
+  // reader.
+  tier?: "PRICE_1" | "PRICE_2" | "PRICE_3";
+};
 
 type PriceHistoryRow = {
   id: string;
@@ -232,11 +240,11 @@ export function MasterPriceHistoryDialog({
                   type="date"
                   value={effectiveFrom}
                   onChange={(e) => setEffectiveFrom(e.target.value)}
-                  min={today}
                   className="h-8"
                 />
                 <p className="text-[10px] text-[#9CA3AF] mt-1">
-                  Past dates are allowed for back-dated corrections.
+                  Past dates are allowed — backfill historical prices or
+                  back-date a correction here.
                 </p>
               </div>
               <div>

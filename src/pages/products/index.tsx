@@ -22,17 +22,22 @@ import {
 } from "@/lib/kv-config";
 
 // ---------- Types matching mock-data ----------
-// Sofa fabric price tier — drives the products-page tier toggle and matches
-// the canonical priceTier values on fabric_tracking. The legacy two-tier set
-// (PRICE_1 / PRICE_2) maps to P1 / P2; P3 is a new tier added to the matrix
-// for higher-end fabrics.
-type SofaTier = "P1" | "P2" | "P3";
-const SOFA_TIERS: SofaTier[] = ["P1", "P2", "P3"];
+// Sofa fabric price tier — values mirror fabric_tracking.priceTier verbatim
+// so a sofa line in CS Order resolves its price with a direct lookup
+// (fabric.priceTier === entry.tier) instead of a string-mapping detour.
+// UI buttons render as "P1" / "P2" / "P3" — that's a display label, not the
+// data shape. P3 was added in migration 0067 alongside this matrix work.
+type SofaTier = "PRICE_1" | "PRICE_2" | "PRICE_3";
+const SOFA_TIERS: { value: SofaTier; label: string }[] = [
+  { value: "PRICE_1", label: "P1" },
+  { value: "PRICE_2", label: "P2" },
+  { value: "PRICE_3", label: "P3" },
+];
 
 // Legacy entries without a tier field were stored as the company's default
 // (Price 2) before the matrix existed. Pin the default here so the read path
 // stays in one place — every height/tier comparison runs through this helper.
-const entryTier = (t: SofaTier | undefined): SofaTier => t ?? "P2";
+const entryTier = (t: SofaTier | undefined): SofaTier => t ?? "PRICE_2";
 
 type DeptWorkingTime = {
   departmentCode: string;
@@ -1297,11 +1302,16 @@ export default function ProductsPage() {
   // Sofa price-matrix tier view. Switching the tier re-renders the same five
   // height columns with that tier's prices — the table layout is unchanged.
   // Persists to localStorage so the operator returns to whichever tier they
-  // were last reviewing without having to re-pick on every page load.
+  // were last reviewing without having to re-pick on every page load. Reads
+  // also tolerate the short "P1"/"P2"/"P3" form that an earlier build wrote
+  // before the values were aligned with fabric_tracking.priceTier.
   const [sofaTier, setSofaTierState] = useState<SofaTier>(() => {
-    if (typeof window === "undefined") return "P2";
+    if (typeof window === "undefined") return "PRICE_2";
     const saved = window.localStorage.getItem("hookka.products.sofaTier");
-    return saved === "P1" || saved === "P3" ? saved : "P2";
+    if (saved === "PRICE_1" || saved === "PRICE_3" || saved === "PRICE_2") return saved;
+    if (saved === "P1") return "PRICE_1";
+    if (saved === "P3") return "PRICE_3";
+    return "PRICE_2";
   });
   const setSofaTier = (t: SofaTier) => {
     setSofaTierState(t);
@@ -1633,15 +1643,15 @@ export default function ProductsPage() {
               <div className="inline-flex rounded-md border border-[#E5E7EB] overflow-hidden">
                 {SOFA_TIERS.map((t) => (
                   <button
-                    key={t}
-                    onClick={() => setSofaTier(t)}
+                    key={t.value}
+                    onClick={() => setSofaTier(t.value)}
                     className={`px-3 py-1.5 text-xs font-medium transition-colors ${
-                      sofaTier === t
+                      sofaTier === t.value
                         ? "bg-[#6B5C32] text-white"
                         : "bg-white text-[#6B7280] hover:bg-[#F3F4F6]"
                     }`}
                   >
-                    {t}
+                    {t.label}
                   </button>
                 ))}
               </div>

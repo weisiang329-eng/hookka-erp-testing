@@ -58,7 +58,11 @@ export const ProductSchema = z
         z.object({
           height: z.string(),
           priceSen: z.number(),
-          tier: z.enum(["P1", "P2", "P3"]).optional(),
+          // Tier values match fabric_tracking.priceTier ("PRICE_1" | "PRICE_2"
+          // | "PRICE_3") so the CS Order sofa path can do a direct
+          // fabric→matrix lookup with no string mapping. UI labels render as
+          // "P1" / "P2" / "P3" — that's a display concern, not a data one.
+          tier: z.enum(["PRICE_1", "PRICE_2", "PRICE_3"]).optional(),
         }),
       )
       .optional(),

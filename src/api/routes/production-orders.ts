@@ -292,6 +292,14 @@ type MinimalJobCardOut = {
   estMinutes: number;
   rackingNumber?: string;
   category: string;
+  // Per-piece progress, surfaced even on the minimal payload so the
+  // Production page can render "1/2"-style partial completion in the
+  // Completion column when a multi-piece JC is partially scanned. See
+  // rowToMinimalPO for the count-by-jobCardId aggregation. piecesTotal
+  // mirrors wipQty (defaulting to 1 for legacy single-piece JCs);
+  // piecesDone counts piece_pics rows where pic1Id IS NOT NULL.
+  piecesTotal: number;
+  piecesDone: number;
 };
 type MinimalPOOut = {
   id: string;
@@ -324,7 +332,14 @@ type MinimalPOOut = {
   jobCards: MinimalJobCardOut[];
 };
 
-function rowToMinimalJobCard(r: JobCardRow): MinimalJobCardOut {
+function rowToMinimalJobCard(
+  r: JobCardRow,
+  piecesDoneByJc: Map<string, number> = new Map(),
+): MinimalJobCardOut {
+  // wipQty defaults to 1 for legacy single-piece JCs; piecesTotal must
+  // therefore floor at 1 so the FE never divides by 0 / renders "0/0".
+  const piecesTotal = Math.max(1, r.wipQty ?? 1);
+  const piecesDone = piecesDoneByJc.get(r.id) ?? 0;
   return {
     id: r.id,
     departmentCode: r.departmentCode ?? "",
@@ -347,17 +362,20 @@ function rowToMinimalJobCard(r: JobCardRow): MinimalJobCardOut {
     estMinutes: r.estMinutes,
     category: r.category ?? "",
     rackingNumber: r.rackingNumber ?? undefined,
+    piecesTotal,
+    piecesDone,
   };
 }
 
 function rowToMinimalPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
+  piecesDoneByJc: Map<string, number> = new Map(),
 ): MinimalPOOut {
   const myJCs = jobCards
     .filter((j) => j.productionOrderId === row.id)
     .sort((a, b) => a.sequence - b.sequence)
-    .map(rowToMinimalJobCard);
+    .map((j) => rowToMinimalJobCard(j, piecesDoneByJc));
   return {
     id: row.id,
     poNo: row.poNo,
@@ -501,6 +519,40 @@ async function fetchInChunks<R>(
   return out;
 }
 
+// Returns Map<jobCardId, count> where count = number of piece_pics rows on
+// that JC with pic1Id IS NOT NULL (i.e. a worker has scanned the QR sticker
+// and "done" PIC1). Used by the minimal /api/production-orders payload to
+// drive the Completion column's "1/2"-style partial-progress display
+// without shipping the full piece_pics tree. Scoped by orgId + jobCardId IN
+// (...) so cost is bound by the active JC set, not the full piece_pics
+// table. Chunked at 100 to respect D1's bind-slot cap (the JC list is
+// pre-bounded to one of: dept-narrow, status-narrow, or full-org JCs;
+// status-narrow on the busiest filter is ~9k JCs → 90 chunks).
+async function fetchPiecesDoneByJc(
+  db: D1Database,
+  orgId: string,
+  jcIds: string[],
+): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (jcIds.length === 0) return out;
+  const rows = await fetchInChunks<{ jobCardId: string; piecesDone: number }>(
+    db,
+    (placeholders) =>
+      `SELECT jobCardId, COUNT(*) AS piecesDone
+         FROM piece_pics
+         WHERE orgId = ?
+           AND pic1Id IS NOT NULL
+           AND jobCardId IN (${placeholders})
+         GROUP BY jobCardId`,
+    jcIds,
+    [orgId],
+  );
+  for (const r of rows) {
+    out.set(r.jobCardId, Number(r.piecesDone) || 0);
+  }
+  return out;
+}
+
 async function fetchAllPOs(
   db: D1Database,
   orgId: string,
@@ -633,6 +685,11 @@ async function fetchFilteredPOs(
   // them) and return the narrow projection. This is the hot path for the
   // Production page — the dropped fields + table save several MB on the
   // ~530 PO / ~9k JC response.
+  //
+  // Exception: a single GROUPED count query against piece_pics (one row per
+  // JC, not per piece) feeds the Completion column's "1/2"-style partial-
+  // progress display. It scopes by jobCardId IN (...) so the cost is bound
+  // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
       // Bind slots: 6 = orgId (outer JC scope) + orgId (po.orgId) + orgId
@@ -644,8 +701,14 @@ async function fetchFilteredPOs(
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
       ]);
+      const jcRows = jcs.results ?? [];
+      const piecesDoneByJc = await fetchPiecesDoneByJc(
+        db,
+        orgId,
+        jcRows.map((j) => j.id),
+      );
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcs.results ?? []),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc),
       );
     }
     if (hasFilter) {
@@ -665,7 +728,12 @@ async function fetchFilteredPOs(
           `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${placeholders})`,
         poIds,
       );
-      return poRows.map((p) => rowToMinimalPO(p, jcs));
+      const piecesDoneByJc = await fetchPiecesDoneByJc(
+        db,
+        orgId,
+        jcs.map((j) => j.id),
+      );
+      return poRows.map((p) => rowToMinimalPO(p, jcs, piecesDoneByJc));
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
     const jcStmt = db
@@ -675,8 +743,14 @@ async function fetchFilteredPOs(
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
     ]);
+    const jcRows = jcs.results ?? [];
+    const piecesDoneByJc = await fetchPiecesDoneByJc(
+      db,
+      orgId,
+      jcRows.map((j) => j.id),
+    );
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcs.results ?? []),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc),
     );
   }
 

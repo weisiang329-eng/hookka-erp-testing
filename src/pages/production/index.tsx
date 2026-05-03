@@ -26,6 +26,13 @@ type JobCard = {
   category: string; productionTimeMinutes: number; overdue: string;
   wipKey?: string; wipCode?: string; wipType?: string; wipLabel?: string;
   wipQty?: number; rackingNumber?: string;
+  // Per-piece progress emitted by the minimal /api/production-orders
+  // payload. piecesTotal mirrors wipQty (>=1); piecesDone counts
+  // piece_pics rows with pic1Id set. Drives the Completion column's
+  // "X/Y" partial-progress badge for multi-piece JCs. Optional because
+  // older client caches and the legacy non-minimal path don't carry them.
+  piecesTotal?: number;
+  piecesDone?: number;
 };
 
 type ProductionOrder = {
@@ -1320,6 +1327,11 @@ export default function ProductionPage({
     rack: string;         // Packing dept — assigned rack location ("Rack 3")
     dueDate: string;
     completedDate: string;
+    // Per-piece progress for the Completion column. piecesTotal floors
+    // at 1 (single-piece JCs); piecesDone is 0 until at least one piece
+    // has been QR-scanned. Renders "X/Y" when 0 < piecesDone < piecesTotal.
+    piecesTotal: number;
+    piecesDone: number;
     pic1: string;
     pic2: string;
     status: string;        // job_card status
@@ -1724,6 +1736,13 @@ export default function ProductionPage({
           rack: (jc as JobCard & { rackingNumber?: string }).rackingNumber || "",
           dueDate: jc.dueDate || "",
           completedDate: jc.completedDate || "",
+          // Surface per-piece progress so renderCompletionCell can show
+          // "X/Y" when a multi-piece JC is partially scanned. Floor
+          // piecesTotal at max(1, wipQty) to mirror the API contract;
+          // piecesDone defaults to 0 so single-piece JCs / payloads
+          // without the new fields don't trip the partial-render branch.
+          piecesTotal: Math.max(1, jc.piecesTotal ?? jc.wipQty ?? 1),
+          piecesDone: jc.piecesDone ?? 0,
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
@@ -1985,8 +2004,18 @@ export default function ProductionPage({
   // pill when present, or a subtle "— Set —" placeholder when empty. The
   // full cell area is a native date picker, matching the dept column pill
   // UX so the user can fill/clear from one place.
+  //
+  // Partial-progress branch: when wipQty > 1 and 0 < piecesDone < piecesTotal,
+  // the JC is mid-flight — some pieces have been QR-scanned, others haven't.
+  // Render an amber "X/Y" pill (matching the dept column's PENDING palette)
+  // so office staff can see partial progress at a glance instead of an empty
+  // cell. Click still opens the same date picker so a user can stamp the
+  // whole JC done if they want; the next API refresh will overwrite.
   const renderCompletionCell = (row: DeptRow) => {
     const has = !!row.completedDate;
+    const total = row.piecesTotal;
+    const done = row.piecesDone;
+    const isPartial = total > 1 && done > 0 && done < total && !has;
     // Single-JC stamp/clear — FAB_CUT no longer fans out to merged
     // siblings.
     return (
@@ -2007,14 +2036,26 @@ export default function ProductionPage({
           );
         }}
         onDoubleClick={(e) => e.stopPropagation()}
-        title="Click to set completion date"
+        title={
+          isPartial
+            ? `${done} of ${total} pieces scanned — click to stamp completion date`
+            : "Click to set completion date"
+        }
       >
         <span
           className={`flex items-center justify-center px-1.5 py-[2px] rounded-sm text-[10px] font-semibold whitespace-nowrap leading-tight w-full ${
-            has ? "bg-[#E0EDF0] text-[#3E6570]" : "text-[#BDB4A8] border border-dashed border-[#E6E0D9] hover:bg-[#FFF8E6]"
+            has
+              ? "bg-[#E0EDF0] text-[#3E6570]"
+              : isPartial
+              ? "bg-[#FAEFCB] text-[#9C6F1E]"
+              : "text-[#BDB4A8] border border-dashed border-[#E6E0D9] hover:bg-[#FFF8E6]"
           }`}
         >
-          {has ? fmtShortDate(row.completedDate) : "— Set —"}
+          {has
+            ? fmtShortDate(row.completedDate)
+            : isPartial
+            ? `${done}/${total}`
+            : "— Set —"}
         </span>
       </div>
     );

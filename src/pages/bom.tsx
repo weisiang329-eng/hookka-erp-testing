@@ -757,15 +757,33 @@ function WIPCodeBuilder({
   );
 }
 
+// Patch applied to a WIPMaterial when the user picks "from SO" in the picker.
+// Clears any concrete inventory link, sets the autoDetect kind, and seeds a
+// sensible default UOM (fabric is sold by metre, legs by piece).
+function autoDetectMaterialPatch(kind: "FABRIC" | "LEG"): Partial<WIPMaterial> {
+  return {
+    autoDetect: kind,
+    code: "",
+    inventoryCode: "",
+    name: kind === "FABRIC" ? "Fabric (from order)" : "Leg (from order)",
+    unit: kind === "FABRIC" ? "MTR" : "PCS",
+  };
+}
+
 // ---------- Raw Material Select (searchable dropdown from inventory) ----------
 function RawMaterialSelect({
   value,
   materials,
   onSelect,
+  onSelectAutoDetect,
 }: {
   value: string;
   materials: RawMaterialOption[];
   onSelect: (rm: RawMaterialOption) => void;
+  // When provided, renders two pinned options at the top of the dropdown
+  // ("Fabric from SO" / "Leg from SO") that bind the material row to the
+  // SO line's fabric or leg height instead of a fixed inventory item.
+  onSelectAutoDetect?: (kind: "FABRIC" | "LEG") => void;
 }) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -777,6 +795,8 @@ function RawMaterialSelect({
       (m) => m.itemCode.toLowerCase().includes(q) || m.description.toLowerCase().includes(q)
     ).slice(0, 50);
   }, [materials, search]);
+
+  const showAutoDetect = !!onSelectAutoDetect && !search.trim();
 
   return (
     <div className="relative flex-1">
@@ -799,6 +819,30 @@ function RawMaterialSelect({
               className="w-full text-xs border border-gray-200 rounded px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
             />
           </div>
+          {showAutoDetect && (
+            <div className="border-b border-gray-100 bg-[#F4F8FA]">
+              <button
+                onClick={() => { onSelectAutoDetect!("FABRIC"); setOpen(false); }}
+                className="w-full text-left px-2 py-1.5 hover:bg-[#E0EDF0] transition-colors"
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-semibold border border-[#A8CAD2]">from SO</span>
+                  <span className="text-xs font-medium text-[#3E6570]">Fabric (follow sales order)</span>
+                </div>
+                <div className="text-[10px] text-gray-500 mt-0.5">Resolves to SO item fabricCode at production time</div>
+              </button>
+              <button
+                onClick={() => { onSelectAutoDetect!("LEG"); setOpen(false); }}
+                className="w-full text-left px-2 py-1.5 hover:bg-[#E0EDF0] transition-colors"
+              >
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] px-1.5 py-0.5 bg-[#E0EDF0] text-[#3E6570] rounded font-semibold border border-[#A8CAD2]">from SO</span>
+                  <span className="text-xs font-medium text-[#3E6570]">Leg (follow sales order)</span>
+                </div>
+                <div className="text-[10px] text-gray-500 mt-0.5">Resolves to SO item legHeightInches at production time</div>
+              </button>
+            </div>
+          )}
           <div className="max-h-[200px] overflow-y-auto divide-y divide-gray-100">
             {filtered.length === 0 ? (
               <div className="px-3 py-4 text-xs text-gray-400 text-center">No materials found</div>
@@ -1827,7 +1871,17 @@ function CreateBOMDialog({
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
-          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode } : m) }
+          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode, autoDetect: undefined } : m) }
+          : w
+      )
+    );
+  }
+  function setMaterialAutoDetect(wi: number, mi: number, kind: "FABRIC" | "LEG") {
+    const patch = autoDetectMaterialPatch(kind);
+    setWipComponents((prev) =>
+      prev.map((w, idx) =>
+        idx === wi
+          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, ...patch } : m) }
           : w
       )
     );
@@ -2101,6 +2155,7 @@ function CreateBOMDialog({
                               value={m.code ? `${m.code}` : ""}
                               materials={rawMaterials}
                               onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                              onSelectAutoDetect={(kind) => setMaterialAutoDetect(wi, mi, kind)}
                             />
                           )}
                           <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
@@ -2251,6 +2306,7 @@ function SubWIPTree({
   onAddMaterial,
   onRemoveMaterial,
   onSelectMaterial,
+  onSelectMaterialAutoDetect,
   onUpdateMaterial,
   onWrap,
   onMoveUp,
@@ -2273,6 +2329,7 @@ function SubWIPTree({
   onAddMaterial: (path: number[]) => void;
   onRemoveMaterial: (path: number[], mi: number) => void;
   onSelectMaterial: (path: number[], mi: number, rm: RawMaterialOption) => void;
+  onSelectMaterialAutoDetect: (path: number[], mi: number, kind: "FABRIC" | "LEG") => void;
   onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
   onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
@@ -2394,6 +2451,7 @@ function SubWIPTree({
                       value={m.code ? `${m.code}` : ""}
                       materials={rawMaterials}
                       onSelect={(rm) => onSelectMaterial(childPath, mi, rm)}
+                      onSelectAutoDetect={(kind) => onSelectMaterialAutoDetect(childPath, mi, kind)}
                     />
                   )}
                   <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
@@ -2428,6 +2486,7 @@ function SubWIPTree({
               onAddMaterial={onAddMaterial}
               onRemoveMaterial={onRemoveMaterial}
               onSelectMaterial={onSelectMaterial}
+              onSelectMaterialAutoDetect={onSelectMaterialAutoDetect}
               onUpdateMaterial={onUpdateMaterial}
               onWrap={onWrap}
               onMoveUp={onMoveUp}
@@ -2581,8 +2640,12 @@ function EditBOMDialog({
   }
   function selectL1Material(i: number, rm: RawMaterialOption) {
     setL1Materials((prev) =>
-      prev.map((m, idx) => (idx === i ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode } : m))
+      prev.map((m, idx) => (idx === i ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode, autoDetect: undefined } : m))
     );
+  }
+  function setL1MaterialAutoDetect(i: number, kind: "FABRIC" | "LEG") {
+    const patch = autoDetectMaterialPatch(kind);
+    setL1Materials((prev) => prev.map((m, idx) => (idx === i ? { ...m, ...patch } : m)));
   }
 
   function addL1Process() {
@@ -2816,7 +2879,16 @@ function EditBOMDialog({
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
-        materials: (node.materials || []).map((m, i) => i === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode } : m),
+        materials: (node.materials || []).map((m, i) => i === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode, autoDetect: undefined } : m),
+      })))
+    );
+  }
+  function setMaterialAutoDetectAtPath(wi: number, path: number[], mi: number, kind: "FABRIC" | "LEG") {
+    const patch = autoDetectMaterialPatch(kind);
+    setWipComponents((prev) =>
+      prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
+        ...node,
+        materials: (node.materials || []).map((m, i) => i === mi ? { ...m, ...patch } : m),
       })))
     );
   }
@@ -2883,7 +2955,17 @@ function EditBOMDialog({
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
-          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode } : m) }
+          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, code: rm.itemCode, name: rm.description, unit: rm.baseUOM, inventoryCode: rm.itemCode, autoDetect: undefined } : m) }
+          : w
+      )
+    );
+  }
+  function setMaterialAutoDetect(wi: number, mi: number, kind: "FABRIC" | "LEG") {
+    const patch = autoDetectMaterialPatch(kind);
+    setWipComponents((prev) =>
+      prev.map((w, idx) =>
+        idx === wi
+          ? { ...w, materials: (w.materials || []).map((m, midx) => midx === mi ? { ...m, ...patch } : m) }
           : w
       )
     );
@@ -3069,6 +3151,7 @@ function EditBOMDialog({
                           value={m.code ? `${m.code}` : ""}
                           materials={rawMaterials}
                           onSelect={(rm) => selectL1Material(i, rm)}
+                          onSelectAutoDetect={(kind) => setL1MaterialAutoDetect(i, kind)}
                         />
                       )}
                       <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
@@ -3174,6 +3257,7 @@ function EditBOMDialog({
                               value={m.code ? `${m.code}` : ""}
                               materials={rawMaterials}
                               onSelect={(rm) => selectMaterial(wi, mi, rm)}
+                              onSelectAutoDetect={(kind) => setMaterialAutoDetect(wi, mi, kind)}
                             />
                           )}
                           <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
@@ -3208,6 +3292,7 @@ function EditBOMDialog({
                       onAddMaterial={(path) => addMaterialAtPath(wi, path)}
                       onRemoveMaterial={(path, mi) => removeMaterialAtPath(wi, path, mi)}
                       onSelectMaterial={(path, mi, rm) => selectMaterialAtPath(wi, path, mi, rm)}
+                      onSelectMaterialAutoDetect={(path, mi, kind) => setMaterialAutoDetectAtPath(wi, path, mi, kind)}
                       onUpdateMaterial={(path, mi, field, value) => updateMaterialAtPath(wi, path, mi, field, value)}
                       fabricOptions={fabricOptions}
                       variantCategories={productVariantCategories}

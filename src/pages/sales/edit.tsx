@@ -213,9 +213,40 @@ export default function EditSalesOrderPage() {
     !saving && !loading && initialSig !== null && initialSig !== formSig;
   useActiveTabDirty(isDirty);
 
+  // Customer-aware variants-config — mirror sales/create.tsx behaviour:
+  //   * No customer → master `variants-config`.
+  //   * Customer + seeded blob → `variants-config:<customerId>`.
+  //   * Customer but not seeded → fall back to master so prices still
+  //     resolve (UI stays usable until someone runs Copy from Master).
   useEffect(() => {
-    fetchVariantsConfig().then(setMaintenanceConfig).catch(() => { /* ignore */ });
-  }, []);
+    let cancelled = false;
+    if (!customerId) {
+      fetchVariantsConfig()
+        .then((cfg) => { if (!cancelled) setMaintenanceConfig(cfg as Record<string, unknown> | null); })
+        .catch(() => { /* ignore */ });
+      return () => { cancelled = true; };
+    }
+    fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+      .then((j) => {
+        if (cancelled) return;
+        if (j?.success && j.data) {
+          setMaintenanceConfig(j.data as Record<string, unknown>);
+        } else {
+          fetchVariantsConfig()
+            .then((cfg) => { if (!cancelled) setMaintenanceConfig(cfg as Record<string, unknown> | null); })
+            .catch(() => { /* ignore */ });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          fetchVariantsConfig()
+            .then((cfg) => { if (!cancelled) setMaintenanceConfig(cfg as Record<string, unknown> | null); })
+            .catch(() => { /* ignore */ });
+        }
+      });
+    return () => { cancelled = true; };
+  }, [customerId]);
 
   // Surcharge lookup from maintenance config
   const getConfigSurcharge = (key: string, value: string, fallback: number): number => {

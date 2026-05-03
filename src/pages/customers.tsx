@@ -1054,6 +1054,648 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
 }
 
 // =====================================================================
+// Customer Maintenance Panel — per-customer snapshot of variants config.
+//
+// Master "Maintenance" lives at kv_config['variants-config'] and contains
+// surcharge prices for Divan Heights / Total Heights / Gaps / Leg Heights /
+// Specials / Sofa Sizes / Sofa Leg Heights / Sofa Specials, plus a Fabrics
+// price-tier list (PRICE_1 / PRICE_2 / PRICE_3). Each customer keeps their
+// OWN copy of this blob keyed kv_config['variants-config:<customerId>'] —
+// snapshotted at customer setup; from then on master changes don't flow
+// through automatically.
+//
+// UX mirrors src/pages/products/index.tsx MaintenanceView:
+//   - Tabbed view (BEDFRAME: Divan / Total / Gaps / Leg / Specials,
+//     SOFA: Sizes / Leg / Specials, COMMON: Fabrics)
+//   - Editable surcharge price (RM input) + delete button per row
+//   - Add row form per tab
+//   - "Copy from Master Maintenance" CTA when customer not yet seeded
+//   - Save button persists the full blob to kv_config:variants-config:<id>
+// =====================================================================
+type CustMaintPriced = { value: string; priceSen: number };
+type CustMaintConfig = {
+  divanHeights: CustMaintPriced[];
+  legHeights: CustMaintPriced[];
+  totalHeights: CustMaintPriced[];
+  gaps: string[];
+  specials: CustMaintPriced[];
+  sofaLegHeights: CustMaintPriced[];
+  sofaSpecials: CustMaintPriced[];
+  sofaSizes: string[];
+  // Fabrics live in /api/fabric-tracking, not in the variants-config blob —
+  // but we still expose a Fabrics tab on the customer panel for completeness
+  // (read-only here; real fabric-tier edits stay on master Maintenance).
+};
+
+type CustMaintListKey =
+  | "divanHeights"
+  | "totalHeights"
+  | "gaps"
+  | "legHeights"
+  | "specials"
+  | "sofaSizes"
+  | "sofaLegHeights"
+  | "sofaSpecials";
+type CustMaintTab = CustMaintListKey | "fabrics";
+
+const CUST_MAINT_TABS: {
+  key: CustMaintTab;
+  label: string;
+  description: string;
+  priced?: boolean;
+  section?: string;
+}[] = [
+  { key: "divanHeights", label: "Divan Heights", description: "Bedframe divan height surcharges", priced: true, section: "Bedframe" },
+  { key: "totalHeights", label: "Total Heights", description: "Bedframe total height surcharges", priced: true, section: "Bedframe" },
+  { key: "gaps", label: "Gaps", description: "Bedframe gap height options", section: "Bedframe" },
+  { key: "legHeights", label: "Leg Heights", description: "Bedframe leg height surcharges", priced: true, section: "Bedframe" },
+  { key: "specials", label: "Specials", description: "Bedframe special order surcharges", priced: true, section: "Bedframe" },
+  { key: "sofaSizes", label: "Sizes", description: "Sofa seat heights", section: "Sofa" },
+  { key: "sofaLegHeights", label: "Leg Heights", description: "Sofa leg height surcharges", priced: true, section: "Sofa" },
+  { key: "sofaSpecials", label: "Specials", description: "Sofa special order surcharges", priced: true, section: "Sofa" },
+  { key: "fabrics", label: "Fabrics", description: "Fabric price-tier assignments (read-only here — manage via master Maintenance)", section: "Common" },
+];
+
+function ensureCustMaintPriced(val: unknown): CustMaintPriced[] {
+  if (!Array.isArray(val)) return [];
+  if (val.length === 0) return [];
+  if (typeof val[0] === "string") {
+    return (val as string[]).map((v) => ({ value: v, priceSen: 0 }));
+  }
+  // Coerce { value, priceSen } shape, dropping unrecognised fields.
+  return (val as unknown[]).map((row) => {
+    if (typeof row !== "object" || !row) return { value: "", priceSen: 0 };
+    const r = row as Record<string, unknown>;
+    return {
+      value: typeof r.value === "string" ? r.value : "",
+      priceSen: typeof r.priceSen === "number" ? r.priceSen : 0,
+    };
+  }).filter((r) => r.value !== "");
+}
+
+function ensureCustMaintStrings(val: unknown): string[] {
+  if (!Array.isArray(val)) return [];
+  return (val as unknown[]).filter((v) => typeof v === "string") as string[];
+}
+
+function parseCustMaintConfig(blob: unknown): CustMaintConfig {
+  const empty: CustMaintConfig = {
+    divanHeights: [], legHeights: [], totalHeights: [],
+    gaps: [], specials: [], sofaLegHeights: [], sofaSpecials: [], sofaSizes: [],
+  };
+  if (!blob || typeof blob !== "object") return empty;
+  const b = blob as Record<string, unknown>;
+  return {
+    divanHeights: ensureCustMaintPriced(b.divanHeights),
+    legHeights: ensureCustMaintPriced(b.legHeights),
+    totalHeights: ensureCustMaintPriced(b.totalHeights),
+    gaps: ensureCustMaintStrings(b.gaps),
+    specials: ensureCustMaintPriced(b.specials),
+    sofaLegHeights: ensureCustMaintPriced(b.sofaLegHeights),
+    sofaSpecials: ensureCustMaintPriced(b.sofaSpecials),
+    sofaSizes: ensureCustMaintStrings(b.sofaSizes),
+  };
+}
+
+type CustFabricRow = {
+  id: string;
+  fabricCode: string;
+  fabricDescription: string;
+  fabricCategory: string;
+  priceTier?: "PRICE_1" | "PRICE_2";
+  soh: number;
+};
+
+function CustomerMaintenancePanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  // Loaded blob from /api/kv-config/variants-config:<customerId>. null = not
+  // yet hydrated; "missing" sentinel via `seeded` flag tells us whether the
+  // customer has had Copy from Master run.
+  const [seeded, setSeeded] = useState<boolean | null>(null);
+  const [config, setConfig] = useState<CustMaintConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [savedSnapshot, setSavedSnapshot] = useState<string>("");
+  const [tab, setTab] = useState<CustMaintTab>("divanHeights");
+  const [newValue, setNewValue] = useState("");
+  const [newPriceSen, setNewPriceSen] = useState(0);
+  const [editingIdx, setEditingIdx] = useState<number | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+  const [fabrics, setFabrics] = useState<CustFabricRow[]>([]);
+  const [fabricsLoading, setFabricsLoading] = useState(false);
+  const [fabricSearch, setFabricSearch] = useState("");
+  const [copying, setCopying] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string>("");
+
+  const customerKey = `variants-config:${customerId}`;
+
+  // Mount-time hydrate from D1.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot fetch on customer change */
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErrorMsg("");
+    fetch(`/api/kv-config/${encodeURIComponent(customerKey)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+      .then((j) => {
+        if (cancelled) return;
+        if (j?.success && j.data) {
+          const cfg = parseCustMaintConfig(j.data);
+          setConfig(cfg);
+          setSavedSnapshot(JSON.stringify(cfg));
+          setSeeded(true);
+        } else {
+          // No customer-keyed blob yet — show the "not seeded" CTA.
+          setSeeded(false);
+          setConfig(null);
+          setSavedSnapshot("");
+        }
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setErrorMsg("Failed to load customer maintenance");
+        setSeeded(false);
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [customerKey]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Load fabrics when fabrics tab opens (read-only mirror of master).
+  /* eslint-disable react-hooks/set-state-in-effect -- lazy load on tab switch */
+  useEffect(() => {
+    if (tab !== "fabrics") return;
+    if (fabrics.length > 0) return;
+    setFabricsLoading(true);
+    fetch("/api/fabric-tracking")
+      .then((r) => r.json() as Promise<{ data?: CustFabricRow[] }>)
+      .then((j) => {
+        setFabrics(j?.data ?? []);
+      })
+      .catch(() => {})
+      .finally(() => setFabricsLoading(false));
+  }, [tab, fabrics.length]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const isDirty = useMemo(
+    () => config != null && JSON.stringify(config) !== savedSnapshot,
+    [config, savedSnapshot],
+  );
+
+  const meta = CUST_MAINT_TABS.find((t) => t.key === tab)!;
+  const isFabricsTab = tab === "fabrics";
+  const isPricedTab = !isFabricsTab && (meta.priced ?? false);
+  const currentStringList: string[] = !isFabricsTab && !isPricedTab && config
+    ? (config[tab as CustMaintListKey] as string[])
+    : [];
+  const currentPricedList: CustMaintPriced[] = !isFabricsTab && isPricedTab && config
+    ? (config[tab as CustMaintListKey] as CustMaintPriced[])
+    : [];
+
+  const handleCopyFromMaster = async () => {
+    if (!confirm(
+      `Copy current Master Maintenance values to "${customerName}"?\n\n` +
+      `This will create a customer-specific snapshot. Future master changes will NOT flow through; you'll edit ${customerName}'s prices independently from this point on.`,
+    )) return;
+    setCopying(true);
+    setErrorMsg("");
+    try {
+      const res = await fetch(
+        `/api/customer-maintenance/${encodeURIComponent(customerId)}/copy-from-master`,
+        { method: "POST", headers: { "Content-Type": "application/json" } },
+      );
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErrorMsg((j as { error?: string })?.error || `Copy failed (HTTP ${res.status})`);
+        return;
+      }
+      // Re-fetch the just-seeded blob so the panel re-renders with content.
+      const refetch = await fetch(`/api/kv-config/${encodeURIComponent(customerKey)}`);
+      const rj = await refetch.json() as { success?: boolean; data?: unknown };
+      if (rj?.success && rj.data) {
+        const cfg = parseCustMaintConfig(rj.data);
+        setConfig(cfg);
+        setSavedSnapshot(JSON.stringify(cfg));
+        setSeeded(true);
+      }
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const handleSave = async () => {
+    if (!config) return;
+    setSaving(true);
+    setErrorMsg("");
+    try {
+      const res = await fetch(`/api/kv-config/${encodeURIComponent(customerKey)}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(config),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErrorMsg((j as { error?: string })?.error || `Save failed (HTTP ${res.status})`);
+        return;
+      }
+      setSavedSnapshot(JSON.stringify(config));
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Network error");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleCancel = () => {
+    if (!savedSnapshot) return;
+    try {
+      setConfig(JSON.parse(savedSnapshot));
+    } catch {
+      // ignore
+    }
+  };
+
+  const addEntry = () => {
+    if (!config || isFabricsTab) return;
+    const v = newValue.trim();
+    if (!v) return;
+    const k = tab as CustMaintListKey;
+    if (isPricedTab) {
+      const list = config[k] as CustMaintPriced[];
+      if (list.some((o) => o.value === v)) { setNewValue(""); return; }
+      setConfig({ ...config, [k]: [...list, { value: v, priceSen: newPriceSen }] });
+    } else {
+      const list = config[k] as string[];
+      if (list.includes(v)) { setNewValue(""); return; }
+      setConfig({ ...config, [k]: [...list, v] });
+    }
+    setNewValue("");
+    setNewPriceSen(0);
+  };
+
+  const removeEntry = (idx: number) => {
+    if (!config || isFabricsTab) return;
+    const k = tab as CustMaintListKey;
+    const list = config[k] as (string | CustMaintPriced)[];
+    setConfig({ ...config, [k]: list.filter((_, i) => i !== idx) });
+  };
+
+  const updatePrice = (idx: number, priceSen: number) => {
+    if (!config || isFabricsTab || !isPricedTab) return;
+    const k = tab as CustMaintListKey;
+    const list = config[k] as CustMaintPriced[];
+    setConfig({
+      ...config,
+      [k]: list.map((o, i) => (i === idx ? { ...o, priceSen } : o)),
+    });
+  };
+
+  const updateEntryValue = (idx: number, newVal: string) => {
+    if (!config || isFabricsTab) return;
+    if (!newVal.trim()) return;
+    const k = tab as CustMaintListKey;
+    if (isPricedTab) {
+      const list = config[k] as CustMaintPriced[];
+      setConfig({
+        ...config,
+        [k]: list.map((o, i) => (i === idx ? { ...o, value: newVal } : o)),
+      });
+    } else {
+      const list = config[k] as string[];
+      setConfig({
+        ...config,
+        [k]: list.map((o, i) => (i === idx ? newVal : o)),
+      });
+    }
+  };
+
+  const startEditing = (idx: number, currentVal: string) => {
+    setEditingIdx(idx);
+    setEditingValue(currentVal);
+  };
+
+  const commitEdit = (idx: number) => {
+    updateEntryValue(idx, editingValue);
+    setEditingIdx(null);
+    setEditingValue("");
+  };
+
+  return (
+    <Card className="border-[#6B5C32] border-2 mt-4">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Package className="h-5 w-5 text-[#6B5C32]" />
+            {customerName} — Customer Maintenance Config
+            {seeded === false && (
+              <Badge className="bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597] text-[10px]">Not seeded</Badge>
+            )}
+            {seeded === true && (
+              <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">Snapshot</Badge>
+            )}
+          </CardTitle>
+          <div className="flex items-center gap-2">
+            {seeded === true && (
+              <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCancel}
+                  disabled={!isDirty || saving}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleSave}
+                  disabled={!isDirty || saving}
+                >
+                  {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Check className="h-4 w-4 mr-1" />}
+                  Save
+                </Button>
+              </>
+            )}
+            <Button
+              variant={seeded === false ? "primary" : "outline"}
+              size="sm"
+              onClick={handleCopyFromMaster}
+              disabled={copying}
+            >
+              {copying ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Copy className="h-4 w-4 mr-1" />}
+              Copy from Master Maintenance
+            </Button>
+          </div>
+        </div>
+        {errorMsg && (
+          <p className="text-xs text-[#9A3A2D] mt-2">{errorMsg}</p>
+        )}
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className="flex items-center justify-center py-10">
+            <Loader2 className="h-6 w-6 animate-spin text-[#6B5C32]" />
+          </div>
+        ) : seeded === false || !config ? (
+          <div className="text-center py-10 text-sm text-[#6B7280] bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
+            <p className="mb-2">{customerName} has no customer-specific Maintenance config yet.</p>
+            <p className="text-xs">Click <strong>Copy from Master Maintenance</strong> above to seed a snapshot. After that, edits stay scoped to this customer only.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {/* Tabs header */}
+            <div className="flex border-b border-[#E2DDD8] bg-[#FAF9F7] overflow-x-auto items-end -mx-6 px-6">
+              {CUST_MAINT_TABS.map((t, i) => {
+                const prevSection = i > 0 ? CUST_MAINT_TABS[i - 1].section : undefined;
+                const showSectionLabel = t.section && t.section !== prevSection;
+                return (
+                  <div key={t.key} className="flex items-end">
+                    {showSectionLabel && (
+                      <div className="flex items-center self-stretch">
+                        {i > 0 && <div className="w-px h-6 bg-[#D1D5DB] mx-1 self-center" />}
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-[#9CA3AF] px-2 pb-3.5 self-end">
+                          {t.section}
+                        </span>
+                      </div>
+                    )}
+                    <button
+                      onClick={() => { setTab(t.key); setNewValue(""); setNewPriceSen(0); setEditingIdx(null); }}
+                      className={`relative px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors ${
+                        tab === t.key
+                          ? "text-[#6B5C32] bg-white border-b-2 border-[#6B5C32]"
+                          : "text-gray-500 hover:text-gray-700 hover:bg-white/50"
+                      }`}
+                    >
+                      {t.label}
+                      <span className="ml-1.5 text-[10px] text-gray-400 font-normal">
+                        ({(() => {
+                          if (t.key === "fabrics") return fabrics.length;
+                          const list = config[t.key as CustMaintListKey];
+                          return Array.isArray(list) ? list.length : 0;
+                        })()})
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+
+            <p className="text-xs text-gray-500">{meta.description}</p>
+
+            {isFabricsTab ? (
+              /* Fabrics tab — read-only list. Tier edits stay on master Maintenance. */
+              <div className="space-y-2">
+                <div className="relative">
+                  <Search className="absolute left-2 top-2.5 h-3.5 w-3.5 text-[#9CA3AF]" />
+                  <input
+                    type="text"
+                    placeholder="Search fabrics..."
+                    value={fabricSearch}
+                    onChange={(e) => setFabricSearch(e.target.value)}
+                    className="w-full pl-8 text-sm border border-[#E2DDD8] rounded-md px-3 py-2 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                  />
+                </div>
+                {fabricsLoading ? (
+                  <div className="flex items-center justify-center py-6">
+                    <Loader2 className="h-5 w-5 animate-spin text-[#6B5C32]" />
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-[#E2DDD8] rounded-md">
+                    <table className="min-w-full divide-y divide-gray-200 text-sm">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Code</th>
+                          <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Description</th>
+                          <th className="px-3 py-2 text-left text-xs font-semibold text-gray-600">Category</th>
+                          <th className="px-3 py-2 text-center text-xs font-semibold text-gray-600">Price Tier</th>
+                          <th className="px-3 py-2 text-right text-xs font-semibold text-gray-600">SOH</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-gray-100">
+                        {fabrics
+                          .filter((f) => {
+                            if (!fabricSearch.trim()) return true;
+                            const q = fabricSearch.toLowerCase();
+                            return f.fabricCode.toLowerCase().includes(q)
+                              || f.fabricDescription.toLowerCase().includes(q);
+                          })
+                          .map((f) => (
+                            <tr key={f.id}>
+                              <td className="px-3 py-1.5 font-mono font-medium text-gray-900">{f.fabricCode}</td>
+                              <td className="px-3 py-1.5 text-gray-700">{f.fabricDescription}</td>
+                              <td className="px-3 py-1.5">
+                                <span className="inline-block px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">
+                                  {f.fabricCategory}
+                                </span>
+                              </td>
+                              <td className="px-3 py-1.5 text-center">
+                                <span className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border ${
+                                  f.priceTier === "PRICE_1"
+                                    ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
+                                    : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
+                                }`}>
+                                  {f.priceTier === "PRICE_1" ? "Price 1" : "Price 2"}
+                                </span>
+                              </td>
+                              <td className="px-3 py-1.5 text-right text-gray-900">{f.soh.toLocaleString()}</td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <>
+                {/* Add row */}
+                <div className="flex gap-2">
+                  <input
+                    value={newValue}
+                    onChange={(e) => setNewValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addEntry(); } }}
+                    placeholder={`Add new ${meta.label.toLowerCase().replace(/s$/, "")}...`}
+                    className="flex-1 text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                  />
+                  {isPricedTab && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-xs text-gray-500">RM</span>
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={newPriceSen / 100}
+                        onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
+                        className="w-24 text-right text-sm border border-[#E2DDD8] rounded-md px-3 py-1.5 bg-[#FAF9F7] focus:outline-none focus:border-[#6B5C32] focus:bg-white"
+                        placeholder="0.00"
+                      />
+                    </div>
+                  )}
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={addEntry}
+                    disabled={!newValue.trim()}
+                  >
+                    <Plus className="h-4 w-4 mr-1" /> Add
+                  </Button>
+                </div>
+
+                {/* List */}
+                <div className="space-y-1.5">
+                  {isPricedTab ? (
+                    currentPricedList.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
+                        No entries yet.
+                      </div>
+                    ) : (
+                      currentPricedList.map((entry, idx) => (
+                        <div
+                          key={`${tab}-${idx}`}
+                          className="flex items-center justify-between px-3 py-1.5 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
+                        >
+                          <div
+                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                            onClick={() => { if (editingIdx !== idx) startEditing(idx, entry.value); }}
+                          >
+                            <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
+                            {editingIdx === idx ? (
+                              <input
+                                autoFocus
+                                value={editingValue}
+                                onChange={(e) => setEditingValue(e.target.value)}
+                                onBlur={() => commitEdit(idx)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") { e.preventDefault(); commitEdit(idx); }
+                                  if (e.key === "Escape") { setEditingIdx(null); setEditingValue(""); }
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
+                              />
+                            ) : (
+                              <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                                {entry.value}
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-3 flex-shrink-0">
+                            <div className="flex items-center gap-1">
+                              <span className="text-xs text-gray-400">RM</span>
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={entry.priceSen / 100}
+                                onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
+                                className="w-20 text-right text-sm border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32]"
+                              />
+                            </div>
+                            <button
+                              onClick={() => removeEntry(idx)}
+                              className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                              title="Remove"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )
+                  ) : (
+                    currentStringList.length === 0 ? (
+                      <div className="text-center py-6 text-xs text-gray-400 bg-[#FAF9F7] rounded-md border border-dashed border-[#E2DDD8]">
+                        No entries yet.
+                      </div>
+                    ) : (
+                      currentStringList.map((entry, idx) => (
+                        <div
+                          key={`${tab}-${idx}`}
+                          className="flex items-center justify-between px-3 py-1.5 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
+                        >
+                          <div
+                            className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                            onClick={() => { if (editingIdx !== idx) startEditing(idx, entry); }}
+                          >
+                            <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
+                            {editingIdx === idx ? (
+                              <input
+                                autoFocus
+                                value={editingValue}
+                                onChange={(e) => setEditingValue(e.target.value)}
+                                onBlur={() => commitEdit(idx)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter") { e.preventDefault(); commitEdit(idx); }
+                                  if (e.key === "Escape") { setEditingIdx(null); setEditingValue(""); }
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
+                              />
+                            ) : (
+                              <span className="text-sm text-[#111827] font-medium group-hover:text-[#6B5C32] group-hover:underline">
+                                {entry}
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            onClick={() => removeEntry(idx)}
+                            className="p-1 text-[#9A3A2D] hover:text-[#7A2E24] hover:bg-[#F9E1DA] rounded"
+                            title="Remove"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      ))
+                    )
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// =====================================================================
 // CustomerPriceHistoryDialog — per-customer-per-product price history
 // + new effective-dated row form. Mirrors MasterPriceHistoryDialog but
 // hits /api/customer-products/:cpId/price-history and
@@ -2131,6 +2773,7 @@ export default function CustomersPage() {
             </CardContent>
           </Card>
           <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
+          <CustomerMaintenancePanel customerId={cust.id} customerName={cust.name} />
           </>
         );
       })()}

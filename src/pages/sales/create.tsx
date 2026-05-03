@@ -408,11 +408,53 @@ function CreateSalesOrderPage() {
       }
     };
 
-    applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
-    void fetchVariantsConfig().then((cfg) =>
-      applyCfg(cfg as Record<string, unknown> | null),
-    );
-  }, []);
+    // Customer-aware variants-config:
+    //   * No customer selected → master `variants-config`.
+    //   * Customer selected + customer-keyed blob exists →
+    //     `variants-config:<customerId>` (per-customer surcharge snapshot).
+    //   * Customer selected but not yet seeded → fall back to master so
+    //     the form keeps working until someone runs Copy from Master.
+    let cancelled = false;
+    if (!customerId) {
+      applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
+      void fetchVariantsConfig().then((cfg) => {
+        if (cancelled) return;
+        applyCfg(cfg as Record<string, unknown> | null);
+      });
+      return () => { cancelled = true; };
+    }
+
+    // Customer selected. Attempt the customer-keyed blob first, fall back
+    // to master if the customer hasn't been seeded yet (404 / null data).
+    fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+      .then((j) => {
+        if (cancelled) return;
+        if (j?.success && j.data) {
+          applyCfg(j.data as Record<string, unknown>);
+        } else {
+          // Not seeded — fall back to master so the picker doesn't go empty.
+          fetch("/api/kv-config/variants-config")
+            .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+            .then((jm) => {
+              if (cancelled) return;
+              if (jm?.success && jm.data) {
+                applyCfg(jm.data as Record<string, unknown>);
+              } else {
+                applyCfg(null);
+              }
+            })
+            .catch(() => {
+              if (!cancelled) applyCfg(null);
+            });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
+      });
+
+    return () => { cancelled = true; };
+  }, [customerId]);
 
   // Load clone data from localStorage if navigated from Clone button.
   /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate from localStorage clone payload on mount */

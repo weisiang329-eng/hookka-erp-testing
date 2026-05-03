@@ -9,6 +9,7 @@ import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import { emitAudit } from "../lib/audit";
+import { hashPin } from "../lib/auth-utils";
 
 const app = new Hono<Env>();
 
@@ -382,6 +383,202 @@ app.delete("/:id", async (c) => {
     data: updated
       ? rowToWorker(updated)
       : { ...rowToWorker(existing), status: "INACTIVE" },
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Admin PIN provisioning
+// ---------------------------------------------------------------------------
+//
+// Two endpoints for the Employee Master page so the operator can hand out PINs
+// directly instead of relying on workers self-onboarding via the existing
+// /api/worker-auth/login firstTimePin path. Cleartext PINs are returned EXACTLY
+// once in the response (subsequent reads only see the SHA-256 hash) — admin
+// must record/distribute on the spot.
+//
+// Both endpoints are gated by workers:update. Setting/rotating a PIN also
+// invalidates active worker_tokens for the worker so any open mobile session
+// is forced to re-authenticate with the new PIN.
+//
+// The existing self-service reset (POST /api/worker-auth/reset-pin via
+// empNo + phoneLast4) remains alive — both flows coexist.
+// ---------------------------------------------------------------------------
+
+function generateRandomPin(): string {
+  // 6-digit numeric PIN. Math.random is fine here because the entropy of any
+  // 6-digit PIN is bounded by the 10^6 search space (regardless of generator),
+  // and the worker portal already throttles login attempts at 10/15min via
+  // checkLoginRateLimit. crypto.getRandomValues would be marginally better
+  // but adds no real security gain for this use case.
+  return Math.floor(Math.random() * 1_000_000)
+    .toString()
+    .padStart(6, "0");
+}
+
+// POST /api/workers/:id/set-pin
+// Body: { pin?: string } — when omitted, generate a random 6-digit PIN.
+// Response: { success: true, data: { workerId, empNo, name, pin } }
+//   pin is the cleartext, ONE-TIME RETURN ONLY. Admin records and shares.
+app.post("/:id/set-pin", async (c) => {
+  const denied = await requirePermission(c, "workers", "update");
+  if (denied) return denied;
+
+  const id = c.req.param("id");
+  const worker = await c.var.DB.prepare(
+    "SELECT id, empNo, name, status FROM workers WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string; empNo: string; name: string; status: string }>();
+  if (!worker) {
+    return c.json({ success: false, error: "Worker not found" }, 404);
+  }
+
+  let body: { pin?: string } = {};
+  try {
+    body = (await c.req.json()) as { pin?: string };
+  } catch {
+    body = {};
+  }
+
+  let cleartext: string;
+  if (typeof body.pin === "string" && body.pin.length > 0) {
+    if (!/^\d{6}$/.test(body.pin)) {
+      return c.json(
+        { success: false, error: "PIN must be 6 digits" },
+        400,
+      );
+    }
+    cleartext = body.pin;
+  } else {
+    cleartext = generateRandomPin();
+  }
+
+  const hashed = await hashPin(cleartext);
+  const now = new Date().toISOString();
+
+  // UPSERT — admin sets must_reset = 0 (no forced reset on first login;
+  // worker can use the PIN directly).
+  await c.var.DB.prepare(
+    `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
+     ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
+  )
+    .bind(worker.id, hashed, now)
+    .run();
+
+  // Force re-login on any open worker portal session for this worker.
+  await c.var.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?")
+    .bind(worker.id)
+    .run();
+
+  // Audit row — record that the PIN was reset by an admin. The cleartext PIN
+  // is intentionally NOT stored on the audit row; only the fact of the reset.
+  await emitAudit(c, {
+    resource: "workers",
+    resourceId: worker.id,
+    action: "pin-reset",
+  });
+
+  return c.json({
+    success: true,
+    data: {
+      workerId: worker.id,
+      empNo: worker.empNo,
+      name: worker.name,
+      pin: cleartext,
+    },
+  });
+});
+
+// POST /api/workers/bulk-generate-pins
+// Body: { workerIds?: string[] }
+//   - omitted/empty: every ACTIVE worker without an existing worker_pins row
+//   - provided: only those ids (skips ones that are not ACTIVE or vanished)
+// Response: { success: true, data: { generated: [{ workerId, empNo, name, pin }], skipped: number } }
+//   Cleartext PINs only here — admin must download/record before navigating away.
+app.post("/bulk-generate-pins", async (c) => {
+  const denied = await requirePermission(c, "workers", "update");
+  if (denied) return denied;
+
+  let body: { workerIds?: string[] } = {};
+  try {
+    body = (await c.req.json()) as { workerIds?: string[] };
+  } catch {
+    body = {};
+  }
+
+  let targets: { id: string; empNo: string; name: string }[];
+  let skipped = 0;
+  if (Array.isArray(body.workerIds) && body.workerIds.length > 0) {
+    // Caller-supplied list — fetch matching ACTIVE workers, count ones that
+    // didn't resolve as skipped.
+    const placeholders = body.workerIds.map(() => "?").join(",");
+    const res = await c.var.DB.prepare(
+      `SELECT id, empNo, name FROM workers WHERE id IN (${placeholders}) AND status = 'ACTIVE'`,
+    )
+      .bind(...body.workerIds)
+      .all<{ id: string; empNo: string; name: string }>();
+    targets = res.results ?? [];
+    skipped = body.workerIds.length - targets.length;
+  } else {
+    // Default — every ACTIVE worker WITHOUT an existing PIN row.
+    const res = await c.var.DB.prepare(
+      `SELECT w.id AS id, w.empNo AS empNo, w.name AS name
+         FROM workers w
+         LEFT JOIN worker_pins p ON p.workerId = w.id
+        WHERE w.status = 'ACTIVE' AND p.workerId IS NULL
+        ORDER BY w.empNo`,
+    ).all<{ id: string; empNo: string; name: string }>();
+    targets = res.results ?? [];
+  }
+
+  const generated: {
+    workerId: string;
+    empNo: string;
+    name: string;
+    pin: string;
+  }[] = [];
+  const now = new Date().toISOString();
+
+  for (const t of targets) {
+    const cleartext = generateRandomPin();
+    const hashed = await hashPin(cleartext);
+    await c.var.DB.prepare(
+      `INSERT INTO worker_pins (workerId, pin, updatedAt, must_reset) VALUES (?, ?, ?, 0)
+       ON CONFLICT (workerId) DO UPDATE SET pin = EXCLUDED.pin, updatedAt = EXCLUDED.updatedAt, must_reset = 0`,
+    )
+      .bind(t.id, hashed, now)
+      .run();
+    await c.var.DB.prepare("DELETE FROM worker_tokens WHERE workerId = ?")
+      .bind(t.id)
+      .run();
+    generated.push({
+      workerId: t.id,
+      empNo: t.empNo,
+      name: t.name,
+      pin: cleartext,
+    });
+  }
+
+  // Single audit row capturing the bulk action; per-worker rows would be
+  // noisy on a fresh-onboarding batch of 30+ workers. resourceId is left
+  // empty since this targets multiple workers; the after payload lists the
+  // affected workerIds for forensic reconstruction (without cleartext PINs).
+  await emitAudit(c, {
+    resource: "workers",
+    resourceId: "*",
+    action: "pin-bulk-generate",
+    after: {
+      workerIds: generated.map((g) => g.workerId),
+      count: generated.length,
+    },
+  });
+
+  return c.json({
+    success: true,
+    data: {
+      generated,
+      skipped,
+    },
   });
 });
 

@@ -31,6 +31,8 @@ import {
   ChevronRight,
   RefreshCw,
   Eye,
+  KeyRound,
+  Copy,
 } from "lucide-react";
 
 // --------------- TYPES ---------------
@@ -136,6 +138,16 @@ function formatHours(minutes: number): string {
 
 function todayStr(): string {
   return new Date().toISOString().split("T")[0];
+}
+
+// Quote a CSV cell when it contains a comma, double-quote or newline. Empty /
+// safe cells render as-is. Internal quotes are escaped by doubling per RFC
+// 4180.
+function csvCell(value: string): string {
+  if (value == null) return "";
+  const needsQuote = /[",\n\r]/.test(value);
+  const escaped = value.replace(/"/g, '""');
+  return needsQuote ? `"${escaped}"` : escaped;
 }
 
 // Lightweight projection of /api/departments for in-page use. Full Department
@@ -911,6 +923,44 @@ const emptyForm: WorkerFormData = {
   status: "ACTIVE",
 };
 
+// PIN-modal state. The single-worker dialog has two phases:
+//   1. "configure"  — pick generate-random vs set-custom, then submit
+//   2. "reveal"     — show the cleartext PIN once with a copy button
+// The cleartext PIN is wiped from React state when the modal closes; the
+// backend never returns it again on subsequent reads.
+type PinModalPhase = "configure" | "reveal";
+
+type PinModalState = {
+  worker: Worker;
+  phase: PinModalPhase;
+  mode: "random" | "custom";
+  customPin: string;
+  submitting: boolean;
+  error: string | null;
+  revealedPin: string | null;
+};
+
+// Bulk-modal state — three phases:
+//   1. "preview"    — show how many ACTIVE workers don't have a PIN yet
+//   2. "submitting" — POST in flight
+//   3. "reveal"     — render the generated PIN list + CSV download
+type BulkModalPhase = "preview" | "submitting" | "reveal";
+
+type BulkPinResult = {
+  workerId: string;
+  empNo: string;
+  name: string;
+  pin: string;
+};
+
+type BulkModalState = {
+  phase: BulkModalPhase;
+  pendingCount: number; // active workers without a PIN
+  generated: BulkPinResult[];
+  skipped: number;
+  error: string | null;
+};
+
 function EmployeeMasterTab({
   workers,
   refreshWorkers,
@@ -930,6 +980,171 @@ function EmployeeMasterTab({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editForm, setEditForm] = useState<WorkerFormData>({ ...emptyForm });
   const [saving, setSaving] = useState(false);
+  const [pinModal, setPinModal] = useState<PinModalState | null>(null);
+  const [bulkModal, setBulkModal] = useState<BulkModalState | null>(null);
+
+  const openPinModal = (w: Worker) => {
+    setPinModal({
+      worker: w,
+      phase: "configure",
+      mode: "random",
+      customPin: "",
+      submitting: false,
+      error: null,
+      revealedPin: null,
+    });
+  };
+  const closePinModal = () => setPinModal(null);
+
+  const submitPin = async () => {
+    if (!pinModal) return;
+    if (pinModal.mode === "custom" && !/^\d{6}$/.test(pinModal.customPin)) {
+      setPinModal({ ...pinModal, error: "PIN must be exactly 6 digits" });
+      return;
+    }
+    setPinModal({ ...pinModal, submitting: true, error: null });
+    try {
+      const body =
+        pinModal.mode === "custom" ? { pin: pinModal.customPin } : {};
+      const res = await fetch(
+        `/api/workers/${pinModal.worker.id}/set-pin`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+      );
+      const json = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        data?: { pin?: string };
+      };
+      if (!res.ok || !json?.success) {
+        setPinModal({
+          ...pinModal,
+          submitting: false,
+          error: json?.error || `Failed (HTTP ${res.status})`,
+        });
+        return;
+      }
+      const pin = json.data?.pin;
+      if (!pin) {
+        setPinModal({
+          ...pinModal,
+          submitting: false,
+          error: "Server did not return a PIN",
+        });
+        return;
+      }
+      setPinModal({
+        ...pinModal,
+        phase: "reveal",
+        submitting: false,
+        revealedPin: pin,
+        error: null,
+      });
+    } catch (e) {
+      setPinModal({
+        ...pinModal,
+        submitting: false,
+        error: e instanceof Error ? e.message : "Network error",
+      });
+    }
+  };
+
+  const openBulkModal = () => {
+    // Pending count is computed locally from the loaded worker list — workers
+    // are flagged as "needs PIN" iff status === ACTIVE. The server is the
+    // source of truth (its query also LEFT JOINs worker_pins to skip workers
+    // who already have one), but we don't want to leak that join here on
+    // every page load, so the preview is approximate and the server's
+    // response (skipped count + actual generated count) is the truth shown
+    // on the reveal screen.
+    const activeCount = workers.filter((w) => w.status === "ACTIVE").length;
+    setBulkModal({
+      phase: "preview",
+      pendingCount: activeCount,
+      generated: [],
+      skipped: 0,
+      error: null,
+    });
+  };
+  const closeBulkModal = () => setBulkModal(null);
+
+  const submitBulk = async () => {
+    if (!bulkModal) return;
+    setBulkModal({ ...bulkModal, phase: "submitting", error: null });
+    try {
+      const res = await fetch("/api/workers/bulk-generate-pins", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        data?: { generated?: BulkPinResult[]; skipped?: number };
+      };
+      if (!res.ok || !json?.success) {
+        setBulkModal({
+          ...bulkModal,
+          phase: "preview",
+          error: json?.error || `Failed (HTTP ${res.status})`,
+        });
+        return;
+      }
+      const generated = json.data?.generated ?? [];
+      setBulkModal({
+        phase: "reveal",
+        pendingCount: bulkModal.pendingCount,
+        generated,
+        skipped: json.data?.skipped ?? 0,
+        error: null,
+      });
+    } catch (e) {
+      setBulkModal({
+        ...bulkModal,
+        phase: "preview",
+        error: e instanceof Error ? e.message : "Network error",
+      });
+    }
+  };
+
+  const downloadBulkCsv = () => {
+    if (!bulkModal || bulkModal.generated.length === 0) return;
+    const header = "empNo,name,pin\n";
+    const rows = bulkModal.generated
+      .map(
+        (r) =>
+          `${csvCell(r.empNo)},${csvCell(r.name)},${csvCell(r.pin)}`,
+      )
+      .join("\n");
+    const blob = new Blob([header + rows], {
+      type: "text/csv;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `worker-pins-${todayStr()}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const copyToClipboard = (text: string) => {
+    if (
+      typeof navigator !== "undefined" &&
+      navigator.clipboard?.writeText
+    ) {
+      navigator.clipboard.writeText(text).then(
+        () => toast.success("Copied to clipboard"),
+        () => toast.error("Could not copy — copy manually"),
+      );
+    } else {
+      toast.error("Clipboard not available — copy the value manually");
+    }
+  };
 
   const handleAdd = async () => {
     setSaving(true);
@@ -1245,7 +1460,7 @@ function EmployeeMasterTab({
       {
         key: "_actions",
         label: "Actions",
-        width: "90px",
+        width: "120px",
         align: "center",
         render: (_value, row) =>
           editingId === row.id ? (
@@ -1272,14 +1487,24 @@ function EmployeeMasterTab({
                 variant="ghost"
                 size="sm"
                 onClick={() => startEdit(row)}
+                title="Edit employee"
               >
                 <Pencil className="h-3 w-3" />
               </Button>
               <Button
                 variant="ghost"
                 size="sm"
+                onClick={() => openPinModal(row)}
+                title="Set / Reset PIN"
+              >
+                <KeyRound className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
                 onClick={() => handleDelete(row.id)}
                 className="text-[#9A3A2D] hover:text-[#7A2E24]"
+                title="Delete employee"
               >
                 <Trash2 className="h-3 w-3" />
               </Button>
@@ -1327,13 +1552,23 @@ function EmployeeMasterTab({
           <CardTitle className="flex items-center gap-2">
             <Users className="h-5 w-5 text-[#6B5C32]" /> Employee Master
           </CardTitle>
-          <Button
-            variant="primary"
-            onClick={() => setShowAddForm(!showAddForm)}
-          >
-            <Plus className="h-4 w-4" />
-            {showAddForm ? "Cancel" : "Add Employee"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={openBulkModal}
+              title="Generate 6-digit PINs for every active worker who doesn't have one yet"
+            >
+              <KeyRound className="h-4 w-4" />
+              Generate PINs for new workers
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => setShowAddForm(!showAddForm)}
+            >
+              <Plus className="h-4 w-4" />
+              {showAddForm ? "Cancel" : "Add Employee"}
+            </Button>
+          </div>
         </div>
       </CardHeader>
       <CardContent>
@@ -1490,6 +1725,323 @@ function EmployeeMasterTab({
           emptyMessage="No employees found."
         />
       </CardContent>
+
+      {/* Per-worker PIN modal — two phases: configure then reveal. */}
+      {pinModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={closePinModal}
+        >
+          <div
+            className="w-full max-w-md rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-[#1F1D1B]">
+                  {pinModal.phase === "reveal"
+                    ? "PIN Set"
+                    : "Set / Reset PIN"}
+                </h3>
+                <div className="mt-1 text-xs text-[#6B7280]">
+                  {pinModal.worker.name}
+                  <span className="mx-1">·</span>
+                  {pinModal.worker.empNo}
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={closePinModal}
+                className="rounded p-1 text-[#6B7280] hover:bg-[#F3F4F6]"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {pinModal.phase === "configure" && (
+              <>
+                <div className="space-y-3">
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      checked={pinModal.mode === "random"}
+                      onChange={() =>
+                        setPinModal({
+                          ...pinModal,
+                          mode: "random",
+                          customPin: "",
+                          error: null,
+                        })
+                      }
+                      className="mt-1"
+                    />
+                    <div>
+                      <div className="text-sm font-medium text-[#1F1D1B]">
+                        Generate random PIN
+                      </div>
+                      <div className="text-xs text-[#6B7280]">
+                        Server picks a random 6-digit PIN.
+                      </div>
+                    </div>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      checked={pinModal.mode === "custom"}
+                      onChange={() =>
+                        setPinModal({
+                          ...pinModal,
+                          mode: "custom",
+                          error: null,
+                        })
+                      }
+                      className="mt-1"
+                    />
+                    <div className="flex-1">
+                      <div className="text-sm font-medium text-[#1F1D1B]">
+                        Set custom PIN
+                      </div>
+                      <Input
+                        value={pinModal.customPin}
+                        onChange={(e) =>
+                          setPinModal({
+                            ...pinModal,
+                            mode: "custom",
+                            customPin: e.target.value
+                              .replace(/\D/g, "")
+                              .slice(0, 6),
+                            error: null,
+                          })
+                        }
+                        onFocus={() =>
+                          setPinModal({
+                            ...pinModal,
+                            mode: "custom",
+                            error: null,
+                          })
+                        }
+                        placeholder="6 digits"
+                        inputMode="numeric"
+                        pattern="\d{6}"
+                        maxLength={6}
+                        className="mt-1 h-8 w-32 text-xs"
+                        disabled={pinModal.mode !== "custom"}
+                      />
+                    </div>
+                  </label>
+                </div>
+                {pinModal.error && (
+                  <div className="mt-3 rounded border border-[#9A3A2D]/30 bg-[#F9E1DA] px-3 py-2 text-xs text-[#9A3A2D]">
+                    {pinModal.error}
+                  </div>
+                )}
+                <div className="mt-5 flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    onClick={closePinModal}
+                    disabled={pinModal.submitting}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={submitPin}
+                    disabled={
+                      pinModal.submitting ||
+                      (pinModal.mode === "custom" &&
+                        !/^\d{6}$/.test(pinModal.customPin))
+                    }
+                  >
+                    {pinModal.submitting
+                      ? "Saving..."
+                      : "Set PIN"}
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {pinModal.phase === "reveal" && pinModal.revealedPin && (
+              <>
+                <div className="rounded-lg border border-[#C6DBA8] bg-[#F0F7E6] p-4 text-center">
+                  <div className="text-xs uppercase tracking-wide text-[#4F7C3A]">
+                    PIN
+                  </div>
+                  <div className="mt-1 font-mono text-3xl tracking-[0.4em] text-[#1F1D1B]">
+                    {pinModal.revealedPin}
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="mt-3"
+                    onClick={() =>
+                      copyToClipboard(pinModal.revealedPin || "")
+                    }
+                  >
+                    <Copy className="h-3 w-3" />
+                    Copy
+                  </Button>
+                </div>
+                <div className="mt-3 rounded border border-[#E0B770]/40 bg-[#FBF3DF] px-3 py-2 text-xs text-[#7A5C1A]">
+                  This PIN won&apos;t be shown again. Record it now and hand it
+                  to the worker. Any open mobile session for this worker has
+                  been forced to re-login.
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                  <Button variant="primary" onClick={closePinModal}>
+                    Done
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Bulk-PIN modal — preview, then reveal with CSV download. */}
+      {bulkModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+          onClick={
+            bulkModal.phase === "submitting" ? undefined : closeBulkModal
+          }
+        >
+          <div
+            className="w-full max-w-2xl rounded-lg bg-white p-6 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-4 flex items-start justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-[#1F1D1B]">
+                  {bulkModal.phase === "reveal"
+                    ? "Generated PINs"
+                    : "Generate PINs for new workers"}
+                </h3>
+                <div className="mt-1 text-xs text-[#6B7280]">
+                  {bulkModal.phase === "reveal"
+                    ? `${bulkModal.generated.length} PINs created`
+                    : "Active workers without an existing PIN will be assigned a random 6-digit PIN."}
+                </div>
+              </div>
+              {bulkModal.phase !== "submitting" && (
+                <button
+                  type="button"
+                  onClick={closeBulkModal}
+                  className="rounded p-1 text-[#6B7280] hover:bg-[#F3F4F6]"
+                  aria-label="Close"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+
+            {bulkModal.phase === "preview" && (
+              <>
+                <div className="rounded border border-[#E2DDD8] bg-[#FAF7F4] p-3 text-sm text-[#4B5563]">
+                  Up to{" "}
+                  <span className="font-semibold text-[#1F1D1B]">
+                    {bulkModal.pendingCount}
+                  </span>{" "}
+                  active worker(s) may need a PIN. The server will skip any
+                  who already have one set and report the actual count below.
+                </div>
+                <div className="mt-3 rounded border border-[#E0B770]/40 bg-[#FBF3DF] px-3 py-2 text-xs text-[#7A5C1A]">
+                  PINs are revealed exactly once. Make sure to download the
+                  CSV before closing the dialog — the cleartext PIN cannot be
+                  recovered later.
+                </div>
+                {bulkModal.error && (
+                  <div className="mt-3 rounded border border-[#9A3A2D]/30 bg-[#F9E1DA] px-3 py-2 text-xs text-[#9A3A2D]">
+                    {bulkModal.error}
+                  </div>
+                )}
+                <div className="mt-5 flex justify-end gap-2">
+                  <Button variant="ghost" onClick={closeBulkModal}>
+                    Cancel
+                  </Button>
+                  <Button variant="primary" onClick={submitBulk}>
+                    Generate PINs
+                  </Button>
+                </div>
+              </>
+            )}
+
+            {bulkModal.phase === "submitting" && (
+              <div className="py-8 text-center text-sm text-[#6B7280]">
+                Generating PINs...
+              </div>
+            )}
+
+            {bulkModal.phase === "reveal" && (
+              <>
+                {bulkModal.generated.length === 0 ? (
+                  <div className="rounded border border-[#E2DDD8] bg-[#FAF7F4] p-4 text-sm text-[#4B5563]">
+                    No PINs needed to be generated — every active worker
+                    already has one.
+                  </div>
+                ) : (
+                  <>
+                    <div className="rounded border border-[#E0B770]/40 bg-[#FBF3DF] px-3 py-2 text-xs text-[#7A5C1A]">
+                      These PINs won&apos;t be shown again. Download the CSV
+                      now and distribute to the workers.
+                    </div>
+                    <div className="mt-3 max-h-80 overflow-auto rounded border border-[#E2DDD8]">
+                      <table className="w-full text-sm">
+                        <thead className="bg-[#F3F4F6] text-xs uppercase tracking-wide text-[#6B7280]">
+                          <tr>
+                            <th className="px-3 py-2 text-left">Emp No</th>
+                            <th className="px-3 py-2 text-left">Name</th>
+                            <th className="px-3 py-2 text-left">PIN</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {bulkModal.generated.map((g) => (
+                            <tr
+                              key={g.workerId}
+                              className="border-t border-[#E2DDD8]"
+                            >
+                              <td className="px-3 py-1.5 font-medium text-[#6B5C32]">
+                                {g.empNo}
+                              </td>
+                              <td className="px-3 py-1.5">{g.name}</td>
+                              <td className="px-3 py-1.5 font-mono tracking-widest">
+                                {g.pin}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    {bulkModal.skipped > 0 && (
+                      <div className="mt-2 text-xs text-[#6B7280]">
+                        {bulkModal.skipped} worker(s) skipped (inactive or
+                        not found).
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="mt-5 flex justify-end gap-2">
+                  {bulkModal.generated.length > 0 && (
+                    <Button variant="outline" onClick={downloadBulkCsv}>
+                      <Download className="h-4 w-4" />
+                      Download CSV
+                    </Button>
+                  )}
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      closeBulkModal();
+                      refreshWorkers();
+                    }}
+                  >
+                    Done
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

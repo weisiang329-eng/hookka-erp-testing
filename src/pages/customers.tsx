@@ -27,6 +27,8 @@ import {
   Search,
   Check,
   FileDown,
+  Calendar,
+  Copy,
 } from "lucide-react";
 
 type CustomerMutationResponse =
@@ -48,6 +50,20 @@ function asCustomerMutationResponse(v: unknown): CustomerMutationResponse | null
 // =====================================================================
 // Customer Products types (per-customer SKU assignments with price overrides)
 // =====================================================================
+// Sofa fabric price tier — mirrors src/pages/products/index.tsx so the
+// Customer Products panel can render the same P1/P2/P3 toggle and tier-
+// scoped seat-height cells. Legacy entries without a tier resolve to
+// PRICE_2 via entryTier(), matching the Products page semantics.
+type SofaTier = "PRICE_1" | "PRICE_2" | "PRICE_3";
+const CUST_SOFA_TIERS: { value: SofaTier; label: string }[] = [
+  { value: "PRICE_1", label: "P1" },
+  { value: "PRICE_2", label: "P2" },
+  { value: "PRICE_3", label: "P3" },
+];
+const custEntryTier = (t: SofaTier | undefined): SofaTier => t ?? "PRICE_2";
+
+type SeatHeightEntry = { height: string; priceSen: number; tier?: SofaTier };
+
 type CustomerProduct = {
   id: string;
   customerId: string;
@@ -57,18 +73,20 @@ type CustomerProduct = {
   category: string;
   basePriceSen: number;
   price1Sen: number | null;
-  // Backend returns an array of { height, priceSen } objects — matches the
-  // shape of products.seatHeightPrices after migration 0031 (string heights).
-  seatHeightPrices: Array<{ height: string; priceSen: number }> | null;
+  // Backend returns an array of { height, priceSen, tier? } objects — tier
+  // is preserved through JSON round-trip even though the legacy server type
+  // didn't model it.
+  seatHeightPrices: SeatHeightEntry[] | null;
   notes: string | null;
   hasPendingPriceChange?: boolean;
+  masterPendingEffectiveFrom?: string | null;
 };
 
 type PriceHistoryRow = {
   id: string;
   basePriceSen: number | null;
   price1Sen: number | null;
-  seatHeightPrices: Array<{ height: string; priceSen: number }>;
+  seatHeightPrices: SeatHeightEntry[];
   effectiveFrom: string;
   notes: string;
   created_at: string;
@@ -89,6 +107,9 @@ type ProductOption = {
   unitM3?: number | null;
   fabricUsage?: number | null;
   productionTimeMinutes?: number | null;
+  description?: string | null;
+  // Master snapshot copy uses these to seed customer_product_prices rows.
+  seatHeightPrices?: SeatHeightEntry[] | null;
 };
 
 // ---------- State badge colours ----------
@@ -113,15 +134,32 @@ function StateBadge({ state }: { state: string }) {
 // =====================================================================
 // Customer Products Panel — shown inside the expanded-customer detail.
 // Lists SKUs assigned to this customer with per-customer price overrides.
+//
+// UX mirrors the Products page (src/pages/products/index.tsx):
+//   - Same row-per-row table layout per category (BF / Sofa / Accessory),
+//     minus Production Time / Total Min / Fabric (m) / Unit (m³) — the
+//     customer panel is contract-scoped, not factory-scoped.
+//   - Edit / Save / Cancel bulk workflow: every price edit lands in a
+//     local dirtyEdits map; Save opens a modal that asks for an effective
+//     date and dispatches one POST /:cpId/prices per dirty row.
+//   - Calendar icon next to product code opens the per-product history
+//     dialog (CustomerPriceHistoryDialog).
+//   - Pending badge surfaces when a future-dated history row exists.
 // =====================================================================
 function CustomerProductsPanel({ customerId, customerName, customer }: { customerId: string; customerName: string; customer: Customer }) {
   const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CustomerProduct[] }>(
     customerId ? `/api/customer-products?customerId=${customerId}` : null
   );
-  const rows: CustomerProduct[] = useMemo(
+  const serverRows: CustomerProduct[] = useMemo(
     () => (resp?.success ? resp.data ?? [] : Array.isArray(resp) ? (resp as CustomerProduct[]) : []),
     [resp]
   );
+
+  // Local state mirrors the Products page: server snapshot seeds the
+  // displayed rows, and inline edits patch the local copy until Save.
+  const [rows, setRows] = useState<CustomerProduct[]>([]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { setRows(serverRows); }, [serverRows]);
 
   const { data: productsResp } = useCachedJson<{ success?: boolean; data?: ProductOption[] }>("/api/products");
   const allProducts: ProductOption[] = useMemo(
@@ -135,71 +173,120 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   const [_assignQuery, setAssignQuery] = useState("");
   const [assignPicked, setAssignPicked] = useState<Set<string>>(new Set());
   const [assignSaving, setAssignSaving] = useState(false);
+  const [copyingFromMaster, setCopyingFromMaster] = useState(false);
 
-  // Inline edit form state
-  const [editId, setEditId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<{
-    basePriceRm: string;
-    price1Rm: string;
-    seatHeightsJson: string;
-    notes: string;
-    effectiveFrom: string;
-  }>({
-    basePriceRm: "",
-    price1Rm: "",
-    seatHeightsJson: "",
-    notes: "",
-    effectiveFrom: "",
-  });
-  const [editSaving, setEditSaving] = useState(false);
+  // Sofa fabric tier toggle — same shape as Products page so legacy
+  // entries with no `tier` resolve to PRICE_2.
+  const [sofaTier, setSofaTier] = useState<SofaTier>("PRICE_2");
 
-  // Price-history disclosure: history rows keyed by cpId, plus open/loading state.
-  const [historyOpenId, setHistoryOpenId] = useState<string | null>(null);
-  const [historyRows, setHistoryRows] = useState<PriceHistoryRow[]>([]);
-  const [historyLoading, setHistoryLoading] = useState(false);
+  // Per-product price-history dialog. Holds the cp row whose history is
+  // being inspected; null when closed.
+  const [historyForCpId, setHistoryForCpId] = useState<string | null>(null);
+
+  // ---------- Bulk edit state (mirrors Products page dirtyEdits) ----------
+  type DirtyCustomerEdit = {
+    customerProductId: string;
+    basePriceSen?: number;
+    price1Sen?: number | null;
+    // Full updated seatHeightPrices snapshot; the bulk POST sends this
+    // so the new history row carries the complete picture and doesn't
+    // accidentally clear cells that were never touched.
+    seatHeightPrices?: SeatHeightEntry[];
+  };
+  const [dirtyEdits, setDirtyEdits] = useState<Map<string, DirtyCustomerEdit>>(new Map());
+  const [editMode, setEditMode] = useState(false);
+  const [showBulkSaveDialog, setShowBulkSaveDialog] = useState(false);
+  const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkEffectiveFrom, setBulkEffectiveFrom] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [bulkNotes, setBulkNotes] = useState("");
+
+  // Inline-cell editing focus state (which cell is currently in input mode).
+  const [editingBaseId, setEditingBaseId] = useState<string | null>(null);
+  const [baseInput, setBaseInput] = useState("");
+  const [editingPrice1Id, setEditingPrice1Id] = useState<string | null>(null);
+  const [price1Input, setPrice1Input] = useState("");
+  // Sofa cell editing — composite key "<cpId>__<height>__<tier>".
+  const [editingSeatKey, setEditingSeatKey] = useState<string | null>(null);
+  const [seatInput, setSeatInput] = useState("");
 
   const todayIso = () => new Date().toISOString().slice(0, 10);
 
-  const loadHistory = async (cpId: string) => {
-    setHistoryLoading(true);
-    try {
-      const res = await fetch(`/api/customer-products/${cpId}/price-history`);
-      const j = (await res.json().catch(() => ({}))) as {
-        success?: boolean;
-        data?: PriceHistoryRow[];
-      };
-      setHistoryRows(j.success ? j.data ?? [] : []);
-    } finally {
-      setHistoryLoading(false);
-    }
-  };
-
-  const toggleHistory = async (cpId: string) => {
-    if (historyOpenId === cpId) {
-      setHistoryOpenId(null);
-      setHistoryRows([]);
-      return;
-    }
-    setHistoryOpenId(cpId);
-    await loadHistory(cpId);
-  };
-
-  const deleteHistoryRow = async (rowId: string, cpId: string) => {
-    if (!confirm("Delete this price history entry?")) return;
-    const res = await fetch(`/api/customer-products/price-row/${rowId}`, {
-      method: "DELETE",
+  function recordDirty(cpId: string, patch: Partial<DirtyCustomerEdit>) {
+    setDirtyEdits((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(cpId) ?? { customerProductId: cpId };
+      next.set(cpId, { ...existing, ...patch });
+      return next;
     });
-    if (!res.ok) {
-      const j = await res.json().catch(() => ({}));
-      alert((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
+  }
+
+  function discardDirty() {
+    setDirtyEdits(new Map());
+    setEditMode(false);
+    setBulkNotes("");
+    // Reload from server to undo optimistic local edits.
+    invalidateCache(`/api/customer-products?customerId=${customerId}`);
+    refresh();
+  }
+
+  const isSeatCellDirty = (cpId: string, height: string, tier: SofaTier) => {
+    const d = dirtyEdits.get(cpId);
+    if (!d || !d.seatHeightPrices) return false;
+    return d.seatHeightPrices.some(
+      (s) => s.height === height && custEntryTier(s.tier) === tier,
+    );
+  };
+
+  // Bulk save — one POST /api/customer-products/:cpId/prices per dirty row.
+  async function bulkSave() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(bulkEffectiveFrom)) {
+      alert("Effective date must be YYYY-MM-DD.");
       return;
     }
-    // Only this customer's products changed — per-URL invalidation leaves
-    // other customers' cached product lists alone.
-    invalidateCache(`/api/customer-products?customerId=${customerId}`);
-    await loadHistory(cpId);
-    refresh();
-  };
+    if (dirtyEdits.size === 0) return;
+    setBulkSaving(true);
+    try {
+      const requests = Array.from(dirtyEdits.values()).map((d) => {
+        const cur = rows.find((r) => r.id === d.customerProductId);
+        // Compose a complete snapshot — fields the user didn't edit get
+        // current values so the history row is self-contained.
+        const body: Record<string, unknown> = {
+          effectiveFrom: bulkEffectiveFrom,
+          notes: bulkNotes || null,
+          basePriceSen:
+            d.basePriceSen !== undefined ? d.basePriceSen : (cur?.basePriceSen ?? null),
+          price1Sen:
+            d.price1Sen !== undefined ? d.price1Sen : (cur?.price1Sen ?? null),
+          seatHeightPrices:
+            d.seatHeightPrices !== undefined
+              ? d.seatHeightPrices
+              : (cur?.seatHeightPrices ?? null),
+        };
+        return fetch(`/api/customer-products/${d.customerProductId}/prices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then((r) => ({ ok: r.ok, status: r.status, cpId: d.customerProductId }));
+      });
+      const results = await Promise.all(requests);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        alert(
+          `${failed.length} of ${results.length} updates failed. The successful ones were saved.`,
+        );
+      }
+      setDirtyEdits(new Map());
+      setShowBulkSaveDialog(false);
+      setEditMode(false);
+      setBulkNotes("");
+      invalidateCache(`/api/customer-products?customerId=${customerId}`);
+      refresh();
+    } finally {
+      setBulkSaving(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -228,70 +315,6 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   }, [rows]);
 
   const assignedIds = useMemo(() => new Set(rows.map((r) => r.productId)), [rows]);
-
-  const openEdit = (row: CustomerProduct) => {
-    setEditId(row.id);
-    setEditForm({
-      basePriceRm: (row.basePriceSen / 100).toFixed(2),
-      price1Rm: row.price1Sen != null ? (row.price1Sen / 100).toFixed(2) : "",
-      seatHeightsJson: row.seatHeightPrices ? JSON.stringify(row.seatHeightPrices) : "",
-      notes: row.notes ?? "",
-      effectiveFrom: todayIso(),
-    });
-  };
-
-  // Save now appends a new price-history row (POST /:cpId/prices). The legacy
-  // override columns on customer_products stay untouched — the history table is
-  // the new authoritative source for price resolution.
-  const saveEdit = async () => {
-    if (!editId) return;
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(editForm.effectiveFrom)) {
-      alert("Effective From date is required (YYYY-MM-DD).");
-      return;
-    }
-    setEditSaving(true);
-    try {
-      const body: Record<string, unknown> = {
-        effectiveFrom: editForm.effectiveFrom,
-      };
-      if (editForm.basePriceRm !== "")
-        body.basePriceSen = Math.round(Number(editForm.basePriceRm) * 100);
-      if (editForm.price1Rm !== "")
-        body.price1Sen = Math.round(Number(editForm.price1Rm) * 100);
-      else body.price1Sen = null;
-      if (editForm.seatHeightsJson.trim()) {
-        try {
-          body.seatHeightPrices = JSON.parse(editForm.seatHeightsJson);
-        } catch {
-          alert(
-            'Seat-height prices must be valid JSON (e.g. [{"height":"24","priceSen":51700}]).',
-          );
-          setEditSaving(false);
-          return;
-        }
-      } else {
-        body.seatHeightPrices = null;
-      }
-      body.notes = editForm.notes || null;
-      const res = await fetch(`/api/customer-products/${editId}/prices`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const j = await res.json().catch(() => ({}));
-        alert((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
-        return;
-      }
-      invalidateCache(`/api/customer-products?customerId=${customerId}`);
-      refresh();
-      // Refresh open history panel if this row is the one being inspected.
-      if (historyOpenId === editId) await loadHistory(editId);
-      setEditId(null);
-    } finally {
-      setEditSaving(false);
-    }
-  };
 
   const handleRemove = async (row: CustomerProduct) => {
     if (!confirm(`Remove "${row.productCode} ${row.productName}" from ${customerName}?`)) return;
@@ -338,11 +361,40 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
     }
   };
 
-  const formatSeatHeights = (sh: Array<{ height: string; priceSen: number }> | null) => {
-    if (!sh || sh.length === 0) return "—";
-    return sh
-      .map((t) => `${t.height}":${(t.priceSen / 100).toFixed(0)}`)
-      .join(" ");
+  // Phase-2 snapshot: assign every unassigned master SKU to this customer
+  // and stamp today's master price into customer_product_prices in one
+  // transactional server call. Pure snapshot — no inheritance after this
+  // unless the user re-runs the action.
+  const handleCopyFromMaster = async () => {
+    const unassignedCount = allProducts.filter((p) => !assignedIds.has(p.id)).length;
+    if (unassignedCount === 0) {
+      alert("All master SKUs are already assigned to this customer.");
+      return;
+    }
+    if (
+      !confirm(
+        `Copy current Master prices for ${unassignedCount} unassigned product${unassignedCount === 1 ? "" : "s"} to ${customerName}? This will snapshot today's master price for each product.`,
+      )
+    ) {
+      return;
+    }
+    setCopyingFromMaster(true);
+    try {
+      const res = await fetch("/api/customer-products/copy-from-master", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId, effectiveFrom: todayIso() }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert((j as { error?: string }).error || `Copy from master failed (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCache(`/api/customer-products?customerId=${customerId}`);
+      refresh();
+    } finally {
+      setCopyingFromMaster(false);
+    }
   };
 
   // Exports the full assignment list (ignores the category tab + search filter)
@@ -391,6 +443,27 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
     doc.save(`Quotation-${safeName}-${yyyymmdd}.pdf`);
   };
 
+  // ---------- Layout helpers (mirror Products page) ----------
+  const isSofaView = categoryTab === "SOFA";
+  const isAccessoryView = categoryTab === "ACCESSORY";
+  // Column count (used as colSpan when rendering the table-level wrapper).
+  // BEDFRAME / ALL: Code | Description | Category | Size | Price 2 | Price 1 | Actions = 7
+  // SOFA:           Code | Description | Model | 24 | 28 | 30 | 32 | 35 | Actions = 9
+  // ACCESSORY:      Code | Description | Base Price | Actions = 4
+  const colSpanN = isSofaView ? 9 : isAccessoryView ? 4 : 7;
+  const gridCols = isSofaView
+    ? "1.3fr 1.5fr 0.7fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.7fr"
+    : isAccessoryView
+    ? "1.3fr 2.5fr 1fr 0.7fr"
+    : "1.3fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr";
+  const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
+
+  // The cp row whose history dialog is open, looked up against the current rows array.
+  const historyTargetRow = useMemo(
+    () => (historyForCpId ? rows.find((r) => r.id === historyForCpId) ?? null : null),
+    [historyForCpId, rows],
+  );
+
   return (
     <Card className="border-[#6B5C32] border-2">
       <CardHeader className="pb-3">
@@ -399,10 +472,23 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             <Package className="h-5 w-5 text-[#6B5C32]" />
             Customer Products — {customerName} ({rows.length})
           </CardTitle>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <Button variant="outline" size="sm" disabled={rows.length === 0} onClick={handleExportQuotation}>
               <FileDown className="h-4 w-4 mr-1" />
               Export Quotation PDF
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={copyingFromMaster}
+              onClick={handleCopyFromMaster}
+            >
+              {copyingFromMaster ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4 mr-1" />
+              )}
+              Copy from Master Listing
             </Button>
             <Button variant="primary" size="sm" onClick={() => setShowAssign(true)}>
               <Plus className="h-4 w-4 mr-1" />
@@ -425,7 +511,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             </button>
           ))}
         </div>
-        <div className="mt-2">
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
           <div className="relative w-48">
             <Search className="h-3.5 w-3.5 text-[#9CA3AF] absolute left-2.5 top-1/2 -translate-y-1/2" />
             <Input
@@ -435,6 +521,77 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
               className="h-8 pl-8"
             />
           </div>
+          {/* Edit / Save / Cancel — bulk price-edit gate, mirrors the
+              Products page. Cells are click-to-edit only while editMode is
+              on; Save opens a modal that asks for the effective date and
+              dispatches one customer_product_prices row per dirty cp row. */}
+          {!editMode ? (
+            <button
+              onClick={() => setEditMode(true)}
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6] transition-colors"
+            >
+              Edit Prices
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => {
+                  if (dirtyEdits.size === 0) {
+                    setEditMode(false);
+                    return;
+                  }
+                  setShowBulkSaveDialog(true);
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  dirtyEdits.size > 0
+                    ? "bg-[#6B5C32] text-white hover:bg-[#5A4E2A]"
+                    : "bg-white text-[#9CA3AF] border border-[#E2DDD8] cursor-not-allowed"
+                }`}
+                disabled={dirtyEdits.size === 0}
+              >
+                Save{dirtyEdits.size > 0 ? ` (${dirtyEdits.size})` : ""}
+              </button>
+              <button
+                onClick={() => {
+                  if (
+                    dirtyEdits.size > 0 &&
+                    !confirm(
+                      `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
+                    )
+                  ) {
+                    return;
+                  }
+                  discardDirty();
+                }}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6] transition-colors"
+              >
+                Cancel
+              </button>
+            </>
+          )}
+          {/* Sofa fabric-tier toggle — only meaningful on the Sofa tab.
+              Mirrors the Products page segmented control. */}
+          {isSofaView && (
+            <>
+              <div className="w-px h-5 bg-[#E2DDD8] mx-1" />
+              <span className="text-[11px] text-[#6B7280] uppercase tracking-wide">Tier</span>
+              <div className="inline-flex rounded-md border border-[#E2DDD8] overflow-hidden">
+                {CUST_SOFA_TIERS.map((t) => (
+                  <button
+                    key={t.value}
+                    onClick={() => setSofaTier(t.value)}
+                    className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                      sofaTier === t.value
+                        ? "bg-[#6B5C32] text-white"
+                        : "bg-white text-[#6B7280] hover:bg-[#F3F4F6]"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -451,6 +608,18 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
           onSubmit={submitAssign}
         />
 
+        {/* Per-product price-history dialog (calendar icon next to code). */}
+        {historyTargetRow && (
+          <CustomerPriceHistoryDialog
+            cp={historyTargetRow}
+            onClose={() => setHistoryForCpId(null)}
+            onChanged={() => {
+              invalidateCache(`/api/customer-products?customerId=${customerId}`);
+              refresh();
+            }}
+          />
+        )}
+
         {rows.length === 0 ? (
           <div className="py-8 text-center space-y-3">
             <p className="text-sm text-[#9CA3AF]">
@@ -461,226 +630,683 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             </Button>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                  <th className="text-left font-medium py-2 px-2">Code</th>
-                  <th className="text-left font-medium py-2 px-2">Name</th>
-                  <th className="text-left font-medium py-2 px-2">Category</th>
-                  <th className="text-right font-medium py-2 px-2">Base Price</th>
-                  <th className="text-right font-medium py-2 px-2">Price 1</th>
-                  <th className="text-left font-medium py-2 px-2">Seat Heights</th>
-                  <th className="text-right font-medium py-2 px-2">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((row) => (
-                  editId === row.id ? (
-                    <tr key={row.id} className="border-b border-[#E2DDD8] bg-[#FAF9F7]">
-                      <td colSpan={7} className="p-3">
-                        <div className="space-y-3">
-                          <div className="flex items-center gap-2">
-                            <span className="doc-number text-xs text-[#1F1D1B]">{row.productCode}</span>
-                            <span className="text-xs text-[#6B7280]">{row.productName}</span>
-                            <Badge className="text-[10px]">{row.category}</Badge>
-                          </div>
-                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                            <div>
-                              <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
-                              <Input
-                                type="number"
-                                step="0.01"
-                                value={editForm.basePriceRm}
-                                onChange={(e) => setEditForm((f) => ({ ...f, basePriceRm: e.target.value }))}
-                                className="h-8"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM) — optional</label>
-                              <Input
-                                type="number"
-                                step="0.01"
-                                value={editForm.price1Rm}
-                                onChange={(e) => setEditForm((f) => ({ ...f, price1Rm: e.target.value }))}
-                                placeholder="leave blank to clear"
-                                className="h-8"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-xs text-[#6B7280] mb-1">Effective From</label>
-                              <Input
-                                type="date"
-                                value={editForm.effectiveFrom}
-                                onChange={(e) => setEditForm((f) => ({ ...f, effectiveFrom: e.target.value }))}
-                                className="h-8"
-                              />
-                            </div>
-                            {row.category === "SOFA" && (
-                              <div className="sm:col-span-3">
-                                <label className="block text-xs text-[#6B7280] mb-1">
-                                  Seat-Height Prices (JSON) — sofa only
-                                </label>
-                                <Input
-                                  value={editForm.seatHeightsJson}
-                                  onChange={(e) => setEditForm((f) => ({ ...f, seatHeightsJson: e.target.value }))}
-                                  placeholder='e.g. [{"height":"24","priceSen":51700}]'
-                                  className="h-8"
-                                />
-                              </div>
-                            )}
-                            <div className="sm:col-span-3">
-                              <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
-                              <Input
-                                value={editForm.notes}
-                                onChange={(e) => setEditForm((f) => ({ ...f, notes: e.target.value }))}
-                                className="h-8"
-                              />
-                            </div>
-                          </div>
-                          <div className="flex items-center justify-between gap-2">
-                            <button
-                              type="button"
-                              onClick={() => toggleHistory(row.id)}
-                              className="text-xs text-[#6B5C32] underline hover:text-[#1F1D1B]"
-                            >
-                              {historyOpenId === row.id ? "Hide price history" : "Price history"}
-                            </button>
-                            <div className="flex justify-end gap-2">
-                              <Button variant="outline" size="sm" onClick={() => setEditId(null)}>Cancel</Button>
-                              <Button variant="primary" size="sm" disabled={editSaving} onClick={saveEdit}>
-                                {editSaving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : null}
-                                Save
-                              </Button>
-                            </div>
-                          </div>
-                          {historyOpenId === row.id && (
-                            <div className="mt-2 border border-[#E2DDD8] rounded-md bg-white">
-                              <div className="px-3 py-2 border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-                                Price history ({historyRows.length})
-                              </div>
-                              {historyLoading ? (
-                                <div className="p-4 text-xs text-[#9CA3AF] flex items-center gap-2">
-                                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
-                                </div>
-                              ) : historyRows.length === 0 ? (
-                                <div className="p-4 text-xs text-[#9CA3AF]">No history yet.</div>
-                              ) : (
-                                <table className="w-full text-xs">
-                                  <thead>
-                                    <tr className="bg-[#FAF9F7] text-[#6B7280]">
-                                      <th className="text-left py-1.5 px-2 font-medium">Effective From</th>
-                                      <th className="text-right py-1.5 px-2 font-medium">Base (RM)</th>
-                                      <th className="text-right py-1.5 px-2 font-medium">Price 1 (RM)</th>
-                                      <th className="text-left py-1.5 px-2 font-medium">Seat Heights</th>
-                                      <th className="text-left py-1.5 px-2 font-medium">Notes</th>
-                                      <th className="text-right py-1.5 px-2 font-medium">Status</th>
-                                      <th className="text-right py-1.5 px-2 font-medium"></th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {historyRows.map((h) => {
-                                      const isPending = h.effectiveFrom > todayIso();
-                                      return (
-                                        <tr key={h.id} className="border-t border-[#E2DDD8]">
-                                          <td className="py-1.5 px-2 doc-number">{h.effectiveFrom}</td>
-                                          <td className="py-1.5 px-2 text-right tabular-nums">
-                                            {h.basePriceSen != null ? (h.basePriceSen / 100).toFixed(2) : "—"}
-                                          </td>
-                                          <td className="py-1.5 px-2 text-right tabular-nums">
-                                            {h.price1Sen != null ? (h.price1Sen / 100).toFixed(2) : "—"}
-                                          </td>
-                                          <td className="py-1.5 px-2 text-[#6B7280]">
-                                            {formatSeatHeights(h.seatHeightPrices?.length ? h.seatHeightPrices : null)}
-                                          </td>
-                                          <td className="py-1.5 px-2 text-[#6B7280]">{h.notes || "—"}</td>
-                                          <td className="py-1.5 px-2 text-right">
-                                            {isPending ? (
-                                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]">
-                                                Pending
-                                              </span>
-                                            ) : (
-                                              <span className="text-[10px] text-[#9CA3AF]">Active</span>
-                                            )}
-                                          </td>
-                                          <td className="py-1.5 px-2 text-right">
-                                            <button
-                                              onClick={() => deleteHistoryRow(h.id, row.id)}
-                                              className="p-1 rounded hover:bg-[#F9E1DA]"
-                                              title="Delete history row"
-                                            >
-                                              <Trash2 className="h-3 w-3 text-[#9A3A2D]" />
-                                            </button>
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
-                                </table>
+          <div className="bg-white rounded-lg border border-[#E2DDD8] overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-[#E2DDD8]">
+                <thead className="bg-[#F9FAFB]">
+                  <tr>
+                    <th colSpan={colSpanN} className="p-0">
+                      <div className="grid" style={{ gridTemplateColumns: gridCols }}>
+                        <div className={`${thCls} text-left flex items-center gap-1.5`}>
+                          <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
+                          Product Code
+                        </div>
+                        <div className={`${thCls} text-left`}>Description</div>
+                        {isSofaView ? (
+                          <>
+                            <div className={`${thCls} text-left`}>Model</div>
+                            <div className={`${thCls} text-right`}>24</div>
+                            <div className={`${thCls} text-right`}>28</div>
+                            <div className={`${thCls} text-right`}>30</div>
+                            <div className={`${thCls} text-right`}>32</div>
+                            <div className={`${thCls} text-right`}>35</div>
+                            <div className={`${thCls} text-right`}>Actions</div>
+                          </>
+                        ) : isAccessoryView ? (
+                          <>
+                            <div className={`${thCls} text-right`}>Base Price</div>
+                            <div className={`${thCls} text-right`}>Actions</div>
+                          </>
+                        ) : (
+                          <>
+                            <div className={`${thCls} text-left`}>Category</div>
+                            <div className={`${thCls} text-left`}>Size</div>
+                            <div className={`${thCls} text-right`}>Price 2</div>
+                            <div className={`${thCls} text-right`}>Price 1</div>
+                            <div className={`${thCls} text-right`}>Actions</div>
+                          </>
+                        )}
+                      </div>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#E2DDD8]">
+                  {filtered.map((row) => {
+                    const productMaster = allProducts.find((p) => p.id === row.productId);
+                    const description = productMaster?.description ?? "";
+                    const baseModel = productMaster?.baseModel ?? "";
+                    const sizeLabel = productMaster?.sizeLabel ?? "";
+                    const isEditingBase = editingBaseId === row.id;
+                    const isEditingP1 = editingPrice1Id === row.id;
+                    const dirty = dirtyEdits.get(row.id);
+                    const baseDirty = dirty?.basePriceSen !== undefined;
+                    const p1Dirty = dirty?.price1Sen !== undefined;
+
+                    return (
+                      <tr key={row.id} className="group">
+                        <td colSpan={colSpanN} className="p-0">
+                          <div
+                            className="grid hover:bg-[#FAF9F7] transition-colors"
+                            style={{ gridTemplateColumns: gridCols }}
+                          >
+                            {/* Code + calendar icon + Pending badge */}
+                            <div className="px-3 py-1.5 flex items-center gap-1.5">
+                              <span className="w-3.5 h-3.5 flex-shrink-0" aria-hidden="true" />
+                              <span className="text-xs font-mono font-medium text-[#111827] whitespace-nowrap">
+                                {row.productCode}
+                              </span>
+                              <button
+                                type="button"
+                                title="View / schedule customer price history"
+                                onClick={() => setHistoryForCpId(row.id)}
+                                className={`p-1 rounded flex-shrink-0 ${
+                                  row.hasPendingPriceChange
+                                    ? "text-[#B8601A] hover:bg-[#FBE4CE]"
+                                    : "text-[#9CA3AF] hover:text-[#6B5C32] hover:bg-[#F4F0E8]"
+                                }`}
+                              >
+                                <Calendar className="h-3.5 w-3.5" />
+                              </button>
+                              {row.hasPendingPriceChange && (
+                                <span
+                                  title="A future-dated price change is queued for this customer"
+                                  className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]"
+                                >
+                                  Pending
+                                </span>
                               )}
                             </div>
-                          )}
-                        </div>
+                            {/* Description */}
+                            <div className="px-3 py-1.5 min-w-0">
+                              <span className="text-xs text-[#111827] truncate block">{row.productName}</span>
+                              {description && (
+                                <span className="block text-[11px] text-[#9CA3AF] truncate">{description}</span>
+                              )}
+                            </div>
+
+                            {isSofaView ? (
+                              <>
+                                {/* Model */}
+                                <div className="px-3 py-1.5 text-sm text-[#111827]">{baseModel || "—"}</div>
+                                {/* 5 seat-height columns, tier-aware */}
+                                {(['24"', '28"', '30"', '32"', '35"'] as const).map((h) => {
+                                  const hNum = h.replace('"', '');
+                                  const norm = (v: unknown) => String(v ?? "").replace('"', '').trim();
+                                  const sh = (row.seatHeightPrices || []).find(
+                                    (s) => norm(s.height) === hNum && custEntryTier(s.tier) === sofaTier,
+                                  );
+                                  const editKey = `${row.id}__${h}__${sofaTier}`;
+                                  const isEditingThisCell = editingSeatKey === editKey;
+                                  return (
+                                    <div key={h} className="px-3 py-1.5 text-right">
+                                      {isEditingThisCell ? (
+                                        <input
+                                          autoFocus
+                                          type="number"
+                                          step="0.01"
+                                          value={seatInput}
+                                          onChange={(e) => setSeatInput(e.target.value)}
+                                          onBlur={() => {
+                                            const val = Math.round(parseFloat(seatInput || "0") * 100);
+                                            setEditingSeatKey(null);
+                                            const matches = (s: SeatHeightEntry) =>
+                                              norm(s.height) === hNum && custEntryTier(s.tier) === sofaTier;
+                                            let arr: SeatHeightEntry[] = row.seatHeightPrices || [];
+                                            if (!arr.find(matches)) {
+                                              arr = [...arr, { height: hNum, priceSen: val, tier: sofaTier }];
+                                            }
+                                            const updated = arr.map((s) =>
+                                              matches(s) ? { height: hNum, priceSen: val, tier: sofaTier } : s,
+                                            );
+                                            setRows((prev) =>
+                                              prev.map((r) =>
+                                                r.id === row.id ? { ...r, seatHeightPrices: updated } : r,
+                                              ),
+                                            );
+                                            recordDirty(row.id, { seatHeightPrices: updated });
+                                          }}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                            if (e.key === "Escape") setEditingSeatKey(null);
+                                          }}
+                                          className="w-full text-right text-xs border border-[#6B5C32] rounded px-1 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                        />
+                                      ) : (
+                                        <button
+                                          onClick={() => {
+                                            if (!editMode) return;
+                                            setSeatInput(((sh?.priceSen ?? 0) / 100).toFixed(2));
+                                            setEditingSeatKey(editKey);
+                                          }}
+                                          className={`text-sm tabular-nums ${
+                                            isSeatCellDirty(row.id, hNum, sofaTier)
+                                              ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E] font-semibold"
+                                              : "text-[#111827]"
+                                          } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                        >
+                                          {sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : <span className="text-[#9CA3AF]">-</span>}
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            ) : isAccessoryView ? (
+                              <>
+                                {/* Base Price (editable) */}
+                                <div className="px-3 py-1.5 text-right">
+                                  {isEditingBase ? (
+                                    <input
+                                      autoFocus
+                                      type="number"
+                                      step="0.01"
+                                      value={baseInput}
+                                      onChange={(e) => setBaseInput(e.target.value)}
+                                      onBlur={() => {
+                                        const val = Math.round(parseFloat(baseInput || "0") * 100);
+                                        setEditingBaseId(null);
+                                        setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, basePriceSen: val } : r));
+                                        recordDirty(row.id, { basePriceSen: val });
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                        if (e.key === "Escape") setEditingBaseId(null);
+                                      }}
+                                      className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                    />
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        if (!editMode) return;
+                                        setEditingBaseId(row.id);
+                                        setBaseInput((row.basePriceSen / 100).toFixed(2));
+                                      }}
+                                      className={`text-sm font-medium ${
+                                        baseDirty
+                                          ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                          : "text-[#111827]"
+                                      } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                    >
+                                      {row.basePriceSen > 0 ? formatRM(row.basePriceSen) : <span className="text-[#9CA3AF]">Set price</span>}
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            ) : (
+                              /* BEDFRAME / ALL */
+                              <>
+                                <div className="px-3 py-1.5">
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                                    row.category === "BEDFRAME" ? "bg-[#FAEFCB] text-[#9C6F1E]" :
+                                    row.category === "SOFA" ? "bg-[#E0EDF0] text-[#3E6570]" :
+                                    "bg-[#F3F4F6] text-[#6B7280]"
+                                  }`}>
+                                    {row.category}
+                                  </span>
+                                </div>
+                                <div className="px-3 py-1.5 text-sm text-[#111827]">{sizeLabel || "—"}</div>
+                                {/* Price 2 */}
+                                <div className="px-3 py-1.5 text-right">
+                                  {isEditingBase ? (
+                                    <input
+                                      autoFocus
+                                      type="number"
+                                      step="0.01"
+                                      value={baseInput}
+                                      onChange={(e) => setBaseInput(e.target.value)}
+                                      onBlur={() => {
+                                        const val = Math.round(parseFloat(baseInput || "0") * 100);
+                                        setEditingBaseId(null);
+                                        setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, basePriceSen: val } : r));
+                                        recordDirty(row.id, { basePriceSen: val });
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                        if (e.key === "Escape") setEditingBaseId(null);
+                                      }}
+                                      className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                    />
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        if (!editMode) return;
+                                        setEditingBaseId(row.id);
+                                        setBaseInput((row.basePriceSen / 100).toFixed(2));
+                                      }}
+                                      className={`text-sm font-medium ${
+                                        baseDirty
+                                          ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                          : "text-[#111827]"
+                                      } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                    >
+                                      {row.basePriceSen > 0 ? formatRM(row.basePriceSen) : <span className="text-[#9CA3AF]">Set price</span>}
+                                    </button>
+                                  )}
+                                </div>
+                                {/* Price 1 */}
+                                <div className="px-3 py-1.5 text-right">
+                                  {isEditingP1 ? (
+                                    <input
+                                      autoFocus
+                                      type="number"
+                                      step="0.01"
+                                      value={price1Input}
+                                      onChange={(e) => setPrice1Input(e.target.value)}
+                                      onBlur={() => {
+                                        const val = price1Input.trim() === ""
+                                          ? null
+                                          : Math.round(parseFloat(price1Input) * 100);
+                                        setEditingPrice1Id(null);
+                                        setRows((prev) => prev.map((r) => r.id === row.id ? { ...r, price1Sen: val } : r));
+                                        recordDirty(row.id, { price1Sen: val });
+                                      }}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                        if (e.key === "Escape") setEditingPrice1Id(null);
+                                      }}
+                                      className="w-full text-right text-sm border border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none"
+                                    />
+                                  ) : (
+                                    <button
+                                      onClick={() => {
+                                        if (!editMode) return;
+                                        setEditingPrice1Id(row.id);
+                                        setPrice1Input(row.price1Sen != null ? (row.price1Sen / 100).toFixed(2) : "");
+                                      }}
+                                      className={`text-sm font-medium ${
+                                        p1Dirty
+                                          ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                          : "text-[#111827]"
+                                      } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
+                                    >
+                                      {row.price1Sen != null && row.price1Sen > 0
+                                        ? formatRM(row.price1Sen)
+                                        : <span className="text-[#9CA3AF]">-</span>}
+                                    </button>
+                                  )}
+                                </div>
+                              </>
+                            )}
+                            {/* Actions */}
+                            <div className="px-3 py-1.5 flex justify-end items-center">
+                              <button
+                                onClick={() => handleRemove(row)}
+                                className="p-1.5 rounded hover:bg-[#F9E1DA]"
+                                title="Remove from this customer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5 text-[#9A3A2D]" />
+                              </button>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {filtered.length === 0 && rows.length > 0 && (
+                    <tr>
+                      <td colSpan={colSpanN} className="py-4 text-center text-xs text-[#9CA3AF]">
+                        {categoryTab !== "ALL"
+                          ? "No SKUs in this category"
+                          : `No SKUs match "${query}".`}
                       </td>
                     </tr>
-                  ) : (
-                    <tr key={row.id} className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7]">
-                      <td className="py-2 px-2 doc-number text-xs text-[#1F1D1B]">{row.productCode}</td>
-                      <td className="py-2 px-2 text-[#1F1D1B]">{row.productName}</td>
-                      <td className="py-2 px-2"><Badge className="text-[10px]">{row.category}</Badge></td>
-                      <td className="py-2 px-2 text-right tabular-nums">
-                        <span className="inline-flex items-center gap-1.5">
-                          {formatRM(row.basePriceSen)}
-                          {row.hasPendingPriceChange && (
-                            <span
-                              title="A future-dated price change is queued"
-                              className="inline-flex items-center px-1.5 py-0.5 rounded text-[9px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]"
-                            >
-                              Pending
-                            </span>
-                          )}
-                        </span>
-                      </td>
-                      <td className="py-2 px-2 text-right tabular-nums text-[#6B7280]">
-                        {row.price1Sen != null ? formatRM(row.price1Sen) : "—"}
-                      </td>
-                      <td className="py-2 px-2 text-xs text-[#6B7280]">{formatSeatHeights(row.seatHeightPrices)}</td>
-                      <td className="py-2 px-2 text-right">
-                        <div className="flex justify-end gap-1">
-                          <button
-                            onClick={() => openEdit(row)}
-                            className="p-1.5 rounded hover:bg-[#E2DDD8]"
-                            title="Edit"
-                          >
-                            <Pencil className="h-3.5 w-3.5 text-[#6B5C32]" />
-                          </button>
-                          <button
-                            onClick={() => handleRemove(row)}
-                            className="p-1.5 rounded hover:bg-[#F9E1DA]"
-                            title="Remove"
-                          >
-                            <Trash2 className="h-3.5 w-3.5 text-[#9A3A2D]" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                ))}
-                {filtered.length === 0 && rows.length > 0 && (
-                  <tr>
-                    <td colSpan={7} className="py-4 text-center text-xs text-[#9CA3AF]">
-                      {categoryTab !== "ALL"
-                        ? "No SKUs in this category"
-                        : `No SKUs match "${query}".`}
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="px-4 py-2 bg-[#F9FAFB] border-t border-[#E2DDD8] flex items-center justify-between">
+              <span className="text-xs text-[#6B7280]">
+                Record {filtered.length > 0 ? 1 : 0} of {filtered.length}
+              </span>
+              <span className="text-xs text-[#9CA3AF]">{rows.length} total assigned</span>
+            </div>
           </div>
         )}
       </CardContent>
+
+      {/* Bulk save dialog — surfaces when the user clicks "Save N changes"
+          while in edit mode. Captures the effective date and an optional
+          shared note, then dispatches one customer_product_prices history
+          row per dirty cp row. */}
+      {showBulkSaveDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => !bulkSaving && setShowBulkSaveDialog(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-[90vw] max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b border-[#E2DDD8]">
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">
+                Save {dirtyEdits.size} price change{dirtyEdits.size === 1 ? "" : "s"}
+              </h2>
+              <p className="text-xs text-[#6B7280] mt-1">
+                Pick the date the new prices should take effect. All
+                changes share the same effective date. Affects {customerName} only.
+              </p>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Effective from *</label>
+                <input
+                  type="date"
+                  value={bulkEffectiveFrom}
+                  onChange={(e) => setBulkEffectiveFrom(e.target.value)}
+                  className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                />
+                <p className="text-[10px] text-[#9CA3AF] mt-1">
+                  Past dates allowed (backfill / corrections); future dates show a Pending badge until they take effect.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Notes (optional)</label>
+                <input
+                  type="text"
+                  value={bulkNotes}
+                  onChange={(e) => setBulkNotes(e.target.value)}
+                  placeholder="e.g. Q3 contract renewal"
+                  className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                />
+              </div>
+              <div className="text-xs text-[#6B7280] bg-[#F9FAFB] border border-[#E2DDD8] rounded px-3 py-2 max-h-40 overflow-y-auto">
+                <p className="font-medium text-[#374151] mb-1">
+                  Affecting {dirtyEdits.size} SKU{dirtyEdits.size === 1 ? "" : "s"}:
+                </p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  {Array.from(dirtyEdits.values()).slice(0, 8).map((d) => {
+                    const cur = rows.find((r) => r.id === d.customerProductId);
+                    return (
+                      <li key={d.customerProductId} className="truncate">
+                        {cur ? `${cur.productCode} — ${cur.productName}` : d.customerProductId}
+                      </li>
+                    );
+                  })}
+                  {dirtyEdits.size > 8 && (
+                    <li className="text-[#9CA3AF]">…and {dirtyEdits.size - 8} more</li>
+                  )}
+                </ul>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+              <button
+                onClick={() => !bulkSaving && setShowBulkSaveDialog(false)}
+                disabled={bulkSaving}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void bulkSave()}
+                disabled={bulkSaving || dirtyEdits.size === 0}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] disabled:opacity-50"
+              >
+                {bulkSaving
+                  ? "Saving…"
+                  : `Save ${dirtyEdits.size} change${dirtyEdits.size === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Card>
+  );
+}
+
+// =====================================================================
+// CustomerPriceHistoryDialog — per-customer-per-product price history
+// + new effective-dated row form. Mirrors MasterPriceHistoryDialog but
+// hits /api/customer-products/:cpId/price-history and
+// /api/customer-products/:cpId/prices.
+// =====================================================================
+function CustomerPriceHistoryDialog({
+  cp,
+  onClose,
+  onChanged,
+}: {
+  cp: CustomerProduct;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const [history, setHistory] = useState<PriceHistoryRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const todayIso = () => new Date().toISOString().slice(0, 10);
+  const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
+  const [baseRm, setBaseRm] = useState((cp.basePriceSen / 100).toFixed(2));
+  const [price1Rm, setPrice1Rm] = useState(
+    cp.price1Sen != null ? (cp.price1Sen / 100).toFixed(2) : "",
+  );
+  const [seatJson, setSeatJson] = useState(
+    cp.seatHeightPrices ? JSON.stringify(cp.seatHeightPrices) : "",
+  );
+  const [notes, setNotes] = useState("");
+
+  const isSofa = cp.category === "SOFA";
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/customer-products/${cp.id}/price-history`);
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: PriceHistoryRow[];
+      };
+      setHistory(j.success ? j.data ?? [] : []);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // load() flips loading + history setters; the dialog opens on a
+  // user-driven prop change (cp.id), not a tight render loop, so the
+  // cascading-render concern react-hooks/set-state-in-effect warns about
+  // doesn't apply here. Same pattern as MasterPriceHistoryDialog.
+  /* eslint-disable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
+  useEffect(() => { void load(); }, [cp.id]);
+  /* eslint-enable react-hooks/exhaustive-deps, react-hooks/set-state-in-effect */
+
+  // ESC closes the dialog.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const save = async () => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      alert("Effective From date is required (YYYY-MM-DD).");
+      return;
+    }
+    setSaving(true);
+    try {
+      const body: Record<string, unknown> = { effectiveFrom };
+      body.basePriceSen = baseRm.trim() === "" ? null : Math.round(Number(baseRm) * 100);
+      body.price1Sen = price1Rm.trim() === "" ? null : Math.round(Number(price1Rm) * 100);
+      if (seatJson.trim()) {
+        try {
+          body.seatHeightPrices = JSON.parse(seatJson);
+        } catch {
+          alert('Seat-height prices must be valid JSON (e.g. [{"height":"24","priceSen":51700}]).');
+          setSaving(false);
+          return;
+        }
+      } else {
+        body.seatHeightPrices = null;
+      }
+      body.notes = notes || null;
+      const res = await fetch(`/api/customer-products/${cp.id}/prices`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        alert((j as { error?: string }).error || `Failed to save (HTTP ${res.status})`);
+        return;
+      }
+      onChanged();
+      void load();
+      setNotes("");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteRow = async (rowId: string) => {
+    if (!confirm("Delete this price history entry?")) return;
+    const res = await fetch(`/api/customer-products/price-row/${rowId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      alert((j as { error?: string }).error || `Failed to delete (HTTP ${res.status})`);
+      return;
+    }
+    onChanged();
+    void load();
+  };
+
+  const formatSeatHeights = (sh: SeatHeightEntry[] | null | undefined) => {
+    if (!sh || sh.length === 0) return "—";
+    return sh.map((t) => `${t.height}":${(t.priceSen / 100).toFixed(0)}`).join(" ");
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl w-[90vw] max-w-3xl mx-4 max-h-[85vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <div>
+            <h2 className="text-lg font-semibold text-[#1F1D1B]">
+              Customer Price History — {cp.productCode}
+            </h2>
+            <p className="text-xs text-[#6B7280] mt-0.5">{cp.productName}</p>
+          </div>
+          <button onClick={onClose} className="p-1 rounded hover:bg-[#E2DDD8]" aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
+          {/* New row form */}
+          <div className="bg-[#FAF9F7] border border-[#E2DDD8] rounded-md p-3 space-y-2">
+            <h3 className="text-sm font-semibold text-[#6B5C32]">Schedule new price</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Effective From *</label>
+                <Input type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} className="h-8" />
+              </div>
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
+                <Input type="number" step="0.01" value={baseRm} onChange={(e) => setBaseRm(e.target.value)} className="h-8" />
+              </div>
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM)</label>
+                <Input type="number" step="0.01" value={price1Rm} onChange={(e) => setPrice1Rm(e.target.value)} placeholder="leave blank for none" className="h-8" />
+              </div>
+              {isSofa && (
+                <div className="sm:col-span-3">
+                  <label className="block text-xs text-[#6B7280] mb-1">Seat-Height Prices (JSON)</label>
+                  <Input
+                    value={seatJson}
+                    onChange={(e) => setSeatJson(e.target.value)}
+                    placeholder='[{"height":"24","priceSen":51700,"tier":"PRICE_2"}]'
+                    className="h-8"
+                  />
+                </div>
+              )}
+              <div className="sm:col-span-3">
+                <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
+                <Input value={notes} onChange={(e) => setNotes(e.target.value)} className="h-8" />
+              </div>
+            </div>
+            <div className="flex justify-end">
+              <Button variant="primary" size="sm" disabled={saving} onClick={save}>
+                {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plus className="h-4 w-4 mr-1" />}
+                Save
+              </Button>
+            </div>
+          </div>
+
+          {/* History table */}
+          <div className="border border-[#E2DDD8] rounded-md bg-white">
+            <div className="px-3 py-2 border-b border-[#E2DDD8] text-xs text-[#6B7280]">
+              History ({history.length})
+            </div>
+            {loading ? (
+              <div className="p-4 text-xs text-[#9CA3AF] flex items-center gap-2">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+              </div>
+            ) : history.length === 0 ? (
+              <div className="p-4 text-xs text-[#9CA3AF]">No history yet.</div>
+            ) : (
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-[#FAF9F7] text-[#6B7280]">
+                    <th className="text-left py-1.5 px-2 font-medium">Effective From</th>
+                    <th className="text-right py-1.5 px-2 font-medium">Base (RM)</th>
+                    <th className="text-right py-1.5 px-2 font-medium">Price 1 (RM)</th>
+                    <th className="text-left py-1.5 px-2 font-medium">Seat Heights</th>
+                    <th className="text-left py-1.5 px-2 font-medium">Notes</th>
+                    <th className="text-right py-1.5 px-2 font-medium">Status</th>
+                    <th className="text-right py-1.5 px-2 font-medium"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((h) => {
+                    const isPending = h.effectiveFrom > todayIso();
+                    return (
+                      <tr key={h.id} className="border-t border-[#E2DDD8]">
+                        <td className="py-1.5 px-2 doc-number">{h.effectiveFrom}</td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">
+                          {h.basePriceSen != null ? (h.basePriceSen / 100).toFixed(2) : "—"}
+                        </td>
+                        <td className="py-1.5 px-2 text-right tabular-nums">
+                          {h.price1Sen != null ? (h.price1Sen / 100).toFixed(2) : "—"}
+                        </td>
+                        <td className="py-1.5 px-2 text-[#6B7280]">
+                          {formatSeatHeights(h.seatHeightPrices?.length ? h.seatHeightPrices : null)}
+                        </td>
+                        <td className="py-1.5 px-2 text-[#6B7280]">{h.notes || "—"}</td>
+                        <td className="py-1.5 px-2 text-right">
+                          {isPending ? (
+                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]">
+                              Pending
+                            </span>
+                          ) : (
+                            <span className="text-[10px] text-[#9CA3AF]">Active</span>
+                          )}
+                        </td>
+                        <td className="py-1.5 px-2 text-right">
+                          <button
+                            onClick={() => deleteRow(h.id)}
+                            className="p-1 rounded hover:bg-[#F9E1DA]"
+                            title="Delete history row"
+                          >
+                            <Trash2 className="h-3 w-3 text-[#9A3A2D]" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+        <div className="flex justify-end px-6 py-4 border-t border-[#E2DDD8]">
+          <Button variant="outline" onClick={onClose}>Close</Button>
+        </div>
+      </div>
+    </div>
   );
 }
 

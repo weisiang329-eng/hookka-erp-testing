@@ -735,6 +735,166 @@ app.post("/bulk-assign", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/customer-products/copy-from-master
+//   body: { customerId, productIds?: string[], effectiveFrom?: string }
+//
+// Phase-2 snapshot flow. For every product in productIds (defaults to "all
+// unassigned products for this customer"):
+//   1. Insert a customer_products assignment row (idempotent on UNIQUE).
+//   2. Append a customer_product_prices history row stamped with today's
+//      master price (resolved through resolveProductPriceAsOf so effective-
+//      dated master rows are honoured).
+//
+// Result: the customer's price list is decoupled from future master
+// changes — pure snapshot semantics, mirroring the Products page's bulk
+// save flow on the customer side.
+// ---------------------------------------------------------------------------
+app.post("/copy-from-master", async (c) => {
+  const denied = await requirePermission(c, "customer-products", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const customerId = String(body.customerId ?? "").trim();
+    const effectiveFrom = String(body.effectiveFrom ?? todayIso()).trim();
+    if (!customerId) {
+      return c.json(
+        { success: false, error: "customerId is required" },
+        400,
+      );
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return c.json(
+        { success: false, error: "effectiveFrom must be YYYY-MM-DD" },
+        400,
+      );
+    }
+
+    // Resolve the candidate set. When productIds is missing we snapshot
+    // every product the customer doesn't already have — that's the common
+    // "I just opened a new account" case.
+    let productIds: string[];
+    if (Array.isArray(body.productIds) && body.productIds.length > 0) {
+      productIds = body.productIds.map(String);
+    } else {
+      const allRes = await c.var.DB.prepare(
+        "SELECT id FROM products",
+      ).all<{ id: string }>();
+      const allIds = (allRes.results ?? []).map((r) => r.id);
+      const assignedRes = await c.var.DB.prepare(
+        "SELECT productId FROM customer_products WHERE customerId = ?",
+      )
+        .bind(customerId)
+        .all<{ productId: string }>();
+      const assigned = new Set(
+        (assignedRes.results ?? []).map((r) => r.productId),
+      );
+      productIds = allIds.filter((pid) => !assigned.has(pid));
+    }
+
+    if (productIds.length === 0) {
+      return c.json({
+        success: true,
+        data: { assigned: 0, snapshotted: 0 },
+      });
+    }
+
+    // Step 1: assign the customer_products rows that don't exist yet.
+    const placeholders = productIds.map(() => "?").join(",");
+    const existingRes = await c.var.DB.prepare(
+      `SELECT id, productId FROM customer_products
+        WHERE customerId = ?
+          AND productId IN (${placeholders})`,
+    )
+      .bind(customerId, ...productIds)
+      .all<{ id: string; productId: string }>();
+    const cpIdByProduct = new Map<string, string>();
+    for (const r of existingRes.results ?? []) {
+      cpIdByProduct.set(r.productId, r.id);
+    }
+    const toInsert = productIds.filter((pid) => !cpIdByProduct.has(pid));
+    if (toInsert.length > 0) {
+      const insertStatements = toInsert.map((pid) => {
+        const newCpId = genId();
+        cpIdByProduct.set(pid, newCpId);
+        return c.var.DB.prepare(
+          `INSERT OR IGNORE INTO customer_products
+             (id, customerId, productId)
+           VALUES (?, ?, ?)`,
+        ).bind(newCpId, customerId, pid);
+      });
+      await c.var.DB.batch(insertStatements);
+      // Some INSERTs may have hit the OR IGNORE branch (race vs concurrent
+      // assigns). Re-read the cp ids for everything in toInsert so the
+      // snapshot loop below uses the persisted ids, not the locally
+      // generated ones that never landed.
+      const reread = await c.var.DB.prepare(
+        `SELECT id, productId FROM customer_products
+          WHERE customerId = ?
+            AND productId IN (${toInsert.map(() => "?").join(",")})`,
+      )
+        .bind(customerId, ...toInsert)
+        .all<{ id: string; productId: string }>();
+      for (const r of reread.results ?? []) {
+        cpIdByProduct.set(r.productId, r.id);
+      }
+    }
+
+    // Step 2: snapshot today's master price into customer_product_prices.
+    // Resolves through the same code path the Products page reads from so
+    // an effective-dated master change that's already live (rare but valid)
+    // gets captured instead of the stale products row.
+    const snapshotStatements: D1PreparedStatement[] = [];
+    let snapshotted = 0;
+    for (const pid of productIds) {
+      const cpId = cpIdByProduct.get(pid);
+      if (!cpId) continue;
+      const master = await resolveProductPriceAsOf(
+        c.var.DB,
+        pid,
+        effectiveFrom,
+      );
+      if (!master) continue;
+      const seatJson =
+        master.seatHeightPrices && master.seatHeightPrices.length > 0
+          ? JSON.stringify(master.seatHeightPrices)
+          : null;
+      snapshotStatements.push(
+        c.var.DB.prepare(
+          `INSERT INTO customer_product_prices
+             (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
+              effectiveFrom, notes, createdBy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          genPriceRowId(),
+          cpId,
+          master.basePriceSen,
+          master.price1Sen,
+          seatJson,
+          effectiveFrom,
+          `Snapshot from Master ${effectiveFrom}`,
+          null,
+        ),
+      );
+      snapshotted += 1;
+    }
+    if (snapshotStatements.length > 0) {
+      await c.var.DB.batch(snapshotStatements);
+    }
+
+    return c.json({
+      success: true,
+      data: {
+        assigned: toInsert.length,
+        snapshotted,
+        skippedDuplicates: existingRes.results?.length ?? 0,
+      },
+    });
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/customer-products/price-for/:productId/:customerId
 //
 // Same resolver logic as the products-side endpoint; exposed here too so

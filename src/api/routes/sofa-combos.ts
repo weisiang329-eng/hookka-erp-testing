@@ -46,6 +46,10 @@ type SofaComboRuleRow = {
 
 type JoinedRow = SofaComboRuleRow & { customerName: string | null };
 
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function genId(): string {
   return `scr-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
 }
@@ -290,6 +294,125 @@ app.post("/", async (c) => {
       },
       201,
     );
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/sofa-combos/copy-from-master
+//   body: { customerId, effectiveFrom?: string }
+//
+// Snapshot every company-wide combo rule (customerId IS NULL) into a
+// customer-specific duplicate so the customer's combos can be edited
+// independently of the master. Mirrors the Customer Products / Customer
+// Maintenance copy-from-master pattern Wei Siang asked for.
+//
+// Skips rules that already have a customer-scoped duplicate (same
+// baseModel + componentSizes + fabricTier already exists for this
+// customer) — re-running the action is idempotent. Each new copy
+// inherits the source's pricesByHeight + notes verbatim, with
+// effectiveFrom defaulted to today (or whatever the caller passed).
+// ---------------------------------------------------------------------------
+app.post("/copy-from-master", async (c) => {
+  const denied = await requirePermission(c, "sofa-combos", "create");
+  if (denied) return denied;
+  try {
+    const body = await c.req.json();
+    const customerId = String(body.customerId ?? "").trim();
+    const effectiveFrom = String(body.effectiveFrom ?? todayIso()).trim();
+    if (!customerId) {
+      return c.json(
+        { success: false, error: "customerId is required" },
+        400,
+      );
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return c.json(
+        { success: false, error: "effectiveFrom must be YYYY-MM-DD" },
+        400,
+      );
+    }
+
+    // Master combos = the latest effective row per (baseModel, componentSizes,
+    // fabricTier) where customerId IS NULL. Group + take the most-recent so
+    // the customer doesn't inherit obsolete past pricing.
+    const masterRes = await c.var.DB.prepare(
+      `SELECT id, baseModel, componentSizes, fabricTier, pricesByHeight,
+              effectiveFrom, notes
+         FROM sofa_combo_rules
+        WHERE customerId IS NULL
+        ORDER BY baseModel, componentSizes, fabricTier,
+                 effectiveFrom DESC, created_at DESC`,
+    ).all<{
+      id: string;
+      baseModel: string;
+      componentSizes: string;
+      fabricTier: string;
+      pricesByHeight: string;
+      effectiveFrom: string;
+      notes: string | null;
+    }>();
+    const masterRows = masterRes.results ?? [];
+    const seenKey = new Set<string>();
+    const newest: typeof masterRows = [];
+    for (const r of masterRows) {
+      const k = `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`;
+      if (seenKey.has(k)) continue;
+      seenKey.add(k);
+      newest.push(r);
+    }
+
+    // Existing customer-scoped rules — used to skip duplicates so the
+    // operation is safe to re-run.
+    const existingRes = await c.var.DB.prepare(
+      `SELECT baseModel, componentSizes, fabricTier
+         FROM sofa_combo_rules
+        WHERE customerId = ?`,
+    )
+      .bind(customerId)
+      .all<{ baseModel: string; componentSizes: string; fabricTier: string }>();
+    const existingKeys = new Set(
+      (existingRes.results ?? []).map(
+        (r) => `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`,
+      ),
+    );
+
+    const inserts: D1PreparedStatement[] = [];
+    let copied = 0;
+    let skipped = 0;
+    for (const r of newest) {
+      const k = `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`;
+      if (existingKeys.has(k)) {
+        skipped++;
+        continue;
+      }
+      copied++;
+      inserts.push(
+        c.var.DB.prepare(
+          `INSERT INTO sofa_combo_rules
+             (id, baseModel, componentSizes, fabricTier, pricesByHeight,
+              customerId, effectiveFrom, notes, createdBy)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          genId(),
+          r.baseModel,
+          r.componentSizes,
+          r.fabricTier,
+          r.pricesByHeight,
+          customerId,
+          effectiveFrom,
+          r.notes,
+          null,
+        ),
+      );
+    }
+    if (inserts.length > 0) await c.var.DB.batch(inserts);
+
+    return c.json({
+      success: true,
+      data: { copied, skipped, sourceMasterRules: newest.length },
+    });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);
   }

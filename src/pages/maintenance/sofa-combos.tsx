@@ -265,10 +265,23 @@ export default function SofaCombosPage() {
             date.
           </p>
         </div>
-        <Button variant="primary" onClick={() => setShowCreate(true)}>
-          <Plus className="h-4 w-4" />
-          New Combo
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Bulk seed: clone every company-wide combo into a customer-
+              scoped duplicate so the customer's combos can be edited
+              independently of master. Idempotent — re-running skips
+              already-copied rules. */}
+          <CopyMasterCombosButton
+            customers={customers}
+            onCopied={() => {
+              invalidateCachePrefix("/api/sofa-combos");
+              refreshRules();
+            }}
+          />
+          <Button variant="primary" onClick={() => setShowCreate(true)}>
+            <Plus className="h-4 w-4" />
+            New Combo
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -764,3 +777,105 @@ function CreateComboDialog({
 
 // Type-only: silence unused-import warning for ApiList kept for future surface.
 export type { ApiList };
+
+// ---------------------------------------------------------------------------
+// CopyMasterCombosButton — page-header action that clones every company-
+// wide combo into a customer-scoped duplicate. Customer picker lives in a
+// small inline popover so the page header stays compact.
+// ---------------------------------------------------------------------------
+function CopyMasterCombosButton({
+  customers,
+  onCopied,
+}: {
+  customers: Customer[];
+  onCopied: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  async function handleCopy() {
+    if (!selectedId) return;
+    const target = customers.find((c) => c.id === selectedId);
+    if (
+      !target ||
+      !confirm(
+        `Copy every company-wide combo into ${target.name}? Already-copied combos are skipped (idempotent).`,
+      )
+    ) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch("/api/sofa-combos/copy-from-master", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId: selectedId }),
+      });
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        error?: string;
+        data?: { copied: number; skipped: number };
+      };
+      if (!res.ok || !j.success) {
+        alert(j.error ?? "Failed to copy combos");
+        return;
+      }
+      const d = j.data ?? { copied: 0, skipped: 0 };
+      alert(
+        `Copied ${d.copied} combo${d.copied === 1 ? "" : "s"} to ${target.name}. ${d.skipped} already existed and were skipped.`,
+      );
+      setOpen(false);
+      setSelectedId("");
+      onCopied();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <Button variant="outline" onClick={() => setOpen(true)}>
+        <Layers className="h-4 w-4" />
+        Copy to customer
+      </Button>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2">
+      <select
+        value={selectedId}
+        onChange={(e) => setSelectedId(e.target.value)}
+        className="h-9 rounded-md border border-[#E2DDD8] bg-white px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+      >
+        <option value="">Pick customer…</option>
+        {customers.map((cu) => (
+          <option key={cu.id} value={cu.id}>
+            {cu.name}
+          </option>
+        ))}
+      </select>
+      <Button
+        variant="primary"
+        size="sm"
+        onClick={() => void handleCopy()}
+        disabled={!selectedId || busy}
+      >
+        {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+        Copy
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => {
+          setOpen(false);
+          setSelectedId("");
+        }}
+        disabled={busy}
+      >
+        Cancel
+      </Button>
+    </div>
+  );
+}

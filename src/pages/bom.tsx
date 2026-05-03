@@ -5018,6 +5018,22 @@ function BatchEditMaterialsDialog({
       name: rm.description,
       unit: rm.baseUOM,
       inventoryCode: rm.itemCode,
+      autoDetect: undefined,
+    });
+  }
+
+  // Convert an existing concrete row to "from SO" (autoDetect). Reuses the
+  // same patch shape the per-BOM editor uses so the material's serialized
+  // form ends up identical regardless of which dialog the user clicked
+  // through to author it.
+  function setRowAutoDetect(key: string, kind: "FABRIC" | "LEG") {
+    const patch = autoDetectMaterialPatch(kind);
+    updateRow(key, {
+      autoDetect: patch.autoDetect,
+      code: patch.code ?? "",
+      name: patch.name ?? "",
+      unit: patch.unit ?? "PCS",
+      inventoryCode: patch.inventoryCode,
     });
   }
 
@@ -5044,6 +5060,45 @@ function BatchEditMaterialsDialog({
         name: rm.description,
         unit: rm.baseUOM,
         inventoryCode: rm.itemCode,
+        autoDetect: undefined,
+        qty: 1,
+        initialCode: "",
+        initialName: "",
+        initialUnit: "",
+        initialQty: 0,
+        toDelete: false,
+      };
+      return [...prev.slice(0, idx), newRow, ...prev.slice(idx)];
+    });
+  }
+
+  // Same as addMaterialFromPlaceholder but stamps autoDetect (FABRIC/LEG)
+  // instead of a concrete inventory pick. The qty default is 1 in the
+  // unit the autoDetect kind canonically uses (MTR for fabric, PCS for
+  // leg). User tunes qty + scaling rule in the per-BOM Edit dialog
+  // (qty is intentionally not editable in this batch view).
+  function addAutoDetectFromPlaceholder(
+    placeholderKey: string,
+    kind: "FABRIC" | "LEG",
+  ) {
+    setRows((prev) => {
+      const idx = prev.findIndex((r) => r.rowKey === placeholderKey);
+      if (idx < 0) return prev;
+      const ph = prev[idx];
+      if (!ph.isPlaceholder) return prev;
+      const counter = ++newRowCounterRef.current;
+      const patch = autoDetectMaterialPatch(kind);
+      const newRow: MatRow = {
+        ...ph,
+        rowKey: `${ph.rowKey}~new${counter}`,
+        matIndex: -1,
+        isPlaceholder: false,
+        isNew: true,
+        code: patch.code ?? "",
+        name: patch.name ?? "",
+        unit: patch.unit ?? "PCS",
+        inventoryCode: patch.inventoryCode,
+        autoDetect: patch.autoDetect,
         qty: 1,
         initialCode: "",
         initialName: "",
@@ -5266,14 +5321,20 @@ function BatchEditMaterialsDialog({
           const node = getNode(clone.wipComponents, e.path);
           if (!node || !node.materials || !node.materials[e.matIndex]) continue;
           const m = node.materials[e.matIndex];
-          // Only update material identity (code / name / unit). Qty is
-          // intentionally NOT touched — see SCOPE note at top of dialog.
-          if (!m.autoDetect) {
-            m.code = e.code;
-            m.name = e.name;
-            m.unit = e.unit;
-            if (e.inventoryCode !== undefined) m.inventoryCode = e.inventoryCode;
-          }
+          // Always sync identity (code / name / unit) AND autoDetect from
+          // the row. Two flows hit this:
+          //   1. concrete → concrete (replace material): autoDetect stays
+          //      undefined on both sides, identity rewritten.
+          //   2. concrete → "from SO" autoDetect: row carries autoDetect
+          //      kind + cleared code/inventoryCode + name="Fabric (from
+          //      order)". Stamping autoDetect lets the cascade resolver
+          //      pick up the SO-bound substitution.
+          // Qty is intentionally NOT touched — see SCOPE note at top.
+          m.code = e.code;
+          m.name = e.name;
+          m.unit = e.unit;
+          m.autoDetect = e.autoDetect;
+          m.inventoryCode = e.autoDetect ? undefined : e.inventoryCode;
         }
         for (const e of deletes) {
           const node = getNode(clone.wipComponents, e.path);
@@ -5289,7 +5350,8 @@ function BatchEditMaterialsDialog({
             name: e.name,
             unit: e.unit,
             qty: e.qty,
-            inventoryCode: e.inventoryCode,
+            inventoryCode: e.autoDetect ? undefined : e.inventoryCode,
+            autoDetect: e.autoDetect,
           });
         }
 
@@ -5708,6 +5770,7 @@ function BatchEditMaterialsDialog({
                           value=""
                           materials={rawMaterials}
                           onSelect={(rm) => addMaterialFromPlaceholder(r.rowKey, rm)}
+                          onSelectAutoDetect={(kind) => addAutoDetectFromPlaceholder(r.rowKey, kind)}
                         />
                       </div>
                     ) : r.autoDetect ? (
@@ -5723,6 +5786,7 @@ function BatchEditMaterialsDialog({
                         value={r.code}
                         materials={rawMaterials}
                         onSelect={(rm) => selectMaterialForRow(r.rowKey, rm)}
+                        onSelectAutoDetect={(kind) => setRowAutoDetect(r.rowKey, kind)}
                       />
                     )}
                     <span

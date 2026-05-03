@@ -1842,11 +1842,7 @@ export default function ProductsPage() {
       });
       const json = (await res.json()) as { success?: boolean; error?: string };
       if (!res.ok || !json.success) {
-        toast({
-          variant: "destructive",
-          title: "Save failed",
-          description: json.error || res.statusText,
-        });
+        toast.error(`Save failed: ${json.error || res.statusText}`);
         return false;
       }
       // Patch local state — product row badge updates without a full refetch.
@@ -1858,11 +1854,7 @@ export default function ProductsPage() {
       invalidateCachePrefix("/api/products");
       return true;
     } catch (err) {
-      toast({
-        variant: "destructive",
-        title: "Save failed",
-        description: err instanceof Error ? err.message : String(err),
-      });
+      toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     } finally {
       setVariantSaving(false);

@@ -37,6 +37,10 @@ import {
   MaintenanceConfigHistoryDialog,
   MaintenanceConfigSaveModal,
 } from "./products/MaintenanceConfigHistoryDialog";
+import {
+  SofaComboHistoryDialog,
+  type SofaComboHistoryRule,
+} from "./maintenance/SofaComboHistoryDialog";
 
 type CustomerMutationResponse =
   | { success: true; data: Customer }
@@ -1808,9 +1812,66 @@ type CustSofaComboRule = {
   componentSizes: CustSofaComboSizes;
   fabricTier: "ANY" | "PRICE_1" | "PRICE_2" | "PRICE_3";
   pricesByHeight: Record<string, number>;
+  customerId: string | null;
+  customerName: string | null;
   effectiveFrom: string;
   notes: string;
+  createdAt: string;
+  createdBy: string | null;
 };
+
+// Group key for the per-combo History dialog. Same shape as the
+// maintenance/sofa-combos page so a customer's combos collapse into one
+// card per (baseModel, componentSizes, fabricTier) tuple. customerId is
+// always the panel's own customerId so it's effectively constant here,
+// but we include it for symmetry with the maintenance page's logic.
+function custComboGroupKey(r: CustSofaComboRule): string {
+  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}|${r.customerId ?? ""}`;
+}
+
+function custPickRepresentative(rs: CustSofaComboRule[]): CustSofaComboRule {
+  const today = new Date().toISOString().slice(0, 10);
+  const sorted = rs.slice().sort((a, b) => {
+    if (a.effectiveFrom !== b.effectiveFrom) {
+      return b.effectiveFrom.localeCompare(a.effectiveFrom);
+    }
+    return (b.createdAt ?? "").localeCompare(a.createdAt ?? "");
+  });
+  for (const r of sorted) {
+    if (r.effectiveFrom <= today) return r;
+  }
+  return sorted[0];
+}
+
+type CustComboGroup = {
+  key: string;
+  rules: CustSofaComboRule[];
+  representative: CustSofaComboRule;
+  hasActive: boolean;
+};
+
+function custGroupByCombo(rules: CustSofaComboRule[]): CustComboGroup[] {
+  const today = new Date().toISOString().slice(0, 10);
+  const buckets: Record<string, CustSofaComboRule[]> = {};
+  for (const r of rules) {
+    const k = custComboGroupKey(r);
+    if (!buckets[k]) buckets[k] = [];
+    buckets[k].push(r);
+  }
+  const groups: CustComboGroup[] = Object.entries(buckets).map(([key, rs]) => {
+    const representative = custPickRepresentative(rs);
+    const hasActive = rs.some((r) => r.effectiveFrom <= today);
+    return { key, rules: rs, representative, hasActive };
+  });
+  groups.sort((a, b) => {
+    if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
+    if (a.representative.baseModel !== b.representative.baseModel) {
+      return a.representative.baseModel.localeCompare(b.representative.baseModel);
+    }
+    return a.representative.effectiveFrom.localeCompare(b.representative.effectiveFrom);
+  });
+  return groups;
+}
 
 const CUST_SOFA_SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
 
@@ -1827,6 +1888,13 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   const [copying, setCopying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
   const [collapsed, setCollapsed] = useState(true);
+  const [historyKey, setHistoryKey] = useState<string | null>(null);
+
+  const comboGroups = useMemo(() => custGroupByCombo(rules), [rules]);
+  const historyRules = useMemo<CustSofaComboRule[] | null>(() => {
+    if (!historyKey) return null;
+    return rules.filter((r) => custComboGroupKey(r) === historyKey);
+  }, [rules, historyKey]);
 
   const reload = () => {
     setLoading(true);
@@ -1964,10 +2032,11 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[#F3F4F6]">
-                  {rules.map((r) => {
+                  {comboGroups.map((g) => {
+                    const r = g.representative;
                     const isPending = r.effectiveFrom > new Date().toISOString().slice(0, 10);
                     return (
-                      <tr key={r.id} className="hover:bg-[#FAF9F7]">
+                      <tr key={g.key} className="hover:bg-[#FAF9F7]">
                         <td className="px-3 py-2 font-mono text-[#1F1D1B]">{r.baseModel}</td>
                         <td className="px-3 py-2 text-[#374151]">
                           {renderCustComponentSizes(r.componentSizes)}
@@ -1991,13 +2060,23 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                           )}
                         </td>
                         <td className="px-3 py-2 text-right">
-                          <button
-                            onClick={() => handleDelete(r)}
-                            className="p-1 rounded hover:bg-[#FBE0DC] text-[#9A3A2D]"
-                            title="Delete combo"
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </button>
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              onClick={() => setHistoryKey(g.key)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"
+                              title="View this combo's full effective-dated history"
+                            >
+                              <History className="h-3 w-3" />
+                              History ({g.rules.length})
+                            </button>
+                            <button
+                              onClick={() => handleDelete(r)}
+                              className="p-1 rounded hover:bg-[#FBE0DC] text-[#9A3A2D]"
+                              title="Delete combo"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );
@@ -2008,6 +2087,13 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
           </div>
         )}
       </CardContent>
+      )}
+      {historyRules && historyRules.length > 0 && (
+        <SofaComboHistoryDialog
+          rules={historyRules as unknown as SofaComboHistoryRule[]}
+          onClose={() => setHistoryKey(null)}
+          refresh={reload}
+        />
       )}
     </Card>
   );

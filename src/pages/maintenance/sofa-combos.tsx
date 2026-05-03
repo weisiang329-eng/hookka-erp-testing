@@ -22,8 +22,12 @@ import { Input } from "@/components/ui/input";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { asArray } from "@/lib/safe-json";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { Loader2, Plus, Trash2, X, Tag, Layers } from "lucide-react";
+import { Loader2, Plus, Trash2, X, Tag, Layers, History } from "lucide-react";
 import type { Product, Customer } from "@/types";
+import {
+  SofaComboHistoryDialog,
+  type SofaComboHistoryRule,
+} from "./SofaComboHistoryDialog";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -153,6 +157,67 @@ function groupByBaseModel(rules: SofaComboRule[]): Record<string, SofaComboRule[
   return m;
 }
 
+// Per-combo group key — unique combination of (baseModel, componentSizes,
+// fabricTier, customerId). All rows under the same key form the timeline
+// the History dialog renders. JSON.stringify(componentSizes) only works
+// because the API canonicalises (sorts) the OR-groups before storage, so
+// equivalent shapes hash identically.
+function comboGroupKey(r: SofaComboRule): string {
+  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}|${r.customerId ?? ""}`;
+}
+
+// Pick the row that "represents" a combo group on the card grid. Rule:
+// newest row whose effectiveFrom <= today (Active). If every row is in
+// the future, fall back to the newest Pending row so the card still
+// shows something. Returned indices preserve the input order so callers
+// can derive Past rows by exclusion.
+function pickRepresentativeRule(rules: SofaComboRule[]): SofaComboRule {
+  const today = todayIso();
+  const sorted = rules.slice().sort((a, b) => {
+    if (a.effectiveFrom !== b.effectiveFrom) {
+      return b.effectiveFrom.localeCompare(a.effectiveFrom);
+    }
+    return b.createdAt.localeCompare(a.createdAt);
+  });
+  for (const r of sorted) {
+    if (r.effectiveFrom <= today) return r;
+  }
+  return sorted[0];
+}
+
+type ComboGroup = {
+  key: string;
+  rules: SofaComboRule[]; // all rows in this group, original order
+  representative: SofaComboRule;
+  hasActive: boolean;
+};
+
+// Bucket the flat rules array into per-combo groups, then sort so groups
+// with an Active row come first (alphabetical by baseModel within each
+// bucket) and Pending-only groups follow.
+function groupByCombo(rules: SofaComboRule[]): ComboGroup[] {
+  const today = todayIso();
+  const buckets: Record<string, SofaComboRule[]> = {};
+  for (const r of rules) {
+    const k = comboGroupKey(r);
+    if (!buckets[k]) buckets[k] = [];
+    buckets[k].push(r);
+  }
+  const groups: ComboGroup[] = Object.entries(buckets).map(([key, rs]) => {
+    const representative = pickRepresentativeRule(rs);
+    const hasActive = rs.some((r) => r.effectiveFrom <= today);
+    return { key, rules: rs, representative, hasActive };
+  });
+  groups.sort((a, b) => {
+    if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
+    if (a.representative.baseModel !== b.representative.baseModel) {
+      return a.representative.baseModel.localeCompare(b.representative.baseModel);
+    }
+    return a.representative.effectiveFrom.localeCompare(b.representative.effectiveFrom);
+  });
+  return groups;
+}
+
 // ---------------------------------------------------------------------------
 // Main page
 // ---------------------------------------------------------------------------
@@ -227,7 +292,29 @@ export default function SofaCombosPage() {
     });
   }, [rules, filterBaseModel, filterCustomer]);
 
-  const grouped = useMemo(() => groupByBaseModel(filteredRules), [filteredRules]);
+  // Two-level structure: outer = baseModel section, inner = per-combo
+  // groups. Pending-only combos sink to the bottom of each baseModel
+  // section. This is the bridge between the current "card per rule" UX
+  // and the new "card per combo, history dialog underneath" UX.
+  const groupedByBase = useMemo(
+    () => groupByBaseModel(filteredRules),
+    [filteredRules],
+  );
+  const combosByBase = useMemo(() => {
+    const m: Record<string, ComboGroup[]> = {};
+    for (const [bm, rs] of Object.entries(groupedByBase)) {
+      m[bm] = groupByCombo(rs);
+    }
+    return m;
+  }, [groupedByBase]);
+
+  // History dialog: open by group key so the dialog re-derives its rules
+  // list from the freshly-fetched data after each save/delete.
+  const [historyKey, setHistoryKey] = useState<string | null>(null);
+  const historyRules = useMemo<SofaComboRule[] | null>(() => {
+    if (!historyKey) return null;
+    return rules.filter((r) => comboGroupKey(r) === historyKey);
+  }, [rules, historyKey]);
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this combo rule? The history of past rules is preserved by their dates."))
@@ -322,7 +409,7 @@ export default function SofaCombosPage() {
       </Card>
 
       {/* Card grid */}
-      {Object.keys(grouped).length === 0 ? (
+      {Object.keys(combosByBase).length === 0 ? (
         <Card>
           <CardContent className="p-10 text-center text-sm text-[#9CA3AF]">
             No combo rules yet. Click "New Combo" to add one.
@@ -330,7 +417,7 @@ export default function SofaCombosPage() {
         </Card>
       ) : (
         <div className="space-y-6">
-          {Object.entries(grouped).map(([baseModel, group]) => (
+          {Object.entries(combosByBase).map(([baseModel, groups]) => (
             <div key={baseModel} className="space-y-3">
               <div className="flex items-center gap-2">
                 <Layers className="h-4 w-4 text-[#6B5C32]" />
@@ -338,21 +425,35 @@ export default function SofaCombosPage() {
                   {baseModel}
                 </h2>
                 <span className="text-xs text-[#9CA3AF]">
-                  ({group.length} rule{group.length === 1 ? "" : "s"})
+                  ({groups.length} combo{groups.length === 1 ? "" : "s"})
                 </span>
               </div>
               <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                {group.map((rule) => (
+                {groups.map((g) => (
                   <ComboCard
-                    key={rule.id}
-                    rule={rule}
-                    onDelete={() => handleDelete(rule.id)}
+                    key={g.key}
+                    rule={g.representative}
+                    historyCount={g.rules.length}
+                    onDelete={() => handleDelete(g.representative.id)}
+                    onOpenHistory={() => setHistoryKey(g.key)}
                   />
                 ))}
               </div>
             </div>
           ))}
         </div>
+      )}
+
+      {/* Per-combo history dialog */}
+      {historyRules && historyRules.length > 0 && (
+        <SofaComboHistoryDialog
+          rules={historyRules as unknown as SofaComboHistoryRule[]}
+          onClose={() => setHistoryKey(null)}
+          refresh={() => {
+            invalidateCachePrefix("/api/sofa-combos");
+            refreshRules();
+          }}
+        />
       )}
 
       {/* Create dialog */}
@@ -378,10 +479,14 @@ export default function SofaCombosPage() {
 // ---------------------------------------------------------------------------
 function ComboCard({
   rule,
+  historyCount,
   onDelete,
+  onOpenHistory,
 }: {
   rule: SofaComboRule;
+  historyCount: number;
   onDelete: () => void;
+  onOpenHistory: () => void;
 }) {
   return (
     <Card>
@@ -427,9 +532,19 @@ function ComboCard({
             );
           })}
         </div>
-        <div className="flex items-center justify-between text-xs text-[#6B7280]">
+        <div className="flex items-center justify-between text-xs text-[#6B7280] gap-2 flex-wrap">
           <span>Effective {formatDate(rule.effectiveFrom)}</span>
-          {statusBadge(rule.effectiveFrom)}
+          <div className="flex items-center gap-2">
+            {statusBadge(rule.effectiveFrom)}
+            <button
+              onClick={onOpenHistory}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"
+              title="View this combo's full effective-dated history"
+            >
+              <History className="h-3 w-3" />
+              History ({historyCount})
+            </button>
+          </div>
         </div>
         {rule.notes ? (
           <p className="text-xs text-[#6B7280] italic">{rule.notes}</p>

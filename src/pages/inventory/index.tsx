@@ -466,32 +466,35 @@ function deriveWIPFromPO(
           card.wipType ||
           (wipKey.includes("::") ? wipKey.split("::")[2] || "" : wipKey) ||
           "";
-        // For Fab Cut we compute the condensed WIP label on the fly from
-        // PO fields so the Inventory column matches the Production page's
-        // `fabCutWIP` helper (src/pages/production/index.tsx ~L1288) —
-        // shape: `{product} | ({size}) | ({totalH}) | {fabric} | (FC)`
-        // with the total-height segment omitted when no BF heights exist.
-        // Sofa consumption math relies on this code equalling the Fab Cut
-        // wipLabel so stock codes line up downstream.
+        // For Fab Cut we prefer the JC's stored wipLabel (Option C carries
+        // the merged form e.g. "5535-2A(LHF)+L(RHF) | (24) | M2402-5 | (FC)"
+        // when several variants share a baseModel + fabric within the SO).
+        // Fall back to per-PO recomputation only when the JC didn't store
+        // one — legacy data from before the wipLabel field was reliably
+        // populated. Recompute mirrors production-builder.ts buildFcWipLabel
+        // and the pre-77ba23c frontend fabCutWIP() helper.
         let wipCodeStr: string;
         if (card.departmentCode === "FAB_CUT") {
-          const totalH =
-            (po.gapInches || 0) +
-            (po.divanHeightInches || 0) +
-            (po.legHeightInches || 0);
-          const isBF = po.itemCategory === "BEDFRAME";
-          wipCodeStr = [
-            po.productCode,
-            po.sizeLabel ? `(${po.sizeLabel})` : "",
-            // BF-only: total height first, Divan height after. Kept in
-            // lockstep with Production page's fabCutWIP() helper so
-            // Inventory WIP codes match exactly what operators see on the
-            // Fab Cut tab.
-            isBF && totalH > 0 ? `(${totalH}")` : "",
-            isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
-            po.fabricCode || "",
-            "(FC)",
-          ].filter(Boolean).join(" | ");
+          if (card.wipLabel) {
+            wipCodeStr = card.wipLabel;
+          } else {
+            const totalH =
+              (po.gapInches || 0) +
+              (po.divanHeightInches || 0) +
+              (po.legHeightInches || 0);
+            const isBF = po.itemCategory === "BEDFRAME";
+            wipCodeStr = [
+              po.productCode,
+              // size segment only for BF — sofa's sizeLabel is already
+              // inside the productCode (e.g. "5530-2A(LHF)"), showing it
+              // again as "(2A(LHF))" would duplicate.
+              isBF && po.sizeLabel ? `(${po.sizeLabel})` : "",
+              isBF && totalH > 0 ? `(${totalH}")` : "",
+              isBF && po.divanHeightInches ? `(DV ${po.divanHeightInches}")` : "",
+              po.fabricCode || "",
+              "(FC)",
+            ].filter(Boolean).join(" | ");
+          }
         } else {
           wipCodeStr = card.wipLabel || card.wipCode || WIP_TYPE_LABELS[wipTypeShort] || wipTypeShort || wipKey;
         }
@@ -847,7 +850,16 @@ const wipColumns: Column<WIPItem>[] = [
   {
     key: "relatedProduct",
     label: "Product",
-    render: (_v, row) => <span className="doc-number text-[#4B5563]">{row.relatedProduct}</span>,
+    render: (_v, row) => {
+      // Sofa display: strip variant suffix to base model (e.g.
+      // "5531-2A(LHF)" → "5531") matching how Wei Siang refers to sofas.
+      // BF/ACC keep the full productCode since the variant IS the model
+      // identity for those categories.
+      const display = row.category === "SOFA"
+        ? (row.relatedProduct || "").split("-")[0]
+        : (row.relatedProduct || "");
+      return <span className="doc-number text-[#4B5563]">{display}</span>;
+    },
   },
   {
     key: "completedBy",
@@ -883,6 +895,9 @@ const wipColumns: Column<WIPItem>[] = [
     key: "sources",
     label: "Source POs",
     align: "right",
+    // Filter dropdown shows the count (matches what the cell renders)
+    // instead of "[object Object]" from stringifying the array.
+    filterAccessor: (row) => row.sources.length,
     render: (_v, row) => (
       <span
         className="text-sm text-[#6B7280]"
@@ -1319,6 +1334,46 @@ export default function InventoryPage() {
     })();
 
     return () => { cancelled = true; };
+  }, []);
+
+  // Re-fetch wip_items when the tab regains focus. Fixes the stale-data
+  // problem where the user marks JCs complete (or clears all completion
+  // dates) on the Production page, navigates back to Inventory, and the
+  // page still shows the pre-mutation snapshot. cachedFetchJson's
+  // localStorage entry was already invalidated by the Production page's
+  // PATCH cascade, so this background refetch picks up the fresh data
+  // without a full reload.
+  useEffect(() => {
+    let cancelled = false;
+    const refetch = async () => {
+      try {
+        const json = await cachedFetchJson<{
+          success?: boolean;
+          data?: BackendWipRow[];
+          _stub?: boolean;
+        }>("/api/inventory/wip");
+        if (
+          !cancelled &&
+          json &&
+          json.success &&
+          Array.isArray(json.data) &&
+          !json._stub
+        ) {
+          setBackendWipRows(json.data as BackendWipRow[]);
+        }
+      } catch { /* swallow */ }
+    };
+    const onFocus = () => refetch();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") refetch();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, []);
 
   // Derived inventory — recomputed whenever the fetches resolve.

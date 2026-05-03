@@ -56,6 +56,7 @@ type POLite = {
   legHeightInches: number | null;
   startDate: string | null;
   status: string;
+  companySOId: string | null;
 };
 
 type JCLite = {
@@ -94,6 +95,13 @@ const WIP_TYPE_LABELS: Record<string, string> = {
   SOFA_CUSHION: "Cushion",
   SOFA_ARMREST: "Armrest",
   SOFA_HEADREST: "Headrest",
+  // Option C — merged FAB_CUT JC carries the set-level itemCategory
+  // (BEDFRAME / SOFA / ACCESSORY) instead of a per-piece type. Add the
+  // human-readable display labels so the Inventory Type column renders
+  // "Bedframe" / "Sofa" / "Accessory" for these merged set rows.
+  BEDFRAME: "Bedframe",
+  SOFA: "Sofa",
+  ACCESSORY: "Accessory",
 };
 
 // Strip the trailing "-NN" line-number suffix from a PO code
@@ -220,7 +228,7 @@ app.get("/", async (c) => {
         `SELECT id, poNo, productId, productCode, productName, itemCategory,
                 sizeCode, sizeLabel, fabricCode, quantity,
                 gapInches, divanHeightInches, legHeightInches,
-                startDate, status
+                startDate, status, companySOId
            FROM production_orders
           WHERE status IN (${placeholders})`,
       )
@@ -245,7 +253,7 @@ app.get("/", async (c) => {
         `SELECT id, poNo, productId, productCode, productName, itemCategory,
                 sizeCode, sizeLabel, fabricCode, quantity,
                 gapInches, divanHeightInches, legHeightInches,
-                startDate, status
+                startDate, status, companySOId
            FROM production_orders
           WHERE status IN (${stubPlaceholders})`,
       )
@@ -497,6 +505,39 @@ app.get("/", async (c) => {
         }
         if (uphTrigger) {
           triggerEntries.push({ producer, trigger: uphTrigger });
+        }
+        // 3) Option C — merged FAB_CUT stub triggered by per-piece
+        //    downstream FAB_SEW completing before the merged FC. The
+        //    producer here is the merged FC JC itself (wipLabel ends
+        //    with "(FC)"). Look for completed FAB_SEW JCs in the same
+        //    merge group:
+        //      BF/ACC → same productionOrderId
+        //      SOFA   → same companySOId + fabricCode
+        //    Without this attribution, the negative stub renders with
+        //    no source row → search by SO id misses it on the
+        //    Inventory WIP page.
+        if (
+          (producer.wipLabel || "").endsWith("(FC)") &&
+          producer.departmentCode === "FAB_CUT"
+        ) {
+          const fcPo = poById.get(producer.productionOrderId);
+          if (fcPo) {
+            const isSofa = (fcPo.itemCategory || "") === "SOFA";
+            for (const cand of allJcs) {
+              if (cand.id === producer.id) continue;
+              if (cand.departmentCode !== "FAB_SEW") continue;
+              if (!isDone(cand)) continue;
+              const candPo = poById.get(cand.productionOrderId);
+              if (!candPo) continue;
+              if (isSofa) {
+                if (candPo.companySOId !== fcPo.companySOId) continue;
+                if (candPo.fabricCode !== fcPo.fabricCode) continue;
+              } else {
+                if (cand.productionOrderId !== producer.productionOrderId) continue;
+              }
+              triggerEntries.push({ producer, trigger: cand });
+            }
+          }
         }
       }
 

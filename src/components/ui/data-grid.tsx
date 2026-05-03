@@ -57,12 +57,14 @@ export type Column<T> = {
   sticky?: boolean;
   // Optional value-filter accessor — when defined, the per-column value-
   // filter dropdown (the "(All)" checkbox panel) reads from this fn
-  // instead of `getNestedValue(row, key)`. Use it when the column's
-  // `key` resolves to a sort number (e.g. dept-status sortKey 0..3) but
-  // the filter UI should show human-readable labels (Pending / Overdue
-  // / Done / —). Sort still uses `key` so sortable: true keeps its
-  // original ordering.
-  filterAccessor?: (row: T) => string;
+  // instead of `getNestedValue(row, key)`. Used for two reasons:
+  //   1. Sortable numeric columns where filter UI needs human labels
+  //      (e.g. dept-status sortKey 0..3 → "Pending / Overdue / Done / —").
+  //   2. Object / array columns where the default String() conversion
+  //      gives "[object Object]" (e.g. Inventory's `sources` array →
+  //      show row.sources.length).
+  // Sort still uses `key` so sortable: true keeps its original ordering.
+  filterAccessor?: (row: T) => string | number | null;
 };
 
 export type ContextMenuItem = {
@@ -283,7 +285,7 @@ function ColumnFilterDropdown<T>({
 }: {
   columnKey: string;
   columnType?: "text" | "date" | "currency" | "number" | "docno" | "status";
-  filterAccessor?: (row: T) => string;
+  filterAccessor?: (row: T) => string | number | null;
   allData: T[];
   activeValues: Set<string> | null;
   textFilter: string;
@@ -305,7 +307,9 @@ function ColumnFilterDropdown<T>({
   // Compute unique values for this column. When the column defines a
   // filterAccessor, route through it so the dropdown shows human labels
   // (e.g. "Pending / Overdue / Done") instead of the raw sort number
-  // the column.key resolves to.
+  // the column.key resolves to. Also covers object/array columns where
+  // the default String(getNestedValue) gives "[object Object]" — the
+  // accessor stringifies into a meaningful filter label.
   const uniqueValues = useMemo(() => {
     const vals = new Map<string, number>();
     allData.forEach(row => {

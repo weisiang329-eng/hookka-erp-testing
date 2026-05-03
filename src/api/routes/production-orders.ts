@@ -582,12 +582,43 @@ async function fetchFilteredPOs(
   // wipKey-grouped variant keeps the JC-row payload down (only loads
   // wipKeys that the active dept actually touches) while letting the
   // frontend picker find the full chain.
-  // Dept-narrowing: orgId scopes the inner subqueries too — otherwise the
-  // wipKey-grouped lookup could return JC ids from another tenant.
+  // Dept-narrowing — Option-C-aware symmetric filter.
+  //
+  // Pre-Option-C this used a wipKey-IN strip: include only JCs whose wipKey
+  // appears in the deptFilter dept's wipKey set. That worked because all
+  // depts on the same piece shared the same wipKey schema. After Option C
+  // the merged FAB_CUT JC has a brand-new wipKey
+  // (`{poId|companySOId}::baseModel::fabric::FAB_CUT`) that never coincides
+  // with any per-piece downstream wipKey, so the strip dropped it — and
+  // /production/fab-sew on SO-2604-347-01 returned 13 of 14 JCs (no FC),
+  // leaving the Fab Cut column rendering "—" everywhere.
+  //
+  // New rule (symmetric, both directions):
+  //   include every JC whose PO is related to the deptFilter's PO set, where
+  //   "related" = same productionOrderId OR same companySOId.
+  //     - same productionOrderId   → BF / ACC case (FC + per-piece SEW/etc.
+  //                                  live on the same PO; deptFilter='FAB_CUT'
+  //                                  also pulls downstream siblings on this
+  //                                  PO).
+  //     - same companySOId         → SOFA case (FC on anchor PO; per-piece
+  //                                  SEW on sibling POs of same SO; both
+  //                                  directions need to see across).
+  //
+  // Performance note: for typical SOs this returns ~14 JCs/PO × 1-3 POs.
+  // The strict wipKey-IN strip was tighter (~7 JCs/PO) but broke under
+  // Option C. The companySOId scan only widens within a SO, which is
+  // bounded — production dataset has ~432 POs across ~340 SOs so the
+  // upper bound on JC payload is well within Hyperdrive's response budget.
   const jcWhereDept = deptFilter
-    ? ` WHERE orgId = ? AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NOT NULL)
-          OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey IS NULL))
-          OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ? AND wipKey = 'FG'))`
+    ? ` WHERE orgId = ? AND productionOrderId IN (
+          SELECT po.id FROM production_orders po
+          WHERE po.orgId = ?
+            AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE orgId = ? AND departmentCode = ?)
+                 OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                      SELECT po2.companySOId FROM production_orders po2
+                      JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                      WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL)))
+        )`
     : "";
 
   if (!includeJobCards) {
@@ -604,12 +635,11 @@ async function fetchFilteredPOs(
   // ~530 PO / ~9k JC response.
   if (minimal) {
     if (deptFilter) {
-      // Dept-narrowed path: the wipKey-grouped subquery already keeps the JC
-      // payload bounded. Leave it untouched.
-      // Sprint 4: 7 bind slots = orgId outer + (orgId,dept) x 3 inner subqueries.
+      // Bind slots: 6 = orgId (outer JC scope) + orgId (po.orgId) + orgId
+      // (inner jc subquery) + deptFilter + orgId (jc2 subquery) + deptFilter.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -651,9 +681,10 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
+    // Bind slots: 6 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -807,12 +838,24 @@ async function fetchPaginatedPOs(
           // aggregate completedDate across the merged set. Without this,
           // the wipKey IN (...FG only...) clause would strip the upstream
           // chain and the Packing tab's date columns render "—".
-          const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND (wipKey IN (SELECT DISTINCT wipKey FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NOT NULL AND productionOrderId IN (${ph}))
-            OR (wipKey IS NULL AND productionOrderId IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey IS NULL AND productionOrderId IN (${ph})))
-            OR productionOrderId IN (SELECT DISTINCT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND wipKey = 'FG' AND productionOrderId IN (${ph})))`;
+          // Symmetric Option-C-aware dept narrowing — see jcWhereDept in
+          // fetchFilteredPOs for the rationale. Include every JC whose PO
+          // is in the requested-dept's PO set OR shares companySOId with
+          // such a PO. This handles both directions: SEW row sees merged
+          // FC (BF same-PO; SOFA anchor PO via companySOId) AND FC row
+          // sees per-piece downstream SEW/FRAME/etc. (BF same-PO; SOFA
+          // sibling POs via companySOId).
+          const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND productionOrderId IN (
+            SELECT po.id FROM production_orders po
+            WHERE po.id IN (${ph})
+              AND (po.id IN (SELECT productionOrderId FROM ${jcSource} WHERE departmentCode = ? AND productionOrderId IN (${ph}))
+                   OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                        SELECT po2.companySOId FROM production_orders po2
+                        JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
+                        WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph})))))`;
           return db
             .prepare(sql)
-            .bind(...chunk, deptFilter, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
+            .bind(...chunk, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
             .all<JobCardRow>();
         }),
       );
@@ -1154,24 +1197,120 @@ export async function applyWipInventoryChange(
     // wipKey but never each other's upstream/downstream (BUG-2026-04-27:
     // Wood Cut completion was wrongly consuming Fab Sew stock because the
     // old wipKey-only filter pulled siblings from both branches).
-    if (!isFabCut && !isWoodCut && wipKey) {
-      const myBranch = jcRow.branchKey ?? "";
-      const children = allJcRows
-        .filter(
-          (j) =>
-            j.wipKey === wipKey &&
-            (j.branchKey ?? "") === myBranch &&
-            j.sequence < jcRow.sequence,
-        )
-        .sort((a, b) => b.sequence - a.sequence);
-      const child = children[0];
-      if (child?.wipLabel) {
-        await db
-          .prepare(
-            "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+    if (!isFabCut && !isWoodCut) {
+      let refundLabel: string | null = null;
+      if (wipKey) {
+        const myBranch = jcRow.branchKey ?? "";
+        const children = allJcRows
+          .filter(
+            (j) =>
+              j.wipKey === wipKey &&
+              (j.branchKey ?? "") === myBranch &&
+              j.sequence < jcRow.sequence,
           )
-          .bind(refundQty, child.wipLabel)
-          .run();
+          .sort((a, b) => b.sequence - a.sequence);
+        if (children[0]?.wipLabel) {
+          refundLabel = children[0].wipLabel;
+        }
+      }
+      // Option C fallback (mirror of forward consume) — refund the merged
+      // FC wip_items row when no per-PO sibling found. Try both wipKey
+      // shapes (BF per-PO, SOFA cross-PO).
+      if (!refundLabel && deptUpper === "FAB_SEW") {
+        const companySOId =
+          poRow.companySOId || poRow.salesOrderId || "";
+        const fabricCode = poRow.fabricCode || "";
+        const bomLookup = await db
+          .prepare(
+            `SELECT baseModel FROM bom_templates
+             WHERE productCode = ?
+             ORDER BY effectiveFrom DESC LIMIT 1`,
+          )
+          .bind(poRow.productCode ?? "")
+          .first<{ baseModel: string | null }>();
+        const baseModel = bomLookup?.baseModel || poRow.productCode || "";
+        const candidates: string[] = [
+          `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
+        ];
+        if (companySOId) {
+          candidates.push(
+            `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+          );
+        }
+        for (const cand of candidates) {
+          const mergedFc = await db
+            .prepare(
+              `SELECT wipLabel FROM job_cards
+               WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
+               LIMIT 1`,
+            )
+            .bind(cand)
+            .first<{ wipLabel: string }>();
+          if (mergedFc?.wipLabel) {
+            refundLabel = mergedFc.wipLabel;
+            break;
+          }
+        }
+      }
+      if (refundLabel) {
+        // Option C dedup-aware refund: forward consume only fired ONCE
+        // per merge group (first DONE sibling). Refund must mirror that:
+        // ONLY refund when this rollback leaves zero DONE siblings —
+        // otherwise the merge group is still partly consumed and the
+        // upstream stub stays.
+        let actualRefund = refundQty;
+        const isMergedFcUpstream = refundLabel.endsWith("(FC)");
+        if (isMergedFcUpstream && deptUpper === "FAB_SEW") {
+          // Count DONE siblings remaining in the merge group (jcRow has
+          // already been UPDATEd to non-DONE by the PATCH handler, so
+          // the COUNT excludes self by virtue of status filter).
+          const isSofa = (poRow.itemCategory || "") === "SOFA";
+          const sibQ = isSofa
+            ? await db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM job_cards jc2
+                     JOIN production_orders po2 ON po2.id = jc2.productionOrderId
+                    WHERE jc2.id != ?
+                      AND jc2.departmentCode = 'FAB_SEW'
+                      AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
+                      AND po2.companySOId = ?
+                      AND po2.fabricCode = ?`,
+                )
+                .bind(
+                  jcRow.id,
+                  poRow.companySOId ?? "",
+                  poRow.fabricCode ?? "",
+                )
+                .first<{ n: number }>()
+            : await db
+                .prepare(
+                  `SELECT COUNT(*) AS n FROM job_cards
+                    WHERE id != ?
+                      AND productionOrderId = ?
+                      AND departmentCode = 'FAB_SEW'
+                      AND (status = 'COMPLETED' OR status = 'TRANSFERRED')`,
+                )
+                .bind(jcRow.id, jcRow.productionOrderId)
+                .first<{ n: number }>();
+          const stillDoneSibling = Number(sibQ?.n ?? 0) > 0;
+          if (stillDoneSibling) {
+            // Other sibling still DONE — merge group is still consumed.
+            // Don't refund (consume stays).
+            actualRefund = 0;
+          } else {
+            // No other DONE sibling — this rollback leaves the group
+            // fully un-consumed. Refund 1 set (mirrors forward consume).
+            actualRefund = 1;
+          }
+        }
+        if (actualRefund > 0) {
+          await db
+            .prepare(
+              "UPDATE wip_items SET stockQty = stockQty + ? WHERE code = ?",
+            )
+            .bind(actualRefund, refundLabel)
+            .run();
+        }
       }
     }
     return;
@@ -1205,6 +1344,7 @@ export async function applyWipInventoryChange(
     // wrongly consumed Fab Sew stock (Wei Siang report 2026-04-27).
     // Filter siblings by (wipKey, branchKey) so each branch's consume
     // only reaches its own true upstream.
+    let upstreamLabel: string | null = null;
     if (!wasActive && wipKey) {
       const myBranch = jcRow.branchKey ?? "";
       const children = allJcRows
@@ -1215,9 +1355,154 @@ export async function applyWipInventoryChange(
             j.sequence < jcRow.sequence,
         )
         .sort((a, b) => b.sequence - a.sequence);
-      const child = children[0];
-      if (child?.wipLabel) {
-        const consumeQty = jcRow.wipQty || poRow.quantity || 1;
+      if (children[0]?.wipLabel) {
+        upstreamLabel = children[0].wipLabel;
+      }
+    }
+    // Option C fallback: FAB_SEW's upstream FC is no longer per-piece on
+    // the same PO — it's the merged FC JC. Two wipKey shapes depending on
+    // category:
+    //   SOFA   → `{companySOId}::{baseModel}::{fabric}::FAB_CUT` (cross-PO
+    //            merge across same SO).
+    //   BF/ACC → `{productionOrderId}::{baseModel}::{fabric}::FAB_CUT`
+    //            (per-PO merge inside one set's POs).
+    //
+    // Try both shapes; whichever matches a real FC JC wins. Falling back
+    // to a plain "any FC JC on this PO" lookup catches the BF case where
+    // the bom_templates baseModel doesn't match the productCode prefix
+    // exactly (legacy BOMs sometimes use different baseModel strings).
+    if (!upstreamLabel && deptUpper === "FAB_SEW") {
+      const companySOId = poRow.companySOId || poRow.salesOrderId || "";
+      const fabricCode = poRow.fabricCode || "";
+      const bomLookup = await db
+        .prepare(
+          `SELECT baseModel FROM bom_templates
+           WHERE productCode = ?
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+        )
+        .bind(poRow.productCode ?? "")
+        .first<{ baseModel: string | null }>();
+      const baseModel = bomLookup?.baseModel || poRow.productCode || "";
+      const candidates: string[] = [];
+      // BF / ACC: per-PO merge.
+      candidates.push(
+        `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
+      );
+      // SOFA: cross-PO merge keyed by companySOId.
+      if (companySOId) {
+        candidates.push(
+          `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+        );
+      }
+      for (const cand of candidates) {
+        const mergedFc = await db
+          .prepare(
+            `SELECT wipLabel FROM job_cards
+             WHERE wipKey = ? AND departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(cand)
+          .first<{ wipLabel: string }>();
+        if (mergedFc?.wipLabel) {
+          upstreamLabel = mergedFc.wipLabel;
+          break;
+        }
+      }
+      // Last-resort fallback: any FC JC on this PO. Catches the BF case
+      // where the constructed wipKey above doesn't match (legacy baseModel
+      // mismatch). Safe because Option C guarantees at most one FC JC
+      // per PO.
+      if (!upstreamLabel) {
+        const anyFc = await db
+          .prepare(
+            `SELECT wipLabel FROM job_cards
+             WHERE productionOrderId = ? AND departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(jcRow.productionOrderId)
+          .first<{ wipLabel: string }>();
+        if (anyFc?.wipLabel) {
+          upstreamLabel = anyFc.wipLabel;
+        }
+      }
+      // For SOFA cross-PO: when this SEW row is on a sibling PO of a
+      // merged sofa group, the FC JC may live on the anchor PO (different
+      // productionOrderId). Walk same-SO siblings.
+      if (!upstreamLabel && companySOId) {
+        const sibFc = await db
+          .prepare(
+            `SELECT jc.wipLabel FROM job_cards jc
+             JOIN production_orders po ON po.id = jc.productionOrderId
+             WHERE po.companySOId = ?
+               AND jc.departmentCode = 'FAB_CUT'
+             LIMIT 1`,
+          )
+          .bind(companySOId)
+          .first<{ wipLabel: string }>();
+        if (sibFc?.wipLabel) {
+          upstreamLabel = sibFc.wipLabel;
+        }
+      }
+    }
+    if (!wasActive && upstreamLabel) {
+      // Option C — when the upstream is a MERGED FC ("X | (FC)" label),
+      // multiple per-piece downstream siblings (HB SEW + DV SEW for BF;
+      // 2A_LHF / L_RHF / CNR sofa-piece SEWs for sofa) all want to
+      // consume from the same upstream wip_items row. Per-piece consume
+      // doesn't balance because per-piece wipQty has BOM multipliers
+      // (BF DV multiplier=2) so the merged FC stock_qty (= set count)
+      // can never reach 0. Use SET-LEVEL dedup: only the FIRST DONE
+      // sibling triggers the consume; subsequent siblings no-op. The
+      // FC's producer-add of +set_count then balances the row to 0.
+      const isMergedFcUpstream =
+        deptUpper === "FAB_SEW" && upstreamLabel.endsWith("(FC)");
+      let consumeQty = jcRow.wipQty || poRow.quantity || 1;
+      if (isMergedFcUpstream) {
+        // Count siblings in the same merge group already DONE (excluding
+        // self). For BF/ACC the group is bounded by productionOrderId.
+        // For SOFA cross-PO the group spans all sibling POs sharing the
+        // same companySOId + fabricCode.
+        const isSofa = (poRow.itemCategory || "") === "SOFA";
+        const sibQ = isSofa
+          ? await db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM job_cards jc2
+                   JOIN production_orders po2 ON po2.id = jc2.productionOrderId
+                  WHERE jc2.id != ?
+                    AND jc2.departmentCode = 'FAB_SEW'
+                    AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
+                    AND po2.companySOId = ?
+                    AND po2.fabricCode = ?`,
+              )
+              .bind(
+                jcRow.id,
+                poRow.companySOId ?? "",
+                poRow.fabricCode ?? "",
+              )
+              .first<{ n: number }>()
+          : await db
+              .prepare(
+                `SELECT COUNT(*) AS n FROM job_cards
+                  WHERE id != ?
+                    AND productionOrderId = ?
+                    AND departmentCode = 'FAB_SEW'
+                    AND (status = 'COMPLETED' OR status = 'TRANSFERRED')`,
+              )
+              .bind(jcRow.id, jcRow.productionOrderId)
+              .first<{ n: number }>();
+        const siblingDone = Number(sibQ?.n ?? 0) > 0;
+        if (siblingDone) {
+          // Already consumed by an earlier sibling. Skip — cascade is
+          // idempotent at the merge-group level.
+          consumeQty = 0;
+        } else {
+          // First sibling to finish. Use 1 set unit, NOT per-piece
+          // wipQty (per-piece would over-decrement by the BOM
+          // multiplier).
+          consumeQty = 1;
+        }
+      }
+      if (consumeQty > 0) {
         // BUG-2026-04-27-013: cascade consume always decrements (no MAX
         // clamp). If the upstream wip_items row doesn't exist (because
         // the upstream JC was skipped / never completed), INSERT one
@@ -1229,6 +1514,15 @@ export async function applyWipInventoryChange(
         // accumulated by 2026-04-30). Migration 0100 added
         // UNIQUE(org_id, code); this is the matching atomic upsert. On
         // conflict we DECREMENT (EXCLUDED.stockQty is already negative).
+        //
+        // Type for the stub: when upstream is a merged FC, the stub
+        // represents the FC's WIP, NOT this SEW JC's piece. Use
+        // itemCategory (BEDFRAME / SOFA / ACCESSORY) so the inventory
+        // Type column shows the correct set-level label. Falls back to
+        // shortType (SEW's wipType) for the legacy non-FC upstream case.
+        const stubType = isMergedFcUpstream
+          ? (poRow.itemCategory || shortType)
+          : shortType;
         await db
           .prepare(
             `INSERT INTO wip_items (id, code, type, relatedProduct, deptStatus, stockQty, status)
@@ -1238,8 +1532,8 @@ export async function applyWipInventoryChange(
           )
           .bind(
             `wip-dyn-${crypto.randomUUID().slice(0, 8)}`,
-            child.wipLabel,
-            shortType,
+            upstreamLabel,
+            stubType,
             poRow.productCode ?? "",
             "PENDING",
             -consumeQty,

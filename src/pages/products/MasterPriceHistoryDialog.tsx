@@ -304,7 +304,7 @@ export function MasterPriceHistoryDialog({
                 <>
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">
-                      Base price (RM)
+                      Price 2 (RM)
                     </label>
                     <Input
                       type="number"
@@ -426,7 +426,7 @@ export function MasterPriceHistoryDialog({
                 <thead className="text-[#6B7280]">
                   <tr className="border-b border-[#E2DDD8]">
                     <th className="text-left py-2 px-2">Effective from</th>
-                    <th className="text-right py-2 px-2">Base</th>
+                    <th className="text-right py-2 px-2">Price 2</th>
                     <th className="text-right py-2 px-2">Price 1</th>
                     <th className="text-left py-2 px-2">Seat tiers</th>
                     <th className="text-left py-2 px-2">Notes</th>

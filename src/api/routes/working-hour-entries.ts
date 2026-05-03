@@ -319,60 +319,122 @@ app.get("/production-revenue", async (c) => {
     });
   }
 
-  // Per (departmentCode, category) revenue attribution.
+  // Per (departmentCode, category) revenue attribution — PROGRESSIVE.
   //
-  // Spec from Wei Siang 2026-04-30: each completed JC's "minute share" of
-  // its parent PO's selling price is the revenue that JC's department
-  // earned. Formula: po_total_revenue × (jc_dept_minutes ÷ po_total_minutes).
-  // Sum per (deptCode, category) so the Labor Cost breakdown table can
-  // show a per-row Category Revenue that reflects each dept's actual
-  // contribution to the period's earnings, instead of the prior naive
-  // copy of the whole-category total into every row.
+  // Spec from Wei Siang 2026-05-03: each dept JC's completion books its
+  // minute-weighted slice of the PO selling price the moment that JC
+  // reaches COMPLETED/TRANSFERRED — NOT when the PO's final UPHOLSTERY
+  // step lands. Total Revenue (above) stays UPH-locked, so by design:
   //
-  // Recognition stays per-PO (only POs whose final UPHOLSTERY JC fell in
-  // [from, to] are included), so the slices sum back to the whole-category
-  // totals — the per-dept numbers reconcile exactly with `Total Revenue`.
+  //   Σ Category Revenue ≥ Total Revenue
+  //
+  // …with the gap = work-in-progress POs whose dept slices have already
+  // been earned but whose UPHOLSTERY JC hasn't completed yet. This is
+  // intentional and lets ops see "we already produced X this period, even
+  // if the booking won't land until UPH closes the loop."
+  //
+  // Period filter: each JC's completedDate must fall in [from, to].
+  // Recognition is per-(PO, dept-JC), not per-PO.
+  //
+  // Slice formula: po_total_price × this_jc_minutes ÷ po_total_minutes
+  //   - po_total_price = unitPriceSen × quantity (same COALESCE as Total
+  //     Revenue, kept symmetric so a per-dept slice and the eventual UPH
+  //     booking use the same denominator)
+  //   - po_total_minutes = SUM of every JC's minutes for that PO across
+  //     ALL departments (including JCs not yet completed) — keeps the
+  //     denominator stable so the slices sum to po_total_price once every
+  //     dept JC has eventually closed.
+  //   - this_jc_minutes = COALESCE(productionTimeMinutes, estMinutes, 0)
+  //     for the specific JC that just completed.
+  // Multiple JCs for the same dept on one PO each contribute independently;
+  // their slices sum to that dept's full share once they all complete.
   const byDeptCategory: Record<string, number> = {};
-  if (recognizedPOs.length > 0) {
-    // Single grouped query across ALL recognized POs to pull dept minutes.
-    // Uses jobCardMinutes = COALESCE(productionTimeMinutes, estMinutes) so
-    // legacy rows that only populated estMinutes still get attributed.
-    const ids = recognizedPOs.map((p) => p.poId);
-    const placeholders = ids.map(() => "?").join(",");
-    const minutesRes = await c.var.DB
+
+  // Pull every dept JC that completed in the window. Joined to the PO so
+  // we can carry itemCategory + price-coalesce candidates in a single
+  // round-trip and reuse the same products fallback as the Total Revenue
+  // query above (productCode-based to handle sofa variant ids).
+  const jcRes = await c.var.DB
+    .prepare(
+      `SELECT jc.productionOrderId AS poId,
+              jc.departmentCode    AS deptCode,
+              po.itemCategory      AS category,
+              po.quantity          AS qty,
+              COALESCE(jc.productionTimeMinutes, jc.estMinutes, 0) AS jcMinutes,
+              COALESCE(
+                soi.unitPriceSen,
+                (SELECT COALESCE(p.basePriceSen, p.price1Sen)
+                   FROM products p
+                  WHERE p.code = po.productCode
+                  ORDER BY p.basePriceSen DESC NULLS LAST, p.id
+                  LIMIT 1),
+                0
+              ) AS unitPriceSen
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+         LEFT JOIN sales_order_items soi
+                ON soi.salesOrderId = po.salesOrderId
+               AND soi.lineNo = po.lineNo
+        WHERE jc.status IN ('COMPLETED','TRANSFERRED')
+          AND jc.completedDate IS NOT NULL
+          AND jc.completedDate >= ?
+          AND jc.completedDate <= ?
+          AND po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')`,
+    )
+    .bind(from, to)
+    .all<{
+      poId: string;
+      deptCode: string;
+      category: "SOFA" | "BEDFRAME" | "ACCESSORY";
+      qty: number | string | null;
+      jcMinutes: number | string | null;
+      unitPriceSen: number | string | null;
+    }>();
+
+  // PO total minutes = sum of every JC's minutes for the PO (regardless
+  // of completion state). Cached so we can attribute every JC slice
+  // against the same stable denominator, even as more JCs complete in
+  // future periods.
+  const touchedPoIds = Array.from(
+    new Set((jcRes.results ?? []).map((r) => r.poId)),
+  );
+  const totalMinutesByPo = new Map<string, number>();
+  if (touchedPoIds.length > 0) {
+    const placeholders = touchedPoIds.map(() => "?").join(",");
+    const totalsRes = await c.var.DB
       .prepare(
         `SELECT productionOrderId,
-                departmentCode,
-                SUM(COALESCE(productionTimeMinutes, estMinutes, 0)) AS minutes
+                SUM(COALESCE(productionTimeMinutes, estMinutes, 0)) AS totalMinutes
            FROM job_cards
           WHERE productionOrderId IN (${placeholders})
-          GROUP BY productionOrderId, departmentCode`,
+          GROUP BY productionOrderId`,
       )
-      .bind(...ids)
-      .all<{ productionOrderId: string; departmentCode: string; minutes: number | string }>();
-
-    type MinRow = { dept: string; min: number };
-    const minutesByPo = new Map<string, MinRow[]>();
-    for (const m of minutesRes.results ?? []) {
-      const min = Number(m.minutes) || 0;
-      if (min <= 0 || !m.departmentCode) continue;
-      const arr = minutesByPo.get(m.productionOrderId) ?? [];
-      arr.push({ dept: m.departmentCode, min });
-      minutesByPo.set(m.productionOrderId, arr);
-    }
-
-    for (const po of recognizedPOs) {
-      const splits = minutesByPo.get(po.poId);
-      if (!splits || splits.length === 0) continue;
-      const totalMin = splits.reduce((s, x) => s + x.min, 0);
-      if (totalMin <= 0) continue;
-      for (const s of splits) {
-        const share = Math.round((po.totalPriceSen * s.min) / totalMin);
-        const key = `${s.dept}|${po.category}`;
-        byDeptCategory[key] = (byDeptCategory[key] ?? 0) + share;
-      }
+      .bind(...touchedPoIds)
+      .all<{ productionOrderId: string; totalMinutes: number | string }>();
+    for (const r of totalsRes.results ?? []) {
+      totalMinutesByPo.set(r.productionOrderId, Number(r.totalMinutes) || 0);
     }
   }
+
+  for (const r of jcRes.results ?? []) {
+    if (r.category !== "SOFA" && r.category !== "BEDFRAME" && r.category !== "ACCESSORY") continue;
+    if (!r.deptCode) continue;
+    const totalMin = totalMinutesByPo.get(r.poId) ?? 0;
+    if (totalMin <= 0) continue;
+    const jcMin = Number(r.jcMinutes) || 0;
+    if (jcMin <= 0) continue;
+    const unitPriceSen = Math.round(
+      typeof r.unitPriceSen === "number" ? r.unitPriceSen : Number(r.unitPriceSen) || 0,
+    );
+    const qty = Math.max(1, Math.round(typeof r.qty === "number" ? r.qty : Number(r.qty) || 1));
+    const poTotalPriceSen = unitPriceSen * qty;
+    const share = Math.round((poTotalPriceSen * jcMin) / totalMin);
+    const key = `${r.deptCode}|${r.category}`;
+    byDeptCategory[key] = (byDeptCategory[key] ?? 0) + share;
+  }
+  // Silence the unused-variable warning — recognizedPOs is still kept
+  // populated above for the legacy `rows` audit + Total Revenue totals.
+  void recognizedPOs;
 
   const data = {
     SOFA: totals.SOFA,

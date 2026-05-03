@@ -3737,12 +3737,11 @@ function LaborCostTab({
     if (typeof rev.totalSen === "number") return rev.totalSen;
     return (Number(rev.SOFA) || 0) + (Number(rev.BEDFRAME) || 0) + (Number(rev.ACCESSORY) || 0);
   }, [plResp, categoryFilter]);
-  // Cost / Revenue ratio uses production labor only - the overhead buckets
-  // (Warehousing borrow, Repair, Maintenance, Production Shortfall) are
-  // not productive cost so they shouldn't pull the ratio against Revenue.
-  // Bug fix 2026-04-28 per user: KPI was using totalLaborCostSen which
-  // included Maintenance / Repair / etc.
-  const overallRatio = totalRevenueSen > 0 ? (productionLaborCostSen / totalRevenueSen) * 100 : 0;
+  // Top KPI used to show a Cost/Revenue percentage built from
+  // productionLaborCostSen / totalRevenueSen (overhead buckets excluded
+  // so Repair/Maintenance didn't pull the ratio). Replaced 2026-05-03 by
+  // a "Remain" absolute RM value (Total Revenue − Production Labor Cost),
+  // computed inline at the render site — see the Remain card below.
   // Repair + Maintenance + other overhead = total - production - shortfall - warehousing
   // Surfaced as a separate "Overhead" KPI so they're still visible but
   // don't muddy the production-only headline.
@@ -3821,10 +3820,15 @@ function LaborCostTab({
             </CardContent>
           </Card>
           <Card>
-            <CardContent className="p-3">
-              <p className="text-xs text-[#6B7280]">Cost / Revenue</p>
-              <p className={`text-lg font-bold ${overallRatio > 30 ? "text-[#9A3A2D]" : overallRatio > 20 ? "text-[#9C6F1E]" : "text-[#4F7C3A]"}`}>
-                {totalRevenueSen > 0 ? `${overallRatio.toFixed(1)}%` : "—"}
+            <CardContent
+              className="p-3"
+              title="Remain = Total Revenue − Production Labor Cost. Positive = labor came in under booked revenue this period; negative = labor outpaced bookings (e.g. workshop did a lot of in-progress work whose POs haven't completed UPHOLSTERY yet, so Total Revenue hasn't recognized it)."
+            >
+              <p className="text-xs text-[#6B7280]">Remain</p>
+              <p className={`text-lg font-bold ${(totalRevenueSen - productionLaborCostSen) >= 0 ? "text-[#4F7C3A]" : "text-[#9A3A2D]"}`}>
+                {totalRevenueSen > 0 || productionLaborCostSen > 0
+                  ? formatCurrency(totalRevenueSen - productionLaborCostSen)
+                  : "—"}
               </p>
             </CardContent>
           </Card>
@@ -3897,7 +3901,7 @@ function LaborCostTab({
                     <th className="h-10 px-3 text-right font-medium text-[#374151]">Hours</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151]">Labor Cost</th>
                     <th className="h-10 px-3 text-right font-medium text-[#374151]">Category Revenue</th>
-                    <th className="h-10 px-3 text-right font-medium text-[#374151]">Cost / Revenue</th>
+                    <th className="h-10 px-3 text-right font-medium text-[#374151]" title="Per-row ratio = this dept's Labor Cost ÷ this dept's Category Revenue slice. Different denominator from the top KPI's Cost/Revenue (which uses Total Revenue), so per-row ratios won't average up to the KPI.">Category Cost / Revenue</th>
                   </tr>
                 </thead>
                 <tbody>

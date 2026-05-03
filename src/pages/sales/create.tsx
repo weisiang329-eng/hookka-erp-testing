@@ -213,6 +213,58 @@ function CreateSalesOrderPage() {
 
   const [customerId, setCustomerId] = useState("");
 
+  // Sofa combo rules (Phase 5c). Loaded once per customer change — pulls
+  // both the customer-scoped rules AND the company-wide rules in one
+  // round-trip and stores the union. Detection later prefers customer
+  // rules over company-wide for the same (baseModel, sizes, fabricTier).
+  type SofaComboRule = {
+    id: string;
+    baseModel: string;
+    componentSizes: string[] | string[][];
+    fabricTier: "ANY" | "PRICE_1" | "PRICE_2" | "PRICE_3";
+    pricesByHeight: Record<string, number>;
+    customerId: string | null;
+    effectiveFrom: string;
+  };
+  const [sofaCombos, setSofaCombos] = useState<SofaComboRule[]>([]);
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    let cancelled = false;
+    const loads: Promise<SofaComboRule[]>[] = [];
+    // Company-wide rules — always relevant.
+    loads.push(
+      fetch("/api/sofa-combos?customerId=null")
+        .then((r) => r.json())
+        .then((raw) => {
+          const j = raw as { success?: boolean; data?: SofaComboRule[] };
+          return j?.success ? (j.data ?? []) : [];
+        })
+        .catch(() => []),
+    );
+    // Customer-scoped rules when a customer is selected.
+    if (customerId) {
+      loads.push(
+        fetch(`/api/sofa-combos?customerId=${encodeURIComponent(customerId)}`)
+          .then((r) => r.json())
+          .then((raw) => {
+          const j = raw as { success?: boolean; data?: SofaComboRule[] };
+          return j?.success ? (j.data ?? []) : [];
+        })
+          .catch(() => []),
+      );
+    }
+    Promise.all(loads).then((batches) => {
+      if (cancelled) return;
+      const merged: SofaComboRule[] = [];
+      for (const arr of batches) merged.push(...arr);
+      setSofaCombos(merged);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
   // Customer-specific assigned product list. Populated from
   // /api/customer-products?customerId=X whenever a customer is selected.
   // The endpoint already resolves the customer's effective price
@@ -884,8 +936,137 @@ function CreateSalesOrderPage() {
     return gap + divan + leg;
   };
 
-  const subtotal = items.reduce((sum, item) => sum + getLineTotal(item), 0);
+  const subtotalBeforeCombo = items.reduce(
+    (sum, item) => sum + getLineTotal(item),
+    0,
+  );
   const totalQty = items.reduce((sum, item) => sum + item.quantity, 0);
+
+  // -------------------------------------------------------------------------
+  // Sofa combo detection (Phase 5c).
+  // -------------------------------------------------------------------------
+  // Group sofa lines by baseModel. For each group:
+  //   1. Determine the uniform fabric tier (mixed-tier groups skip combo).
+  //   2. Determine seat height (must be uniform across the group too — combo
+  //      is keyed per height).
+  //   3. Pick the best matching combo rule:
+  //      customer-scoped + tier > customer-scoped + ANY > company + tier > company + ANY
+  //      (effective_from <= today filtered, latest effective wins).
+  //   4. Match componentSizes — supports both legacy flat shape and the new
+  //      OR-group shape ([["2A(LHF)","2A(RHF)"],["L(LHF)","L(RHF)"]]). For
+  //      OR-groups: every group must have ≥1 line with a matching sizeCode.
+  //      For flat: line set must equal the combo set exactly.
+  //   5. Compute discount = sum(line totals in group) − combo total for that
+  //      seat height. Discount is positive when the combo saves money. If
+  //      negative or zero, no discount is applied.
+  type ComboMatch = {
+    baseModel: string;
+    seatHeight: string;
+    fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY";
+    customerSpecific: boolean;
+    discountSen: number;
+    comboTotalSen: number;
+    components: string[]; // for display
+    affectedLineUids: string[];
+  };
+  const todayDateStr = new Date().toISOString().slice(0, 10);
+  const matchesGroup = (
+    groups: string[] | string[][],
+    sizes: string[],
+  ): boolean => {
+    if (!Array.isArray(groups) || groups.length === 0) return false;
+    const isGrouped = Array.isArray(groups[0]);
+    if (!isGrouped) {
+      // Flat legacy shape: exact set match (sorted).
+      const sortedRule = (groups as string[]).slice().sort();
+      const sortedLine = sizes.slice().sort();
+      if (sortedRule.length !== sortedLine.length) return false;
+      return sortedRule.every((v, i) => v === sortedLine[i]);
+    }
+    // OR-group shape: every group must have at least one matching line size.
+    const sizeSet = new Set(sizes);
+    return (groups as string[][]).every((g) => g.some((v) => sizeSet.has(v)));
+  };
+  const lineFabricTier = (line: LineItem): "PRICE_1" | "PRICE_2" | "PRICE_3" | null => {
+    const tracking = fabricTrackings.find((ft) => ft.fabricCode === line.fabricCode);
+    return tracking?.priceTier ?? null;
+  };
+  const comboMatches: ComboMatch[] = useMemo(() => {
+    const out: ComboMatch[] = [];
+    const sofaLines = items.filter(
+      (it) => it.itemCategory === "SOFA" && !!it.baseModel && !!it.seatHeight && !!it.fabricCode,
+    );
+    if (sofaLines.length === 0 || sofaCombos.length === 0) return out;
+    const byBase = new Map<string, LineItem[]>();
+    for (const l of sofaLines) {
+      const arr = byBase.get(l.baseModel) ?? [];
+      arr.push(l);
+      byBase.set(l.baseModel, arr);
+    }
+    for (const [baseModel, group] of byBase) {
+      // Uniform tier across group, else combo doesn't apply.
+      const tiers = new Set<string | null>();
+      for (const g of group) tiers.add(lineFabricTier(g));
+      if (tiers.size > 1 || tiers.has(null)) continue;
+      const groupTier = ([...tiers][0] ?? null) as
+        | "PRICE_1"
+        | "PRICE_2"
+        | "PRICE_3"
+        | null;
+      if (!groupTier) continue;
+      // Uniform seat height required (combo prices are per height).
+      const heights = new Set(group.map((g) => g.seatHeight));
+      if (heights.size > 1) continue;
+      const seatHeight = [...heights][0];
+      const sizes = group.map((g) => g.sizeCode).filter(Boolean);
+      // Candidate rules — filter by baseModel + effective_from + componentSizes match.
+      const candidates = sofaCombos.filter(
+        (r) =>
+          r.baseModel === baseModel &&
+          r.effectiveFrom <= todayDateStr &&
+          matchesGroup(r.componentSizes, sizes),
+      );
+      if (candidates.length === 0) continue;
+      // Priority: (customer + tier) > (customer + ANY) > (company + tier) > (company + ANY).
+      const priorityOf = (r: SofaComboRule): number => {
+        const isCustomer = r.customerId === customerId && customerId !== "";
+        const tierMatch = r.fabricTier === groupTier;
+        if (isCustomer && tierMatch) return 4;
+        if (isCustomer && r.fabricTier === "ANY") return 3;
+        if (!r.customerId && tierMatch) return 2;
+        if (!r.customerId && r.fabricTier === "ANY") return 1;
+        return 0;
+      };
+      const best = candidates
+        .map((r) => ({ r, p: priorityOf(r) }))
+        .filter((x) => x.p > 0)
+        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+      if (!best) continue;
+      const comboTotal = best.r.pricesByHeight[seatHeight];
+      if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
+      const groupSum = group.reduce((s, g) => s + getLineTotal(g), 0);
+      const discount = groupSum - comboTotal;
+      if (discount <= 0) continue;
+      out.push({
+        baseModel,
+        seatHeight,
+        fabricTier: best.r.fabricTier,
+        customerSpecific: best.r.customerId === customerId && customerId !== "",
+        discountSen: discount,
+        comboTotalSen: comboTotal,
+        components: sizes,
+        affectedLineUids: group.map((g) => g._uid),
+      });
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- getLineTotal is stable
+  }, [items, sofaCombos, fabricTrackings, customerId]);
+
+  const totalComboDiscountSen = comboMatches.reduce(
+    (s, m) => s + m.discountSen,
+    0,
+  );
+  const subtotal = subtotalBeforeCombo - totalComboDiscountSen;
 
   const handleSubmit = async (status: "DRAFT" | "CONFIRMED" = "DRAFT") => {
     if (!customerId) { toast.warning("Please select a customer"); return; }
@@ -917,9 +1098,67 @@ function CreateSalesOrderPage() {
     // key reused for the chained /confirm call so a retry of the whole
     // flow short-circuits both POSTs.
     const idemKey = crypto.randomUUID();
+    // Apply combo discount before submit by reducing each affected line's
+    // basePriceSen proportionally. Final stored line totals add up to the
+    // combo's negotiated total — downstream invoicing/COGS reads correct
+    // numbers without needing a discount column on sales_orders. Lines
+    // outside any combo are untouched. Phase 5c.b.
+    let itemsAfterCombo: LineItem[] = items;
+    if (comboMatches.length > 0) {
+      const adjustments = new Map<string, number>(); // _uid → new basePriceSen
+      for (const m of comboMatches) {
+        const groupLines = items.filter((l) => m.affectedLineUids.includes(l._uid));
+        const groupSum = groupLines.reduce((s, l) => s + getLineTotal(l), 0);
+        if (groupSum <= 0) continue;
+        const ratio = m.comboTotalSen / groupSum;
+        for (const l of groupLines) {
+          const lineTotal = getLineTotal(l);
+          // Re-derive an adjusted unit price for the line (after the combo
+          // discount), then back out the new basePriceSen. We keep the
+          // surcharges (divan/leg/totalHeight/special/quantity) as-is — only
+          // basePriceSen absorbs the discount, since that's the SKU value
+          // the combo is renegotiating. Round-down with a final rounding
+          // residual rebalanced into the last line so the group sum still
+          // exactly equals comboTotalSen.
+          const adjustedLineTotal = Math.floor(lineTotal * ratio);
+          const surchargesPerUnit =
+            (l.divanPriceSen || 0) +
+            (l.legPriceSen || 0) +
+            (l.totalHeightPriceSen || 0) +
+            (l.specialOrderPriceSen || 0);
+          const adjustedUnit = Math.max(0, Math.round(adjustedLineTotal / Math.max(1, l.quantity)));
+          const newBase = Math.max(0, adjustedUnit - surchargesPerUnit);
+          adjustments.set(l._uid, newBase);
+        }
+        // Rebalance rounding residual into the highest-priced line in the
+        // group so the post-discount sum matches comboTotalSen exactly.
+        const newGroupSum = groupLines.reduce((s, l) => {
+          const newBase = adjustments.get(l._uid) ?? l.basePriceSen;
+          const unit =
+            newBase +
+            (l.divanPriceSen || 0) +
+            (l.legPriceSen || 0) +
+            (l.totalHeightPriceSen || 0) +
+            (l.specialOrderPriceSen || 0);
+          return s + unit * l.quantity;
+        }, 0);
+        const residual = m.comboTotalSen - newGroupSum;
+        if (residual !== 0 && groupLines.length > 0) {
+          // Push residual into the line with the highest current basePrice.
+          const target = groupLines
+            .slice()
+            .sort((a, b) => (adjustments.get(b._uid) ?? b.basePriceSen) - (adjustments.get(a._uid) ?? a.basePriceSen))[0];
+          const cur = adjustments.get(target._uid) ?? target.basePriceSen;
+          adjustments.set(target._uid, Math.max(0, cur + Math.round(residual / Math.max(1, target.quantity))));
+        }
+      }
+      itemsAfterCombo = items.map((l) =>
+        adjustments.has(l._uid) ? { ...l, basePriceSen: adjustments.get(l._uid)! } : l,
+      );
+    }
     try {
       // Strip the client-only `_uid` so the server contract is unchanged.
-      const itemsForServer = items.map((it) => {
+      const itemsForServer = itemsAfterCombo.map((it) => {
         const { _uid: _drop, ...rest } = it;
         void _drop;
         return rest;
@@ -1222,7 +1461,21 @@ function CreateSalesOrderPage() {
             <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Total Qty</span><span className="font-medium">{totalQty}</span></div>
             <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Line Items</span><span className="font-medium">{items.filter(l => l.productId).length}</span></div>
             <hr className="border-[#E2DDD8]" />
-            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Subtotal</span><span className="font-medium amount">{formatCurrency(subtotal)}</span></div>
+            <div className="flex justify-between text-sm"><span className="text-[#6B7280]">Subtotal</span><span className="font-medium amount">{formatCurrency(subtotalBeforeCombo)}</span></div>
+            {comboMatches.map((m, i) => (
+              <div
+                key={`combo-${i}`}
+                className="flex justify-between text-sm"
+                title={`${m.baseModel} ${m.components.join(" + ")} @ ${m.seatHeight}" — combo total ${formatCurrency(m.comboTotalSen)}${m.customerSpecific ? " (customer-specific)" : ""}`}
+              >
+                <span className="text-[#4F7C3A]">
+                  Combo discount ({m.baseModel} {m.fabricTier === "ANY" ? "" : m.fabricTier})
+                </span>
+                <span className="font-medium text-[#4F7C3A] amount">
+                  −{formatCurrency(m.discountSen)}
+                </span>
+              </div>
+            ))}
             <div className="flex justify-between text-lg font-bold"><span>Total</span><span className="text-[#6B5C32]">{formatCurrency(subtotal)}</span></div>
             <div className="text-xs text-[#9CA3AF]">Status will be set to {pendingStatus === "DRAFT" ? "DRAFT" : "IN_PRODUCTION"}</div>
           </CardContent>

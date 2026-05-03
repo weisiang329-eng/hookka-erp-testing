@@ -22,7 +22,7 @@ import { Input } from "@/components/ui/input";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { asArray } from "@/lib/safe-json";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { Loader2, Plus, Trash2, X, Tag, Layers, History } from "lucide-react";
+import { Loader2, Plus, Trash2, X, Tag, Layers, History, Pencil } from "lucide-react";
 import type { Product, Customer } from "@/types";
 import {
   SofaComboHistoryDialog,
@@ -536,6 +536,14 @@ function ComboCard({
           <span>Effective {formatDate(rule.effectiveFrom)}</span>
           <div className="flex items-center gap-2">
             {statusBadge(rule.effectiveFrom)}
+            <button
+              onClick={onOpenHistory}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] transition-colors"
+              title="Schedule a new effective-dated price (or view full history)"
+            >
+              <Pencil className="h-3 w-3" />
+              Edit
+            </button>
             <button
               onClick={onOpenHistory}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"

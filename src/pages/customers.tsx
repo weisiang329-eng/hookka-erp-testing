@@ -2205,6 +2205,14 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                           <div className="inline-flex items-center gap-1">
                             <button
                               onClick={() => setHistoryKey(g.key)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] transition-colors"
+                              title="Schedule a new effective-dated price (or view full history)"
+                            >
+                              <Pencil className="h-3 w-3" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() => setHistoryKey(g.key)}
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-white text-[#6B5C32] border border-[#D4CCB4] hover:bg-[#F4F0E8] transition-colors"
                               title="View this combo's full effective-dated history"
                             >

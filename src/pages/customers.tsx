@@ -1204,6 +1204,8 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   const [fabricSearch, setFabricSearch] = useState("");
   const [copying, setCopying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
+  // Collapsed by default — operator can expand the panel they want to inspect.
+  const [collapsed, setCollapsed] = useState(true);
 
   const customerKey = `variants-config:${customerId}`;
 
@@ -1404,7 +1406,16 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
     <Card className="border-[#6B5C32] border-2 mt-4">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
-          <CardTitle className="flex items-center gap-2 text-base">
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="flex items-center gap-2 text-base font-semibold text-[#1F1D1B] hover:text-[#6B5C32] transition-colors"
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? (
+              <ChevronRight className="h-4 w-4 text-[#6B5C32]" />
+            ) : (
+              <ChevronDown className="h-4 w-4 text-[#6B5C32]" />
+            )}
             <Package className="h-5 w-5 text-[#6B5C32]" />
             {customerName} — Customer Maintenance Config
             {seeded === false && (
@@ -1413,7 +1424,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
             {seeded === true && (
               <Badge className="bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] text-[10px]">Snapshot</Badge>
             )}
-          </CardTitle>
+          </button>
           <div className="flex items-center gap-2">
             {seeded === true && (
               <>
@@ -1451,6 +1462,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
           <p className="text-xs text-[#9A3A2D] mt-2">{errorMsg}</p>
         )}
       </CardHeader>
+      {!collapsed && (
       <CardContent>
         {loading ? (
           <div className="flex items-center justify-center py-10">
@@ -1710,6 +1722,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
           </div>
         )}
       </CardContent>
+      )}
     </Card>
   );
 }
@@ -1746,6 +1759,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   const [loading, setLoading] = useState(true);
   const [copying, setCopying] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string>("");
+  const [collapsed, setCollapsed] = useState(true);
 
   const reload = () => {
     setLoading(true);
@@ -1806,13 +1820,22 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   };
 
   return (
-    <Card className="border-[#6B5C32] border-2">
+    <Card className="border-[#6B5C32] border-2 mt-4">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <CardTitle className="flex items-center gap-2 text-base">
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="flex items-center gap-2 text-base font-semibold text-[#1F1D1B] hover:text-[#6B5C32] transition-colors"
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? (
+              <ChevronRight className="h-4 w-4 text-[#6B5C32]" />
+            ) : (
+              <ChevronDown className="h-4 w-4 text-[#6B5C32]" />
+            )}
             <Package className="h-5 w-5 text-[#6B5C32]" />
             Sofa Combos — {customerName} ({rules.length})
-          </CardTitle>
+          </button>
           <div className="flex items-center gap-2 flex-wrap">
             <Button
               variant="outline"
@@ -1836,6 +1859,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
           </div>
         </div>
       </CardHeader>
+      {!collapsed && (
       <CardContent>
         {errorMsg && (
           <div className="mb-3 rounded-md border border-[#E8B2A1] bg-[#F9E1DA] px-3 py-2 text-sm text-[#9A3A2D]">
@@ -1917,6 +1941,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
           </div>
         )}
       </CardContent>
+      )}
     </Card>
   );
 }

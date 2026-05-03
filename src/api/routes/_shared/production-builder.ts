@@ -324,6 +324,7 @@ export async function createProductionOrdersForOrder(
   db: D1Database,
   order: OrderForProduction,
   items: OrderItemForProduction[],
+  opts: { forceRebuild?: boolean } = {},
 ): Promise<{
   statements: D1PreparedStatement[];
   created: CreatedProductionOrder[];
@@ -339,34 +340,42 @@ export async function createProductionOrdersForOrder(
   // set. CANCELLED rows are excluded so a cancel + re-confirm cycle (after
   // an SO edit added new lines) can fan out fresh POs for the new items
   // instead of being silently no-op'd by the idempotency check.
-  const fkColumn =
-    order.sourceType === "SO" ? "salesOrderId" : "consignmentOrderId";
-  const existing = await db
-    .prepare(
-      `SELECT id, poNo, productName, quantity, status FROM production_orders
-         WHERE ${fkColumn} = ? AND status <> 'CANCELLED' ORDER BY lineNo`,
-    )
-    .bind(order.id)
-    .all<{
-      id: string;
-      poNo: string;
-      productName: string | null;
-      quantity: number;
-      status: string;
-    }>();
-  const existingRows = existing.results ?? [];
-  if (existingRows.length > 0) {
-    return {
-      statements: [],
-      created: existingRows.map((r) => ({
-        id: r.id,
-        poNo: r.poNo,
-        productName: r.productName ?? "",
-        quantity: r.quantity,
-        status: r.status,
-      })),
-      preExisting: true,
-    };
+  //
+  // forceRebuild: callers (e.g. /backfill-split-multi-qty) that batch their
+  // own DELETE + builder INSERTs into a single transaction need to skip
+  // this read-only check — the existing POs they see here are the ones
+  // about to be deleted by the same batch, so the check would falsely
+  // bail the rebuild.
+  if (!opts.forceRebuild) {
+    const fkColumn =
+      order.sourceType === "SO" ? "salesOrderId" : "consignmentOrderId";
+    const existing = await db
+      .prepare(
+        `SELECT id, poNo, productName, quantity, status FROM production_orders
+           WHERE ${fkColumn} = ? AND status <> 'CANCELLED' ORDER BY lineNo`,
+      )
+      .bind(order.id)
+      .all<{
+        id: string;
+        poNo: string;
+        productName: string | null;
+        quantity: number;
+        status: string;
+      }>();
+    const existingRows = existing.results ?? [];
+    if (existingRows.length > 0) {
+      return {
+        statements: [],
+        created: existingRows.map((r) => ({
+          id: r.id,
+          poNo: r.poNo,
+          productName: r.productName ?? "",
+          quantity: r.quantity,
+          status: r.status,
+        })),
+        preExisting: true,
+      };
+    }
   }
 
   // ---- Department lookup ----

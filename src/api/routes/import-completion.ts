@@ -4766,17 +4766,12 @@ app.post("/backfill-split-multi-qty", async (c) => {
       continue;
     }
 
-    // Delete all POs of this SO. CASCADE handles job_cards + piece_pics.
-    // Done as a single statement so partial failure leaves no half-deleted
-    // state. Idempotency: production-builder's existence check ignores
-    // CANCELLED rows, but we hard-delete here so deterministic poIds
-    // (pord-{soId}-NN) are free for reuse by the new fan-out.
-    await db
-      .prepare(`DELETE FROM production_orders WHERE salesOrderId = ?`)
-      .bind(plan.sourceId)
-      .run();
-
-    // Re-run cascade. The builder builds a list of statements; we batch them.
+    // Re-run cascade FIRST (it does pure reads + builds statements). We then
+    // run DELETE + the cascade INSERTs together in one batch so a partial
+    // failure can't leave the SO with deleted POs and no replacements.
+    // forceRebuild=true so the builder doesn't bail on the about-to-be-
+    // deleted POs; deterministic poIds (pord-{soId}-NN) collide with the
+    // existing rows but the DELETE in the same batch frees them first.
     const built = await createProductionOrdersForOrder(
       db,
       {
@@ -4807,10 +4802,12 @@ app.post("/backfill-split-multi-qty", async (c) => {
         specialOrder: it.specialOrder,
         notes: it.notes,
       })),
+      { forceRebuild: true },
     );
-    if (built.statements.length > 0) {
-      await db.batch(built.statements);
-    }
+    const deleteStmt = db
+      .prepare(`DELETE FROM production_orders WHERE salesOrderId = ?`)
+      .bind(plan.sourceId);
+    await db.batch([deleteStmt, ...built.statements]);
 
     executed.push({
       sourceId: plan.sourceId,

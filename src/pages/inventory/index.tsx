@@ -1363,15 +1363,17 @@ export default function InventoryPage() {
         }
       } catch { /* swallow */ }
     };
-    const onFocus = () => refetch();
+    // Use visibilitychange ONLY (not window.focus) — focus fires when
+    // ANY in-page popup closes (native date picker, autocomplete,
+    // browser context menu), which would trigger a refetch + re-render
+    // on every interaction with form controls. visibilitychange only
+    // fires on tab switch / window minimize / programmatic hide.
     const onVisibility = () => {
       if (document.visibilityState === "visible") refetch();
     };
-    window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
       cancelled = true;
-      window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);

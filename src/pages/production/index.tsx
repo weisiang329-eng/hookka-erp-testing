@@ -960,20 +960,20 @@ export default function ProductionPage({
     refreshOrders();
   }, [refreshOrders]);
 
-  // Auto-refresh on tab focus / visibility return. Mirrors the inventory
-  // page fix — when the user comes back from another tab (or another
-  // browser window), pull the latest production_orders so JC status
-  // changes made elsewhere (other operator, scanner, batch importer) are
-  // reflected without a manual refresh.
+  // Auto-refresh on tab visibility return. Use visibilitychange ONLY
+  // (not window.focus) — focus fires when ANY in-page popup closes
+  // (native date picker, autocomplete, browser context menu) which
+  // triggered a full refetch + re-render every time the user clicked a
+  // date input, making the picker feel unresponsive (it would close
+  // itself before the user could pick a date because the React tree
+  // reconciled). visibilitychange only fires on tab switch / window
+  // minimize / programmatic hide, so date pickers stay interactive.
   useEffect(() => {
-    const onFocus = () => fetchOrders();
     const onVisibility = () => {
       if (document.visibilityState === "visible") fetchOrders();
     };
-    window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
-      window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, [fetchOrders]);

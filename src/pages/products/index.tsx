@@ -2075,16 +2075,19 @@ export default function ProductsPage() {
         const isAccessory = categoryFilter === "ACCESSORY";
         const colSpanN = isSofa ? 13 : isAccessory ? 8 : 10;
         const gridCols = isSofa
-          // 24/28/30/32/35 price columns need room for "RM 1,000.00" with
-          // thousands separators — 0.65fr clipped the text; widened to 0.95fr.
-          // Description + Model compressed slightly to claim the headroom.
-          ? "1.3fr 1.5fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.6fr 0.7fr"
+          // Sofa: Code | Description | Model | 24 | 28 | 30 | 32 | 35 | Unit | Fabric | Total Min | Variants
+          // 24/28/30/32/35 price cells need "RM 1,000.00" room (0.95fr).
+          // Total Min column was too narrow (0.6fr) — "1405 min" wrapped to
+          // two lines. Widened to 0.9fr and trimmed Description by 0.3fr to
+          // compensate (descriptions echo the SKU code, plenty of headroom).
+          ? "1.3fr 1.2fr 0.55fr 0.95fr 0.95fr 0.95fr 0.95fr 0.95fr 0.6fr 0.5fr 0.9fr 0.7fr"
           : isAccessory
           // ACCESSORY: Code | Description | Base Price | Unit M3 | Fabric
           // (no Category/Size/Price2 — pillows don't carry those), and
           // no Total Min / Variants / seat-height columns either.
           ? "1.3fr 2.5fr 1fr 0.7fr 1fr"
-          : "1.3fr 2fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.7fr 0.8fr";
+          // Bedframe: Total Min bumped 0.7→0.9 for the same reason as sofa.
+          : "1.3fr 1.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr 0.7fr 0.9fr 0.8fr";
         const thCls = "px-3 py-1.5 text-[11px] font-medium text-[#6B7280] uppercase tracking-wider";
         return (
       <div className="bg-white rounded-lg border border-[#E5E7EB] overflow-hidden">
@@ -2477,7 +2480,7 @@ export default function ProductsPage() {
                             <div className="px-3 py-1.5 text-right text-sm text-[#111827]">
                               {(cfg?.fabricUsage ?? p.fabricUsage)} m
                             </div>
-                            <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827]">
+                            <div className="px-3 py-1.5 text-right text-sm font-medium text-[#111827] whitespace-nowrap">
                               {totalMin} min
                             </div>
                             {/* Variants badge */}

@@ -31,7 +31,12 @@ import {
   Copy,
   ChevronDown,
   ChevronRight,
+  History,
 } from "lucide-react";
+import {
+  MaintenanceConfigHistoryDialog,
+  MaintenanceConfigSaveModal,
+} from "./products/MaintenanceConfigHistoryDialog";
 
 type CustomerMutationResponse =
   | { success: true; data: Customer }
@@ -1206,8 +1211,15 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
   const [errorMsg, setErrorMsg] = useState<string>("");
   // Collapsed by default — operator can expand the panel they want to inspect.
   const [collapsed, setCollapsed] = useState(true);
+  // Effective-dated history workflow. Mirrors the master Maintenance page —
+  // the legacy kv_config('variants-config:<id>') write path stays so live
+  // readers (sales/create.tsx, sales/edit.tsx, consignment) keep working;
+  // these dialogs add an audit/effective-date layer on top.
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showHistoryDialog, setShowHistoryDialog] = useState(false);
 
   const customerKey = `variants-config:${customerId}`;
+  const scope = `customer:${customerId}`;
 
   // Mount-time hydrate from D1.
   /* eslint-disable react-hooks/set-state-in-effect -- one-shot fetch on customer change */
@@ -1428,6 +1440,25 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
           <div className="flex items-center gap-2">
             {seeded === true && (
               <>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowHistoryDialog(true)}
+                  title="View effective-dated history of this customer's maintenance config"
+                >
+                  <History className="h-3.5 w-3.5 mr-1" />
+                  View History
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowSaveModal(true)}
+                  disabled={!config}
+                  title="Save current values as an effective-dated history snapshot"
+                >
+                  <Calendar className="h-3.5 w-3.5 mr-1" />
+                  Save Snapshot
+                </Button>
                 <Button
                   variant="outline"
                   size="sm"
@@ -1723,6 +1754,42 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
         )}
       </CardContent>
       )}
+
+      {/* Effective-date snapshot modal */}
+      <MaintenanceConfigSaveModal
+        open={showSaveModal}
+        scope={scope}
+        config={config}
+        onClose={() => setShowSaveModal(false)}
+        onSaved={async (effectiveFrom) => {
+          setShowSaveModal(false);
+          // Mirror today-effective snapshots into the legacy
+          // kv_config('variants-config:<id>') key so sales/create.tsx etc.
+          // see the same values immediately. Future-dated snapshots stay
+          // only in the history table until their day arrives.
+          const today = new Date().toISOString().slice(0, 10);
+          if (config && effectiveFrom <= today) {
+            try {
+              await fetch(`/api/kv-config/${encodeURIComponent(customerKey)}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(config),
+              });
+              setSavedSnapshot(JSON.stringify(config));
+            } catch {
+              // Non-fatal — the history row was saved successfully.
+            }
+          }
+        }}
+      />
+
+      {/* History listing dialog */}
+      <MaintenanceConfigHistoryDialog
+        open={showHistoryDialog}
+        scope={scope}
+        title={`${customerName} — Maintenance config history`}
+        onClose={() => setShowHistoryDialog(false)}
+      />
     </Card>
   );
 }

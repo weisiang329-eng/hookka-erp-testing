@@ -3,11 +3,15 @@ import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cac
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
-import { Plus, Trash2, Save, AlertCircle, Check, Calendar } from "lucide-react";
+import { Plus, Trash2, Save, AlertCircle, Check, Calendar, History } from "lucide-react";
 import { fetchJson } from "@/lib/fetch-json";
 import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
+import {
+  MaintenanceConfigHistoryDialog,
+  MaintenanceConfigSaveModal,
+} from "./MaintenanceConfigHistoryDialog";
 
 const ProductMutationSchema = mutationWithData(ProductSchema);
 import {
@@ -569,6 +573,8 @@ type MaintenanceConfig = {
 
 // Variants live in D1 under kv_config('variants-config'); see src/lib/kv-config.ts.
 
+const todayIso = () => new Date().toISOString().slice(0, 10);
+
 const DEFAULT_MAINTENANCE_CONFIG: MaintenanceConfig = {
   divanHeights: [
     { value: '4"', priceSen: 0 },
@@ -725,6 +731,14 @@ function MaintenanceView() {
   const [fabricsList, setFabricsList] = useState<FabricTrackingItem[]>([]);
   const [fabricsLoading, setFabricsLoading] = useState(false);
   const [fabricSearch, setFabricSearch] = useState("");
+
+  // Effective-dated history workflow. The legacy kv_config('variants-config')
+  // write path stays live (many readers across BOM, Sales, Production rely on
+  // it) — these dialogs are an additional audit/effective-date layer on top
+  // of it. Save Snapshot writes a row to /api/maintenance-config/changes;
+  // View History opens the listing dialog.
+  const [showSaveModal, setShowSaveModal] = useState(false);
+  const [showHistoryDialog, setShowHistoryDialog] = useState(false);
 
   /* eslint-disable react-hooks/set-state-in-effect -- mount-time hydrate of kv-config + subscription to cross-tab updates */
   useEffect(() => {
@@ -961,6 +975,22 @@ function MaintenanceView() {
             Reset to defaults
           </button>
           <button
+            onClick={() => setShowHistoryDialog(true)}
+            className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 border border-[#E2DDD8] rounded-md text-gray-600 hover:bg-[#FAF9F7]"
+            title="View effective-dated history of master maintenance config"
+          >
+            <History className="w-3.5 h-3.5" />
+            View History
+          </button>
+          <button
+            onClick={() => setShowSaveModal(true)}
+            className="inline-flex items-center gap-1.5 text-sm px-4 py-2 border border-[#6B5C32] text-[#6B5C32] bg-white rounded-md hover:bg-[#FAEFCB] disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Save current values as an effective-dated history snapshot"
+          >
+            <Calendar className="w-4 h-4" />
+            Save Snapshot
+          </button>
+          <button
             onClick={handleSave}
             disabled={!isDirty}
             className="inline-flex items-center gap-1.5 text-sm px-4 py-2 bg-[#6B5C32] text-white rounded-md hover:bg-[#5A4D2A] disabled:opacity-40 disabled:cursor-not-allowed"
@@ -970,6 +1000,37 @@ function MaintenanceView() {
           </button>
         </div>
       </div>
+
+      {/* Effective-date snapshot modal */}
+      <MaintenanceConfigSaveModal
+        open={showSaveModal}
+        scope="master"
+        config={config}
+        onClose={() => setShowSaveModal(false)}
+        onSaved={async (effectiveFrom) => {
+          setShowSaveModal(false);
+          // Mirror the today-effective snapshot into the legacy
+          // kv_config('variants-config') key so existing readers (BOM,
+          // sales/create, sales/edit, consignment, etc.) immediately see
+          // the same values. Skipped for future-dated snapshots — those
+          // belong only in the history table until their day arrives.
+          if (effectiveFrom <= todayIso()) {
+            saveMaintenanceConfig(config);
+            await flushKvConfig(VARIANTS_CONFIG_KEY);
+            setSavedSnapshot(JSON.stringify(config));
+            setSaveError("");
+          }
+          showToast("Snapshot saved to history");
+        }}
+      />
+
+      {/* History listing dialog */}
+      <MaintenanceConfigHistoryDialog
+        open={showHistoryDialog}
+        scope="master"
+        title="Master Maintenance — config history"
+        onClose={() => setShowHistoryDialog(false)}
+      />
 
       {/* Tabs + Content */}
       <div className="bg-white rounded-lg border border-[#E2DDD8] overflow-hidden">

@@ -453,15 +453,92 @@ export function MasterPriceHistoryDialog({
                             ? formatCurrency(h.price1Sen)
                             : "—"}
                         </td>
-                        <td className="py-1.5 px-2 text-[#6B7280]">
-                          {h.seatHeightPrices.length > 0
-                            ? h.seatHeightPrices
-                                .map(
-                                  (t) =>
-                                    `${t.height}":${(t.priceSen / 100).toFixed(0)}`,
-                                )
-                                .join(" ")
-                            : "—"}
+                        <td className="py-1.5 px-2 text-[#6B7280] align-top">
+                          {h.seatHeightPrices.length > 0 ? (
+                            (() => {
+                              // Build a {height -> {tier -> priceSen}} lookup so
+                              // we can render the same 5×3 grid as the editor
+                              // form above. Legacy entries (no tier) collapse
+                              // into the P2 column to match every reader's
+                              // fallback behavior.
+                              const lookup: Record<
+                                string,
+                                Record<"PRICE_1" | "PRICE_2" | "PRICE_3", number | null>
+                              > = {};
+                              for (const h2 of SOFA_HEIGHTS) {
+                                lookup[h2] = {
+                                  PRICE_1: null,
+                                  PRICE_2: null,
+                                  PRICE_3: null,
+                                };
+                              }
+                              for (const r of h.seatHeightPrices) {
+                                const key = String(r.height ?? "")
+                                  .replace('"', "")
+                                  .trim();
+                                if (!lookup[key]) continue;
+                                const tier = (r.tier ?? "PRICE_2") as
+                                  | "PRICE_1"
+                                  | "PRICE_2"
+                                  | "PRICE_3";
+                                lookup[key][tier] = r.priceSen;
+                              }
+                              return (
+                                <table className="text-[10px] tabular-nums border-collapse">
+                                  <thead>
+                                    <tr className="text-[#9CA3AF]">
+                                      <th className="px-1 py-0 font-normal" />
+                                      <th className="px-1 py-0 text-right font-normal">
+                                        P1
+                                      </th>
+                                      <th className="px-1 py-0 text-right font-normal">
+                                        P2
+                                      </th>
+                                      <th className="px-1 py-0 text-right font-normal">
+                                        P3
+                                      </th>
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {SOFA_HEIGHTS.map((hh) => (
+                                      <tr key={hh}>
+                                        <td className="px-1 py-0 text-[#1F1D1B] font-medium">
+                                          {hh}&Prime;
+                                        </td>
+                                        {(
+                                          [
+                                            "PRICE_1",
+                                            "PRICE_2",
+                                            "PRICE_3",
+                                          ] as const
+                                        ).map((tt) => {
+                                          const v = lookup[hh]?.[tt];
+                                          return (
+                                            <td
+                                              key={tt}
+                                              className="px-1 py-0 text-right"
+                                            >
+                                              {v != null ? (
+                                                <span className="text-[#1F1D1B]">
+                                                  {(v / 100).toFixed(0)}
+                                                </span>
+                                              ) : (
+                                                <span className="text-[#D1D5DB]">
+                                                  —
+                                                </span>
+                                              )}
+                                            </td>
+                                          );
+                                        })}
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              );
+                            })()
+                          ) : (
+                            "—"
+                          )}
                         </td>
                         <td className="py-1.5 px-2 text-[#6B7280]">
                           {h.notes || "—"}

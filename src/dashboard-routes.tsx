@@ -101,6 +101,7 @@ const RDMaintenance = lazy(() => import('./pages/rd/maintenance'))
 const Reports = lazy(() => import('./pages/reports'))
 const Notifications = lazy(() => import('./pages/notifications'))
 const Maintenance = lazy(() => import('./pages/maintenance'))
+const MaintenanceSofaCombos = lazy(() => import('./pages/maintenance/sofa-combos'))
 
 // Settings
 const Settings = lazy(() => import('./pages/settings'))
@@ -319,6 +320,7 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/reports', element: <S><Reports /></S> },
   { path: '/notifications', element: <S><Notifications /></S> },
   { path: '/maintenance', element: <S><Maintenance /></S> },
+  { path: '/maintenance/sofa-combos', element: <S><MaintenanceSofaCombos /></S> },
 
   // Settings
   { path: '/settings', element: <S><Settings /></S> },

@@ -40,6 +40,7 @@ import {
   Route,
   DollarSign,
   Scale,
+  Tag,
   type LucideIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -109,6 +110,7 @@ const navigationGroups: NavGroup[] = [
     items: [
       { name: "Products", href: "/products", icon: Boxes },
       { name: "BOM", href: "/bom", icon: Layers },
+      { name: "Sofa Combos", href: "/maintenance/sofa-combos", icon: Tag },
     ],
   },
   {

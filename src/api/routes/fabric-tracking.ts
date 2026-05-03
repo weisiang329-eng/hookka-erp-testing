@@ -16,7 +16,7 @@ type FabricTrackingRow = {
   fabricCode: string;
   fabricDescription: string | null;
   fabricCategory: "B.M-FABR" | "S-FABR" | "S.M-FABR" | "LINING" | "WEBBING" | null;
-  priceTier: "PRICE_1" | "PRICE_2" | null;
+  priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
   price: number;
   soh: number;
   poOutstanding: number;
@@ -80,7 +80,7 @@ type FabricTrackingBody = {
   fabricCode?: string;
   fabricDescription?: string | null;
   fabricCategory?: FabricTrackingRow["fabricCategory"];
-  priceTier?: "PRICE_1" | "PRICE_2";
+  priceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3";
   price?: number;
   soh?: number;
   poOutstanding?: number;
@@ -214,9 +214,13 @@ app.put("/:id", async (c) => {
   try {
     const body = await c.req.json();
 
-    let priceTier: "PRICE_1" | "PRICE_2" | null = existing.priceTier;
+    let priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | null = existing.priceTier;
     if (body.priceTier !== undefined) {
-      if (body.priceTier === "PRICE_1" || body.priceTier === "PRICE_2") {
+      if (
+        body.priceTier === "PRICE_1" ||
+        body.priceTier === "PRICE_2" ||
+        body.priceTier === "PRICE_3"
+      ) {
         priceTier = body.priceTier;
       }
     }

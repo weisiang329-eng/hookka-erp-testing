@@ -207,7 +207,7 @@ function InventoryTab({
   setSearch: (v: string) => void;
   categoryFilter: string;
   setCategoryFilter: (v: string) => void;
-  onPriceTierChange: (id: string, tier: "PRICE_1" | "PRICE_2") => void;
+  onPriceTierChange: (id: string, tier: "PRICE_1" | "PRICE_2" | "PRICE_3") => void;
 }) {
   return (
     <div className="space-y-4">
@@ -290,17 +290,20 @@ function InventoryTab({
                         onChange={(e) =>
                           onPriceTierChange(
                             f.id,
-                            e.target.value as "PRICE_1" | "PRICE_2"
+                            e.target.value as "PRICE_1" | "PRICE_2" | "PRICE_3"
                           )
                         }
                         className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${
                           f.priceTier === "PRICE_1"
                             ? "bg-[#E0EDF0] border-[#A8CAD2] text-[#3E6570]"
-                            : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
+                            : f.priceTier === "PRICE_3"
+                              ? "bg-[#F0E5F8] border-[#C9A8E0] text-[#5E3D80]"
+                              : "bg-[#FAEFCB] border-[#E8D597] text-[#9C6F1E]"
                         }`}
                       >
                         <option value="PRICE_1">Price 1</option>
                         <option value="PRICE_2">Price 2</option>
+                        <option value="PRICE_3">Price 3</option>
                       </select>
                     </td>
                     <td className="px-3 py-2 text-right text-gray-700">

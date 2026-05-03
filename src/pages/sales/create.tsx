@@ -194,11 +194,11 @@ function CreateSalesOrderPage() {
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
   const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
-  const { data: fabricTrackingsResp } = useCachedJson<{ data?: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[] }>("/api/fabric-tracking");
+  const { data: fabricTrackingsResp } = useCachedJson<{ data?: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3"}[] }>("/api/fabric-tracking");
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
-  const fabricTrackings: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2"}[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
+  const fabricTrackings: {id: string; fabricCode: string; priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3"}[] = useMemo(() => fabricTrackingsResp?.data || [], [fabricTrackingsResp]);
   const [saving, setSaving] = useState(false);
   const [isClone, setIsClone] = useState(false);
   const [pendingStatus, setPendingStatus] = useState<"DRAFT" | "CONFIRMED" | "CONFIRMING">("DRAFT");
@@ -212,6 +212,58 @@ function CreateSalesOrderPage() {
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, MaintenanceConfigValue[]> | null>(null);
 
   const [customerId, setCustomerId] = useState("");
+
+  // Customer-specific assigned product list. Populated from
+  // /api/customer-products?customerId=X whenever a customer is selected.
+  // The endpoint already resolves the customer's effective price
+  // (snapshot history > legacy override > master) and surfaces
+  // hasPendingPriceChange / masterPendingEffectiveFrom flags.
+  type CustomerProductRow = {
+    id: string;
+    customerId: string;
+    productId: string;
+    productCode: string;
+    productName: string;
+    category: string;
+    basePriceSen: number | null;
+    price1Sen: number | null;
+    seatHeightPrices: { height: string; priceSen: number; tier?: "PRICE_1" | "PRICE_2" | "PRICE_3" }[] | null;
+    notes: string;
+    hasPendingPriceChange?: boolean;
+  };
+  const [customerProducts, setCustomerProducts] = useState<CustomerProductRow[]>([]);
+  // Load on customer change. Empty customer = empty array (handlers fall
+  // through to the global products list when the map is empty). State
+  // mutations during the effect are intentional — there is no derivable
+  // signal we can swap in without a fetch round-trip.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (!customerId) {
+      setCustomerProducts([]);
+      return;
+    }
+    let cancelled = false;
+    fetch(`/api/customer-products?customerId=${encodeURIComponent(customerId)}`)
+      .then((r) => r.json())
+      .then((raw) => {
+        if (cancelled) return;
+        const j = raw as { success?: boolean; data?: CustomerProductRow[] };
+        setCustomerProducts(j.success ? (j.data ?? []) : []);
+      })
+      .catch(() => {
+        if (!cancelled) setCustomerProducts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [customerId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+  // Map for O(1) lookup by productId.
+  const customerProductsMap = useMemo(() => {
+    const m = new Map<string, CustomerProductRow>();
+    for (const cp of customerProducts) m.set(cp.productId, cp);
+    return m;
+  }, [customerProducts]);
   const [deliveryHubId, setDeliveryHubId] = useState("");
   const [customerPOId, setCustomerPOId] = useState("");
   const [customerSOId, setCustomerSOId] = useState("");
@@ -491,18 +543,47 @@ function CreateSalesOrderPage() {
         return prev.map((item, i) => (i === idx ? { ...item, ...updates } : item));
       }
       return prev.map((item, i) => {
-        if (i === idx) return { ...item, ...updates };
+        if (i === idx) {
+          // First sofa line of this baseModel — also re-resolve its own
+          // basePrice when seat height was the trigger so the user sees
+          // the matrix-aware price land immediately. Tier comes from the
+          // current fabric (or fabric being set in this same updates batch).
+          if ("seatHeight" in updates) {
+            const fabricCode = updates.fabricCode ?? item.fabricCode;
+            const seatHeight = (updates.seatHeight ?? item.seatHeight) as string;
+            const prod = products.find(p => p.id === item.productId);
+            const tiers = (item.seatHeightPrices && item.seatHeightPrices.length > 0)
+              ? item.seatHeightPrices
+              : prod?.seatHeightPrices;
+            const newPrice = resolveSofaTierPrice(tiers, seatHeight, fabricCode);
+            return {
+              ...item,
+              ...updates,
+              ...(newPrice !== null ? { basePriceSen: newPrice } : {}),
+            };
+          }
+          return { ...item, ...updates };
+        }
         if (item.itemCategory !== "SOFA" || item.baseModel !== source.baseModel) return item;
-        // For seat height: re-resolve the other line's basePrice from its
-        // own cached seatHeightPrices (customer-specific when available,
-        // global product otherwise). Prices can differ by module.
+        // Sibling lines: same logic — re-resolve basePrice when seat
+        // height changes, using THIS line's own fabric (sibling lines may
+        // have already overridden their fabric independently). Tier
+        // pulled from fabric_tracking via the same resolver.
         if ("seatHeight" in updates) {
           const prod = products.find(p => p.id === item.productId);
           const tiers = (item.seatHeightPrices && item.seatHeightPrices.length > 0)
             ? item.seatHeightPrices
             : prod?.seatHeightPrices;
-          const tier = tiers?.find(t => t.height === updates.seatHeight);
-          return { ...item, ...updates, basePriceSen: tier?.priceSen ?? item.basePriceSen };
+          const newPrice = resolveSofaTierPrice(
+            tiers,
+            (updates.seatHeight ?? item.seatHeight) as string,
+            item.fabricCode,
+          );
+          return {
+            ...item,
+            ...updates,
+            ...(newPrice !== null ? { basePriceSen: newPrice } : {}),
+          };
         }
         return { ...item, ...updates };
       });
@@ -513,6 +594,15 @@ function CreateSalesOrderPage() {
     const prod = products.find(p => p.id === productId);
     if (!prod) return;
     const isSofa = prod.category === "SOFA";
+    // Customer-specific snapshot price (Phase 2). When a customer is
+    // selected and this product is in their assigned list, seed the line
+    // from the customer override row instead of the master product.
+    // Otherwise fall through to the master values.
+    const cp = customerProductsMap.get(prod.id);
+    const seedPrice1 = cp?.price1Sen ?? prod.price1Sen ?? null;
+    const seedSeat = (cp?.seatHeightPrices ?? prod.seatHeightPrices ?? []) as
+      | { height: string; priceSen: number; tier?: "PRICE_1" | "PRICE_2" | "PRICE_3" }[]
+      | [];
     updateItem(idx, {
       productId: prod.id,
       productCode: prod.code,
@@ -522,10 +612,8 @@ function CreateSalesOrderPage() {
       sizeCode: prod.sizeCode,
       sizeLabel: prod.sizeLabel,
       basePriceSen: 0, // Don't set base price yet — fabric determines Price 1 vs Price 2
-      // Seed price hints from the global product record. Customer-specific
-      // pricing is resolved server-side on SO create.
-      price1Sen: prod.price1Sen ?? null,
-      seatHeightPrices: prod.seatHeightPrices ?? [],
+      price1Sen: seedPrice1,
+      seatHeightPrices: seedSeat,
       // Reset category-specific fields
       seatHeight: "",
       gapInches: isSofa ? null : items[idx].gapInches,
@@ -536,13 +624,49 @@ function CreateSalesOrderPage() {
     });
   };
 
+  // Resolve a sofa line's tier-aware price from its current (height, tier)
+  // pair. Tier comes from fabric_tracking.priceTier (defaults to PRICE_2
+  // when fabric is unset or untagged). Legacy seatHeightPrices entries
+  // without a tier field also resolve as PRICE_2 — keeps behaviour stable
+  // for SKUs that pre-date the matrix.
+  const resolveSofaTierPrice = (
+    seatHeightPrices: { height: string; priceSen: number; tier?: "PRICE_1" | "PRICE_2" | "PRICE_3" }[] | undefined,
+    seatHeight: string,
+    fabricCode: string,
+  ): number | null => {
+    if (!seatHeightPrices || seatHeightPrices.length === 0 || !seatHeight) return null;
+    const tracking = fabricTrackings.find((ft) => ft.fabricCode === fabricCode);
+    const tier = tracking?.priceTier ?? "PRICE_2";
+    const cell = seatHeightPrices.find(
+      (s) => s.height === seatHeight && (s.tier ?? "PRICE_2") === tier,
+    );
+    if (cell) return cell.priceSen;
+    // Fallback: tier-agnostic match (e.g. PRICE_3 fabric on a SKU only
+    // priced at PRICE_2 — show the closest rather than zero).
+    const flat = seatHeightPrices.find((s) => s.height === seatHeight);
+    return flat?.priceSen ?? null;
+  };
+
   const selectFabric = (idx: number, fabricId: string) => {
     const fab = fabrics.find(f => f.id === fabricId);
     if (!fab) return;
     const item = items[idx];
 
     if (item?.itemCategory === "SOFA") {
-      propagateSofaVariant(idx, { fabricId: fab.id, fabricCode: fab.code });
+      // Tier-aware sofa pricing: when both seat height and fabric are
+      // chosen, look up the (height, tier) cell of the price matrix and
+      // seed basePriceSen. If only fabric is set, just store it — the
+      // seat-height handler will resolve the price when that's picked.
+      const newPrice = resolveSofaTierPrice(
+        item.seatHeightPrices,
+        item.seatHeight,
+        fab.code,
+      );
+      propagateSofaVariant(idx, {
+        fabricId: fab.id,
+        fabricCode: fab.code,
+        ...(newPrice !== null ? { basePriceSen: newPrice } : {}),
+      });
     } else if (item?.itemCategory === "BEDFRAME" && item.productId) {
       // Look up fabric priceTier from tracking data
       const tracking = fabricTrackings.find(ft => ft.fabricCode === fab.code);
@@ -1079,7 +1203,15 @@ function CreateSalesOrderPage() {
               key={item._uid}
               item={item}
               idx={idx}
-              products={products}
+              // Filter the catalogue down to what's actually assigned to
+              // this customer. When no customer is selected, fall through
+              // to the full master list — stays compatible with workflows
+              // that build the line set before picking a customer.
+              products={
+                customerProductsMap.size > 0
+                  ? products.filter((p) => customerProductsMap.has(p.id))
+                  : products
+              }
               fabrics={fabrics}
               onSelectProduct={selectProduct}
               onSelectFabric={selectFabric}

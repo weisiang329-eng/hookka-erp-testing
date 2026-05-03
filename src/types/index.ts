@@ -1320,7 +1320,9 @@ export type FabricTracking = {
   fabricCode: string;
   fabricDescription: string;
   fabricCategory: "B.M-FABR" | "S-FABR" | "S.M-FABR" | "LINING" | "WEBBING";
-  priceTier: "PRICE_1" | "PRICE_2";
+  // Tier extended to PRICE_3 in migration 0067 (sofa price matrix uses three
+  // fabric tiers; bedframe still effectively uses just PRICE_1/PRICE_2).
+  priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3";
   price: number;
   soh: number;
   poOutstanding: number;

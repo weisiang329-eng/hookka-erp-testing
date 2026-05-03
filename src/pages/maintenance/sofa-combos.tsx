@@ -577,7 +577,9 @@ function CreateComboDialog({
   const [groups, setGroups] = useState<string[][]>([[]]);
   const [fabricTier, setFabricTier] = useState<FabricTier>("ANY");
   const [pricesRm, setPricesRm] = useState<Record<string, string>>({});
-  const [customerId, setCustomerId] = useState<string>("");
+  // Multi-select: empty Set = company-wide; 1+ ids = create one row per
+  // selected customer (server is single-customerId per row, frontend loops).
+  const [customerIds, setCustomerIds] = useState<Set<string>>(new Set());
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
@@ -667,23 +669,34 @@ function CreateComboDialog({
 
     setSaving(true);
     try {
-      const body = {
+      const targets: (string | null)[] =
+        customerIds.size === 0 ? [null] : Array.from(customerIds);
+      const baseBody = {
         baseModel,
         componentSizes: componentSizeGroups,
         fabricTier,
         pricesByHeight,
-        customerId: customerId || null,
         effectiveFrom,
         notes: notes.trim() || null,
       };
-      const res = await fetch("/api/sofa-combos", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const json = (await res.json().catch(() => ({}))) as ApiSingle<unknown>;
-      if (!res.ok || !json.success) {
-        setErr(json.error ?? "Failed to create combo rule");
+      // Fire one POST per customer (or one with null for company-wide).
+      // Stop on first failure so the operator sees the error rather than
+      // half-applying the change.
+      const results = await Promise.all(
+        targets.map((cid) =>
+          fetch("/api/sofa-combos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...baseBody, customerId: cid }),
+          }).then(async (r) => ({
+            ok: r.ok,
+            json: (await r.json().catch(() => ({}))) as ApiSingle<unknown>,
+          })),
+        ),
+      );
+      const failed = results.find((r) => !r.ok || !r.json.success);
+      if (failed) {
+        setErr(failed.json.error ?? "Failed to create combo rule");
         setSaving(false);
         return;
       }
@@ -860,23 +873,77 @@ function CreateComboDialog({
               </div>
             </div>
 
-            {/* Customer */}
+            {/* Customer multi-select */}
             <div>
               <label className="block text-xs font-medium text-[#374151] mb-1">
-                Customer (leave blank for company-wide)
+                Customers
               </label>
-              <select
-                value={customerId}
-                onChange={(e) => setCustomerId(e.target.value)}
-                className="h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-              >
-                <option value="">All customers (company-wide)</option>
-                {customers.map((cu) => (
-                  <option key={cu.id} value={cu.id}>
-                    {cu.name}
-                  </option>
-                ))}
-              </select>
+              <p className="text-[11px] text-[#6B7280] mb-2">
+                Pick none → company-wide (visible to every customer). Pick one
+                or more → creates a separate combo row for each selected
+                customer (only those customers see the deal).
+              </p>
+              <div className="flex items-center gap-2 mb-2">
+                <button
+                  type="button"
+                  onClick={() => setCustomerIds(new Set())}
+                  className={`text-xs px-2.5 py-1 rounded-md border transition-colors ${
+                    customerIds.size === 0
+                      ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                      : "bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                  }`}
+                >
+                  Company-wide
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCustomerIds(new Set(customers.map((c) => c.id)))}
+                  className="text-xs px-2.5 py-1 rounded-md border bg-white text-[#6B7280] border-[#E2DDD8] hover:bg-[#F3F4F6]"
+                >
+                  Select all customers
+                </button>
+                {customerIds.size > 0 && (
+                  <span className="text-[11px] text-[#6B5C32] font-medium">
+                    {customerIds.size} selected
+                  </span>
+                )}
+              </div>
+              <div className="max-h-40 overflow-y-auto rounded-md border border-[#E2DDD8] bg-white p-2">
+                {customers.length === 0 ? (
+                  <p className="text-xs text-[#9CA3AF] italic">No customers.</p>
+                ) : (
+                  <div className="grid grid-cols-2 gap-1">
+                    {customers.map((cu) => {
+                      const checked = customerIds.has(cu.id);
+                      return (
+                        <label
+                          key={cu.id}
+                          className={`flex items-center gap-1.5 px-2 py-1 rounded text-xs cursor-pointer transition-colors ${
+                            checked
+                              ? "bg-[#EEF3E4] text-[#4F7C3A]"
+                              : "text-[#4B5563] hover:bg-[#F3F4F6]"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setCustomerIds((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(cu.id)) next.delete(cu.id);
+                                else next.add(cu.id);
+                                return next;
+                              });
+                            }}
+                            className="h-3 w-3"
+                          />
+                          {cu.name}
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Effective from + notes */}

@@ -456,7 +456,10 @@ function CreateComboDialog({
   onSaved: () => void;
 }) {
   const [baseModel, setBaseModel] = useState<string>(baseModels[0] ?? "");
-  const [selectedSizes, setSelectedSizes] = useState<string[]>([]);
+  // Explicit OR-group editor: each compartment is one group of "any-of"
+  // modules. Across compartments must all match (AND). Default: one empty
+  // compartment so the operator immediately sees the structure.
+  const [groups, setGroups] = useState<string[][]>([[]]);
   const [fabricTier, setFabricTier] = useState<FabricTier>("ANY");
   const [pricesRm, setPricesRm] = useState<Record<string, string>>({});
   const [customerId, setCustomerId] = useState<string>("");
@@ -476,17 +479,31 @@ function CreateComboDialog({
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // Reset selectedSizes when baseModel changes — old selection won't match
+  // Reset compartments when baseModel changes — old selection won't match
   // the new model's size set.
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    setSelectedSizes([]);
+    setGroups([[]]);
   }, [baseModel]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
-  function toggleSize(sz: string) {
-    setSelectedSizes((prev) =>
-      prev.includes(sz) ? prev.filter((s) => s !== sz) : [...prev, sz],
+  function toggleSizeInGroup(groupIdx: number, sz: string) {
+    setGroups((prev) =>
+      prev.map((g, i) =>
+        i === groupIdx
+          ? g.includes(sz)
+            ? g.filter((s) => s !== sz)
+            : [...g, sz]
+          : g,
+      ),
+    );
+  }
+  function addGroup() {
+    setGroups((prev) => [...prev, []]);
+  }
+  function removeGroup(idx: number) {
+    setGroups((prev) =>
+      prev.length <= 1 ? [[]] : prev.filter((_, i) => i !== idx),
     );
   }
 
@@ -498,8 +515,12 @@ function CreateComboDialog({
       setErr("Select a base model");
       return;
     }
-    if (selectedSizes.length === 0) {
-      setErr("Select at least one component size");
+    // Drop empty compartments and dedupe; bail out if nothing usable left.
+    const cleanedGroups: string[][] = groups
+      .map((g) => Array.from(new Set(g)).slice().sort())
+      .filter((g) => g.length > 0);
+    if (cleanedGroups.length === 0) {
+      setErr("Add at least one compartment with at least one module");
       return;
     }
     // Build pricesByHeight from the form. Skip blank entries — the resolver
@@ -521,30 +542,13 @@ function CreateComboDialog({
       return;
     }
 
-    // Auto-group by base size: handedness variants of the same base
-    // (2A(LHF) and 2A(RHF), L(LHF) and L(RHF), …) collapse into ONE
-    // OR-group so a single combo rule covers all 4 orientations of a
-    // 2A+L deal. Sizes without handedness (CNR, STOOL, 1S/2S/3S, 1NA/2NA)
-    // each form their own one-element group.
-    //
-    // Storage shape on componentSizes is now string[][]:
-    //   [["2A(LHF)","2A(RHF)"], ["L(LHF)","L(RHF)"]]
-    // Detection on the CS Order side requires every group to have at
-    // least one matching module on the cart (any-of within a group,
-    // all-of across groups).
-    const stripHandedness = (s: string): string =>
-      s.replace(/\s*\((?:LHF|RHF)\)\s*/i, "").trim();
-    const groupedByBase = new Map<string, string[]>();
-    for (const sz of selectedSizes) {
-      const base = stripHandedness(sz) || sz;
-      const arr = groupedByBase.get(base) ?? [];
-      if (!arr.includes(sz)) arr.push(sz);
-      groupedByBase.set(base, arr);
-    }
-    const componentSizeGroups: string[][] = Array.from(groupedByBase.values()).map(
-      (g) => g.slice().sort(),
-    );
-    componentSizeGroups.sort((a, b) => a[0].localeCompare(b[0]));
+    // Storage shape on componentSizes is string[][] — one entry per
+    // compartment. Within a compartment any module qualifies (OR);
+    // across compartments every group must have a match (AND). Sort
+    // across compartments so equivalent shapes hash to the same JSON.
+    const componentSizeGroups: string[][] = cleanedGroups
+      .slice()
+      .sort((a, b) => a[0].localeCompare(b[0]));
 
     setSaving(true);
     try {
@@ -607,43 +611,84 @@ function CreateComboDialog({
               </select>
             </div>
 
-            {/* Component sizes */}
+            {/* Component sizes — one compartment = one OR-group.
+                Within a compartment any checked module satisfies it (OR).
+                Across compartments every group needs a match (AND). */}
             <div>
               <label className="block text-xs font-medium text-[#374151] mb-1">
-                Component Sizes (modules in this combo)
+                Components
               </label>
+              <p className="text-[11px] text-[#6B7280] mb-2">
+                Each compartment is an <b>OR</b> group (any one module
+                satisfies it). Compartments are joined by <b>AND</b>.
+                Example: <i>Compartment A: 2A(LHF) / 2A(RHF) <b>+</b>
+                Compartment B: L(LHF) / L(RHF)</i>.
+              </p>
               {availableSizes.length === 0 ? (
                 <p className="text-xs text-[#9CA3AF] italic">
                   Pick a base model first to see its modules.
                 </p>
               ) : (
-                <div className="flex flex-wrap gap-2">
-                  {availableSizes.map((sz) => {
-                    const checked = selectedSizes.includes(sz);
-                    return (
-                      <label
-                        key={sz}
-                        className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm cursor-pointer transition-colors ${
-                          checked
-                            ? "bg-[#EEF3E4] border-[#C6DBA8] text-[#4F7C3A]"
-                            : "bg-white border-[#E2DDD8] text-[#4B5563] hover:bg-[#FAF9F7]"
-                        }`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() => toggleSize(sz)}
-                          className="h-3.5 w-3.5"
-                        />
-                        {sz}
-                      </label>
-                    );
-                  })}
+                <div className="space-y-2">
+                  {groups.map((group, gIdx) => (
+                    <div
+                      key={gIdx}
+                      className="rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2"
+                    >
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className="text-[11px] font-semibold text-[#6B5C32] uppercase tracking-wide">
+                          Compartment {String.fromCharCode(65 + gIdx)} (any of)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeGroup(gIdx)}
+                          disabled={groups.length <= 1}
+                          className="text-[11px] text-[#9A3A2D] hover:underline disabled:text-[#9CA3AF] disabled:no-underline"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {availableSizes.map((sz) => {
+                          const checked = group.includes(sz);
+                          return (
+                            <label
+                              key={sz}
+                              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs cursor-pointer transition-colors ${
+                                checked
+                                  ? "bg-[#EEF3E4] border-[#C6DBA8] text-[#4F7C3A]"
+                                  : "bg-white border-[#E2DDD8] text-[#4B5563] hover:bg-[#F3F4F6]"
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => toggleSizeInGroup(gIdx, sz)}
+                                className="h-3 w-3"
+                              />
+                              {sz}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={addGroup}
+                    className="inline-flex items-center gap-1 text-xs text-[#6B5C32] hover:underline"
+                  >
+                    <Plus className="h-3 w-3" /> Add Compartment
+                  </button>
                 </div>
               )}
-              {selectedSizes.length > 0 && (
-                <p className="text-xs text-[#6B7280] mt-1.5">
-                  Combo: {[...selectedSizes].sort().join(" + ")}
+              {groups.some((g) => g.length > 0) && (
+                <p className="text-xs text-[#6B7280] mt-2">
+                  Combo:{" "}
+                  {groups
+                    .filter((g) => g.length > 0)
+                    .map((g) => [...g].sort().join(" / "))
+                    .join(" + ")}
                 </p>
               )}
             </div>

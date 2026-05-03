@@ -29,6 +29,8 @@ import {
   FileDown,
   Calendar,
   Copy,
+  ChevronDown,
+  ChevronRight,
 } from "lucide-react";
 
 type CustomerMutationResponse =
@@ -182,6 +184,10 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
   // Per-product price-history dialog. Holds the cp row whose history is
   // being inspected; null when closed.
   const [historyForCpId, setHistoryForCpId] = useState<string | null>(null);
+
+  // Collapsed by default so the Maintenance + Sofa Combo panels below
+  // are visible without scrolling past 200+ product rows.
+  const [collapsed, setCollapsed] = useState(true);
 
   // ---------- Bulk edit state (mirrors Products page dirtyEdits) ----------
   type DirtyCustomerEdit = {
@@ -468,10 +474,19 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
     <Card className="border-[#6B5C32] border-2">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
-          <CardTitle className="flex items-center gap-2 text-base">
+          <button
+            onClick={() => setCollapsed((v) => !v)}
+            className="flex items-center gap-2 text-base font-semibold text-[#1F1D1B] hover:text-[#6B5C32] transition-colors"
+            aria-expanded={!collapsed}
+          >
+            {collapsed ? (
+              <ChevronRight className="h-4 w-4 text-[#6B5C32]" />
+            ) : (
+              <ChevronDown className="h-4 w-4 text-[#6B5C32]" />
+            )}
             <Package className="h-5 w-5 text-[#6B5C32]" />
             Customer Products — {customerName} ({rows.length})
-          </CardTitle>
+          </button>
           <div className="flex items-center gap-2 flex-wrap">
             <Button variant="outline" size="sm" disabled={rows.length === 0} onClick={handleExportQuotation}>
               <FileDown className="h-4 w-4 mr-1" />
@@ -496,6 +511,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             </Button>
           </div>
         </div>
+        {!collapsed && (<>
         <div className="flex items-center gap-2 flex-wrap mt-3">
           {categoryTabs.map((tab) => (
             <button
@@ -593,7 +609,9 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
             </>
           )}
         </div>
+        </>)}
       </CardHeader>
+      {!collapsed && (
       <CardContent>
         {/* Assign SKU modal — full-screen overlay. The old inline expand didn't scale for bulk assign. */}
         <AssignSkuModal
@@ -963,6 +981,7 @@ function CustomerProductsPanel({ customerId, customerName, customer }: { custome
           </div>
         )}
       </CardContent>
+      )}
 
       {/* Bulk save dialog — surfaces when the user clicks "Save N changes"
           while in edit mode. Captures the effective date and an optional

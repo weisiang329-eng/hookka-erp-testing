@@ -677,20 +677,10 @@ export default function ProductionPage({
   // payload size penalty is negligible vs the dropped Lifecycle dropdown
   // it replaces (which was redundant with the column filter the user
   // already had at hand).
-  // baseUrl is rebuilt every render from the live filter state so the
-  // server-side dueFrom/dueTo window matches whatever the operator has in
-  // the date inputs. useCachedJson keys off the URL string, so each
-  // window change cuts a fresh fetch (and a fresh localStorage cache key).
-  const dueQueryFrag =
-    (fltDueFrom ? `&dueFrom=${encodeURIComponent(fltDueFrom)}` : "") +
-    (fltDueTo ? `&dueTo=${encodeURIComponent(fltDueTo)}` : "");
-  const baseUrl =
-    mode === "dept" && deptCode
-      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
-      : `/api/production-orders?fields=minimal${dueQueryFrag}`;
+  // shouldFetch needs to live up here because some downstream effects
+  // depend on it. baseUrl / dueQueryFrag are deferred to AFTER
+  // fltDueFrom/fltDueTo are declared (~line 791) to dodge a TDZ error.
   const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
-  const ordersUrl: string | null = shouldFetch ? baseUrl : null;
-  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
@@ -703,6 +693,7 @@ export default function ProductionPage({
   // Keep activeTab in sync with the deptCode prop when navigating between
   // sibling dept routes (React Router reuses the component instance on
   // /production/fab-cut → /production/fab-sew transitions).
+  /* eslint-disable react-hooks/set-state-in-effect -- syncing activeTab to URL deptCode on route change */
   useEffect(() => {
     if (mode === "dept" && deptCode && deptCode !== activeTab) {
       setActiveTabRaw(deptCode);
@@ -710,6 +701,7 @@ export default function ProductionPage({
       setActiveTabRaw("ALL");
     }
   }, [mode, deptCode, activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   // Wrapped setter that marks tab-switch start time; the matching end is
   // recorded at the top of the next render via useEffect below. Over 200ms
   // gets a [slow-tab] warn.
@@ -790,6 +782,17 @@ export default function ProductionPage({
   // payload to match. Operator can clear either field to widen the range.
   const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", todayISO());
   const [fltDueTo, setFltDueTo] = useUrlState<string>("to", todayISO());
+  // dueQueryFrag/baseUrl/ordersResp moved here from earlier in the file
+  // to satisfy the TDZ for fltDueFrom/fltDueTo (declared just above).
+  const dueQueryFrag =
+    (fltDueFrom ? `&dueFrom=${encodeURIComponent(fltDueFrom)}` : "") +
+    (fltDueTo ? `&dueTo=${encodeURIComponent(fltDueTo)}` : "");
+  const baseUrl =
+    mode === "dept" && deptCode
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
+      : `/api/production-orders?fields=minimal${dueQueryFrag}`;
+  const ordersUrl: string | null = shouldFetch ? baseUrl : null;
+  const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // (Lifecycle dropdown removed 2026-04-27 — replaced by the Status
   // column's per-column filter. The grid loads all PO statuses now.)
   // New filters (2026-04-25):
@@ -830,9 +833,11 @@ export default function ProductionPage({
     !!fltCategory ||
     !!fltItemType ||
     !!fltModel;
+  /* eslint-disable react-hooks/set-state-in-effect -- gate fetch on first filter activation */
   useEffect(() => {
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
   }, [anyFilterActive, shouldFetch]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Scroll position restoration — keyed per active dept tab so each dept
   // remembers its own scroll independently. sessionStorage so the value
@@ -869,7 +874,9 @@ export default function ProductionPage({
   // Reset the mirror when the active tab changes — the new dept's grid will
   // report its own rows once it mounts. Without this, stale rows from the
   // previous dept would briefly filter the QR tile row to an empty set.
+  /* eslint-disable react-hooks/set-state-in-effect -- reset mirror on tab change */
   useEffect(() => { setGridFilteredDeptRows(null); }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Batch sticker printing — populated when the user clicks "Print Job Card
   // Stickers" or "Print FG Stickers" in the header. Each entry renders into
@@ -952,10 +959,12 @@ export default function ProductionPage({
   const [_showFgPreview, setShowFgPreview] = useState(false);
   // Collapse both on tab change so the new tab starts fast; user re-opens
   // per tab if they actually need the QR grid.
+  /* eslint-disable react-hooks/set-state-in-effect -- collapse panels on tab change */
   useEffect(() => {
     setShowQRStrip(false);
     setShowFgPreview(false);
   }, [activeTab]);
+  /* eslint-enable react-hooks/set-state-in-effect */
   // When true, the fgStickers useEffect will fire window.print() on next
   // populate. Auto-population on UPH/PACK tab entry leaves this false so
   // the preview tiles render without triggering a print dialog.
@@ -2595,6 +2604,7 @@ export default function ProductionPage({
   // load so the tiles stay in sync with what the operator is looking at.
   // Other tabs clear the list so the hidden print container doesn't carry
   // stale data into a job-card print job.
+  /* eslint-disable react-hooks/set-state-in-effect -- auto-load FG stickers on UPH/PACK tab */
   useEffect(() => {
     if (activeTab === "UPHOLSTERY" || activeTab === "PACKING") {
       loadFgStickers();
@@ -2602,6 +2612,7 @@ export default function ProductionPage({
       setFgStickers([]);
     }
   }, [activeTab, loadFgStickers]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   // Once the batch container is rendered, fire the print dialog. Small
   // timeout lets React paint the hidden container first; QR images are

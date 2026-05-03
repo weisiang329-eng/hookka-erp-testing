@@ -395,27 +395,12 @@ function CustomerAssignmentsSection({ productId, active }: { productId: string; 
 }
 
 // ---------- Variant Config Defaults (per base model) ----------
-const DEFAULT_VARIANT_CONFIGS: Record<string, ProductVariantConfig[]> = {
-  // Bedframe defaults
-  "1003": [
-    { category: "DIVAN_HEIGHT", label: "Divan Height", options: [
-      { value: '8"', label: '8"', priceSen: 0, isDefault: true },
-      { value: '10"', label: '10"', priceSen: 5000, isDefault: false },
-      { value: '12"', label: '12"', priceSen: 10000, isDefault: false },
-    ]},
-    { category: "LEG_HEIGHT", label: "Leg Height", options: [
-      { value: "NO_LEG", label: "No Leg", priceSen: 0, isDefault: true },
-      { value: '2"', label: '2"', priceSen: 0, isDefault: false },
-      { value: '4"', label: '4"', priceSen: 3000, isDefault: false },
-      { value: '6"', label: '6"', priceSen: 5000, isDefault: false },
-    ]},
-    { category: "SPECIAL", label: "Special Order", options: [
-      { value: "NONE", label: "None", priceSen: 0, isDefault: true },
-      { value: "NO_LEG", label: "No Leg", priceSen: 0, isDefault: false },
-      { value: "EXTRA_FOAM", label: "Extra Foam", priceSen: 8000, isDefault: false },
-    ]},
-  ],
-};
+// Empty by default — operators configure variants per SKU through the
+// Variant Maintenance dialog. Previously seeded HILTON (1003) with three
+// hard-coded categories which was misleading: those defaults weren't
+// persisted (only React state) and made it look like other SKUs were
+// missing data when they simply hadn't been configured yet.
+const DEFAULT_VARIANT_CONFIGS: Record<string, ProductVariantConfig[]> = {};
 
 // ---------- Variant Editor Dialog ----------
 function VariantEditorDialog({

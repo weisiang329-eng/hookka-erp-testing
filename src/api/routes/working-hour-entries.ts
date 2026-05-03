@@ -240,15 +240,22 @@ app.get("/production-revenue", async (c) => {
               po.customerName      AS customerName,
               po.salesOrderNo      AS soNo,
               po.quantity          AS qty,
-              p.category           AS category,
-              COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0) AS unitPriceSen
+              po.itemCategory      AS category,
+              COALESCE(
+                soi.unitPriceSen,
+                (SELECT COALESCE(p.basePriceSen, p.price1Sen)
+                   FROM products p
+                  WHERE p.code = po.productCode
+                  ORDER BY p.basePriceSen DESC NULLS LAST, p.id
+                  LIMIT 1),
+                0
+              ) AS unitPriceSen
          FROM per_po
          JOIN production_orders po ON po.id = per_po.productionOrderId
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
-         LEFT JOIN products p ON p.id = po.productId
-        WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
+        WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
         ORDER BY per_po.unit_completed_at DESC`,
     )
     .bind(from, to)

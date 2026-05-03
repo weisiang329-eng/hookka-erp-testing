@@ -37,10 +37,16 @@ const FABRIC_TIERS: FabricTier[] = ["ANY", "PRICE_1", "PRICE_2", "PRICE_3"];
 // JSON shape stored in the table.
 const SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
 
+// Storage shape changed mid-flight from string[] (single-variant exact match)
+// to string[][] (OR-groups: each inner array is "any-of", outer is "all-of").
+// Server still accepts the legacy flat shape and wraps each element into a
+// 1-element group, so a fresh client never sees mixed shapes — but the
+// renderer needs to handle both during the rollout window.
+type ComponentSizeGroups = string[] | string[][];
 type SofaComboRule = {
   id: string;
   baseModel: string;
-  componentSizes: string[];
+  componentSizes: ComponentSizeGroups;
   fabricTier: FabricTier;
   pricesByHeight: Record<string, number>;
   customerId: string | null;
@@ -50,6 +56,19 @@ type SofaComboRule = {
   createdAt: string;
   createdBy: string | null;
 };
+
+// Render the OR-grouped sizes as readable text.
+//   [["2A(LHF)","2A(RHF)"], ["L(LHF)","L(RHF)"]]  →  "2A(LHF) / 2A(RHF) + L(LHF) / L(RHF)"
+//   ["2A(LHF)", "L(LHF)"]                         →  "2A(LHF) + L(LHF)"
+// "+" between groups means "AND"; "/" within a group means "OR".
+function renderComponentSizes(sizes: ComponentSizeGroups): string {
+  if (!Array.isArray(sizes) || sizes.length === 0) return "—";
+  const isGrouped = Array.isArray(sizes[0]);
+  if (!isGrouped) return (sizes as string[]).join(" + ");
+  return (sizes as string[][])
+    .map((g) => g.join(" / "))
+    .join(" + ");
+}
 
 type ApiList<T> = { success?: boolean; data?: T[] };
 type ApiSingle<T> = { success?: boolean; data?: T; error?: string };
@@ -94,11 +113,26 @@ function fabricTierBadge(t: FabricTier) {
 }
 
 function statusBadge(effectiveFrom: string) {
-  const isPending = effectiveFrom > todayIso();
+  const today = todayIso();
+  const isPending = effectiveFrom > today;
   if (isPending) {
+    // Days-until countdown so the operator can see at a glance how close
+    // a scheduled combo is to taking effect. <=3d red, <=14d orange,
+    // beyond that the standard amber matches the master Pending badge.
+    const ms = new Date(effectiveFrom + "T00:00:00Z").getTime() - new Date(today + "T00:00:00Z").getTime();
+    const days = Math.max(0, Math.round(ms / 86400000));
+    const cls =
+      days <= 3
+        ? "bg-[#FBE0DC] text-[#9A3A2D] border-[#E8B2A1]"
+        : days <= 14
+          ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+          : "bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]";
     return (
-      <span className="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border bg-[#FAEFCB] text-[#9C6F1E] border-[#E8D597]">
-        Pending {formatDate(effectiveFrom)}
+      <span
+        className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium border ${cls}`}
+        title={`Becomes effective on ${effectiveFrom}`}
+      >
+        Pending · {days}d
       </span>
     );
   }
@@ -348,7 +382,7 @@ function ComboCard({
               </span>
               <span className="text-xs text-[#6B7280]">·</span>
               <span className="text-xs font-medium text-[#4B5563]">
-                {rule.componentSizes.join(" + ")}
+                {renderComponentSizes(rule.componentSizes)}
               </span>
               {fabricTierBadge(rule.fabricTier)}
             </div>

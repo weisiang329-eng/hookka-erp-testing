@@ -1715,6 +1715,213 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
 }
 
 // =====================================================================
+// CustomerSofaCombosPanel — read-only listing of this customer's sofa
+// combo rules, plus Copy-from-Master + per-row Delete. The full editor
+// (with new-combo dialog, edit, etc.) lives on /maintenance/sofa-combos
+// — a "Manage in full editor" link routes there with the customer
+// pre-selected via querystring.
+// =====================================================================
+type CustSofaComboSizes = string[] | string[][];
+type CustSofaComboRule = {
+  id: string;
+  baseModel: string;
+  componentSizes: CustSofaComboSizes;
+  fabricTier: "ANY" | "PRICE_1" | "PRICE_2" | "PRICE_3";
+  pricesByHeight: Record<string, number>;
+  effectiveFrom: string;
+  notes: string;
+};
+
+const CUST_SOFA_SEAT_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+
+function renderCustComponentSizes(sizes: CustSofaComboSizes): string {
+  if (!Array.isArray(sizes) || sizes.length === 0) return "—";
+  const grouped = Array.isArray(sizes[0]);
+  if (!grouped) return (sizes as string[]).join(" + ");
+  return (sizes as string[][]).map((g) => g.join(" / ")).join(" + ");
+}
+
+function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: string; customerName: string }) {
+  const [rules, setRules] = useState<CustSofaComboRule[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [copying, setCopying] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string>("");
+
+  const reload = () => {
+    setLoading(true);
+    setErrorMsg("");
+    fetch(`/api/sofa-combos?customerId=${encodeURIComponent(customerId)}`)
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: CustSofaComboRule[] }>)
+      .then((j) => {
+        if (j?.success) setRules(j.data ?? []);
+        else setRules([]);
+      })
+      .catch(() => setErrorMsg("Failed to load sofa combos"))
+      .finally(() => setLoading(false));
+  };
+
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot fetch on customer change */
+  useEffect(() => {
+    reload();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  const handleCopyFromMaster = async () => {
+    if (!confirm(
+      `Copy company-wide Sofa Combos to "${customerName}"?\n\n` +
+      `This snapshots the latest master rules into customer-specific copies. ` +
+      `Already-snapshotted rules are skipped (re-running is safe).`,
+    )) return;
+    setCopying(true);
+    setErrorMsg("");
+    try {
+      const res = await fetch("/api/sofa-combos/copy-from-master", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ customerId }),
+      });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        setErrorMsg((j as { error?: string })?.error || `Copy failed (HTTP ${res.status})`);
+        return;
+      }
+      reload();
+    } finally {
+      setCopying(false);
+    }
+  };
+
+  const handleDelete = async (rule: CustSofaComboRule) => {
+    if (!confirm(
+      `Delete combo "${rule.baseModel} — ${renderCustComponentSizes(rule.componentSizes)}"?`,
+    )) return;
+    const res = await fetch(`/api/sofa-combos/${rule.id}`, { method: "DELETE" });
+    if (!res.ok) {
+      const j = await res.json().catch(() => ({}));
+      setErrorMsg((j as { error?: string })?.error || `Delete failed (HTTP ${res.status})`);
+      return;
+    }
+    reload();
+  };
+
+  return (
+    <Card className="border-[#6B5C32] border-2">
+      <CardHeader className="pb-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <CardTitle className="flex items-center gap-2 text-base">
+            <Package className="h-5 w-5 text-[#6B5C32]" />
+            Sofa Combos — {customerName} ({rules.length})
+          </CardTitle>
+          <div className="flex items-center gap-2 flex-wrap">
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={copying}
+              onClick={handleCopyFromMaster}
+            >
+              {copying ? (
+                <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4 mr-1" />
+              )}
+              Copy from Master
+            </Button>
+            <a
+              href="/maintenance/sofa-combos"
+              className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E2DDD8] hover:bg-[#F3F4F6] transition-colors"
+            >
+              Open Full Editor →
+            </a>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent>
+        {errorMsg && (
+          <div className="mb-3 rounded-md border border-[#E8B2A1] bg-[#F9E1DA] px-3 py-2 text-sm text-[#9A3A2D]">
+            {errorMsg}
+          </div>
+        )}
+        {loading ? (
+          <p className="text-sm text-[#9CA3AF] py-4 text-center">Loading...</p>
+        ) : rules.length === 0 ? (
+          <div className="py-8 text-center space-y-3">
+            <p className="text-sm text-[#9CA3AF]">
+              No customer-specific sofa combos yet.
+            </p>
+            <p className="text-xs text-[#9CA3AF]">
+              Click <b>Copy from Master</b> to snapshot the company-wide combo
+              rules into customer-specific copies that you can edit independently.
+            </p>
+          </div>
+        ) : (
+          <div className="bg-white rounded-lg border border-[#E2DDD8] overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="min-w-full divide-y divide-[#E2DDD8] text-sm">
+                <thead className="bg-[#F9FAFB]">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Base</th>
+                    <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Components</th>
+                    <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Tier</th>
+                    {CUST_SOFA_SEAT_HEIGHTS.map((h) => (
+                      <th key={h} className="px-3 py-2 text-right font-semibold text-[#6B7280]">
+                        {h}″
+                      </th>
+                    ))}
+                    <th className="px-3 py-2 text-left font-semibold text-[#6B7280]">Effective</th>
+                    <th className="px-3 py-2 text-right font-semibold text-[#6B7280]">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#F3F4F6]">
+                  {rules.map((r) => {
+                    const isPending = r.effectiveFrom > new Date().toISOString().slice(0, 10);
+                    return (
+                      <tr key={r.id} className="hover:bg-[#FAF9F7]">
+                        <td className="px-3 py-2 font-mono text-[#1F1D1B]">{r.baseModel}</td>
+                        <td className="px-3 py-2 text-[#374151]">
+                          {renderCustComponentSizes(r.componentSizes)}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium bg-[#F0ECE9] text-[#4B5563] border border-[#E2DDD8]">
+                            {r.fabricTier}
+                          </span>
+                        </td>
+                        {CUST_SOFA_SEAT_HEIGHTS.map((h) => (
+                          <td key={h} className="px-3 py-2 text-right text-[#374151]">
+                            {r.pricesByHeight[h] != null ? formatRM(r.pricesByHeight[h]) : "—"}
+                          </td>
+                        ))}
+                        <td className="px-3 py-2 text-[#6B7280]">
+                          {r.effectiveFrom}
+                          {isPending && (
+                            <span className="ml-2 inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium bg-[#FAEFCB] text-[#9C6F1E] border border-[#E8D597]">
+                              Pending
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right">
+                          <button
+                            onClick={() => handleDelete(r)}
+                            className="p-1 rounded hover:bg-[#FBE0DC] text-[#9A3A2D]"
+                            title="Delete combo"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// =====================================================================
 // CustomerPriceHistoryDialog — per-customer-per-product price history
 // + new effective-dated row form. Mirrors MasterPriceHistoryDialog but
 // hits /api/customer-products/:cpId/price-history and
@@ -2793,6 +3000,7 @@ export default function CustomersPage() {
           </Card>
           <CustomerProductsPanel customerId={cust.id} customerName={cust.name} customer={cust} />
           <CustomerMaintenancePanel customerId={cust.id} customerName={cust.name} />
+          <CustomerSofaCombosPanel customerId={cust.id} customerName={cust.name} />
           </>
         );
       })()}

@@ -122,6 +122,24 @@ export type Product = {
     count: number;
     names: string[];
   };
+  // Per-SKU default variant pre-fills consumed by /sales/create. Operator
+  // configures these in Products → Variant Defaults; SO line auto-fills
+  // from them on product select (still overrideable per line).
+  defaultVariants?: ProductDefaultVariants;
+};
+
+// Per-SKU defaults for divan / leg / gap / specials / fabric. BEDFRAME
+// uses divanHeight/legHeight/gap/specials/fabricCode; SOFA uses
+// seatHeight/legHeight/specials/fabricCode; ACCESSORY only fabricCode.
+// Empty fields stay undefined / empty array — the SO line just falls
+// back to no pre-fill for them.
+export type ProductDefaultVariants = {
+  fabricCode?: string;
+  divanHeight?: string;
+  legHeight?: string;
+  gap?: string;
+  seatHeight?: string;
+  specials?: string[];
 };
 
 // --- Fabrics ---

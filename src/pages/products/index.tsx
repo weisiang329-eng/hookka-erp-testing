@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { cachedFetchJson, invalidateCachePrefix, useCachedJson } from "@/lib/cached-fetch";
 import { useToast } from "@/components/ui/toast";
 import { Link } from "react-router-dom";
@@ -76,20 +76,30 @@ type Product = {
   // sees a scheduled change at a glance (countdown UI in MasterPriceHistoryDialog).
   hasPendingPriceChange?: boolean;
   pendingEffectiveFrom?: string;
+  // Per-SKU default variant pre-fills. The Variant Maintenance dialog writes
+  // here; /sales/create reads here when the operator picks this product to
+  // pre-fill divan height / leg height / gap / specials / fabric on the line.
+  // The line operator can still override after pre-fill.
+  defaultVariants?: ProductDefaultVariants;
 };
 
-type VariantOption = {
-  value: string;
-  label: string;
-  priceSen: number;
-  isDefault: boolean;
+// Per-SKU default variant pre-fills. Bedframe and sofa products use
+// disjoint subsets of these fields; accessories typically have none.
+type ProductDefaultVariants = {
+  fabricCode?: string;
+  // Bedframe fields
+  divanHeight?: string;
+  legHeight?: string;
+  gap?: string;
+  // Sofa fields
+  seatHeight?: string;
+  // Shared (BF + SOFA) multi-select. Empty array = no defaults.
+  specials?: string[];
 };
 
-type ProductVariantConfig = {
-  category: string; // FABRIC, DIVAN_HEIGHT, LEG_HEIGHT, SPECIAL
-  label: string;
-  options: VariantOption[];
-};
+// (Legacy ProductVariantConfig / VariantOption types were retired when
+// per-SKU variant defaults moved to products.defaultVariants. The new
+// shape — ProductDefaultVariants — lives next to the Product type above.)
 
 type ProductDeptConfig = {
   productCode: string;
@@ -400,76 +410,132 @@ function CustomerAssignmentsSection({ productId, active }: { productId: string; 
 
 // ---------- Variant Config Defaults (per base model) ----------
 // Empty by default — operators configure variants per SKU through the
-// Variant Maintenance dialog. Previously seeded HILTON (1003) with three
-// hard-coded categories which was misleading: those defaults weren't
-// persisted (only React state) and made it look like other SKUs were
-// missing data when they simply hadn't been configured yet.
-const DEFAULT_VARIANT_CONFIGS: Record<string, ProductVariantConfig[]> = {};
-
 // ---------- Variant Editor Dialog ----------
+// Per-SKU default variant configurator. The fields displayed depend on
+// product.category:
+//   BEDFRAME  → Fabric · Divan Height · Leg Height · Gap · Specials
+//   SOFA      → Fabric · Seat Height · Leg Height · Specials
+//   ACCESSORY → Fabric only
+// Option lists for divan/leg/gap/specials/sofa-* come from the master
+// kv_config('variants-config') Maintenance config so anything the
+// operator adds in Maintenance is immediately available here. Fabric
+// options come from /api/fabric-tracking. The Save button emits the
+// full ProductDefaultVariants blob; the parent persists it via
+// PATCH /api/products/:id.
 function VariantEditorDialog({
-  open, onClose, product, variants, onSave,
+  open, onClose, product, defaults, maintenanceConfig, fabrics, onSave, saving,
 }: {
-  open: boolean; onClose: () => void; product: Product;
-  variants: ProductVariantConfig[]; onSave: (v: ProductVariantConfig[]) => void;
+  open: boolean;
+  onClose: () => void;
+  product: Product;
+  defaults: ProductDefaultVariants;
+  maintenanceConfig: MaintenanceConfig;
+  fabrics: { code: string; description?: string }[];
+  onSave: (v: ProductDefaultVariants) => void;
+  saving?: boolean;
 }) {
-  const [configs, setConfigs] = useState<ProductVariantConfig[]>([]);
+  const [draft, setDraft] = useState<ProductDefaultVariants>({});
 
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot deep clone of variants into editor state when dialog opens */
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot deep clone of defaults into editor state when dialog opens */
   useEffect(() => {
-    if (open) setConfigs(variants.map((v) => ({ ...v, options: v.options.map((o) => ({ ...o })) })));
-  }, [open, variants]);
+    if (open) {
+      setDraft({
+        fabricCode: defaults.fabricCode,
+        divanHeight: defaults.divanHeight,
+        legHeight: defaults.legHeight,
+        gap: defaults.gap,
+        seatHeight: defaults.seatHeight,
+        specials: [...(defaults.specials ?? [])],
+      });
+    }
+  }, [open, defaults]);
   /* eslint-enable react-hooks/set-state-in-effect */
-
-  function addVariantCategory() {
-    setConfigs((prev) => [...prev, {
-      category: "CUSTOM", label: "Custom Option", options: [
-        { value: "default", label: "Default", priceSen: 0, isDefault: true },
-      ],
-    }]);
-  }
-
-  function removeCategory(ci: number) {
-    setConfigs((prev) => prev.filter((_, i) => i !== ci));
-  }
-
-  function updateCategory(ci: number, field: string, value: string) {
-    setConfigs((prev) => prev.map((c, i) => i === ci ? { ...c, [field]: value } : c));
-  }
-
-  function addOption(ci: number) {
-    setConfigs((prev) => prev.map((c, i) =>
-      i === ci ? { ...c, options: [...c.options, { value: "", label: "", priceSen: 0, isDefault: false }] } : c
-    ));
-  }
-
-  function removeOption(ci: number, oi: number) {
-    setConfigs((prev) => prev.map((c, i) =>
-      i === ci ? { ...c, options: c.options.filter((_, j) => j !== oi) } : c
-    ));
-  }
-
-  function updateOption(ci: number, oi: number, field: string, value: string | number | boolean) {
-    setConfigs((prev) => prev.map((c, i) =>
-      i === ci ? {
-        ...c,
-        options: c.options.map((o, j) => {
-          if (j !== oi) return field === "isDefault" && value === true ? { ...o, isDefault: false } : o;
-          return { ...o, [field]: value };
-        }),
-      } : c
-    ));
-  }
 
   if (!open) return null;
 
+  const isBF = product.category === "BEDFRAME";
+  const isSofa = product.category === "SOFA";
+
+  // The specials master config is two separate lists in the maintenance
+  // config (BF vs SOFA). Pick the right one for this product type.
+  const specialsList: { value: string; priceSen?: number }[] = isSofa
+    ? (maintenanceConfig.sofaSpecials ?? [])
+    : (maintenanceConfig.specials ?? []);
+
+  // Single-value pickers (divan / leg / gap / seat / fabric). Empty string =
+  // "no default", which maps to undefined in the saved blob.
+  const setSingle = (key: keyof ProductDefaultVariants, value: string) => {
+    setDraft((prev) => ({ ...prev, [key]: value || undefined }));
+  };
+
+  // Multi-value picker for specials. Toggle in/out of the array.
+  const toggleSpecial = (value: string) => {
+    setDraft((prev) => {
+      const current = prev.specials ?? [];
+      const next = current.includes(value)
+        ? current.filter((v) => v !== value)
+        : [...current, value];
+      return { ...prev, specials: next };
+    });
+  };
+
+  const handleSave = () => {
+    // Strip empty strings / empty arrays before persisting so the saved
+    // blob stays compact and "configured" check (any field set) is
+    // accurate.
+    const out: ProductDefaultVariants = {};
+    if (draft.fabricCode) out.fabricCode = draft.fabricCode;
+    if (isBF) {
+      if (draft.divanHeight) out.divanHeight = draft.divanHeight;
+      if (draft.legHeight) out.legHeight = draft.legHeight;
+      if (draft.gap) out.gap = draft.gap;
+    } else if (isSofa) {
+      if (draft.seatHeight) out.seatHeight = draft.seatHeight;
+      if (draft.legHeight) out.legHeight = draft.legHeight;
+    }
+    if ((draft.specials?.length ?? 0) > 0) out.specials = draft.specials;
+    onSave(out);
+  };
+
+  const handleClear = () => {
+    setDraft({ specials: [] });
+  };
+
+  // Reusable single-select field renderer. Plain function (not a
+  // component) so React doesn't treat it as a freshly-mounted component
+  // every render — keeps internal state of <select> stable.
+  const renderSelectField = (props: {
+    label: string;
+    value: string | undefined;
+    options: { value: string; label?: string }[];
+    onChange: (v: string) => void;
+    placeholder?: string;
+  }) => (
+    <div className="space-y-1">
+      <label className="text-xs font-medium text-[#6B7280]">{props.label}</label>
+      <select
+        value={props.value ?? ""}
+        onChange={(e) => props.onChange(e.target.value)}
+        className="w-full text-sm border border-[#E5E7EB] rounded px-2.5 py-1.5 bg-white"
+      >
+        <option value="">{props.placeholder ?? "— Not Set —"}</option>
+        {props.options.map((opt) => (
+          <option key={opt.value} value={opt.value}>{opt.label ?? opt.value}</option>
+        ))}
+      </select>
+    </div>
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-white rounded-xl shadow-xl w-[680px] max-h-[80vh] flex flex-col">
+      <div className="bg-white rounded-xl shadow-xl w-[560px] max-h-[85vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#E5E7EB]">
           <div>
-            <h2 className="text-lg font-bold text-[#111827]">Variant Maintenance</h2>
+            <h2 className="text-lg font-bold text-[#111827]">Variant Defaults</h2>
             <p className="text-xs text-[#6B7280] mt-0.5">{product.code} — {product.name}</p>
+            <p className="text-[10px] text-[#9CA3AF] mt-0.5">
+              Sales Order pre-fills from these on product select. Operator can still override per line.
+            </p>
           </div>
           <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
             <svg className="w-5 h-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -479,68 +545,118 @@ function VariantEditorDialog({
         </div>
 
         <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          {configs.map((cfg, ci) => (
-            <div key={ci} className="border border-[#E5E7EB] rounded-lg p-3 space-y-2">
-              <div className="flex items-center gap-2">
-                <select value={cfg.category} onChange={(e) => updateCategory(ci, "category", e.target.value)}
-                  className="text-sm border border-[#E5E7EB] rounded px-2 py-1 bg-white">
-                  <option value="DIVAN_HEIGHT">Divan Height</option>
-                  <option value="LEG_HEIGHT">Leg Height</option>
-                  <option value="FABRIC">Fabric</option>
-                  <option value="SPECIAL">Special Order</option>
-                  <option value="SEAT_HEIGHT">Seat Height</option>
-                  <option value="SOFA_LEG">Sofa Leg</option>
-                  <option value="CUSTOM">Custom</option>
-                </select>
-                <input value={cfg.label} onChange={(e) => updateCategory(ci, "label", e.target.value)}
-                  className="text-sm border border-[#E5E7EB] rounded px-2 py-1 flex-1" placeholder="Label" />
-                <button onClick={() => removeCategory(ci)} className="p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                </button>
-              </div>
+          {/* Fabric — applies to all categories */}
+          {renderSelectField({
+            label: "Default Fabric",
+            value: draft.fabricCode,
+            onChange: (v) => setSingle("fabricCode", v),
+            options: fabrics.map((f) => ({
+              value: f.code,
+              label: f.description ? `${f.code} — ${f.description}` : f.code,
+            })),
+          })}
 
-              {/* Options table */}
-              <div className="space-y-1">
-                <div className="grid grid-cols-[1fr_1.5fr_0.8fr_0.5fr_0.3fr] gap-1 text-[10px] font-medium text-[#6B7280] uppercase px-1">
-                  <span>Value</span><span>Label</span><span>Price +/-</span><span>Default</span><span></span>
-                </div>
-                {cfg.options.map((opt, oi) => (
-                  <div key={oi} className="grid grid-cols-[1fr_1.5fr_0.8fr_0.5fr_0.3fr] gap-1 items-center">
-                    <input value={opt.value} onChange={(e) => updateOption(ci, oi, "value", e.target.value)}
-                      className="text-xs border border-[#E5E7EB] rounded px-1.5 py-1 font-mono" />
-                    <input value={opt.label} onChange={(e) => updateOption(ci, oi, "label", e.target.value)}
-                      className="text-xs border border-[#E5E7EB] rounded px-1.5 py-1" />
-                    <input type="number" value={opt.priceSen / 100} onChange={(e) => updateOption(ci, oi, "priceSen", Math.round(parseFloat(e.target.value || "0") * 100))}
-                      className="text-xs border border-[#E5E7EB] rounded px-1.5 py-1" step="0.01" />
-                    <div className="flex justify-center">
-                      <input type="radio" name={`default-${ci}`} checked={opt.isDefault}
-                        onChange={() => updateOption(ci, oi, "isDefault", true)} className="accent-[#6B5C32]" />
-                    </div>
-                    <button onClick={() => removeOption(ci, oi)} className="text-[#9A3A2D] hover:text-[#7A2E24] text-center">
-                      <svg className="w-3.5 h-3.5 mx-auto" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                      </svg>
-                    </button>
-                  </div>
-                ))}
-                <button onClick={() => addOption(ci)} className="text-[10px] px-2 py-0.5 bg-gray-100 text-gray-500 rounded hover:bg-gray-200">
-                  + Add Option
-                </button>
+          {isBF && (
+            <>
+              {renderSelectField({
+                label: "Default Divan Height",
+                value: draft.divanHeight,
+                onChange: (v) => setSingle("divanHeight", v),
+                options: (maintenanceConfig.divanHeights ?? []).map((o) => ({ value: o.value })),
+              })}
+              {renderSelectField({
+                label: "Default Leg Height",
+                value: draft.legHeight,
+                onChange: (v) => setSingle("legHeight", v),
+                options: (maintenanceConfig.legHeights ?? []).map((o) => ({ value: o.value })),
+              })}
+              {renderSelectField({
+                label: "Default Gap",
+                value: draft.gap,
+                onChange: (v) => setSingle("gap", v),
+                options: (maintenanceConfig.gaps ?? []).map((g) => ({ value: g })),
+              })}
+            </>
+          )}
+
+          {isSofa && (
+            <>
+              {renderSelectField({
+                label: "Default Seat Height",
+                value: draft.seatHeight,
+                onChange: (v) => setSingle("seatHeight", v),
+                options: (maintenanceConfig.sofaSizes ?? []).map((s) => ({ value: s })),
+              })}
+              {renderSelectField({
+                label: "Default Leg Height",
+                value: draft.legHeight,
+                onChange: (v) => setSingle("legHeight", v),
+                options: (maintenanceConfig.sofaLegHeights ?? []).map((o) => ({ value: o.value })),
+              })}
+            </>
+          )}
+
+          {/* Specials — multi-select for BF and SOFA only */}
+          {(isBF || isSofa) && specialsList.length > 0 && (
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-[#6B7280]">
+                Default Special Orders <span className="text-[#9CA3AF]">(multi-select)</span>
+              </label>
+              <div className="border border-[#E5E7EB] rounded p-2 max-h-40 overflow-y-auto space-y-1">
+                {specialsList.map((s) => {
+                  const checked = (draft.specials ?? []).includes(s.value);
+                  return (
+                    <label key={s.value} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-[#F9FAFB] px-1.5 py-1 rounded">
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleSpecial(s.value)}
+                        className="accent-[#6B5C32]"
+                      />
+                      <span className="flex-1">{s.value}</span>
+                      {typeof s.priceSen === "number" && s.priceSen !== 0 && (
+                        <span className="text-[10px] text-[#9CA3AF] tabular-nums">
+                          {s.priceSen > 0 ? "+" : ""}RM {(s.priceSen / 100).toFixed(2)}
+                        </span>
+                      )}
+                    </label>
+                  );
+                })}
               </div>
             </div>
-          ))}
+          )}
 
-          <button onClick={addVariantCategory}
-            className="w-full py-2 text-xs border border-dashed border-[#E5E7EB] rounded-lg text-[#6B7280] hover:bg-[#F9FAFB]">
-            + Add Variant Category
-          </button>
+          {product.category === "ACCESSORY" && (
+            <p className="text-xs text-[#6B7280] italic">
+              Accessories only support a default fabric. Other variant fields don't apply.
+            </p>
+          )}
         </div>
 
-        <div className="px-6 py-4 border-t border-[#E5E7EB] flex justify-end gap-2">
-          <button onClick={onClose} className="px-4 py-2 text-sm border border-[#E5E7EB] rounded-lg text-gray-600 hover:bg-gray-50">Cancel</button>
-          <button onClick={() => { onSave(configs); onClose(); }} className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A]">Save Variants</button>
+        <div className="px-6 py-4 border-t border-[#E5E7EB] flex items-center justify-between">
+          <button
+            onClick={handleClear}
+            disabled={saving}
+            className="text-xs text-[#9A3A2D] hover:underline disabled:opacity-50"
+          >
+            Clear all defaults
+          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={onClose}
+              disabled={saving}
+              className="px-4 py-2 text-sm border border-[#E5E7EB] rounded-lg text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleSave}
+              disabled={saving}
+              className="px-4 py-2 text-sm bg-[#6B5C32] text-white rounded-lg hover:bg-[#5A4D2A] disabled:opacity-50"
+            >
+              {saving ? "Saving…" : "Save Defaults"}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1331,8 +1447,18 @@ export default function ProductsPage() {
   const [categoryFilter, setCategoryFilter] = useState<string>("BEDFRAME");
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [loading, setLoading] = useState(true);
-  const [variantMap, setVariantMap] = useState<Record<string, ProductVariantConfig[]>>({});
+  // Master Maintenance config (kv_config 'variants-config'). Variant editor
+  // dialog reads divan/leg/gap/specials/sofa option lists from here so any
+  // value the operator adds in the Maintenance tab is immediately
+  // selectable as a default.
+  const [maintenanceConfig, setMaintenanceConfig] = useState<MaintenanceConfig>(DEFAULT_MAINTENANCE_CONFIG);
+  // Fabric list. Variant editor uses this for the Default Fabric
+  // dropdown — same source as Sales Order's fabric picker so codes align.
+  const [fabricList, setFabricList] = useState<{ code: string; description?: string }[]>([]);
   const [editingVariant, setEditingVariant] = useState<Product | null>(null);
+  // PATCH-in-flight flag so the Save button can show a loading state and
+  // prevent double-submit while the request is on the wire.
+  const [variantSaving, setVariantSaving] = useState(false);
   const [editingPrice, setEditingPrice] = useState<string | null>(null);
   const [priceInput, setPriceInput] = useState("");
   const [editingM3, setEditingM3] = useState<string | null>(null);
@@ -1667,16 +1793,81 @@ export default function ProductsPage() {
     return map;
   }, [configs]);
 
-  // Initialize variant configs from defaults
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot mount-time seed of static defaults */
+  // Hydrate maintenance config + fabric list once at mount. Both feed the
+  // Variant Defaults dialog dropdowns. Maintenance config also live-syncs
+  // via the kv-config subscription below so adding a divan height in the
+  // Maintenance tab makes it immediately selectable here without a
+  // refresh.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate of master config + fabrics for the variant dialog */
   useEffect(() => {
-    const map: Record<string, ProductVariantConfig[]> = {};
-    Object.entries(DEFAULT_VARIANT_CONFIGS).forEach(([model, configs]) => {
-      map[model] = configs;
+    setMaintenanceConfig(parseMaintenanceConfig(getVariantsConfigSync()));
+    let cancelled = false;
+    void fetchVariantsConfig().then((v) => {
+      if (cancelled) return;
+      setMaintenanceConfig(parseMaintenanceConfig(v));
     });
-    setVariantMap(map);
+    const off = subscribeKvConfig(VARIANTS_CONFIG_KEY, (v) => {
+      setMaintenanceConfig(parseMaintenanceConfig(v as VariantsConfig | null));
+    });
+    void cachedFetchJson<{ data?: { code: string; fabricDescription?: string }[] }>("/api/fabric-tracking")
+      .then((d) => {
+        if (cancelled) return;
+        setFabricList(
+          (d?.data ?? []).map((f) => ({ code: f.code, description: f.fabricDescription })),
+        );
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off();
+    };
   }, []);
   /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Persist updated default variants to /api/products/:id and refresh the
+  // local product row so the badge + expand panel reflect the saved state
+  // immediately. PATCH (well, PUT — that's what /api/products/:id supports)
+  // is fire-once-and-await so the dialog stays open until persisted.
+  const saveDefaultVariants = useCallback(async (
+    productId: string,
+    defaults: ProductDefaultVariants,
+  ) => {
+    setVariantSaving(true);
+    try {
+      const res = await fetch(`/api/products/${productId}`, {
+        method: "PUT",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultVariants: defaults }),
+      });
+      const json = (await res.json()) as { success?: boolean; error?: string };
+      if (!res.ok || !json.success) {
+        toast({
+          variant: "destructive",
+          title: "Save failed",
+          description: json.error || res.statusText,
+        });
+        return false;
+      }
+      // Patch local state — product row badge updates without a full refetch.
+      setProducts((prev) =>
+        prev.map((p) =>
+          p.id === productId ? { ...p, defaultVariants: defaults } : p,
+        ),
+      );
+      invalidateCachePrefix("/api/products");
+      return true;
+    } catch (err) {
+      toast({
+        variant: "destructive",
+        title: "Save failed",
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    } finally {
+      setVariantSaving(false);
+    }
+  }, [toast]);
 
   const categories = useMemo(() => {
     const cats = new Set(products.map((p) => p.category));
@@ -1971,7 +2162,19 @@ export default function ProductsPage() {
                   : (cfg ? totalConfigMinutes(cfg) : 0);
                 const price1Val = p.price1Sen ?? 0;
                 const basePrice = p.basePriceSen ?? p.costPriceSen ?? 0;
-                const modelVariants = variantMap[p.baseModel] || [];
+                // Per-SKU default variants — read straight from the product
+                // row. The badge shows "✓ Configured" when ANY default field
+                // is set, otherwise "Configure". Counting the number of set
+                // fields in a summary list below.
+                const variantDefaults: ProductDefaultVariants = p.defaultVariants ?? {};
+                const variantSetCount =
+                  (variantDefaults.fabricCode ? 1 : 0) +
+                  (variantDefaults.divanHeight ? 1 : 0) +
+                  (variantDefaults.legHeight ? 1 : 0) +
+                  (variantDefaults.gap ? 1 : 0) +
+                  (variantDefaults.seatHeight ? 1 : 0) +
+                  ((variantDefaults.specials?.length ?? 0) > 0 ? 1 : 0);
+                const hasVariantDefaults = variantSetCount > 0;
                 const isEditingThisPrice = editingPrice === p.id;
 
                 return (
@@ -2290,12 +2493,17 @@ export default function ProductsPage() {
                               <button
                                 onClick={() => setEditingVariant(p)}
                                 className={`text-[10px] font-medium px-2 py-1 rounded-full border transition-colors ${
-                                  modelVariants.length > 0
+                                  hasVariantDefaults
                                     ? "bg-[#EEF3E4] text-[#4F7C3A] border-[#C6DBA8] hover:bg-[#EEF3E4]"
                                     : "bg-gray-50 text-gray-400 border-gray-200 hover:bg-gray-100"
                                 }`}
+                                title={
+                                  hasVariantDefaults
+                                    ? "Edit default variants for this SKU"
+                                    : "Configure default variants — Sales Order will pre-fill from these"
+                                }
                               >
-                                {modelVariants.length > 0 ? `${modelVariants.length} types` : "Configure"}
+                                {hasVariantDefaults ? `${variantSetCount} set` : "Configure"}
                               </button>
                             </div>
                           </>
@@ -2306,8 +2514,11 @@ export default function ProductsPage() {
                         <div className="px-4 pb-4 space-y-3">
                           {cfg && <ProductionConfig config={cfg} />}
 
-                          {/* Variant Defaults Summary */}
-                          {modelVariants.length > 0 && (
+                          {/* Variant Defaults Summary — flat key/value cards
+                              for the fields the operator has actually set,
+                              one card per non-empty default. Edit hops back
+                              into the dialog for changes. */}
+                          {hasVariantDefaults && (
                             <div className="bg-[#FAF9F7] border border-[#E5E7EB] rounded-lg p-4">
                               <div className="flex items-center justify-between mb-2">
                                 <h4 className="text-sm font-semibold text-[#374151]">Variant Defaults</h4>
@@ -2319,21 +2530,44 @@ export default function ProductsPage() {
                                 </button>
                               </div>
                               <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                                {modelVariants.map((vc, i) => {
-                                  const defaultOpt = vc.options.find((o) => o.isDefault);
-                                  return (
-                                    <div key={i} className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
-                                      <div className="text-[10px] font-medium text-[#6B7280] uppercase">{vc.label}</div>
-                                      <div className="text-sm font-medium text-[#111827]">
-                                        {defaultOpt?.label || "-"}
-                                        {defaultOpt && defaultOpt.priceSen > 0 && (
-                                          <span className="text-xs text-[#4F7C3A] ml-1">+{formatCurrency(defaultOpt.priceSen)}</span>
-                                        )}
-                                      </div>
-                                      <div className="text-[10px] text-[#9CA3AF]">{vc.options.length} options available</div>
+                                {variantDefaults.fabricCode && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Fabric</div>
+                                    <div className="text-sm font-medium text-[#111827]">{variantDefaults.fabricCode}</div>
+                                  </div>
+                                )}
+                                {variantDefaults.divanHeight && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Divan Height</div>
+                                    <div className="text-sm font-medium text-[#111827]">{variantDefaults.divanHeight}</div>
+                                  </div>
+                                )}
+                                {variantDefaults.legHeight && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Leg Height</div>
+                                    <div className="text-sm font-medium text-[#111827]">{variantDefaults.legHeight}</div>
+                                  </div>
+                                )}
+                                {variantDefaults.gap && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Gap</div>
+                                    <div className="text-sm font-medium text-[#111827]">{variantDefaults.gap}</div>
+                                  </div>
+                                )}
+                                {variantDefaults.seatHeight && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB]">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Seat Height</div>
+                                    <div className="text-sm font-medium text-[#111827]">{variantDefaults.seatHeight}</div>
+                                  </div>
+                                )}
+                                {(variantDefaults.specials?.length ?? 0) > 0 && (
+                                  <div className="bg-white rounded-md px-3 py-2 border border-[#E5E7EB] col-span-2 md:col-span-3">
+                                    <div className="text-[10px] font-medium text-[#6B7280] uppercase">Specials</div>
+                                    <div className="text-sm font-medium text-[#111827]">
+                                      {(variantDefaults.specials ?? []).join(" · ")}
                                     </div>
-                                  );
-                                })}
+                                  </div>
+                                )}
                               </div>
                             </div>
                           )}
@@ -2390,8 +2624,14 @@ export default function ProductsPage() {
           open={!!editingVariant}
           onClose={() => setEditingVariant(null)}
           product={editingVariant}
-          variants={variantMap[editingVariant.baseModel] || []}
-          onSave={(v) => setVariantMap((prev) => ({ ...prev, [editingVariant.baseModel]: v }))}
+          defaults={editingVariant.defaultVariants ?? {}}
+          maintenanceConfig={maintenanceConfig}
+          fabrics={fabricList}
+          saving={variantSaving}
+          onSave={async (v) => {
+            const ok = await saveDefaultVariants(editingVariant.id, v);
+            if (ok) setEditingVariant(null);
+          }}
         />
       )}
 

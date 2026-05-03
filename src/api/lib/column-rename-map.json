@@ -141,6 +141,7 @@
   "days60Sen": "days60_sen",
   "days90Sen": "days90_sen",
   "debitSen": "debit_sen",
+  "defaultVariants": "default_variants",
   "deliveredAt": "delivered_at",
   "deliveryAddress": "delivery_address",
   "deliveryCostSen": "delivery_cost_sen",

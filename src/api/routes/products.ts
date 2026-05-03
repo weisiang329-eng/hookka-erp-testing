@@ -35,6 +35,23 @@ type ProductRow = {
   fabricColor: string | null;
   pieces: string | null;
   seatHeightPrices: string | null;
+  defaultVariants: string | null;
+};
+
+// Per-SKU default variant pre-fills consumed by /sales/create. Each shape
+// is JSON-encoded and stored as TEXT in products.default_variants. Empty
+// fields just stay undefined / empty array — the SO line falls back to
+// "no pre-fill" for them.
+type DefaultVariants = {
+  fabricCode?: string;
+  // Bedframe-only fields
+  divanHeight?: string;
+  legHeight?: string;
+  gap?: string;
+  // Sofa-only fields
+  seatHeight?: string;
+  // Shared multi-select
+  specials?: string[];
 };
 
 type BomComponentRow = {
@@ -201,6 +218,10 @@ function rowToProduct(
       [],
     );
   }
+  // Per-SKU default variants (BF: divanHeight/legHeight/gap/specials/fabric;
+  // SOFA: seatHeight/legHeight/specials/fabric). Empty object when nothing
+  // configured — the SO line just falls back to no pre-fill.
+  base.defaultVariants = parseJson<DefaultVariants>(row.defaultVariants, {});
   if (priceOverlay) {
     base.hasPendingPriceChange = priceOverlay.hasPendingPriceChange;
     if (priceOverlay.pendingEffectiveFrom) {
@@ -484,8 +505,8 @@ app.post("/", async (c) => {
         `INSERT INTO products (id, code, name, category, description, baseModel,
            sizeCode, sizeLabel, fabricUsage, unitM3, status, costPriceSen,
            basePriceSen, price1Sen, productionTimeMinutes, subAssemblies,
-           skuCode, fabricColor, pieces, seatHeightPrices)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           skuCode, fabricColor, pieces, seatHeightPrices, defaultVariants)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         id,
         body.code,
@@ -507,6 +528,7 @@ app.post("/", async (c) => {
         body.fabricColor ?? null,
         body.pieces ? JSON.stringify(body.pieces) : null,
         body.seatHeightPrices ? JSON.stringify(body.seatHeightPrices) : null,
+        body.defaultVariants ? JSON.stringify(body.defaultVariants) : null,
       ),
       ...bomComponentsInput.map((comp) =>
         c.var.DB.prepare(
@@ -631,6 +653,12 @@ app.put("/:id", async (c) => {
           : body.seatHeightPrices
             ? JSON.stringify(body.seatHeightPrices)
             : null,
+      defaultVariants:
+        body.defaultVariants === undefined
+          ? existing.defaultVariants
+          : body.defaultVariants
+            ? JSON.stringify(body.defaultVariants)
+            : null,
     };
 
     const statements: D1PreparedStatement[] = [
@@ -640,7 +668,7 @@ app.put("/:id", async (c) => {
            sizeCode = ?, sizeLabel = ?, fabricUsage = ?, unitM3 = ?, status = ?,
            costPriceSen = ?, basePriceSen = ?, price1Sen = ?,
            productionTimeMinutes = ?, subAssemblies = ?, skuCode = ?,
-           fabricColor = ?, pieces = ?, seatHeightPrices = ?
+           fabricColor = ?, pieces = ?, seatHeightPrices = ?, defaultVariants = ?
          WHERE id = ?`,
       ).bind(
         merged.code,
@@ -662,6 +690,7 @@ app.put("/:id", async (c) => {
         merged.fabricColor,
         merged.pieces,
         merged.seatHeightPrices,
+        merged.defaultVariants,
         id,
       ),
     ];

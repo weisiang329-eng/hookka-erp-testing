@@ -1011,8 +1011,6 @@ function MaintenanceView() {
     }
     setConfig(savedConfig);
     setEditMode(false);
-    setEditingIdx(null);
-    setEditingValue("");
     setNewValue("");
     setNewPriceSen(0);
   }
@@ -1159,7 +1157,7 @@ function MaintenanceView() {
                   </div>
                 )}
                 <button
-                  onClick={() => { setTab(t.key); setNewValue(""); setNewPriceSen(0); setEditingIdx(null); }}
+                  onClick={() => { setTab(t.key); setNewValue(""); setNewPriceSen(0); }}
                   className={`relative px-4 py-3 text-sm font-medium whitespace-nowrap transition-colors ${
                     tab === t.key
                       ? "text-[#6B5C32] bg-white border-b-2 border-[#6B5C32]"

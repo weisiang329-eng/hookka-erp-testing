@@ -4208,6 +4208,7 @@ function MasterTemplatesDialog({
                     onAddMaterial={(path) => addMaterialAtPath(wi, path)}
                     onRemoveMaterial={(path, mi) => removeMaterialAtPath(wi, path, mi)}
                     onSelectMaterial={(path, mi, rm) => selectMaterialAtPath(wi, path, mi, rm)}
+                    onSelectMaterialAutoDetect={(path, mi, kind) => setMaterialAutoDetectAtPath(wi, path, mi, kind)}
                     onUpdateMaterial={(path, mi, field, value) => updateMaterialAtPath(wi, path, mi, field, value)}
                     onWrap={(path, si) => wrapSubWIPAtPath(wi, path, si)}
                     onMoveUp={(path, si) => moveSubWIPUpAtPath(wi, path, si)}

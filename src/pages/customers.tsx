@@ -2033,17 +2033,57 @@ function CustomerPriceHistoryDialog({
   const [saving, setSaving] = useState(false);
 
   const todayIso = () => new Date().toISOString().slice(0, 10);
+  const daysUntil = (iso: string): number => {
+    const t = new Date(todayIso() + "T00:00:00Z").getTime();
+    const d = new Date(iso + "T00:00:00Z").getTime();
+    return Math.round((d - t) / 86400000);
+  };
   const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
   const [baseRm, setBaseRm] = useState((cp.basePriceSen / 100).toFixed(2));
   const [price1Rm, setPrice1Rm] = useState(
     cp.price1Sen != null ? (cp.price1Sen / 100).toFixed(2) : "",
   );
-  const [seatJson, setSeatJson] = useState(
-    cp.seatHeightPrices ? JSON.stringify(cp.seatHeightPrices) : "",
-  );
   const [notes, setNotes] = useState("");
 
   const isSofa = cp.category === "SOFA";
+
+  // Sofa price matrix: 5 heights × 3 fabric tiers. Stored here as RM-string
+  // inputs (so blank = "no price for this cell" instead of "RM 0"). Save
+  // builds the sparse seatHeightPrices array from the non-blank cells.
+  const SOFA_HEIGHTS = ["24", "28", "30", "32", "35"] as const;
+  const SOFA_TIERS = ["PRICE_1", "PRICE_2", "PRICE_3"] as const;
+  type CustSofaTier = (typeof SOFA_TIERS)[number];
+  type CustSofaHeight = (typeof SOFA_HEIGHTS)[number];
+  const blankGrid = (): Record<CustSofaHeight, Record<CustSofaTier, string>> => {
+    const out: Record<string, Record<string, string>> = {};
+    for (const h of SOFA_HEIGHTS) {
+      out[h] = { PRICE_1: "", PRICE_2: "", PRICE_3: "" };
+    }
+    return out as Record<CustSofaHeight, Record<CustSofaTier, string>>;
+  };
+
+  // Seed the editor grid from the customer-product's existing
+  // seatHeightPrices so "schedule a price hike" is one date-pick + edit
+  // away. Legacy entries without a tier default to PRICE_2.
+  const seedGridFromCp = (
+    rows: SeatHeightEntry[] | null | undefined,
+  ): Record<CustSofaHeight, Record<CustSofaTier, string>> => {
+    const g = blankGrid();
+    if (!rows) return g;
+    const norm = (v: string) => String(v ?? "").replace('"', "").trim();
+    for (const r of rows) {
+      const h = norm(r.height) as CustSofaHeight;
+      if (!SOFA_HEIGHTS.includes(h)) continue;
+      const t = (r.tier ?? "PRICE_2") as CustSofaTier;
+      if (!SOFA_TIERS.includes(t)) continue;
+      g[h][t] = (r.priceSen / 100).toFixed(2);
+    }
+    return g;
+  };
+
+  const [seatGrid, setSeatGrid] = useState<
+    Record<CustSofaHeight, Record<CustSofaTier, string>>
+  >(() => seedGridFromCp(cp.seatHeightPrices));
 
   const load = async () => {
     setLoading(true);
@@ -2086,14 +2126,26 @@ function CustomerPriceHistoryDialog({
       const body: Record<string, unknown> = { effectiveFrom };
       body.basePriceSen = baseRm.trim() === "" ? null : Math.round(Number(baseRm) * 100);
       body.price1Sen = price1Rm.trim() === "" ? null : Math.round(Number(price1Rm) * 100);
-      if (seatJson.trim()) {
-        try {
-          body.seatHeightPrices = JSON.parse(seatJson);
-        } catch {
-          alert('Seat-height prices must be valid JSON (e.g. [{"height":"24","priceSen":51700}]).');
-          setSaving(false);
-          return;
+      if (isSofa) {
+        // Build sparse seatHeightPrices from the grid. Each non-blank cell
+        // becomes one entry; blank cells are omitted so the resolver
+        // falls back to whatever was previously effective for that
+        // (height, tier) pair.
+        const rows: { height: string; priceSen: number; tier: CustSofaTier }[] = [];
+        for (const h of SOFA_HEIGHTS) {
+          for (const t of SOFA_TIERS) {
+            const raw = (seatGrid[h]?.[t] ?? "").trim();
+            if (!raw) continue;
+            const num = Number(raw);
+            if (!Number.isFinite(num) || num < 0) {
+              alert(`Invalid price for ${h}" ${t}: must be a non-negative number.`);
+              setSaving(false);
+              return;
+            }
+            rows.push({ height: h, priceSen: Math.round(num * 100), tier: t });
+          }
         }
+        body.seatHeightPrices = rows.length > 0 ? rows : null;
       } else {
         body.seatHeightPrices = null;
       }
@@ -2130,10 +2182,7 @@ function CustomerPriceHistoryDialog({
     void load();
   };
 
-  const formatSeatHeights = (sh: SeatHeightEntry[] | null | undefined) => {
-    if (!sh || sh.length === 0) return "—";
-    return sh.map((t) => `${t.height}":${(t.priceSen / 100).toFixed(0)}`).join(" ");
-  };
+  const today = todayIso();
 
   return (
     <div
@@ -2141,7 +2190,7 @@ function CustomerPriceHistoryDialog({
       onClick={onClose}
     >
       <div
-        className="bg-white rounded-lg shadow-xl w-[90vw] max-w-3xl mx-4 max-h-[85vh] flex flex-col"
+        className="bg-white rounded-lg shadow-xl flex flex-col w-[80vw] h-[85vh] max-w-4xl mx-4"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
@@ -2155,114 +2204,329 @@ function CustomerPriceHistoryDialog({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-          {/* New row form */}
-          <div className="bg-[#FAF9F7] border border-[#E2DDD8] rounded-md p-3 space-y-2">
-            <h3 className="text-sm font-semibold text-[#6B5C32]">Schedule new price</h3>
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div className="flex-1 overflow-y-auto px-6 py-4 space-y-6">
+          {/* ===== New scheduled change ===== */}
+          <section>
+            <h3 className="text-sm font-medium text-[#1F1D1B] mb-3">
+              New scheduled change
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs text-[#6B7280] mb-1">Effective From *</label>
-                <Input type="date" value={effectiveFrom} onChange={(e) => setEffectiveFrom(e.target.value)} className="h-8" />
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Effective from *
+                </label>
+                <Input
+                  type="date"
+                  value={effectiveFrom}
+                  onChange={(e) => setEffectiveFrom(e.target.value)}
+                  className="h-8"
+                />
+                <p className="text-[10px] text-[#9CA3AF] mt-1">
+                  Past dates are allowed — backfill historical prices or
+                  back-date a correction here.
+                </p>
               </div>
               <div>
-                <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
-                <Input type="number" step="0.01" value={baseRm} onChange={(e) => setBaseRm(e.target.value)} className="h-8" />
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Notes
+                </label>
+                <Input
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="e.g. Q3 price hike"
+                  className="h-8"
+                />
               </div>
-              <div>
-                <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM)</label>
-                <Input type="number" step="0.01" value={price1Rm} onChange={(e) => setPrice1Rm(e.target.value)} placeholder="leave blank for none" className="h-8" />
-              </div>
+              {!isSofa && (
+                <>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">
+                      Base price (RM)
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={baseRm}
+                      onChange={(e) => setBaseRm(e.target.value)}
+                      className="h-8 text-right"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B7280] mb-1">
+                      Price 1 (RM)
+                    </label>
+                    <Input
+                      type="number"
+                      step="0.01"
+                      value={price1Rm}
+                      onChange={(e) => setPrice1Rm(e.target.value)}
+                      className="h-8 text-right"
+                    />
+                  </div>
+                </>
+              )}
               {isSofa && (
-                <div className="sm:col-span-3">
-                  <label className="block text-xs text-[#6B7280] mb-1">Seat-Height Prices (JSON)</label>
-                  <Input
-                    value={seatJson}
-                    onChange={(e) => setSeatJson(e.target.value)}
-                    placeholder='[{"height":"24","priceSen":51700,"tier":"PRICE_2"}]'
-                    className="h-8"
-                  />
+                <div className="sm:col-span-2">
+                  <label className="block text-xs text-[#6B7280] mb-2">
+                    Seat-height × fabric tier (RM)
+                  </label>
+                  <p className="text-[10px] text-[#9CA3AF] mb-2">
+                    Leave a cell blank to keep the previously-effective price
+                    for that (height × tier). Filled cells become the new
+                    price from {effectiveFrom} onwards.
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="text-xs border-collapse">
+                      <thead>
+                        <tr>
+                          <th className="px-2 py-1.5 text-left text-[#6B7280] font-medium">
+                            Height
+                          </th>
+                          {SOFA_TIERS.map((t) => (
+                            <th
+                              key={t}
+                              className="px-2 py-1.5 text-right text-[#6B7280] font-medium"
+                            >
+                              {t === "PRICE_1"
+                                ? "P1"
+                                : t === "PRICE_2"
+                                  ? "P2"
+                                  : "P3"}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {SOFA_HEIGHTS.map((h) => (
+                          <tr key={h}>
+                            <td className="px-2 py-1 text-[#1F1D1B] font-medium">
+                              {h}&quot;
+                            </td>
+                            {SOFA_TIERS.map((t) => (
+                              <td key={t} className="px-1 py-1">
+                                <Input
+                                  type="number"
+                                  step="0.01"
+                                  value={seatGrid[h]?.[t] ?? ""}
+                                  onChange={(e) =>
+                                    setSeatGrid((g) => ({
+                                      ...g,
+                                      [h]: { ...g[h], [t]: e.target.value },
+                                    }))
+                                  }
+                                  className="h-8 text-right w-24"
+                                  placeholder="—"
+                                />
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
-              <div className="sm:col-span-3">
-                <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
-                <Input value={notes} onChange={(e) => setNotes(e.target.value)} className="h-8" />
-              </div>
             </div>
-            <div className="flex justify-end">
+            <div className="mt-3 flex justify-end">
               <Button variant="primary" size="sm" disabled={saving} onClick={save}>
                 {saving ? <Loader2 className="h-4 w-4 mr-1 animate-spin" /> : <Plus className="h-4 w-4 mr-1" />}
-                Save
+                Schedule
               </Button>
             </div>
-          </div>
+          </section>
 
-          {/* History table */}
-          <div className="border border-[#E2DDD8] rounded-md bg-white">
-            <div className="px-3 py-2 border-b border-[#E2DDD8] text-xs text-[#6B7280]">
-              History ({history.length})
-            </div>
+          {/* ===== History table ===== */}
+          <section>
+            <h3 className="text-sm font-medium text-[#1F1D1B] mb-3">
+              Price history ({history.length})
+            </h3>
             {loading ? (
-              <div className="p-4 text-xs text-[#9CA3AF] flex items-center gap-2">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
-              </div>
+              <p className="text-sm text-[#9CA3AF] py-6 text-center">
+                Loading…
+              </p>
             ) : history.length === 0 ? (
-              <div className="p-4 text-xs text-[#9CA3AF]">No history yet.</div>
+              <p className="text-sm text-[#9CA3AF] py-6 text-center">
+                No scheduled or past price changes yet. The current displayed
+                price comes from the customer-product record.
+              </p>
             ) : (
               <table className="w-full text-xs">
-                <thead>
-                  <tr className="bg-[#FAF9F7] text-[#6B7280]">
-                    <th className="text-left py-1.5 px-2 font-medium">Effective From</th>
-                    <th className="text-right py-1.5 px-2 font-medium">Base (RM)</th>
-                    <th className="text-right py-1.5 px-2 font-medium">Price 1 (RM)</th>
-                    <th className="text-left py-1.5 px-2 font-medium">Seat Heights</th>
-                    <th className="text-left py-1.5 px-2 font-medium">Notes</th>
-                    <th className="text-right py-1.5 px-2 font-medium">Status</th>
-                    <th className="text-right py-1.5 px-2 font-medium"></th>
+                <thead className="text-[#6B7280]">
+                  <tr className="border-b border-[#E2DDD8]">
+                    <th className="text-left py-2 px-2">Effective from</th>
+                    <th className="text-right py-2 px-2">Base</th>
+                    <th className="text-right py-2 px-2">Price 1</th>
+                    <th className="text-left py-2 px-2">Seat tiers</th>
+                    <th className="text-left py-2 px-2">Notes</th>
+                    <th className="text-right py-2 px-2">Status</th>
+                    <th />
                   </tr>
                 </thead>
                 <tbody>
-                  {history.map((h) => {
-                    const isPending = h.effectiveFrom > todayIso();
-                    return (
-                      <tr key={h.id} className="border-t border-[#E2DDD8]">
-                        <td className="py-1.5 px-2 doc-number">{h.effectiveFrom}</td>
-                        <td className="py-1.5 px-2 text-right tabular-nums">
-                          {h.basePriceSen != null ? (h.basePriceSen / 100).toFixed(2) : "—"}
-                        </td>
-                        <td className="py-1.5 px-2 text-right tabular-nums">
-                          {h.price1Sen != null ? (h.price1Sen / 100).toFixed(2) : "—"}
-                        </td>
-                        <td className="py-1.5 px-2 text-[#6B7280]">
-                          {formatSeatHeights(h.seatHeightPrices?.length ? h.seatHeightPrices : null)}
-                        </td>
-                        <td className="py-1.5 px-2 text-[#6B7280]">{h.notes || "—"}</td>
-                        <td className="py-1.5 px-2 text-right">
-                          {isPending ? (
-                            <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]">
-                              Pending
-                            </span>
-                          ) : (
-                            <span className="text-[10px] text-[#9CA3AF]">Active</span>
-                          )}
-                        </td>
-                        <td className="py-1.5 px-2 text-right">
-                          <button
-                            onClick={() => deleteRow(h.id)}
-                            className="p-1 rounded hover:bg-[#F9E1DA]"
-                            title="Delete history row"
-                          >
-                            <Trash2 className="h-3 w-3 text-[#9A3A2D]" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                  {/* Active = newest row whose effectiveFrom <= today; we
+                      compute its id once per render so the badge column can
+                      cheaply mark it. Pending = future-dated. Past = older
+                      than the active row. */}
+                  {(() => {
+                    const activeId = (() => {
+                      const past = history.filter((r) => r.effectiveFrom <= today);
+                      if (past.length === 0) return null;
+                      return past.reduce((a, b) =>
+                        a.effectiveFrom >= b.effectiveFrom ? a : b,
+                      ).id;
+                    })();
+                    return history.map((h) => {
+                      const pending = h.effectiveFrom > today;
+                      const days = daysUntil(h.effectiveFrom);
+                      const isActive = h.id === activeId;
+                      return (
+                        <tr key={h.id} className="border-b border-[#F0EEEA]">
+                          <td className="py-1.5 px-2 doc-number">
+                            {h.effectiveFrom}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tabular-nums">
+                            {h.basePriceSen != null
+                              ? formatCurrency(h.basePriceSen)
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 px-2 text-right tabular-nums">
+                            {h.price1Sen != null
+                              ? formatCurrency(h.price1Sen)
+                              : "—"}
+                          </td>
+                          <td className="py-1.5 px-2 text-[#6B7280] align-top">
+                            {h.seatHeightPrices && h.seatHeightPrices.length > 0 ? (
+                              (() => {
+                                // Build a {height -> {tier -> priceSen}}
+                                // lookup so we can render the same 5×3 grid
+                                // as the editor form above. Legacy entries
+                                // (no tier) collapse into the P2 column to
+                                // match every reader's fallback behavior.
+                                const lookup: Record<
+                                  string,
+                                  Record<"PRICE_1" | "PRICE_2" | "PRICE_3", number | null>
+                                > = {};
+                                for (const h2 of SOFA_HEIGHTS) {
+                                  lookup[h2] = {
+                                    PRICE_1: null,
+                                    PRICE_2: null,
+                                    PRICE_3: null,
+                                  };
+                                }
+                                for (const r of h.seatHeightPrices) {
+                                  const key = String(r.height ?? "")
+                                    .replace('"', "")
+                                    .trim();
+                                  if (!lookup[key]) continue;
+                                  const tier = (r.tier ?? "PRICE_2") as
+                                    | "PRICE_1"
+                                    | "PRICE_2"
+                                    | "PRICE_3";
+                                  lookup[key][tier] = r.priceSen;
+                                }
+                                return (
+                                  <table className="text-[10px] tabular-nums border-collapse">
+                                    <thead>
+                                      <tr className="text-[#9CA3AF]">
+                                        <th className="px-1 py-0 font-normal" />
+                                        <th className="px-1 py-0 text-right font-normal">
+                                          P1
+                                        </th>
+                                        <th className="px-1 py-0 text-right font-normal">
+                                          P2
+                                        </th>
+                                        <th className="px-1 py-0 text-right font-normal">
+                                          P3
+                                        </th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {SOFA_HEIGHTS.map((hh) => (
+                                        <tr key={hh}>
+                                          <td className="px-1 py-0 text-[#1F1D1B] font-medium">
+                                            {hh}&Prime;
+                                          </td>
+                                          {(
+                                            [
+                                              "PRICE_1",
+                                              "PRICE_2",
+                                              "PRICE_3",
+                                            ] as const
+                                          ).map((tt) => {
+                                            const v = lookup[hh]?.[tt];
+                                            return (
+                                              <td
+                                                key={tt}
+                                                className="px-1 py-0 text-right"
+                                              >
+                                                {v != null ? (
+                                                  <span className="text-[#1F1D1B]">
+                                                    {(v / 100).toFixed(0)}
+                                                  </span>
+                                                ) : (
+                                                  <span className="text-[#D1D5DB]">
+                                                    —
+                                                  </span>
+                                                )}
+                                              </td>
+                                            );
+                                          })}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                );
+                              })()
+                            ) : (
+                              "—"
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 text-[#6B7280]">
+                            {h.notes || "—"}
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            {pending ? (
+                              <span
+                                className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium border ${
+                                  days <= 3
+                                    ? "bg-[#FBE0DC] text-[#9A3A2D] border-[#E8B2A1]"
+                                    : days <= 14
+                                      ? "bg-[#FBE4CE] text-[#B8601A] border-[#E8B786]"
+                                      : "bg-[#F4F0E8] text-[#6B5C32] border-[#D4CCB4]"
+                                }`}
+                                title={`Becomes effective on ${h.effectiveFrom}`}
+                              >
+                                Pending · {days}d
+                              </span>
+                            ) : isActive ? (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#E0EDF0] text-[#3E6570] border border-[#B8D0D5]">
+                                Active
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#F3F4F6] text-[#9CA3AF] border border-[#E2DDD8]">
+                                Past
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 text-right">
+                            <button
+                              onClick={() => deleteRow(h.id)}
+                              className="p-1 rounded text-[#9A3A2D] hover:bg-[#FBE0DC]"
+                              title="Delete this entry"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    });
+                  })()}
                 </tbody>
               </table>
             )}
-          </div>
+          </section>
         </div>
-        <div className="flex justify-end px-6 py-4 border-t border-[#E2DDD8]">
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
           <Button variant="outline" onClick={onClose}>Close</Button>
         </div>
       </div>

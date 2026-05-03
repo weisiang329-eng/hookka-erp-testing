@@ -1330,6 +1330,125 @@ export default function ProductsPage() {
     [products, scheduleProductId],
   );
 
+  // Bulk-edit pending changes. Every inline price edit (BF Price 2 / Price 1
+  // and Sofa seat-height cells) writes here instead of going straight to the
+  // products table. Keyed by productId so multiple cells in the same SKU
+  // collapse into one product_prices history row at save time. The "Save N
+  // changes" floating button below opens a modal that asks for an
+  // effective_from date and posts one row per dirty product.
+  type DirtyEdit = {
+    productId: string;
+    basePriceSen?: number;
+    price1Sen?: number | null;
+    // Full updated seatHeightPrices array for the product — the bulk save
+    // POST sends the complete snapshot so the new history row's NULL
+    // semantics (= inherit from products) don't accidentally clear cells
+    // that weren't edited.
+    seatHeightPrices?: { height: string; priceSen: number; tier?: SofaTier }[];
+  };
+  const [dirtyEdits, setDirtyEdits] = useState<Map<string, DirtyEdit>>(new Map());
+  const [showBulkSaveDialog, setShowBulkSaveDialog] = useState(false);
+  const [bulkSaving, setBulkSaving] = useState(false);
+  // Page-level edit mode. Cells are read-only when off; click-to-edit
+  // triggers no-op outside edit mode so the table is safe to browse.
+  const [editMode, setEditMode] = useState(false);
+  // Bulk save form state — surfaced when the user clicks "Save N changes".
+  // Effective date defaults to today; past dates are allowed for backfill,
+  // future dates park the row as Pending until that date passes.
+  const [bulkEffectiveFrom, setBulkEffectiveFrom] = useState(() =>
+    new Date().toISOString().slice(0, 10),
+  );
+  const [bulkNotes, setBulkNotes] = useState("");
+
+  function recordDirty(productId: string, patch: Partial<DirtyEdit>) {
+    setDirtyEdits((prev) => {
+      const next = new Map(prev);
+      const existing = next.get(productId) ?? { productId };
+      next.set(productId, { ...existing, ...patch });
+      return next;
+    });
+  }
+  function discardDirty() {
+    setDirtyEdits(new Map());
+    setEditMode(false);
+    setBulkNotes("");
+    // Reload from server to undo the optimistic local edits.
+    void reloadProductsAfterSchedule();
+  }
+
+  // Bulk save — dispatch one POST /api/products/:id/prices per dirty
+  // product with a single shared effective date. NULL on a field means
+  // "inherit from products" at resolve time; we always pass the FULL
+  // intended state (current values for unedited fields) so the new
+  // history row is a complete snapshot.
+  async function bulkSave() {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(bulkEffectiveFrom)) {
+      alert("Effective date must be YYYY-MM-DD.");
+      return;
+    }
+    if (dirtyEdits.size === 0) return;
+    setBulkSaving(true);
+    try {
+      const requests = Array.from(dirtyEdits.values()).map((d) => {
+        const prod = products.find((p) => p.id === d.productId);
+        // Compose a complete-state body so the resolver doesn't pull a
+        // missing field from the products table at a stale moment.
+        const body: Record<string, unknown> = {
+          effectiveFrom: bulkEffectiveFrom,
+          notes: bulkNotes || null,
+          basePriceSen:
+            d.basePriceSen !== undefined
+              ? d.basePriceSen
+              : (prod?.basePriceSen ?? null),
+          price1Sen:
+            d.price1Sen !== undefined
+              ? d.price1Sen
+              : (prod?.price1Sen ?? null),
+          seatHeightPrices:
+            d.seatHeightPrices !== undefined
+              ? d.seatHeightPrices
+              : (prod?.seatHeightPrices ?? null),
+        };
+        return fetch(`/api/products/${d.productId}/prices`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }).then((r) => ({ ok: r.ok, status: r.status, productId: d.productId }));
+      });
+      const results = await Promise.all(requests);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        alert(
+          `${failed.length} of ${results.length} updates failed. The successful ones were saved.`,
+        );
+      }
+      // Wipe local dirty state and reload so the table reflects the new
+      // currently-effective price (or shows the Pending badge if the
+      // effective date is in the future).
+      setDirtyEdits(new Map());
+      setShowBulkSaveDialog(false);
+      setEditMode(false);
+      setBulkNotes("");
+      await reloadProductsAfterSchedule();
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+  // Helpers for the cell-level "is this dirty?" indicator. Sofa lookup is
+  // (height, tier)-aware so editing P1 doesn't paint a P2 cell yellow.
+  const isProductDirty = (productId: string) => dirtyEdits.has(productId);
+  const isSeatCellDirty = (
+    productId: string,
+    height: string,
+    tier: SofaTier,
+  ) => {
+    const d = dirtyEdits.get(productId);
+    if (!d || !d.seatHeightPrices) return false;
+    return d.seatHeightPrices.some(
+      (s) => s.height === height && (s.tier ?? "PRICE_2") === tier,
+    );
+  };
+
   // Reload products when a price change is scheduled or deleted so the
   // Pending badge + currently-effective price reflect the latest history.
   // Reuses the same cached endpoint the initial load uses so a future
@@ -1629,6 +1748,56 @@ export default function ProductsPage() {
               disabled={importing}
             />
           </label>
+          <div className="w-px h-5 bg-[#E5E7EB] mx-1" />
+          {/* Edit / Save / Cancel — every price edit on this page goes
+              through this gate now. Cells are click-to-edit only while
+              editMode is on; clicking Save opens a modal that asks for the
+              effective date and dispatches one product_prices history row
+              per dirty product. */}
+          {!editMode ? (
+            <button
+              onClick={() => setEditMode(true)}
+              className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+            >
+              Edit Prices
+            </button>
+          ) : (
+            <>
+              <button
+                onClick={() => {
+                  if (dirtyEdits.size === 0) {
+                    setEditMode(false);
+                    return;
+                  }
+                  setShowBulkSaveDialog(true);
+                }}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  dirtyEdits.size > 0
+                    ? "bg-[#6B5C32] text-white hover:bg-[#5A4E2A]"
+                    : "bg-white text-[#9CA3AF] border border-[#E5E7EB] cursor-not-allowed"
+                }`}
+                disabled={dirtyEdits.size === 0}
+              >
+                Save{dirtyEdits.size > 0 ? ` (${dirtyEdits.size})` : ""}
+              </button>
+              <button
+                onClick={() => {
+                  if (
+                    dirtyEdits.size > 0 &&
+                    !confirm(
+                      `Discard ${dirtyEdits.size} unsaved change${dirtyEdits.size === 1 ? "" : "s"}?`,
+                    )
+                  ) {
+                    return;
+                  }
+                  discardDirty();
+                }}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] transition-colors"
+              >
+                Cancel
+              </button>
+            </>
+          )}
           {/* Tier switcher — only meaningful for sofas (5 height columns
               are tier-aware). Renders as a single segmented control so the
               row-per-row table layout is preserved; clicking a tier re-renders
@@ -1868,11 +2037,11 @@ export default function ProductsPage() {
                                         const hN = h.replace('"', '');
                                         let arr = p.seatHeightPrices || [];
                                         // Match by BOTH height and current tier so editing
-                                        // P1 doesn't overwrite an existing P2 cell and vice
-                                        // versa. Legacy untiered entries match the P2 view
-                                        // (entryTier defaults), so a P2 edit will upgrade
-                                        // an old `{height,priceSen}` row in place by adding
-                                        // an explicit `tier:'P2'` field to it.
+                                        // P1 doesn't overwrite an existing P2 cell. Legacy
+                                        // untiered entries match the P2 view (entryTier
+                                        // defaults), so a P2 edit upgrades an old
+                                        // {height,priceSen} row in place by writing an
+                                        // explicit tier:'PRICE_2'.
                                         const matches = (s: typeof arr[number]) =>
                                           norm(s.height) === hN && entryTier(s.tier) === sofaTier;
                                         if (!arr.find(matches)) {
@@ -1881,18 +2050,13 @@ export default function ProductsPage() {
                                         const updated = arr.map((s) =>
                                           matches(s) ? { height: hN, priceSen: val, tier: sofaTier } : s
                                         );
+                                        // Mark the cell dirty in local state so the table
+                                        // reflects the edit immediately, but DON'T touch
+                                        // products yet — the bulk Save flow batches every
+                                        // dirty cell into one product_prices row when the
+                                        // user picks an effective date.
                                         setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, seatHeightPrices: updated } : pr));
-                                        fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                          method: "PUT",
-                                          body: { seatHeightPrices: updated },
-                                        }).then((data) => {
-                                          if (data.success && data.data) {
-                                            invalidateCachePrefix("/api/products");
-                                            invalidateCachePrefix("/api/bom");
-                                            invalidateCachePrefix("/api/bom-master-templates");
-                                            setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                          }
-                                        }).catch(() => {});
+                                        recordDirty(p.id, { seatHeightPrices: updated });
                                       }}
                                       onKeyDown={(e) => {
                                         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1903,10 +2067,15 @@ export default function ProductsPage() {
                                   ) : (
                                     <button
                                       onClick={() => {
+                                        if (!editMode) return;
                                         setSeatPriceInputs({ [h]: ((sh?.priceSen ?? 0) / 100).toFixed(2) });
                                         setEditingSeatPrices(editKey);
                                       }}
-                                      className="text-sm tabular-nums text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                      className={`text-sm tabular-nums ${
+                                        isSeatCellDirty(p.id, hNum, sofaTier)
+                                          ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E] font-semibold"
+                                          : "text-[#111827]"
+                                      } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
                                     >
                                       {sh && sh.priceSen > 0 ? formatCurrency(sh.priceSen) : <span className="text-[#9CA3AF]">-</span>}
                                     </button>
@@ -1937,18 +2106,11 @@ export default function ProductsPage() {
                                   onBlur={() => {
                                     const val = Math.round(parseFloat(priceInput || "0") * 100);
                                     setEditingPrice(null);
+                                    // Local-only update — bulk Save batches every dirty
+                                    // cell into one product_prices row at the picked
+                                    // effective date.
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, basePriceSen: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { basePriceSen: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
+                                    recordDirty(p.id, { basePriceSen: val });
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1959,8 +2121,16 @@ export default function ProductsPage() {
                                 />
                               ) : (
                                 <button
-                                  onClick={() => { setEditingPrice(p.id); setPriceInput((basePrice / 100).toFixed(2)); }}
-                                  className="text-sm font-medium text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice(p.id);
+                                    setPriceInput((basePrice / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.basePriceSen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
                                 >
                                   {basePrice > 0 ? formatCurrency(basePrice) : <span className="text-[#9CA3AF]">Set price</span>}
                                 </button>
@@ -1978,17 +2148,7 @@ export default function ProductsPage() {
                                     const val = Math.round(parseFloat(price1Input || "0") * 100);
                                     setEditingPrice1(null);
                                     setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, price1Sen: val } : pr));
-                                    fetchJson(`/api/products/${p.id}`, ProductMutationSchema, {
-                                      method: "PUT",
-                                      body: { price1Sen: val },
-                                    }).then((data) => {
-                                      if (data.success && data.data) {
-                                        invalidateCachePrefix("/api/products");
-                                        invalidateCachePrefix("/api/bom");
-                                        invalidateCachePrefix("/api/bom-master-templates");
-                                        setProducts((prev) => prev.map((pr) => pr.id === p.id ? { ...pr, ...(data.data as Partial<Product>) } : pr));
-                                      }
-                                    }).catch(() => {});
+                                    recordDirty(p.id, { price1Sen: val });
                                   }}
                                   onKeyDown={(e) => {
                                     if (e.key === "Enter") (e.target as HTMLInputElement).blur();
@@ -1999,8 +2159,16 @@ export default function ProductsPage() {
                                 />
                               ) : (
                                 <button
-                                  onClick={() => { setEditingPrice1(p.id); setPrice1Input((price1Val / 100).toFixed(2)); }}
-                                  className="text-sm font-medium text-[#111827] hover:text-[#6B5C32] hover:underline"
+                                  onClick={() => {
+                                    if (!editMode) return;
+                                    setEditingPrice1(p.id);
+                                    setPrice1Input((price1Val / 100).toFixed(2));
+                                  }}
+                                  className={`text-sm font-medium ${
+                                    isProductDirty(p.id) && dirtyEdits.get(p.id)?.price1Sen !== undefined
+                                      ? "bg-[#FEF7E0] px-1.5 rounded text-[#9C6F1E]"
+                                      : "text-[#111827]"
+                                  } ${editMode ? "hover:text-[#6B5C32] hover:underline cursor-pointer" : "cursor-default"}`}
                                 >
                                   {price1Val > 0 ? formatCurrency(price1Val) : <span className="text-[#9CA3AF]">-</span>}
                                 </button>
@@ -2187,6 +2355,102 @@ export default function ProductsPage() {
         onClose={() => setScheduleProductId(null)}
         onSaved={reloadProductsAfterSchedule}
       />
+
+      {/* Bulk save dialog — surfaces when the user clicks "Save N changes"
+          while in edit mode. Captures the effective date and an optional
+          shared note, then dispatches one product_prices history row per
+          dirty product. Future-dated rows park as Pending until the date
+          passes; past dates are allowed for backfilling historical prices. */}
+      {showBulkSaveDialog && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          onClick={() => !bulkSaving && setShowBulkSaveDialog(false)}
+        >
+          <div
+            className="bg-white rounded-lg shadow-xl w-[90vw] max-w-md mx-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-6 py-4 border-b border-[#E2DDD8]">
+              <h2 className="text-lg font-semibold text-[#1F1D1B]">
+                Save {dirtyEdits.size} price change
+                {dirtyEdits.size === 1 ? "" : "s"}
+              </h2>
+              <p className="text-xs text-[#6B7280] mt-1">
+                Pick the date the new prices should take effect. All
+                changes share the same effective date.
+              </p>
+            </div>
+            <div className="px-6 py-4 space-y-4">
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Effective from *
+                </label>
+                <input
+                  type="date"
+                  value={bulkEffectiveFrom}
+                  onChange={(e) => setBulkEffectiveFrom(e.target.value)}
+                  className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                />
+                <p className="text-[10px] text-[#9CA3AF] mt-1">
+                  Past dates allowed (backfill / corrections); future dates
+                  show a Pending badge until they take effect.
+                </p>
+              </div>
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">
+                  Notes (optional)
+                </label>
+                <input
+                  type="text"
+                  value={bulkNotes}
+                  onChange={(e) => setBulkNotes(e.target.value)}
+                  placeholder="e.g. Q3 sofa P2 hike"
+                  className="w-full border border-[#E2DDD8] rounded px-2 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
+                />
+              </div>
+              <div className="text-xs text-[#6B7280] bg-[#F9FAFB] border border-[#E5E7EB] rounded px-3 py-2 max-h-40 overflow-y-auto">
+                <p className="font-medium text-[#374151] mb-1">
+                  Affecting {dirtyEdits.size} SKU
+                  {dirtyEdits.size === 1 ? "" : "s"}:
+                </p>
+                <ul className="list-disc list-inside space-y-0.5">
+                  {Array.from(dirtyEdits.values()).slice(0, 8).map((d) => {
+                    const prod = products.find((p) => p.id === d.productId);
+                    return (
+                      <li key={d.productId} className="truncate">
+                        {prod ? `${prod.code} — ${prod.name}` : d.productId}
+                      </li>
+                    );
+                  })}
+                  {dirtyEdits.size > 8 && (
+                    <li className="text-[#9CA3AF]">
+                      …and {dirtyEdits.size - 8} more
+                    </li>
+                  )}
+                </ul>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+              <button
+                onClick={() => !bulkSaving && setShowBulkSaveDialog(false)}
+                disabled={bulkSaving}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-white text-[#6B7280] border border-[#E5E7EB] hover:bg-[#F3F4F6] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => void bulkSave()}
+                disabled={bulkSaving || dirtyEdits.size === 0}
+                className="px-3 py-1.5 rounded-md text-xs font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] disabled:opacity-50"
+              >
+                {bulkSaving
+                  ? "Saving…"
+                  : `Save ${dirtyEdits.size} change${dirtyEdits.size === 1 ? "" : "s"}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

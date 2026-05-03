@@ -852,8 +852,8 @@ function MaintenanceView() {
   const [tab, setTab] = useState<MaintenanceTab>("divanHeights");
   const [newValue, setNewValue] = useState("");
   const [newPriceSen, setNewPriceSen] = useState(0);
-  const [editingIdx, setEditingIdx] = useState<number | null>(null);
-  const [editingValue, setEditingValue] = useState("");
+  // (Legacy click-to-edit state removed — inputs are now always editable
+  // when editMode is on, mirroring the SKU Master pattern.)
   const [toastVisible, setToastVisible] = useState(false);
   const [toastMsg, setToastMsg] = useState("Saved");
 
@@ -986,7 +986,8 @@ function MaintenanceView() {
 
   function updateEntryValue(idx: number, newVal: string) {
     if (isFabricsTab || !editMode) return;
-    if (!newVal.trim()) return;
+    // Allow blank intermediate state — operators routinely clear a value
+    // before typing the new one. Empty rows get filtered on Save anyway.
     const k = tab as MaintenanceListKey;
     if (isPricedTab) {
       setConfig(prev => ({
@@ -999,18 +1000,6 @@ function MaintenanceView() {
         [k]: (prev[k] as string[]).map((o, i) => i === idx ? newVal : o),
       }));
     }
-  }
-
-  function startEditing(idx: number, currentVal: string) {
-    if (!editMode) return;
-    setEditingIdx(idx);
-    setEditingValue(currentVal);
-  }
-
-  function commitEdit(idx: number) {
-    updateEntryValue(idx, editingValue);
-    setEditingIdx(null);
-    setEditingValue("");
   }
 
   function handleCancel() {
@@ -1328,10 +1317,7 @@ function MaintenanceView() {
                         key={`${tab}-${idx}`}
                         className="flex items-center justify-between px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                       >
-                        <div
-                          className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
-                          onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry.value); }}
-                        >
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
                           {/* Per-row history icon — only on priced lists. Click
                               opens a read-only timeline of this row's RM across
                               snapshots. Shown in both browse + edit mode. */}
@@ -1348,21 +1334,14 @@ function MaintenanceView() {
                             </button>
                           )}
                           <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                          {editMode && editingIdx === idx ? (
+                          {editMode ? (
                             <input
-                              autoFocus
-                              value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
-                              onBlur={() => commitEdit(idx)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") { e.preventDefault(); commitEdit(idx); }
-                                if (e.key === "Escape") { setEditingIdx(null); setEditingValue(""); }
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
+                              value={entry.value}
+                              onChange={(e) => updateEntryValue(idx, e.target.value)}
+                              className="text-sm font-medium border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-48"
                             />
                           ) : (
-                            <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
+                            <span className="text-sm text-[#111827] font-medium">
                               {entry.value}
                             </span>
                           )}
@@ -1408,26 +1387,16 @@ function MaintenanceView() {
                         key={`${tab}-${idx}`}
                         className="flex items-center justify-between px-3 py-2 bg-[#FAF9F7] border border-[#E2DDD8] rounded-md hover:bg-white transition-colors group"
                       >
-                        <div
-                          className={`flex items-center gap-2 flex-1 min-w-0 ${editMode ? "cursor-pointer" : ""}`}
-                          onClick={() => { if (editMode && editingIdx !== idx) startEditing(idx, entry); }}
-                        >
+                        <div className="flex items-center gap-2 flex-1 min-w-0">
                           <span className="text-[10px] text-gray-400 font-mono w-6 flex-shrink-0">{idx + 1}</span>
-                          {editMode && editingIdx === idx ? (
+                          {editMode ? (
                             <input
-                              autoFocus
-                              value={editingValue}
-                              onChange={(e) => setEditingValue(e.target.value)}
-                              onBlur={() => commitEdit(idx)}
-                              onKeyDown={(e) => {
-                                if (e.key === "Enter") { e.preventDefault(); commitEdit(idx); }
-                                if (e.key === "Escape") { setEditingIdx(null); setEditingValue(""); }
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                              className="text-sm font-medium border-2 border-[#6B5C32] rounded px-2 py-0.5 bg-[#FAEFCB] focus:outline-none w-48"
+                              value={entry}
+                              onChange={(e) => updateEntryValue(idx, e.target.value)}
+                              className="text-sm font-medium border border-[#E2DDD8] rounded px-2 py-1 bg-white focus:outline-none focus:border-[#6B5C32] w-48"
                             />
                           ) : (
-                            <span className={`text-sm text-[#111827] font-medium ${editMode ? "group-hover:text-[#6B5C32] group-hover:underline" : ""}`}>
+                            <span className="text-sm text-[#111827] font-medium">
                               {entry}
                             </span>
                           )}

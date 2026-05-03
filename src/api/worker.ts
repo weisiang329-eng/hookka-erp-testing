@@ -226,7 +226,7 @@ function isPreviewHostname(requestUrl: string): boolean {
   }
 }
 
-function pickDbUrl(env: Env, requestUrl: string): string | undefined {
+function pickDbUrl(env: Env["Bindings"], requestUrl: string): string | undefined {
   if (isPreviewHostname(requestUrl) && env.HYPERDRIVE_STAGING?.connectionString) {
     return env.HYPERDRIVE_STAGING.connectionString;
   }

@@ -700,6 +700,7 @@ function CreateSalesOrderPage() {
     const prod = products.find(p => p.id === productId);
     if (!prod) return;
     const isSofa = prod.category === "SOFA";
+    const isBF = prod.category === "BEDFRAME";
     // Customer-specific snapshot price (Phase 2). When a customer is
     // selected and this product is in their assigned list, seed the line
     // from the customer override row instead of the master product.
@@ -709,24 +710,112 @@ function CreateSalesOrderPage() {
     const seedSeat = (cp?.seatHeightPrices ?? prod.seatHeightPrices ?? []) as
       | { height: string; priceSen: number; tier?: "PRICE_1" | "PRICE_2" | "PRICE_3" }[]
       | [];
+
+    // ---- Variant default pre-fill ------------------------------------
+    // Per-SKU defaults stored on products.defaultVariants. The Variant
+    // Defaults dialog on /products writes these. We pre-populate the line
+    // from the saved values; user can still override every input.
+    //   BEDFRAME: divanHeight, legHeight, gap, specials, fabricCode
+    //   SOFA:     seatHeight, legHeight, specials, fabricCode
+    const def = prod.defaultVariants ?? {};
+    const lookupDivanSurcharge = (h: string): number => {
+      const cfgEntry = maintenanceConfig?.divanHeights?.find(
+        (e: { value: string; priceSen: number } | string) =>
+          typeof e === "object" && e.value === h,
+      );
+      if (cfgEntry && typeof cfgEntry === "object") return cfgEntry.priceSen;
+      return divanHeightOptions.find((o) => o.height === h)?.surcharge ?? 0;
+    };
+    const lookupLegSurcharge = (h: string): number => {
+      const cfgKey = isSofa ? "sofaLegHeights" : "legHeights";
+      const cfgEntry = maintenanceConfig?.[cfgKey]?.find(
+        (e: { value: string; priceSen: number } | string) =>
+          typeof e === "object" && e.value === h,
+      );
+      if (cfgEntry && typeof cfgEntry === "object") return cfgEntry.priceSen;
+      return legHeightOptions.find((o) => o.height === h)?.surcharge ?? 0;
+    };
+    // Map default specials (stored as display names like "HB Fully Cover")
+    // back to internal codes ("HB_FULL_COVER") that LineItem.specialOrders
+    // uses. Drop any that don't have a known code so the line doesn't
+    // carry orphan IDs through to the API.
+    const defaultSpecialCodes: string[] = (def.specials ?? [])
+      .map((name) => specialOrderOptions.find((o) => o.name === name)?.code)
+      .filter((c): c is string => !!c);
+
+    // BF default values (only apply to bedframes — the inputs are hidden
+    // for sofa/accessory).
+    const bfDivanInches = isBF && def.divanHeight ? parseInches(def.divanHeight) : null;
+    const bfLegInches = isBF && def.legHeight ? parseInches(def.legHeight) : null;
+    const bfGapInches = isBF && def.gap ? parseInches(def.gap) : null;
+    const bfDivanPrice = isBF && def.divanHeight ? lookupDivanSurcharge(def.divanHeight) : 0;
+    const bfLegPrice = isBF && def.legHeight ? lookupLegSurcharge(def.legHeight) : 0;
+    // SOFA default values.
+    const sofaSeat = isSofa && def.seatHeight ? def.seatHeight : "";
+    const sofaLegInches = isSofa && def.legHeight ? parseInches(def.legHeight) : null;
+    const sofaLegPrice = isSofa && def.legHeight ? lookupLegSurcharge(def.legHeight) : 0;
+    const sofaSeatTier = (isSofa && sofaSeat && seedSeat.length > 0)
+      ? seedSeat.find((s) => s.height === sofaSeat)
+      : undefined;
+    // Specials surcharge (re-using calcSpecialOrderSurcharge which already
+    // handles the HB+Divan combined-cover rule so the prefill matches what
+    // toggleSpecialOrder would produce).
+    const defaultSpecialSurcharge = defaultSpecialCodes.length > 0
+      ? calcSpecialOrderSurcharge(defaultSpecialCodes)
+      : 0;
+    // Fabric default — resolve to fabricId by code so downstream fabric
+    // picker shows the right selection. Skip if defaults didn't set one.
+    const defaultFabric = def.fabricCode
+      ? fabrics.find((f) => f.code === def.fabricCode)
+      : undefined;
+    // For bedframes, when both fabric and tier resolve, set basePriceSen
+    // from price1Sen (Price 1 tier) or fall back to costPriceSen (Price 2).
+    let bfBasePriceFromFabric = 0;
+    if (isBF && defaultFabric) {
+      const tracking = fabricTrackings.find((ft) => ft.fabricCode === defaultFabric.code);
+      const tier = tracking?.bedframePriceTier ?? tracking?.priceTier ?? "PRICE_2";
+      bfBasePriceFromFabric =
+        tier === "PRICE_1"
+          ? (cp?.price1Sen ?? prod.price1Sen ?? 0)
+          : (cp?.basePriceSen ?? prod.basePriceSen ?? 0);
+    }
+
     updateItem(idx, {
       productId: prod.id,
       productCode: prod.code,
       productName: prod.name,
       itemCategory: prod.category,
       baseModel: prod.baseModel,
-      sizeCode: prod.sizeCode,
-      sizeLabel: prod.sizeLabel,
-      basePriceSen: 0, // Don't set base price yet — fabric determines Price 1 vs Price 2
+      sizeCode: isSofa && sofaSeat ? sofaSeat.replace(/"/g, "").trim() : prod.sizeCode,
+      sizeLabel: isSofa && sofaSeat ? sofaSeat : prod.sizeLabel,
+      // Base price: resolves once fabric is known. For sofa, the seat-tier
+      // matrix gives a price even without fabric (via the seedSeat lookup
+      // below); for bedframe, leave 0 unless the default fabric pinned it.
+      basePriceSen: isSofa
+        ? (sofaSeatTier?.priceSen ?? 0)
+        : bfBasePriceFromFabric,
       price1Sen: seedPrice1,
       seatHeightPrices: seedSeat,
-      // Reset category-specific fields
-      seatHeight: "",
-      gapInches: isSofa ? null : items[idx].gapInches,
-      divanHeightInches: isSofa ? null : items[idx].divanHeightInches,
-      divanPriceSen: isSofa ? 0 : items[idx].divanPriceSen,
-      legHeightInches: isSofa ? null : items[idx].legHeightInches,
-      legPriceSen: isSofa ? 0 : items[idx].legPriceSen,
+      // Fabric prefill (applies to all categories).
+      ...(defaultFabric
+        ? { fabricId: defaultFabric.id, fabricCode: defaultFabric.code }
+        : {}),
+      // Specials prefill — codes (LineItem.specialOrders) + comma-joined
+      // display string for the saved specialOrder field + surcharge.
+      specialOrders: defaultSpecialCodes,
+      specialOrder: defaultSpecialCodes
+        .map((c) => specialOrderOptions.find((o) => o.code === c)?.name ?? "")
+        .filter(Boolean)
+        .join(", "),
+      specialOrderPriceSen: defaultSpecialSurcharge,
+      // Category-specific dimension prefills.
+      seatHeight: sofaSeat,
+      gapInches: isSofa ? null : (bfGapInches ?? items[idx].gapInches),
+      divanHeightInches: isSofa ? null : (bfDivanInches ?? items[idx].divanHeightInches),
+      divanPriceSen: isSofa ? 0 : (bfDivanInches != null ? bfDivanPrice : items[idx].divanPriceSen),
+      legHeightInches: isSofa ? sofaLegInches : (bfLegInches ?? items[idx].legHeightInches),
+      legPriceSen: isSofa ? sofaLegPrice : (bfLegInches != null ? bfLegPrice : items[idx].legPriceSen),
+      totalHeightPriceSen: 0, // recomputed by updateItem when divan/leg/gap change
     });
   };
 

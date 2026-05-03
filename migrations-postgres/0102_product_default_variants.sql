@@ -1,0 +1,35 @@
+-- ---------------------------------------------------------------------------
+-- 0102_product_default_variants.sql
+--
+-- Add a JSON-encoded default_variants column to products so each SKU can
+-- carry pre-fill defaults for Sales Order line items. When the operator
+-- picks a product on /sales/create, the SO line auto-populates from this
+-- blob (fabric, divan height, leg height, gap, specials for bedframes;
+-- fabric, seat height, leg height, specials for sofas) — and the operator
+-- can still override on the line.
+--
+-- Shape (BEDFRAME):
+--   {
+--     "fabricCode": "CH141-12",
+--     "divanHeight": "8\"",
+--     "legHeight": "4\"",
+--     "gap": "6\"",
+--     "specials": ["HB Fully Cover"]
+--   }
+--
+-- Shape (SOFA):
+--   {
+--     "fabricCode": "CH141-12",
+--     "seatHeight": "30",
+--     "legHeight": "4\"",
+--     "specials": []
+--   }
+--
+-- TEXT (not JSONB) to match the surrounding products columns
+-- (subAssemblies, pieces, seatHeightPrices) and the D1Compat layer's
+-- string-in / string-out contract. The SPA parses on read, stringifies
+-- on write — same pattern as the other JSON columns.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE products
+  ADD COLUMN IF NOT EXISTS default_variants TEXT;

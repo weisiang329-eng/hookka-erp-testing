@@ -206,17 +206,8 @@ function asStringList(v: unknown): string[] {
   return v.filter((s): s is string => typeof s === "string");
 }
 
-function fmtPricedList(rows: MaintPriced[]): string {
-  if (rows.length === 0) return DASH;
-  return rows
-    .map((r) => (r.priceSen > 0 ? `${r.value} — ${fmtRM(r.priceSen)}` : r.value))
-    .join(", ");
-}
-
-function fmtStringList(rows: string[]): string {
-  if (rows.length === 0) return DASH;
-  return rows.join(", ");
-}
+// (legacy helpers fmtPricedList / fmtStringList removed — the new
+//  per-list mini-table layout doesn't need string formatting helpers)
 
 // ---------------------------------------------------------------------------
 // Main generator
@@ -405,36 +396,13 @@ export default function generateCustomerQuotationPdfV2(
       y += 2;
 
       if (cat === "SOFA") {
-        // Sofa: per-row main entry plus a tier sub-row per seat height.
-        // The header line shows code/name/model/Price 2/Price 1; below it
-        // a small tier matrix shows P1/P2/P3 across the standard heights.
-        autoTable(doc, {
-          startY: y,
-          margin: { left: margin, right: margin },
-          head: [["Code", "Description", "Size", "Price 2", "Price 1"]],
-          body: rows.map((p) => [
-            p.code,
-            p.name,
-            p.sizeLabel || p.sizeCode || DASH,
-            rmOrDash(p.basePriceSen),
-            rmOrDash(p.price1Sen),
-          ]),
-          styles: sharedStyles,
-          headStyles: sharedHead,
-          alternateRowStyles: sharedAlt,
-          columnStyles: {
-            0: { cellWidth: 24 },
-            1: { cellWidth: "auto" },
-            2: { cellWidth: 22 },
-            3: { cellWidth: 24, halign: "right" },
-            4: { cellWidth: 24, halign: "right" },
-          },
-        });
-        advanceYAfterTable();
-
-        // Compact seat-height matrix per sofa SKU. Skip when no rows.
+        // Sofa: only the seat-height tier matrix — the bare Code/Desc/Size/
+        // Price 2/Price 1 table duplicates info already in the matrix
+        // (Price 2 == matrix P2 column for legacy 5-cell rows). Operator
+        // asked to drop the duplicate so the quotation stays compact.
         const matrixHead: string[] = [
           "Code",
+          "Description",
           "Tier",
           ...SEAT_HEIGHTS.map((h) => `${h}"`),
         ];
@@ -442,7 +410,7 @@ export default function generateCustomerQuotationPdfV2(
         for (const p of rows) {
           if (!p.seatHeightPrices || p.seatHeightPrices.length === 0) continue;
           for (const tier of TIERS_ORDER) {
-            const row: string[] = [p.code, TIER_LABEL[tier] ?? tier];
+            const row: string[] = [p.code, p.name, TIER_LABEL[tier] ?? tier];
             let any = false;
             for (const h of SEAT_HEIGHTS) {
               const sen = nthTierForHeight(p.seatHeightPrices, h, tier);
@@ -453,12 +421,6 @@ export default function generateCustomerQuotationPdfV2(
           }
         }
         if (matrixBody.length > 0) {
-          ensureRoom(15);
-          doc.setFontSize(8);
-          doc.setFont("helvetica", "italic");
-          doc.setTextColor(107, 92, 50);
-          doc.text("Seat-height tier matrix", margin, y);
-          y += 2;
           autoTable(doc, {
             startY: y,
             margin: { left: margin, right: margin },
@@ -469,12 +431,13 @@ export default function generateCustomerQuotationPdfV2(
             alternateRowStyles: sharedAlt,
             columnStyles: {
               0: { cellWidth: 24 },
-              1: { cellWidth: 14 },
-              2: { halign: "right" },
+              1: { cellWidth: "auto" },
+              2: { cellWidth: 14 },
               3: { halign: "right" },
               4: { halign: "right" },
               5: { halign: "right" },
               6: { halign: "right" },
+              7: { halign: "right" },
             },
           });
           advanceYAfterTable();
@@ -621,52 +584,105 @@ export default function generateCustomerQuotationPdfV2(
     y += 8;
   } else {
     const b = usedBlob as Record<string, unknown>;
-    const blocks: Array<{ section: string; entries: [string, string][] }> = [
+
+    // Render each list as its OWN small table so the operator can scan
+    // values + surcharges line-by-line. Priced lists get an Item +
+    // Surcharge two-column table. String lists (Gaps / Sizes / Fabrics)
+    // get a compact comma-joined inline row labelled by the field name.
+    type Block = {
+      title: string;
+      pricedLists: Array<{ label: string; rows: MaintPriced[] }>;
+      stringLists: Array<{ label: string; rows: string[] }>;
+    };
+    const blocks: Block[] = [
       {
-        section: "Bedframe",
-        entries: [
-          ["Divan Heights", fmtPricedList(asPricedList(b.divanHeights))],
-          ["Total Heights", fmtPricedList(asPricedList(b.totalHeights))],
-          ["Gaps", fmtStringList(asStringList(b.gaps))],
-          ["Leg Heights", fmtPricedList(asPricedList(b.legHeights))],
-          ["Specials", fmtPricedList(asPricedList(b.specials))],
+        title: "Bedframe",
+        pricedLists: [
+          { label: "Divan Heights", rows: asPricedList(b.divanHeights) },
+          { label: "Total Heights", rows: asPricedList(b.totalHeights) },
+          { label: "Leg Heights",   rows: asPricedList(b.legHeights) },
+          { label: "Specials",      rows: asPricedList(b.specials) },
+        ],
+        stringLists: [
+          { label: "Gaps", rows: asStringList(b.gaps) },
         ],
       },
       {
-        section: "Sofa",
-        entries: [
-          ["Sizes", fmtStringList(asStringList(b.sofaSizes))],
-          ["Leg Heights", fmtPricedList(asPricedList(b.sofaLegHeights))],
-          ["Specials", fmtPricedList(asPricedList(b.sofaSpecials))],
+        title: "Sofa",
+        pricedLists: [
+          { label: "Leg Heights", rows: asPricedList(b.sofaLegHeights) },
+          { label: "Specials",    rows: asPricedList(b.sofaSpecials) },
+        ],
+        stringLists: [
+          { label: "Sizes", rows: asStringList(b.sofaSizes) },
         ],
       },
       {
-        section: "Common",
-        entries: [["Fabrics", fmtStringList(asStringList(b.fabrics))]],
+        title: "Common",
+        pricedLists: [],
+        stringLists: [
+          { label: "Fabrics", rows: asStringList(b.fabrics) },
+        ],
       },
     ];
 
     for (const block of blocks) {
-      ensureRoom(20);
-      doc.setFontSize(9);
+      ensureRoom(15);
+      doc.setFontSize(10);
       doc.setFont("helvetica", "bold");
-      doc.setTextColor(31, 29, 27);
-      doc.text(block.section, margin, y);
-      y += 2;
-      autoTable(doc, {
-        startY: y,
-        margin: { left: margin, right: margin },
-        head: [["Field", "Values"]],
-        body: block.entries,
-        styles: sharedStyles,
-        headStyles: sharedHead,
-        alternateRowStyles: sharedAlt,
-        columnStyles: {
-          0: { cellWidth: 36 },
-          1: { cellWidth: "auto" },
-        },
-      });
-      advanceYAfterTable();
+      doc.setTextColor(107, 92, 50);
+      doc.text(block.title, margin, y);
+      y += 4;
+
+      // Priced lists — Item / Surcharge two-column mini-tables, one per list.
+      for (const pl of block.pricedLists) {
+        if (pl.rows.length === 0) continue;
+        ensureRoom(15);
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(75, 85, 99);
+        doc.text(pl.label, margin + 2, y);
+        y += 1;
+        autoTable(doc, {
+          startY: y,
+          margin: { left: margin + 2, right: margin },
+          head: [["Item", "Surcharge"]],
+          body: pl.rows.map((r) => [
+            r.value,
+            r.priceSen > 0 ? fmtRM(r.priceSen) : DASH,
+          ]),
+          styles: { ...sharedStyles, fontSize: 7.5 },
+          headStyles: sharedHead,
+          alternateRowStyles: sharedAlt,
+          columnStyles: {
+            0: { cellWidth: 50 },
+            1: { cellWidth: 30, halign: "right" },
+          },
+          tableWidth: 80,
+        });
+        advanceYAfterTable();
+      }
+
+      // String lists — inline comma-joined under their label.
+      for (const sl of block.stringLists) {
+        if (sl.rows.length === 0) continue;
+        ensureRoom(8);
+        doc.setFontSize(8);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(75, 85, 99);
+        doc.text(`${sl.label}:`, margin + 2, y);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(31, 29, 27);
+        const labelWidth = doc.getTextWidth(`${sl.label}: `);
+        const text = sl.rows.join(", ");
+        // wrap if needed
+        const usableWidth = pageW - margin * 2 - 4 - labelWidth;
+        const wrapped = doc.splitTextToSize(text, usableWidth);
+        doc.text(wrapped, margin + 2 + labelWidth + 1, y);
+        y += 4 + (wrapped.length - 1) * 3.5;
+      }
+
+      y += 3;
     }
   }
 

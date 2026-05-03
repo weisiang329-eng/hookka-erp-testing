@@ -594,6 +594,8 @@ async function fetchFilteredPOs(
   includeArchive = false,
   minimal = false,
   deptFilter: string | null = null,
+  dueFrom: string | null = null,
+  dueTo: string | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
@@ -614,12 +616,27 @@ async function fetchFilteredPOs(
     : "job_cards";
   // Sprint 4: orgId is always the leading WHERE predicate. Status filter
   // becomes an AND clause when present.
+  // dueFrom / dueTo: optional targetEndDate window. NULL is preserved on
+  // both sides — undated POs survive the filter so the daily view still
+  // shows them. Mirrors the client-side guard at
+  // production/index.tsx:1188-1189.
+  const dueClauses: string[] = [];
+  const dueBindings: string[] = [];
+  if (dueFrom) {
+    dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+    dueBindings.push(dueFrom);
+  }
+  if (dueTo) {
+    dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+    dueBindings.push(dueTo);
+  }
+  const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
   const poSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders}) ORDER BY created_at DESC, id DESC`
-    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${placeholders})${dueWhere} ORDER BY created_at DESC, id DESC`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere} ORDER BY created_at DESC, id DESC`;
   const poStmt = hasFilter
-    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]))
-    : db.prepare(poSql).bind(orgId);
+    ? db.prepare(poSql).bind(orgId, ...(statuses as string[]), ...dueBindings)
+    : db.prepare(poSql).bind(orgId, ...dueBindings);
 
   // Dept-narrowing: when caller passes ?dept=FOAM (etc.), return JCs
   // whose wipKey appears in any wipKey that contains a matching-dept JC,
@@ -833,6 +850,8 @@ async function fetchPaginatedPOs(
   includeArchive = false,
   minimal = false,
   deptFilter: string | null = null,
+  dueFrom: string | null = null,
+  dueTo: string | null = null,
 ): Promise<{ data: ProductionOrderOut[] | MinimalPOOut[]; total: number }> {
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const statusPlaceholders = hasFilter
@@ -851,19 +870,33 @@ async function fetchPaginatedPOs(
         SELECT * FROM job_cards_archive)`
     : "job_cards";
 
+  // dueFrom / dueTo: same NULL-preserving targetEndDate window as
+  // fetchFilteredPOs above.
+  const dueClauses: string[] = [];
+  const dueBindings: string[] = [];
+  if (dueFrom) {
+    dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+    dueBindings.push(dueFrom);
+  }
+  if (dueTo) {
+    dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+    dueBindings.push(dueTo);
+  }
+  const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
+
   const countSql = hasFilter
-    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})`
-    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?`;
+    ? `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere}`
+    : `SELECT COUNT(*) AS n FROM ${poSource} WHERE orgId = ?${dueWhere}`;
   const pageSql = hasFilter
-    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders}) ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
-    : `SELECT * FROM ${poSource} WHERE orgId = ? ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
+    ? `SELECT * FROM ${poSource} WHERE orgId = ? AND status IN (${statusPlaceholders})${dueWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+    : `SELECT * FROM ${poSource} WHERE orgId = ?${dueWhere} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`;
 
   const countStmt = hasFilter
-    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]))
-    : db.prepare(countSql).bind(orgId);
+    ? db.prepare(countSql).bind(orgId, ...(statuses as string[]), ...dueBindings)
+    : db.prepare(countSql).bind(orgId, ...dueBindings);
   const pageStmt = hasFilter
-    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), limit, offset)
-    : db.prepare(pageSql).bind(orgId, limit, offset);
+    ? db.prepare(pageSql).bind(orgId, ...(statuses as string[]), ...dueBindings, limit, offset)
+    : db.prepare(pageSql).bind(orgId, ...dueBindings, limit, offset);
 
   const [countRes, pageRes] = await Promise.all([
     countStmt.first<{ n: number }>(),
@@ -2799,6 +2832,13 @@ app.get("/", async (c) => {
       ? deptParamRaw.trim().toUpperCase()
       : null;
 
+  // Server-side targetEndDate window. Both bounds are optional; either or
+  // both can be supplied. NULL targetEndDate rows are preserved on both
+  // sides so undated POs aren't silently hidden — matches the client-side
+  // filter at production/index.tsx:1188-1189.
+  const dueFrom = c.req.query("dueFrom") || null;
+  const dueTo = c.req.query("dueTo") || null;
+
   const orgId = getOrgId(c);
 
   if (!paginate) {
@@ -2810,6 +2850,8 @@ app.get("/", async (c) => {
       includeArchive,
       minimal,
       deptFilter,
+      dueFrom,
+      dueTo,
     );
     return c.json({ success: true, data, total: data.length });
   }
@@ -2827,6 +2869,8 @@ app.get("/", async (c) => {
     includeArchive,
     minimal,
     deptFilter,
+    dueFrom,
+    dueTo,
   );
   return c.json({ success: true, data, page, limit, total });
 });

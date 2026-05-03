@@ -93,6 +93,14 @@ type Cell = {
   latestCompleted: string; // latest completedDate across this dept's cards
 };
 
+// Today as YYYY-MM-DD. Used for the page's default fltDueFrom/fltDueTo so
+// the production grid (and the API call that backs it) only loads POs
+// whose targetEndDate falls on today by default. Matches the rest of the
+// page's date-handling convention (e.g. line 143 above).
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
 function fmtShortDate(iso: string): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -669,10 +677,17 @@ export default function ProductionPage({
   // payload size penalty is negligible vs the dropped Lifecycle dropdown
   // it replaces (which was redundant with the column filter the user
   // already had at hand).
+  // baseUrl is rebuilt every render from the live filter state so the
+  // server-side dueFrom/dueTo window matches whatever the operator has in
+  // the date inputs. useCachedJson keys off the URL string, so each
+  // window change cuts a fresh fetch (and a fresh localStorage cache key).
+  const dueQueryFrag =
+    (fltDueFrom ? `&dueFrom=${encodeURIComponent(fltDueFrom)}` : "") +
+    (fltDueTo ? `&dueTo=${encodeURIComponent(fltDueTo)}` : "");
   const baseUrl =
     mode === "dept" && deptCode
-      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}`
-      : `/api/production-orders?fields=minimal`;
+      ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
+      : `/api/production-orders?fields=minimal${dueQueryFrag}`;
   const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
   const ordersUrl: string | null = shouldFetch ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
@@ -771,8 +786,12 @@ export default function ProductionPage({
   }, [fltSearchInput, setFltSearch]);
   const [fltState, setFltState] = useUrlState<string>("state", "");
   const [fltCustomer, setFltCustomer] = useUrlState<string>("customer", "");
-  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
-  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
+  // Default to today's date on both ends so the production grid lands on
+  // the operator's daily slice instead of the full ~530-PO list. The
+  // server-side dueFrom/dueTo filter (production-orders.ts) trims the wire
+  // payload to match. Operator can clear either field to widen the range.
+  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", todayISO());
+  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", todayISO());
   // (Lifecycle dropdown removed 2026-04-27 — replaced by the Status
   // column's per-column filter. The grid loads all PO statuses now.)
   // New filters (2026-04-25):

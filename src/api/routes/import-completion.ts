@@ -1863,40 +1863,46 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
 
-  // 1. Pull all WAITING FAB_CUT JCs + their owning PO context.
+  // 1. Pull all WAITING FAB_CUT JCs + their owning PO context. Avoid
+  //    custom aliases — D1/Postgres adapter sometimes lowercases mixed-
+  //    case aliases on the way out, leaving `fcPoId` as undefined.
   const fcRes = await db
     .prepare(
-      `SELECT j.id              AS fcId,
-              COALESCE(j.wipKey,'') AS fcWipKey,
-              j.wipLabel        AS fcWipLabel,
-              j.productionOrderId AS fcPoId,
-              j.estMinutes      AS fcEstMinutes,
-              j.productionTimeMinutes AS fcProductionTimeMinutes,
-              po.companySOId    AS companySOId,
-              po.salesOrderId   AS salesOrderId,
-              po.productCode    AS productCode,
-              po.fabricCode     AS fabricCode,
-              po.itemCategory   AS itemCategory
+      `SELECT j.id,
+              COALESCE(j.wipKey,'') AS wipKey,
+              j.wipLabel,
+              j.productionOrderId,
+              j.estMinutes,
+              j.productionTimeMinutes,
+              po.companySOId,
+              po.salesOrderId,
+              po.productCode,
+              po.fabricCode,
+              po.itemCategory
          FROM job_cards j
          LEFT JOIN production_orders po ON po.id = j.productionOrderId
         WHERE j.departmentCode = 'FAB_CUT'
           AND j.status = 'WAITING'
           AND j.completedDate IS NULL`,
     )
-    .all<{
-      fcId: string;
-      fcWipKey: string;
-      fcWipLabel: string | null;
-      fcPoId: string;
-      fcEstMinutes: number | null;
-      fcProductionTimeMinutes: number | null;
-      companySOId: string | null;
-      salesOrderId: string | null;
-      productCode: string | null;
-      fabricCode: string | null;
-      itemCategory: string | null;
-    }>();
-  const allFcs = fcRes.results ?? [];
+    .all<Record<string, unknown>>();
+  const allFcs = (fcRes.results ?? []).map((r) => {
+    const get = (k: string): unknown =>
+      r[k] !== undefined ? r[k] : r[k.toLowerCase()];
+    return {
+      fcId: String(get("id") ?? ""),
+      fcWipKey: String(get("wipKey") ?? ""),
+      fcWipLabel: get("wipLabel") as string | null,
+      fcPoId: String(get("productionOrderId") ?? ""),
+      fcEstMinutes: get("estMinutes") as number | null,
+      fcProductionTimeMinutes: get("productionTimeMinutes") as number | null,
+      companySOId: get("companySOId") as string | null,
+      salesOrderId: get("salesOrderId") as string | null,
+      productCode: get("productCode") as string | null,
+      fabricCode: get("fabricCode") as string | null,
+      itemCategory: get("itemCategory") as string | null,
+    };
+  });
 
   // 2. Build a per-FC trigger lookup: scan completed FAB_SEW JCs in
   //    matching POs. Cache bom_templates baseModel lookups.
@@ -1939,7 +1945,7 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
     // matches this FC's group key.
     const sewRows = await db
       .prepare(
-        `SELECT j.id AS sewId, j.completedDate AS sewDate
+        `SELECT j.id, j.completedDate, po.productCode
            FROM job_cards j
            JOIN production_orders po ON po.id = j.productionOrderId
           WHERE j.departmentCode = 'FAB_SEW'
@@ -1952,32 +1958,20 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
             )`,
       )
       .bind(fabricCode, fc.fcPoId, companySOId, companySOId)
-      .all<{ sewId: string; sewDate: string }>();
+      .all<Record<string, unknown>>();
 
     // Filter SEW results to those whose PO's productCode also resolves to
     // the same baseModel (avoids cross-model bleed within an SO group).
     const candidateSews: { sewId: string; sewDate: string }[] = [];
     for (const sew of sewRows.results ?? []) {
-      const raw = sew as unknown as Record<string, unknown>;
-      const sewId =
-        typeof raw.sewId === "string"
-          ? (raw.sewId as string)
-          : typeof raw.sewid === "string"
-            ? (raw.sewid as string)
-            : "";
-      const sewDate =
-        typeof raw.sewDate === "string"
-          ? (raw.sewDate as string)
-          : typeof raw.sewdate === "string"
-            ? (raw.sewdate as string)
-            : "";
-      if (!sewId || !sewDate) continue;
-      const sewPoRow = await db
-        .prepare(`SELECT productCode FROM production_orders WHERE id = (SELECT productionOrderId FROM job_cards WHERE id = ?)`)
-        .bind(sewId)
-        .first<{ productCode: string | null }>();
-      const sewBaseModel = sewPoRow?.productCode
-        ? await lookupBaseModel(sewPoRow.productCode)
+      const get = (k: string): unknown =>
+        sew[k] !== undefined ? sew[k] : sew[k.toLowerCase()];
+      const sewId = String(get("id") ?? "");
+      const sewDate = String(get("completedDate") ?? "");
+      const sewProductCode = String(get("productCode") ?? "");
+      if (!sewId || !sewDate || !/^\d{4}-\d{2}-\d{2}$/.test(sewDate)) continue;
+      const sewBaseModel = sewProductCode
+        ? await lookupBaseModel(sewProductCode)
         : "";
       if (sewBaseModel === baseModel) {
         candidateSews.push({ sewId, sewDate });

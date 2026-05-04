@@ -2097,13 +2097,32 @@ async function cascadeUpholsteryToCO(
         .run();
     }
   } else if (co.status === "READY_TO_SHIP") {
-    // Mirror the SO twin: rollback drops back to IN_PRODUCTION.
+    // Mirror the SO twin: rollback drops back to IN_PRODUCTION + clears
+    // stockedIn on every PO whose UPH set is no longer fully done. Without
+    // the stockedIn clear, the SO twin's BUG-2026-04-27-020 fix (line
+    // ~2148) would be one-sided — CO POs would keep stockedIn=1 forever
+    // after a UPH undo.
     await db
       .prepare(
         "UPDATE consignment_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
       )
       .bind(now, co.id)
       .run();
+    for (const p of siblingPOs) {
+      if (!p.stockedIn) continue;
+      const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
+      const stillFullyDone =
+        mine.length > 0 &&
+        mine.every(
+          (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
+        );
+      if (!stillFullyDone) {
+        await db
+          .prepare("UPDATE production_orders SET stockedIn = 0 WHERE id = ?")
+          .bind(p.id)
+          .run();
+      }
+    }
   }
 }
 

@@ -20,7 +20,7 @@ import {
 } from "@/lib/pricing-options";
 import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import { useActiveTabDirty } from "@/contexts/tabs-context";
+import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
 
 type SeatHeightTier = { height: string; priceSen: number };
@@ -348,7 +348,7 @@ function CreateSalesOrderPage() {
     !!customerDeliveryDate || !!hookkaExpectedDD || !!notes ||
     items.some((it) => !!it.productId)
   );
-  useActiveTabDirty(isDirty);
+  useUnsavedChanges(isDirty);
 
   // Form draft — auto-save the in-progress form to localStorage every 500ms
   // (debounced inside the hook). If the user navigates away mid-edit and

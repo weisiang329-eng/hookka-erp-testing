@@ -1,15 +1,12 @@
 import { useEffect } from "react";
+import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
-import { TabBar } from "@/components/layout/tab-bar";
-import { TabbedOutlet } from "@/components/layout/tabbed-outlet";
-import { TabsCapModal } from "@/components/layout/tabs-cap-modal";
-import { TabsProvider } from "@/contexts/tabs-context";
-import { TabsKeyboardShortcuts } from "@/contexts/tabs-keyboard";
+import { Breadcrumbs } from "@/components/layout/breadcrumbs";
 import { ToastProvider, useToast } from "@/components/ui/toast";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
-import { useLocation } from "react-router-dom";
+import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
 
 // Lives inside ToastProvider so it can pop a toast when a new deploy lands.
 // Polls for a new bundle hash every 5 min + on focus; on change, surfaces a
@@ -90,20 +87,17 @@ export default function DashboardLayout() {
   return (
     <ToastProvider>
       <NewVersionWatcher />
-      <TabsProvider>
-        <TabsKeyboardShortcuts />
-        <div className="h-full">
-          <Sidebar />
-          <div className="pl-60 transition-all duration-300">
-            <Topbar />
-            <TabBar />
-            <main className="p-6">
-              <TabbedOutlet />
-            </main>
-          </div>
+      <div className="h-full">
+        <Sidebar />
+        <div className="pl-60 transition-all duration-300">
+          <Topbar />
+          <Breadcrumbs />
+          <main className="p-6">
+            <Routes>{DASHBOARD_ROUTE_ELEMENTS}</Routes>
+          </main>
         </div>
-        <TabsCapModal />
-      </TabsProvider>
+      </div>
+      <ScrollRestoration />
     </ToastProvider>
   );
 }

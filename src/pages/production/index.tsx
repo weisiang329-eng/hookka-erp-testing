@@ -780,8 +780,28 @@ export default function ProductionPage({
   // the operator's daily slice instead of the full ~530-PO list. The
   // server-side dueFrom/dueTo filter (production-orders.ts) trims the wire
   // payload to match. Operator can clear either field to widen the range.
-  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", todayISO());
-  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", todayISO());
+  // Date filters: URL is source of truth. Default value here is "" so
+  // useUrlState NEVER falls back to today() — that fallback caused the
+  // input to flicker back to today between an onChange writing to URL
+  // and useSearchParams seeing the new param, which read like "the
+  // date input doesn't respond". A useEffect below seeds today on
+  // first mount when both URL params are blank so the operator's
+  // initial view stays narrowed to today.
+  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
+  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
+  // First-mount seed — only when BOTH from + to are blank. Picking
+  // either via the input writes a real value to the URL, after which
+  // this effect's branch never fires again (filters stay where the
+  // operator put them).
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL-seed on first mount only
+  useEffect(() => {
+    if (!fltDueFrom && !fltDueTo) {
+      const today = todayISO();
+      setFltDueFrom(today);
+      setFltDueTo(today);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // dueQueryFrag/baseUrl/ordersResp moved here from earlier in the file
   // to satisfy the TDZ for fltDueFrom/fltDueTo (declared just above).
   const dueQueryFrag =

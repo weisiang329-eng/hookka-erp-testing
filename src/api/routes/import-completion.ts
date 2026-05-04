@@ -1448,6 +1448,366 @@ app.post("/cascade-upstream-completion", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/uph-pofold-backfill?dryRun=true|false
+//
+// Per-WIP backfill that complements /cascade-upstream-completion. The
+// existing cascade walks per (PO, wipKey, branchKey) groups, which leaves
+// a hole for the migration-period scenario where a worker scans only the
+// terminal UPHOLSTERY JC and never scans any earlier-dept JC at all.
+// In that case the wood/fabric sub-branches sit alone in their groups
+// (no UPH sibling, since UPH lives at branchKey="" on the wipKey root),
+// the per-branch anchor falls back to FAB_SEW / WOOD_CUT / FRAMING, and
+// none of those anchors cascade upstream by the rule set — so 0 rows
+// move (observed live: 1189 candidates → 0 planned).
+//
+// This endpoint takes the simpler PER-WIP view:
+//
+//   1. For each (PO, wipKey), find the UPH JC (there is exactly one per
+//      top-level WIP — see bom-wip-breakdown.ts:319-369). If that UPH
+//      is COMPLETED/TRANSFERRED with a completedDate, the entire WIP
+//      is eligible for backfill.
+//   2. Backfill EVERY non-done JC in the eligible (PO, wipKey) whose
+//      deptCode ∈ {FAB_CUT, FAB_SEW, WOOD_CUT, FRAMING, WEBBING, FOAM},
+//      regardless of branchKey. PACKING is skipped (it lives in the
+//      separate wipKey="FG" group and is governed by the PO-completion
+//      handler). UPH itself is the eligibility signal so it's by
+//      definition already done.
+//   3. Process the flips in DEPT_ORDER (FAB_CUT → FAB_SEW → WOOD_CUT →
+//      FOAM → FRAMING → WEBBING) so each dept's applyWipInventoryChange
+//      finds its upstream sibling already producer-added.
+//   4. completedDate uses the canonical leadtime formula
+//      (anchor_date + (ltAnchor - ltTarget) days, clamped to 0 if
+//      positive, clamped to CASCADE_DATE_CLAMP if past today). Anchor
+//      is the UPH completedDate of the SAME wipKey. For SOFA all
+//      upstream lead times ≤ UPH's so offsets collapse to 0 → all
+//      backfilled dates equal the per-WIP UPH completedDate, which is
+//      the physical reality (workers scanned UPH as a one-shot at the
+//      end of the cycle).
+//   5. Each WAITING → COMPLETED flip fires applyWipInventoryChange and
+//      postJobCardLabor (best-effort: a cascade failure does NOT roll
+//      back the JC UPDATE). PIC fields are left untouched (NULL on the
+//      WAITING row, NULL after the UPDATE).
+//
+// Half-completed UPH POs (e.g. BEDFRAME with DIVAN UPH done +
+// HEADBOARD UPH still WAITING): the per-WIP gating naturally handles
+// them — DIVAN's earlier depts get backfilled, HEADBOARD's untouched.
+//
+// Migration cleanup: this endpoint, /cascade-upstream-completion, and
+// /backfill-cascade-wip-producers are all one-shot tools and will be
+// removed wholesale post-migration. Don't refactor or generalize.
+//
+// Query params:
+//   ?dryRun=true|false   default false
+//
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+const UPH_POFOLD_TARGET_DEPTS = new Set([
+  "FAB_CUT",
+  "FAB_SEW",
+  "WOOD_CUT",
+  "FOAM",
+  "FRAMING",
+  "WEBBING",
+]);
+const UPH_POFOLD_DEPT_ORDER = [
+  "FAB_CUT",
+  "FAB_SEW",
+  "WOOD_CUT",
+  "FOAM",
+  "FRAMING",
+  "WEBBING",
+] as const;
+
+type UphPofoldCandidate = {
+  id: string;
+  productionOrderId: string;
+  wipKey: string;
+  branchKey: string | null;
+  departmentCode: string;
+  wipType: string | null;
+  itemCategory: string | null;
+  sequence: number;
+  estMinutes: number | null;
+  productionTimeMinutes: number | null;
+  anchorDate: string;
+  newDate: string;
+  actualMinutes: number;
+  offsetDays: number;
+  clampedToAnchor: boolean;
+};
+
+app.post("/uph-pofold-backfill", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  const leadTimes: LeadTimeMap = await loadLeadTimes(db);
+  const ltLookup = (cat: string | null, dept: string | null): number | null => {
+    if (!dept) return null;
+    const normCat = (cat || "").toUpperCase() === "SOFA" ? "SOFA" : "BEDFRAME";
+    const v = leadTimes[normCat]?.[dept];
+    return typeof v === "number" && v >= 0 ? v : null;
+  };
+
+  // Per-WIP UPH anchor map: (productionOrderId, wipKey) → completedDate.
+  // Only includes (PO, wipKey) where the UPH JC is COMPLETED/TRANSFERRED
+  // with a non-null completedDate. wipKey is COALESCEd to '' so empty-key
+  // rows still group cleanly.
+  const uphAnchorRes = await db
+    .prepare(
+      `SELECT productionOrderId,
+              COALESCE(wipKey,'') AS wk,
+              completedDate AS uphDate
+         FROM job_cards
+        WHERE departmentCode = 'UPHOLSTERY'
+          AND status IN ('COMPLETED','TRANSFERRED')
+          AND completedDate IS NOT NULL`,
+    )
+    .all<{ productionOrderId: string; wk: string; uphDate: string }>();
+  const uphAnchorMap = new Map<string, string>();
+  for (const r of uphAnchorRes.results ?? []) {
+    const raw = r as unknown as Record<string, unknown>;
+    const date =
+      typeof raw.uphDate === "string"
+        ? (raw.uphDate as string)
+        : typeof raw.uphdate === "string"
+          ? (raw.uphdate as string)
+          : null;
+    if (!date) continue;
+    uphAnchorMap.set(`${r.productionOrderId}||${r.wk}`, date);
+  }
+
+  // Candidate JCs: WAITING earlier-dept rows whose (PO, wipKey) has an
+  // UPH anchor in the map above. Only six target depts.
+  const candRes = await db
+    .prepare(
+      `SELECT j.id              AS id,
+              j.productionOrderId AS productionOrderId,
+              COALESCE(j.wipKey,'')  AS wipKey,
+              j.branchKey       AS branchKey,
+              j.departmentCode  AS departmentCode,
+              j.wipType         AS wipType,
+              po.itemCategory   AS itemCategory,
+              j.sequence        AS sequence,
+              j.estMinutes      AS estMinutes,
+              j.productionTimeMinutes AS productionTimeMinutes
+         FROM job_cards j
+         LEFT JOIN production_orders po ON po.id = j.productionOrderId
+        WHERE j.status = 'WAITING'
+          AND j.completedDate IS NULL
+          AND j.departmentCode IN ('FAB_CUT','FAB_SEW','WOOD_CUT','FOAM','FRAMING','WEBBING')`,
+    )
+    .all<Omit<UphPofoldCandidate, "anchorDate" | "newDate" | "actualMinutes" | "offsetDays" | "clampedToAnchor">>();
+  const allWaiting = candRes.results ?? [];
+
+  let noUphAnchorSkipped = 0;
+  const plans: UphPofoldCandidate[] = [];
+  const dateHistogram: Record<string, number> = {};
+  const deptCounts: Record<string, number> = {};
+  for (const cand of allWaiting) {
+    const key = `${cand.productionOrderId}||${cand.wipKey ?? ""}`;
+    const anchorDate = uphAnchorMap.get(key);
+    if (!anchorDate) {
+      // (PO, wipKey) has no completed UPH — that WIP is still in production,
+      // skip per Policy B.
+      noUphAnchorSkipped++;
+      continue;
+    }
+    if (!UPH_POFOLD_TARGET_DEPTS.has(cand.departmentCode)) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(anchorDate)) continue;
+
+    const ltAnchor = ltLookup(cand.itemCategory, "UPHOLSTERY");
+    const ltTarget = ltLookup(cand.itemCategory, cand.departmentCode);
+    let offset: number;
+    let clamped = false;
+    if (ltAnchor == null || ltTarget == null) {
+      offset = 0;
+    } else {
+      offset = ltAnchor - ltTarget;
+      if (offset > 0) {
+        offset = 0;
+        clamped = true;
+      }
+    }
+    let newDate = addDaysISO(anchorDate, offset);
+    if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
+
+    const actualMinutes =
+      cand.productionTimeMinutes != null
+        ? cand.productionTimeMinutes
+        : cand.estMinutes != null
+          ? cand.estMinutes
+          : 0;
+
+    plans.push({
+      ...cand,
+      anchorDate,
+      newDate,
+      actualMinutes,
+      offsetDays: offset,
+      clampedToAnchor: clamped,
+    });
+    dateHistogram[newDate] = (dateHistogram[newDate] ?? 0) + 1;
+    deptCounts[cand.departmentCode] =
+      (deptCounts[cand.departmentCode] ?? 0) + 1;
+  }
+
+  // Sort by DEPT_ORDER then by PO+wipKey for stable + cascade-safe order.
+  const deptRank = new Map(UPH_POFOLD_DEPT_ORDER.map((d, i) => [d, i]));
+  plans.sort((a, b) => {
+    const dA = deptRank.get(a.departmentCode) ?? 99;
+    const dB = deptRank.get(b.departmentCode) ?? 99;
+    if (dA !== dB) return dA - dB;
+    const k = `${a.productionOrderId}||${a.wipKey}`.localeCompare(
+      `${b.productionOrderId}||${b.wipKey}`,
+    );
+    if (k !== 0) return k;
+    return a.sequence - b.sequence;
+  });
+
+  const sample = plans.slice(0, 10).map((p) => ({
+    id: p.id,
+    productionOrderId: p.productionOrderId,
+    wipKey: p.wipKey,
+    branchKey: p.branchKey,
+    departmentCode: p.departmentCode,
+    wipType: p.wipType,
+    itemCategory: p.itemCategory,
+    anchorDate: p.anchorDate,
+    newDate: p.newDate,
+    offsetDays: p.offsetDays,
+    clampedToAnchor: p.clampedToAnchor,
+    actualMinutes: p.actualMinutes,
+  }));
+
+  // Distinct (PO, wipKey) pairs in scope — useful counter alongside JC count.
+  const distinctWips = new Set(plans.map((p) => `${p.productionOrderId}||${p.wipKey}`));
+  const distinctPOs = new Set(plans.map((p) => p.productionOrderId));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidatesScanned: allWaiting.length,
+      noUphAnchorSkipped,
+      planned: plans.length,
+      distinctWipKeysAffected: distinctWips.size,
+      distinctPOsAffected: distinctPOs.size,
+      deptCounts,
+      dateHistogram,
+      sample,
+    });
+  }
+
+  let updated = 0;
+  const errors: Array<{ jcId: string; message: string }> = [];
+
+  // Per-PO load cache so multiple flips in the same PO share one fetch.
+  const poCache = new Map<
+    string,
+    { po: ProductionOrderRow; allJcs: JobCardRow[] }
+  >();
+
+  for (const plan of plans) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET status = 'COMPLETED',
+                  completedDate = ?,
+                  actualMinutes = ?,
+                  overdue = 'COMPLETED'
+            WHERE id = ?`,
+        )
+        .bind(plan.newDate, plan.actualMinutes, plan.id)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        jcId: plan.id,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    const poId = plan.productionOrderId;
+    let cached = poCache.get(poId);
+    if (!cached) {
+      try {
+        const po = await loadProductionOrderById(db, poId);
+        if (!po) continue;
+        const allJcs = await findJobCardsByPO(db, poId);
+        cached = { po, allJcs };
+        poCache.set(poId, cached);
+      } catch (err) {
+        console.error("[uph-pofold-backfill] PO/JC load failed", {
+          jcId: plan.id,
+          poId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+    }
+
+    const idx = cached.allJcs.findIndex((j) => j.id === plan.id);
+    if (idx === -1) continue;
+    const prevStatus = cached.allJcs[idx].status;
+    const updatedJc: JobCardRow = {
+      ...cached.allJcs[idx],
+      status: "COMPLETED",
+      completedDate: plan.newDate,
+      actualMinutes: plan.actualMinutes,
+      overdue: "COMPLETED",
+    };
+    cached.allJcs[idx] = updatedJc;
+
+    try {
+      await applyWipInventoryChange(
+        db,
+        cached.po,
+        updatedJc,
+        "COMPLETED",
+        cached.allJcs,
+        prevStatus,
+      );
+    } catch (err) {
+      console.error("[uph-pofold-backfill] WIP cascade failed", {
+        jcId: plan.id,
+        poId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    try {
+      await postJobCardLabor(db, plan.id, poId);
+    } catch (err) {
+      console.error("[uph-pofold-backfill] postJobCardLabor failed", {
+        jcId: plan.id,
+        poId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    candidatesScanned: allWaiting.length,
+    noUphAnchorSkipped,
+    planned: plans.length,
+    distinctWipKeysAffected: distinctWips.size,
+    distinctPOsAffected: distinctPOs.size,
+    updated,
+    errors,
+    deptCounts,
+    dateHistogram,
+    sample,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/fix-misparsed-jan-dates
 //
 // One-shot fix for the 2026-04-30 CSV import. The earlier importer parsed

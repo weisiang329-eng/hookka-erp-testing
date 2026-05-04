@@ -502,25 +502,37 @@ export default function SalesPage() {
 
   // Quick date presets for filterDateFrom / filterDateTo. Sales staff
   // usually want "this month / last month / this year" at a glance.
+  //
+  // Bug history: previously called setFilterDateFrom + setFilterDateTo in
+  // sequence, but useUrlState wraps setSearchParams which React 18 batches —
+  // the second call captured `prev` from before the first wrote, so `from`
+  // landed empty and `to` won, producing the "Showing 345 of 353" bug
+  // (only end-of-period filtered). One atomic setSearchParams call writes
+  // both keys against the same snapshot.
   const applyDatePreset = (preset: "this-month" | "last-month" | "this-year") => {
     const now = new Date();
     const fmt = (d: Date) => d.toISOString().split("T")[0];
+    let fromStr = "";
+    let toStr = "";
     if (preset === "this-month") {
-      const from = new Date(now.getFullYear(), now.getMonth(), 1);
-      const to = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth() + 1, 0));
     } else if (preset === "last-month") {
-      const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const to = new Date(now.getFullYear(), now.getMonth(), 0);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth(), 0));
     } else {
-      const from = new Date(now.getFullYear(), 0, 1);
-      const to = new Date(now.getFullYear(), 11, 31);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), 0, 1));
+      toStr = fmt(new Date(now.getFullYear(), 11, 31));
     }
+    setSearchParams(
+      (prev) => {
+        const out = new URLSearchParams(prev);
+        out.set("from", fromStr);
+        out.set("to", toStr);
+        return out;
+      },
+      { replace: true },
+    );
   };
 
   return (

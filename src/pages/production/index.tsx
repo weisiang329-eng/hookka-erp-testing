@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { useUrlState } from "@/lib/use-url-state";
+import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -812,6 +812,9 @@ export default function ProductionPage({
     useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
   const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
   const [fltModel, setFltModel] = useUrlState<string>("model", "");
+  // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
+  // setters race under React 18 batching — see useUrlBatch jsdoc.
+  const setUrlBatch = useUrlBatch();
 
   // Overview-matrix-only sort. The dept-tab Production Sheet has DataGrid's
   // built-in sort; this state drives the Overview "Due" header click-to-sort.
@@ -3536,11 +3539,21 @@ export default function ProductionPage({
           fltDateAxis !== "dueDate") && (
           <button
             onClick={() => {
-              setFltSearch(""); setFltSearchInput("");
-              setFltState(""); setFltCustomer("");
-              setFltDueFrom(""); setFltDueTo("");
-              setFltCategory(""); setFltItemType(""); setFltModel("");
-              setFltDateAxis("dueDate");
+              // One atomic URL write for all 9 URL-backed filters; the
+              // debounced search-input mirror is regular useState and stays
+              // outside the batch.
+              setFltSearchInput("");
+              setUrlBatch({
+                q: null,
+                state: null,
+                customer: null,
+                from: null,
+                to: null,
+                cat: null,
+                itype: null,
+                model: null,
+                axis: null,
+              });
             }}
             className="text-[10px] text-[#6B5C32] hover:underline"
           >

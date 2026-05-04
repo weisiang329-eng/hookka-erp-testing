@@ -151,3 +151,52 @@ export function useUrlStateBool(
   );
   return [value, setValue];
 }
+
+/**
+ * Batch URL state writer — set / unset multiple query params atomically
+ * in one history.replaceState call.
+ *
+ * MUST be used (instead of calling several `useUrlState` setters in a row)
+ * whenever a single user action mutates more than one URL-backed filter.
+ * Reason: useUrlState's setter wraps `setSearchParams`, and React 18
+ * batches consecutive calls — the second call's `prev` snapshot is the
+ * pre-batch URL, so the second write overwrites with prev (without the
+ * first write applied) and the first key silently drops.
+ *
+ * Real-world casualties of the race when this helper didn't exist:
+ *   - Sales "This Month" / "Last Month" presets dropped `from`, only
+ *     `to` landed → "Showing 345 of 353" filter (commit cd41b19).
+ *   - Production today-due seed effect dropped `from`, page froze
+ *     mid-render and tab navigation hung (reverted in c3ea4aa).
+ *
+ * Pass `null` (or `""`) as a value to delete that key from the URL —
+ * mirrors useUrlState's "default → drop the param" rule.
+ *
+ *   const setUrl = useUrlBatch();
+ *   setUrl({ from: "2026-04-01", to: "2026-04-30" });
+ *   setUrl({ status: null, customer: null });   // clears both
+ */
+export function useUrlBatch(): (
+  updates: Record<string, string | null | undefined>,
+) => void {
+  const [, setSearchParams] = useSearchParams();
+  return useCallback(
+    (updates) => {
+      setSearchParams(
+        (prev) => {
+          const out = new URLSearchParams(prev);
+          for (const [k, v] of Object.entries(updates)) {
+            if (v === null || v === undefined || v === "") {
+              out.delete(k);
+            } else {
+              out.set(k, v);
+            }
+          }
+          return out;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+}

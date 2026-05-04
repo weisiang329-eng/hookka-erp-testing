@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
+import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -462,25 +462,27 @@ export default function SalesPage() {
 
   // Quick date presets for filterDateFrom / filterDateTo. Sales staff
   // usually want "this month / last month / this year" at a glance.
+  // useUrlBatch — single setSearchParams call writes both keys atomically.
+  // Calling setFilterDateFrom + setFilterDateTo back-to-back races under
+  // React 18 batching (the second's `prev` snapshot is the pre-batch URL,
+  // first write gets dropped) — same bug that hit sales applyDatePreset.
+  const setUrlBatch = useUrlBatch();
   const applyDatePreset = (preset: "this-month" | "last-month" | "this-year") => {
     const now = new Date();
     const fmt = (d: Date) => d.toISOString().split("T")[0];
+    let fromStr = "";
+    let toStr = "";
     if (preset === "this-month") {
-      const from = new Date(now.getFullYear(), now.getMonth(), 1);
-      const to = new Date(now.getFullYear(), now.getMonth() + 1, 0);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth(), 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth() + 1, 0));
     } else if (preset === "last-month") {
-      const from = new Date(now.getFullYear(), now.getMonth() - 1, 1);
-      const to = new Date(now.getFullYear(), now.getMonth(), 0);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+      toStr = fmt(new Date(now.getFullYear(), now.getMonth(), 0));
     } else {
-      const from = new Date(now.getFullYear(), 0, 1);
-      const to = new Date(now.getFullYear(), 11, 31);
-      setFilterDateFrom(fmt(from));
-      setFilterDateTo(fmt(to));
+      fromStr = fmt(new Date(now.getFullYear(), 0, 1));
+      toStr = fmt(new Date(now.getFullYear(), 11, 31));
     }
+    setUrlBatch({ from: fromStr, to: toStr });
   };
 
   return (

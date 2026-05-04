@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { useToast } from "@/components/ui/toast";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { useUrlState, useUrlStateNumber } from "@/lib/use-url-state";
+import { useUrlState, useUrlStateNumber, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -500,15 +500,11 @@ export default function SalesPage() {
     [filteredOrders]
   );
 
-  // Quick date presets for filterDateFrom / filterDateTo. Sales staff
-  // usually want "this month / last month / this year" at a glance.
-  //
-  // Bug history: previously called setFilterDateFrom + setFilterDateTo in
-  // sequence, but useUrlState wraps setSearchParams which React 18 batches —
-  // the second call captured `prev` from before the first wrote, so `from`
-  // landed empty and `to` won, producing the "Showing 345 of 353" bug
-  // (only end-of-period filtered). One atomic setSearchParams call writes
-  // both keys against the same snapshot.
+  // Quick date presets — see useUrlBatch jsdoc for why we can't just call
+  // setFilterDateFrom + setFilterDateTo in sequence (React 18 batches the
+  // two setSearchParams calls and the second's prev snapshot drops the
+  // first). useUrlBatch writes both keys against the same prev.
+  const setUrlBatch = useUrlBatch();
   const applyDatePreset = (preset: "this-month" | "last-month" | "this-year") => {
     const now = new Date();
     const fmt = (d: Date) => d.toISOString().split("T")[0];
@@ -524,15 +520,7 @@ export default function SalesPage() {
       fromStr = fmt(new Date(now.getFullYear(), 0, 1));
       toStr = fmt(new Date(now.getFullYear(), 11, 31));
     }
-    setSearchParams(
-      (prev) => {
-        const out = new URLSearchParams(prev);
-        out.set("from", fromStr);
-        out.set("to", toStr);
-        return out;
-      },
-      { replace: true },
-    );
+    setUrlBatch({ from: fromStr, to: toStr });
   };
 
   return (

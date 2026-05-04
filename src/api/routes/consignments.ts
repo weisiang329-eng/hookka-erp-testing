@@ -14,6 +14,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { emitAudit } from "../lib/audit";
 import {
   type ConsignmentNoteRow,
   type ConsignmentItemRow,
@@ -23,6 +24,7 @@ import {
   nextConsignmentNoteNumber,
   resolveTransport,
   updateConsignmentNoteById,
+  validatePOMutex,
 } from "../lib/consignment-note-shared";
 
 const app = new Hono<Env>();
@@ -121,6 +123,43 @@ app.post("/", async (c) => {
       productionOrderId: string | null;
     };
     let itemSeeds: ItemSeed[] = [];
+
+    // PO mutex check (parity with consignment-notes.ts:211-244). Reject
+    // if any incoming PO is already on a non-terminal CN/DO. The legacy
+    // /consignments POST was missing this guard; a duplicate CN created
+    // here would double-stamp fg_units at dispatch.
+    if (productionOrderIds.length > 0) {
+      const mutex = await validatePOMutex(c.var.DB, productionOrderIds, "CN");
+      if (!mutex.ok) {
+        return c.json(
+          {
+            success: false,
+            error: `Cannot create consignment note — ${mutex.conflicts.length} PO${mutex.conflicts.length === 1 ? "" : "s"} already on an active dispatch document: ${mutex.conflicts.join(", ")}`,
+            conflicts: mutex.conflicts,
+            reason: mutex.reason,
+          },
+          409,
+        );
+      }
+    } else if (Array.isArray(body.items)) {
+      const itemPoIds = (body.items as Array<Record<string, unknown>>)
+        .map((it) => it.productionOrderId)
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      if (itemPoIds.length > 0) {
+        const mutex = await validatePOMutex(c.var.DB, itemPoIds, "CN");
+        if (!mutex.ok) {
+          return c.json(
+            {
+              success: false,
+              error: `Cannot create consignment note — ${mutex.conflicts.length} PO${mutex.conflicts.length === 1 ? "" : "s"} already on an active dispatch document: ${mutex.conflicts.join(", ")}`,
+              conflicts: mutex.conflicts,
+              reason: mutex.reason,
+            },
+            409,
+          );
+        }
+      }
+    }
 
     if (productionOrderIds.length > 0) {
       const ph = productionOrderIds.map(() => "?").join(",");
@@ -296,6 +335,27 @@ app.put("/:id", async (c) => {
     }
     const body = (await c.req.json()) as Record<string, unknown>;
 
+    // Pre-flight items-lock check. updateConsignmentNoteById (helper at
+    // consignment-note-shared.ts:575) returns reason="items_locked" when
+    // body.items is present and the existing/next status isn't ACTIVE.
+    // We previously called the helper AFTER deleting items, so the 403
+    // bubbled up but the consignment_items rows were already gone. Pre-
+    // check here so the lock rejection is non-destructive.
+    if (Array.isArray(body.items)) {
+      const nextStatus = (body.status as string | undefined) ?? existing.status;
+      if (!(existing.status === "ACTIVE" && nextStatus === "ACTIVE")) {
+        return c.json(
+          {
+            success: false,
+            error: `Consignment items are locked once status leaves ACTIVE (current: ${existing.status}). Items field rejected.`,
+            reason: "items_locked",
+            currentStatus: existing.status,
+          },
+          403,
+        );
+      }
+    }
+
     // If items provided, replace them and recompute totalValue. We do
     // this before delegating to updateConsignmentNoteById so the helper
     // sees the post-replace state if a future iteration of it reads
@@ -379,6 +439,16 @@ app.put("/:id", async (c) => {
       }
       return c.json({ success: false, error: "Consignment not found" }, 404);
     }
+    // Audit parity with the canonical /api/consignment-notes PUT
+    // (consignment-notes.ts:1031-1049). Any successful update on this
+    // legacy surface now leaves the same audit row shape.
+    await emitAudit(c, {
+      resource: "consignment-notes",
+      resourceId: id,
+      action: "update",
+      before: existing,
+      after: res.note,
+    });
     return c.json({
       success: true,
       data: rowToConsignmentNote(res.note, res.items),
@@ -389,6 +459,19 @@ app.put("/:id", async (c) => {
 });
 
 // DELETE /api/consignments/:id
+//
+// Refuses to delete past ACTIVE — once a CN has been dispatched (status
+// PARTIALLY_SOLD / FULLY_SOLD / IN_TRANSIT / DELIVERED / RETURNED) the
+// fg_units rows already carry cnId stamps + the goods may have moved
+// physically. Mirrors DO's DRAFT-only delete guard
+// (delivery-orders.ts:1911 area).
+//
+// Rolls back any fg_units cnId/status stamps for ACTIVE-state CNs that
+// somehow have units pointing at them (defensive — a properly-ACTIVE CN
+// shouldn't have fg_units cnId set, but pre-fix CNs and seed data can).
+//
+// Emits an audit row so the deletion is traceable. Without this any
+// delete via this surface vanishes silently.
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "consignments", "delete");
   if (denied) return denied;
@@ -401,10 +484,48 @@ app.delete("/:id", async (c) => {
   if (!existing) {
     return c.json({ success: false, error: "Consignment not found" }, 404);
   }
+
+  // Status guard: only ACTIVE CNs are safely deletable. Anything past
+  // ACTIVE has live downstream side-effects (fg_units cnId stamps,
+  // STOCK_OUT movements, customer outstandingSen reservations) that
+  // delete should not silently undo.
+  if (existing.status !== "ACTIVE") {
+    return c.json(
+      {
+        success: false,
+        error: `Cannot delete consignment note in status ${existing.status}. Mark it as RETURNED or revert to ACTIVE before deleting.`,
+        currentStatus: existing.status,
+      },
+      403,
+    );
+  }
+
+  // Defensive fg_units rollback for any unit that picked up this cnId
+  // (shouldn't happen at ACTIVE but guard against legacy seed state).
+  await c.var.DB
+    .prepare(
+      `UPDATE fg_units
+          SET cnId = NULL,
+              status = CASE WHEN status = 'LOADED' THEN 'PACKED' ELSE status END,
+              loadedAt = CASE WHEN status = 'LOADED' THEN NULL ELSE loadedAt END
+        WHERE cnId = ?`,
+    )
+    .bind(id)
+    .run();
+
   await c.var.DB.prepare("DELETE FROM consignment_notes WHERE id = ?")
     .bind(id)
     .run();
   // consignment_items cascades via FK
+
+  await emitAudit(c, {
+    resource: "consignment-notes",
+    resourceId: id,
+    action: "delete",
+    before: existing,
+    after: null,
+  });
+
   return c.json({ success: true });
 });
 

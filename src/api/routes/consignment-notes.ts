@@ -33,9 +33,21 @@ import { requirePermission } from "../lib/rbac";
 const app = new Hono<Env>();
 
 // GET /api/consignment-notes
+//
+// Pagination: ?page=1&limit=200. FE list (consignment/note.tsx:540) sends
+// these and expects {data, page, limit, total}. Without honoring them this
+// route returned the whole CN table on every list-render — fine while CN
+// count was small, but it's a scaling cliff once volume crosses a few
+// hundred (mirrors /api/delivery-orders/list).
+//
+// items still loads the full table — N+1 join would defeat the page win,
+// and the FE only consumes items for visible CN rows. Keep parity with
+// DO list behaviour.
 app.get("/", async (c) => {
   const status = c.req.query("status");
   const customerId = c.req.query("customerId");
+  const pageParam = c.req.query("page");
+  const limitParam = c.req.query("limit");
   const clauses: string[] = [];
   const params: string[] = [];
   if (status) {
@@ -47,16 +59,37 @@ app.get("/", async (c) => {
     params.push(customerId);
   }
   const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+
+  // Pagination defaults: no params → return everything (legacy callers).
+  const page = pageParam ? Math.max(1, parseInt(pageParam, 10) || 1) : null;
+  const limit = limitParam ? Math.max(1, Math.min(1000, parseInt(limitParam, 10) || 200)) : null;
+
+  const totalRes = await c.var.DB
+    .prepare(`SELECT COUNT(*) AS n FROM consignment_notes ${where}`)
+    .bind(...params)
+    .first<{ n: number }>();
+  const total = Number(totalRes?.n ?? 0);
+
+  let listSql = `SELECT * FROM consignment_notes ${where} ORDER BY noteNumber DESC`;
+  const listParams: string[] = [...params];
+  if (page !== null && limit !== null) {
+    const offset = (page - 1) * limit;
+    listSql += ` LIMIT ${limit} OFFSET ${offset}`;
+  }
+
   const [notesRes, itemsRes] = await Promise.all([
-    c.var.DB.prepare(`SELECT * FROM consignment_notes ${where}`)
-      .bind(...params)
-      .all<ConsignmentNoteRow>(),
+    c.var.DB.prepare(listSql).bind(...listParams).all<ConsignmentNoteRow>(),
     c.var.DB.prepare("SELECT * FROM consignment_items").all<ConsignmentItemRow>(),
   ]);
   const data = (notesRes.results ?? []).map((r) =>
     rowToConsignmentNote(r, itemsRes.results ?? []),
   );
-  return c.json({ success: true, data, total: data.length });
+  return c.json({
+    success: true,
+    data,
+    total,
+    ...(page !== null && limit !== null ? { page, limit } : {}),
+  });
 });
 
 // ---------------------------------------------------------------------------

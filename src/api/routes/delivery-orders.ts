@@ -1489,9 +1489,17 @@ app.put("/:id", async (c) => {
         for (const po of poRows) {
           statements.push(
             c.var.DB.prepare(
+              // CN-side dispatch (consignment-note-shared.ts:807) stamps
+              // cnId on units when goods leave for a consignment customer.
+              // Without the cnId-NULL guard here, a sibling DO POST would
+              // STEAL a unit already LOADED onto a CN — fg_units row
+              // becomes "doId set, cnId set, status overwritten" with
+              // both downstream docs claiming the same physical unit.
               `UPDATE fg_units
                   SET doId = ?, status = 'LOADED', loadedAt = ?
-                WHERE poId = ? AND (doId IS NULL OR doId = '')`,
+                WHERE poId = ?
+                  AND (doId IS NULL OR doId = '')
+                  AND (cnId IS NULL OR cnId = '')`,
             ).bind(id, now, po.id),
             c.var.DB.prepare(
               `INSERT INTO stock_movements (

@@ -160,6 +160,18 @@ export function CommandPalette({
           loop
           label="Command palette"
           className="flex flex-col"
+          onKeyDown={(e) => {
+            // cmdk's <Command.Input> swallows window-level keydown events
+            // (it stops propagation so its own j/k navigation doesn't
+            // collide with the host page). That breaks the global Escape
+            // close handler in DashboardLayout — press Esc and the
+            // overlay just sat there. Handle it locally instead so the
+            // palette is always closeable from inside its own root.
+            if (e.key === "Escape") {
+              e.preventDefault();
+              onOpenChange(false);
+            }
+          }}
         >
           <div className="flex items-center gap-2 px-3 py-3 border-b border-[#E2DDD8]">
             <Search className="w-4 h-4 text-[#9A918A]" />

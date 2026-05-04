@@ -49,15 +49,23 @@ type SOStatusChangeEntry = {
   autoActions: string[];
 };
 
+// `OUTSTANDING` is a synthetic option (not a stored status). It groups
+// every SO that's been confirmed but isn't yet fully off the sales desk
+// — i.e. customer is still owed goods OR an invoice but the order isn't
+// closed/cancelled/on hold. Filter logic in filteredOrders.
+const OUTSTANDING_STATUSES = new Set([
+  "CONFIRMED",
+  "IN_PRODUCTION",
+  "READY_TO_SHIP",
+  "SHIPPED",
+  "INVOICED",
+]);
 const ALL_STATUSES = [
   { value: "", label: "All Statuses" },
   { value: "DRAFT", label: "Draft" },
   { value: "CONFIRMED", label: "Confirmed" },
-  { value: "IN_PRODUCTION", label: "In Production" },
-  { value: "READY_TO_SHIP", label: "Ready to Ship" },
-  { value: "SHIPPED", label: "Shipped" },
+  { value: "OUTSTANDING", label: "Outstanding" },
   { value: "DELIVERED", label: "Delivered" },
-  { value: "INVOICED", label: "Invoiced" },
   { value: "CLOSED", label: "Closed" },
   { value: "ON_HOLD", label: "On Hold" },
   { value: "CANCELLED", label: "Cancelled" },
@@ -263,7 +271,13 @@ export default function SalesPage() {
     return orders.filter(o => {
       if (tab === "DRAFT" && o.status !== "DRAFT") return false;
       if (tab === "CONFIRMED" && o.status === "DRAFT") return false;
-      if (filterStatus && o.status !== filterStatus) return false;
+      if (filterStatus) {
+        if (filterStatus === "OUTSTANDING") {
+          if (!OUTSTANDING_STATUSES.has(o.status)) return false;
+        } else if (o.status !== filterStatus) {
+          return false;
+        }
+      }
       if (filterCustomer && o.customerId !== filterCustomer) return false;
       if (filterDateFrom) {
         const orderDate = o.companySODate.split("T")[0];

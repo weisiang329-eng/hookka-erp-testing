@@ -1861,6 +1861,17 @@ export async function applyWipInventoryChange(
       (jcRow.departmentCode || "").toUpperCase() === "FAB_SEW";
     const isSofa = (poRow.itemCategory || "").toUpperCase() === "SOFA";
 
+    // Defense-in-depth: UPHOLSTERY's wip_items math fires only at
+    // COMPLETED via the branch-terminal loop further up. The IN_PROGRESS
+    // default-path consume below relies on `branchKey` being non-empty
+    // on the upstream JC AND empty on UPH itself; in today's BOM that's
+    // always true so children[0] resolves to undefined and the function
+    // safely returns. But the contract is implicit — a future BOM that
+    // emits a UPH JC with a non-null branchKey would prematurely consume
+    // one branch terminal at IN_PROGRESS. Explicit guard makes this
+    // invariant self-documenting.
+    if ((jcRow.departmentCode || "").toUpperCase() === "UPHOLSTERY") return;
+
     // Sofa Fab Sew special case: the Fab Cut merge groups a full sofa
     // set (1A(LHF) + 1NA + 1A(RHF) sharing the same bolt) into one
     // sticker. The moment Fab Sew picks up the stack to start sewing
@@ -1921,23 +1932,28 @@ export async function applyWipInventoryChange(
     const child = children[0];
     if (!child || !child.wipLabel) return;
 
-    const entry = await db
-      .prepare("SELECT id, stockQty FROM wip_items WHERE code = ?")
-      .bind(child.wipLabel)
-      .first<{ id: string; stockQty: number }>();
-    if (entry && entry.stockQty > 0) {
-      const remaining = Math.max(0, entry.stockQty - wipQty);
-      await db
-        .prepare(
-          `UPDATE wip_items SET stockQty = ?, status = ? WHERE id = ?`,
-        )
-        .bind(
-          remaining,
-          remaining === 0 ? "IN_PRODUCTION" : "COMPLETED",
-          entry.id,
-        )
-        .run();
-    }
+    // Atomic conditional UPDATE — was previously SELECT-then-UPDATE,
+    // which raced under concurrent WAITING→IN_PROGRESS PATCHes for the
+    // same upstream wipLabel (both reads see the pre-decrement stockQty,
+    // both writes commit, one decrement is lost). The ON-CONFLICT upsert
+    // pattern used in the COMPLETED branch (post-migration 0100) doesn't
+    // apply here because we're decrementing an existing row by qty, not
+    // upserting a known final value. Use a guarded UPDATE that only
+    // mutates rows where stockQty > 0 + computes remaining + status in
+    // SQL itself.
+    await db
+      .prepare(
+        `UPDATE wip_items
+            SET stockQty = MAX(0, stockQty - ?),
+                status = CASE
+                  WHEN MAX(0, stockQty - ?) = 0 THEN 'IN_PRODUCTION'
+                  ELSE 'COMPLETED'
+                END
+          WHERE code = ?
+            AND stockQty > 0`,
+      )
+      .bind(wipQty, wipQty, child.wipLabel)
+      .run();
   }
 }
 

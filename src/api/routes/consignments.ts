@@ -209,12 +209,12 @@ app.post("/", async (c) => {
            sentDate, status, totalValue, notes,
            driverId, driverName, driverContactPerson, driverPhone,
            vehicleId, vehicleNo, vehicleType,
-           dispatchedAt, deliveredAt, acknowledgedAt,
+           dispatchedAt, inTransitAt, deliveredAt, acknowledgedAt,
            consignmentOrderId, hubId
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                    ?, ?, ?, ?,
                    ?, ?, ?,
-                   ?, ?, ?,
+                   ?, ?, ?, ?,
                    ?, ?)`,
       ).bind(
         id,
@@ -235,7 +235,11 @@ app.post("/", async (c) => {
         transport.vehicleId,
         transport.vehicleNo,
         transport.vehicleType,
-        // Lifecycle timestamps null on create.
+        // Lifecycle timestamps null on create. inTransitAt added per
+        // migration 0078 — was previously omitted from this legacy INSERT
+        // and worked because the column defaults NULL, but it drifted
+        // from the canonical /api/consignment-notes POST shape.
+        null,
         null,
         null,
         null,

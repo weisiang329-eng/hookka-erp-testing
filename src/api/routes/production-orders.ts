@@ -2089,12 +2089,31 @@ async function cascadeUpholsteryToCO(
       }
     }
     if (co.status !== "READY_TO_SHIP") {
-      await db
-        .prepare(
-          "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
-        )
-        .bind(now, co.id)
-        .run();
+      await db.batch([
+        db
+          .prepare(
+            "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+          )
+          .bind(now, co.id),
+        db
+          .prepare(
+            `INSERT INTO co_status_changes
+               (id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            `cosc-${crypto.randomUUID().slice(0, 8)}`,
+            co.id,
+            co.status,
+            "READY_TO_SHIP",
+            "System",
+            now,
+            "All sibling COs' UPH job cards completed",
+            JSON.stringify([
+              `PO ${poId} UPH completion bumped CO to READY_TO_SHIP`,
+            ]),
+          ),
+      ]);
     }
   } else if (co.status === "READY_TO_SHIP") {
     // Mirror the SO twin: rollback drops back to IN_PRODUCTION + clears
@@ -2102,12 +2121,31 @@ async function cascadeUpholsteryToCO(
     // the stockedIn clear, the SO twin's BUG-2026-04-27-020 fix (line
     // ~2148) would be one-sided — CO POs would keep stockedIn=1 forever
     // after a UPH undo.
-    await db
-      .prepare(
-        "UPDATE consignment_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
-      )
-      .bind(now, co.id)
-      .run();
+    await db.batch([
+      db
+        .prepare(
+          "UPDATE consignment_orders SET status = 'IN_PRODUCTION', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, co.id),
+      db
+        .prepare(
+          `INSERT INTO co_status_changes
+             (id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `cosc-${crypto.randomUUID().slice(0, 8)}`,
+          co.id,
+          "READY_TO_SHIP",
+          "IN_PRODUCTION",
+          "System",
+          now,
+          "UPH job card rolled back to non-DONE",
+          JSON.stringify([
+            `PO ${poId} UPH rolled back — CO no longer fully upholstered`,
+          ]),
+        ),
+    ]);
     for (const p of siblingPOs) {
       if (!p.stockedIn) continue;
       const mine = uphJcs.filter((j) => j.productionOrderId === p.id);
@@ -2293,12 +2331,30 @@ async function cascadePoCompletionToCO(
   const sibList = siblings.results ?? [];
   const allDone = sibList.length > 0 && sibList.every((p) => p.status === "COMPLETED");
   if (allDone && co.status !== "READY_TO_SHIP") {
-    await db
-      .prepare(
-        "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
-      )
-      .bind(new Date().toISOString(), consignmentOrderId)
-      .run();
+    const now = new Date().toISOString();
+    await db.batch([
+      db
+        .prepare(
+          "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, consignmentOrderId),
+      db
+        .prepare(
+          `INSERT INTO co_status_changes
+             (id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `cosc-${crypto.randomUUID().slice(0, 8)}`,
+          consignmentOrderId,
+          co.status,
+          "READY_TO_SHIP",
+          "System",
+          now,
+          "All sibling POs COMPLETED",
+          JSON.stringify(["PO completion cascade bumped CO to READY_TO_SHIP"]),
+        ),
+    ]);
   }
 }
 
@@ -2341,12 +2397,30 @@ export async function cascadeCNCompletionToCO(
     sibList.length > 0 &&
     sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
   if (allDone && co.status !== "DELIVERED") {
-    await db
-      .prepare(
-        "UPDATE consignment_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
-      )
-      .bind(new Date().toISOString(), consignmentOrderId)
-      .run();
+    const now = new Date().toISOString();
+    await db.batch([
+      db
+        .prepare(
+          "UPDATE consignment_orders SET status = 'DELIVERED', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, consignmentOrderId),
+      db
+        .prepare(
+          `INSERT INTO co_status_changes
+             (id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `cosc-${crypto.randomUUID().slice(0, 8)}`,
+          consignmentOrderId,
+          co.status,
+          "DELIVERED",
+          "System",
+          now,
+          "All sibling CNs FULLY_SOLD or CLOSED",
+          JSON.stringify(["CN completion cascade bumped CO to DELIVERED"]),
+        ),
+    ]);
   }
 }
 
@@ -2382,12 +2456,30 @@ export async function cascadeCNReversalToCO(
     sibList.length > 0 &&
     sibList.every((c) => c.status === "FULLY_SOLD" || c.status === "CLOSED");
   if (stillAllDone) return;
-  await db
-    .prepare(
-      "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
-    )
-    .bind(new Date().toISOString(), consignmentOrderId)
-    .run();
+  const now = new Date().toISOString();
+  await db.batch([
+    db
+      .prepare(
+        "UPDATE consignment_orders SET status = 'READY_TO_SHIP', updated_at = ? WHERE id = ?",
+      )
+      .bind(now, consignmentOrderId),
+    db
+      .prepare(
+        `INSERT INTO co_status_changes
+           (id, co_id, from_status, to_status, changed_by, timestamp, notes, auto_actions)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        `cosc-${crypto.randomUUID().slice(0, 8)}`,
+        consignmentOrderId,
+        "DELIVERED",
+        "READY_TO_SHIP",
+        "System",
+        now,
+        "CN reversed below FULLY_SOLD — CO no longer fully delivered",
+        JSON.stringify(["CN reversal cascade dropped CO from DELIVERED"]),
+      ),
+  ]);
 }
 
 // Track F cost cascade lives in ../lib/po-cost-cascade.ts and is wired

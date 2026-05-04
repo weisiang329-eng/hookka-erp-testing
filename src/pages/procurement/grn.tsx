@@ -160,12 +160,12 @@ function GRNFormDialog({
                           </td>
                           <td className="px-3 py-2 text-right">{poItem.quantity} {poItem.unit}</td>
                           <td className="px-3 py-2 text-right">
-                            <Input type="number" min={0} className={`w-20 text-right ml-auto ${overReceipt ? "border-[#9A3A2D]" : ""}`}
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} className={`w-20 text-right ml-auto ${overReceipt ? "border-[#9A3A2D]" : ""}`}
                               value={entry.receivedQty} onChange={(e) => updateItem(idx, "receivedQty", Number(e.target.value))} />
                             {overReceipt && <div className="text-[10px] text-[#9A3A2D] mt-0.5">Exceeds 110%</div>}
                           </td>
                           <td className="px-3 py-2 text-right">
-                            <Input type="number" min={0} max={entry.receivedQty} className="w-20 text-right ml-auto"
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} max={entry.receivedQty} className="w-20 text-right ml-auto"
                               value={entry.rejectedQty} onChange={(e) => updateItem(idx, "rejectedQty", Number(e.target.value))} />
                           </td>
                           <td className="px-3 py-2 text-right font-medium">{entry.acceptedQty}</td>

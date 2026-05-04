@@ -784,7 +784,7 @@ function CreateServiceOrderModal({
                             </td>
                             <td className="p-2">
                               <Input
-                                type="number"
+                                type="number" onFocus={(e) => e.currentTarget.select()}
                                 min="1"
                                 max={it.quantity}
                                 value={pick?.qty ?? ""}
@@ -910,7 +910,7 @@ function CreateServiceOrderModal({
                           </td>
                           <td className="p-2">
                             <Input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               min="1"
                               value={l.qty}
                               onChange={(e) =>

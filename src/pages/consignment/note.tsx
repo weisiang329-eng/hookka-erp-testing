@@ -3890,7 +3890,7 @@ export default function ConsignmentNotePage() {
                         <td className="px-3 py-2 text-right tabular-nums">{item.quantity}</td>
                         <td className="px-3 py-2 text-right">
                           <input
-                            type="number"
+                            type="number" onFocus={(e) => e.currentTarget.select()}
                             min={1}
                             max={item.quantity}
                             value={crReturnQtys[item.id] ?? item.quantity}

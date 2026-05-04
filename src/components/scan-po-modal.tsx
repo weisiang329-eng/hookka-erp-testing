@@ -742,7 +742,7 @@ function ClaudePOCard({
                         </td>
                         <td className="px-2 py-1 text-center">
                           <input
-                            type="number"
+                            type="number" onFocus={(e) => e.currentTarget.select()}
                             className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
                             value={item.quantity}
                             onChange={e => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}

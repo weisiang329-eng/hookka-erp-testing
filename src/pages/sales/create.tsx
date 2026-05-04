@@ -1988,18 +1988,18 @@ function LineItemCard({
         <div className="grid grid-cols-2 gap-3">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
-            <Input type="number" min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
           </div>
         </div>
       ) : item.itemCategory === "SOFA" ? (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
-            <Input type="number" min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Seat Size *</label>
@@ -2026,14 +2026,14 @@ function LineItemCard({
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-            <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => onUpdate(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
           </div>
         </div>
       ) : (
         <div className="grid grid-cols-2 sm:grid-cols-6 gap-3">
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
-            <Input type="number" min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => onUpdate(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
           </div>
           <div>
             <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>

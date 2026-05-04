@@ -307,7 +307,7 @@ export function MasterPriceHistoryDialog({
                       Price 2 (RM)
                     </label>
                     <Input
-                      type="number"
+                      type="number" onFocus={(e) => e.currentTarget.select()}
                       step="0.01"
                       value={baseRm}
                       onChange={(e) => setBaseRm(e.target.value)}
@@ -319,7 +319,7 @@ export function MasterPriceHistoryDialog({
                       Price 1 (RM)
                     </label>
                     <Input
-                      type="number"
+                      type="number" onFocus={(e) => e.currentTarget.select()}
                       step="0.01"
                       value={price1Rm}
                       onChange={(e) => setPrice1Rm(e.target.value)}
@@ -368,7 +368,7 @@ export function MasterPriceHistoryDialog({
                             {SOFA_TIERS.map((t) => (
                               <td key={t} className="px-1 py-1">
                                 <Input
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   step="0.01"
                                   value={seatGrid[h]?.[t] ?? ""}
                                   onChange={(e) =>

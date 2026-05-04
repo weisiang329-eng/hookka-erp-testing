@@ -559,7 +559,7 @@ export default function SettingsPage() {
                     </td>
                     <td className="py-3 px-3">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         className="w-20 h-8 text-xs"
                         value={dept.workingHoursPerDay}
                         min={1}
@@ -573,7 +573,7 @@ export default function SettingsPage() {
                     </td>
                     <td className="py-3 px-3">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         className="w-20 h-8 text-xs"
                         value={dept.workersAssigned}
                         min={0}
@@ -660,7 +660,7 @@ export default function SettingsPage() {
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Lunch Break (hrs)</label>
                 <Input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   value={workCalendar.lunchBreakHours}
                   min={0}
                   max={3}
@@ -671,7 +671,7 @@ export default function SettingsPage() {
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Efficiency Factor (%)</label>
                 <Input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   value={workCalendar.efficiencyFactor}
                   min={0}
                   max={100}
@@ -705,7 +705,7 @@ export default function SettingsPage() {
                     <td className="py-3 px-3 font-medium text-[#1F1D1B]">{lt.departmentName}</td>
                     <td className="py-3 px-3">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         className="w-20 h-8 text-xs"
                         value={lt.bedframeDays}
                         min={0}
@@ -718,7 +718,7 @@ export default function SettingsPage() {
                     </td>
                     <td className="py-3 px-3">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         className="w-20 h-8 text-xs"
                         value={lt.sofaDays}
                         min={0}
@@ -770,7 +770,7 @@ export default function SettingsPage() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-[#6B7280]">RM</span>
                         <Input
-                          type="number"
+                          type="number" onFocus={(e) => e.currentTarget.select()}
                           className="w-28 h-8 text-xs"
                           value={sc.amountSen / 100}
                           min={0}
@@ -867,7 +867,7 @@ export default function SettingsPage() {
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Session Timeout (hours)</label>
                 <Input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   value={systemSettings.sessionTimeoutHours}
                   min={1}
                   max={24}
@@ -879,7 +879,7 @@ export default function SettingsPage() {
               <div>
                 <label className="block text-sm font-medium text-[#374151] mb-1.5">Max Concurrent Sessions</label>
                 <Input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   value={systemSettings.maxConcurrentSessions}
                   min={1}
                   max={10}

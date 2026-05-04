@@ -303,7 +303,7 @@ export default function RDMaintenancePage() {
               <div>
                 <label className={labelClass}>Hourly Rate (RM/hr)</label>
                 <input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   inputMode="decimal"
                   min={0}
                   step={0.01}
@@ -325,7 +325,7 @@ export default function RDMaintenancePage() {
               <div>
                 <label className={labelClass}>Monthly Fixed Cost (RM)</label>
                 <input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   inputMode="decimal"
                   min={0}
                   step={0.01}

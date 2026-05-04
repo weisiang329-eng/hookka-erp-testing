@@ -1402,7 +1402,7 @@ function AffectedProductsPanel({
                 </div>
                 <div className="flex items-center gap-2">
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     min={0}
                     value={p.qty ?? ""}
                     onChange={(e) => {
@@ -1895,7 +1895,7 @@ function SpawnServiceOrderModal({
                             <Input value={l.productName} onChange={(e) => patchFreeLine(l.id, { productName: e.target.value })} placeholder="e.g. Brown leather sofa" className="h-7 text-xs px-2" />
                           </td>
                           <td className="p-2">
-                            <Input type="number" min="1" value={l.qty} onChange={(e) => patchFreeLine(l.id, { qty: e.target.value })} className="h-7 text-xs px-2" />
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min="1" value={l.qty} onChange={(e) => patchFreeLine(l.id, { qty: e.target.value })} className="h-7 text-xs px-2" />
                           </td>
                           <td className="p-2">
                             <Input value={l.issue} onChange={(e) => patchFreeLine(l.id, { issue: e.target.value })} placeholder="optional" className="h-7 text-xs px-2" />
@@ -1952,7 +1952,7 @@ function SpawnServiceOrderModal({
                             <td className="p-2 text-right font-mono">{it.quantity}</td>
                             <td className="p-2">
                               <Input
-                                type="number" min="1" max={it.quantity}
+                                type="number" onFocus={(e) => e.currentTarget.select()} min="1" max={it.quantity}
                                 value={pick?.qty ?? ""}
                                 onChange={(e) => patchPick(it.id, { qty: e.target.value })}
                                 disabled={!picked}

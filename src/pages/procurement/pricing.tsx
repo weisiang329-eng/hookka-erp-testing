@@ -356,7 +356,7 @@ function AddBindingDialog({
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">Unit Price *</span>
-            <Input type="number" step="0.01" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value)} />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" value={form.unitPrice} onChange={(e) => set("unitPrice", e.target.value)} />
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">Currency</span>
@@ -371,11 +371,11 @@ function AddBindingDialog({
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">Lead Time (days)</span>
-            <Input type="number" value={form.leadTimeDays} onChange={(e) => set("leadTimeDays", e.target.value)} />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} value={form.leadTimeDays} onChange={(e) => set("leadTimeDays", e.target.value)} />
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">MOQ</span>
-            <Input type="number" value={form.moq} onChange={(e) => set("moq", e.target.value)} />
+            <Input type="number" onFocus={(e) => e.currentTarget.select()} value={form.moq} onChange={(e) => set("moq", e.target.value)} />
           </label>
           <label>
             <span className="block text-xs font-medium text-gray-600 mb-1">Payment Terms</span>

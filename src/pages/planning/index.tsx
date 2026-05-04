@@ -1173,7 +1173,7 @@ export default function PlanningPage() {
                           </td>
                           <td className="px-3 py-2 text-center">
                             <input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               min="0"
                               value={bedframeVal}
                               onChange={(e) =>
@@ -1184,7 +1184,7 @@ export default function PlanningPage() {
                           </td>
                           <td className="px-3 py-2 text-center">
                             <input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               min="0"
                               value={sofaVal}
                               onChange={(e) =>

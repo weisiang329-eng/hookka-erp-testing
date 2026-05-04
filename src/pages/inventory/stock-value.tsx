@@ -428,7 +428,7 @@ function EntryTab({
                           {value ? (
                             isEditable ? (
                               <Input
-                                type="number"
+                                type="number" onFocus={(e) => e.currentTarget.select()}
                                 step="0.01"
                                 className="w-32 ml-auto text-right text-xs h-8"
                                 placeholder="Enter RM"

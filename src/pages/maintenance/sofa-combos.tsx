@@ -864,7 +864,7 @@ function CreateComboDialog({
                       {h}
                     </div>
                     <Input
-                      type="number"
+                      type="number" onFocus={(e) => e.currentTarget.select()}
                       step="0.01"
                       min="0"
                       placeholder="0.00"

@@ -328,7 +328,7 @@ export default function DebitNotesPage() {
                       />
                       <input
                         className="w-20 border border-gray-300 rounded-md px-3 py-2 text-sm"
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="1"
                         placeholder="Qty"
                         value={item.quantity}
@@ -336,7 +336,7 @@ export default function DebitNotesPage() {
                       />
                       <input
                         className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm"
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
                         placeholder="Unit Price (sen)"
                         value={item.unitPrice || ""}

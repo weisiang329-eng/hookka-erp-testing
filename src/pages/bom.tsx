@@ -927,7 +927,7 @@ function MaterialScalingEditor({
         <>
           <span className="text-gray-400">base</span>
           <input
-            type="number"
+            type="number" onFocus={(e) => e.currentTarget.select()}
             value={Number.isFinite(scaling.baseValue) ? scaling.baseValue : 0}
             step="1"
             min="0"
@@ -939,7 +939,7 @@ function MaterialScalingEditor({
           />
           <span className="text-gray-400">in, qty +</span>
           <input
-            type="number"
+            type="number" onFocus={(e) => e.currentTarget.select()}
             value={Number.isFinite(scaling.perUnit) ? scaling.perUnit : 0}
             step="0.01"
             min="0"
@@ -2067,7 +2067,7 @@ function CreateBOMDialog({
                         ))}
                       </select>
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         value={w.quantity}
                         onChange={(e) => updateWIP(wi, "quantity", parseInt(e.target.value) || 1)}
                         className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white"
@@ -2158,7 +2158,7 @@ function CreateBOMDialog({
                               onSelectAutoDetect={(kind) => setMaterialAutoDetect(wi, mi, kind)}
                             />
                           )}
-                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -2363,7 +2363,7 @@ function SubWIPTree({
               <select value={sub.wipType} onChange={(e) => onUpdate(childPath, "wipType", e.target.value)} className={`text-xs ${c.border} border rounded px-1.5 py-1 bg-white`}>
                 {Object.entries(WIP_TYPE_LABELS).map(([k, v]) => (<option key={k} value={k}>{v.label}</option>))}
               </select>
-              <input type="number" value={sub.quantity} onChange={(e) => onUpdate(childPath, "quantity", parseInt(e.target.value) || 1)} className={`text-xs ${c.border} border rounded px-1.5 py-1 w-12 bg-white`} min={1} />
+              <input type="number" onFocus={(e) => e.currentTarget.select()} value={sub.quantity} onChange={(e) => onUpdate(childPath, "quantity", parseInt(e.target.value) || 1)} className={`text-xs ${c.border} border rounded px-1.5 py-1 w-12 bg-white`} min={1} />
               <span className="text-[10px] text-gray-500">PCS</span>
               {onWrap && (
                 <button
@@ -2454,7 +2454,7 @@ function SubWIPTree({
                       onSelectAutoDetect={(kind) => onSelectMaterialAutoDetect(childPath, mi, kind)}
                     />
                   )}
-                  <input type="number" value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                  <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => onUpdateMaterial(childPath, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                   <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
                   <button onClick={() => onRemoveMaterial(childPath, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                     <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -3154,7 +3154,7 @@ function EditBOMDialog({
                           onSelectAutoDetect={(kind) => setL1MaterialAutoDetect(i, kind)}
                         />
                       )}
-                      <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                      <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
                       <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
                       <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -3195,7 +3195,7 @@ function EditBOMDialog({
                       <select value={w.wipType} onChange={(e) => updateWIP(wi, "wipType", e.target.value)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 bg-white">
                         {Object.entries(WIP_TYPE_LABELS).map(([k, v]) => (<option key={k} value={k}>{v.label}</option>))}
                       </select>
-                      <input type="number" value={w.quantity} onChange={(e) => updateWIP(wi, "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
+                      <input type="number" onFocus={(e) => e.currentTarget.select()} value={w.quantity} onChange={(e) => updateWIP(wi, "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
                       <span className="text-xs text-gray-500">PCS</span>
                       <button onClick={() => removeWIP(wi)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                         <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
@@ -3260,7 +3260,7 @@ function EditBOMDialog({
                               onSelectAutoDetect={(kind) => setMaterialAutoDetect(wi, mi, kind)}
                             />
                           )}
-                          <input type="number" value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                          <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateWIPMaterial(wi, mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                           <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
                           <button onClick={() => removeWIPMaterial(wi, mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -4046,7 +4046,7 @@ function MasterTemplatesDialog({
                     <option value="FABRIC">Auto: Fabric</option>
                     <option value="LEG">Auto: Leg</option>
                   </select>
-                  <input type="number" value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
+                  <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateL1Material(i, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-14 bg-white" />
                   <span className="text-[10px] text-gray-500 w-8">{m.unit || "PCS"}</span>
                   <button onClick={() => removeL1Material(i)} className="ml-auto p-1 hover:bg-[#F9E1DA] rounded text-[#9A3A2D]">
                     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -4073,7 +4073,7 @@ function MasterTemplatesDialog({
                     <select value={w.wipType} onChange={(e) => updateWIPAtPath(wi, [], "wipType", e.target.value)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 bg-white">
                       {Object.entries(WIP_TYPE_LABELS).map(([k, v]) => (<option key={k} value={k}>{v.label}</option>))}
                     </select>
-                    <input type="number" value={w.quantity} onChange={(e) => updateWIPAtPath(wi, [], "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
+                    <input type="number" onFocus={(e) => e.currentTarget.select()} value={w.quantity} onChange={(e) => updateWIPAtPath(wi, [], "quantity", parseInt(e.target.value) || 1)} className="text-sm border border-[#A8CAD2] rounded px-2 py-1 w-16 bg-white" min={1} />
                     <span className="text-xs text-gray-500">PCS</span>
                     <button
                       onClick={() => wrapWIPAt(wi)}
@@ -4176,7 +4176,7 @@ function MasterTemplatesDialog({
                           <option value="FABRIC">Auto: Fabric</option>
                           <option value="LEG">Auto: Leg</option>
                         </select>
-                        <input type="number" value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
+                        <input type="number" onFocus={(e) => e.currentTarget.select()} value={m.qty} onChange={(e) => updateMaterialAtPath(wi, [], mi, "qty", parseFloat(e.target.value) || 0)} className="text-xs border border-gray-200 rounded px-1.5 py-1 w-14" />
                         <span className="text-[10px] text-gray-400 w-8">{m.unit || "PCS"}</span>
                         <button onClick={() => removeMaterialAtPath(wi, [], mi)} className="text-[#9A3A2D] hover:text-[#7A2E24]">
                           <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" /></svg>
@@ -4621,7 +4621,7 @@ function ProductionTimesDialog({ open, onClose }: { open: boolean; onClose: () =
                       <td key={cat} className="border-b border-[#E2DDD8] p-1">
                         <div className="flex items-center justify-center gap-1">
                           <input
-                            type="number"
+                            type="number" onFocus={(e) => e.currentTarget.select()}
                             value={val}
                             onChange={(e) => updateTime(d, cat, parseInt(e.target.value) || 0)}
                             className="w-14 text-xs border border-[#E2DDD8] rounded px-1 py-1 bg-white text-center focus:outline-none focus:border-[#6B5C32]"

@@ -1208,7 +1208,7 @@ function CreateProjectDialog({
                     Purchase Price (RM)
                   </label>
                   <input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     inputMode="decimal"
                     min={0}
                     step={0.01}
@@ -1258,7 +1258,7 @@ function CreateProjectDialog({
             <div className="space-y-1.5">
               <label className="block text-sm font-medium text-[#1F1D1B]">Budget (RM)</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 min="0"
                 step="0.01"
                 value={form.totalBudgetRM}

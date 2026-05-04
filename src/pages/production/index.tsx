@@ -593,7 +593,7 @@ function CreateStockPODialog({
             <div>
               <label className="text-sm font-medium text-[#111827]">Quantity</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 min={1}
                 value={quantity}
                 onChange={(e) => setQuantity(Math.max(1, Number(e.target.value) || 1))}

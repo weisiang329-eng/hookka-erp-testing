@@ -922,7 +922,7 @@ function JournalEntryForm({
                     </td>
                     <td className="py-1.5 px-2">
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
                         step="0.01"
                         placeholder="0.00"
@@ -933,7 +933,7 @@ function JournalEntryForm({
                     </td>
                     <td className="py-1.5 px-2">
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
                         step="0.01"
                         placeholder="0.00"
@@ -1107,7 +1107,7 @@ function ARTab({ arData, onRefresh }: { arData: ARAgingEntry[]; onRefresh: () =>
                 <div>
                   <label className="text-xs font-medium text-[#6B7280] mb-1 block">Amount (RM)</label>
                   <input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     min="0"
                     step="0.01"
                     placeholder="0.00"
@@ -1258,7 +1258,7 @@ function APTab({ apData, onRefresh }: { apData: APAgingEntry[]; onRefresh: () =>
                 <div>
                   <label className="text-xs font-medium text-[#6B7280] mb-1 block">Amount (RM)</label>
                   <input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     min="0"
                     step="0.01"
                     placeholder="0.00"

@@ -304,7 +304,7 @@ export default function OrganisationsPage() {
               />
               <div className="flex items-center gap-1">
                 <input
-                  type="number"
+                  type="number" onFocus={(e) => e.currentTarget.select()}
                   min={0}
                   max={100}
                   value={Math.round(config.hookkaToOhanaRate * 100)}

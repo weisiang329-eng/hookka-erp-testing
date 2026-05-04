@@ -363,7 +363,7 @@ export default function MaintenancePage() {
                     {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
                   </select>
                   <input name="type" list="equipment-type-options" required placeholder="Equipment Type (type or pick)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
-                  <input name="maintenanceCycleDays" type="number" defaultValue={30} placeholder="Cycle (days)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="maintenanceCycleDays" type="number" onFocus={(e) => e.currentTarget.select()} defaultValue={30} placeholder="Cycle (days)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="purchaseDate" type="date" required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="notes" placeholder="Notes (optional)" className="sm:col-span-2 h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <div className="flex items-end">
@@ -398,7 +398,7 @@ export default function MaintenancePage() {
                     <option value="REPAIR">REPAIR</option>
                     <option value="DECOMMISSIONED">DECOMMISSIONED</option>
                   </select>
-                  <input name="maintenanceCycleDays" type="number" defaultValue={editingEquipment.maintenanceCycleDays} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="maintenanceCycleDays" type="number" onFocus={(e) => e.currentTarget.select()} defaultValue={editingEquipment.maintenanceCycleDays} className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="notes" defaultValue={editingEquipment.notes} placeholder="Notes" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <div className="flex items-end">
                     <Button type="submit" variant="primary" className="w-full">Update</Button>
@@ -490,8 +490,8 @@ export default function MaintenancePage() {
                   <input name="date" type="date" defaultValue="2026-04-14" required className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="performedBy" required placeholder="Performed By" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <input name="description" required placeholder="Description of work done" className="sm:col-span-2 h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
-                  <input name="cost" type="number" step="0.01" placeholder="Cost (RM)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
-                  <input name="downtimeHours" type="number" step="0.5" placeholder="Downtime (hours)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="cost" type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" placeholder="Cost (RM)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
+                  <input name="downtimeHours" type="number" onFocus={(e) => e.currentTarget.select()} step="0.5" placeholder="Downtime (hours)" className="h-10 rounded-md border border-[#E2DDD8] bg-white px-3 text-sm placeholder:text-[#9CA3AF] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]" />
                   <div className="flex items-end">
                     <Button type="submit" variant="primary" className="w-full">Submit Log</Button>
                   </div>

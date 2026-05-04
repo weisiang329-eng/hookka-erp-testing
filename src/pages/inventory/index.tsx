@@ -1947,7 +1947,7 @@ export default function InventoryPage() {
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
                     <input
-                      type="number" step="0.01" min={0}
+                      type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                       value={fgForm.basePriceSen !== undefined ? (fgForm.basePriceSen / 100).toFixed(2) : ""}
                       onChange={e => setFgForm(f => ({ ...f, basePriceSen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
@@ -1957,7 +1957,7 @@ export default function InventoryPage() {
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Price 1 (RM)</label>
                     <input
-                      type="number" step="0.01" min={0}
+                      type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                       value={fgForm.price1Sen !== undefined && fgForm.price1Sen !== null ? (fgForm.price1Sen / 100).toFixed(2) : ""}
                       onChange={e => setFgForm(f => ({ ...f, price1Sen: e.target.value === "" ? undefined : Math.round(parseFloat(e.target.value || "0") * 100) }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
@@ -1967,7 +1967,7 @@ export default function InventoryPage() {
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Unit M3</label>
                     <input
-                      type="number" step="0.01" min={0}
+                      type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min={0}
                       value={fgForm.unitM3 !== undefined ? String(fgForm.unitM3) : ""}
                       onChange={e => setFgForm(f => ({ ...f, unitM3: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
@@ -1977,7 +1977,7 @@ export default function InventoryPage() {
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Fabric Usage (m)</label>
                     <input
-                      type="number" step="0.1" min={0}
+                      type="number" onFocus={(e) => e.currentTarget.select()} step="0.1" min={0}
                       value={fgForm.fabricUsage !== undefined ? String(fgForm.fabricUsage) : ""}
                       onChange={e => setFgForm(f => ({ ...f, fabricUsage: e.target.value === "" ? undefined : parseFloat(e.target.value || "0") }))}
                       className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none"
@@ -2231,7 +2231,7 @@ export default function InventoryPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-[#6B7280] mb-1">Balance Qty</label>
-                    <input type="number" value={rmForm.balanceQty || ""} onChange={e => setRmForm(f => ({ ...f, balanceQty: Number(e.target.value) }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="0" />
+                    <input type="number" onFocus={(e) => e.currentTarget.select()} value={rmForm.balanceQty || ""} onChange={e => setRmForm(f => ({ ...f, balanceQty: Number(e.target.value) }))} className="w-full border border-[#E2DDD8] rounded px-3 py-1.5 text-sm focus:border-[#6B5C32] focus:outline-none" placeholder="0" />
                   </div>
                 </div>
                 <div className="flex justify-end gap-2 pt-4">
@@ -2348,7 +2348,7 @@ export default function InventoryPage() {
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Base Price (RM)</label>
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     value={(editFGForm.costPriceSen / 100).toFixed(2)}
                     onChange={(e) => setEditFGForm(f => ({ ...f, costPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) }))}
                     className="h-[34px]"
@@ -2359,7 +2359,7 @@ export default function InventoryPage() {
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Stock Qty</label>
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     value={editFGForm.stockQty}
                     onChange={(e) => setEditFGForm(f => ({ ...f, stockQty: parseInt(e.target.value) || 0 }))}
                     className="h-[34px]"
@@ -2369,7 +2369,7 @@ export default function InventoryPage() {
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Unit M3</label>
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     value={editFGForm.unitM3}
                     onChange={(e) => setEditFGForm(f => ({ ...f, unitM3: parseFloat(e.target.value) || 0 }))}
                     className="h-[34px]"
@@ -2380,7 +2380,7 @@ export default function InventoryPage() {
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Fabric Usage (m)</label>
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     value={editFGForm.fabricUsage}
                     onChange={(e) => setEditFGForm(f => ({ ...f, fabricUsage: parseFloat(e.target.value) || 0 }))}
                     className="h-[34px]"
@@ -2391,7 +2391,7 @@ export default function InventoryPage() {
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Production Time (min)</label>
                   <Input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     value={editFGForm.productionTimeMinutes}
                     onChange={(e) => setEditFGForm(f => ({ ...f, productionTimeMinutes: parseInt(e.target.value) || 0 }))}
                     className="h-[34px]"
@@ -2587,7 +2587,7 @@ export default function InventoryPage() {
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Stock Qty</label>
-                  <Input type="number" value={editRMForm.balanceQty} onChange={(e) => setEditRMForm(f => ({ ...f, balanceQty: parseInt(e.target.value) || 0 }))} />
+                  <Input type="number" onFocus={(e) => e.currentTarget.select()} value={editRMForm.balanceQty} onChange={(e) => setEditRMForm(f => ({ ...f, balanceQty: parseInt(e.target.value) || 0 }))} />
                 </div>
               </div>
               <div>

@@ -512,15 +512,15 @@ function SKUFormDialog({
           <div className="grid grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Unit Price (RM) *</label>
-              <Input type="number" step="0.01" min="0" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} required placeholder="0.00" />
+              <Input type="number" onFocus={(e) => e.currentTarget.select()} step="0.01" min="0" value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} required placeholder="0.00" />
             </div>
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Lead Time (days)</label>
-              <Input type="number" min="1" value={leadTimeDays} onChange={(e) => setLeadTimeDays(Number(e.target.value))} />
+              <Input type="number" onFocus={(e) => e.currentTarget.select()} min="1" value={leadTimeDays} onChange={(e) => setLeadTimeDays(Number(e.target.value))} />
             </div>
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">MOQ</label>
-              <Input type="number" min="1" value={moq} onChange={(e) => setMoq(Number(e.target.value))} />
+              <Input type="number" onFocus={(e) => e.currentTarget.select()} min="1" value={moq} onChange={(e) => setMoq(Number(e.target.value))} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

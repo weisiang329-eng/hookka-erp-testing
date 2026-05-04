@@ -512,7 +512,7 @@ export default function StockAdjustmentsPage() {
                     </td>
                     <td className="py-1 px-1">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
                         step="0.001"
                         value={row.qty}
@@ -524,7 +524,7 @@ export default function StockAdjustmentsPage() {
                     </td>
                     <td className="py-1 px-1">
                       <Input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
                         value={row.unitCost}
                         onChange={(e) => patchRow(row.uid, { unitCost: e.target.value })}

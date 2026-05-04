@@ -314,7 +314,7 @@ function POFormDialog({
                       <div className="grid grid-cols-8 gap-2 items-end mt-2">
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Qty</label>
-                          <Input className="h-8 text-xs" type="number" min={0} value={item.quantity} onChange={(e) => updateItemQty(idx, Number(e.target.value))} />
+                          <Input className="h-8 text-xs" type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.quantity} onChange={(e) => updateItemQty(idx, Number(e.target.value))} />
                         </div>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Price (sen)</label>

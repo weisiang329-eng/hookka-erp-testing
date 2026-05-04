@@ -2442,7 +2442,7 @@ export default function RDProjectDetailPage() {
                 <div>
                   <label className={labelClass}>Purchase Price (RM)</label>
                   <input
-                    type="number"
+                    type="number" onFocus={(e) => e.currentTarget.select()}
                     inputMode="decimal"
                     min={0}
                     step={0.01}
@@ -2508,7 +2508,7 @@ export default function RDProjectDetailPage() {
             <div>
               <label className={labelClass}>R&D Budget (RM)</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 className={inputClass}
                 min={0}
                 step={0.01}
@@ -2526,7 +2526,7 @@ export default function RDProjectDetailPage() {
             <div>
               <label className={labelClass}>Target Selling Price (RM)</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 className={inputClass}
                 min={0}
                 step={0.01}
@@ -2539,7 +2539,7 @@ export default function RDProjectDetailPage() {
             <div>
               <label className={labelClass}>Target Material Cost (RM)</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 className={inputClass}
                 min={0}
                 step={0.01}
@@ -2618,7 +2618,7 @@ export default function RDProjectDetailPage() {
           <div>
             <label className={labelClass}>Labour Hours</label>
             <input
-              type="number"
+              type="number" onFocus={(e) => e.currentTarget.select()}
               className={inputClass}
               min={0}
               step={0.5}
@@ -2821,7 +2821,7 @@ export default function RDProjectDetailPage() {
                     <div>
                       <label className={labelClass}>Quantity</label>
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         className={`${inputClass} ${qtyOver ? "border-red-400 focus:border-red-500 focus:ring-red-200" : ""}`}
                         min={0.01}
                         step={0.01}
@@ -2946,7 +2946,7 @@ export default function RDProjectDetailPage() {
             <div>
               <label className={labelClass}>Hours</label>
               <input
-                type="number"
+                type="number" onFocus={(e) => e.currentTarget.select()}
                 className={inputClass}
                 min={0.5}
                 step={0.5}
@@ -2997,7 +2997,7 @@ export default function RDProjectDetailPage() {
           <div>
             <label className={labelClass}>Labour Cost (RM)</label>
             <input
-              type="number"
+              type="number" onFocus={(e) => e.currentTarget.select()}
               inputMode="decimal"
               min={0}
               step={0.01}

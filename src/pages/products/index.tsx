@@ -1282,7 +1282,7 @@ function MaintenanceView() {
                         * Label stays neutral; the number carries its sign. */}
                       <span className="text-xs text-gray-500">RM</span>
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         step="0.01"
                         value={newPriceSen / 100}
                         onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
@@ -1349,7 +1349,7 @@ function MaintenanceView() {
                             <span className="text-xs text-gray-400">RM</span>
                             {editMode ? (
                               <input
-                                type="number"
+                                type="number" onFocus={(e) => e.currentTarget.select()}
                                 step="0.01"
                                 value={entry.priceSen / 100}
                                 onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
@@ -2270,7 +2270,7 @@ export default function ProductsPage() {
                                   {isEditingThis ? (
                                     <input
                                       autoFocus
-                                      type="number"
+                                      type="number" onFocus={(e) => e.currentTarget.select()}
                                       step="0.01"
                                       value={seatPriceInputs[h] ?? ""}
                                       onChange={(e) => setSeatPriceInputs((prev) => ({ ...prev, [h]: e.target.value }))}
@@ -2343,7 +2343,7 @@ export default function ProductsPage() {
                               {isEditingThisPrice ? (
                                 <input
                                   autoFocus
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   value={priceInput}
                                   onChange={(e) => setPriceInput(e.target.value)}
                                   onBlur={() => {
@@ -2384,7 +2384,7 @@ export default function ProductsPage() {
                               {editingPrice1 === p.id ? (
                                 <input
                                   autoFocus
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   value={price1Input}
                                   onChange={(e) => setPrice1Input(e.target.value)}
                                   onBlur={() => {
@@ -2441,7 +2441,7 @@ export default function ProductsPage() {
                               {editingM3 === p.id ? (
                                 <input
                                   autoFocus
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   value={m3Input}
                                   onChange={(e) => setM3Input(e.target.value)}
                                   onBlur={() => {

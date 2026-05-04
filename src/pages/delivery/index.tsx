@@ -2852,7 +2852,7 @@ export default function DeliveryPage() {
                     <div>
                       <label className="text-xs text-[#6B7280] font-medium">Drop Points</label>
                       <input
-                        type="number"
+                        type="number" onFocus={(e) => e.currentTarget.select()}
                         min={1}
                         value={editForm.dropPoints}
                         onChange={(e) => setEditForm((f) => ({ ...f, dropPoints: e.target.value }))}
@@ -3693,7 +3693,7 @@ export default function DeliveryPage() {
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">Cap (m³)</label>
                             <input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               value={vehicleForm.capacityM3}
                               onChange={(e) => setVehicleForm((f) => ({ ...f, capacityM3: e.target.value }))}
                               className="mt-1 w-full h-8 px-2 rounded border border-[#E2DDD8] text-xs focus:outline-none focus:border-[#6B5C32]"
@@ -3702,7 +3702,7 @@ export default function DeliveryPage() {
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">Rate/Trip (RM)</label>
                             <input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
                               value={vehicleForm.ratePerTripRM}
                               onChange={(e) => setVehicleForm((f) => ({ ...f, ratePerTripRM: e.target.value }))}
@@ -3712,7 +3712,7 @@ export default function DeliveryPage() {
                           <div>
                             <label className="text-[10px] text-[#6B7280] font-medium">+Drop (RM)</label>
                             <input
-                              type="number"
+                              type="number" onFocus={(e) => e.currentTarget.select()}
                               step="0.01"
                               value={vehicleForm.ratePerExtraDropRM}
                               onChange={(e) => setVehicleForm((f) => ({ ...f, ratePerExtraDropRM: e.target.value }))}

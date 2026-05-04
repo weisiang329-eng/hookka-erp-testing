@@ -840,7 +840,7 @@ export default function EditSalesOrderPage() {
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
-                      <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+                      <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
                     </div>
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Seat Size *</label>
@@ -898,7 +898,7 @@ export default function EditSalesOrderPage() {
                     </div>
                     <div>
                       <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-                      <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                      <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                     </div>
                   </div>
                 ) : (
@@ -906,23 +906,23 @@ export default function EditSalesOrderPage() {
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Qty</label>
-                        <Input type="number" min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
+                        <Input type="number" onFocus={(e) => e.currentTarget.select()} min={1} value={item.quantity} onChange={(e) => updateItem(idx, { quantity: parseInt(e.target.value) || 1 })} className="h-8" />
                       </div>
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Base Price (RM)</label>
-                        <Input type="number" min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                        <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.basePriceSen / 100} onChange={(e) => updateItem(idx, { basePriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                       </div>
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Gap (&quot;)</label>
-                        <Input type="number" min={0} value={item.gapInches ?? ""} onChange={(e) => updateItem(idx, { gapInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                        <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.gapInches ?? ""} onChange={(e) => updateItem(idx, { gapInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
                       </div>
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Divan H (&quot;)</label>
-                        <Input type="number" min={0} value={item.divanHeightInches ?? ""} onChange={(e) => updateItem(idx, { divanHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                        <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.divanHeightInches ?? ""} onChange={(e) => updateItem(idx, { divanHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
                       </div>
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Leg H (&quot;)</label>
-                        <Input type="number" min={0} value={item.legHeightInches ?? ""} onChange={(e) => updateItem(idx, { legHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
+                        <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.legHeightInches ?? ""} onChange={(e) => updateItem(idx, { legHeightInches: e.target.value ? parseFloat(e.target.value) : null })} className="h-8" placeholder="-" />
                       </div>
                     </div>
 
@@ -931,19 +931,19 @@ export default function EditSalesOrderPage() {
                         {item.divanHeightInches && (
                           <div>
                             <label className="block text-xs text-[#9CA3AF] mb-1">Divan Surcharge (RM)</label>
-                            <Input type="number" min={0} value={item.divanPriceSen / 100} onChange={(e) => updateItem(idx, { divanPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.divanPriceSen / 100} onChange={(e) => updateItem(idx, { divanPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                           </div>
                         )}
                         {item.legHeightInches && (
                           <div>
                             <label className="block text-xs text-[#9CA3AF] mb-1">Leg Surcharge (RM)</label>
-                            <Input type="number" min={0} value={item.legPriceSen / 100} onChange={(e) => updateItem(idx, { legPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.legPriceSen / 100} onChange={(e) => updateItem(idx, { legPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                           </div>
                         )}
                         {item.specialOrder && (
                           <div>
                             <label className="block text-xs text-[#9CA3AF] mb-1">Special Order Surcharge (RM)</label>
-                            <Input type="number" min={0} value={item.specialOrderPriceSen / 100} onChange={(e) => updateItem(idx, { specialOrderPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
+                            <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.specialOrderPriceSen / 100} onChange={(e) => updateItem(idx, { specialOrderPriceSen: Math.round(parseFloat(e.target.value || "0") * 100) })} className="h-8 text-right" />
                           </div>
                         )}
                       </div>

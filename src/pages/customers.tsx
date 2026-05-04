@@ -845,7 +845,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                                       {isEditingThisCell ? (
                                         <input
                                           autoFocus
-                                          type="number"
+                                          type="number" onFocus={(e) => e.currentTarget.select()}
                                           step="0.01"
                                           value={seatInput}
                                           onChange={(e) => setSeatInput(e.target.value)}
@@ -901,7 +901,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                                   {isEditingBase ? (
                                     <input
                                       autoFocus
-                                      type="number"
+                                      type="number" onFocus={(e) => e.currentTarget.select()}
                                       step="0.01"
                                       value={baseInput}
                                       onChange={(e) => setBaseInput(e.target.value)}
@@ -953,7 +953,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                                   {isEditingBase ? (
                                     <input
                                       autoFocus
-                                      type="number"
+                                      type="number" onFocus={(e) => e.currentTarget.select()}
                                       step="0.01"
                                       value={baseInput}
                                       onChange={(e) => setBaseInput(e.target.value)}
@@ -991,7 +991,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
                                   {isEditingP1 ? (
                                     <input
                                       autoFocus
-                                      type="number"
+                                      type="number" onFocus={(e) => e.currentTarget.select()}
                                       step="0.01"
                                       value={price1Input}
                                       onChange={(e) => setPrice1Input(e.target.value)}
@@ -1730,7 +1730,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                       <div className="flex items-center gap-1">
                         <span className="text-xs text-gray-500">RM</span>
                         <input
-                          type="number"
+                          type="number" onFocus={(e) => e.currentTarget.select()}
                           step="0.01"
                           value={newPriceSen / 100}
                           onChange={(e) => setNewPriceSen(Math.round(parseFloat(e.target.value || "0") * 100))}
@@ -1805,7 +1805,7 @@ function CustomerMaintenancePanel({ customerId, customerName }: { customerId: st
                               <span className="text-xs text-gray-400">RM</span>
                               {editMode ? (
                                 <input
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   step="0.01"
                                   value={entry.priceSen / 100}
                                   onChange={(e) => updatePrice(idx, Math.round(parseFloat(e.target.value || "0") * 100))}
@@ -2480,7 +2480,7 @@ function CustomerPriceHistoryDialog({
                       Price 2 (RM)
                     </label>
                     <Input
-                      type="number"
+                      type="number" onFocus={(e) => e.currentTarget.select()}
                       step="0.01"
                       value={baseRm}
                       onChange={(e) => setBaseRm(e.target.value)}
@@ -2492,7 +2492,7 @@ function CustomerPriceHistoryDialog({
                       Price 1 (RM)
                     </label>
                     <Input
-                      type="number"
+                      type="number" onFocus={(e) => e.currentTarget.select()}
                       step="0.01"
                       value={price1Rm}
                       onChange={(e) => setPrice1Rm(e.target.value)}
@@ -2541,7 +2541,7 @@ function CustomerPriceHistoryDialog({
                             {SOFA_TIERS.map((t) => (
                               <td key={t} className="px-1 py-1">
                                 <Input
-                                  type="number"
+                                  type="number" onFocus={(e) => e.currentTarget.select()}
                                   step="0.01"
                                   value={seatGrid[h]?.[t] ?? ""}
                                   onChange={(e) =>
@@ -3359,7 +3359,7 @@ export default function CustomersPage() {
               </div>
               <div>
                 <label className="text-xs font-medium text-[#374151] mb-1 block">Credit Limit (RM)</label>
-                <Input type="number" value={addForm.creditLimitSen / 100} onChange={(e) => setAddForm({ ...addForm, creditLimitSen: Math.round(Number(e.target.value) * 100) })} placeholder="0.00" />
+                <Input type="number" onFocus={(e) => e.currentTarget.select()} value={addForm.creditLimitSen / 100} onChange={(e) => setAddForm({ ...addForm, creditLimitSen: Math.round(Number(e.target.value) * 100) })} placeholder="0.00" />
               </div>
             </div>
             <div className="flex justify-end gap-2 mt-4">
@@ -3662,7 +3662,7 @@ export default function CustomersPage() {
                 </div>
                 <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Credit Limit (RM)</label>
-                  <Input type="number" value={editCustForm.creditLimitSen / 100} onChange={(e) => setEditCustForm(f => ({ ...f, creditLimitSen: Math.round(Number(e.target.value) * 100) }))} />
+                  <Input type="number" onFocus={(e) => e.currentTarget.select()} value={editCustForm.creditLimitSen / 100} onChange={(e) => setEditCustForm(f => ({ ...f, creditLimitSen: Math.round(Number(e.target.value) * 100) }))} />
                 </div>
               </div>
             </div>

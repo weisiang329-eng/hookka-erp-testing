@@ -77,13 +77,34 @@ export default function SalesPage() {
   // URL-synced so refresh / share-link land back on the same page.
   const [page, setPage] = useUrlStateNumber("page", 1);
 
+  // Filter state read up front so we can adjust the fetch URL when any
+  // filter is active (filters were silently scoped to the current 200-row
+  // page before — "This Year" missed the second page of orders).
+  const _flStatus = useUrlState<string>("status", "");
+  const _flCustomer = useUrlState<string>("customer", "");
+  const _flFrom = useUrlState<string>("from", "");
+  const _flTo = useUrlState<string>("to", "");
+  const _flCat = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
+  const _flDDFrom = useUrlState<string>("ddFrom", "");
+  const _flDDTo = useUrlState<string>("ddTo", "");
+  const _filtersActive = !!(
+    _flStatus[0] || _flCustomer[0] || _flFrom[0] || _flTo[0] ||
+    _flCat[0] || _flDDFrom[0] || _flDDTo[0]
+  );
+
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{
     success?: boolean;
     data?: SalesOrder[];
     page?: number;
     limit?: number;
     total?: number;
-  }>(`/api/sales-orders?page=${page}&limit=${PAGE_SIZE}`);
+  }>(
+    _filtersActive
+      // No page params → server returns the whole dataset (capped at 5000
+      // server-side, well above current ~350 SOs). Client filters/paginates.
+      ? `/api/sales-orders`
+      : `/api/sales-orders?page=${page}&limit=${PAGE_SIZE}`,
+  );
   // Whole-dataset status bucket counts — tab badges read from this so
   // "Draft (N)" / "Confirmed (N)" reflect the full table, not just the
   // current page of rows.
@@ -161,19 +182,20 @@ export default function SalesPage() {
   const [transferSuccess, setTransferSuccess] = useState<{ type: "do" | "inv"; docNo: string } | null>(null);
   const [matchedDO, setMatchedDO] = useState<DeliveryOrder | null>(null);
 
-  // Filters — URL-synced so refresh / shared link / back-forward keeps
-  // the user's exact view. Default values are stripped from the URL so
-  // empty filters don't litter the address bar.
-  const [filterStatus, setFilterStatus] = useUrlState<string>("status", "");
-  const [filterCustomer, setFilterCustomer] = useUrlState<string>("customer", "");
-  const [filterDateFrom, setFilterDateFrom] = useUrlState<string>("from", "");
-  const [filterDateTo, setFilterDateTo] = useUrlState<string>("to", "");
+  // Filters — already wired via the early _flXXX bindings above so the
+  // fetch URL can drop pagination when any filter is active. Re-bind here
+  // to the same tuples so the rest of the component keeps the original
+  // setFilterX names.
+  const [filterStatus, setFilterStatus] = _flStatus;
+  const [filterCustomer, setFilterCustomer] = _flCustomer;
+  const [filterDateFrom, setFilterDateFrom] = _flFrom;
+  const [filterDateTo, setFilterDateTo] = _flTo;
   // Category matches if ANY line on the SO is the chosen category. DD axis
   // = customerDeliveryDate (sales staff filter on the date the customer
   // expects delivery, not SO entry date / internal expected DD).
-  const [filterCategory, setFilterCategory] = useUrlState<"" | "BEDFRAME" | "SOFA" | "ACCESSORY">("cat", "");
-  const [filterDDFrom, setFilterDDFrom] = useUrlState<string>("ddFrom", "");
-  const [filterDDTo, setFilterDDTo] = useUrlState<string>("ddTo", "");
+  const [filterCategory, setFilterCategory] = _flCat;
+  const [filterDDFrom, setFilterDDFrom] = _flDDFrom;
+  const [filterDDTo, setFilterDDTo] = _flDDTo;
   // Show/hide filter panel — sessionStorage so closing the tab forgets,
   // but a refresh keeps the panel open if user had it open.
   const [showFilters, setShowFilters] = useSessionState<boolean>("sales:showFilters", false);

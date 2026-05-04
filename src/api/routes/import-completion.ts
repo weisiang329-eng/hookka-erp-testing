@@ -1876,6 +1876,8 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
               j.productionTimeMinutes,
               po.companySOId,
               po.salesOrderId,
+              po.companyCOId,
+              po.consignmentOrderId,
               po.productCode,
               po.fabricCode,
               po.itemCategory
@@ -1898,6 +1900,8 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
       fcProductionTimeMinutes: get("productionTimeMinutes") as number | null,
       companySOId: get("companySOId") as string | null,
       salesOrderId: get("salesOrderId") as string | null,
+      companyCOId: get("companyCOId") as string | null,
+      consignmentOrderId: get("consignmentOrderId") as string | null,
       productCode: get("productCode") as string | null,
       fabricCode: get("fabricCode") as string | null,
       itemCategory: get("itemCategory") as string | null,
@@ -1936,13 +1940,20 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
     }
     const baseModel = await lookupBaseModel(fc.productCode);
     const fabricCode = fc.fabricCode || "";
-    const companySOId = fc.companySOId || fc.salesOrderId || "";
+    // Parent-doc key — match either SO or CO ids so CO-origin sofa
+    // FCs find their cross-PO SEW siblings.
+    const parentDocKey =
+      fc.companySOId ||
+      fc.salesOrderId ||
+      fc.companyCOId ||
+      fc.consignmentOrderId ||
+      "";
 
     // Find COMPLETED FAB_SEW JCs that point back to this FC via the same
-    // (companySOId | productionOrderId)::baseModel::fabricCode::FAB_CUT key
-    // pattern that production-orders.ts:1481-1552 uses to resolve from
-    // SEW to FC. Reverse lookup: SEW lives on a PO whose companySOId
-    // matches this FC's group key.
+    // (parentDocKey | productionOrderId)::baseModel::fabricCode::FAB_CUT
+    // key pattern that production-orders.ts:1481-1552 uses to resolve
+    // from SEW to FC. Reverse lookup: SEW lives on a PO whose parent
+    // doc id matches this FC's group key (either side).
     const sewRows = await db
       .prepare(
         `SELECT j.id, j.completedDate, po.productCode
@@ -1954,10 +1965,16 @@ app.post("/fab-cut-pofold-backfill", async (c) => {
             AND COALESCE(po.fabricCode,'') = ?
             AND (
               po.id = ?
-              OR (COALESCE(po.companySOId,'') = ? AND ? <> '')
+              OR (
+                ? <> ''
+                AND (
+                  COALESCE(po.companySOId,'') = ?
+                  OR COALESCE(po.companyCOId,'') = ?
+                )
+              )
             )`,
       )
-      .bind(fabricCode, fc.fcPoId, companySOId, companySOId)
+      .bind(fabricCode, fc.fcPoId, parentDocKey, parentDocKey, parentDocKey)
       .all<Record<string, unknown>>();
 
     // Filter SEW results to those whose PO's productCode also resolves to
@@ -4312,6 +4329,7 @@ type RebuildPoRow = {
   productCode: string | null;
   itemCategory: string | null;
   salesOrderId: string | null;
+  consignmentOrderId: string | null;
   fabricCode: string | null;
   quantity: number | null;
 };
@@ -4349,7 +4367,8 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
   // (mirrors applyWipInventoryChange's wipLabel fallback at line 1003-1015).
   const poRes = await db
     .prepare(
-      `SELECT id, productCode, itemCategory, salesOrderId, fabricCode, quantity
+      `SELECT id, productCode, itemCategory, salesOrderId,
+              consignmentOrderId, fabricCode, quantity
          FROM production_orders`,
     )
     .all<RebuildPoRow>();
@@ -4602,15 +4621,19 @@ app.post("/rebuild-wip-from-jcs", async (c) => {
   }
 
   // ----- Step 6 — sofa FAB_SEW zero-out edge case -----
-  // Group sofa POs by (salesOrderId, fabricCode). If any FAB_SEW JC across
-  // the group is IN_PROGRESS|COMPLETED|TRANSFERRED, every FAB_CUT wipLabel
-  // in that group's POs is forced to 0.
-  type SofaGroupKey = string; // `${salesOrderId}|${fabricCode}`
+  // Group sofa POs by (parentDocId, fabricCode). parentDocId = SO id OR
+  // CO id — without the CO branch, CO sofa groups skipped this step
+  // entirely and FAB_CUT WIP for CO sofas drifted away from truth.
+  // If any FAB_SEW JC across the group is IN_PROGRESS|COMPLETED|
+  // TRANSFERRED, every FAB_CUT wipLabel in that group's POs is forced
+  // to 0.
+  type SofaGroupKey = string; // `${parentDocId}|${fabricCode}`
   const sofaGroups = new Map<SofaGroupKey, RebuildPoRow[]>();
   for (const po of poById.values()) {
     if ((po.itemCategory ?? "").toUpperCase() !== "SOFA") continue;
-    if (!po.salesOrderId || !po.fabricCode) continue;
-    const k = `${po.salesOrderId}|${po.fabricCode}`;
+    const parentDocId = po.salesOrderId || po.consignmentOrderId || "";
+    if (!parentDocId || !po.fabricCode) continue;
+    const k = `${parentDocId}|${po.fabricCode}`;
     const list = sofaGroups.get(k) ?? [];
     list.push(po);
     sofaGroups.set(k, list);
@@ -4939,6 +4962,8 @@ type FcRow = {
   poItemCategory: string | null;
   poCompanySOId: string | null;
   poSalesOrderId: string | null;
+  poCompanyCOId: string | null;
+  poConsignmentOrderId: string | null;
   bomBaseModel: string | null;
 };
 
@@ -5008,6 +5033,8 @@ app.post("/backfill-fab-cut-merge", async (c) => {
          po.itemCategory      AS "poItemCategory",
          po.companySOId       AS "poCompanySOId",
          po.salesOrderId      AS "poSalesOrderId",
+         po.companyCOId       AS "poCompanyCOId",
+         po.consignmentOrderId AS "poConsignmentOrderId",
          bt.baseModel         AS "bomBaseModel"
        FROM job_cards jc
        JOIN production_orders po ON po.id = jc.productionOrderId
@@ -5028,16 +5055,23 @@ app.post("/backfill-fab-cut-merge", async (c) => {
   const groups = new Map<string, FcRow[]>();
   let skippedNoSO = 0;
   for (const row of allRows) {
-    const companySOId = row.poCompanySOId ?? row.poSalesOrderId ?? "";
+    // Parent doc id — SO id or CO id. Without the CO branch, every CO
+    // sofa row hit `skippedNoSO++` and never participated in merge.
+    const parentDocKey =
+      row.poCompanySOId ??
+      row.poSalesOrderId ??
+      row.poCompanyCOId ??
+      row.poConsignmentOrderId ??
+      "";
     const baseModel = row.bomBaseModel || row.poProductCode || "";
     const fabric = row.poFabricCode ?? "";
     const isSofa = (row.poItemCategory ?? "") === "SOFA";
-    if (isSofa && !companySOId) {
+    if (isSofa && !parentDocKey) {
       skippedNoSO++;
       continue;
     }
     const key = isSofa
-      ? `SOFA::${companySOId}::${baseModel}::${fabric}`
+      ? `SOFA::${parentDocKey}::${baseModel}::${fabric}`
       : `PO::${row.productionOrderId}`;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key)!.push(row);

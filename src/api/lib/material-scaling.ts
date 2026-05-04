@@ -1,28 +1,41 @@
 // ---------------------------------------------------------------------------
 // material-scaling.ts — dimension-driven scaling for BOM WIP raw materials.
 //
-// Each WIPMaterial may carry an optional `scaling` rule:
+// Each WIPMaterial may carry zero or more `scaling` rules:
 //
-//   { dimension, baseValue, perUnit }
+//   [{ dimension, baseValue, perUnit }, ...]
 //
 // At consumption time (MRP forecast, PO completion FIFO consumption,
-// future cost ledger), we expand the base qty using the SO/PO line
-// dimensions:
+// future cost ledger), we expand the base qty by SUMMING every rule's
+// contribution:
 //
-//   effectiveQty = baseQty + max(0, dim - baseValue) * perUnit
+//   effectiveQty = baseQty + Σ over rules:
+//                    max(0, SOLine[rule.dim] - rule.baseValue) * rule.perUnit
 //
 // FLOOR semantics: the BOM is recorded against the smallest spec build,
 // so orders SMALLER than the baseline still consume the full baseQty
-// (we never decrease — `max(0, …)` clamps the negative delta to zero).
-// Orders larger than baseline scale up linearly per inch.
+// (we never decrease — `max(0, …)` clamps the negative delta to zero
+// per-rule, so a small dim on one rule doesn't subtract from another
+// rule's contribution). Orders larger than baseline scale up linearly
+// per inch on each independent dimension.
 //
-// User example (sofa fabric):
+// User example (bedframe fabric, two rules stacked):
+//   - Base recipe:  1.5 m of fabric @ divan 8" + gap 0"
+//   - Rule A:       +0.2 m per inch divan over 8"
+//   - Rule B:       +0.1 m per inch gap over 0"
+//   - SO line:      divan 10", gap 2"
+//   - Effective:    1.5 + (10−8)*0.2 + (2−0)*0.1 = 2.1 m
+//
+// Single-rule legacy example (sofa fabric):
 //   - Base recipe: 5 metres of fabric @ seat height 24"
 //   - perUnit:     0.2 metres per inch over 24
 //   - SO line:     seat height 27"
 //   - Effective:   5 + max(0, 27 - 24) * 0.2 = 5.6 metres
 //   - SO line at 22": 5 + max(0, 22 - 24) * 0.2 = 5 metres (floored)
 //
+// Backwards compat: parseMaterialScaling accepts BOTH the legacy single-
+// object shape AND the new array shape, normalising to MaterialScaling[].
+// bom_versions.tree is opaque JSON so no DB migration is needed.
 // ---------------------------------------------------------------------------
 
 export type MaterialScalingDimension =
@@ -88,37 +101,85 @@ export function pickDimension(
 }
 
 /**
- * Apply the scaling rule. Returns the effective qty to consume.
+ * Apply every scaling rule and return the effective qty to consume.
  *
- * Defensive against malformed JSON: if scaling is present but missing
- * baseValue / perUnit, falls back to baseQty unchanged.
+ * Each rule contributes max(0, dim - rule.baseValue) * rule.perUnit
+ * INDEPENDENTLY; the contributions are summed onto baseQty. A rule
+ * whose dimension is missing on the PO contributes 0 (fallback to
+ * baseQty for that rule, not the whole row).
+ *
+ * Defensive against malformed JSON: rules missing or with non-finite
+ * baseValue / perUnit contribute 0. An empty / null / undefined rules
+ * list returns baseQty unchanged.
+ *
+ * Accepts a single rule for ergonomic call-site compat — this is just
+ * normalised to a 1-element array internally.
  */
 export function expandMaterialQty(
   baseQty: number,
-  scaling: MaterialScaling | null | undefined,
+  scaling: MaterialScaling | MaterialScaling[] | null | undefined,
   dims: ProductionDimensions,
 ): number {
   if (!scaling) return baseQty;
-  if (
-    typeof scaling.baseValue !== "number" ||
-    typeof scaling.perUnit !== "number" ||
-    !Number.isFinite(scaling.baseValue) ||
-    !Number.isFinite(scaling.perUnit)
-  ) {
-    return baseQty;
+  const rules = Array.isArray(scaling) ? scaling : [scaling];
+  if (rules.length === 0) return baseQty;
+  let qty = baseQty;
+  for (const rule of rules) {
+    if (!rule) continue;
+    if (
+      typeof rule.baseValue !== "number" ||
+      typeof rule.perUnit !== "number" ||
+      !Number.isFinite(rule.baseValue) ||
+      !Number.isFinite(rule.perUnit)
+    ) {
+      continue;
+    }
+    const dimValue = pickDimension(rule.dimension, dims);
+    if (dimValue == null) continue;
+    const delta = Math.max(0, dimValue - rule.baseValue);
+    qty += delta * rule.perUnit;
   }
-  const dimValue = pickDimension(scaling.dimension, dims);
-  if (dimValue == null) return baseQty;
-  const delta = Math.max(0, dimValue - scaling.baseValue);
-  return baseQty + delta * scaling.perUnit;
+  return qty;
 }
 
 /**
  * Type guard for parsing untrusted JSON (BOM template wipComponents
- * blob, mock seed data). Returns the typed scaling rule or null if any
- * required field is missing or of the wrong type.
+ * blob, mock seed data). Returns an array of typed scaling rules.
+ *
+ * Accepts BOTH:
+ *   - legacy single-object shape: { dimension, baseValue, perUnit }
+ *     → normalised to a 1-element array
+ *   - new array shape: [{ ... }, { ... }]
+ *
+ * Invalid / partially-malformed entries are filtered out. Returns []
+ * when input is null / not an object / not a valid rule shape.
+ *
+ * Verification (the canonical mixed-rule check):
+ *   rules = [
+ *     { dimension: "divan",  baseValue: 8, perUnit: 0.2 },
+ *     { dimension: "gap",    baseValue: 0, perUnit: 0.1 },
+ *   ]
+ *   qty   = 1.5
+ *   dims  = { divanHeightInches: 10, gapInches: 2 }
+ *   →     1.5 + (10−8)*0.2 + (2−0)*0.1 = 2.1
  */
-export function parseMaterialScaling(raw: unknown): MaterialScaling | null {
+export function parseMaterialScaling(raw: unknown): MaterialScaling[] {
+  if (raw == null) return [];
+  // Array shape (new): filter each entry through parseOne.
+  if (Array.isArray(raw)) {
+    const out: MaterialScaling[] = [];
+    for (const entry of raw) {
+      const parsed = parseOneScaling(entry);
+      if (parsed) out.push(parsed);
+    }
+    return out;
+  }
+  // Legacy single-object shape: normalise to 1-element array.
+  const one = parseOneScaling(raw);
+  return one ? [one] : [];
+}
+
+function parseOneScaling(raw: unknown): MaterialScaling | null {
   if (!raw || typeof raw !== "object") return null;
   const r = raw as Record<string, unknown>;
   const dim = r.dimension;

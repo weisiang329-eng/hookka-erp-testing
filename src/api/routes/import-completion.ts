@@ -1811,6 +1811,341 @@ app.post("/uph-pofold-backfill", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/fab-cut-pofold-backfill?dryRun=true|false
+//
+// Companion to /uph-pofold-backfill that handles the merged FAB_CUT JC.
+// FAB_CUT lives under its own (SO|PO)::baseModel::fabricCode::FAB_CUT
+// wipKey (production-builder.ts:271, 792-833) — completely disjoint from
+// any UPHOLSTERY wipKey, so the per-WIP UPH-anchor rule in
+// /uph-pofold-backfill never picks it up. This endpoint flips merged
+// FAB_CUT JCs whose downstream FAB_SEW siblings are already COMPLETED
+// (which is the physical signal that cutting did happen).
+//
+// Eligibility per WAITING merged FAB_CUT JC:
+//   1. Resolve the FC's owning PO + (companySOId, productCode→baseModel,
+//      fabricCode). Mirror the lookup that /production-orders.ts:1481-1552
+//      uses to find the FC from a FAB_SEW (just inverted).
+//   2. Build the same candidate keys: `${productionOrderId}::${baseModel}::
+//      ${fabricCode}::FAB_CUT` AND (for SOFA) `${companySOId}::...`. The
+//      FC's wipKey will match one of those.
+//   3. Find every FAB_SEW JC that points back to this FC. Use the SAME
+//      reverse lookup the consume code does — match by (po.companySOId =
+//      X AND baseModel matches po.productCode AND po.fabricCode = Y) for
+//      SOFA, or by po.id for BF/ACC.
+//   4. If at least one such FAB_SEW is COMPLETED/TRANSFERRED with a
+//      completedDate, the FC is eligible. completedDate = MIN of those
+//      FAB_SEW dates − 1 day (FAB_CUT lead = 1, clamped to 0 if it goes
+//      past CASCADE_DATE_CLAMP or ahead of any FAB_SEW date).
+//
+// Each flip fires applyWipInventoryChange (producer-add for the FC's
+// wipLabel) + postJobCardLabor. PIC stays NULL.
+//
+// Migration cleanup: removed alongside the other /api/import/cascade-*
+// and /uph-pofold-* endpoints once data hygiene catches up.
+// ---------------------------------------------------------------------------
+type FcCandidate = {
+  fcId: string;
+  fcWipKey: string;
+  fcWipLabel: string | null;
+  fcPoId: string;
+  fcEstMinutes: number | null;
+  fcProductionTimeMinutes: number | null;
+  newDate: string;
+  actualMinutes: number;
+  triggerSewIds: string[];
+  triggerSewMinDate: string;
+};
+
+app.post("/fab-cut-pofold-backfill", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Pull all WAITING FAB_CUT JCs + their owning PO context.
+  const fcRes = await db
+    .prepare(
+      `SELECT j.id              AS fcId,
+              COALESCE(j.wipKey,'') AS fcWipKey,
+              j.wipLabel        AS fcWipLabel,
+              j.productionOrderId AS fcPoId,
+              j.estMinutes      AS fcEstMinutes,
+              j.productionTimeMinutes AS fcProductionTimeMinutes,
+              po.companySOId    AS companySOId,
+              po.salesOrderId   AS salesOrderId,
+              po.productCode    AS productCode,
+              po.fabricCode     AS fabricCode,
+              po.itemCategory   AS itemCategory
+         FROM job_cards j
+         LEFT JOIN production_orders po ON po.id = j.productionOrderId
+        WHERE j.departmentCode = 'FAB_CUT'
+          AND j.status = 'WAITING'
+          AND j.completedDate IS NULL`,
+    )
+    .all<{
+      fcId: string;
+      fcWipKey: string;
+      fcWipLabel: string | null;
+      fcPoId: string;
+      fcEstMinutes: number | null;
+      fcProductionTimeMinutes: number | null;
+      companySOId: string | null;
+      salesOrderId: string | null;
+      productCode: string | null;
+      fabricCode: string | null;
+      itemCategory: string | null;
+    }>();
+  const allFcs = fcRes.results ?? [];
+
+  // 2. Build a per-FC trigger lookup: scan completed FAB_SEW JCs in
+  //    matching POs. Cache bom_templates baseModel lookups.
+  const baseModelCache = new Map<string, string>();
+  const lookupBaseModel = async (productCode: string): Promise<string> => {
+    if (!productCode) return "";
+    if (baseModelCache.has(productCode)) return baseModelCache.get(productCode)!;
+    const r = await db
+      .prepare(
+        `SELECT baseModel FROM bom_templates
+         WHERE productCode = ?
+         ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ baseModel: string | null }>();
+    const bm = r?.baseModel || productCode;
+    baseModelCache.set(productCode, bm);
+    return bm;
+  };
+
+  let noTriggerSkipped = 0;
+  const plans: FcCandidate[] = [];
+  const dateHistogram: Record<string, number> = {};
+  const skippedReasons: Record<string, number> = {};
+
+  for (const fc of allFcs) {
+    if (!fc.productCode) {
+      noTriggerSkipped++;
+      skippedReasons["no_product_code"] = (skippedReasons["no_product_code"] ?? 0) + 1;
+      continue;
+    }
+    const baseModel = await lookupBaseModel(fc.productCode);
+    const fabricCode = fc.fabricCode || "";
+    const companySOId = fc.companySOId || fc.salesOrderId || "";
+
+    // Find COMPLETED FAB_SEW JCs that point back to this FC via the same
+    // (companySOId | productionOrderId)::baseModel::fabricCode::FAB_CUT key
+    // pattern that production-orders.ts:1481-1552 uses to resolve from
+    // SEW to FC. Reverse lookup: SEW lives on a PO whose companySOId
+    // matches this FC's group key.
+    const sewRows = await db
+      .prepare(
+        `SELECT j.id AS sewId, j.completedDate AS sewDate
+           FROM job_cards j
+           JOIN production_orders po ON po.id = j.productionOrderId
+          WHERE j.departmentCode = 'FAB_SEW'
+            AND j.status IN ('COMPLETED','TRANSFERRED')
+            AND j.completedDate IS NOT NULL
+            AND COALESCE(po.fabricCode,'') = ?
+            AND (
+              po.id = ?
+              OR (COALESCE(po.companySOId,'') = ? AND ? <> '')
+            )`,
+      )
+      .bind(fabricCode, fc.fcPoId, companySOId, companySOId)
+      .all<{ sewId: string; sewDate: string }>();
+
+    // Filter SEW results to those whose PO's productCode also resolves to
+    // the same baseModel (avoids cross-model bleed within an SO group).
+    const candidateSews: { sewId: string; sewDate: string }[] = [];
+    for (const sew of sewRows.results ?? []) {
+      const raw = sew as unknown as Record<string, unknown>;
+      const sewId =
+        typeof raw.sewId === "string"
+          ? (raw.sewId as string)
+          : typeof raw.sewid === "string"
+            ? (raw.sewid as string)
+            : "";
+      const sewDate =
+        typeof raw.sewDate === "string"
+          ? (raw.sewDate as string)
+          : typeof raw.sewdate === "string"
+            ? (raw.sewdate as string)
+            : "";
+      if (!sewId || !sewDate) continue;
+      const sewPoRow = await db
+        .prepare(`SELECT productCode FROM production_orders WHERE id = (SELECT productionOrderId FROM job_cards WHERE id = ?)`)
+        .bind(sewId)
+        .first<{ productCode: string | null }>();
+      const sewBaseModel = sewPoRow?.productCode
+        ? await lookupBaseModel(sewPoRow.productCode)
+        : "";
+      if (sewBaseModel === baseModel) {
+        candidateSews.push({ sewId, sewDate });
+      }
+    }
+
+    if (candidateSews.length === 0) {
+      noTriggerSkipped++;
+      skippedReasons["no_completed_fab_sew_sibling"] =
+        (skippedReasons["no_completed_fab_sew_sibling"] ?? 0) + 1;
+      continue;
+    }
+
+    // FAB_CUT happens BEFORE FAB_SEW. Date = min(sew dates) − 1 (FAB_CUT
+    // lead = 1, FAB_SEW lead = 1, offset = 0 → use min sew date directly,
+    // then clamp to today). Subtract 1 day to keep chronology strict.
+    const sortedDates = candidateSews
+      .map((s) => s.sewDate)
+      .sort();
+    const minSewDate = sortedDates[0];
+    let newDate = addDaysISO(minSewDate, -1);
+    if (newDate > CASCADE_DATE_CLAMP) newDate = CASCADE_DATE_CLAMP;
+
+    const actualMinutes =
+      fc.fcProductionTimeMinutes != null
+        ? fc.fcProductionTimeMinutes
+        : fc.fcEstMinutes != null
+          ? fc.fcEstMinutes
+          : 0;
+
+    plans.push({
+      fcId: fc.fcId,
+      fcWipKey: fc.fcWipKey,
+      fcWipLabel: fc.fcWipLabel,
+      fcPoId: fc.fcPoId,
+      fcEstMinutes: fc.fcEstMinutes,
+      fcProductionTimeMinutes: fc.fcProductionTimeMinutes,
+      newDate,
+      actualMinutes,
+      triggerSewIds: candidateSews.map((s) => s.sewId),
+      triggerSewMinDate: minSewDate,
+    });
+    dateHistogram[newDate] = (dateHistogram[newDate] ?? 0) + 1;
+  }
+
+  const sample = plans.slice(0, 10).map((p) => ({
+    fcId: p.fcId,
+    fcWipKey: p.fcWipKey,
+    fcWipLabel: p.fcWipLabel,
+    fcPoId: p.fcPoId,
+    newDate: p.newDate,
+    triggerSewMinDate: p.triggerSewMinDate,
+    triggerSewCount: p.triggerSewIds.length,
+  }));
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      totalWaitingFcJcs: allFcs.length,
+      noTriggerSkipped,
+      skippedReasons,
+      planned: plans.length,
+      dateHistogram,
+      sample,
+    });
+  }
+
+  let updated = 0;
+  const errors: Array<{ fcId: string; message: string }> = [];
+  const poCache = new Map<
+    string,
+    { po: ProductionOrderRow; allJcs: JobCardRow[] }
+  >();
+
+  for (const plan of plans) {
+    try {
+      await db
+        .prepare(
+          `UPDATE job_cards
+              SET status = 'COMPLETED',
+                  completedDate = ?,
+                  actualMinutes = ?,
+                  overdue = 'COMPLETED'
+            WHERE id = ?`,
+        )
+        .bind(plan.newDate, plan.actualMinutes, plan.fcId)
+        .run();
+      updated++;
+    } catch (err) {
+      errors.push({
+        fcId: plan.fcId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      continue;
+    }
+
+    let cached = poCache.get(plan.fcPoId);
+    if (!cached) {
+      try {
+        const po = await loadProductionOrderById(db, plan.fcPoId);
+        if (!po) continue;
+        const allJcs = await findJobCardsByPO(db, plan.fcPoId);
+        cached = { po, allJcs };
+        poCache.set(plan.fcPoId, cached);
+      } catch (err) {
+        console.error("[fab-cut-pofold-backfill] PO/JC load failed", {
+          fcId: plan.fcId,
+          poId: plan.fcPoId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+    }
+
+    const idx = cached.allJcs.findIndex((j) => j.id === plan.fcId);
+    if (idx === -1) continue;
+    const prevStatus = cached.allJcs[idx].status;
+    const updatedJc: JobCardRow = {
+      ...cached.allJcs[idx],
+      status: "COMPLETED",
+      completedDate: plan.newDate,
+      actualMinutes: plan.actualMinutes,
+      overdue: "COMPLETED",
+    };
+    cached.allJcs[idx] = updatedJc;
+
+    try {
+      await applyWipInventoryChange(
+        db,
+        cached.po,
+        updatedJc,
+        "COMPLETED",
+        cached.allJcs,
+        prevStatus,
+      );
+    } catch (err) {
+      console.error("[fab-cut-pofold-backfill] WIP cascade failed", {
+        fcId: plan.fcId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    try {
+      await postJobCardLabor(db, plan.fcId, plan.fcPoId);
+    } catch (err) {
+      console.error("[fab-cut-pofold-backfill] postJobCardLabor failed", {
+        fcId: plan.fcId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    totalWaitingFcJcs: allFcs.length,
+    noTriggerSkipped,
+    skippedReasons,
+    planned: plans.length,
+    updated,
+    errors,
+    dateHistogram,
+    sample,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/fix-misparsed-jan-dates
 //
 // One-shot fix for the 2026-04-30 CSV import. The earlier importer parsed

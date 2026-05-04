@@ -883,7 +883,7 @@ app.post("/clear-future-completions", async (c) => {
 //
 // Permission: production-orders:update.
 // ---------------------------------------------------------------------------
-const CASCADE_DATE_CLAMP = "2026-04-30";
+const CASCADE_DATE_CLAMP = "2026-05-04";
 
 // Default rules — fire regardless of wipType.
 const CASCADE_ALLOWED_DEFAULT: Record<string, readonly string[]> = {

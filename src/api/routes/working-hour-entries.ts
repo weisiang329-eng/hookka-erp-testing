@@ -238,11 +238,15 @@ app.get("/production-revenue", async (c) => {
               po.productCode       AS productCode,
               po.productName       AS productName,
               po.customerName      AS customerName,
-              po.salesOrderNo      AS soNo,
+              COALESCE(po.salesOrderNo, po.companyCOId) AS soNo,
               po.quantity          AS qty,
               po.itemCategory      AS category,
+              -- CO-aware unit price: SO line item OR CO line item OR
+              -- product master fallback. Without the CO branch, every CO
+              -- PO got 0 revenue contribution.
               COALESCE(
                 soi.unitPriceSen,
+                coi.unitPriceSen,
                 (SELECT COALESCE(p.basePriceSen, p.price1Sen)
                    FROM products p
                   WHERE p.code = po.productCode
@@ -255,6 +259,9 @@ app.get("/production-revenue", async (c) => {
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
+         LEFT JOIN consignment_order_items coi
+                ON coi.consignmentOrderId = po.consignmentOrderId
+               AND coi.lineNo = po.lineNo
         WHERE po.itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
         ORDER BY per_po.unit_completed_at DESC`,
     )
@@ -368,6 +375,7 @@ app.get("/production-revenue", async (c) => {
               COALESCE(jc.productionTimeMinutes, jc.estMinutes, 0) AS "jcMinutes",
               COALESCE(
                 soi.unitPriceSen,
+                coi.unitPriceSen,
                 (SELECT COALESCE(p.basePriceSen, p.price1Sen)
                    FROM products p
                   WHERE p.code = po.productCode
@@ -380,6 +388,9 @@ app.get("/production-revenue", async (c) => {
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
+         LEFT JOIN consignment_order_items coi
+                ON coi.consignmentOrderId = po.consignmentOrderId
+               AND coi.lineNo = po.lineNo
         WHERE jc.status IN ('COMPLETED','TRANSFERRED')
           AND jc.completedDate IS NOT NULL
           AND jc.completedDate >= ?
@@ -579,33 +590,62 @@ app.get("/daily-breakdown", async (c) => {
   //    companySODate. Uses sales_order_items.itemCategory directly — both
   //    `sales_order_items` and `products` carry the column, but the SO line
   //    is what was actually sold (and is the canonical source for the sale).
+  // CO-aware: Order Value = (sales_orders + consignment_orders) per the
+  // companySODate / companyCODate axis. Without the CO branch, every CO
+  // contributed 0 to the chart and the Category Revenue split was
+  // wrong for any tenant that runs consignment alongside retail.
   const orderValueRes = category
     ? await c.var.DB
         .prepare(
-          `SELECT so.companySODate AS d,
-                  SUM(COALESCE(soi.lineTotalSen, 0)) AS v
-             FROM sales_order_items soi
-             JOIN sales_orders so ON so.id = soi.salesOrderId
-            WHERE so.companySODate IS NOT NULL
-              AND so.companySODate != ''
-              AND so.companySODate >= ?
-              AND so.companySODate <= ?
-              AND soi.itemCategory = ?
-            GROUP BY so.companySODate`,
+          `SELECT d, SUM(v) AS v FROM (
+             SELECT so.companySODate AS d,
+                    SUM(COALESCE(soi.lineTotalSen, 0)) AS v
+               FROM sales_order_items soi
+               JOIN sales_orders so ON so.id = soi.salesOrderId
+              WHERE so.companySODate IS NOT NULL
+                AND so.companySODate != ''
+                AND so.companySODate >= ?
+                AND so.companySODate <= ?
+                AND soi.itemCategory = ?
+              GROUP BY so.companySODate
+             UNION ALL
+             SELECT co.companyCODate AS d,
+                    SUM(COALESCE(coi.lineTotalSen, 0)) AS v
+               FROM consignment_order_items coi
+               JOIN consignment_orders co ON co.id = coi.consignmentOrderId
+              WHERE co.companyCODate IS NOT NULL
+                AND co.companyCODate != ''
+                AND co.companyCODate >= ?
+                AND co.companyCODate <= ?
+                AND coi.itemCategory = ?
+              GROUP BY co.companyCODate
+           ) u
+           GROUP BY d`,
         )
-        .bind(from, to, category)
+        .bind(from, to, category, from, to, category)
         .all<{ d: string; v: number | string | null }>()
     : await c.var.DB
         .prepare(
-          `SELECT companySODate AS d, SUM(totalSen) AS v
-             FROM sales_orders
-            WHERE companySODate IS NOT NULL
-              AND companySODate != ''
-              AND companySODate >= ?
-              AND companySODate <= ?
-            GROUP BY companySODate`,
+          `SELECT d, SUM(v) AS v FROM (
+             SELECT companySODate AS d, SUM(totalSen) AS v
+               FROM sales_orders
+              WHERE companySODate IS NOT NULL
+                AND companySODate != ''
+                AND companySODate >= ?
+                AND companySODate <= ?
+              GROUP BY companySODate
+             UNION ALL
+             SELECT companyCODate AS d, SUM(totalSen) AS v
+               FROM consignment_orders
+              WHERE companyCODate IS NOT NULL
+                AND companyCODate != ''
+                AND companyCODate >= ?
+                AND companyCODate <= ?
+              GROUP BY companyCODate
+           ) u
+           GROUP BY d`,
         )
-        .bind(from, to)
+        .bind(from, to, from, to)
         .all<{ d: string; v: number | string | null }>();
 
   // 2. Production value — same per-PO recognition as /production-revenue.
@@ -636,13 +676,16 @@ app.get("/daily-breakdown", async (c) => {
                          THEN completedDate END) <= ?
        )
        SELECT substr(per_po.unit_completed_at, 1, 10) AS d,
-              SUM(COALESCE(soi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)
+              SUM(COALESCE(soi.unitPriceSen, coi.unitPriceSen, p.basePriceSen, p.price1Sen, 0)
                   * MAX(1, COALESCE(po.quantity, 1))) AS v
          FROM per_po
          JOIN production_orders po ON po.id = per_po.productionOrderId
          LEFT JOIN sales_order_items soi
                 ON soi.salesOrderId = po.salesOrderId
                AND soi.lineNo = po.lineNo
+         LEFT JOIN consignment_order_items coi
+                ON coi.consignmentOrderId = po.consignmentOrderId
+               AND coi.lineNo = po.lineNo
          LEFT JOIN products p ON p.id = po.productId
         WHERE p.category IN ('SOFA','BEDFRAME','ACCESSORY')
           ${category ? "AND p.category = ?" : ""}

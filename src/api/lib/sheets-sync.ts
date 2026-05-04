@@ -241,11 +241,16 @@ export async function backfillAllJobCards(
               po.poNo        AS poNo,
               po.customerName AS customerName,
               po.productCode AS productCode,
-              so.customerPOId AS customerPOId,
-              so.reference   AS soReference
+              -- CO-aware: COALESCE the SO and CO equivalents so CO POs
+              -- emit the same customerPOId / reference shape that SO POs
+              -- do. Without this, CO rows pushed to Sheets had blank
+              -- customerPOId and soReference columns.
+              COALESCE(so.customerPOId, co.customerPOId) AS customerPOId,
+              COALESCE(so.reference, co.reference)       AS soReference
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
     LEFT JOIN sales_orders so ON so.id = po.salesOrderId
+    LEFT JOIN consignment_orders co ON co.id = po.consignmentOrderId
         WHERE jc.status NOT IN ('CANCELLED','COMPLETED','TRANSFERRED')
           AND po.status NOT IN ('CANCELLED')`,
     )

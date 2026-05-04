@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { formatDate, formatDateTime } from "@/lib/utils";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
+import { ObjectPageHeader } from "@/components/ui/object-page-header";
 import {
-  ArrowLeft,
   User,
   MapPin,
   Phone,
@@ -271,14 +271,12 @@ export default function DeliveryDetailPage() {
     <div className="space-y-6">
       <LockBanner reason={lockReason} />
       <PresenceBanner holders={otherEditors} />
-      {/* Header */}
-      <div className="flex items-center gap-4">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/delivery")}>
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div className="flex-1">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold text-[#1F1D1B] doc-number">{order.doNo}</h1>
+      <ObjectPageHeader
+        backTo="/delivery"
+        title={order.doNo}
+        subtitle={`${order.customerName} · ${order.companySOId}`}
+        badges={
+          <>
             <Badge variant="status" status={order.status}>
               {STATUS_LABEL[order.status] || order.status.replace(/_/g, " ")}
             </Badge>
@@ -288,50 +286,49 @@ export default function DeliveryDetailPage() {
                 {overdueDays}d overdue
               </span>
             )}
-          </div>
-          <p className="text-xs text-[#6B7280]">
-            {order.customerName} &middot; {order.companySOId}
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={async () => {
-              const { generateDOPdf } = await import("@/lib/generate-do-pdf");
-              generateDOPdf(order as unknown as import("@/types").DeliveryOrder);
-            }}
-          >
-            <Download className="h-4 w-4" /> Download DO PDF
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={async () => {
-              const { generatePackingListPdf } = await import("@/lib/generate-packing-pdf");
-              generatePackingListPdf(order as unknown as import("@/types").DeliveryOrder);
-            }}
-          >
-            <ClipboardList className="h-4 w-4" /> Print Packing List
-          </Button>
-          {flow && (
-            <Button variant="primary" size="sm" onClick={() => advanceStatus()} disabled={updating}>
-              {flow.icon} {updating ? "Updating..." : flow.label}
-            </Button>
-          )}
-          {order.status === "DELIVERED" && (
+          </>
+        }
+        actions={
+          <>
             <Button
-              variant="primary"
+              variant="outline"
               size="sm"
-              onClick={() => advanceStatus("INVOICED")}
-              disabled={updating}
+              onClick={async () => {
+                const { generateDOPdf } = await import("@/lib/generate-do-pdf");
+                generateDOPdf(order as unknown as import("@/types").DeliveryOrder);
+              }}
             >
-              <ReceiptText className="h-4 w-4" />
-              {updating ? "Updating..." : "Convert to Invoice"}
+              <Download className="h-4 w-4" /> Download DO PDF
             </Button>
-          )}
-        </div>
-      </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                const { generatePackingListPdf } = await import("@/lib/generate-packing-pdf");
+                generatePackingListPdf(order as unknown as import("@/types").DeliveryOrder);
+              }}
+            >
+              <ClipboardList className="h-4 w-4" /> Print Packing List
+            </Button>
+            {flow && (
+              <Button variant="primary" size="sm" onClick={() => advanceStatus()} disabled={updating}>
+                {flow.icon} {updating ? "Updating..." : flow.label}
+              </Button>
+            )}
+            {order.status === "DELIVERED" && (
+              <Button
+                variant="primary"
+                size="sm"
+                onClick={() => advanceStatus("INVOICED")}
+                disabled={updating}
+              >
+                <ReceiptText className="h-4 w-4" />
+                {updating ? "Updating..." : "Convert to Invoice"}
+              </Button>
+            )}
+          </>
+        }
+      />
 
       {/* Info Cards */}
       <div className="grid gap-6 grid-cols-1 lg:grid-cols-3">

@@ -423,7 +423,13 @@ export default function WorkerScanPage() {
           matches = await findMatches(parsed.poNo, deptHint);
         }
         if (matches.length === 1) {
+          // Auto-submit on unambiguous QR scan — the operator wanted
+          // "scan = instant complete", no extra Confirm tap. We still
+          // call setResult so the lookup card paints briefly while
+          // the POST is in flight, then the success state takes over
+          // (or a soft-warning Confirm dialog shows on 202).
           setResult({ kind: "lookup", ...matches[0], piece });
+          await handleConfirmScan({ ctx: { ...matches[0], piece } });
         } else if (matches.length > 1) {
           setResult({ kind: "choices", options: matches, piece });
         } else {
@@ -648,15 +654,20 @@ export default function WorkerScanPage() {
   // UPSTREAM_LOCKED) and records an audit row in scan_override_audit.
   // Used by the confirm dialog's Continue button after the worker
   // acknowledges the warning on a prior 202 round-trip.
-  async function handleConfirmScan(opts?: { force?: boolean }) {
-    // Accept either a fresh lookup OR a confirm-dialog continue. Both
-    // carry the order+jobCard context we need to re-post.
+  async function handleConfirmScan(
+    opts?: { force?: boolean; ctx?: { order: Order; jobCard: JobCard; piece?: PieceInfo } },
+  ) {
+    // Accept either a caller-supplied ctx (auto-submit path right after
+    // QR decode, before React has flushed the new `result`), a fresh
+    // lookup, or a confirm-dialog continue. All three carry the
+    // order+jobCard context we need to re-post.
     const ctx =
-      result.kind === "lookup"
+      opts?.ctx ??
+      (result.kind === "lookup"
         ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
         : result.kind === "confirm"
           ? { order: result.order, jobCard: result.jobCard, piece: result.piece }
-          : null;
+          : null);
     if (!ctx) return;
     if (!workerId) {
       setResult({ kind: "error", message: t("common.error") });

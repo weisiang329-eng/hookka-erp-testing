@@ -103,16 +103,16 @@ test('producer dept upsert path runs for non-UPH on COMPLETED', () => {
   );
 });
 
-test('Fab Sew atomic consume on (salesOrderId, fabricCode) is unchanged', () => {
+test('Fab Sew atomic consume on (parentDocId, fabricCode) is intact', () => {
   const src = read();
   // memory/project_production_lifecycle.md: sofa Fab Sew first IN_PROGRESS
   // zeros every wip_item whose label matches Fab Cut labels of sibling POs
-  // sharing (salesOrderId, fabricCode). Pin that this rule survives the
-  // wipLabel fallback fix.
+  // sharing (parentDocId, fabricCode). parentDocId = salesOrderId OR
+  // consignmentOrderId — both must match so CO sofa groups also zero out.
   assert.match(
     src,
-    /WHERE po\.salesOrderId = \?\s*\n\s*AND po\.fabricCode = \?\s*\n\s*AND po\.itemCategory = 'SOFA'\s*\n\s*AND jc\.departmentCode = 'FAB_CUT'/,
-    'sofa Fab Sew atomic consume should query by (salesOrderId, fabricCode, FAB_CUT)',
+    /WHERE \(po\.salesOrderId = \? OR po\.consignmentOrderId = \?\)\s*\n\s*AND \? <> ''\s*\n\s*AND po\.fabricCode = \?\s*\n\s*AND po\.itemCategory = 'SOFA'\s*\n\s*AND jc\.departmentCode = 'FAB_CUT'/,
+    'sofa Fab Sew atomic consume should query by (parentDocId={salesOrderId|consignmentOrderId}, fabricCode, FAB_CUT)',
   );
   assert.match(
     src,

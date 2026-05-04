@@ -776,12 +776,14 @@ export default function ProductionPage({
   }, [fltSearchInput, setFltSearch]);
   const [fltState, setFltState] = useUrlState<string>("state", "");
   const [fltCustomer, setFltCustomer] = useUrlState<string>("customer", "");
-  // Default to today's date on both ends so the production grid lands on
-  // the operator's daily slice instead of the full ~530-PO list. The
-  // server-side dueFrom/dueTo filter (production-orders.ts) trims the wire
-  // payload to match. Operator can clear either field to widen the range.
-  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", todayISO());
-  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", todayISO());
+  // Date filters: URL is source of truth. Default value here is "" so
+  // useUrlState NEVER falls back to today() on the round-trip — that
+  // fallback caused Clear all + native picker Clear to silently snap
+  // back to today (operators couldn't view full history). The first-
+  // mount seed effect below writes today via the atomic useUrlBatch
+  // helper so the operator's initial view stays narrowed to today.
+  const [fltDueFrom, setFltDueFrom] = useUrlState<string>("from", "");
+  const [fltDueTo, setFltDueTo] = useUrlState<string>("to", "");
   // dueQueryFrag/baseUrl/ordersResp moved here from earlier in the file
   // to satisfy the TDZ for fltDueFrom/fltDueTo (declared just above).
   const dueQueryFrag =
@@ -815,6 +817,21 @@ export default function ProductionPage({
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
+
+  // First-mount seed: when both date params are blank, narrow to today
+  // so the operator lands on the daily slice. Atomic write via
+  // useUrlBatch dodges the React 18 batching race that two sequential
+  // setSearchParams hit (and that previously caused a freeze — see
+  // useUrlBatch jsdoc). Once the user clears or changes either field,
+  // the URL holds a real value and this branch never re-fires.
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot URL-seed on first mount only
+  useEffect(() => {
+    if (!fltDueFrom && !fltDueTo) {
+      const today = todayISO();
+      setUrlBatch({ from: today, to: today });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Overview-matrix-only sort. The dept-tab Production Sheet has DataGrid's
   // built-in sort; this state drives the Overview "Due" header click-to-sort.
@@ -3310,16 +3327,20 @@ export default function ProductionPage({
     fltSearch, fltCustomer, fltState, fltDueFrom, fltDueTo, gridFilterIdSet,
   ]);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-20">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#6B5C32] border-t-transparent" />
-      </div>
-    );
-  }
+  // NOTE: loading is intentionally NOT an early-return — that previously
+  // unmounted the entire page (header, filter bar, open native date picker
+  // popups) on every refetch, which killed mid-interaction calendars and
+  // forced the user to start over. Instead the spinner renders as a small
+  // fixed badge so the filter UI remains live during refetch.
 
   return (
     <div className="space-y-4">
+      {loading && (
+        <div className="fixed top-2 right-2 z-50 flex items-center gap-2 px-3 py-1.5 bg-white border border-[#E6E0D9] rounded shadow-sm text-xs text-[#6B5C32]">
+          <div className="h-3 w-3 animate-spin rounded-full border-2 border-[#6B5C32] border-t-transparent" />
+          Loading…
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>

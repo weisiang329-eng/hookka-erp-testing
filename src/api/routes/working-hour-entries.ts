@@ -356,11 +356,16 @@ app.get("/production-revenue", async (c) => {
   // query above (productCode-based to handle sofa variant ids).
   const jcRes = await c.var.DB
     .prepare(
-      `SELECT jc.productionOrderId AS poId,
-              jc.departmentCode    AS deptCode,
-              po.itemCategory      AS category,
-              po.quantity          AS qty,
-              COALESCE(jc.productionTimeMinutes, jc.estMinutes, 0) AS jcMinutes,
+      // Double-quoted aliases so Postgres preserves camelCase. Unquoted
+      // aliases fold to all-lowercase ("poId" → "poid") and the d1-compat
+      // snake→camel transform can't resurrect them, so r.poId would land
+      // undefined and the loop below would skip every row — Category
+      // Revenue read as 0 in the breakdown table.
+      `SELECT jc.productionOrderId AS "poId",
+              jc.departmentCode    AS "deptCode",
+              po.itemCategory      AS "category",
+              po.quantity          AS "qty",
+              COALESCE(jc.productionTimeMinutes, jc.estMinutes, 0) AS "jcMinutes",
               COALESCE(
                 soi.unitPriceSen,
                 (SELECT COALESCE(p.basePriceSen, p.price1Sen)
@@ -369,7 +374,7 @@ app.get("/production-revenue", async (c) => {
                   ORDER BY p.basePriceSen DESC NULLS LAST, p.id
                   LIMIT 1),
                 0
-              ) AS unitPriceSen
+              ) AS "unitPriceSen"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
          LEFT JOIN sales_order_items soi
@@ -403,8 +408,9 @@ app.get("/production-revenue", async (c) => {
     const placeholders = touchedPoIds.map(() => "?").join(",");
     const totalsRes = await c.var.DB
       .prepare(
-        `SELECT productionOrderId,
-                SUM(COALESCE(productionTimeMinutes, estMinutes, 0)) AS totalMinutes
+        // Same camelCase-preserving alias rule as the JC query above.
+        `SELECT productionOrderId AS "productionOrderId",
+                SUM(COALESCE(productionTimeMinutes, estMinutes, 0)) AS "totalMinutes"
            FROM job_cards
           WHERE productionOrderId IN (${placeholders})
           GROUP BY productionOrderId`,

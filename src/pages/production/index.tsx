@@ -14,8 +14,8 @@ import { useTimeout } from "@/lib/scheduler";
 import { useToast } from "@/components/ui/toast";
 import { getCurrentUser } from "@/lib/auth";
 
-import type { JobCard, ProductionOrder, Worker } from "./types";
-import { DEPARTMENTS, todayISO, cellFor } from "./utils";
+import type { CellState, JobCard, ProductionOrder, Worker } from "./types";
+import { DEPARTMENTS, cellFor, fmtShortDate, todayISO } from "./utils";
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
@@ -3111,7 +3111,6 @@ export default function ProductionPage({
             data={deptRows}
             keyField="id"
             stickyHeader
-            virtualize
             maxHeight="calc(100vh - 300px)"
             emptyMessage={`No job cards in ${activeDept.name}.`}
             onDoubleClick={(row) => {

@@ -1655,10 +1655,13 @@ app.post("/uph-pofold-backfill", async (c) => {
   }
 
   // Sort by DEPT_ORDER then by PO+wipKey for stable + cascade-safe order.
-  const deptRank = new Map(UPH_POFOLD_DEPT_ORDER.map((d, i) => [d, i]));
+  const deptRank: Record<string, number> = {};
+  UPH_POFOLD_DEPT_ORDER.forEach((d, i) => {
+    deptRank[d] = i;
+  });
   plans.sort((a, b) => {
-    const dA = deptRank.get(a.departmentCode) ?? 99;
-    const dB = deptRank.get(b.departmentCode) ?? 99;
+    const dA = deptRank[a.departmentCode] ?? 99;
+    const dB = deptRank[b.departmentCode] ?? 99;
     if (dA !== dB) return dA - dB;
     const k = `${a.productionOrderId}||${a.wipKey}`.localeCompare(
       `${b.productionOrderId}||${b.wipKey}`,

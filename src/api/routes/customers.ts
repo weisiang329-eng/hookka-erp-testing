@@ -221,6 +221,82 @@ app.put("/:id", async (c) => {
       )
       .run();
 
+    // ---- Sync delivery_hubs ----
+    // Frontend sends the FULL hub array on every customer save (the customers
+    // page mutates `customer.deliveryHubs` locally, then PUTs the whole
+    // record). Diff strategy:
+    //   - DELETE rows whose id isn't in the incoming array (preserves FK
+    //     refs from sales_orders.hubId / delivery_orders.hubId /
+    //     consignment_orders.hubId — those FKs are ON DELETE SET NULL,
+    //     so dropping a hub orphans those refs).
+    //   - UPSERT each incoming hub on its id (so existing hubs keep
+    //     their id and SO/DO/CO refs stay valid).
+    // This is the missing half of the save path — pre-fix the PUT only
+    // updated the customers row, so hubs added in the UI evaporated on
+    // page reload.
+    if (Array.isArray(body.deliveryHubs)) {
+      type IncomingHub = {
+        id?: string;
+        code?: string;
+        shortName?: string;
+        state?: string;
+        address?: string;
+        contactName?: string;
+        phone?: string;
+        email?: string;
+        isDefault?: boolean;
+      };
+      const incoming = (body.deliveryHubs as IncomingHub[]).filter(
+        (h) => typeof h?.id === "string" && h.id.length > 0,
+      );
+      const incomingIds = new Set(incoming.map((h) => h.id as string));
+
+      const existingHubsRes = await c.var.DB.prepare(
+        "SELECT id FROM delivery_hubs WHERE customerId = ?",
+      )
+        .bind(id)
+        .all<{ id: string }>();
+      const existingIds = (existingHubsRes.results ?? []).map((r) => r.id);
+
+      for (const oldId of existingIds) {
+        if (!incomingIds.has(oldId)) {
+          await c.var.DB.prepare("DELETE FROM delivery_hubs WHERE id = ?")
+            .bind(oldId)
+            .run();
+        }
+      }
+
+      for (const h of incoming) {
+        await c.var.DB.prepare(
+          `INSERT INTO delivery_hubs
+             (id, customerId, code, shortName, state, address, contactName, phone, email, isDefault)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             code = excluded.code,
+             shortName = excluded.shortName,
+             state = excluded.state,
+             address = excluded.address,
+             contactName = excluded.contactName,
+             phone = excluded.phone,
+             email = excluded.email,
+             isDefault = excluded.isDefault`,
+        )
+          .bind(
+            h.id ?? "",
+            id,
+            h.code ?? "",
+            h.shortName ?? "",
+            h.state ?? null,
+            h.address ?? null,
+            h.contactName ?? null,
+            h.phone ?? null,
+            h.email ?? null,
+            h.isDefault ? 1 : 0,
+          )
+          .run();
+      }
+    }
+
     const hubsRes = await c.var.DB.prepare(
       "SELECT * FROM delivery_hubs WHERE customerId = ?",
     )

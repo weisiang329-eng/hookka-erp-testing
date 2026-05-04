@@ -115,17 +115,32 @@ function cellFor(
   let cards = order.jobCards.filter((j) => j.departmentCode === deptCode);
   // Option C — for FAB_CUT, the merged JC may live on the anchor PO of a
   // SOFA cross-PO group; this PO is a sibling and has zero FC JCs of its
-  // own. Walk same-companySOId / same-baseModel / same-fabric siblings
-  // and surface the anchor's FC so the Overview cell isn't blank.
+  // own. Walk same-(SO|CO)/same-baseModel/same-fabric siblings and
+  // surface the anchor's FC so the Overview cell isn't blank.
+  // Consignment-Order POs use companyCOId / consignmentOrderId (not
+  // companySOId / salesOrderId), so include both pairs in the order key
+  // — without this, every sibling-of-anchor row in a CO group rendered
+  // blank even though fabric was already cut.
   if (deptCode === "FAB_CUT" && cards.length === 0 && allOrders) {
-    const mySoId = order.companySOId || order.salesOrderId || "";
-    if (mySoId) {
+    const myGroupId =
+      order.companySOId ||
+      order.salesOrderId ||
+      order.companyCOId ||
+      order.consignmentOrderId ||
+      "";
+    if (myGroupId) {
       const isSofa = order.itemCategory === "SOFA";
       const myBase = (order.productCode || "").split("-")[0];
       const myFabric = order.fabricCode || "";
       for (const sib of allOrders) {
         if (sib.id === order.id) continue;
-        if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+        const sibGroupId =
+          sib.companySOId ||
+          sib.salesOrderId ||
+          sib.companyCOId ||
+          sib.consignmentOrderId ||
+          "";
+        if (sibGroupId !== myGroupId) continue;
         if (isSofa) {
           if ((sib.fabricCode || "") !== myFabric) continue;
           const sibBase = (sib.productCode || "").split("-")[0];
@@ -1606,32 +1621,45 @@ export default function ProductionPage({
           //       don't match the merged FC's wipKey. Allow "*" fallback
           //       for any dept so the FC row can surface downstream
           //       progress. For SOFA cross-PO merge, scan sibling POs of
-          //       the same companySOId for that dept's JC.
+          //       the same parent doc (SO or CO) for that dept's JC.
           const lookingForFc = code === "FAB_CUT";
           const fromFcRow = jc.departmentCode === "FAB_CUT";
           if (lookingForFc || fromFcRow) {
             const samePoAny = byDept ? byDept.get("*") : undefined;
             if (samePoAny) return samePoAny;
             // Cross-PO scan for the merge group's siblings.
-            //   SOFA  → group key is (companySOId + baseModel + fabricCode);
+            //   SOFA  → group key is (parentDocId + baseModel + fabricCode);
             //           sibling POs span multiple modules of the same sofa.
-            //   BF/ACC → group key is companySOId itself (each set already
+            //   BF/ACC → group key is parentDocId itself (each set already
             //            has its own line-suffixed SOID, so siblings within
             //            the same SOID are the HB / DV / piece-fan-out of
             //            the same set). Don't constrain by baseModel because
             //            HB-piece and DV-piece POs may have different
             //            productCodes (HB-Q-22 vs DV-5FT) but share the
             //            set's SOID.
-            const mySoId = o.companySOId || o.salesOrderId || "";
-            if (mySoId) {
+            // Consignment-Order POs use companyCOId / consignmentOrderId
+            // (companySOId / salesOrderId are empty), so include both pairs.
+            const myGroupId =
+              o.companySOId ||
+              o.salesOrderId ||
+              o.companyCOId ||
+              o.consignmentOrderId ||
+              "";
+            if (myGroupId) {
               const isSofa = o.itemCategory === "SOFA";
               const myBase = (o.productCode || "").split("-")[0];
               const myFabric = o.fabricCode || "";
               for (const sib of filteredOrders) {
                 if (sib.id === o.id) continue;
-                if ((sib.companySOId || sib.salesOrderId || "") !== mySoId) continue;
+                const sibGroupId =
+                  sib.companySOId ||
+                  sib.salesOrderId ||
+                  sib.companyCOId ||
+                  sib.consignmentOrderId ||
+                  "";
+                if (sibGroupId !== myGroupId) continue;
                 // SOFA must also match baseModel + fabric since multiple
-                // sofa products can coexist in one SO.
+                // sofa products can coexist in one parent doc.
                 if (isSofa) {
                   if ((sib.fabricCode || "") !== myFabric) continue;
                   const sibBase = (sib.productCode || "").split("-")[0];

@@ -2991,7 +2991,7 @@ export default function CustomersPage() {
 
   // edit customer dialog state
   const [editCustomer, setEditCustomer] = useState<Customer | null>(null);
-  const [editCustForm, setEditCustForm] = useState({ name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0 });
+  const [editCustForm, setEditCustForm] = useState({ code: "", name: "", ssmNo: "", companyAddress: "", contactName: "", phone: "", email: "", creditTerms: "", creditLimitSen: 0 });
 
   // add/edit hub form state
   const [showAddHub, setShowAddHub] = useState(false);
@@ -3074,6 +3074,7 @@ export default function CustomersPage() {
   const openEditCustomer = (cust: Customer) => {
     setEditCustomer(cust);
     setEditCustForm({
+      code: cust.code,
       name: cust.name,
       ssmNo: cust.ssmNo || "",
       companyAddress: cust.companyAddress || "",
@@ -3611,6 +3612,13 @@ export default function CustomersPage() {
               <h3 className="text-sm font-semibold text-[#6B5C32]">Company Information</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div>
+                  <label className="block text-xs text-[#6B7280] mb-1">Creditor Code *</label>
+                  <Input value={editCustForm.code} onChange={(e) => setEditCustForm(f => ({ ...f, code: e.target.value }))} />
+                  <p className="mt-1 text-[10px] text-[#9C6F1E] bg-[#FAEFCB] border border-[#E8D899] rounded px-2 py-1">
+                    ⚠ Changing the code does not rewrite historical SO / DO / Invoice / Maintenance / Customer Products references — those records keep the old code on file. Use only when fixing a typo or migrating accounting numbering.
+                  </p>
+                </div>
+                <div>
                   <label className="block text-xs text-[#6B7280] mb-1">Customer Name *</label>
                   <Input value={editCustForm.name} onChange={(e) => setEditCustForm(f => ({ ...f, name: e.target.value }))} />
                 </div>
@@ -3660,7 +3668,7 @@ export default function CustomersPage() {
             </div>
             <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
               <Button variant="outline" onClick={() => setEditCustomer(null)}>Cancel</Button>
-              <Button variant="primary" onClick={saveEditCustomer} disabled={!editCustForm.name}>Save Changes</Button>
+              <Button variant="primary" onClick={saveEditCustomer} disabled={!editCustForm.name || !editCustForm.code}>Save Changes</Button>
             </div>
           </div>
         </div>

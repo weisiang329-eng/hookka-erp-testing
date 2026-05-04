@@ -277,7 +277,19 @@ app.get("/today", async (c) => {
         ? {
             clockIn: attendance.clockIn,
             clockOut: attendance.clockOut,
-            workingMinutes: attendance.workingMinutes,
+            // Live computation: when worker is clocked IN but not OUT yet,
+            // workingMinutes = 0 in DB until clockOut runs. Show ticking
+            // working time on the home page instead of a static 0.
+            workingMinutes: (() => {
+              if (attendance.workingMinutes > 0) return attendance.workingMinutes;
+              if (!attendance.clockIn || attendance.clockOut) {
+                return attendance.workingMinutes;
+              }
+              const [h, m] = attendance.clockIn.split(":").map(Number);
+              const now = new Date();
+              const total = now.getHours() * 60 + now.getMinutes() - (h * 60 + m);
+              return Math.max(0, total);
+            })(),
             status: attendance.status,
           }
         : null,
@@ -741,24 +753,89 @@ app.get("/payslips", async (c) => {
     taxSen: r.pcbSen,
   }));
 
-  // Zeroed `current` row — keeps the shape the frontend's runtime parser
-  // expects without re-doing the admin payroll math here.  When the
-  // operator runs the monthly payslip generation, the new row shows up
-  // in `history` immediately.
+  // Live current-month estimate so the worker sees something between
+  // monthly payroll runs.  Same prorated-basic + OT 1.5x + piece bonus
+  // formula the mock used.  Never overrides what's in `history` — once
+  // the admin generates the period's payslip, the row in `history` is
+  // the source of truth and this `current` becomes a redundant preview.
   const now = new Date();
   const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const monthPrefix = `${period}-`;
+
+  const worker = auth.worker as {
+    basicSalarySen?: number;
+    workingDaysPerMonth?: number;
+    workingHoursPerDay?: number;
+  };
+  const basicSalarySen = worker.basicSalarySen ?? 0;
+  const daysInMonth = worker.workingDaysPerMonth ?? 26;
+  const hoursPerDay = worker.workingHoursPerDay ?? 8;
+
+  // Worked days + OT minutes this month from attendance.
+  const attRes = await c.var.DB.prepare(
+    `SELECT date, status, overtimeMinutes
+       FROM attendance
+      WHERE employeeId = ? AND date LIKE ?`,
+  )
+    .bind(workerId, `${monthPrefix}%`)
+    .all<{ date: string; status: string; overtimeMinutes: number }>();
+  const monthAtt = attRes.results ?? [];
+  const workedDays = monthAtt.filter(
+    (r) => r.status === "PRESENT" || r.status === "HALF_DAY",
+  ).length;
+  const otMinutes = monthAtt.reduce((s, r) => s + (r.overtimeMinutes ?? 0), 0);
+
+  const basicEarnedSen =
+    daysInMonth > 0 ? Math.round((basicSalarySen / daysInMonth) * workedDays) : 0;
+  const hourlyRateSen =
+    daysInMonth > 0 && hoursPerDay > 0
+      ? basicSalarySen / daysInMonth / hoursPerDay
+      : 0;
+  const otSen = Math.round((otMinutes / 60) * hourlyRateSen * 1.5);
+
+  // Piece bonus this month — sum of PIECE_RATE_SEN[deptCode] for every
+  // completed/transferred JC where this worker is pic1/pic2/piecePic.
+  let pieceBonusSen = 0;
+  const poRes = await c.var.DB.prepare(
+    "SELECT id, jobCards FROM production_orders",
+  ).all<{ id: string; jobCards: string }>();
+  for (const o of poRes.results ?? []) {
+    let cards: Array<{
+      status?: string;
+      completedDate?: string | null;
+      pic1Id?: string | null;
+      pic2Id?: string | null;
+      departmentCode?: string;
+      piecePics?: Array<{ pic1Id?: string | null; pic2Id?: string | null }>;
+    }> = [];
+    try {
+      const parsed = JSON.parse(o.jobCards || "[]");
+      if (Array.isArray(parsed)) cards = parsed;
+    } catch { /* skip */ }
+    for (const jc of cards) {
+      if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
+      const d = (jc.completedDate || "").slice(0, 10);
+      if (!d.startsWith(monthPrefix)) continue;
+      const onLegacyPic = jc.pic1Id === workerId || jc.pic2Id === workerId;
+      const onPiecePic = (jc.piecePics ?? []).some(
+        (s) => s.pic1Id === workerId || s.pic2Id === workerId,
+      );
+      if (!onLegacyPic && !onPiecePic) continue;
+      pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
+    }
+  }
 
   return c.json({
     success: true,
     data: {
       current: {
         period,
-        workedDays: 0,
-        otMinutes: 0,
-        basicEarnedSen: 0,
-        otSen: 0,
-        pieceBonusSen: 0,
-        estimatedGrossSen: 0,
+        workedDays,
+        otMinutes,
+        basicEarnedSen,
+        otSen,
+        pieceBonusSen,
+        estimatedGrossSen: basicEarnedSen + otSen + pieceBonusSen,
       },
       history,
     },

@@ -1,13 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Routes, ScrollRestoration, useLocation } from "react-router-dom";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { Breadcrumbs } from "@/components/layout/breadcrumbs";
-import { CommandPalette } from "@/components/command-palette";
 import { ToastProvider, useToast } from "@/components/ui/toast";
 import { fetchVariantsConfig } from "@/lib/kv-config";
 import { useVersionCheck } from "@/lib/use-version-check";
-import { pushRecent } from "@/lib/use-recent-records";
 import { DASHBOARD_ROUTE_ELEMENTS } from "@/dashboard-routes";
 
 // Lives inside ToastProvider so it can pop a toast when a new deploy lands.
@@ -36,30 +34,6 @@ function NewVersionWatcher() {
 
 export default function DashboardLayout() {
   const { pathname } = useLocation();
-  const [paletteOpen, setPaletteOpen] = useState(false);
-
-  // Push every record-detail navigation into the Cmd-K "Recent" list.
-  // Non-record paths are filtered inside pushRecent itself.
-  useEffect(() => {
-    pushRecent(pathname);
-  }, [pathname]);
-
-  // Global Cmd/Ctrl+K → toggle palette. Editable elements are NOT
-  // excluded here on purpose: Cmd-K is universally a navigation key
-  // across modern apps (Linear / Raycast / Vercel / GitHub) and users
-  // expect it to win even mid-typing.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
-        e.preventDefault();
-        setPaletteOpen((prev) => !prev);
-      } else if (e.key === "Escape" && paletteOpen) {
-        setPaletteOpen(false);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [paletteOpen]);
 
   // Defer heavy startup work so first paint / page navigation stays responsive.
   // NOTE: We intentionally avoid static-importing `@/pages/bom` here because
@@ -124,7 +98,6 @@ export default function DashboardLayout() {
         </div>
       </div>
       <ScrollRestoration />
-      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </ToastProvider>
   );
 }

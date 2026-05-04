@@ -286,6 +286,10 @@ export type ProductionOrder = {
   customerName: string;
   customerState: string;
   companySOId: string;
+  // Consignment-Order linkage (migration 0064). CO-origin POs leave
+  // salesOrderId/companySOId empty and carry these instead.
+  consignmentOrderId?: string;
+  companyCOId?: string;
   productId: string;
   productCode: string;
   productName: string;

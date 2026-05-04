@@ -21,6 +21,8 @@ type ProductionOrder = {
   salesOrderId: string; salesOrderNo: string; lineNo: number;
   customerPOId: string; customerReference: string; customerName: string; customerState: string;
   companySOId: string;
+  // Migration 0064 — CO linkage. POs from a CO have empty SO ids.
+  consignmentOrderId?: string; companyCOId?: string;
   productId: string; productCode: string; productName: string; itemCategory: "SOFA"|"BEDFRAME"|"ACCESSORY";
   sizeCode: string; sizeLabel: string; fabricCode: string; quantity: number;
   gapInches: number|null; divanHeightInches: number|null; legHeightInches: number|null;
@@ -404,6 +406,8 @@ export default function MasterTrackerPage() {
                         className="border-b border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
                         onClick={() => {
                           if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
+                          else if (order.consignmentOrderId)
+                            navigate(`/consignment/${order.consignmentOrderId}`);
                         }}
                       >
                         <td className="px-2 py-1.5 font-medium doc-number sticky left-0 bg-white z-10">

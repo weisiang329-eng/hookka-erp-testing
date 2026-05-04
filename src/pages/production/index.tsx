@@ -733,6 +733,7 @@ export default function ProductionPage({
     soId: string;          // line-suffixed SO ID, unique per production line (= poNo)
     salesOrderNo: string;  // parent sales order id, NOT unique per line
     salesOrderId: string;  // SO primary key — used to route double-click to /sales/:id
+    consignmentOrderId: string;  // CO primary key — used to route to /consignment/:id when SO id is empty
     customerPOId: string;
     customerRef: string;
     customerName: string;
@@ -1066,11 +1067,8 @@ export default function ProductionPage({
                   ? (o.companySOId || o.companyCOId)
                   : o.poNo) || "",
           salesOrderNo: o.companySOId || o.companyCOId || "",   // parent doc (SO or CO), not unique per line
-          // SO PK only — CO rows leave this empty so double-click handlers
-          // (which navigate to /sales/:id) become no-ops on CO rows
-          // instead of routing to a 404. CO-aware double-click is a
-          // separate follow-up.
           salesOrderId: o.salesOrderId || "",
+          consignmentOrderId: o.consignmentOrderId || "",
           customerPOId: o.customerPOId || "",
           customerRef: o.customerReference || "",
           customerName: o.customerName || "",
@@ -1559,18 +1557,26 @@ export default function ProductionPage({
             : row.poStatus === "CANCELLED"
               ? "CANCELLED"
               : "";
+        // CO-aware parent-doc navigation: SO POs → /sales/:id, CO POs →
+        // /consignment/:id. Without the CO branch, every CO row's SO ID
+        // cell rendered as plain text (no link).
+        const parentRoute = row.salesOrderId
+          ? `/sales/${row.salesOrderId}`
+          : row.consignmentOrderId
+            ? `/consignment/${row.consignmentOrderId}`
+            : null;
         return (
           <span className="flex items-center gap-1.5 tabular-nums">
-            {row.salesOrderId ? (
+            {parentRoute ? (
               <button
                 type="button"
                 className="doc-number truncate text-[#6B5C32] hover:underline cursor-pointer text-left bg-transparent p-0 border-0"
                 onClick={(e) => {
                   e.stopPropagation();
-                  navigate(`/sales/${row.salesOrderId}`);
+                  navigate(parentRoute);
                 }}
                 onDoubleClick={(e) => e.stopPropagation()}
-                title={`Open Sales Order ${row.soId}`}
+                title={`Open ${row.salesOrderId ? "Sales" : "Consignment"} Order ${row.soId}`}
               >
                 {row.soId}
               </button>
@@ -3115,15 +3121,20 @@ export default function ProductionPage({
             emptyMessage={`No job cards in ${activeDept.name}.`}
             onDoubleClick={(row) => {
               if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
+              else if (row.consignmentOrderId) navigate(`/consignment/${row.consignmentOrderId}`);
             }}
             contextMenuItems={(row): ContextMenuItem[] => [
               {
-                label: "Open Sales Order",
+                label: row.salesOrderId
+                  ? "Open Sales Order"
+                  : "Open Consignment Order",
                 icon: <ExternalLink className="h-3.5 w-3.5" />,
                 action: () => {
                   if (row.salesOrderId) navigate(`/sales/${row.salesOrderId}`);
+                  else if (row.consignmentOrderId)
+                    navigate(`/consignment/${row.consignmentOrderId}`);
                 },
-                disabled: !row.salesOrderId,
+                disabled: !row.salesOrderId && !row.consignmentOrderId,
               },
             ]}
             gridId={`production-dept-${activeDept.code.toLowerCase()}`}
@@ -3256,6 +3267,8 @@ export default function ProductionPage({
               style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
               onDoubleClick={() => {
                 if (order.salesOrderId) navigate(`/sales/${order.salesOrderId}`);
+                else if (order.consignmentOrderId)
+                  navigate(`/consignment/${order.consignmentOrderId}`);
               }}
             >
               <div className="px-3 py-1.5 text-xs text-[#1F1D1B] flex items-center gap-1.5 tabular-nums">

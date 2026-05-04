@@ -466,17 +466,38 @@ app.post("/", async (c) => {
     if (productionOrderIds.length > 0) {
       const placeholders = productionOrderIds.map(() => "?").join(",");
       const poRes = await c.var.DB.prepare(
-        `SELECT id, poNo, salesOrderId, companySOId, productCode, productName,
+        `SELECT id, poNo, salesOrderId, consignmentOrderId, companySOId,
+                productCode, productName,
                 sizeLabel, fabricCode, quantity, rackingNumber,
                 customerName, customerState
            FROM production_orders WHERE id IN (${placeholders})`,
       )
         .bind(...productionOrderIds)
-        .all<PoRow>();
+        .all<PoRow & { consignmentOrderId?: string | null }>();
       poRowsForItems = poRes.results ?? [];
       if (poRowsForItems.length === 0) {
         return c.json(
           { success: false, error: "No matching production orders" },
+          400,
+        );
+      }
+      // CO POs route via Consignment Notes, not Delivery Orders. Frontend
+      // already filters them out of the DO picker (delivery/index.tsx),
+      // but a direct API call (or seed script) could leak them in. Belt-
+      // and-braces guard rejects any CO PO at POST time.
+      const coPoNos = poRowsForItems
+        .filter(
+          (r) =>
+            (r as unknown as { consignmentOrderId?: string | null })
+              .consignmentOrderId,
+        )
+        .map((r) => r.poNo);
+      if (coPoNos.length > 0) {
+        return c.json(
+          {
+            success: false,
+            error: `Consignment-Order POs cannot be added to a Delivery Order. Use a Consignment Note instead. Offending POs: ${coPoNos.join(", ")}`,
+          },
           400,
         );
       }

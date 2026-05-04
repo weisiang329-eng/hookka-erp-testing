@@ -58,6 +58,12 @@ type ProductionOrderRow = {
   poNo: string;
   salesOrderId: string | null;
   salesOrderNo: string | null;
+  // CO-origin POs leave SO ids NULL and carry these instead. unitSerial
+  // and customerHub resolution fall back to CO when SO is empty.
+  consignmentOrderId: string | null;
+  consignmentOrderNo?: string | null;
+  companySOId: string | null;
+  companyCOId: string | null;
   lineNo: number;
   customerName: string | null;
   productId: string | null;
@@ -202,7 +208,8 @@ export async function generateFGUnitsForPO(
 }> {
   const po = await db
     .prepare(
-      `SELECT id, poNo, salesOrderId, salesOrderNo, lineNo, customerName,
+      `SELECT id, poNo, salesOrderId, salesOrderNo, companySOId,
+         consignmentOrderId, companyCOId, lineNo, customerName,
          productId, productCode, productName, quantity, startDate, completedDate
        FROM production_orders WHERE id = ?`,
     )
@@ -246,22 +253,33 @@ export async function generateFGUnitsForPO(
   const totalUnits = Math.max(1, po.quantity || 1);
   const totalPieces = pieces.count;
 
-  // Pick a customer hub — best-effort, matches in-memory helper
+  // Pick a customer hub — best-effort, matches in-memory helper. POs from
+  // a CO have salesOrderId NULL and live under consignmentOrderId; resolve
+  // the customer through the CO instead so CO-origin FG units still get a
+  // hub stamped.
   let hubShort: string | null = null;
+  let parentCustomerId: string | null = null;
   if (po.salesOrderId) {
     const so = await db
       .prepare("SELECT id, customerId FROM sales_orders WHERE id = ?")
       .bind(po.salesOrderId)
       .first<SalesOrderMini>();
-    if (so?.customerId) {
-      const hub = await db
-        .prepare(
-          "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
-        )
-        .bind(so.customerId)
-        .first<DeliveryHubMini>();
-      hubShort = hub?.shortName ?? null;
-    }
+    parentCustomerId = so?.customerId ?? null;
+  } else if (po.consignmentOrderId) {
+    const co = await db
+      .prepare("SELECT id, customerId FROM consignment_orders WHERE id = ?")
+      .bind(po.consignmentOrderId)
+      .first<{ id: string; customerId: string | null }>();
+    parentCustomerId = co?.customerId ?? null;
+  }
+  if (parentCustomerId) {
+    const hub = await db
+      .prepare(
+        "SELECT shortName FROM delivery_hubs WHERE customerId = ? ORDER BY isDefault DESC, id ASC LIMIT 1",
+      )
+      .bind(parentCustomerId)
+      .first<DeliveryHubMini>();
+    hubShort = hub?.shortName ?? null;
   }
 
   const pad = (n: number, w: number) => String(n).padStart(w, "0");
@@ -280,7 +298,17 @@ export async function generateFGUnitsForPO(
   for (let u = 1; u <= totalUnits; u++) {
     for (let p = 1; p <= totalPieces; p++) {
       const pieceName = pieces.names[p - 1] ?? `Piece ${p}`;
-      const unitSerial = `${po.salesOrderNo ?? ""}-R${po.lineNo}-U${pad(u, unitWidth)}-P${p}/${totalPieces}`;
+      // CO-aware: empty salesOrderNo on a CO PO produced malformed
+      // `-R1-U01-P1/2` serials with no parent prefix. Fall back to
+      // companyCOId / companySOId so the parent doc id always anchors
+      // the serial.
+      const parentDocNo =
+        po.salesOrderNo ||
+        (po as unknown as { consignmentOrderNo?: string | null }).consignmentOrderNo ||
+        po.companySOId ||
+        po.companyCOId ||
+        "";
+      const unitSerial = `${parentDocNo}-R${po.lineNo}-U${pad(u, unitWidth)}-P${p}/${totalPieces}`;
       const unitBatch = String(Number(baseBatch) + (u - 1))
         .slice(-6)
         .padStart(6, "0");

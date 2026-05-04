@@ -678,6 +678,10 @@ async function fetchFilteredPOs(
   // Option C. The companySOId scan only widens within a SO, which is
   // bounded — production dataset has ~432 POs across ~340 SOs so the
   // upper bound on JC payload is well within Hyperdrive's response budget.
+  // Cross-PO sibling subquery widens the JC fetch so a sibling PO of a
+  // merged group (e.g. SOFA cross-PO FAB_CUT) gets the merged JC pulled
+  // in. CO-origin POs use companyCOId instead of companySOId — match
+  // either pair so CO sofa siblings render correctly in dept tabs.
   const jcWhereDept = deptFilter
     ? ` WHERE orgId = ? AND productionOrderId IN (
           SELECT po.id FROM production_orders po
@@ -686,7 +690,11 @@ async function fetchFilteredPOs(
                  OR (po.companySOId IS NOT NULL AND po.companySOId IN (
                       SELECT po2.companySOId FROM production_orders po2
                       JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
-                      WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL)))
+                      WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL))
+                 OR (po.companyCOId IS NOT NULL AND po.companyCOId IN (
+                      SELECT po3.companyCOId FROM production_orders po3
+                      JOIN ${jcSource} jc3 ON jc3.productionOrderId = po3.id
+                      WHERE jc3.orgId = ? AND jc3.departmentCode = ? AND po3.companyCOId IS NOT NULL)))
         )`
     : "";
 
@@ -709,11 +717,12 @@ async function fetchFilteredPOs(
   // by the JC set we already loaded, not the full piece_pics table.
   if (minimal) {
     if (deptFilter) {
-      // Bind slots: 6 = orgId (outer JC scope) + orgId (po.orgId) + orgId
-      // (inner jc subquery) + deptFilter + orgId (jc2 subquery) + deptFilter.
+      // Bind slots: 8 = orgId (outer JC scope) + orgId (po.orgId) + orgId
+      // (inner jc) + deptFilter + orgId (jc2 SO sibling) + deptFilter +
+      // orgId (jc3 CO sibling) + deptFilter.
       const jcStmt = db
         .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
+        .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
       const [pos, jcs] = await Promise.all([
         poStmt.all<ProductionOrderRow>(),
         jcStmt.all<JobCardRow>(),
@@ -772,10 +781,10 @@ async function fetchFilteredPOs(
   }
 
   if (deptFilter) {
-    // Bind slots: 6 — see jcWhereDept comment above for the layout.
+    // Bind slots: 8 — see jcWhereDept comment above for the layout.
     const jcStmt = db
       .prepare(`SELECT * FROM ${jcSource}${jcWhereDept}`)
-      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter);
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter);
     const [pos, jcs, pics] = await Promise.all([
       poStmt.all<ProductionOrderRow>(),
       jcStmt.all<JobCardRow>(),
@@ -947,11 +956,9 @@ async function fetchPaginatedPOs(
           // chain and the Packing tab's date columns render "—".
           // Symmetric Option-C-aware dept narrowing — see jcWhereDept in
           // fetchFilteredPOs for the rationale. Include every JC whose PO
-          // is in the requested-dept's PO set OR shares companySOId with
-          // such a PO. This handles both directions: SEW row sees merged
-          // FC (BF same-PO; SOFA anchor PO via companySOId) AND FC row
-          // sees per-piece downstream SEW/FRAME/etc. (BF same-PO; SOFA
-          // sibling POs via companySOId).
+          // is in the requested-dept's PO set OR shares the same parent
+          // doc id (SO or CO) with such a PO. CO sofa cross-PO merge
+          // matches via companyCOId; SO via companySOId.
           const sql = `SELECT * FROM ${jcSource} WHERE productionOrderId IN (${ph}) AND productionOrderId IN (
             SELECT po.id FROM production_orders po
             WHERE po.id IN (${ph})
@@ -959,10 +966,17 @@ async function fetchPaginatedPOs(
                    OR (po.companySOId IS NOT NULL AND po.companySOId IN (
                         SELECT po2.companySOId FROM production_orders po2
                         JOIN ${jcSource} jc2 ON jc2.productionOrderId = po2.id
-                        WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph})))))`;
+                        WHERE jc2.departmentCode = ? AND po2.companySOId IS NOT NULL AND po2.id IN (${ph})))
+                   OR (po.companyCOId IS NOT NULL AND po.companyCOId IN (
+                        SELECT po3.companyCOId FROM production_orders po3
+                        JOIN ${jcSource} jc3 ON jc3.productionOrderId = po3.id
+                        WHERE jc3.departmentCode = ? AND po3.companyCOId IS NOT NULL AND po3.id IN (${ph})))))`;
           return db
             .prepare(sql)
-            .bind(...chunk, ...chunk, deptFilter, ...chunk, deptFilter, ...chunk)
+            .bind(
+              ...chunk, ...chunk, deptFilter, ...chunk,
+              deptFilter, ...chunk, deptFilter, ...chunk,
+            )
             .all<JobCardRow>();
         }),
       );
@@ -1324,8 +1338,14 @@ export async function applyWipInventoryChange(
       // FC wip_items row when no per-PO sibling found. Try both wipKey
       // shapes (BF per-PO, SOFA cross-PO).
       if (!refundLabel && deptUpper === "FAB_SEW") {
-        const companySOId =
-          poRow.companySOId || poRow.salesOrderId || "";
+        // Parent-doc key for SOFA cross-PO merge: prefer SO-side ids,
+        // fall back to CO-side ids (CO sofa POs have companySOId NULL).
+        const parentDocKey =
+          poRow.companySOId ||
+          poRow.salesOrderId ||
+          poRow.companyCOId ||
+          poRow.consignmentOrderId ||
+          "";
         const fabricCode = poRow.fabricCode || "";
         const bomLookup = await db
           .prepare(
@@ -1339,9 +1359,9 @@ export async function applyWipInventoryChange(
         const candidates: string[] = [
           `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
         ];
-        if (companySOId) {
+        if (parentDocKey) {
           candidates.push(
-            `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+            `${parentDocKey}::${baseModel}::${fabricCode}::FAB_CUT`,
           );
         }
         for (const cand of candidates) {
@@ -1372,6 +1392,9 @@ export async function applyWipInventoryChange(
           // already been UPDATEd to non-DONE by the PATCH handler, so
           // the COUNT excludes self by virtue of status filter).
           const isSofa = (poRow.itemCategory || "") === "SOFA";
+          // CO-aware parent-doc key (mirrors forward consume dedup).
+          const refundParentDocKey =
+            poRow.companySOId || poRow.companyCOId || "";
           const sibQ = isSofa
             ? await db
                 .prepare(
@@ -1380,12 +1403,15 @@ export async function applyWipInventoryChange(
                     WHERE jc2.id != ?
                       AND jc2.departmentCode = 'FAB_SEW'
                       AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
-                      AND po2.companySOId = ?
+                      AND (po2.companySOId = ? OR po2.companyCOId = ?)
+                      AND ? <> ''
                       AND po2.fabricCode = ?`,
                 )
                 .bind(
                   jcRow.id,
-                  poRow.companySOId ?? "",
+                  refundParentDocKey,
+                  refundParentDocKey,
+                  refundParentDocKey,
                   poRow.fabricCode ?? "",
                 )
                 .first<{ n: number }>()
@@ -1479,7 +1505,16 @@ export async function applyWipInventoryChange(
     // the bom_templates baseModel doesn't match the productCode prefix
     // exactly (legacy BOMs sometimes use different baseModel strings).
     if (!upstreamLabel && deptUpper === "FAB_SEW") {
-      const companySOId = poRow.companySOId || poRow.salesOrderId || "";
+      // Parent-doc key for SOFA cross-PO merge. Falls back to CO-side ids
+      // (companyCOId / consignmentOrderId) when SO ids are NULL — without
+      // this, CO sofa SEW completion couldn't find the merged FC and
+      // dedup/refund cascades misbehaved.
+      const parentDocKey =
+        poRow.companySOId ||
+        poRow.salesOrderId ||
+        poRow.companyCOId ||
+        poRow.consignmentOrderId ||
+        "";
       const fabricCode = poRow.fabricCode || "";
       const bomLookup = await db
         .prepare(
@@ -1495,10 +1530,10 @@ export async function applyWipInventoryChange(
       candidates.push(
         `${jcRow.productionOrderId}::${baseModel}::${fabricCode}::FAB_CUT`,
       );
-      // SOFA: cross-PO merge keyed by companySOId.
-      if (companySOId) {
+      // SOFA: cross-PO merge keyed by parent doc id (SO or CO).
+      if (parentDocKey) {
         candidates.push(
-          `${companySOId}::${baseModel}::${fabricCode}::FAB_CUT`,
+          `${parentDocKey}::${baseModel}::${fabricCode}::FAB_CUT`,
         );
       }
       for (const cand of candidates) {
@@ -1534,17 +1569,18 @@ export async function applyWipInventoryChange(
       }
       // For SOFA cross-PO: when this SEW row is on a sibling PO of a
       // merged sofa group, the FC JC may live on the anchor PO (different
-      // productionOrderId). Walk same-SO siblings.
-      if (!upstreamLabel && companySOId) {
+      // productionOrderId). Walk same-(SO|CO) siblings.
+      if (!upstreamLabel && parentDocKey) {
         const sibFc = await db
           .prepare(
             `SELECT jc.wipLabel FROM job_cards jc
              JOIN production_orders po ON po.id = jc.productionOrderId
-             WHERE po.companySOId = ?
+             WHERE (po.companySOId = ? OR po.companyCOId = ?)
+               AND ? <> ''
                AND jc.departmentCode = 'FAB_CUT'
              LIMIT 1`,
           )
-          .bind(companySOId)
+          .bind(parentDocKey, parentDocKey, parentDocKey)
           .first<{ wipLabel: string }>();
         if (sibFc?.wipLabel) {
           upstreamLabel = sibFc.wipLabel;
@@ -1570,6 +1606,14 @@ export async function applyWipInventoryChange(
         // For SOFA cross-PO the group spans all sibling POs sharing the
         // same companySOId + fabricCode.
         const isSofa = (poRow.itemCategory || "") === "SOFA";
+        // CO-aware parent-doc key. CO sofa POs leave companySOId NULL
+        // (parent doc lives on companyCOId/consignmentOrderId), and the
+        // SO-only WHERE filter treated every CO sibling as "first to
+        // finish" → forward consume fired N times → upstream stub went
+        // negative by (N-1) sets per CO sofa group. Match either pair so
+        // dedup works regardless of order origin.
+        const parentDocKey =
+          poRow.companySOId || poRow.companyCOId || "";
         const sibQ = isSofa
           ? await db
               .prepare(
@@ -1578,12 +1622,15 @@ export async function applyWipInventoryChange(
                   WHERE jc2.id != ?
                     AND jc2.departmentCode = 'FAB_SEW'
                     AND (jc2.status = 'COMPLETED' OR jc2.status = 'TRANSFERRED')
-                    AND po2.companySOId = ?
+                    AND (po2.companySOId = ? OR po2.companyCOId = ?)
+                    AND ? <> ''
                     AND po2.fabricCode = ?`,
               )
               .bind(
                 jcRow.id,
-                poRow.companySOId ?? "",
+                parentDocKey,
+                parentDocKey,
+                parentDocKey,
                 poRow.fabricCode ?? "",
               )
               .first<{ n: number }>()
@@ -1822,19 +1869,26 @@ export async function applyWipInventoryChange(
     // FAB_SEW IN_PROGRESS in a (SO, fabric) group zeroes every
     // upstream FAB_CUT wip_items row in that group. Subsequent sibling
     // FAB_SEW scans are no-ops because the stock is already 0.
-    if (isFabSew && isSofa && poRow.salesOrderId && poRow.fabricCode) {
+    // CO-aware parent-doc id: SO id OR CO id. Without the CO branch
+    // every CO sofa FAB_SEW IN_PROGRESS skipped the FAB_CUT zero-out,
+    // leaving the merged FC stock floating until a downstream consume
+    // happened to drop it.
+    const parentDocId =
+      poRow.salesOrderId || poRow.consignmentOrderId || "";
+    if (isFabSew && isSofa && parentDocId && poRow.fabricCode) {
       const siblingLabels = await db
         .prepare(
           `SELECT DISTINCT jc.wipLabel AS "wipLabel"
              FROM production_orders po
              JOIN job_cards jc ON jc.productionOrderId = po.id
-            WHERE po.salesOrderId = ?
+            WHERE (po.salesOrderId = ? OR po.consignmentOrderId = ?)
+              AND ? <> ''
               AND po.fabricCode = ?
               AND po.itemCategory = 'SOFA'
               AND jc.departmentCode = 'FAB_CUT'
               AND jc.wipLabel IS NOT NULL`,
         )
-        .bind(poRow.salesOrderId, poRow.fabricCode)
+        .bind(parentDocId, parentDocId, parentDocId, poRow.fabricCode)
         .all<{ wipLabel: string | null }>();
       const labels = (siblingLabels.results ?? [])
         .map((r) => r.wipLabel)

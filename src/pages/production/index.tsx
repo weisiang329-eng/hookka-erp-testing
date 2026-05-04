@@ -1983,7 +1983,13 @@ export default function ProductionPage({
             fabricColor: p?.fabricColor || o.fabricCode || "",
             customerName: u.customerName || o.customerName || "",
             customerHub: u.customerHub || "",
-            salesOrderNo: o.salesOrderNo || o.companySOId || "",
+            // CO-aware: fall back through SO ids → CO ids so the sticker
+            // for a CO-origin PO shows CO-YYMM-NNN instead of blank.
+            salesOrderNo:
+              o.salesOrderNo ||
+              o.companySOId ||
+              o.companyCOId ||
+              "",
             pieceNo: u.pieceNo,
             totalPieces: u.totalPieces,
             pieceName: u.pieceName,

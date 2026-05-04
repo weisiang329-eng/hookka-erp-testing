@@ -9,7 +9,7 @@ import { Link } from "react-router-dom";
 import { useSearchParams } from "react-router-dom";
 import { parseStickerData } from "@/lib/qr-utils";
 import { fetchJson } from "@/lib/fetch-json";
-import { useActiveTabDirty } from "@/contexts/tabs-context";
+import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 
 const WorkerListSchema = z.object({
   success: z.boolean(),
@@ -116,7 +116,7 @@ function ScannerPage() {
     !submitting &&
     lookupResult !== null &&
     submitResult?.kind !== "success";
-  useActiveTabDirty(isScanPending);
+  useUnsavedChanges(isScanPending);
 
   // Fetch worker list once
   useEffect(() => {

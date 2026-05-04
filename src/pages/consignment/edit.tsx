@@ -21,7 +21,7 @@ import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cac
 import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
-import { useActiveTabDirty } from "@/contexts/tabs-context";
+import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 
 type LineItem = {
   id?: string;
@@ -193,7 +193,7 @@ export default function EditSalesOrderPage() {
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   const isDirty =
     !saving && !loading && initialSig !== null && initialSig !== formSig;
-  useActiveTabDirty(isDirty);
+  useUnsavedChanges(isDirty);
 
   useEffect(() => {
     fetchVariantsConfig().then(setMaintenanceConfig).catch(() => { /* ignore */ });

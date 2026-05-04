@@ -13,7 +13,7 @@ test('core project files exist', () => {
   assert.ok(existsSync(resolve(root, 'package.json')));
   assert.ok(existsSync(resolve(root, 'wrangler.toml')));
   assert.ok(existsSync(resolve(root, 'src/layouts/DashboardLayout.tsx')));
-  assert.ok(existsSync(resolve(root, 'src/components/layout/tabbed-outlet.tsx')));
+  assert.ok(existsSync(resolve(root, 'src/components/layout/breadcrumbs.tsx')));
 });
 
 test('enterprise architecture and review docs exist', () => {

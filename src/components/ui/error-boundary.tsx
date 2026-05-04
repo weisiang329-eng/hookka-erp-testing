@@ -81,11 +81,20 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
   const [showDetails, setShowDetails] = React.useState(false);
   const isDev = import.meta.env.DEV;
 
-  // Auto-recover from stale chunks by hard-reloading once.
+  // Auto-recover from stale chunks by hard-reloading. The previous
+  // implementation set a once-per-session guard that NEVER cleared, so
+  // any user who hit a stale chunk on day 1 still couldn't auto-reload
+  // after a fix-deploy on day 2 — their tab stayed visually blank
+  // (Suspense stuck on dim "Loading…" text) until they manually
+  // cleared sessionStorage. Use a 60s cooldown instead: blocks tight
+  // reload loops but lets a fresh stale-chunk hit (e.g., next deploy
+  // a few hours later) auto-recover normally.
   React.useEffect(() => {
     if (!isStaleChunkError(error)) return;
-    const KEY = "hookka-stale-chunk-reloaded";
-    if (sessionStorage.getItem(KEY)) return; // already tried once
+    const KEY = "hookka-stale-chunk-reloaded-at";
+    const COOLDOWN_MS = 60_000;
+    const lastTs = Number(sessionStorage.getItem(KEY) || 0);
+    if (lastTs && Date.now() - lastTs < COOLDOWN_MS) return;
     sessionStorage.setItem(KEY, String(Date.now()));
     window.location.reload();
   }, [error]);

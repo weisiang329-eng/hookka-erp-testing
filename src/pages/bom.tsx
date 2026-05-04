@@ -33,11 +33,14 @@ type WIPMaterial = {
   unit: string;
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG"; // auto-filled from SO item at production time
-  // Optional dimension scaling. At consumption time qty expands as
-  //   effectiveQty = qty + max(0, SOLine[dimension] - baseValue) * perUnit
-  // (floor: orders smaller than baseline still consume baseQty).
+  // Optional dimension scaling rules — multiple rules stack across
+  // independent dimensions (e.g. divan height AND gap each contribute).
+  // At consumption time qty expands as
+  //   effectiveQty = qty + Σ over rules:
+  //                    max(0, SOLine[rule.dim] - rule.baseValue) * rule.perUnit
+  // (floor: orders smaller than baseline still consume baseQty per rule).
   // See src/api/lib/material-scaling.ts for the apply helpers.
-  scaling?: MaterialScaling;
+  scaling?: MaterialScaling[];
 };
 
 type CodeSegment = {
@@ -879,60 +882,112 @@ function RawMaterialSelect({
 // dimension dropdown on "none" removes the scaling rule entirely. The
 // editor renders inline + always-visible so the user can see at a glance
 // which materials scale and which don't, without an extra toggle click.
+// Labels match the SO line entry form (Total Height / Gap / Divan Height /
+// Leg Height / Sofa Size) so authors don't have to map between two
+// different vocabularies. Underlying value strings stay the same so the
+// resolver in api/lib/material-scaling.ts keeps working.
 const SCALING_DIM_OPTIONS: Array<{ value: MaterialScalingDimension; label: string }> = [
-  { value: "totalHeight", label: "total height (gap+divan+leg)" },
-  { value: "gap", label: "gap" },
-  { value: "divan", label: "divan height" },
-  { value: "leg", label: "leg height" },
-  { value: "seatHeight", label: "sofa seat height" },
+  { value: "totalHeight", label: "Total Height" },
+  { value: "gap", label: "Gap" },
+  { value: "divan", label: "Divan Height" },
+  { value: "leg", label: "Leg Height" },
+  { value: "seatHeight", label: "Sofa Size" },
 ];
+
+// Accept both the new array shape AND legacy single-object data still
+// living in saved bom_versions.tree blobs. Returns a fresh array safe
+// to mutate.
+function normaliseScaling(
+  scaling: MaterialScaling | MaterialScaling[] | undefined,
+): MaterialScaling[] {
+  if (!scaling) return [];
+  if (Array.isArray(scaling)) return scaling.slice();
+  // Legacy single-object → 1-element array.
+  return [scaling];
+}
 
 function MaterialScalingEditor({
   scaling,
   unit,
   onChange,
 }: {
-  scaling: MaterialScaling | undefined;
+  // Accept legacy single-object or undefined at runtime even though the
+  // declared WIPMaterial.scaling is now MaterialScaling[]. Saved BOMs
+  // pre-array still flow through here; normaliseScaling handles them.
+  scaling: MaterialScaling[] | MaterialScaling | undefined;
   unit: string;
-  onChange: (next: MaterialScaling | undefined) => void;
+  onChange: (next: MaterialScaling[] | undefined) => void;
 }) {
-  const dim = scaling?.dimension ?? "";
+  const rules = normaliseScaling(scaling);
+
+  function emit(next: MaterialScaling[]) {
+    onChange(next.length === 0 ? undefined : next);
+  }
+
+  function updateRule(idx: number, patch: Partial<MaterialScaling>) {
+    const next = rules.map((r, i) => (i === idx ? { ...r, ...patch } : r));
+    emit(next);
+  }
+
+  function removeRule(idx: number) {
+    emit(rules.filter((_, i) => i !== idx));
+  }
+
+  function addRule() {
+    emit([
+      ...rules,
+      { dimension: "totalHeight", baseValue: 24, perUnit: 0 },
+    ]);
+  }
+
+  // No rules yet: render only the "+ Add scaling" affordance so existing
+  // unscaled materials keep their compact one-liner in the BOM tree.
+  if (rules.length === 0) {
+    return (
+      <div className="ml-7 mb-1 flex items-center gap-1.5 text-[10px] text-gray-500">
+        <button
+          type="button"
+          onClick={addRule}
+          className="text-[10px] text-[#3E6570] hover:text-[#2A4A55] underline"
+          title="Add a dimension scaling rule"
+        >
+          + Add scaling
+        </button>
+      </div>
+    );
+  }
+
   return (
-    <div className="ml-7 mb-1 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500">
-      <span className="text-gray-400">Scale by</span>
-      <select
-        value={dim}
-        onChange={(e) => {
-          const newDim = e.target.value as MaterialScalingDimension | "";
-          if (!newDim) {
-            onChange(undefined);
-          } else {
-            onChange({
-              dimension: newDim,
-              baseValue: scaling?.baseValue ?? 24,
-              perUnit: scaling?.perUnit ?? 0,
-            });
-          }
-        }}
-        className="text-[10px] border border-gray-200 rounded px-1 py-0.5 bg-white"
-      >
-        <option value="">— none —</option>
-        {SCALING_DIM_OPTIONS.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      {scaling && (
-        <>
+    <div className="ml-7 mb-1 flex flex-col gap-1 text-[10px] text-gray-500">
+      {rules.map((rule, idx) => (
+        <div
+          key={idx}
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          <span className="text-gray-400">Scale by</span>
+          <select
+            value={rule.dimension}
+            onChange={(e) =>
+              updateRule(idx, {
+                dimension: e.target.value as MaterialScalingDimension,
+              })
+            }
+            className="text-[10px] border border-gray-200 rounded px-1 py-0.5 bg-white"
+          >
+            {SCALING_DIM_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                {o.label}
+              </option>
+            ))}
+          </select>
           <span className="text-gray-400">base</span>
           <input
             type="number" onFocus={(e) => e.currentTarget.select()}
-            value={Number.isFinite(scaling.baseValue) ? scaling.baseValue : 0}
+            value={Number.isFinite(rule.baseValue) ? rule.baseValue : 0}
             step="1"
             min="0"
             onChange={(e) =>
-              onChange({ ...scaling, baseValue: parseFloat(e.target.value) || 0 })
+              updateRule(idx, { baseValue: parseFloat(e.target.value) || 0 })
             }
             className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-12 bg-white"
             title="Smallest size at which the recorded qty applies"
@@ -940,18 +995,48 @@ function MaterialScalingEditor({
           <span className="text-gray-400">in, qty +</span>
           <input
             type="number" onFocus={(e) => e.currentTarget.select()}
-            value={Number.isFinite(scaling.perUnit) ? scaling.perUnit : 0}
+            value={Number.isFinite(rule.perUnit) ? rule.perUnit : 0}
             step="0.01"
             min="0"
             onChange={(e) =>
-              onChange({ ...scaling, perUnit: parseFloat(e.target.value) || 0 })
+              updateRule(idx, { perUnit: parseFloat(e.target.value) || 0 })
             }
             className="text-[10px] border border-gray-200 rounded px-1 py-0.5 w-14 bg-white"
             title="Extra qty per 1 inch over base"
           />
           <span className="text-gray-400">{unit || "unit"}/inch over base</span>
-        </>
-      )}
+          <button
+            type="button"
+            onClick={() => removeRule(idx)}
+            className="text-[#9A3A2D] hover:text-[#7A2E24] ml-1"
+            title="Remove this scaling rule"
+          >
+            <svg
+              className="w-3 h-3"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M6 18L18 6M6 6l12 12"
+              />
+            </svg>
+          </button>
+        </div>
+      ))}
+      <div>
+        <button
+          type="button"
+          onClick={addRule}
+          className="text-[10px] text-[#3E6570] hover:text-[#2A4A55] underline"
+          title="Stack another scaling rule on a different dimension"
+        >
+          + Add another
+        </button>
+      </div>
     </div>
   );
 }
@@ -1712,7 +1797,7 @@ function CreateBOMDialog({
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -1780,7 +1865,7 @@ function CreateBOMDialog({
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
 
-  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -1810,7 +1895,7 @@ function CreateBOMDialog({
     );
   }
 
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -1858,7 +1943,7 @@ function CreateBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2321,16 +2406,16 @@ function SubWIPTree({
   path: number[];
   onAdd: (path: number[]) => void;
   onRemove: (path: number[], si: number) => void;
-  onUpdate: (path: number[], field: string, value: string | number | MaterialScaling | undefined) => void;
+  onUpdate: (path: number[], field: string, value: string | number | MaterialScaling[] | undefined) => void;
   onUpdateSegments: (path: number[], segs: CodeSegment[]) => void;
   onAddProcess: (path: number[]) => void;
   onRemoveProcess: (path: number[], pi: number) => void;
-  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
+  onUpdateProcess: (path: number[], pi: number, field: string, value: string | number | MaterialScaling[] | undefined) => void;
   onAddMaterial: (path: number[]) => void;
   onRemoveMaterial: (path: number[], mi: number) => void;
   onSelectMaterial: (path: number[], mi: number, rm: RawMaterialOption) => void;
   onSelectMaterialAutoDetect: (path: number[], mi: number, kind: "FABRIC" | "LEG") => void;
-  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) => void;
+  onUpdateMaterial: (path: number[], mi: number, field: string, value: string | number | MaterialScaling[] | undefined) => void;
   onWrap?: (path: number[], si: number) => void;
   onMoveUp?: (path: number[], si: number) => void;
   onMoveDown?: (path: number[], si: number) => void;
@@ -2635,7 +2720,7 @@ function EditBOMDialog({
   function removeL1Material(i: number) {
     setL1Materials((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Material(i: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateL1Material(i: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setL1Materials((prev) => prev.map((m, idx) => (idx === i ? { ...m, [field]: value } : m)));
   }
   function selectL1Material(i: number, rm: RawMaterialOption) {
@@ -2657,7 +2742,7 @@ function EditBOMDialog({
   function removeL1Process(i: number) {
     setL1Processes((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateL1Process(i: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setL1Processes((prev) =>
       prev.map((p, idx) => {
         if (idx !== i) return p;
@@ -2713,7 +2798,7 @@ function EditBOMDialog({
   function removeWIP(i: number) {
     setWipComponents((prev) => prev.filter((_, idx) => idx !== i));
   }
-  function updateWIP(i: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIP(i: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => (idx === i ? { ...w, [field]: value } : w))
     );
@@ -2734,7 +2819,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIPProcess(wi: number, pi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2774,7 +2859,7 @@ function EditBOMDialog({
       )
     );
   }
-  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIPMaterial(wi: number, mi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) =>
         idx === wi
@@ -2846,7 +2931,7 @@ function EditBOMDialog({
     );
   }
 
-  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
+  function updateSubWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({ ...node, [field]: value })))
     );
@@ -2892,7 +2977,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -2918,7 +3003,7 @@ function EditBOMDialog({
       })))
     );
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     setWipComponents((prev) =>
       prev.map((w, idx) => idx !== wi ? w : updateAtPath(w, path, (node) => ({
         ...node,
@@ -3640,7 +3725,7 @@ function MasterTemplatesDialog({
     }));
   }
 
-  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling | undefined) {
+  function updateWIPAtPath(wi: number, path: number[], field: string, value: string | number | MaterialScaling[] | undefined) {
     mutateWIP(wi, path, (node) => ({ ...node, [field]: value }));
   }
   function updateWIPSegmentsAtPath(wi: number, path: number[], segs: CodeSegment[]) {
@@ -3706,7 +3791,7 @@ function MasterTemplatesDialog({
   function removeProcessAtPath(wi: number, path: number[], pi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, processes: node.processes.filter((_, i) => i !== pi) }));
   }
-  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateProcessAtPath(wi: number, path: number[], pi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       processes: node.processes.map((p, i) => {
@@ -3735,7 +3820,7 @@ function MasterTemplatesDialog({
   function removeMaterialAtPath(wi: number, path: number[], mi: number) {
     mutateWIP(wi, path, (node) => ({ ...node, materials: (node.materials || []).filter((_, i) => i !== mi) }));
   }
-  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling | undefined) {
+  function updateMaterialAtPath(wi: number, path: number[], mi: number, field: string, value: string | number | MaterialScaling[] | undefined) {
     mutateWIP(wi, path, (node) => ({
       ...node,
       materials: (node.materials || []).map((m, i) => (i === mi ? { ...m, [field]: value } : m)),

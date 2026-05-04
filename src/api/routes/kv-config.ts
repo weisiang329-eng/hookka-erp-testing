@@ -69,11 +69,20 @@ app.put("/:key", async (c) => {
   const now = new Date().toISOString();
 
   await c.var.DB.prepare(
+    // `excluded.updated_at` (snake_case) — Postgres exposes the EXCLUDED
+    // pseudo-table with the actual column name, and the d1-compat
+    // camelCase translator doesn't follow into EXCLUDED.* refs. The old
+    // `excluded.updatedAt` exploded with "column does not exist" on every
+    // second save (silently — the prepared statement only fails when the
+    // ON CONFLICT branch fires), so customer Maintenance / master
+    // Maintenance / org letterhead all silently failed to persist edits
+    // after the first write. customer-maintenance.ts:81-89 had a
+    // workaround comment but the underlying typo was never fixed here.
     `INSERT INTO kv_config (key, value, updated_at)
      VALUES (?, ?, ?)
      ON CONFLICT(key) DO UPDATE SET
        value = excluded.value,
-       updated_at = excluded.updatedAt`,
+       updated_at = excluded.updated_at`,
   )
     .bind(key, value, now)
     .run();

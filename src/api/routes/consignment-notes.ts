@@ -25,7 +25,7 @@ import {
   validatePOMutex,
   CN_VALID_TRANSITIONS,
 } from "../lib/consignment-note-shared";
-import { cascadeCNCompletionToCO } from "./production-orders";
+import { cascadeCNCompletionToCO, cascadeCNReversalToCO } from "./production-orders";
 import { nextInvoiceNo } from "./invoices";
 import { emitAudit } from "../lib/audit";
 import { requirePermission } from "../lib/rbac";
@@ -688,7 +688,40 @@ app.post("/:id/return", async (c) => {
       ).bind(nextStatus, nextTotalValue, dispatchedAt, id),
     );
 
+    // CO-parity gap (2026-05-04): if the CN had previously been
+    // converted to an invoice (convertedInvoiceId set), the
+    // outstandingSen bump from /convert-to-invoice needs to be reversed
+    // by the difference between the original totalValue and the post-
+    // return totalValue. Otherwise A/R stays inflated by the value of
+    // returned items.
+    if (cn.convertedInvoiceId && cn.totalValue > nextTotalValue) {
+      const refundSen = cn.totalValue - nextTotalValue;
+      statements.push(
+        c.var.DB.prepare(
+          `UPDATE customers
+              SET outstandingSen = MAX(0, COALESCE(outstandingSen, 0) - ?),
+                  updated_at = ?
+            WHERE id = ?`,
+        ).bind(refundSen, now, cn.customerId),
+      );
+    }
+
     await c.var.DB.batch(statements);
+
+    // CO cascade — /return bypasses updateConsignmentNoteById (which
+    // would have fired this) so we have to invoke it explicitly. Without
+    // this, the parent CO stays at DELIVERED even after every CN under
+    // it goes RETURNED, blocking re-dispatch + leaving CO status stale.
+    if (cn.consignmentOrderId) {
+      try {
+        await cascadeCNReversalToCO(c.var.DB, cn.consignmentOrderId);
+      } catch (err) {
+        console.error(
+          "[POST /api/consignment-notes/:id/return] CO reversal cascade failed:",
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
 
     // Audit (best-effort — never blocks the mutation per audit.ts contract).
     await emitAudit(c, {
@@ -829,6 +862,48 @@ app.post("/:id/convert-to-invoice", async (c) => {
 
     const subtotalSen = invoiceItems.reduce((s, i) => s + i.totalSen, 0);
     const totalSen = subtotalSen;
+
+    // CO-parity gap (2026-05-04): credit-limit gate. CN unit prices are
+    // 0 at CN POST time so the gate has to live here at convert time
+    // (where we resolved real prices from CO items). Mirrors DO's
+    // pre-POST gate at delivery-orders.ts:728-737.
+    if (cn.customerId) {
+      const customerRow = await c.var.DB
+        .prepare(
+          "SELECT id, outstandingSen, creditLimitSen FROM customers WHERE id = ?",
+        )
+        .bind(cn.customerId)
+        .first<{
+          id: string;
+          outstandingSen: number | null;
+          creditLimitSen: number | null;
+        }>();
+      if (
+        customerRow &&
+        typeof customerRow.creditLimitSen === "number" &&
+        customerRow.creditLimitSen > 0
+      ) {
+        const outstanding = Number(customerRow.outstandingSen) || 0;
+        const projected = outstanding + totalSen;
+        if (projected > customerRow.creditLimitSen) {
+          return c.json(
+            {
+              success: false,
+              error: "Credit limit exceeded",
+              code: "CREDIT_LIMIT_EXCEEDED",
+              details: {
+                limit: customerRow.creditLimitSen,
+                outstanding,
+                invoiceTotal: totalSen,
+                projected,
+              },
+            },
+            409,
+          );
+        }
+      }
+    }
+
     const now = new Date().toISOString();
     const invoiceDate = now.split("T")[0];
     const due = new Date();
@@ -930,6 +1005,16 @@ app.post("/:id/convert-to-invoice", async (c) => {
             SET status = 'DELIVERED', deliveredAt = ?
           WHERE cnId = ? AND status = 'LOADED'`,
       ).bind(now, id),
+      // CO-parity gap (2026-05-04): bump customers.outstandingSen by the
+      // invoice total, mirroring DO's DELIVERED → invoice flow
+      // (delivery-orders.ts:1857-1861). Without this, every CN-origin
+      // invoice was off-ledger from the customer's A/R balance.
+      c.var.DB.prepare(
+        `UPDATE customers
+            SET outstandingSen = COALESCE(outstandingSen, 0) + ?,
+                updated_at = ?
+          WHERE id = ?`,
+      ).bind(totalSen, now, cn.customerId),
     ];
 
     await c.var.DB.batch(statements);

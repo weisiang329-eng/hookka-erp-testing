@@ -553,7 +553,8 @@ app.post("/", async (c) => {
       );
     }
     const customerRow = await c.var.DB.prepare(
-      `SELECT id, name, contactName, phone FROM customers WHERE id = ?`,
+      `SELECT id, name, contactName, phone, creditLimitSen, outstandingSen
+         FROM customers WHERE id = ?`,
     )
       .bind(customerId)
       .first<{
@@ -561,6 +562,8 @@ app.post("/", async (c) => {
         name: string;
         contactName: string | null;
         phone: string | null;
+        creditLimitSen: number;
+        outstandingSen: number;
       }>();
     if (!customerRow) {
       return c.json({ success: false, error: "Customer not found" }, 400);
@@ -654,6 +657,72 @@ app.post("/", async (c) => {
       Math.round(items.reduce((s, i) => s + i.itemM3 * i.quantity, 0) * 100) /
       100;
     const totalItems = items.reduce((s, i) => s + i.quantity, 0);
+
+    // -------------------------------------------------------------------
+    // Credit-limit gate (Policy A — gate at DO POST):
+    //   Customer can place SO of any amount; pickup (DO dispatch) is
+    //   gated by credit limit. This is the only gate — DELIVERED
+    //   transition no longer rechecks (option B/C is intentionally
+    //   not implemented).
+    //
+    //   The "DO total" we project here matches the auto-DRAFT-invoice
+    //   total computed at the DELIVERED cascade (delivery-orders.ts
+    //   ~L1647-1685): DO line quantity × the SO line unit price for the
+    //   matching productCode. We sum across every SO referenced by
+    //   either body.salesOrderId OR the production_orders attached to
+    //   the DO's items (multi-SO DOs leave salesOrderId null but still
+    //   pull prices from each item's parent SO).
+    //
+    //   When creditLimitSen <= 0 the customer has no limit configured
+    //   (common during onboarding) — let the DO through unchecked.
+    // -------------------------------------------------------------------
+    let projectedDoTotalSen = 0;
+    if (customerRow.creditLimitSen > 0) {
+      const soIdsForPricing = new Set<string>();
+      if (salesOrderId) soIdsForPricing.add(salesOrderId);
+      for (const po of poRowsForItems) {
+        if (po.salesOrderId) soIdsForPricing.add(po.salesOrderId);
+      }
+      const priceByCode = new Map<string, number>();
+      if (soIdsForPricing.size > 0) {
+        const ph = [...soIdsForPricing].map(() => "?").join(",");
+        const priceRes = await c.var.DB.prepare(
+          `SELECT productCode, unitPriceSen
+             FROM sales_order_items
+            WHERE salesOrderId IN (${ph})`,
+        )
+          .bind(...soIdsForPricing)
+          .all<{ productCode: string | null; unitPriceSen: number }>();
+        for (const r of priceRes.results ?? []) {
+          if (r.productCode && !priceByCode.has(r.productCode)) {
+            priceByCode.set(r.productCode, r.unitPriceSen);
+          }
+        }
+      }
+      for (const it of items) {
+        const unit = priceByCode.get(it.productCode) ?? 0;
+        projectedDoTotalSen += unit * it.quantity;
+      }
+      const projectedOutstanding =
+        customerRow.outstandingSen + projectedDoTotalSen;
+      if (projectedOutstanding > customerRow.creditLimitSen) {
+        return c.json(
+          {
+            success: false,
+            error: "Credit limit exceeded",
+            code: "CREDIT_LIMIT_EXCEEDED",
+            details: {
+              limit: customerRow.creditLimitSen,
+              outstanding: customerRow.outstandingSen,
+              doTotal: projectedDoTotalSen,
+              projected: projectedOutstanding,
+            },
+          },
+          409,
+        );
+      }
+    }
+
     const now = new Date().toISOString();
     const id = genDoId();
     const doNo: string = body.doNo || (await genNextDoNo(c.var.DB));
@@ -1744,6 +1813,31 @@ app.put("/:id", async (c) => {
               ),
             );
           }
+
+          // -------------------------------------------------------------
+          // Outstanding-A/R bump on DELIVERED (Policy A — single anchor).
+          //
+          // outstandingSen follows DISPATCHED goods, not SO confirmation:
+          // pre-fix the field was only ever moved by Debit/Credit Notes and
+          // Payments, so it didn't reflect "what the customer owes for
+          // goods that have left our warehouse". Bumping here in the same
+          // batch as the auto-DRAFT-invoice keeps state consistent — a
+          // partial failure rolls back both, so we can't strand
+          // outstanding without an invoice (or vice versa).
+          //
+          // Inside `if (!existingInvoice)` so it's idempotent — a re-run
+          // of the DELIVERED transition (rare, e.g. retry after partial
+          // batch failure caught by db.batch) won't double-count.
+          //
+          // TODO: if a future flow takes a DO out of DELIVERED back to a
+          // pre-delivery status, mirror this as `outstandingSen -= ...`
+          // in the same batch. No such reverse path exists today.
+          // -------------------------------------------------------------
+          statements.push(
+            c.var.DB.prepare(
+              `UPDATE customers SET outstandingSen = outstandingSen + ? WHERE id = ?`,
+            ).bind(computedTotal, existing.customerId),
+          );
         }
       }
     }

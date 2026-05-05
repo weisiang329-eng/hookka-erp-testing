@@ -118,6 +118,13 @@ function isValidFabricTier(t: unknown): t is FabricTier {
 app.get("/", async (c) => {
   const baseModel = c.req.query("baseModel");
   const customerId = c.req.query("customerId");
+  // When set with a real customerId, the response also includes
+  // company-wide (customerId IS NULL) combos whose baseModel matches a
+  // product this customer is assigned (via customer_products). Lets the
+  // customer's combo panel surface "All customers" combos that
+  // ACTUALLY apply to them, instead of nothing or everything.
+  const includeApplicableMaster =
+    c.req.query("includeApplicableMaster") === "true";
 
   const where: string[] = [];
   const binds: unknown[] = [];
@@ -125,9 +132,42 @@ app.get("/", async (c) => {
     where.push("scr.baseModel = ?");
     binds.push(baseModel);
   }
+  let customerScopeSql = "";
   if (customerId) {
     if (customerId === "null" || customerId === "NULL") {
       where.push("scr.customerId IS NULL");
+    } else if (includeApplicableMaster) {
+      // OR clause: customer-specific rows OR company-wide rows whose
+      // baseModel is in the customer's assigned product baseModels.
+      // Compute the assigned baseModels first.
+      const cpRes = await c.var.DB
+        .prepare(
+          `SELECT DISTINCT p.code FROM customer_products cp
+             JOIN products p ON p.id = cp.productId
+            WHERE cp.customerId = ?`,
+        )
+        .bind(customerId)
+        .all<{ code: string }>();
+      const baseModels = new Set<string>();
+      for (const r of cpRes.results ?? []) {
+        // baseModel = first segment before the first '-' (matches the
+        // pattern used elsewhere: "5535-2A(LHF)" → "5535").
+        const bm = (r.code || "").split("-")[0];
+        if (bm) baseModels.add(bm);
+      }
+      if (baseModels.size === 0) {
+        // Customer has no assigned products → only their customer-scoped
+        // combos qualify; no master overlay.
+        where.push("scr.customerId = ?");
+        binds.push(customerId);
+      } else {
+        const bmList = Array.from(baseModels);
+        const placeholders = bmList.map(() => "?").join(",");
+        customerScopeSql =
+          `(scr.customerId = ? OR (scr.customerId IS NULL AND scr.baseModel IN (${placeholders})))`;
+        binds.push(customerId, ...bmList);
+        where.push(customerScopeSql);
+      }
     } else {
       where.push("scr.customerId = ?");
       binds.push(customerId);

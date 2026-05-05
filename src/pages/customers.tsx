@@ -2048,7 +2048,9 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   const reload = () => {
     setLoading(true);
     setErrorMsg("");
-    fetch(`/api/sofa-combos?customerId=${encodeURIComponent(customerId)}`)
+    fetch(
+      `/api/sofa-combos?customerId=${encodeURIComponent(customerId)}&includeApplicableMaster=true`,
+    )
       .then((r) => r.json() as Promise<{ success?: boolean; data?: CustSofaComboRule[] }>)
       .then((j) => {
         if (j?.success) setRules(j.data ?? []);

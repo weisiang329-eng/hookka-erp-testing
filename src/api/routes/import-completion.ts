@@ -8546,11 +8546,15 @@ app.post("/migrate-do-from-excel", async (c) => {
   }
   const deliveryDate = (body.deliveryDate ?? today).slice(0, 10);
 
-  // 1. Get every existing DO's do_no (idempotency check).
+  // 1. Get every existing DO's (doNo, id) so we can append line items to
+  //    an existing DO when the legacy Excel has multiple custPOs sharing
+  //    one DO number (multi-SO-per-DO is common in the old system).
   const existingDoRes = await db
-    .prepare(`SELECT doNo FROM delivery_orders`)
-    .all<{ doNo: string }>();
-  const existingDoNos = new Set((existingDoRes.results ?? []).map(r => r.doNo));
+    .prepare(`SELECT id, doNo FROM delivery_orders`)
+    .all<{ id: string; doNo: string }>();
+  const existingDoMap = new Map<string, string>(
+    (existingDoRes.results ?? []).map(r => [r.doNo, r.id]),
+  );
 
   // 2. Pre-fetch all SOs (with customerPOId) + production_orders (with PACKING JCs) in 2 passes.
   const soRes = await db
@@ -8580,7 +8584,6 @@ app.post("/migrate-do-from-excel", async (c) => {
   const plans: Plan[] = [];
   for (const e of entries) {
     const plan: Plan = { custPO: e.custPO, doNo: e.doNo, poIds: [], packingJcsToStamp: [] };
-    if (existingDoNos.has(e.doNo)) { plan.skipReason = "DO already exists"; plans.push(plan); continue; }
     const so = soByCustPo.get(e.custPO);
     if (!so) { plan.skipReason = "No matching SO"; plans.push(plan); continue; }
     plan.soId = so.id;
@@ -8620,7 +8623,6 @@ app.post("/migrate-do-from-excel", async (c) => {
   const skipped = plans.filter(p => p.skipReason);
   const summary = {
     entries: entries.length,
-    existingDoSkipped: skipped.filter(p => p.skipReason === "DO already exists").length,
     noSoMatch: skipped.filter(p => p.skipReason === "No matching SO").length,
     usableCount: usable.length,
     totalPackingJcsToStamp: usable.reduce((s, p) => s + p.packingJcsToStamp.length, 0),
@@ -8637,8 +8639,11 @@ app.post("/migrate-do-from-excel", async (c) => {
     });
   }
 
-  // Live execute. Per-plan: stamp PACKING JCs + INSERT delivery_orders + items.
-  let dosCreated = 0, packingStamped = 0;
+  // Live execute. Per-plan: stamp PACKING JCs + INSERT or APPEND delivery_orders + items.
+  // Multiple legacy custPOs commonly share one DO number (multi-SO-per-DO).
+  // First entry with a given doNo creates the header; subsequent entries with
+  // the same doNo append their items to the existing DO and update totals.
+  let dosCreated = 0, dosAppendedTo = 0, packingStamped = 0;
   const errors: Array<{ custPO: string; error: string }> = [];
   for (const plan of usable) {
     try {
@@ -8652,10 +8657,7 @@ app.post("/migrate-do-from-excel", async (c) => {
           ).bind(today, j.jcId),
         );
       }
-      // INSERT delivery_orders header
-      const doId = `do-${crypto.randomUUID().slice(0, 8)}`;
       const so = soByCustPo.get(plan.custPO)!;
-      // Compute total_m3 + total_items by joining PO+products
       const placeholders = plan.poIds.map(() => "?").join(",");
       const totalsRes = plan.poIds.length > 0
         ? await db.prepare(
@@ -8666,23 +8668,44 @@ app.post("/migrate-do-from-excel", async (c) => {
               WHERE po.id IN (${placeholders})`,
           ).bind(...plan.poIds).first<{ totalM3: number; totalItems: number }>()
         : { totalM3: 0, totalItems: 0 };
-      stmts.push(
-        db.prepare(
-          `INSERT INTO delivery_orders
-             (id, doNo, salesOrderId, companySO, companySOId, customerId,
-              customerPOId, customerName, customerState, hubId,
-              deliveryDate, totalM3, totalItems, status, dispatchedAt,
-              created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LOADED', ?, ?, ?)`,
-        ).bind(
-          doId, plan.doNo, plan.soId ?? null, so.companySO, so.companySOId,
-          so.customerId, plan.custPO, so.customerName, so.customerState ?? null,
-          so.hubId ?? null, deliveryDate, totalsRes?.totalM3 ?? 0,
-          totalsRes?.totalItems ?? 0,
-          new Date().toISOString(),
-          new Date().toISOString(), new Date().toISOString(),
-        ),
-      );
+
+      let doId = existingDoMap.get(plan.doNo);
+      const isAppend = !!doId;
+      if (!doId) {
+        doId = `do-${crypto.randomUUID().slice(0, 8)}`;
+        stmts.push(
+          db.prepare(
+            `INSERT INTO delivery_orders
+               (id, doNo, salesOrderId, companySO, companySOId, customerId,
+                customerPOId, customerName, customerState, hubId,
+                deliveryDate, totalM3, totalItems, status, dispatchedAt,
+                created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LOADED', ?, ?, ?)`,
+          ).bind(
+            doId, plan.doNo, plan.soId ?? null, so.companySO, so.companySOId,
+            so.customerId, plan.custPO, so.customerName, so.customerState ?? null,
+            so.hubId ?? null, deliveryDate, totalsRes?.totalM3 ?? 0,
+            totalsRes?.totalItems ?? 0,
+            new Date().toISOString(),
+            new Date().toISOString(), new Date().toISOString(),
+          ),
+        );
+        existingDoMap.set(plan.doNo, doId);
+      } else {
+        // Append: increment totals on the existing DO header.
+        stmts.push(
+          db.prepare(
+            `UPDATE delivery_orders
+                SET totalM3 = totalM3 + ?, totalItems = totalItems + ?, updated_at = ?
+              WHERE id = ?`,
+          ).bind(
+            totalsRes?.totalM3 ?? 0,
+            totalsRes?.totalItems ?? 0,
+            new Date().toISOString(),
+            doId,
+          ),
+        );
+      }
       // INSERT delivery_order_items — one per production_order
       if (plan.poIds.length > 0) {
         const poItemsRes = await db.prepare(
@@ -8729,7 +8752,7 @@ app.post("/migrate-do-from-excel", async (c) => {
       for (let i = 0; i < stmts.length; i += 50) {
         await db.batch(stmts.slice(i, i + 50));
       }
-      dosCreated++;
+      if (isAppend) dosAppendedTo++; else dosCreated++;
       packingStamped += plan.packingJcsToStamp.length;
     } catch (err) {
       errors.push({ custPO: plan.custPO, error: err instanceof Error ? err.message : String(err) });
@@ -8738,7 +8761,7 @@ app.post("/migrate-do-from-excel", async (c) => {
 
   return c.json({
     success: true, dryRun: false, summary,
-    dosCreated, packingStamped,
+    dosCreated, dosAppendedTo, packingStamped,
     errorCount: errors.length, errors: errors.slice(0, 10),
   });
 });

@@ -7854,14 +7854,14 @@ app.post("/historical-purchases-backfill", async (c) => {
       }
       const stockedItems = resolved.filter((r) => r.rmId !== null);
 
-      // Compute totals.
-      const stockedSubtotal = stockedItems.reduce(
-        (s, r) => s + r.qty * r.unitPriceSen,
-        0,
+      // Compute totals. Math.round defends against float drift when qty is
+      // a fraction (e.g. fabric: 261.6 * 890 = 232824.00000000003 in JS).
+      // amountSen / totalSen / subtotalSen are INTEGER NOT NULL.
+      const stockedSubtotal = Math.round(
+        stockedItems.reduce((s, r) => s + r.qty * r.unitPriceSen, 0),
       );
-      const piAmountSen = resolved.reduce(
-        (s, r) => s + r.qty * r.unitPriceSen,
-        0,
+      const piAmountSen = Math.round(
+        resolved.reduce((s, r) => s + r.qty * r.unitPriceSen, 0),
       );
 
       // ----- PO -----
@@ -7905,7 +7905,7 @@ app.post("/historical-purchases-backfill", async (c) => {
       for (let i = 0; i < stockedItems.length; i++) {
         const it = stockedItems[i];
         const poItemId = `poi-${crypto.randomUUID().slice(0, 8)}`;
-        const lineTotal = it.qty * it.unitPriceSen;
+        const lineTotal = Math.round(it.qty * it.unitPriceSen);
         statements.push(
           db
             .prepare(

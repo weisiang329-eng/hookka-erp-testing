@@ -6424,4 +6424,398 @@ app.post("/cancel-leaked-co-pos", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/apply-houzs-sofa-pricesheet?dryRun=true|false&scope=master|houzs|both
+//
+// One-shot: applies the Dorsettloft 4/01 price sheet (Houzs HOK code mapping)
+// to our 7 SOFA base models' compartment-level prices. Both PRICE_2 (Fabric
+// B&C) and PRICE_3 (Fabric A) tiers are written into seatHeightPrices with
+// per-entry tier markers, plus basePriceSen mirrors the smallest-height
+// PRICE_2 value. The 4/01 row is edited in place (matches Wei Siang's prior
+// preference on the Queen-bedframe correction); when no 4/01 row exists for
+// a (product,scope) pair, a new row is inserted.
+//
+// Mapping rules (all confirmed with Wei Siang 2026-05-05):
+//   • 5530/5535       → DSL 9028
+//   • 5531/5539       → DSL 9028 × 0.945, Math.round (Houzs %5.5 discount tier)
+//   • 5536            → DSL 9058 (with special-cases below)
+//   • 5537/5540       → DSL 8030
+// Variant translator (our → sheet):
+//   1A → 1R, 2A → 2R, 1S/2S/3S → "1/2/3 SEATER", CNR → CORNER, others same.
+// 3S prefers the "(2 + 1)" / "(2+1)" split version over "(no split)".
+// 32"/35" fallback when target DSL lacks the cell:
+//   use 8030 same-variant price minus (backrest_count × 50), where
+//   backrests = {1S/1A/1R/1NA:1, 2S/2A/2R/2NA:2, 3S:3, L:1, CORNER:1, STOOL:0}.
+// Special overrides:
+//   • 5530/5535/5536 CNR @ 32"/35" → borrow that DSL's CORNER@30 value
+//     (no fallback to 8030 — 8030 has no CORNER row).
+//   • 5537/5540 CNR @ all heights  → 5530 CORNER (9028) + RM 50, BC and A.
+//   • 5536 STOOL  @ all heights    → flat RM 550 (current — 9058 has no STOOL,
+//     9028 STOOL only at 22/26/28; user opted to keep current rather than
+//     fall back).
+//   • 5536 CSL                     → untouched (no source anywhere in sheet).
+// ---------------------------------------------------------------------------
+const SOFA_PRICESHEET = {
+  "8030": {
+    "1 SEATER":            { 24:[874,920], 25:[874,920], 26:[874,920], 27:[874,920], 28:[874,920], 30:[920,966], 32:[1150,1196], 35:[1150,1196] },
+    "2 SEATER (no split)": { 24:[1254,1320], 25:[1254,1320], 26:[1254,1320], 27:[1254,1320], 28:[1254,1320], 30:[1320,1386], 32:[1650,1716], 35:[1650,1716] },
+    "3 SEATER (no split)": { 24:[1672,1760], 25:[1672,1760], 26:[1672,1760], 27:[1672,1760], 28:[1672,1760], 30:[1760,1848] },
+    "3 SEATER (2+1)":      { 24:[1752,1840], 25:[1752,1840], 26:[1752,1840], 27:[1752,1840], 28:[1752,1840] },
+    "3 SEATER (2 + 1)":    { 32:[2280,2368], 35:[2280,2368] },
+    "STOOL":               { 24:[500,520], 25:[500,520], 26:[500,520], 27:[500,520], 28:[500,520], 30:[500,520], 32:[600,620], 35:[600,620] },
+    "1NA":                 { 24:[550,590], 25:[550,590], 26:[550,590], 27:[550,590], 28:[550,590], 30:[550,590], 32:[760,800], 35:[760,800] },
+    "1R":                  { 24:[700,750], 25:[700,750], 26:[700,750], 27:[700,750], 28:[700,750], 30:[700,750], 32:[910,960], 35:[910,960] },
+    "2NA":                 { 24:[1100,1180], 25:[1100,1180], 26:[1100,1180], 27:[1100,1180], 28:[1100,1180], 30:[1100,1180], 32:[1520,1600], 35:[1520,1600] },
+    "2R":                  { 24:[1250,1340], 25:[1250,1340], 26:[1250,1340], 27:[1250,1340], 28:[1250,1340], 30:[1250,1340], 32:[1670,1760], 35:[1670,1760] },
+    "L":                   { 24:[1000,1050], 25:[1000,1050], 26:[1000,1050], 27:[1000,1050], 28:[1000,1050], 30:[1050,1100], 32:[1060,1110], 35:[1060,1110] },
+  },
+  "9028": {
+    "1 SEATER":            { 22:[805,851], 24:[805,851], 26:[874,920], 28:[874,920], 30:[920,966], 32:[966,1012], 35:[1012,1058] },
+    "2 SEATER":            { 22:[1155,1221], 24:[1155,1221], 26:[1254,1320], 28:[1254,1320], 30:[1320,1386], 32:[1386,1452], 35:[1452,1518] },
+    "3 SEATER":            { 22:[1540,1628], 24:[1540,1628], 26:[1672,1760], 28:[1672,1760], 30:[1760,1848], 32:[1848,1936], 35:[1936,2024] },
+    "3 SEATER (2+1)":      { 22:[1771,1859], 24:[1620,1708], 26:[1752,1840], 28:[1752,1840], 30:[1840,1928], 32:[1928,2016], 35:[2016,2104] },
+    "L":                   { 22:[1050,1100], 24:[1050,1100], 26:[1100,1150], 28:[1100,1150], 30:[1160,1210], 32:[1200,1250] },
+    "1NA":                 { 22:[500,540], 24:[500,540], 26:[550,590], 28:[550,590], 30:[550,590], 32:[600,640] },
+    "1R":                  { 22:[650,700], 24:[650,700], 26:[700,750], 28:[700,740], 30:[700,750], 32:[750,800] },
+    "2NA":                 { 22:[1000,1080], 24:[1000,1080], 26:[1100,1180], 28:[1100,1180], 30:[1100,1180], 32:[1200,1280] },
+    "2R":                  { 22:[1150,1240], 24:[1150,1240], 26:[1250,1340], 28:[1250,1340], 30:[1250,1340], 32:[1350,1440] },
+    "CORNER":              { 22:[900,960], 24:[900,960], 26:[900,960], 28:[900,960], 30:[900,960] },
+    "STOOL":               { 22:[500,520], 26:[500,520], 28:[500,520] },
+  },
+  "9058": {
+    "1 SEATER":            { 24:[782,828], 26:[828,874], 28:[828,874], 30:[828,874] },
+    "2 SEATER":            { 24:[1122,1188], 26:[1188,1254], 28:[1188,1254], 30:[1188,1254] },
+    "3 SEATER":            { 24:[1496,1584], 26:[1584,1672], 28:[1584,1672], 30:[1584,1672] },
+    "3 SEATER (2+1)":      { 24:[1576,1664], 26:[1664,1752], 28:[1664,1752], 30:[1664,1752] },
+    "L":                   { 24:[1050,1100], 26:[1100,1150], 28:[1100,1150], 30:[1100,1150] },
+    "1NA":                 { 24:[550,590], 26:[550,590], 28:[550,590], 30:[550,590] },
+    "1R":                  { 24:[700,750], 26:[700,750], 28:[700,750], 30:[700,750] },
+    "2NA":                 { 24:[1100,1180], 26:[1100,1180], 28:[1100,1180], 30:[1100,1180] },
+    "2R":                  { 24:[1250,1340], 26:[1250,1340], 28:[1250,1340], 30:[1250,1340] },
+    "CORNER":              { 24:[900,960], 26:[900,960], 28:[900,960], 30:[900,960], 32:[900,960] },
+  },
+} as const;
+type SheetCell = readonly [number, number]; // [BC_RM, A_RM]
+type SheetTbl = Record<string, Record<string, Record<number, readonly [number, number]>>>;
+
+const MODEL_MAP_HOUZS: Record<string, { dsl: "9028" | "9058" | "8030"; mult: number }> = {
+  "5530": { dsl: "9028", mult: 1 },
+  "5531": { dsl: "9028", mult: 0.945 },
+  "5535": { dsl: "9028", mult: 1 },
+  "5536": { dsl: "9058", mult: 1 },
+  "5537": { dsl: "8030", mult: 1 },
+  "5539": { dsl: "9028", mult: 0.945 },
+  "5540": { dsl: "8030", mult: 1 },
+};
+const BACKREST_COUNT: Record<string, number> = {
+  "1S": 1, "1A": 1, "1R": 1, "1NA": 1,
+  "2S": 2, "2A": 2, "2R": 2, "2NA": 2,
+  "3S": 3,
+  "L": 1, "CORNER": 1, "CNR": 1,
+  "STOOL": 0,
+};
+
+function ourVariantToSheetVariant(sizeCode: string): string {
+  const v = sizeCode.trim().toUpperCase().replace(/\s*\(.*\)\s*/g, "");
+  const map: Record<string, string> = {
+    "1A": "1R", "2A": "2R",
+    "1S": "1 SEATER", "2S": "2 SEATER", "3S": "3 SEATER",
+    "CNR": "CORNER",
+  };
+  return map[v] ?? v;
+}
+function backrestKeyOf(sizeCode: string): string {
+  return sizeCode.trim().toUpperCase().replace(/\s*\(.*\)\s*/g, "");
+}
+function lookupSheetCell(
+  dsl: "8030" | "9028" | "9058",
+  sheetVariant: string,
+  height: number,
+): SheetCell | null {
+  // 3S → prefer (2+1) split forms first, then (no split) / plain
+  const candidates: string[] = [];
+  if (sheetVariant === "3 SEATER") {
+    candidates.push("3 SEATER (2 + 1)", "3 SEATER (2+1)", "3 SEATER (no split)", "3 SEATER");
+  } else if (sheetVariant === "2 SEATER") {
+    candidates.push("2 SEATER", "2 SEATER (no split)");
+  } else {
+    candidates.push(sheetVariant);
+  }
+  const tbl = SOFA_PRICESHEET as unknown as SheetTbl;
+  for (const cv of candidates) {
+    const t = tbl[dsl]?.[cv];
+    if (t && t[height]) return t[height];
+  }
+  return null;
+}
+function priceFor(
+  baseModel: string,
+  sizeCode: string,
+  height: number,
+): SheetCell | null {
+  // CSL: skip — no source anywhere.
+  if (sizeCode.startsWith("CSL")) return null;
+
+  const mm = MODEL_MAP_HOUZS[baseModel];
+  if (!mm) return null;
+  const sv = ourVariantToSheetVariant(sizeCode);
+  const bk = backrestKeyOf(sizeCode);
+
+  // 5536 STOOL: 9058 has no STOOL row, but Wei Siang opted to follow 9028's
+  // STOOL prices (incl. Fabric A). Override the DSL lookup to 9028 for this
+  // specific (model, variant) — every other rule (32/35 fallback to 8030,
+  // mult, etc.) applies normally.
+  let dslForLookup: "8030" | "9028" | "9058" = mm.dsl;
+  if (baseModel === "5536" && bk === "STOOL") dslForLookup = "9028";
+
+  // Special: 5537 / 5540 CNR → 5530 CORNER (9028) + RM 50 across all heights
+  if ((baseModel === "5537" || baseModel === "5540") && bk === "CNR") {
+    const corner = lookupSheetCell("9028", "CORNER", height)
+      ?? lookupSheetCell("9028", "CORNER", 30); // 32/35 borrow 30
+    if (!corner) return null;
+    return [corner[0] + 50, corner[1] + 50];
+  }
+
+  // Special: 5530/5535/5536 CNR @ 32/35 → borrow this DSL's CORNER@30
+  if (bk === "CNR" && (height === 32 || height === 35)) {
+    const corner30 = lookupSheetCell(mm.dsl, "CORNER", 30);
+    if (!corner30) return null;
+    return [
+      Math.round(corner30[0] * mm.mult),
+      Math.round(corner30[1] * mm.mult),
+    ];
+  }
+
+  // Standard sheet lookup
+  let cell = lookupSheetCell(dslForLookup, sv, height);
+  if (cell) {
+    return [Math.round(cell[0] * mm.mult), Math.round(cell[1] * mm.mult)];
+  }
+
+  // 32/35 fallback: 8030 - (backrests × 50)
+  if (height === 32 || height === 35) {
+    cell = lookupSheetCell("8030", sv, height);
+    if (cell) {
+      const backrests = BACKREST_COUNT[bk] ?? 0;
+      const deduction = backrests * 50;
+      return [
+        Math.round((cell[0] - deduction) * mm.mult),
+        Math.round((cell[1] - deduction) * mm.mult),
+      ];
+    }
+  }
+
+  return null;
+}
+
+const HEIGHTS_TO_FILL = [24, 28, 30, 32, 35];
+
+app.post("/apply-houzs-sofa-pricesheet", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const scope = (c.req.query("scope") || "both").toLowerCase(); // master | houzs | both
+  const effectiveFrom = "2026-04-01";
+
+  const targetBases = Object.keys(MODEL_MAP_HOUZS);
+  const placeholders = targetBases.map(() => "?").join(",");
+  const prodRes = await db
+    .prepare(
+      `SELECT id, code, baseModel, sizeCode, basePriceSen, seatHeightPrices
+         FROM products
+        WHERE category = 'SOFA' AND baseModel IN (${placeholders})`,
+    )
+    .bind(...targetBases)
+    .all<{
+      id: string; code: string; baseModel: string; sizeCode: string;
+      basePriceSen: number | null; seatHeightPrices: string | null;
+    }>();
+  const prods = prodRes.results ?? [];
+
+  // Compute new seatHeightPrices array per product. For each height, push two
+  // entries (PRICE_2 BC + PRICE_3 A). Drop the height entirely when priceFor
+  // returns null (per "missing → blank" rule). basePriceSen = smallest-height
+  // PRICE_2 value, or null when nothing fills.
+  type PerProductPlan = {
+    id: string;
+    code: string;
+    baseModel: string;
+    sizeCode: string;
+    skipped: boolean;
+    skipReason?: string;
+    newBasePriceSen: number | null;
+    newSeatHeightPrices: Array<{ height: string; priceSen: number; tier: "PRICE_2" | "PRICE_3" }>;
+    cellsFilled: number;
+    cellsBlank: number;
+  };
+  const plans: PerProductPlan[] = [];
+  for (const p of prods) {
+    if (p.sizeCode.startsWith("CSL")) {
+      plans.push({ id: p.id, code: p.code, baseModel: p.baseModel, sizeCode: p.sizeCode,
+        skipped: true, skipReason: "CSL — no sheet source",
+        newBasePriceSen: p.basePriceSen, newSeatHeightPrices: [], cellsFilled: 0, cellsBlank: 0 });
+      continue;
+    }
+    const newSeats: Array<{ height: string; priceSen: number; tier: "PRICE_2" | "PRICE_3" }> = [];
+    let cellsFilled = 0, cellsBlank = 0;
+    let smallestBC: number | null = null;
+    for (const h of HEIGHTS_TO_FILL) {
+      const cell = priceFor(p.baseModel, p.sizeCode, h);
+      if (!cell) { cellsBlank++; continue; }
+      cellsFilled++;
+      newSeats.push({ height: String(h), priceSen: cell[0] * 100, tier: "PRICE_2" });
+      newSeats.push({ height: String(h), priceSen: cell[1] * 100, tier: "PRICE_3" });
+      if (smallestBC === null) smallestBC = cell[0] * 100;
+    }
+    plans.push({ id: p.id, code: p.code, baseModel: p.baseModel, sizeCode: p.sizeCode,
+      skipped: false, newBasePriceSen: smallestBC, newSeatHeightPrices: newSeats,
+      cellsFilled, cellsBlank });
+  }
+
+  const summary = {
+    productsTotal: prods.length,
+    productsSkipped: plans.filter(p => p.skipped).length,
+    productsToWrite: plans.filter(p => !p.skipped).length,
+    productsFullyBlank: plans.filter(p => !p.skipped && p.cellsFilled === 0).map(p => p.code),
+    cellsFilled: plans.reduce((s, p) => s + p.cellsFilled, 0),
+    cellsBlank: plans.reduce((s, p) => s + p.cellsBlank, 0),
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, scope, effectiveFrom,
+      summary,
+      sample: plans.filter(p => !p.skipped).slice(0, 3).map(p => ({
+        code: p.code,
+        newBasePriceRM: p.newBasePriceSen ? p.newBasePriceSen / 100 : null,
+        newSeatHeightPrices: p.newSeatHeightPrices.map(s => ({
+          h: s.height, t: s.tier, RM: s.priceSen / 100,
+        })),
+      })),
+    });
+  }
+
+  // Live execute. For each product:
+  //   - if scope includes master: upsert product_prices @ 4/01
+  //   - if scope includes houzs:  upsert customer_product_prices @ 4/01
+  //     (lookup customer_products row by (customerId='cust-1', productId))
+  let masterRowsWritten = 0, houzsRowsWritten = 0, houzsSkipped = 0;
+  for (const plan of plans) {
+    if (plan.skipped) continue;
+    const seatJson = JSON.stringify(plan.newSeatHeightPrices);
+
+    if (scope === "master" || scope === "both") {
+      const existing = await db
+        .prepare(
+          `SELECT id FROM product_prices
+            WHERE productId = ? AND effectiveFrom = ?`,
+        )
+        .bind(plan.id, effectiveFrom)
+        .first<{ id: string }>();
+      if (existing) {
+        await db
+          .prepare(
+            `UPDATE product_prices
+                SET basePriceSen = ?, seatHeightPrices = ?
+              WHERE id = ?`,
+          )
+          .bind(plan.newBasePriceSen, seatJson, existing.id)
+          .run();
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO product_prices
+               (id, productId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, NULL)`,
+          )
+          .bind(
+            `pp-${crypto.randomUUID().slice(0, 12)}`,
+            plan.id, plan.newBasePriceSen, seatJson, effectiveFrom,
+            "Houzs price-sheet apply (Wei Siang 2026-05-05)",
+          )
+          .run();
+      }
+      masterRowsWritten++;
+    }
+
+    if (scope === "houzs" || scope === "both") {
+      const cp = await db
+        .prepare(
+          `SELECT id FROM customer_products
+            WHERE customerId = 'cust-1' AND productId = ?`,
+        )
+        .bind(plan.id)
+        .first<{ id: string }>();
+      if (!cp) { houzsSkipped++; continue; }
+      const existing = await db
+        .prepare(
+          `SELECT id FROM customer_product_prices
+            WHERE customerProductId = ? AND effectiveFrom = ?`,
+        )
+        .bind(cp.id, effectiveFrom)
+        .first<{ id: string }>();
+      if (existing) {
+        await db
+          .prepare(
+            `UPDATE customer_product_prices
+                SET basePriceSen = ?, seatHeightPrices = ?
+              WHERE id = ?`,
+          )
+          .bind(plan.newBasePriceSen, seatJson, existing.id)
+          .run();
+      } else {
+        await db
+          .prepare(
+            `INSERT INTO customer_product_prices
+               (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, NULL, ?, ?, ?, NULL)`,
+          )
+          .bind(
+            `cpp-${crypto.randomUUID().slice(0, 12)}`,
+            cp.id, plan.newBasePriceSen, seatJson, effectiveFrom,
+            "Houzs price-sheet apply (Wei Siang 2026-05-05)",
+          )
+          .run();
+      }
+      // Also keep the cp row's legacy basePriceSen mirror in sync — readers
+      // that ignore history fall back to it. Same value as the smallest-height
+      // PRICE_2.
+      await db
+        .prepare(
+          `UPDATE customer_products
+              SET basePriceSen = ?, seatHeightPrices = ?
+            WHERE id = ?`,
+        )
+        .bind(plan.newBasePriceSen, seatJson, cp.id)
+        .run();
+      houzsRowsWritten++;
+    }
+  }
+  // Mirror smallest-height PRICE_2 onto the products table itself for legacy
+  // readers (cost ledger derives from it via `products.basePriceSen` when
+  // history isn't queried).
+  if (scope === "master" || scope === "both") {
+    for (const plan of plans) {
+      if (plan.skipped) continue;
+      await db
+        .prepare(
+          `UPDATE products
+              SET basePriceSen = ?, seatHeightPrices = ?
+            WHERE id = ?`,
+        )
+        .bind(plan.newBasePriceSen, JSON.stringify(plan.newSeatHeightPrices), plan.id)
+        .run();
+    }
+  }
+
+  return c.json({
+    success: true, dryRun: false, scope, effectiveFrom,
+    summary, masterRowsWritten, houzsRowsWritten, houzsSkipped,
+  });
+});
+
 export default app;

@@ -298,8 +298,8 @@ export default function PlanningPage() {
   });
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
-  const [_recalcRunning, setRecalcRunning] = useState(false);
-  const [_recalcResult, setRecalcResult] = useState<string | null>(null);
+  const [recalcRunning, setRecalcRunning] = useState(false);
+  const [recalcResult, setRecalcResult] = useState<string | null>(null);
 
   const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
@@ -363,7 +363,7 @@ export default function PlanningPage() {
   // current lead-time config. Destructive for old orders, so we confirm first
   // and then invalidate the production cache so the tracker picks up new
   // dates immediately.
-  const _recalcAllDueDates = async () => {
+  const recalcAllDueDates = async () => {
     const ok = window.confirm(
       "Recalculate due dates on ALL existing production orders?\n\n" +
         "This will rewrite every job card's dueDate using the current lead " +
@@ -1113,9 +1113,12 @@ export default function PlanningPage() {
                   {ltSavedAt && (
                     <span className="text-xs text-[#6B5C32]">Saved {ltSavedAt}</span>
                   )}
+                  {recalcResult && (
+                    <span className="text-xs text-[#6B5C32]">{recalcResult}</span>
+                  )}
                   <Button
                     onClick={saveLeadTimes}
-                    disabled={ltSaving}
+                    disabled={ltSaving || recalcRunning}
                     className="bg-[#6B5C32] text-white hover:bg-[#5a4d29]"
                   >
                     {ltSaving ? (
@@ -1125,6 +1128,27 @@ export default function PlanningPage() {
                       </>
                     ) : (
                       "Save Lead Times"
+                    )}
+                  </Button>
+                  {/* Save only persists the new lead-time map for FUTURE SO
+                    * confirms; existing PO job_cards still hold dueDates
+                    * computed under the OLD lead times. Recalculate All
+                    * sweeps every active PO and rewrites its job_cards
+                    * via /api/production/leadtimes/recalc-all so the
+                    * Production grid actually reflects the new config. */}
+                  <Button
+                    variant="outline"
+                    onClick={recalcAllDueDates}
+                    disabled={ltSaving || recalcRunning}
+                    title="Rewrite every existing production order's job-card dueDates using the saved lead times"
+                  >
+                    {recalcRunning ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Recalculating...
+                      </>
+                    ) : (
+                      "Recalculate Existing POs"
                     )}
                   </Button>
                 </div>

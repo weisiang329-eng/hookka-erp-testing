@@ -2144,7 +2144,7 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
               <ChevronDown className="h-4 w-4 text-[#6B5C32]" />
             )}
             <Package className="h-5 w-5 text-[#6B5C32]" />
-            Sofa Combos — {customerName} ({rules.length})
+            Sofa Combos — {customerName} ({comboGroups.length})
           </button>
           <div className="flex items-center gap-2 flex-wrap">
             <Button
@@ -2250,7 +2250,30 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
                               title="View this combo's full effective-dated history"
                             >
                               <History className="h-3 w-3" />
-                              History ({g.rules.length})
+                              History (
+                                {
+                                  // Count unique (date, prices) tuples
+                                  // — matches what the dedup'd dialog
+                                  // will render. Same logic as the
+                                  // master sofa-combos page card count.
+                                  new Set(
+                                    g.rules.map(
+                                      (r) =>
+                                        `${r.effectiveFrom}|${JSON.stringify(
+                                          Object.keys(r.pricesByHeight)
+                                            .sort()
+                                            .reduce<Record<string, number>>(
+                                              (acc, k) => {
+                                                acc[k] = r.pricesByHeight[k];
+                                                return acc;
+                                              },
+                                              {},
+                                            ),
+                                        )}`,
+                                    ),
+                                  ).size
+                                }
+                                )
                             </button>
                             <button
                               onClick={() => handleDelete(r)}

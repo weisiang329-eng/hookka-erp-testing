@@ -1884,6 +1884,7 @@ app.post("/derive-historical-price-baselines", async (c) => {
       `SELECT cp.id           AS cpId,
               cp.productId    AS productId,
               cp.customerId   AS customerId,
+              cp.basePriceSen AS cpLegacyBase,
               p.code          AS productCode,
               p.category      AS category,
               MIN(cph.effectiveFrom) AS earliestHistory
@@ -1891,12 +1892,13 @@ app.post("/derive-historical-price-baselines", async (c) => {
          JOIN products p ON p.id = cp.productId
          LEFT JOIN customer_product_prices cph
                 ON cph.customerProductId = cp.id
-        GROUP BY cp.id, cp.productId, cp.customerId, p.code, p.category`,
+        GROUP BY cp.id, cp.productId, cp.customerId, cp.basePriceSen, p.code, p.category`,
     )
     .all<{
       cpId: string;
       productId: string;
       customerId: string;
+      cpLegacyBase: number | null;
       productCode: string;
       category: string;
       earliestHistory: string | null;
@@ -1939,13 +1941,31 @@ app.post("/derive-historical-price-baselines", async (c) => {
       .bind(cp.productCode, cp.customerId, cutoff)
       .first<{ lineId: string; basePriceSen: number; soDate: string }>();
 
-    if (!oldestLine) {
+    // Fallback chain when no historical SO line exists for this
+    // (productCode, customerId): use the cp.basePriceSen legacy column
+    // value. This preserves a sensible 2020-01-01 row even for cps that
+    // were assignment-only or seeded via "Copy from Master" without any
+    // SO history under that customer. Without this fallback the customer-
+    // side history dialog stays empty for all such cps.
+    let baselinePriceSen: number | null = oldestLine?.basePriceSen ?? null;
+    let sourceLineId = oldestLine?.lineId ?? "(legacy cp.basePriceSen)";
+    let sourceDate = oldestLine?.soDate ?? "(legacy)";
+    if (
+      baselinePriceSen == null &&
+      typeof cp.cpLegacyBase === "number" &&
+      cp.cpLegacyBase > 0
+    ) {
+      baselinePriceSen = cp.cpLegacyBase;
+      sourceLineId = "(legacy cp.basePriceSen)";
+      sourceDate = "(legacy)";
+    }
+    if (baselinePriceSen == null) {
       skipped.push({
         scope: "customer",
         key: `${cp.productCode}|${cp.customerId}`,
         reason: cp.earliestHistory
-          ? `no SO line predates ${cutoff}`
-          : "no historical SO line found",
+          ? `no SO line predates ${cutoff} and no legacy basePriceSen`
+          : "no historical SO line and no legacy basePriceSen",
       });
       continue;
     }
@@ -1957,9 +1977,9 @@ app.post("/derive-historical-price-baselines", async (c) => {
       productCode: cp.productCode,
       customerId: cp.customerId,
       baselineDate: PRICE_BASELINE_DATE,
-      basePriceSen: oldestLine.basePriceSen,
-      sourceSoLineId: oldestLine.lineId,
-      sourceSoCompanySODate: oldestLine.soDate,
+      basePriceSen: baselinePriceSen,
+      sourceSoLineId: sourceLineId,
+      sourceSoCompanySODate: sourceDate,
     });
   }
 
@@ -1972,16 +1992,18 @@ app.post("/derive-historical-price-baselines", async (c) => {
       `SELECT p.id          AS productId,
               p.code        AS productCode,
               p.category    AS category,
+              p.basePriceSen AS legacyBase,
               MIN(pp.effectiveFrom) AS earliestHistory
          FROM products p
          LEFT JOIN product_prices pp ON pp.productId = p.id
         WHERE p.category IN ('BEDFRAME','ACCESSORY')
-        GROUP BY p.id, p.code, p.category`,
+        GROUP BY p.id, p.code, p.category, p.basePriceSen`,
     )
     .all<{
       productId: string;
       productCode: string;
       category: string;
+      legacyBase: number | null;
       earliestHistory: string | null;
     }>();
   const prodRows = prodRowsRes.results ?? [];
@@ -2005,7 +2027,23 @@ app.post("/derive-historical-price-baselines", async (c) => {
       )
       .bind(p.productCode, cutoff)
       .first<{ lineId: string; basePriceSen: number; soDate: string }>();
-    if (!oldestLine) continue;
+
+    // Same fallback chain as customer scope: SO line first, legacy
+    // products.basePriceSen second.
+    let basePriceSen: number | null = oldestLine?.basePriceSen ?? null;
+    let sourceLineId = oldestLine?.lineId ?? "(legacy products.basePriceSen)";
+    let sourceDate = oldestLine?.soDate ?? "(legacy)";
+    if (
+      basePriceSen == null &&
+      typeof p.legacyBase === "number" &&
+      p.legacyBase > 0
+    ) {
+      basePriceSen = p.legacyBase;
+      sourceLineId = "(legacy products.basePriceSen)";
+      sourceDate = "(legacy)";
+    }
+    if (basePriceSen == null) continue;
+
     candidates.push({
       scope: "master",
       cpId: null,
@@ -2013,9 +2051,9 @@ app.post("/derive-historical-price-baselines", async (c) => {
       productCode: p.productCode,
       customerId: null,
       baselineDate: PRICE_BASELINE_DATE,
-      basePriceSen: oldestLine.basePriceSen,
-      sourceSoLineId: oldestLine.lineId,
-      sourceSoCompanySODate: oldestLine.soDate,
+      basePriceSen,
+      sourceSoLineId: sourceLineId,
+      sourceSoCompanySODate: sourceDate,
     });
   }
 

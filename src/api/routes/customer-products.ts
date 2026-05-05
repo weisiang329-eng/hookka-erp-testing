@@ -804,16 +804,27 @@ app.post("/bulk-assign", async (c) => {
 // POST /api/customer-products/copy-from-master
 //   body: { customerId, productIds?: string[], effectiveFrom?: string }
 //
-// Phase-2 snapshot flow. For every product in productIds (defaults to "all
-// unassigned products for this customer"):
-//   1. Insert a customer_products assignment row (idempotent on UNIQUE).
-//   2. Append a customer_product_prices history row stamped with today's
-//      master price (resolved through resolveProductPriceAsOf so effective-
-//      dated master rows are honoured).
+// Two-phase sync:
+//   1. Assignment — ensure every master product (or every productId in
+//      `productIds`) has a customer_products row for this customer.
+//      Idempotent: existing assignments are kept.
+//   2. History mirror — for every cp row of this customer, copy EVERY
+//      master product_prices row into customer_product_prices using the
+//      same effectiveFrom date, so the customer's history dialog
+//      reflects the full master timeline (2020-01-01 baseline + every
+//      scheduled change).
+//      Idempotent: skips rows that already exist (matching cpId +
+//      effectiveFrom + basePriceSen). The frontend "Copy from Master
+//      Listing" button always runs this path so re-clicking it on a
+//      customer with no new SKUs still backfills missing historical
+//      rows — fixing the previous behaviour where customers ended up
+//      with a single "Snapshot from Master" row instead of the full
+//      master history.
 //
-// Result: the customer's price list is decoupled from future master
-// changes — pure snapshot semantics, mirroring the Products page's bulk
-// save flow on the customer side.
+// Result: the customer's price list MIRRORS the master's full history.
+// Subsequent customer-side scheduled changes still take effect via
+// customer_product_prices INSERT — the mirror runs only for rows that
+// don't already exist on the customer side.
 // ---------------------------------------------------------------------------
 app.post("/copy-from-master", async (c) => {
   const denied = await requirePermission(c, "customer-products", "create");
@@ -835,9 +846,9 @@ app.post("/copy-from-master", async (c) => {
       );
     }
 
-    // Resolve the candidate set. When productIds is missing we snapshot
-    // every product the customer doesn't already have — that's the common
-    // "I just opened a new account" case.
+    // Resolve the candidate set. When productIds is missing we consider
+    // every product (assigned + unassigned) so the history-mirror step
+    // can backfill rows for cps that already exist.
     let productIds: string[];
     if (Array.isArray(body.productIds) && body.productIds.length > 0) {
       productIds = body.productIds.map(String);
@@ -845,26 +856,17 @@ app.post("/copy-from-master", async (c) => {
       const allRes = await c.var.DB.prepare(
         "SELECT id FROM products",
       ).all<{ id: string }>();
-      const allIds = (allRes.results ?? []).map((r) => r.id);
-      const assignedRes = await c.var.DB.prepare(
-        "SELECT productId FROM customer_products WHERE customerId = ?",
-      )
-        .bind(customerId)
-        .all<{ productId: string }>();
-      const assigned = new Set(
-        (assignedRes.results ?? []).map((r) => r.productId),
-      );
-      productIds = allIds.filter((pid) => !assigned.has(pid));
+      productIds = (allRes.results ?? []).map((r) => r.id);
     }
 
     if (productIds.length === 0) {
       return c.json({
         success: true,
-        data: { assigned: 0, snapshotted: 0 },
+        data: { assigned: 0, historyRowsAdded: 0 },
       });
     }
 
-    // Step 1: assign the customer_products rows that don't exist yet.
+    // Step 1: ensure assignment rows exist for every productId.
     const placeholders = productIds.map(() => "?").join(",");
     const existingRes = await c.var.DB.prepare(
       `SELECT id, productId FROM customer_products
@@ -891,7 +893,7 @@ app.post("/copy-from-master", async (c) => {
       await c.var.DB.batch(insertStatements);
       // Some INSERTs may have hit the OR IGNORE branch (race vs concurrent
       // assigns). Re-read the cp ids for everything in toInsert so the
-      // snapshot loop below uses the persisted ids, not the locally
+      // mirror loop below uses the persisted ids, not the locally
       // generated ones that never landed.
       const reread = await c.var.DB.prepare(
         `SELECT id, productId FROM customer_products
@@ -905,53 +907,81 @@ app.post("/copy-from-master", async (c) => {
       }
     }
 
-    // Step 2: snapshot today's master price into customer_product_prices.
-    // Resolves through the same code path the Products page reads from so
-    // an effective-dated master change that's already live (rare but valid)
-    // gets captured instead of the stale products row.
-    const snapshotStatements: D1PreparedStatement[] = [];
-    let snapshotted = 0;
+    // Step 2: mirror EVERY master product_prices row into
+    // customer_product_prices for every cp. Idempotent — skip rows that
+    // already exist with the same effectiveFrom + basePriceSen.
+    let historyRowsAdded = 0;
+    const mirrorStmts: D1PreparedStatement[] = [];
     for (const pid of productIds) {
       const cpId = cpIdByProduct.get(pid);
       if (!cpId) continue;
-      const master = await resolveProductPriceAsOf(
-        c.var.DB,
-        pid,
-        effectiveFrom,
-      );
-      if (!master) continue;
-      const seatJson =
-        master.seatHeightPrices && master.seatHeightPrices.length > 0
-          ? JSON.stringify(master.seatHeightPrices)
-          : null;
-      snapshotStatements.push(
-        c.var.DB.prepare(
-          `INSERT INTO customer_product_prices
-             (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
-              effectiveFrom, notes, createdBy)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(
-          genPriceRowId(),
-          cpId,
-          master.basePriceSen,
-          master.price1Sen,
-          seatJson,
-          effectiveFrom,
-          `Snapshot from Master ${effectiveFrom}`,
-          null,
+      // Pull ALL master history rows for this product.
+      const masterRowsRes = await c.var.DB.prepare(
+        `SELECT basePriceSen, price1Sen, seatHeightPrices, effectiveFrom, notes
+           FROM product_prices
+          WHERE productId = ?`,
+      )
+        .bind(pid)
+        .all<{
+          basePriceSen: number | null;
+          price1Sen: number | null;
+          seatHeightPrices: string | null;
+          effectiveFrom: string;
+          notes: string | null;
+        }>();
+      const masterRows = masterRowsRes.results ?? [];
+      if (masterRows.length === 0) continue;
+
+      // Pull existing cp rows so we can dedup.
+      const existingCpRowsRes = await c.var.DB.prepare(
+        `SELECT effectiveFrom, basePriceSen
+           FROM customer_product_prices
+          WHERE customerProductId = ?`,
+      )
+        .bind(cpId)
+        .all<{ effectiveFrom: string; basePriceSen: number | null }>();
+      const existingKeys = new Set(
+        (existingCpRowsRes.results ?? []).map(
+          (r) => `${r.effectiveFrom}|${r.basePriceSen ?? "null"}`,
         ),
       );
-      snapshotted += 1;
+
+      for (const mr of masterRows) {
+        const key = `${mr.effectiveFrom}|${mr.basePriceSen ?? "null"}`;
+        if (existingKeys.has(key)) continue;
+        mirrorStmts.push(
+          c.var.DB.prepare(
+            `INSERT INTO customer_product_prices
+               (id, customerProductId, basePriceSen, price1Sen,
+                seatHeightPrices, effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            genPriceRowId(),
+            cpId,
+            mr.basePriceSen,
+            mr.price1Sen,
+            mr.seatHeightPrices,
+            mr.effectiveFrom,
+            mr.notes
+              ? `Mirrored from Master: ${mr.notes}`
+              : `Mirrored from Master ${mr.effectiveFrom}`,
+            null,
+          ),
+        );
+        existingKeys.add(key);
+        historyRowsAdded += 1;
+      }
     }
-    if (snapshotStatements.length > 0) {
-      await c.var.DB.batch(snapshotStatements);
+    // Batch in chunks of 50 to stay under the D1 statement-per-batch cap.
+    for (let i = 0; i < mirrorStmts.length; i += 50) {
+      await c.var.DB.batch(mirrorStmts.slice(i, i + 50));
     }
 
     return c.json({
       success: true,
       data: {
         assigned: toInsert.length,
-        snapshotted,
+        historyRowsAdded,
         skippedDuplicates: existingRes.results?.length ?? 0,
       },
     });

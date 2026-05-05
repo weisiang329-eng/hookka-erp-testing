@@ -397,21 +397,19 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     }
   };
 
-  // Phase-2 snapshot: assign every unassigned master SKU to this customer
-  // and stamp today's master price into customer_product_prices in one
-  // transactional server call. Pure snapshot — no inheritance after this
-  // unless the user re-runs the action.
+  // Two-phase sync: assign every unassigned master SKU AND mirror every
+  // master product_prices history row into customer_product_prices.
+  // Idempotent — re-clicking on a customer with all SKUs already
+  // assigned still backfills missing historical rows, so the customer's
+  // history dialog reflects the master timeline (baseline + scheduled
+  // changes) instead of just a single snapshot.
   const handleCopyFromMaster = async () => {
     const unassignedCount = allProducts.filter((p) => !assignedIds.has(p.id)).length;
-    if (unassignedCount === 0) {
-      alert("All master SKUs are already assigned to this customer.");
-      return;
-    }
-    if (
-      !confirm(
-        `Copy current Master prices for ${unassignedCount} unassigned product${unassignedCount === 1 ? "" : "s"} to ${customerName}? This will snapshot today's master price for each product.`,
-      )
-    ) {
+    const confirmMsg =
+      unassignedCount === 0
+        ? `All master SKUs already assigned to ${customerName}. Re-syncing the price HISTORY from Master will add any missing rows (idempotent — won't duplicate). Continue?`
+        : `Copy ${unassignedCount} unassigned SKU${unassignedCount === 1 ? "" : "s"} to ${customerName} AND mirror the full master price history (every effective-dated row). Continue?`;
+    if (!confirm(confirmMsg)) {
       return;
     }
     setCopyingFromMaster(true);
@@ -426,6 +424,15 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
         alert((j as { error?: string }).error || `Copy from master failed (HTTP ${res.status})`);
         return;
       }
+      const j = (await res.json().catch(() => ({}))) as {
+        success?: boolean;
+        data?: { assigned?: number; historyRowsAdded?: number };
+      };
+      const a = j.data?.assigned ?? 0;
+      const h = j.data?.historyRowsAdded ?? 0;
+      alert(
+        `Sync done — assigned ${a} new SKU${a === 1 ? "" : "s"}, mirrored ${h} master price-history row${h === 1 ? "" : "s"}.`,
+      );
       invalidateCache(`/api/customer-products?customerId=${customerId}`);
       refresh();
     } finally {

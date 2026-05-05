@@ -1076,34 +1076,43 @@ function CreateSalesOrderPage() {
     affectedLineUids: string[];
   };
   const todayDateStr = new Date().toISOString().slice(0, 10);
-  const matchesGroup = (
+  // Greedy subset matcher (Wei Siang 2026-05-05).
+  //
+  // Rule semantic:
+  //   - Flat shape (string[]): each element is a required size.
+  //   - OR-group shape (string[][]): each group is "pick one option".
+  //
+  // Returns the subset of input lines that satisfies the rule's pieces
+  // (one line per rule slot, greedy first-match), or null when at least
+  // one rule slot can't be filled. Lines NOT in the returned subset are
+  // "extras" and stay at full master price — no combo discount bleeds
+  // into them. Replaces the older boolean matchesGroup which let extras
+  // ride the combo (Wei Siang's 2A+L+1NA case → was wrongly snowballing
+  // the 1NA into the 2A+L combo's redistribution).
+  const findComboSubset = <L extends { sizeCode: string }>(
     groups: string[] | string[][],
-    sizes: string[],
-  ): boolean => {
-    if (!Array.isArray(groups) || groups.length === 0) return false;
+    lines: L[],
+  ): L[] | null => {
+    if (!Array.isArray(groups) || groups.length === 0) return null;
     const isGrouped = Array.isArray(groups[0]);
+    const remaining = lines.slice();
+    const matched: L[] = [];
     if (!isGrouped) {
-      // Flat legacy shape: exact set match (sorted).
-      const sortedRule = (groups as string[]).slice().sort();
-      const sortedLine = sizes.slice().sort();
-      if (sortedRule.length !== sortedLine.length) return false;
-      return sortedRule.every((v, i) => v === sortedLine[i]);
+      for (const ruleSize of (groups as string[])) {
+        const idx = remaining.findIndex((l) => l.sizeCode === ruleSize);
+        if (idx === -1) return null;
+        matched.push(remaining[idx]);
+        remaining.splice(idx, 1);
+      }
+      return matched;
     }
-    // OR-group shape (strict, Wei Siang 2026-05-05):
-    //   - Every group must have at least one matching line size.
-    //   - Every line size must appear in some group (no extras).
-    //   - Total line count must equal sum of OR options across groups, so
-    //     a line set with an extra piece (e.g. 2A+L+1NA against a 2A+L
-    //     combo) doesn't snowball the 1NA into the combo discount.
-    // Pre-strict, OR-group was lenient: only required every group to have
-    // at least one match, which let extras silently inherit the combo
-    // discount via the redistribute pass. That matched ~5 unintended
-    // groups across active SOs and overcharged customers.
-    const flat = (groups as string[][]).flat();
-    const sortedFlat = flat.slice().sort();
-    const sortedLine = sizes.slice().sort();
-    if (sortedFlat.length !== sortedLine.length) return false;
-    return sortedFlat.every((v, i) => v === sortedLine[i]);
+    for (const groupOpts of (groups as string[][])) {
+      const idx = remaining.findIndex((l) => groupOpts.includes(l.sizeCode));
+      if (idx === -1) return null;
+      matched.push(remaining[idx]);
+      remaining.splice(idx, 1);
+    }
+    return matched;
   };
   const lineFabricTier = (line: LineItem): "PRICE_1" | "PRICE_2" | "PRICE_3" | null => {
     // Combo detection only fires for sofa lines, so resolve via the
@@ -1139,14 +1148,17 @@ function CreateSalesOrderPage() {
       const heights = new Set(group.map((g) => g.seatHeight));
       if (heights.size > 1) continue;
       const seatHeight = [...heights][0];
-      const sizes = group.map((g) => g.sizeCode).filter(Boolean);
-      // Candidate rules — filter by baseModel + effective_from + componentSizes match.
-      const candidates = sofaCombos.filter(
-        (r) =>
-          r.baseModel === baseModel &&
-          r.effectiveFrom <= todayDateStr &&
-          matchesGroup(r.componentSizes, sizes),
-      );
+      // Candidate rules — for each rule, attempt to find a subset of the
+      // group that satisfies the rule's componentSizes. Rules whose pieces
+      // can't be fully filled by this group are dropped. Extras (lines
+      // outside the matched subset) keep their per-piece master price.
+      const candidates = sofaCombos
+        .filter(
+          (r) =>
+            r.baseModel === baseModel && r.effectiveFrom <= todayDateStr,
+        )
+        .map((r) => ({ r, subset: findComboSubset(r.componentSizes, group) }))
+        .filter((x): x is { r: SofaComboRule; subset: LineItem[] } => x.subset !== null);
       if (candidates.length === 0) continue;
       // Priority: (customer + tier) > (customer + ANY) > (company + tier) > (company + ANY).
       const priorityOf = (r: SofaComboRule): number => {
@@ -1159,14 +1171,15 @@ function CreateSalesOrderPage() {
         return 0;
       };
       const best = candidates
-        .map((r) => ({ r, p: priorityOf(r) }))
+        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
         .filter((x) => x.p > 0)
         .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
       if (!best) continue;
       const comboTotal = best.r.pricesByHeight[seatHeight];
       if (typeof comboTotal !== "number" || comboTotal <= 0) continue;
-      const groupSum = group.reduce((s, g) => s + getLineTotal(g), 0);
-      const discount = groupSum - comboTotal;
+      // Subset sum (not full group). Extras stay at master price entirely.
+      const subsetSum = best.subset.reduce((s, g) => s + getLineTotal(g), 0);
+      const discount = subsetSum - comboTotal;
       if (discount <= 0) continue;
       out.push({
         baseModel,
@@ -1175,8 +1188,8 @@ function CreateSalesOrderPage() {
         customerSpecific: best.r.customerId === customerId && customerId !== "",
         discountSen: discount,
         comboTotalSen: comboTotal,
-        components: sizes,
-        affectedLineUids: group.map((g) => g._uid),
+        components: best.subset.map((l) => l.sizeCode),
+        affectedLineUids: best.subset.map((l) => l._uid),
       });
     }
     return out;

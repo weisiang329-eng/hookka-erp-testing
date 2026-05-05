@@ -7129,23 +7129,35 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     componentSizes: (() => { try { return JSON.parse(r.componentSizes); } catch { return []; } })(),
     pricesByHeight: (() => { try { return JSON.parse(r.pricesByHeight); } catch { return {}; } })(),
   }));
-  function matchesGroup(groups: unknown, sizes: string[]): boolean {
-    if (!Array.isArray(groups) || groups.length === 0) return false;
+  // Greedy subset matcher — mirrors findComboSubset in create.tsx.
+  // Returns the subset of the input plans whose compartment variants fill
+  // the rule's pieces (one plan per rule slot, greedy first-match), or
+  // null when the rule can't be fully satisfied. Extras outside the
+  // returned subset stay at full master price (no discount bleed).
+  function findComboSubset(
+    groups: unknown,
+    items: Array<{ variant: string; plan: ChangePlan }>,
+  ): ChangePlan[] | null {
+    if (!Array.isArray(groups) || groups.length === 0) return null;
     const isGrouped = Array.isArray(groups[0]);
+    const remaining = items.slice();
+    const matched: ChangePlan[] = [];
     if (!isGrouped) {
-      const sortedRule = (groups as string[]).slice().sort();
-      const sortedLine = sizes.slice().sort();
-      if (sortedRule.length !== sortedLine.length) return false;
-      return sortedRule.every((v, i) => v === sortedLine[i]);
+      for (const ruleSize of (groups as string[])) {
+        const idx = remaining.findIndex((it) => it.variant === ruleSize);
+        if (idx === -1) return null;
+        matched.push(remaining[idx].plan);
+        remaining.splice(idx, 1);
+      }
+      return matched;
     }
-    // Strict: line size set must equal flattened group options exactly
-    // (multiset equality). Mirrors the new create.tsx logic — extras like
-    // a 1NA on a 2A+L combo line should NOT snowball into the discount.
-    const flat = (groups as string[][]).flat();
-    const sortedFlat = flat.slice().sort();
-    const sortedLine = sizes.slice().sort();
-    if (sortedFlat.length !== sortedLine.length) return false;
-    return sortedFlat.every((v, i) => v === sortedLine[i]);
+    for (const groupOpts of (groups as string[][])) {
+      const idx = remaining.findIndex((it) => groupOpts.includes(it.variant));
+      if (idx === -1) return null;
+      matched.push(remaining[idx].plan);
+      remaining.splice(idx, 1);
+    }
+    return matched;
   }
   // Index plans by SO for grouping. Sofa-only.
   const plansBySo = new Map<string, ChangePlan[]>();
@@ -7180,22 +7192,26 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       if (heights.size > 1) continue;
       const seatHeight = [...heights][0]!;
       const groupTier = [...tiers][0]!;
-      // Compartment variants — strip the productCode prefix.
-      // For combo matching we need the variant token (e.g. "1A(LHF)") not
-      // the seatHeight. The line item.productCode is "<base>-<variant>";
-      // pull the variant from after the first dash.
-      const variants = group.map((g) => {
+      // Compartment variants — strip the productCode prefix to get the
+      // (1A(LHF), 2NA, etc.) token used by combo rule matching. Pair
+      // each variant with its plan so findComboSubset can return the
+      // matched plans directly.
+      const groupItems = group.map((g) => {
         const code = g.productCode || "";
         const dash = code.indexOf("-");
-        return dash >= 0 ? code.slice(dash + 1) : "";
-      }).filter(Boolean);
-      // Find best matching rule, priority customer+tier > customer+ANY >
-      // master+tier > master+ANY (mirrors create.tsx).
-      const candidates = comboRules.filter((r) =>
-        r.baseModel === baseModel
-          && (r.effectiveFrom <= (so.companySODate || so.createdAt || today))
-          && matchesGroup(r.componentSizes, variants)
-      );
+        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
+      }).filter((x) => x.variant);
+      // For each candidate rule, attempt to find a satisfying SUBSET of
+      // the group. Rules whose pieces can't be filled get dropped.
+      // Priority customer+tier > customer+ANY > master+tier > master+ANY
+      // (mirrors create.tsx).
+      const candidates = comboRules
+        .filter((r) =>
+          r.baseModel === baseModel
+            && (r.effectiveFrom <= (so.companySODate || so.createdAt || today)),
+        )
+        .map((r) => ({ r, subset: findComboSubset(r.componentSizes, groupItems) }))
+        .filter((x): x is { r: ComboRule; subset: ChangePlan[] } => x.subset !== null);
       if (candidates.length === 0) continue;
       const priorityOf = (r: ComboRule): number => {
         const isCustomer = r.customerId === so.customerId && so.customerId;
@@ -7207,7 +7223,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
         return 0;
       };
       const best = candidates
-        .map((r) => ({ r, p: priorityOf(r) }))
+        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
         .filter((x) => x.p > 0)
         .sort((a, b) =>
           b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1),
@@ -7215,15 +7231,15 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       if (!best) continue;
       const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
       if (comboTotalRM <= 0) continue;
-      const groupSumRM = group.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
-      if (groupSumRM <= comboTotalRM) continue; // no discount applicable
-      const ratio = comboTotalRM / groupSumRM;
-      // Distribute proportionally — adjust each line's basePriceSen so the
-      // group sum lands on comboTotal (with rounding residual rebalanced
-      // into the highest-priced line, matching create.tsx exactly).
+      // Subset sum only — extras (non-subset plans in the group) keep
+      // their full master price, no discount bleed.
+      const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+      if (subsetSumRM <= comboTotalRM) continue;
+      const ratio = comboTotalRM / subsetSumRM;
+      // Distribute proportionally across the SUBSET only.
       let runningGroupSumSen = 0;
       const adjusted: ChangePlan[] = [];
-      for (const p of group) {
+      for (const p of best.subset) {
         const it = items.find(i => i.id === p.itemId)!;
         const oldLineSen = (p.newLineRM ?? 0) * 100;
         const adjustedLineSen = Math.floor(oldLineSen * ratio);

@@ -2042,7 +2042,31 @@ function CustomerSofaCombosPanel({ customerId, customerName }: { customerId: str
   const comboGroups = useMemo(() => custGroupByCombo(rules), [rules]);
   const historyRules = useMemo<CustSofaComboRule[] | null>(() => {
     if (!historyKey) return null;
-    return rules.filter((r) => custComboGroupKey(r) === historyKey);
+    const matching = rules.filter((r) => custComboGroupKey(r) === historyKey);
+    // Dedup by (effectiveFrom + pricesJson). When the API returns
+    // includeApplicableMaster=true the customer's own row + the master
+    // row for the same (combo, tier) at the same date+price both land
+    // in the timeline; collapse them. Prefer the customer-scoped row
+    // (real ownership) over the master fallback when both exist.
+    const sortedKeys = (p: Record<string, number>) =>
+      JSON.stringify(
+        Object.keys(p).sort().reduce<Record<string, number>>((acc, k) => {
+          acc[k] = p[k];
+          return acc;
+        }, {}),
+      );
+    const seen = new Map<string, CustSofaComboRule>();
+    for (const r of matching) {
+      const key = `${r.effectiveFrom}|${sortedKeys(r.pricesByHeight)}`;
+      const existing = seen.get(key);
+      if (!existing) {
+        seen.set(key, r);
+      } else if (!existing.customerId && r.customerId) {
+        // Replace master with customer-scoped row when both exist.
+        seen.set(key, r);
+      }
+    }
+    return Array.from(seen.values());
   }, [rules, historyKey]);
 
   const reload = () => {

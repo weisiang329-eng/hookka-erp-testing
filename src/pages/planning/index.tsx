@@ -19,7 +19,9 @@ import {
   AlertTriangle,
   Search,
   ClipboardList,
+  Calendar,
 } from "lucide-react";
+import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
 
 // ── Types matching mock-data ──
 
@@ -300,6 +302,15 @@ export default function PlanningPage() {
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
   const [recalcRunning, setRecalcRunning] = useState(false);
   const [recalcResult, setRecalcResult] = useState<string | null>(null);
+  // History dialog (scheduled future-dated changes). Mirrors the products
+  // MasterPriceHistoryDialog pattern. `pendingSummary` is sourced from the
+  // GET /api/production/leadtimes response so the trigger button can show
+  // a "X pending" badge without an extra round-trip.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [pendingSummary, setPendingSummary] = useState<{
+    count: number;
+    nearestEffectiveFrom: string | null;
+  }>({ count: 0, nearestEffectiveFrom: null });
 
   const { data: leadTimesJson, refresh: refreshLeadTimes } = useCachedJson<{ success?: boolean; data?: unknown }>("/api/production/leadtimes");
 
@@ -314,7 +325,12 @@ export default function PlanningPage() {
       !Array.isArray(d) &&
       ((d as { BEDFRAME?: unknown }).BEDFRAME || (d as { SOFA?: unknown }).SOFA)
     ) {
-      const dd = d as { BEDFRAME?: Record<string, number>; SOFA?: Record<string, number>; hookkaDDBuffer?: unknown };
+      const dd = d as {
+        BEDFRAME?: Record<string, number>;
+        SOFA?: Record<string, number>;
+        hookkaDDBuffer?: unknown;
+        pending?: { count?: number; nearestEffectiveFrom?: string | null };
+      };
       setLeadTimes({
         BEDFRAME: dd.BEDFRAME ?? {},
         SOFA: dd.SOFA ?? {},
@@ -326,6 +342,10 @@ export default function PlanningPage() {
           SOFA: typeof b.SOFA === "number" && b.SOFA >= 0 ? b.SOFA : 1,
         });
       }
+      setPendingSummary({
+        count: typeof dd.pending?.count === "number" ? dd.pending.count : 0,
+        nearestEffectiveFrom: dd.pending?.nearestEffectiveFrom ?? null,
+      });
     }
   }, [leadTimesJson]);
   /* eslint-enable react-hooks/set-state-in-effect */
@@ -1116,6 +1136,32 @@ export default function PlanningPage() {
                   {recalcResult && (
                     <span className="text-xs text-[#6B5C32]">{recalcResult}</span>
                   )}
+                  {/* History dialog trigger — mirrors the 📅 icon button next
+                    * to product codes on /products. Highlights orange when
+                    * any future-dated change is queued so the user notices
+                    * pending state at a glance. */}
+                  <Button
+                    variant="outline"
+                    onClick={() => setHistoryOpen(true)}
+                    title={
+                      pendingSummary.count > 0 && pendingSummary.nearestEffectiveFrom
+                        ? `${pendingSummary.count} pending · next on ${pendingSummary.nearestEffectiveFrom}`
+                        : "Schedule future-dated lead-time changes"
+                    }
+                    className={
+                      pendingSummary.count > 0
+                        ? "border-[#E8B786] text-[#B8601A] hover:bg-[#FBE4CE]"
+                        : undefined
+                    }
+                  >
+                    <Calendar className="mr-2 h-4 w-4" />
+                    History
+                    {pendingSummary.count > 0 && (
+                      <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#FBE4CE] text-[#B8601A] border border-[#E8B786]">
+                        {pendingSummary.count} pending
+                      </span>
+                    )}
+                  </Button>
                   <Button
                     onClick={saveLeadTimes}
                     disabled={ltSaving || recalcRunning}
@@ -1234,6 +1280,17 @@ export default function PlanningPage() {
           </Card>
         </div>
       )}
+
+      <LeadTimeHistoryDialog
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        onSaved={() => {
+          // Refresh the GET /api/production/leadtimes payload so the inline
+          // table picks up new effective values + the pending badge updates.
+          invalidateCachePrefix("/api/production/leadtimes");
+          refreshLeadTimes();
+        }}
+      />
     </div>
   );
 }

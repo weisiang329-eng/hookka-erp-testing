@@ -30,9 +30,59 @@ const app = new Hono<Env>();
 const CATEGORIES = ["BEDFRAME", "SOFA"] as const;
 type Category = (typeof CATEGORIES)[number];
 
-type LeadTimesResponse = LeadTimeMap & {
-  hookkaDDBuffer: HookkaDDBuffer;
+// Pending summary surfaced on GET / so the /planning header can show a
+// badge ("3 pending · next 2026-06-01") next to the 📅 history button
+// without a second round-trip. Mirrors the hasPendingPriceChange /
+// pendingEffectiveFrom pair on the products listing.
+type PendingSummary = {
+  count: number;
+  nearestEffectiveFrom: string | null;
 };
+
+type LeadTimesResponse = {
+  BEDFRAME: Record<string, number>;
+  SOFA: Record<string, number>;
+  hookkaDDBuffer: HookkaDDBuffer;
+  pending: PendingSummary;
+};
+
+// Row shapes for the history table responses. Mirrors product_prices
+// (see resolveProductPriceAsOf in products.ts) — id is the row PK,
+// effectiveFrom is ISO YYYY-MM-DD, status is computed at read-time.
+type LeadTimeHistoryRow = {
+  id: string;
+  kind: "leadTime";
+  category: string;
+  deptCode: string;
+  days: number;
+  effectiveFrom: string;
+  notes: string;
+  createdAt: string;
+  status: "Pending" | "Active" | "Past";
+};
+
+type HookkaBufferHistoryRow = {
+  id: string;
+  kind: "hookkaBuffer";
+  category: string;
+  days: number;
+  effectiveFrom: string;
+  notes: string;
+  createdAt: string;
+  status: "Pending" | "Active" | "Past";
+};
+
+function genLeadTimeRowId(): string {
+  return `lt-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+}
+
+function genHookkaBufferRowId(): string {
+  return `hd-${crypto.randomUUID().replace(/-/g, "").slice(0, 8)}`;
+}
+
+function todayIso(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 const RECALC_BATCH_SIZE = 50;
 
@@ -83,12 +133,52 @@ function computeNewDueDates(
   return out;
 }
 
-async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> {
-  const [lead, buffer] = await Promise.all([
-    loadLeadTimes(db),
-    loadHookkaDDBuffer(db),
+async function loadPendingSummary(
+  db: D1Database,
+  asOfDate: string,
+): Promise<PendingSummary> {
+  // Count + earliest effective_from across both history tables. Used by the
+  // /planning header to decide whether to highlight the 📅 button orange.
+  const [ltRow, bufRow] = await Promise.all([
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n, MIN(effective_from) AS "nearest"
+           FROM production_lead_times_history
+          WHERE effective_from > ?`,
+      )
+      .bind(asOfDate)
+      .first<{ n: number; nearest: string | null }>(),
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n, MIN(effective_from) AS "nearest"
+           FROM hookka_dd_buffer_history
+          WHERE effective_from > ?`,
+      )
+      .bind(asOfDate)
+      .first<{ n: number; nearest: string | null }>(),
   ]);
-  return { ...lead, hookkaDDBuffer: buffer };
+  const ltCount = Number(ltRow?.n ?? 0);
+  const bufCount = Number(bufRow?.n ?? 0);
+  const candidates = [ltRow?.nearest, bufRow?.nearest].filter(
+    (v): v is string => typeof v === "string" && !!v,
+  );
+  const nearest = candidates.length > 0 ? candidates.sort()[0] : null;
+  return { count: ltCount + bufCount, nearestEffectiveFrom: nearest };
+}
+
+async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> {
+  const asOf = todayIso();
+  const [lead, buffer, pending] = await Promise.all([
+    loadLeadTimes(db, asOf),
+    loadHookkaDDBuffer(db, asOf),
+    loadPendingSummary(db, asOf),
+  ]);
+  return {
+    BEDFRAME: lead.BEDFRAME ?? {},
+    SOFA: lead.SOFA ?? {},
+    hookkaDDBuffer: buffer,
+    pending,
+  };
 }
 
 // GET /
@@ -230,6 +320,295 @@ app.post("/recalc-all", async (c) => {
     const msg = err instanceof Error ? err.message : String(err);
     return c.json({ success: false, error: msg }, 500);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Lead-time + hookka-buffer history (production_lead_times_history,
+// hookka_dd_buffer_history; migration 0105). Mirrors the price-history
+// endpoints on /api/products/* — append-only rows with effective_from,
+// resolver picks newest <= today, future-dated rows stay dormant until
+// their date passes.
+// ---------------------------------------------------------------------------
+
+// GET /history — full merged history (lead-time rows + hookka-buffer rows),
+// each tagged with `kind` and computed `status` (Pending / Active / Past).
+// Sorted newest-first by effective_from then created_at to match the
+// MasterPriceHistoryDialog table convention.
+app.get("/history", async (c) => {
+  const today = todayIso();
+  const [ltRes, bufRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT id, category, dept_code AS "deptCode", days,
+              effective_from AS "effectiveFrom",
+              notes, created_at AS "createdAt"
+         FROM production_lead_times_history
+        ORDER BY effective_from DESC, created_at DESC`,
+    ).all<{
+      id: string;
+      category: string;
+      deptCode?: string;
+      dept_code?: string;
+      days: number;
+      effectiveFrom?: string;
+      effective_from?: string;
+      notes: string | null;
+      createdAt?: string;
+      created_at?: string;
+    }>(),
+    c.var.DB.prepare(
+      `SELECT id, category, days,
+              effective_from AS "effectiveFrom",
+              notes, created_at AS "createdAt"
+         FROM hookka_dd_buffer_history
+        ORDER BY effective_from DESC, created_at DESC`,
+    ).all<{
+      id: string;
+      category: string;
+      days: number;
+      effectiveFrom?: string;
+      effective_from?: string;
+      notes: string | null;
+      createdAt?: string;
+      created_at?: string;
+    }>(),
+  ]);
+
+  // Build (cat, dept) → newest-effective-row id, so we can mark exactly one
+  // row "Active" per (cat, dept). Rows newer than today are Pending; older
+  // rows that were once active become Past. Mirrors the activeId resolution
+  // in MaintenanceItemHistoryDialog.
+  const ltActiveByKey = new Map<string, string>();
+  for (const r of ltRes.results ?? []) {
+    const dept = r.deptCode ?? r.dept_code;
+    const ef = r.effectiveFrom ?? r.effective_from;
+    if (!dept || !ef) continue;
+    const key = `${r.category}|${dept}`;
+    if (ef > today) continue;
+    if (!ltActiveByKey.has(key)) ltActiveByKey.set(key, r.id);
+  }
+  const bufActiveByKey = new Map<string, string>();
+  for (const r of bufRes.results ?? []) {
+    const ef = r.effectiveFrom ?? r.effective_from;
+    if (!ef) continue;
+    if (ef > today) continue;
+    if (!bufActiveByKey.has(r.category)) bufActiveByKey.set(r.category, r.id);
+  }
+
+  const leadTimes: LeadTimeHistoryRow[] = (ltRes.results ?? [])
+    .map((r): LeadTimeHistoryRow | null => {
+      const dept = r.deptCode ?? r.dept_code;
+      const ef = r.effectiveFrom ?? r.effective_from;
+      if (!dept || !ef) return null;
+      const key = `${r.category}|${dept}`;
+      const status: "Pending" | "Active" | "Past" =
+        ef > today ? "Pending" : ltActiveByKey.get(key) === r.id ? "Active" : "Past";
+      return {
+        id: r.id,
+        kind: "leadTime",
+        category: r.category,
+        deptCode: dept,
+        days: r.days,
+        effectiveFrom: ef,
+        notes: r.notes ?? "",
+        createdAt: r.createdAt ?? r.created_at ?? "",
+        status,
+      };
+    })
+    .filter((x): x is LeadTimeHistoryRow => x !== null);
+
+  const hookkaBuffer: HookkaBufferHistoryRow[] = (bufRes.results ?? [])
+    .map((r): HookkaBufferHistoryRow | null => {
+      const ef = r.effectiveFrom ?? r.effective_from;
+      if (!ef) return null;
+      const status: "Pending" | "Active" | "Past" =
+        ef > today ? "Pending" : bufActiveByKey.get(r.category) === r.id ? "Active" : "Past";
+      return {
+        id: r.id,
+        kind: "hookkaBuffer",
+        category: r.category,
+        days: r.days,
+        effectiveFrom: ef,
+        notes: r.notes ?? "",
+        createdAt: r.createdAt ?? r.created_at ?? "",
+        status,
+      };
+    })
+    .filter((x): x is HookkaBufferHistoryRow => x !== null);
+
+  return c.json({ success: true, data: { leadTimes, hookkaBuffer } });
+});
+
+// POST /schedule — append a new dated lead-time or hookka-buffer row.
+// Body shape (kind selects which history table):
+//   { kind: "leadTime",     category, deptCode, days, effectiveFrom, notes? }
+//   { kind: "hookkaBuffer", category,           days, effectiveFrom, notes? }
+//
+// Auto-baseline (mirrors POST /api/products/:id/prices):
+//   When scheduling the FIRST history row for a given (category, deptCode)
+//   pair AND the new effective_from is in the future, we capture today's
+//   currently-effective value (from the legacy baseline table or seeded
+//   defaults) as a row dated today with notes="Auto-baseline (captured
+//   before scheduled change)". Without this, when the future date kicks
+//   in there's no record of "what the value used to be" — same gap Wei
+//   Siang flagged on the products side.
+app.post("/schedule", async (c) => {
+  const denied = await requirePermission(c, "production-leadtimes", "update");
+  if (denied) return denied;
+  let body: Record<string, unknown>;
+  try {
+    body = (await c.req.json()) as Record<string, unknown>;
+  } catch {
+    return c.json({ success: false, error: "Invalid request body" }, 400);
+  }
+
+  const kind = body.kind === "hookkaBuffer" ? "hookkaBuffer" : body.kind === "leadTime" ? "leadTime" : null;
+  if (!kind) {
+    return c.json({ success: false, error: "kind must be 'leadTime' or 'hookkaBuffer'" }, 400);
+  }
+  const category = String(body.category ?? "").trim();
+  if (category !== "BEDFRAME" && category !== "SOFA") {
+    return c.json({ success: false, error: "category must be BEDFRAME or SOFA" }, 400);
+  }
+  const effectiveFrom = String(body.effectiveFrom ?? "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+    return c.json({ success: false, error: "effectiveFrom (YYYY-MM-DD) is required" }, 400);
+  }
+  const daysRaw = Number(body.days);
+  if (!Number.isFinite(daysRaw) || daysRaw < 0) {
+    return c.json({ success: false, error: "days must be a non-negative number" }, 400);
+  }
+  const days = Math.round(daysRaw);
+  const notes = typeof body.notes === "string" && body.notes.trim() ? body.notes.trim() : null;
+  const createdBy = typeof body.createdBy === "string" && body.createdBy ? body.createdBy : null;
+
+  await ensureLeadTimesSeeded(c.var.DB);
+  await ensureHookkaDDBufferSeeded(c.var.DB);
+
+  if (kind === "leadTime") {
+    const deptCode = String(body.deptCode ?? "").trim();
+    if (!deptCode) {
+      return c.json({ success: false, error: "deptCode is required for kind=leadTime" }, 400);
+    }
+
+    // Auto-baseline: only when scheduling a future row AND no prior history
+    // for this (category, deptCode) exists yet.
+    const today = todayIso();
+    if (effectiveFrom > today) {
+      const existing = await c.var.DB
+        .prepare(
+          `SELECT id FROM production_lead_times_history
+            WHERE category = ? AND dept_code = ? LIMIT 1`,
+        )
+        .bind(category, deptCode)
+        .first<{ id: string }>();
+      if (!existing) {
+        // Resolve the current effective value from the (already-seeded)
+        // baseline so the auto-baseline reflects what users see today.
+        const liveMap = await loadLeadTimes(c.var.DB, today);
+        const liveDays = liveMap[category]?.[deptCode];
+        if (typeof liveDays === "number") {
+          await c.var.DB
+            .prepare(
+              `INSERT INTO production_lead_times_history
+                 (id, category, dept_code, days, effective_from, notes, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              genLeadTimeRowId(),
+              category,
+              deptCode,
+              liveDays,
+              today,
+              "Auto-baseline (captured before scheduled change)",
+              createdBy,
+            )
+            .run();
+        }
+      }
+    }
+
+    const id = genLeadTimeRowId();
+    await c.var.DB
+      .prepare(
+        `INSERT INTO production_lead_times_history
+           (id, category, dept_code, days, effective_from, notes, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(id, category, deptCode, days, effectiveFrom, notes, createdBy)
+      .run();
+    return c.json({ success: true, data: { id } }, 201);
+  }
+
+  // kind === "hookkaBuffer"
+  const today = todayIso();
+  if (effectiveFrom > today) {
+    const existing = await c.var.DB
+      .prepare(
+        `SELECT id FROM hookka_dd_buffer_history
+          WHERE category = ? LIMIT 1`,
+      )
+      .bind(category)
+      .first<{ id: string }>();
+    if (!existing) {
+      const liveMap = await loadHookkaDDBuffer(c.var.DB, today);
+      const liveDays = liveMap[category as Category];
+      if (typeof liveDays === "number") {
+        await c.var.DB
+          .prepare(
+            `INSERT INTO hookka_dd_buffer_history
+               (id, category, days, effective_from, notes, created_by)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            genHookkaBufferRowId(),
+            category,
+            liveDays,
+            today,
+            "Auto-baseline (captured before scheduled change)",
+            createdBy,
+          )
+          .run();
+      }
+    }
+  }
+
+  const id = genHookkaBufferRowId();
+  await c.var.DB
+    .prepare(
+      `INSERT INTO hookka_dd_buffer_history
+         (id, category, days, effective_from, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .bind(id, category, days, effectiveFrom, notes, createdBy)
+    .run();
+  return c.json({ success: true, data: { id } }, 201);
+});
+
+// DELETE /history/:id — remove a single history row. Auto-detects whether
+// the id belongs to the lead-time or hookka-buffer table by id-prefix
+// (`lt-` vs `hd-`); falls back to checking each table if the prefix
+// convention drifts.
+app.delete("/history/:id", async (c) => {
+  const denied = await requirePermission(c, "production-leadtimes", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+  if (!id) return c.json({ success: false, error: "id is required" }, 400);
+
+  const tables = id.startsWith("hd-")
+    ? (["hookka_dd_buffer_history", "production_lead_times_history"] as const)
+    : (["production_lead_times_history", "hookka_dd_buffer_history"] as const);
+
+  for (const table of tables) {
+    const existing = await c.var.DB
+      .prepare(`SELECT id FROM ${table} WHERE id = ?`)
+      .bind(id)
+      .first<{ id: string }>();
+    if (existing) {
+      await c.var.DB.prepare(`DELETE FROM ${table} WHERE id = ?`).bind(id).run();
+      return c.json({ success: true, data: { id, table } });
+    }
+  }
+  return c.json({ success: false, error: "History row not found" }, 404);
 });
 
 export default app;

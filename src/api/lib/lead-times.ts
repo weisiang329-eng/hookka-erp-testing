@@ -78,10 +78,16 @@ export async function ensureLeadTimesSeeded(db: D1Database): Promise<void> {
   }
 }
 
-// Load the full (category, deptCode) → days map. Falls back to the in-file
-// DEFAULT_LEAD_DAYS for any missing (category, deptCode) pair so callers
-// never hit undefined. BEDFRAME values are used as the fallback category
-// (ACCESSORY, etc.).
+// Load the (category, deptCode) → days map effective ON or BEFORE `asOfDate`
+// (default: today, ISO YYYY-MM-DD).
+//
+// Resolution order, per (category, dept_code):
+//   1. Newest production_lead_times_history row with effective_from <= asOf
+//      (mirrors the product_prices pattern from migration 0066).
+//   2. Fall back to the legacy production_lead_times baseline row.
+//   3. Fall back to the in-file DEFAULT_LEAD_DAYS so callers never hit
+//      undefined; BEDFRAME values are the fallback for unknown categories
+//      (ACCESSORY, etc.).
 //
 // Postgres column is `dept_code` (snake_case). The D1Compat adapter
 // translates camelCase identifiers in the SQL string to snake_case for
@@ -92,20 +98,49 @@ export async function ensureLeadTimesSeeded(db: D1Database): Promise<void> {
 // user-saved configuration. Aliasing in SQL and accepting both keys on
 // the result row covers both runtime modes (raw Postgres in tests, D1
 // + adapter in workers).
-export async function loadLeadTimes(db: D1Database): Promise<LeadTimeMap> {
-  const res = await db
-    .prepare(
-      'SELECT category, dept_code AS "deptCode", days FROM production_lead_times',
-    )
-    .all<{ category: string; deptCode?: string; dept_code?: string; days: number }>();
+export async function loadLeadTimes(
+  db: D1Database,
+  asOfDate?: string,
+): Promise<LeadTimeMap> {
+  const asOf = asOfDate || new Date().toISOString().slice(0, 10);
   const map: LeadTimeMap = { BEDFRAME: {}, SOFA: {} };
-  for (const row of res.results ?? []) {
+
+  // Layer 1: history (latest effective_from <= asOf wins per (cat, dept)).
+  // DISTINCT ON keeps the first row in each (category, dept_code) group;
+  // ORDER BY pins the newest effective_from + tiebreaks on created_at.
+  const histRes = await db
+    .prepare(
+      `SELECT DISTINCT ON (category, dept_code)
+              category, dept_code AS "deptCode", days
+         FROM production_lead_times_history
+        WHERE effective_from <= ?
+        ORDER BY category, dept_code, effective_from DESC, created_at DESC`,
+    )
+    .bind(asOf)
+    .all<{ category: string; deptCode?: string; dept_code?: string; days: number }>();
+  for (const row of histRes.results ?? []) {
     if (!map[row.category]) map[row.category] = {};
     const dept = row.deptCode ?? row.dept_code;
     if (typeof dept !== "string" || !dept) continue;
     map[row.category][dept] = row.days;
   }
-  // Merge defaults for any missing entries.
+
+  // Layer 2: legacy baseline. Fills any (cat, dept) that history didn't cover.
+  const baseRes = await db
+    .prepare(
+      'SELECT category, dept_code AS "deptCode", days FROM production_lead_times',
+    )
+    .all<{ category: string; deptCode?: string; dept_code?: string; days: number }>();
+  for (const row of baseRes.results ?? []) {
+    if (!map[row.category]) map[row.category] = {};
+    const dept = row.deptCode ?? row.dept_code;
+    if (typeof dept !== "string" || !dept) continue;
+    if (map[row.category][dept] == null) {
+      map[row.category][dept] = row.days;
+    }
+  }
+
+  // Layer 3: in-file defaults for anything still missing.
   for (const cat of Object.keys(DEFAULT_LEAD_DAYS)) {
     if (!map[cat]) map[cat] = {};
     for (const dept of Object.keys(DEFAULT_LEAD_DAYS[cat])) {
@@ -160,17 +195,46 @@ export async function ensureHookkaDDBufferSeeded(db: D1Database): Promise<void> 
   ]);
 }
 
-// Load { BEDFRAME, SOFA } buffer map. Falls back to defaults for any missing
-// category so callers never hit undefined.
-export async function loadHookkaDDBuffer(db: D1Database): Promise<HookkaDDBuffer> {
-  const res = await db
+// Load { BEDFRAME, SOFA } buffer map effective ON or BEFORE `asOfDate`
+// (default: today). Same three-layer resolution as loadLeadTimes:
+// history → legacy baseline → in-file defaults.
+export async function loadHookkaDDBuffer(
+  db: D1Database,
+  asOfDate?: string,
+): Promise<HookkaDDBuffer> {
+  const asOf = asOfDate || new Date().toISOString().slice(0, 10);
+  const map: HookkaDDBuffer = { ...DEFAULT_HOOKKA_DD_BUFFER };
+  const seen = new Set<string>();
+
+  // Layer 1: history (latest effective_from <= asOf wins per category).
+  const histRes = await db
+    .prepare(
+      `SELECT DISTINCT ON (category) category, days
+         FROM hookka_dd_buffer_history
+        WHERE effective_from <= ?
+        ORDER BY category, effective_from DESC, created_at DESC`,
+    )
+    .bind(asOf)
+    .all<{ category: string; days: number }>();
+  for (const row of histRes.results ?? []) {
+    if (row.category === "BEDFRAME" || row.category === "SOFA") {
+      if (Number.isFinite(row.days) && row.days >= 0) {
+        map[row.category] = row.days;
+        seen.add(row.category);
+      }
+    }
+  }
+
+  // Layer 2: legacy baseline for any category not covered by history.
+  const baseRes = await db
     .prepare("SELECT category, days FROM hookka_dd_buffer")
     .all<{ category: string; days: number }>();
-  const map: HookkaDDBuffer = { ...DEFAULT_HOOKKA_DD_BUFFER };
-  for (const row of res.results ?? []) {
+  for (const row of baseRes.results ?? []) {
     if (row.category === "BEDFRAME" || row.category === "SOFA") {
-      map[row.category] =
-        Number.isFinite(row.days) && row.days >= 0 ? row.days : map[row.category];
+      if (seen.has(row.category)) continue;
+      if (Number.isFinite(row.days) && row.days >= 0) {
+        map[row.category] = row.days;
+      }
     }
   }
   return map;

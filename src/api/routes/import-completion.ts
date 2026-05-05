@@ -6818,4 +6818,341 @@ app.post("/apply-houzs-sofa-pricesheet", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/recompute-so-sofa-prices?dryRun=true|false&statuses=...
+//
+// Bulk recompute of basePriceSen / unitPriceSen / lineTotalSen on every SOFA
+// line item in active sales_orders. Wei Siang fixed master + Houzs cascade
+// 2026-05-05 and now wants those numbers to flow into open SOs.
+//
+// Per item:
+//   1. Look up fabric_tracking.sofaPriceTier by fabric_code.
+//   2. Pick the customer_product_prices row for (customerId, productId)
+//      that's active as of the SO's companySODate (fall back to today, then
+//      master if no customer override exists).
+//   3. From seatHeightPrices, find { height: sizeCode, tier } match.
+//   4. New basePriceSen = priceSen.
+//   5. New unitPriceSen = base + legPriceSen + divanPriceSen + specialOrderPriceSen.
+//   6. New lineTotalSen = unitPriceSen × quantity.
+//
+// Items that don't match the 7-model SOFA set are skipped silently.
+// Items where fabric tier or seat-height entry can't be resolved get logged
+// in the response but not changed. SO subtotal_sen + grand_total_sen are
+// recomputed off the new line totals.
+//
+// Idempotent — running it twice produces the same result.
+// ---------------------------------------------------------------------------
+const SOFA_TARGET_BASES = ["5530","5531","5535","5536","5537","5539","5540"];
+type SoiRow = {
+  id: string;
+  salesOrderId: string;
+  productId: string | null;
+  productCode: string | null;
+  itemCategory: string | null;
+  sizeCode: string | null;
+  fabricCode: string | null;
+  quantity: number;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  divanPriceSen: number;
+  legHeightInches: number | null;
+  legPriceSen: number;
+  specialOrder: string | null;
+  specialOrderPriceSen: number;
+  basePriceSen: number;
+  unitPriceSen: number;
+  lineTotalSen: number;
+};
+type SoRow = {
+  id: string;
+  companySOId: string | null;
+  customerId: string | null;
+  customerName: string | null;
+  status: string | null;
+  companySODate: string | null;
+  createdAt: string | null;
+};
+
+app.post("/recompute-so-sofa-prices", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const statusFilter = (c.req.query("statuses") || "").trim()
+    ? c.req.query("statuses")!.split(",").map(s => s.trim()).filter(Boolean)
+    : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 1. Fabric → tier map.
+  const ftRes = await db
+    .prepare(
+      `SELECT fabricCode, sofaPriceTier FROM fabric_tracking
+        WHERE sofaPriceTier IS NOT NULL`,
+    )
+    .all<{ fabricCode: string; sofaPriceTier: string }>();
+  const fabricTierMap = new Map<string, string>();
+  for (const r of (ftRes.results ?? [])) {
+    fabricTierMap.set(r.fabricCode, r.sofaPriceTier);
+  }
+
+  // 2. Pull SOs in scope + their items (single broad fetch).
+  const soPlaceholders = statusFilter.map(() => "?").join(",");
+  const soRes = await db
+    .prepare(
+      `SELECT id, companySOId, customerId, customerName, status,
+              companySODate, created_at AS createdAt
+         FROM sales_orders
+        WHERE status IN (${soPlaceholders})`,
+    )
+    .bind(...statusFilter)
+    .all<SoRow>();
+  const sos = soRes.results ?? [];
+  if (sos.length === 0) {
+    return c.json({ success: true, dryRun, scope: statusFilter, soCount: 0 });
+  }
+  const soIds = sos.map(s => s.id);
+  const soById = new Map(sos.map(s => [s.id, s] as const));
+
+  // 3. All sofa line items for those SOs.
+  const itemsRes = await db
+    .prepare(
+      `SELECT id, salesOrderId, productId, productCode, itemCategory, sizeCode,
+              fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
+              legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              basePriceSen, unitPriceSen, lineTotalSen
+         FROM sales_order_items
+        WHERE itemCategory = 'SOFA'
+          AND salesOrderId IN (${soIds.map(() => "?").join(",")})`,
+    )
+    .bind(...soIds)
+    .all<SoiRow>();
+  const items = (itemsRes.results ?? []).filter((it) => {
+    if (!it.productCode) return false;
+    return SOFA_TARGET_BASES.some((b) => it.productCode!.startsWith(b + "-"));
+  });
+
+  // 4. Pre-load customer_product_prices history for every (customerId,
+  //    productId) combo touched by these items. Map → array of history rows.
+  const cpKeys = Array.from(new Set(items.map((it) => {
+    const so = soById.get(it.salesOrderId);
+    if (!so?.customerId || !it.productId) return null;
+    return `${so.customerId}|${it.productId}`;
+  }).filter((k): k is string => k !== null)));
+  const cpHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const k of cpKeys) {
+    const [customerId, productId] = k.split("|");
+    const cpRes = await db
+      .prepare(
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+           FROM customer_products cp
+           JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
+          WHERE cp.customerId = ? AND cp.productId = ?
+          ORDER BY cpp.effectiveFrom DESC`,
+      )
+      .bind(customerId, productId)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    cpHistMap.set(k, cpRes.results ?? []);
+  }
+
+  // 5. Pre-load master product_prices for products without customer overrides.
+  const productIds = Array.from(new Set(items.map(it => it.productId).filter((p): p is string => !!p)));
+  const masterHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const pid of productIds) {
+    const mhRes = await db
+      .prepare(
+        `SELECT basePriceSen, seatHeightPrices, effectiveFrom
+           FROM product_prices
+          WHERE productId = ?
+          ORDER BY effectiveFrom DESC`,
+      )
+      .bind(pid)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    masterHistMap.set(pid, mhRes.results ?? []);
+  }
+
+  type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
+  function pickActive(
+    rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>,
+    asOf: string,
+  ): { basePriceSen: number; entries: SeatHeightEntry[] } | null {
+    const usable = rows
+      .filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null)
+      .sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+    const r = usable[0];
+    if (!r) return null;
+    let entries: SeatHeightEntry[] = [];
+    try {
+      entries = (JSON.parse(r.seatHeightPrices ?? "[]") || []) as SeatHeightEntry[];
+    } catch { /* ignore */ }
+    return { basePriceSen: r.basePriceSen!, entries };
+  }
+  function lookupSeatHeight(
+    entries: SeatHeightEntry[], height: string, tier: string,
+  ): number | null {
+    // Exact (height, tier) match
+    let m = entries.find(e => e.height === height && e.tier === tier);
+    if (m) return m.priceSen;
+    // Same height, tier missing → treat as PRICE_2 default
+    if (tier === "PRICE_2") {
+      m = entries.find(e => e.height === height && !e.tier);
+      if (m) return m.priceSen;
+    }
+    // No height match
+    return null;
+  }
+
+  type ChangePlan = {
+    soId: string;
+    companySOId: string | null;
+    customerName: string | null;
+    status: string | null;
+    itemId: string;
+    productCode: string | null;
+    sizeCode: string | null;
+    fabricCode: string | null;
+    fabricTier: string | null;
+    quantity: number;
+    oldBaseRM: number;
+    newBaseRM: number | null;
+    oldUnitRM: number;
+    newUnitRM: number | null;
+    oldLineRM: number;
+    newLineRM: number | null;
+    skipReason?: string;
+  };
+  const plans: ChangePlan[] = [];
+  for (const it of items) {
+    const so = soById.get(it.salesOrderId)!;
+    const tier = (it.fabricCode && fabricTierMap.get(it.fabricCode)) || "PRICE_2";
+    const asOf = (so.companySODate || so.createdAt || today).slice(0, 10);
+    const cpKey = so.customerId && it.productId ? `${so.customerId}|${it.productId}` : null;
+    const cpHist = cpKey ? cpHistMap.get(cpKey) ?? [] : [];
+    const masterHist = it.productId ? masterHistMap.get(it.productId) ?? [] : [];
+    const cpActive = cpHist.length ? pickActive(cpHist, asOf) : null;
+    const masterActive = pickActive(masterHist, asOf);
+    const active = cpActive ?? masterActive;
+    const plan: ChangePlan = {
+      soId: it.salesOrderId,
+      companySOId: so.companySOId,
+      customerName: so.customerName,
+      status: so.status,
+      itemId: it.id,
+      productCode: it.productCode,
+      sizeCode: it.sizeCode,
+      fabricCode: it.fabricCode,
+      fabricTier: tier,
+      quantity: it.quantity,
+      oldBaseRM: it.basePriceSen / 100,
+      newBaseRM: null,
+      oldUnitRM: it.unitPriceSen / 100,
+      newUnitRM: null,
+      oldLineRM: it.lineTotalSen / 100,
+      newLineRM: null,
+    };
+    if (!active) { plan.skipReason = "no active price row (cust + master both missing)"; plans.push(plan); continue; }
+    if (!it.sizeCode) { plan.skipReason = "missing sizeCode (seat height)"; plans.push(plan); continue; }
+    const priceSen = lookupSeatHeight(active.entries, it.sizeCode, tier);
+    if (priceSen == null) { plan.skipReason = `no seat-height entry for ${it.sizeCode}/${tier}`; plans.push(plan); continue; }
+    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
+    const newLine = newUnit * it.quantity;
+    plan.newBaseRM = priceSen / 100;
+    plan.newUnitRM = newUnit / 100;
+    plan.newLineRM = newLine / 100;
+    plans.push(plan);
+  }
+
+  // Summary stats
+  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
+  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  const skipped = plans.filter(p => p.skipReason);
+  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const summary = {
+    soCount: sos.length,
+    sofaItemsConsidered: items.length,
+    willChange: willChange.length,
+    noChange: noChange.length,
+    skipped: skipped.length,
+    skipReasons: skipped.reduce<Record<string, number>>((acc, p) => {
+      acc[p.skipReason!] = (acc[p.skipReason!] || 0) + 1; return acc;
+    }, {}),
+    sumLineDiffRM: Math.round(sumDiff * 100) / 100,
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, scope: statusFilter, summary,
+      sampleChanges: willChange.slice(0, 10).map(p => ({
+        so: p.companySOId, cust: p.customerName, status: p.status,
+        product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
+        oldBase: p.oldBaseRM, newBase: p.newBaseRM,
+        oldLine: p.oldLineRM, newLine: p.newLineRM,
+        diff: Math.round(((p.newLineRM ?? 0) - p.oldLineRM) * 100) / 100,
+        qty: p.quantity,
+      })),
+      sampleSkipped: skipped.slice(0, 5).map(p => ({
+        so: p.companySOId, product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, reason: p.skipReason,
+      })),
+    });
+  }
+
+  // Live execute. Update items first; then recompute each affected SO total.
+  let itemsUpdated = 0;
+  const dirtySoIds = new Set<string>();
+  for (let i = 0; i < willChange.length; i += 50) {
+    const batch = willChange.slice(i, i + 50);
+    const stmts: ReturnType<D1Database["prepare"]>[] = [];
+    for (const p of batch) {
+      stmts.push(
+        db.prepare(
+          `UPDATE sales_order_items
+              SET basePriceSen = ?, unitPriceSen = ?, lineTotalSen = ?
+            WHERE id = ?`,
+        ).bind(
+          Math.round((p.newBaseRM ?? 0) * 100),
+          Math.round((p.newUnitRM ?? 0) * 100),
+          Math.round((p.newLineRM ?? 0) * 100),
+          p.itemId,
+        ),
+      );
+      dirtySoIds.add(p.soId);
+    }
+    if (stmts.length > 0) await db.batch(stmts);
+    itemsUpdated += batch.length;
+  }
+
+  // Recompute SO subtotal/total: sum sales_order_items.line_total_sen.
+  let sosUpdated = 0;
+  for (const soId of dirtySoIds) {
+    const sumRes = await db
+      .prepare(
+        `SELECT COALESCE(SUM(lineTotalSen), 0) AS sub
+           FROM sales_order_items WHERE salesOrderId = ?`,
+      )
+      .bind(soId)
+      .first<{ sub: number }>();
+    const sub = sumRes?.sub ?? 0;
+    // SO has subtotal_sen / grand_total_sen — keep tax/discount untouched,
+    // just refresh subtotal + grand. (Tax/discount columns are not on every
+    // SO; do a defensive UPDATE that only sets subtotal_sen and let an
+    // existing grand_total_sen stay if the column doesn't exist via the
+    // adapter quirks. We'll set grand_total_sen = subtotal_sen since the
+    // current SOs in this dataset don't carry separate tax.)
+    await db
+      .prepare(
+        `UPDATE sales_orders
+            SET subtotalSen = ?, grandTotalSen = ?, updated_at = ?
+          WHERE id = ?`,
+      )
+      .bind(sub, sub, new Date().toISOString(), soId)
+      .run();
+    sosUpdated++;
+  }
+
+  return c.json({
+    success: true, dryRun: false, scope: statusFilter, summary,
+    itemsUpdated, sosUpdated,
+  });
+});
+
 export default app;

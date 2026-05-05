@@ -8574,6 +8574,15 @@ app.post("/migrate-do-from-excel", async (c) => {
     soByCustPo.set(s.customerPOId, s);
   }
 
+  // 2b. Pre-fetch every PO that is already in some delivery_order_items row
+  //     so we can skip custPOs already migrated (idempotency).
+  const alreadyMigratedRes = await db
+    .prepare(`SELECT DISTINCT productionOrderId FROM delivery_order_items WHERE productionOrderId IS NOT NULL`)
+    .all<{ productionOrderId: string }>();
+  const migratedPoIds = new Set<string>(
+    (alreadyMigratedRes.results ?? []).map(r => r.productionOrderId),
+  );
+
   type Plan = {
     custPO: string; doNo: string; soId?: string;
     customerId?: string; companySOId?: string;
@@ -8599,6 +8608,13 @@ app.post("/migrate-do-from-excel", async (c) => {
       .bind(so.id)
       .all<{ id: string; poNo: string | null }>();
     const poIds = (poRes.results ?? []).map(p => p.id);
+    // Idempotency: if every PO of this SO is already in delivery_order_items,
+    // skip — this custPO was already migrated.
+    if (poIds.length > 0 && poIds.every(id => migratedPoIds.has(id))) {
+      plan.skipReason = "Already migrated";
+      plans.push(plan);
+      continue;
+    }
     plan.poIds = poIds;
     if (poIds.length > 0) {
       const placeholders = poIds.map(() => "?").join(",");
@@ -8624,6 +8640,7 @@ app.post("/migrate-do-from-excel", async (c) => {
   const summary = {
     entries: entries.length,
     noSoMatch: skipped.filter(p => p.skipReason === "No matching SO").length,
+    alreadyMigrated: skipped.filter(p => p.skipReason === "Already migrated").length,
     usableCount: usable.length,
     totalPackingJcsToStamp: usable.reduce((s, p) => s + p.packingJcsToStamp.length, 0),
     totalPOsToBundle: usable.reduce((s, p) => s + p.poIds.length, 0),

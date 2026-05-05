@@ -6884,16 +6884,31 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
   const today = new Date().toISOString().slice(0, 10);
 
-  // 1. Fabric → tier map.
+  // 1. Fabric → tier map. Table is `fabric_trackings` (plural) per
+  //    routes/fabric-tracking.ts. Split tiers (sofa vs bedframe) live in
+  //    sofaPriceTier / bedframePriceTier; legacy priceTier is the fallback.
   const ftRes = await db
     .prepare(
-      `SELECT fabricCode, sofaPriceTier FROM fabric_tracking
-        WHERE sofaPriceTier IS NOT NULL`,
+      `SELECT fabricCode, sofaPriceTier, bedframePriceTier, priceTier
+         FROM fabric_trackings`,
     )
-    .all<{ fabricCode: string; sofaPriceTier: string }>();
-  const fabricTierMap = new Map<string, string>();
+    .all<{
+      fabricCode: string;
+      sofaPriceTier: string | null;
+      bedframePriceTier: string | null;
+      priceTier: string | null;
+    }>();
+  const fabricSofaTierMap = new Map<string, string>();
+  const fabricBedframeTierMap = new Map<string, string>();
   for (const r of (ftRes.results ?? [])) {
-    fabricTierMap.set(r.fabricCode, r.sofaPriceTier);
+    fabricSofaTierMap.set(
+      r.fabricCode,
+      r.sofaPriceTier ?? r.priceTier ?? "PRICE_2",
+    );
+    fabricBedframeTierMap.set(
+      r.fabricCode,
+      r.bedframePriceTier ?? r.priceTier ?? "PRICE_2",
+    );
   }
 
   // 2. Pull SOs in scope + their items (single broad fetch).
@@ -7030,7 +7045,12 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   const plans: ChangePlan[] = [];
   for (const it of items) {
     const so = soById.get(it.salesOrderId)!;
-    const tier = (it.fabricCode && fabricTierMap.get(it.fabricCode)) || "PRICE_2";
+    // Sofa + Accessory share sofaPriceTier; Bedframe uses bedframePriceTier.
+    const tier = it.fabricCode
+      ? (it.itemCategory === "BEDFRAME"
+          ? fabricBedframeTierMap.get(it.fabricCode)
+          : fabricSofaTierMap.get(it.fabricCode)) || "PRICE_2"
+      : "PRICE_2";
     const asOf = (so.companySODate || so.createdAt || today).slice(0, 10);
     const cpKey = so.customerId && it.productId ? `${so.customerId}|${it.productId}` : null;
     const cpHist = cpKey ? cpHistMap.get(cpKey) ?? [] : [];

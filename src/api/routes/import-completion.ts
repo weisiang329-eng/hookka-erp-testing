@@ -1811,6 +1811,70 @@ app.post("/uph-pofold-backfill", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/cleanup-snapshot-from-master-rows?dryRun=true|false
+//
+// One-shot DELETE for the redundant "Snapshot from Master <date>" rows
+// in customer_product_prices that the OLD copy-from-master logic created
+// (one per cp, dated today's date, recording the current master price).
+//
+// The new copy-from-master mirrors the FULL master history, so the
+// snapshot row is now redundant — the same price is already reachable
+// via the 4-26 (or whichever is most recent) master mirror row.
+//
+// Idempotent. Migration-temp.
+// ---------------------------------------------------------------------------
+app.post("/cleanup-snapshot-from-master-rows", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  const candidatesRes = await db
+    .prepare(
+      `SELECT id, customerProductId, basePriceSen, effectiveFrom, notes
+         FROM customer_product_prices
+        WHERE notes LIKE 'Snapshot from Master%'`,
+    )
+    .all<{
+      id: string;
+      customerProductId: string;
+      basePriceSen: number | null;
+      effectiveFrom: string;
+      notes: string | null;
+    }>();
+  const candidates = candidatesRes.results ?? [];
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      planned: candidates.length,
+      sample: candidates.slice(0, 10),
+    });
+  }
+
+  let deleted = 0;
+  for (let i = 0; i < candidates.length; i += 50) {
+    const slice = candidates.slice(i, i + 50);
+    const stmts = slice.map((r) =>
+      db
+        .prepare("DELETE FROM customer_product_prices WHERE id = ?")
+        .bind(r.id),
+    );
+    await db.batch(stmts);
+    deleted += slice.length;
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    planned: candidates.length,
+    deleted,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/derive-historical-price-baselines?dryRun=true|false
 //
 // One-shot helper to seed `customer_product_prices` + `product_prices`

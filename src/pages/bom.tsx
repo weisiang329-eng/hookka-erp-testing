@@ -4822,6 +4822,12 @@ type MatRow = {
   name: string;
   unit: string;
   qty: number;
+  // Scaling rules — currently editable in this dialog ONLY for newly-added
+  // rows (isNew=true). Existing rows render qty/scaling as readonly to
+  // preserve the dialog's primary "batch replace material" semantic
+  // (mass-changing per-row qty across N BOMs is rarely what the user
+  // wants — that flow lives in the per-BOM Edit dialog instead).
+  scaling?: MaterialScaling[];
   inventoryCode?: string;
   autoDetect?: "FABRIC" | "LEG";
   toDelete: boolean;
@@ -4872,6 +4878,7 @@ function buildMatRows(
         name: m.name || "",
         unit: m.unit || "PCS",
         qty: m.qty || 0,
+        scaling: normaliseScaling(m.scaling),
         inventoryCode: m.inventoryCode,
         autoDetect: m.autoDetect,
         toDelete: false,
@@ -5147,6 +5154,7 @@ function BatchEditMaterialsDialog({
         inventoryCode: rm.itemCode,
         autoDetect: undefined,
         qty: 1,
+        scaling: undefined,
         initialCode: "",
         initialName: "",
         initialUnit: "",
@@ -5160,8 +5168,9 @@ function BatchEditMaterialsDialog({
   // Same as addMaterialFromPlaceholder but stamps autoDetect (FABRIC/LEG)
   // instead of a concrete inventory pick. The qty default is 1 in the
   // unit the autoDetect kind canonically uses (MTR for fabric, PCS for
-  // leg). User tunes qty + scaling rule in the per-BOM Edit dialog
-  // (qty is intentionally not editable in this batch view).
+  // leg). qty + scaling are now editable inline on the new row (Wei Siang
+  // 2026-05-05 — having to flip to the per-BOM Edit dialog just to set
+  // qty was a real two-step pain).
   function addAutoDetectFromPlaceholder(
     placeholderKey: string,
     kind: "FABRIC" | "LEG",
@@ -5185,6 +5194,7 @@ function BatchEditMaterialsDialog({
         inventoryCode: patch.inventoryCode,
         autoDetect: patch.autoDetect,
         qty: 1,
+        scaling: undefined,
         initialCode: "",
         initialName: "",
         initialUnit: "",
@@ -5193,6 +5203,28 @@ function BatchEditMaterialsDialog({
       };
       return [...prev.slice(0, idx), newRow, ...prev.slice(idx)];
     });
+  }
+
+  // Inline updaters for qty + scaling on newly-added rows. These don't
+  // touch existing (non-isNew) rows to keep batch-replace semantics
+  // intact — qty/scaling for already-saved materials still live in the
+  // per-BOM Edit dialog.
+  function updateNewRowQty(rowKey: string, qty: number) {
+    setRows((prev) =>
+      prev.map((r) =>
+        r.rowKey === rowKey && r.isNew ? { ...r, qty } : r,
+      ),
+    );
+  }
+  function updateNewRowScaling(
+    rowKey: string,
+    scaling: MaterialScaling[] | undefined,
+  ) {
+    setRows((prev) =>
+      prev.map((r) =>
+        r.rowKey === rowKey && r.isNew ? { ...r, scaling } : r,
+      ),
+    );
   }
 
   // Toggle delete on a row. New (isNew) rows are simply removed from the
@@ -5435,6 +5467,10 @@ function BatchEditMaterialsDialog({
             name: e.name,
             unit: e.unit,
             qty: e.qty,
+            // Persist scaling rules captured inline in the dialog (Wei
+            // Siang 2026-05-05). Empty / undefined scaling stays absent
+            // so the WIPMaterial JSON shape isn't bloated.
+            scaling: e.scaling && e.scaling.length > 0 ? e.scaling : undefined,
             inventoryCode: e.autoDetect ? undefined : e.inventoryCode,
             autoDetect: e.autoDetect,
           });
@@ -5811,8 +5847,8 @@ function BatchEditMaterialsDialog({
                   ? "bg-[#FAEFCB]/60"
                   : "hover:bg-[#FAF9F7]";
                 return (
+                  <React.Fragment key={r.rowKey}>
                   <div
-                    key={r.rowKey}
                     className={`grid grid-cols-[28px_minmax(110px,1fr)_minmax(110px,1fr)_minmax(220px,2fr)_70px_50px_28px] gap-2 px-3 py-1.5 items-center border-b border-[#E2DDD8] last:border-b-0 text-xs ${rowTone}`}
                   >
                     <input
@@ -5874,16 +5910,34 @@ function BatchEditMaterialsDialog({
                         onSelectAutoDetect={(kind) => setRowAutoDetect(r.rowKey, kind)}
                       />
                     )}
-                    <span
-                      className="text-right text-xs text-gray-500 tabular-nums px-1.5 py-1"
-                      title={
-                        r.isPlaceholder
-                          ? "Pick a material to add it to this WIP step."
-                          : "Qty is managed in the per-BOM Edit dialog, not here."
-                      }
-                    >
-                      {r.isPlaceholder ? "—" : r.qty}
-                    </span>
+                    {r.isNew ? (
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        value={r.qty}
+                        onFocus={(e) => e.currentTarget.select()}
+                        onChange={(e) =>
+                          updateNewRowQty(
+                            r.rowKey,
+                            parseFloat(e.target.value) || 0,
+                          )
+                        }
+                        className="text-right text-xs border border-[#C6DBA8] rounded px-1.5 py-1 w-full bg-white tabular-nums"
+                        title="Qty per FG (scaling rules below stack on top)"
+                      />
+                    ) : (
+                      <span
+                        className="text-right text-xs text-gray-500 tabular-nums px-1.5 py-1"
+                        title={
+                          r.isPlaceholder
+                            ? "Pick a material to add it to this WIP step."
+                            : "Qty for existing materials is managed in the per-BOM Edit dialog (this dialog is for batch replace / add / delete)."
+                        }
+                      >
+                        {r.isPlaceholder ? "—" : r.qty}
+                      </span>
+                    )}
                     <span className="text-[10px] text-gray-500">
                       {r.isPlaceholder ? "" : r.unit}
                     </span>
@@ -5913,6 +5967,21 @@ function BatchEditMaterialsDialog({
                       </button>
                     )}
                   </div>
+                  {/* Inline scaling editor for new rows. Reuses the same
+                      <MaterialScalingEditor> the per-BOM Edit dialog uses,
+                      so the rule shape + UX are identical. Skipped on
+                      delete-flagged rows (no point editing what's about
+                      to be deleted). */}
+                  {r.isNew && !r.toDelete && (
+                    <div className={`px-3 pb-1.5 ${rowTone} border-b border-[#E2DDD8]`}>
+                      <MaterialScalingEditor
+                        scaling={r.scaling}
+                        unit={r.unit}
+                        onChange={(next) => updateNewRowScaling(r.rowKey, next)}
+                      />
+                    </div>
+                  )}
+                  </React.Fragment>
                 );
               })}
             </div>

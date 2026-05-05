@@ -158,12 +158,16 @@ function groupByBaseModel(rules: SofaComboRule[]): Record<string, SofaComboRule[
 }
 
 // Per-combo group key — unique combination of (baseModel, componentSizes,
-// fabricTier, customerId). All rows under the same key form the timeline
-// the History dialog renders. JSON.stringify(componentSizes) only works
-// because the API canonicalises (sorts) the OR-groups before storage, so
-// equivalent shapes hash identically.
+// fabricTier, pricesByHeight). Customers with IDENTICAL prices for the
+// same combo shape collapse into ONE card to keep the list compact. When
+// prices differ between customers the group key diverges and the cards
+// stay separate.
+//
+// JSON.stringify(componentSizes) only works because the API canonicalises
+// (sorts) the OR-groups before storage; same for pricesByHeight which is
+// always written in seat-height ASC order.
 function comboGroupKey(r: SofaComboRule): string {
-  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}|${r.customerId ?? ""}`;
+  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}|${JSON.stringify(r.pricesByHeight)}`;
 }
 
 // Pick the row that "represents" a combo group on the card grid. Rule:
@@ -432,16 +436,29 @@ export default function SofaCombosPage() {
                 </span>
               </div>
               <div className="grid gap-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3">
-                {groups.map((g) => (
-                  <ComboCard
-                    key={g.key}
-                    rule={g.representative}
-                    historyCount={g.rules.length}
-                    onDelete={() => handleDelete(g.representative.id)}
-                    onOpenHistory={() => setHistoryKey(g.key)}
-                    onEdit={() => setEditingRule(g.representative)}
-                  />
-                ))}
+                {groups.map((g) => {
+                  // Distinct customer labels in this collapsed group.
+                  // Sort for stable rendering. Master (NULL customerId)
+                  // contributes empty list = "All customers" badge.
+                  const customerNames = Array.from(
+                    new Set(
+                      g.rules
+                        .map((r) => r.customerName)
+                        .filter((n): n is string => !!n),
+                    ),
+                  ).sort();
+                  return (
+                    <ComboCard
+                      key={g.key}
+                      rule={g.representative}
+                      historyCount={g.rules.length}
+                      customerNames={customerNames}
+                      onDelete={() => handleDelete(g.representative.id)}
+                      onOpenHistory={() => setHistoryKey(g.key)}
+                      onEdit={() => setEditingRule(g.representative)}
+                    />
+                  );
+                })}
               </div>
             </div>
           ))}
@@ -500,12 +517,15 @@ export default function SofaCombosPage() {
 function ComboCard({
   rule,
   historyCount,
+  customerNames,
   onDelete,
   onOpenHistory,
   onEdit,
 }: {
   rule: SofaComboRule;
   historyCount: number;
+  /** Distinct customer labels in this group. Empty = company-wide. */
+  customerNames: string[];
   onDelete: () => void;
   onOpenHistory: () => void;
   onEdit: () => void;
@@ -526,9 +546,20 @@ function ComboCard({
               </span>
               {fabricTierBadge(rule.fabricTier)}
             </div>
-            <div className="text-xs text-[#6B7280]">
-              {rule.customerName ?? "All customers"}
-            </div>
+            {customerNames.length === 0 ? (
+              <div className="text-xs text-[#6B7280]">All customers</div>
+            ) : (
+              <div className="flex flex-wrap gap-1">
+                {customerNames.map((c) => (
+                  <span
+                    key={c}
+                    className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-[#F4F0E8] text-[#6B5C32] border border-[#E2DDD8]"
+                  >
+                    {c}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
           <Button variant="ghost" size="icon" onClick={onDelete}>
             <Trash2 className="h-4 w-4 text-[#9A3A2D]" />

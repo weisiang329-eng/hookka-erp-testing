@@ -384,11 +384,21 @@ export default function SofaCombosPage() {
 
   // History dialog: open by group key so the dialog re-derives its rules
   // list from the freshly-fetched data after each save/delete.
+  //
+  // The card's group key is `${combo}|${currentActivePricesJson}` (set by
+  // groupByCombo Pass 2), so a plain comboGroupKey filter on rules misses
+  // every row whose own pricesByHeight differs from the active. Find the
+  // matching card via combosByBase and use ITS .rules (which include
+  // every contributing customer's full timeline).
   const [historyKey, setHistoryKey] = useState<string | null>(null);
   const historyRules = useMemo<SofaComboRule[] | null>(() => {
     if (!historyKey) return null;
-    return rules.filter((r) => comboGroupKey(r) === historyKey);
-  }, [rules, historyKey]);
+    for (const cards of Object.values(combosByBase)) {
+      const card = cards.find((g) => g.key === historyKey);
+      if (card) return card.rules;
+    }
+    return null;
+  }, [combosByBase, historyKey]);
 
   async function handleDelete(id: string) {
     if (!confirm("Delete this combo rule? The history of past rules is preserved by their dates."))
@@ -847,13 +857,13 @@ function CreateComboDialog({
       };
       if (isEdit && editingRule) {
         // SMART SAVE — protects historical rows from accidental overwrite:
-        //   - effectiveFrom UNCHANGED → PUT (in-place fix; same date so
-        //     the row's place in the timeline is preserved). Use case:
-        //     fixing a typo on the original row.
-        //   - effectiveFrom CHANGED → POST a NEW row (additive history;
-        //     the old row stays as Past). Use case: scheduling a price
-        //     change for a new effective date — mirrors product master
-        //     price-history behaviour.
+        //   - PRICES UNCHANGED → PUT (in-place fix; covers typo on date,
+        //     compartments, fabric tier, customer, notes — none of these
+        //     are "new history events", just data corrections).
+        //   - PRICES CHANGED   → POST a NEW row (additive history; old
+        //     row preserved as Past). Mirrors product master price-
+        //     history flow: every price change creates a new effective-
+        //     dated row.
         //
         // Customer broadcast: additional selected customers always POST
         // new rows (one per customer) regardless of edit mode.
@@ -863,11 +873,15 @@ function CreateComboDialog({
             ? null
             : (selectedCustomers[0] ?? null);
         const additionalCustomerIds = selectedCustomers.slice(1);
-        const dateUnchanged = effectiveFrom === editingRule.effectiveFrom;
+        const pricesUnchanged =
+          JSON.stringify(pricesByHeight) ===
+          JSON.stringify(editingRule.pricesByHeight);
 
         // 1. Save THIS row.
-        if (dateUnchanged) {
-          // PUT in place — typo / metadata fix, same effective date.
+        if (pricesUnchanged) {
+          // PUT in place — non-price edit (date typo, compartment fix,
+          // tier change, customer reassignment, notes). History timeline
+          // not affected because the price level didn't change.
           const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
@@ -880,7 +894,8 @@ function CreateComboDialog({
             return;
           }
         } else {
-          // POST a new effective-dated row — old row preserved.
+          // POST a new row — price level changed; the operator is
+          // scheduling a new effective-dated price. Old row preserved.
           const postR = await fetch("/api/sofa-combos", {
             method: "POST",
             headers: { "Content-Type": "application/json" },

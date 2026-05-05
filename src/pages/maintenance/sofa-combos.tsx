@@ -157,17 +157,17 @@ function groupByBaseModel(rules: SofaComboRule[]): Record<string, SofaComboRule[
   return m;
 }
 
-// Per-combo group key — unique combination of (baseModel, componentSizes,
-// fabricTier, pricesByHeight). Customers with IDENTICAL prices for the
-// same combo shape collapse into ONE card to keep the list compact. When
-// prices differ between customers the group key diverges and the cards
-// stay separate.
+// Per-combo group key — keyed by (baseModel, componentSizes, fabricTier)
+// only. ONE card per combo SHAPE; price evolution is shown inside the
+// History dialog (mirrors product master price history). When customers
+// have DIFFERENT current-active prices we still split the card via a
+// second-level dedup (see groupByCombo below) so the visual stays
+// faithful to who-pays-what.
 //
 // JSON.stringify(componentSizes) only works because the API canonicalises
-// (sorts) the OR-groups before storage; same for pricesByHeight which is
-// always written in seat-height ASC order.
+// (sorts) the OR-groups before storage.
 function comboGroupKey(r: SofaComboRule): string {
-  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}|${JSON.stringify(r.pricesByHeight)}`;
+  return `${r.baseModel}|${JSON.stringify(r.componentSizes)}|${r.fabricTier}`;
 }
 
 // Pick the row that "represents" a combo group on the card grid. Rule:
@@ -175,6 +175,11 @@ function comboGroupKey(r: SofaComboRule): string {
 // the future, fall back to the newest Pending row so the card still
 // shows something. Returned indices preserve the input order so callers
 // can derive Past rows by exclusion.
+//
+// Currently unused after the two-pass groupByCombo refactor (each per-
+// (combo, customer) bucket picks its own active inline). Kept for
+// future single-grouping fallback paths; ignore the lint nag.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function pickRepresentativeRule(rules: SofaComboRule[]): SofaComboRule {
   const today = todayIso();
   const sorted = rules.slice().sort((a, b) => {
@@ -191,27 +196,89 @@ function pickRepresentativeRule(rules: SofaComboRule[]): SofaComboRule {
 
 type ComboGroup = {
   key: string;
-  rules: SofaComboRule[]; // all rows in this group, original order
+  rules: SofaComboRule[]; // all rules in the group (full history for the dialog)
   representative: SofaComboRule;
   hasActive: boolean;
 };
 
-// Bucket the flat rules array into per-combo groups, then sort so groups
-// with an Active row come first (alphabetical by baseModel within each
-// bucket) and Pending-only groups follow.
+// Two-pass grouping:
+//   Pass 1 — bucket by (combo, customerId): collect each customer's
+//            full price-change timeline for this combo, then pick that
+//            customer's current active rule.
+//   Pass 2 — bucket Pass 1's active rules by (combo, currentActivePrices):
+//            customers paying the SAME current price for the same combo
+//            collapse into one card; customers paying DIFFERENT current
+//            prices stay split. The card's `rules` includes EVERY rule
+//            from EVERY contributing customer, so the History dialog
+//            shows the full union timeline (Past/Active/Pending) and
+//            never strands a row.
+//
+// This gives Wei Siang what they asked for: ONE card per combo (not N
+// per effective-date), with price evolution surfaced via History — same
+// UX as the product master price-history dialog. Adding a new effective-
+// dated row at the same price = card stays as-is + new row in History.
+// Adding a new effective-dated row at a NEW price = card stays + new
+// row in History; only when the current ACTIVE price changes does a
+// second card potentially appear (when only some customers have moved
+// to the new price).
 function groupByCombo(rules: SofaComboRule[]): ComboGroup[] {
   const today = todayIso();
-  const buckets: Record<string, SofaComboRule[]> = {};
+
+  // Pass 1: per (combo, customerId) — collect rules, pick active.
+  type PerCC = {
+    rules: SofaComboRule[];
+    active: SofaComboRule;
+    hasActive: boolean;
+  };
+  const perCustomer = new Map<string, PerCC>();
   for (const r of rules) {
-    const k = comboGroupKey(r);
-    if (!buckets[k]) buckets[k] = [];
-    buckets[k].push(r);
+    const k = `${comboGroupKey(r)}|${r.customerId ?? ""}`;
+    let e = perCustomer.get(k);
+    if (!e) {
+      e = { rules: [], active: r, hasActive: false };
+      perCustomer.set(k, e);
+    }
+    e.rules.push(r);
   }
-  const groups: ComboGroup[] = Object.entries(buckets).map(([key, rs]) => {
-    const representative = pickRepresentativeRule(rs);
-    const hasActive = rs.some((r) => r.effectiveFrom <= today);
-    return { key, rules: rs, representative, hasActive };
-  });
+  for (const e of perCustomer.values()) {
+    const sortedDesc = e.rules
+      .slice()
+      .sort((a, b) =>
+        a.effectiveFrom !== b.effectiveFrom
+          ? b.effectiveFrom.localeCompare(a.effectiveFrom)
+          : b.createdAt.localeCompare(a.createdAt),
+      );
+    let active = sortedDesc.find((r) => r.effectiveFrom <= today);
+    e.hasActive = !!active;
+    // Fall back to newest pending if no active row exists.
+    if (!active) active = sortedDesc[0];
+    e.active = active;
+  }
+
+  // Pass 2: bucket by (combo, currentActivePricesJson). Cards collapse
+  // when customers share the same current active price.
+  const cards = new Map<string, ComboGroup>();
+  for (const e of perCustomer.values()) {
+    const cardKey = `${comboGroupKey(e.active)}|${JSON.stringify(e.active.pricesByHeight)}`;
+    let g = cards.get(cardKey);
+    if (!g) {
+      g = {
+        key: cardKey,
+        rules: [],
+        representative: e.active,
+        hasActive: false,
+      };
+      cards.set(cardKey, g);
+    }
+    g.rules.push(...e.rules);
+    if (e.hasActive) g.hasActive = true;
+    // Prefer an active rule as representative over a pending one.
+    if (e.hasActive && !cards.get(cardKey)!.representative) {
+      g.representative = e.active;
+    }
+  }
+
+  const groups = Array.from(cards.values());
   groups.sort((a, b) => {
     if (a.hasActive !== b.hasActive) return a.hasActive ? -1 : 1;
     if (a.representative.baseModel !== b.representative.baseModel) {
@@ -696,7 +763,6 @@ function CreateComboDialog({
   // the new model's size set. Skip in edit mode on first render so the
   // pre-filled groups from editingRule survive (they came from the same
   // baseModel anyway). Subsequent baseModel edits in either mode reset.
-  /* eslint-disable react-hooks/set-state-in-effect */
   const baseModelMounted = useRef(false);
   useEffect(() => {
     if (isEdit && !baseModelMounted.current) {
@@ -705,7 +771,6 @@ function CreateComboDialog({
     }
     setGroups([[]]);
   }, [baseModel, isEdit]);
-  /* eslint-enable react-hooks/set-state-in-effect */
 
   function toggleSizeInGroup(groupIdx: number, sz: string) {
     setGroups((prev) =>
@@ -781,38 +846,55 @@ function CreateComboDialog({
         notes: notes.trim() || null,
       };
       if (isEdit && editingRule) {
-        // Edit mode: PUT the existing row + broadcast to additional
-        // selected customers as new rows. Lets the operator both
-        // correct the current row AND copy the same deal to other
-        // customers in one save action.
+        // SMART SAVE — protects historical rows from accidental overwrite:
+        //   - effectiveFrom UNCHANGED → PUT (in-place fix; same date so
+        //     the row's place in the timeline is preserved). Use case:
+        //     fixing a typo on the original row.
+        //   - effectiveFrom CHANGED → POST a NEW row (additive history;
+        //     the old row stays as Past). Use case: scheduling a price
+        //     change for a new effective date — mirrors product master
+        //     price-history behaviour.
         //
-        // Customer list semantics:
-        //   - Empty Set      → update THIS row to company-wide (NULL)
-        //   - 1 selected     → update THIS row to that customer
-        //   - N selected     → update THIS row to FIRST selected,
-        //                      POST N-1 new rows for the others
+        // Customer broadcast: additional selected customers always POST
+        // new rows (one per customer) regardless of edit mode.
         const selectedCustomers = Array.from(customerIds);
         const primaryCustomerId: string | null =
           selectedCustomers.length === 0
             ? null
             : (selectedCustomers[0] ?? null);
         const additionalCustomerIds = selectedCustomers.slice(1);
+        const dateUnchanged = effectiveFrom === editingRule.effectiveFrom;
 
-        // 1. Update THIS row.
-        const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
-        });
-        const putJson = (await putR.json().catch(() => ({}))) as ApiSingle<unknown>;
-        if (!putR.ok || !putJson.success) {
-          setErr(putJson.error ?? "Failed to update combo rule");
-          setSaving(false);
-          return;
+        // 1. Save THIS row.
+        if (dateUnchanged) {
+          // PUT in place — typo / metadata fix, same effective date.
+          const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
+          });
+          const putJson = (await putR.json().catch(() => ({}))) as ApiSingle<unknown>;
+          if (!putR.ok || !putJson.success) {
+            setErr(putJson.error ?? "Failed to update combo rule");
+            setSaving(false);
+            return;
+          }
+        } else {
+          // POST a new effective-dated row — old row preserved.
+          const postR = await fetch("/api/sofa-combos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
+          });
+          const postJson = (await postR.json().catch(() => ({}))) as ApiSingle<unknown>;
+          if (!postR.ok || !postJson.success) {
+            setErr(postJson.error ?? "Failed to add new effective-dated row");
+            setSaving(false);
+            return;
+          }
         }
 
         // 2. Broadcast: POST a clone for each additional customer.
-        //    Sequential so any failure surfaces clearly.
         for (const cid of additionalCustomerIds) {
           const postR = await fetch("/api/sofa-combos", {
             method: "POST",
@@ -822,7 +904,7 @@ function CreateComboDialog({
           const postJson = (await postR.json().catch(() => ({}))) as ApiSingle<unknown>;
           if (!postR.ok || !postJson.success) {
             setErr(
-              `Updated this row, but failed to broadcast to additional customer ${cid}: ${postJson.error ?? "unknown error"}`,
+              `Saved this row, but failed to broadcast to additional customer ${cid}: ${postJson.error ?? "unknown error"}`,
             );
             setSaving(false);
             return;

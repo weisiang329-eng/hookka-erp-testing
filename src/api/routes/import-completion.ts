@@ -6139,4 +6139,182 @@ app.post("/backfill-split-multi-qty", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/queen-price-correction-rm5?dryRun=true|false
+//
+// One-shot price correction for Queen Size BEDFRAMEs. Wei Siang flagged that
+// the 4/26 surcharge across all Queen SKUs was applied at +RM30 instead of
+// the intended +RM25 — every Queen master + customer override row needs to
+// drop by RM5 (500 sen). NOT idempotent: each run subtracts another 500.
+// dryRun=true returns the row counts without writing.
+//
+// Scope:
+//   1. product_prices rows where productId is Queen BEDFRAME AND effective_from
+//      = '2026-04-26' AND base_price_sen IS NOT NULL  → -500 sen each.
+//   2. customer_product_prices rows that are the CURRENTLY-ACTIVE row for any
+//      (customer, Queen product) pair — pick the newest row per cp where
+//      effective_from <= today AND base_price_sen IS NOT NULL → -500 sen.
+//
+// Customers whose active cp row has base_price_sen = NULL inherit from
+// master; the master edit propagates automatically — no cp edit needed.
+//
+// Migration-temp. Delete this endpoint once the correction is live + verified.
+// ---------------------------------------------------------------------------
+app.post("/queen-price-correction-rm5", async (c) => {
+  const denied = await requirePermission(c, "products", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const today = new Date().toISOString().slice(0, 10);
+
+  // 1. Queen BEDFRAME product ids.
+  const queenRes = await db
+    .prepare(
+      `SELECT id, code FROM products
+        WHERE sizeCode = 'Q' AND category = 'BEDFRAME'`,
+    )
+    .all<{ id: string; code: string }>();
+  const queen = queenRes.results ?? [];
+  if (queen.length === 0) {
+    return c.json(
+      { success: false, error: "No Queen BEDFRAME products found" },
+      404,
+    );
+  }
+  const queenIds = queen.map((p) => p.id);
+  const placeholders = queenIds.map(() => "?").join(",");
+
+  // 2. Master product_prices rows at 4/26 with concrete prices.
+  const masterRowsRes = await db
+    .prepare(
+      `SELECT id, productId, basePriceSen, effectiveFrom
+         FROM product_prices
+        WHERE productId IN (${placeholders})
+          AND effectiveFrom = '2026-04-26'
+          AND basePriceSen IS NOT NULL`,
+    )
+    .bind(...queenIds)
+    .all<{
+      id: string;
+      productId: string;
+      basePriceSen: number;
+      effectiveFrom: string;
+    }>();
+  const masterRows = (masterRowsRes.results ?? []).filter(
+    (r) => typeof r.basePriceSen === "number",
+  );
+
+  // 3. All customer_product Queen assignments.
+  const cpRes = await db
+    .prepare(
+      `SELECT id, customerId, productId
+         FROM customer_products
+        WHERE productId IN (${placeholders})`,
+    )
+    .bind(...queenIds)
+    .all<{ id: string; customerId: string; productId: string }>();
+  const cps = cpRes.results ?? [];
+
+  // 4. For each cp, fetch the currently-active price row with concrete price.
+  //    Sequential awaits (not Promise.all) to keep memory + connection usage
+  //    bounded; ~88 rows is well within the request budget.
+  const cpRowsToUpdate: Array<{
+    rowId: string;
+    cpId: string;
+    customerId: string;
+    productId: string;
+    oldBaseSen: number;
+    newBaseSen: number;
+    effectiveFrom: string;
+  }> = [];
+  for (const cp of cps) {
+    const active = await db
+      .prepare(
+        `SELECT id, basePriceSen, effectiveFrom
+           FROM customer_product_prices
+          WHERE customerProductId = ?
+            AND effectiveFrom <= ?
+            AND basePriceSen IS NOT NULL
+          ORDER BY effectiveFrom DESC
+          LIMIT 1`,
+      )
+      .bind(cp.id, today)
+      .first<{ id: string; basePriceSen: number; effectiveFrom: string }>();
+    if (active && typeof active.basePriceSen === "number") {
+      cpRowsToUpdate.push({
+        rowId: active.id,
+        cpId: cp.id,
+        customerId: cp.customerId,
+        productId: cp.productId,
+        oldBaseSen: active.basePriceSen,
+        newBaseSen: active.basePriceSen - 500,
+        effectiveFrom: active.effectiveFrom,
+      });
+    }
+  }
+
+  // Date histogram for the customer side — confirms the (4/26 + 4/01)
+  // distribution the planner expected before going live.
+  const cpDateBuckets: Record<string, number> = {};
+  for (const r of cpRowsToUpdate) {
+    cpDateBuckets[r.effectiveFrom] = (cpDateBuckets[r.effectiveFrom] ?? 0) + 1;
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      queenProductCount: queen.length,
+      masterRowsToUpdate: masterRows.length,
+      customerRowsToUpdate: cpRowsToUpdate.length,
+      customerRowsByEffectiveFrom: cpDateBuckets,
+      sampleMaster: masterRows.slice(0, 3).map((r) => ({
+        rowId: r.id,
+        productId: r.productId,
+        oldRM: r.basePriceSen / 100,
+        newRM: (r.basePriceSen - 500) / 100,
+      })),
+      sampleCustomer: cpRowsToUpdate.slice(0, 5).map((r) => ({
+        rowId: r.rowId,
+        customerId: r.customerId,
+        productId: r.productId,
+        effectiveFrom: r.effectiveFrom,
+        oldRM: r.oldBaseSen / 100,
+        newRM: r.newBaseSen / 100,
+      })),
+    });
+  }
+
+  // 5. Apply. Batched to keep round-trip count down.
+  const masterStmts = masterRows.map((r) =>
+    db
+      .prepare(`UPDATE product_prices SET basePriceSen = ? WHERE id = ?`)
+      .bind(r.basePriceSen - 500, r.id),
+  );
+  const custStmts = cpRowsToUpdate.map((r) =>
+    db
+      .prepare(`UPDATE customer_product_prices SET basePriceSen = ? WHERE id = ?`)
+      .bind(r.newBaseSen, r.rowId),
+  );
+  let masterUpdated = 0;
+  for (let i = 0; i < masterStmts.length; i += 50) {
+    await db.batch(masterStmts.slice(i, i + 50));
+    masterUpdated += Math.min(50, masterStmts.length - i);
+  }
+  let custUpdated = 0;
+  for (let i = 0; i < custStmts.length; i += 50) {
+    await db.batch(custStmts.slice(i, i + 50));
+    custUpdated += Math.min(50, custStmts.length - i);
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    masterUpdated,
+    customerUpdated: custUpdated,
+    customerRowsByEffectiveFrom: cpDateBuckets,
+  });
+});
+
 export default app;

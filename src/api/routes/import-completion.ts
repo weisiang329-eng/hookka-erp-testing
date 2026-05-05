@@ -7374,6 +7374,397 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/recompute-co-sofa-prices?dryRun=true|false&statuses=...
+//
+// CO twin of /recompute-so-sofa-prices — same logic, different tables.
+// Rebuilds basePriceSen / unitPriceSen / lineTotalSen on every CO line item
+// in active consignment_orders, with the same per-line price resolution
+// (customer override → master fallback at companyCODate, fabric tier from
+// fabric_trackings.sofaPriceTier or bedframePriceTier) and the same sofa-
+// combo subset matching pass (extras keep master price, no discount bleed).
+//
+// CO create flow doesn't currently bake combo discount, so this is also
+// the first time CO line items get combo redistribution.
+// ---------------------------------------------------------------------------
+app.post("/recompute-co-sofa-prices", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const statusFilter = (c.req.query("statuses") || "").trim()
+    ? c.req.query("statuses")!.split(",").map(s => s.trim()).filter(Boolean)
+    : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Fabric → tier maps (same as SO version).
+  const ftRes = await db
+    .prepare(
+      `SELECT fabricCode, sofaPriceTier, bedframePriceTier, priceTier
+         FROM fabric_trackings`,
+    )
+    .all<{ fabricCode: string; sofaPriceTier: string | null; bedframePriceTier: string | null; priceTier: string | null }>();
+  const fabricSofaTierMap = new Map<string, string>();
+  const fabricBedframeTierMap = new Map<string, string>();
+  for (const r of (ftRes.results ?? [])) {
+    fabricSofaTierMap.set(r.fabricCode, r.sofaPriceTier ?? r.priceTier ?? "PRICE_2");
+    fabricBedframeTierMap.set(r.fabricCode, r.bedframePriceTier ?? r.priceTier ?? "PRICE_2");
+  }
+
+  // Pull COs in scope.
+  const coPlaceholders = statusFilter.map(() => "?").join(",");
+  const coRes = await db
+    .prepare(
+      `SELECT id, companyCOId, customerId, customerName, status,
+              companyCODate, created_at AS createdAt
+         FROM consignment_orders
+        WHERE status IN (${coPlaceholders})`,
+    )
+    .bind(...statusFilter)
+    .all<{ id: string; companyCOId: string | null; customerId: string | null; customerName: string | null; status: string | null; companyCODate: string | null; createdAt: string | null }>();
+  const cos = coRes.results ?? [];
+  if (cos.length === 0) {
+    return c.json({ success: true, dryRun, scope: statusFilter, coCount: 0 });
+  }
+  const coIds = cos.map(s => s.id);
+  const coById = new Map(cos.map(s => [s.id, s] as const));
+
+  type CoiRow = SoiRow & { consignmentOrderId: string };
+  const itemsRes = await db
+    .prepare(
+      `SELECT id, consignmentOrderId AS salesOrderId, productId, productCode, itemCategory, sizeCode,
+              fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
+              legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              basePriceSen, unitPriceSen, lineTotalSen
+         FROM consignment_order_items
+        WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+          AND consignmentOrderId IN (${coIds.map(() => "?").join(",")})`,
+    )
+    .bind(...coIds)
+    .all<CoiRow>();
+  const items = (itemsRes.results ?? []).filter((it) => {
+    if (!it.productCode) return false;
+    if (it.itemCategory === "SOFA") {
+      return SOFA_TARGET_BASES.some((b) => it.productCode!.startsWith(b + "-"));
+    }
+    return it.itemCategory === "BEDFRAME" || it.itemCategory === "ACCESSORY";
+  });
+
+  // Pre-load customer + master price history (mirrors SO version).
+  const cpKeys = Array.from(new Set(items.map((it) => {
+    const co = coById.get(it.salesOrderId);
+    if (!co?.customerId || !it.productId) return null;
+    return `${co.customerId}|${it.productId}`;
+  }).filter((k): k is string => k !== null)));
+  const cpHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const k of cpKeys) {
+    const [customerId, productId] = k.split("|");
+    const cpRes = await db
+      .prepare(
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+           FROM customer_products cp
+           JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
+          WHERE cp.customerId = ? AND cp.productId = ?
+          ORDER BY cpp.effectiveFrom DESC`,
+      )
+      .bind(customerId, productId)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    cpHistMap.set(k, cpRes.results ?? []);
+  }
+  const productIds = Array.from(new Set(items.map(it => it.productId).filter((p): p is string => !!p)));
+  const masterHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const pid of productIds) {
+    const mhRes = await db
+      .prepare(
+        `SELECT basePriceSen, seatHeightPrices, effectiveFrom
+           FROM product_prices
+          WHERE productId = ?
+          ORDER BY effectiveFrom DESC`,
+      )
+      .bind(pid)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    masterHistMap.set(pid, mhRes.results ?? []);
+  }
+
+  type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
+  function pickActive(rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>, asOf: string) {
+    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+    const r = usable[0];
+    if (!r) return null;
+    let entries: SeatHeightEntry[] = [];
+    try { entries = (JSON.parse(r.seatHeightPrices ?? "[]") || []) as SeatHeightEntry[]; } catch { /* ignore */ }
+    return { basePriceSen: r.basePriceSen!, entries };
+  }
+  function lookupSeatHeight(entries: SeatHeightEntry[], height: string, tier: string): number | null {
+    let m = entries.find(e => e.height === height && e.tier === tier);
+    if (m) return m.priceSen;
+    if (tier === "PRICE_2") {
+      m = entries.find(e => e.height === height && !e.tier);
+      if (m) return m.priceSen;
+    }
+    return null;
+  }
+
+  type ChangePlan2 = {
+    coId: string; companyCOId: string | null; customerName: string | null; status: string | null;
+    itemId: string; productCode: string | null; sizeCode: string | null;
+    fabricCode: string | null; fabricTier: string | null; quantity: number;
+    oldBaseRM: number; newBaseRM: number | null;
+    oldUnitRM: number; newUnitRM: number | null;
+    oldLineRM: number; newLineRM: number | null;
+    skipReason?: string;
+  };
+  const plans: ChangePlan2[] = [];
+  for (const it of items) {
+    const co = coById.get(it.salesOrderId)!;
+    const tier = it.fabricCode
+      ? (it.itemCategory === "BEDFRAME"
+          ? fabricBedframeTierMap.get(it.fabricCode)
+          : fabricSofaTierMap.get(it.fabricCode)) || "PRICE_2"
+      : "PRICE_2";
+    const asOf = (co.companyCODate || co.createdAt || today).slice(0, 10);
+    const cpKey = co.customerId && it.productId ? `${co.customerId}|${it.productId}` : null;
+    const cpHist = cpKey ? cpHistMap.get(cpKey) ?? [] : [];
+    const masterHist = it.productId ? masterHistMap.get(it.productId) ?? [] : [];
+    const cpActive = cpHist.length ? pickActive(cpHist, asOf) : null;
+    const masterActive = pickActive(masterHist, asOf);
+    const active = cpActive ?? masterActive;
+    const plan: ChangePlan2 = {
+      coId: it.salesOrderId, companyCOId: co.companyCOId, customerName: co.customerName, status: co.status,
+      itemId: it.id, productCode: it.productCode, sizeCode: it.sizeCode,
+      fabricCode: it.fabricCode, fabricTier: tier, quantity: it.quantity,
+      oldBaseRM: it.basePriceSen / 100, newBaseRM: null,
+      oldUnitRM: it.unitPriceSen / 100, newUnitRM: null,
+      oldLineRM: it.lineTotalSen / 100, newLineRM: null,
+    };
+    if (!active) { plan.skipReason = "no active price row"; plans.push(plan); continue; }
+    let priceSen: number | null = null;
+    if (it.itemCategory === "SOFA") {
+      if (!it.sizeCode) { plan.skipReason = "missing sizeCode"; plans.push(plan); continue; }
+      priceSen = lookupSeatHeight(active.entries, it.sizeCode, tier);
+      if (priceSen == null) { plan.skipReason = `no seat-height entry for ${it.sizeCode}/${tier}`; plans.push(plan); continue; }
+    } else {
+      priceSen = active.basePriceSen;
+    }
+    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
+    const newLine = newUnit * it.quantity;
+    plan.newBaseRM = priceSen / 100;
+    plan.newUnitRM = newUnit / 100;
+    plan.newLineRM = newLine / 100;
+    plans.push(plan);
+  }
+
+  // Sofa combo subset pass (mirrors SO version).
+  type ComboRule = { baseModel: string; componentSizes: unknown; fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY"; pricesByHeight: Record<string, number>; customerId: string | null; effectiveFrom: string };
+  const comboRes = await db
+    .prepare(
+      `SELECT baseModel, componentSizes, fabricTier, pricesByHeight, customerId, effectiveFrom
+         FROM sofa_combo_rules
+        WHERE effectiveFrom <= ?`,
+    )
+    .bind(today)
+    .all<{ baseModel: string; componentSizes: string; fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY"; pricesByHeight: string; customerId: string | null; effectiveFrom: string }>();
+  const comboRules: ComboRule[] = (comboRes.results ?? []).map((r) => ({
+    baseModel: r.baseModel, fabricTier: r.fabricTier, customerId: r.customerId, effectiveFrom: r.effectiveFrom,
+    componentSizes: (() => { try { return JSON.parse(r.componentSizes); } catch { return []; } })(),
+    pricesByHeight: (() => { try { return JSON.parse(r.pricesByHeight); } catch { return {}; } })(),
+  }));
+  function findComboSubsetCo(groups: unknown, items2: Array<{ variant: string; plan: ChangePlan2 }>): ChangePlan2[] | null {
+    if (!Array.isArray(groups) || groups.length === 0) return null;
+    const isGrouped = Array.isArray(groups[0]);
+    const remaining = items2.slice();
+    const matched: ChangePlan2[] = [];
+    if (!isGrouped) {
+      for (const ruleSize of (groups as string[])) {
+        const idx = remaining.findIndex((it) => it.variant === ruleSize);
+        if (idx === -1) return null;
+        matched.push(remaining[idx].plan); remaining.splice(idx, 1);
+      }
+      return matched;
+    }
+    for (const groupOpts of (groups as string[][])) {
+      const idx = remaining.findIndex((it) => groupOpts.includes(it.variant));
+      if (idx === -1) return null;
+      matched.push(remaining[idx].plan); remaining.splice(idx, 1);
+    }
+    return matched;
+  }
+
+  const plansByCo = new Map<string, ChangePlan2[]>();
+  for (const p of plans) {
+    if (p.skipReason || p.newLineRM == null) continue;
+    const arr = plansByCo.get(p.coId) ?? [];
+    arr.push(p); plansByCo.set(p.coId, arr);
+  }
+  let comboMatches = 0;
+  for (const [coId, coPlans] of plansByCo) {
+    const co = coById.get(coId)!;
+    const sofaPlans = coPlans.filter((p) => {
+      const it = items.find(i => i.id === p.itemId);
+      return it?.itemCategory === "SOFA";
+    });
+    if (sofaPlans.length < 2) continue;
+    const byBase = new Map<string, ChangePlan2[]>();
+    for (const p of sofaPlans) {
+      const baseModel = (p.productCode || "").split("-")[0];
+      const arr = byBase.get(baseModel) ?? [];
+      arr.push(p); byBase.set(baseModel, arr);
+    }
+    for (const [baseModel, group] of byBase) {
+      if (group.length < 2) continue;
+      const tiers = new Set(group.map((g) => g.fabricTier));
+      if (tiers.size > 1) continue;
+      const heights = new Set(group.map((g) => g.sizeCode));
+      if (heights.size > 1) continue;
+      const seatHeight = [...heights][0]!;
+      const groupTier = [...tiers][0]!;
+      const groupItems = group.map((g) => {
+        const code = g.productCode || "";
+        const dash = code.indexOf("-");
+        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
+      }).filter((x) => x.variant);
+      const candidates = comboRules
+        .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= (co.companyCODate || co.createdAt || today))
+        .map((r) => ({ r, subset: findComboSubsetCo(r.componentSizes, groupItems) }))
+        .filter((x): x is { r: ComboRule; subset: ChangePlan2[] } => x.subset !== null);
+      if (candidates.length === 0) continue;
+      const priorityOf = (r: ComboRule): number => {
+        const isCustomer = r.customerId === co.customerId && co.customerId;
+        const tierMatch = r.fabricTier === groupTier;
+        if (isCustomer && tierMatch) return 4;
+        if (isCustomer && r.fabricTier === "ANY") return 3;
+        if (!r.customerId && tierMatch) return 2;
+        if (!r.customerId && r.fabricTier === "ANY") return 1;
+        return 0;
+      };
+      const best = candidates
+        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+        .filter((x) => x.p > 0)
+        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+      if (!best) continue;
+      const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
+      if (comboTotalRM <= 0) continue;
+      const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+      if (subsetSumRM <= comboTotalRM) continue;
+      const ratio = comboTotalRM / subsetSumRM;
+      let runningGroupSumSen = 0;
+      const adjusted: ChangePlan2[] = [];
+      for (const p of best.subset) {
+        const it = items.find(i => i.id === p.itemId)!;
+        const oldLineSen = (p.newLineRM ?? 0) * 100;
+        const adjustedLineSen = Math.floor(oldLineSen * ratio);
+        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
+        const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
+        const newUnitSen = newBaseSen + surchargesPerUnit;
+        const newLineSen = newUnitSen * it.quantity;
+        p.newBaseRM = newBaseSen / 100; p.newUnitRM = newUnitSen / 100; p.newLineRM = newLineSen / 100;
+        runningGroupSumSen += newLineSen; adjusted.push(p);
+      }
+      const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
+      if (residualSen !== 0 && adjusted.length > 0) {
+        const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
+        const it = items.find(i => i.id === target.itemId)!;
+        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const cur = (target.newBaseRM ?? 0) * 100;
+        const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
+        const newBase = Math.max(0, adj);
+        const newUnit = newBase + surchargesPerUnit;
+        const newLine = newUnit * it.quantity;
+        target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
+      }
+      comboMatches++;
+    }
+  }
+
+  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
+  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  const skipped = plans.filter(p => p.skipReason);
+  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const summary = {
+    coCount: cos.length, itemsConsidered: items.length, willChange: willChange.length,
+    noChange: noChange.length, skipped: skipped.length,
+    skipReasons: skipped.reduce<Record<string, number>>((acc, p) => { acc[p.skipReason!] = (acc[p.skipReason!] || 0) + 1; return acc; }, {}),
+    comboMatchedGroups: comboMatches,
+    sumLineDiffRM: Math.round(sumDiff * 100) / 100,
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, scope: statusFilter, summary,
+      sampleChanges: willChange.slice(0, 20).map(p => ({
+        co: p.companyCOId, cust: p.customerName, status: p.status,
+        product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
+        oldBase: p.oldBaseRM, newBase: p.newBaseRM,
+        oldLine: p.oldLineRM, newLine: p.newLineRM,
+        diff: Math.round(((p.newLineRM ?? 0) - p.oldLineRM) * 100) / 100,
+        qty: p.quantity,
+      })),
+    });
+  }
+
+  let itemsUpdated = 0;
+  const dirtyCoIds = new Set<string>();
+  for (let i = 0; i < willChange.length; i += 50) {
+    const batch = willChange.slice(i, i + 50);
+    const stmts: ReturnType<D1Database["prepare"]>[] = [];
+    for (const p of batch) {
+      stmts.push(
+        db.prepare(`UPDATE consignment_order_items SET basePriceSen = ?, unitPriceSen = ?, lineTotalSen = ? WHERE id = ?`)
+          .bind(Math.round((p.newBaseRM ?? 0) * 100), Math.round((p.newUnitRM ?? 0) * 100), Math.round((p.newLineRM ?? 0) * 100), p.itemId),
+      );
+      dirtyCoIds.add(p.coId);
+    }
+    if (stmts.length > 0) await db.batch(stmts);
+    itemsUpdated += batch.length;
+  }
+  let cosUpdated = 0;
+  for (const coId of dirtyCoIds) {
+    const sumRes = await db
+      .prepare(`SELECT COALESCE(SUM(lineTotalSen), 0) AS sub FROM consignment_order_items WHERE consignmentOrderId = ?`)
+      .bind(coId).first<{ sub: number }>();
+    const sub = sumRes?.sub ?? 0;
+    await db.prepare(`UPDATE consignment_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?`)
+      .bind(sub, sub, new Date().toISOString(), coId).run();
+    cosUpdated++;
+  }
+  return c.json({ success: true, dryRun: false, scope: statusFilter, summary, itemsUpdated, cosUpdated });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/resync-co-totals — CO twin of resync-so-totals.
+// ---------------------------------------------------------------------------
+app.post("/resync-co-totals", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const cosRes = await db.prepare(
+    `SELECT id, subtotalSen, totalSen FROM consignment_orders
+      WHERE status IN ('IN_PRODUCTION','READY_TO_SHIP','CONFIRMED','DRAFT')`,
+  ).all<{ id: string; subtotalSen: number; totalSen: number }>();
+  const cos = cosRes.results ?? [];
+  let outOfSync = 0, updated = 0;
+  const samples: Array<{ coId: string; oldSub: number; newSub: number; diff: number }> = [];
+  const now = new Date().toISOString();
+  for (const co of cos) {
+    const sumRes = await db.prepare(
+      `SELECT COALESCE(SUM(lineTotalSen), 0) AS sub FROM consignment_order_items WHERE consignmentOrderId = ?`,
+    ).bind(co.id).first<{ sub: number }>();
+    const newSub = sumRes?.sub ?? 0;
+    if (newSub === co.subtotalSen && newSub === co.totalSen) continue;
+    outOfSync++;
+    if (samples.length < 10) samples.push({ coId: co.id, oldSub: co.subtotalSen, newSub, diff: newSub - co.subtotalSen });
+    if (!dryRun) {
+      await db.prepare(`UPDATE consignment_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?`)
+        .bind(newSub, newSub, now, co.id).run();
+      updated++;
+    }
+  }
+  return c.json({ success: true, dryRun, coCount: cos.length, outOfSync, updated, samples });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/resync-so-totals
 //
 // Single-purpose resync: walk every active SO, set subtotal_sen + total_sen

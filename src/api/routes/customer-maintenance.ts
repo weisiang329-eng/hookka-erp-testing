@@ -96,30 +96,47 @@ app.post("/:customerId/copy-from-master", async (c) => {
   // skip rows that already exist for this customer scope at the same
   // (effective_from, config) pair.
   const customerScope = `customer:${customerId}`;
+  // D1 adapter sometimes lowercases mixed-case aliases on the way out.
+  // Read with the camelCase alias AND fallback to the lowercased form.
   const masterHistRes = await c.var.DB
     .prepare(
-      `SELECT effective_from, config, notes
+      `SELECT effective_from AS "effectiveFrom", config, notes
          FROM maintenance_config_history
         WHERE scope = 'master'`,
     )
-    .all<{
-      effective_from: string;
-      config: string;
-      notes: string | null;
-    }>();
-  const masterHistRows = masterHistRes.results ?? [];
+    .all<Record<string, unknown>>();
+  const readEff = (r: Record<string, unknown>): string => {
+    if (typeof r.effectiveFrom === "string") return r.effectiveFrom;
+    if (typeof r.effective_from === "string") return r.effective_from;
+    if (typeof (r as Record<string, unknown>)["effectivefrom"] === "string") {
+      return (r as Record<string, string>).effectivefrom;
+    }
+    return "";
+  };
+  const masterHistRows = (masterHistRes.results ?? [])
+    .map((r) => ({
+      effective_from: readEff(r),
+      config: typeof r.config === "string" ? r.config : "",
+      notes: typeof r.notes === "string" ? r.notes : null,
+    }))
+    .filter((r) => r.effective_from && r.config);
   let mirroredHistoryRows = 0;
   if (masterHistRows.length > 0) {
     const existingCustHistRes = await c.var.DB
       .prepare(
-        `SELECT effective_from, config
+        `SELECT effective_from AS "effectiveFrom", config
            FROM maintenance_config_history
           WHERE scope = ?`,
       )
       .bind(customerScope)
-      .all<{ effective_from: string; config: string }>();
+      .all<Record<string, unknown>>();
+    const existingCustHistRows = (existingCustHistRes.results ?? [])
+      .map((r) => ({
+        effective_from: readEff(r),
+        config: typeof r.config === "string" ? r.config : "",
+      }));
     const existingKeys = new Set(
-      (existingCustHistRes.results ?? []).map(
+      existingCustHistRows.map(
         (r) => `${r.effective_from}|${r.config.length}|${r.config.slice(0, 64)}`,
       ),
     );

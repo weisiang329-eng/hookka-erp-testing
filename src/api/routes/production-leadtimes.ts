@@ -1,23 +1,23 @@
 // ---------------------------------------------------------------------------
-// D1-backed Production Lead Times.
+// Production Lead Times — single source of truth = the *_history tables
+// (migrations 0105 + 0106). Inline /planning Save and the dialog Schedule
+// flow both write here; `loadLeadTimes` resolves "latest effective_from
+// <= today" per (cat, dept). The legacy production_lead_times +
+// hookka_dd_buffer baseline tables are no longer read; their previous
+// contents were backfilled into history with effective_from='2020-01-01'
+// by 0106 so historical SO confirms still find a value.
 //
-// GET / — returns the full (category → deptCode → days) map.
-// PUT / — accepts { BEDFRAME: {...}, SOFA: {...} } and upserts each entry.
-//
-// Response shape matches the original mock route so the Planning page
-// (src/pages/planning/index.tsx) doesn't need changes:
-//   { success: true, data: { BEDFRAME: { FAB_CUT: 7, ... }, SOFA: {...} } }
-//
-// Seeding: on the first GET/PUT after deploy the table may be empty —
-// `ensureLeadTimesSeeded` inserts safe defaults (see ../lib/lead-times.ts).
+// GET / — returns current effective values + pending summary
+// PUT / — bulk upsert "as of today" (ON CONFLICT DO UPDATE on uniq idx)
+// POST /schedule — schedule one row at a chosen effective_from
+// GET /history — full merged history with Pending/Active/Past
+// DEL /history/:id — remove one row
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import {
-  ensureLeadTimesSeeded,
   loadLeadTimes,
-  ensureHookkaDDBufferSeeded,
   loadHookkaDDBuffer,
   leadDaysFor,
   addDays,
@@ -183,8 +183,6 @@ async function buildResponsePayload(db: D1Database): Promise<LeadTimesResponse> 
 
 // GET /
 app.get("/", async (c) => {
-  await ensureLeadTimesSeeded(c.var.DB);
-  await ensureHookkaDDBufferSeeded(c.var.DB);
   const data = await buildResponsePayload(c.var.DB);
   return c.json({ success: true, data });
 });
@@ -192,6 +190,12 @@ app.get("/", async (c) => {
 // PUT /
 // Accepts { BEDFRAME: { DEPT: n, ... }, SOFA: {...}, hookkaDDBuffer: { BEDFRAME: n, SOFA: n } }
 // All three top-level keys are optional — any missing key is left unchanged.
+//
+// Writes go to the *_history tables with effective_from=today (single source
+// of truth, matches the dialog's scheduling flow). Same-day re-saves of the
+// same (cat, dept) overwrite via ON CONFLICT DO UPDATE on the unique
+// constraint added in migration 0106 — no daily-noise rows in the history
+// dialog.
 app.put("/", async (c) => {
   const denied = await requirePermission(c, "production-leadtimes", "update");
   if (denied) return denied;
@@ -200,10 +204,9 @@ app.put("/", async (c) => {
     return c.json({ success: false, error: "Body must be an object" }, 400);
   }
 
-  await ensureLeadTimesSeeded(c.var.DB);
-  await ensureHookkaDDBufferSeeded(c.var.DB);
-
+  const today = todayIso();
   const statements: D1PreparedStatement[] = [];
+
   for (const cat of CATEGORIES) {
     const incoming = (body as Record<string, unknown>)[cat];
     if (!incoming || typeof incoming !== "object") continue;
@@ -211,14 +214,18 @@ app.put("/", async (c) => {
       incoming as Record<string, unknown>,
     )) {
       const n = Number(raw);
-      // Preserve original validation: reject non-finite and negative; coerce to int.
       if (!Number.isFinite(n) || n < 0) continue;
       const days = Math.round(n);
       statements.push(
         c.var.DB.prepare(
-          `INSERT INTO production_lead_times (category, deptCode, days) VALUES (?, ?, ?)
-           ON CONFLICT (category, deptCode) DO UPDATE SET days = EXCLUDED.days`,
-        ).bind(cat as Category, deptCode, days),
+          `INSERT INTO production_lead_times_history
+             (id, category, dept_code, days, effective_from, notes)
+           VALUES (?, ?, ?, ?, ?, NULL)
+           ON CONFLICT (category, dept_code, effective_from)
+           DO UPDATE SET days = EXCLUDED.days,
+                         created_at = (to_char(NOW() AT TIME ZONE 'UTC',
+                           'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
+        ).bind(genLeadTimeRowId(), cat as Category, deptCode, days, today),
       );
     }
   }
@@ -233,9 +240,14 @@ app.put("/", async (c) => {
       const days = Math.round(n);
       statements.push(
         c.var.DB.prepare(
-          `INSERT INTO hookka_dd_buffer (category, days) VALUES (?, ?)
-           ON CONFLICT (category) DO UPDATE SET days = EXCLUDED.days`,
-        ).bind(cat as Category, days),
+          `INSERT INTO hookka_dd_buffer_history
+             (id, category, days, effective_from, notes)
+           VALUES (?, ?, ?, ?, NULL)
+           ON CONFLICT (category, effective_from)
+           DO UPDATE SET days = EXCLUDED.days,
+                         created_at = (to_char(NOW() AT TIME ZONE 'UTC',
+                           'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
+        ).bind(genHookkaBufferRowId(), cat as Category, days, today),
       );
     }
   }
@@ -255,8 +267,6 @@ app.post("/recalc-all", async (c) => {
   const denied = await requirePermission(c, "production-leadtimes", "create");
   if (denied) return denied;
   try {
-    await ensureLeadTimesSeeded(c.var.DB);
-    await ensureHookkaDDBufferSeeded(c.var.DB);
     const [leadTimes, hookkaBuffer] = await Promise.all([
       loadLeadTimes(c.var.DB),
       loadHookkaDDBuffer(c.var.DB),
@@ -443,14 +453,12 @@ app.get("/history", async (c) => {
 //   { kind: "leadTime",     category, deptCode, days, effectiveFrom, notes? }
 //   { kind: "hookkaBuffer", category,           days, effectiveFrom, notes? }
 //
-// Auto-baseline (mirrors POST /api/products/:id/prices):
-//   When scheduling the FIRST history row for a given (category, deptCode)
-//   pair AND the new effective_from is in the future, we capture today's
-//   currently-effective value (from the legacy baseline table or seeded
-//   defaults) as a row dated today with notes="Auto-baseline (captured
-//   before scheduled change)". Without this, when the future date kicks
-//   in there's no record of "what the value used to be" — same gap Wei
-//   Siang flagged on the products side.
+// ON CONFLICT DO UPDATE on the (cat, dept_code, effective_from) /
+// (cat, effective_from) unique constraint added in migration 0106 — same
+// (cat, dept, date) tuple just overwrites instead of stacking duplicate
+// rows. No auto-baseline logic needed since every inline /planning Save
+// also writes a today-dated history row, so the historical "what was the
+// value before?" gap is naturally captured.
 app.post("/schedule", async (c) => {
   const denied = await requirePermission(c, "production-leadtimes", "update");
   if (denied) return denied;
@@ -481,58 +489,23 @@ app.post("/schedule", async (c) => {
   const notes = typeof body.notes === "string" && body.notes.trim() ? body.notes.trim() : null;
   const createdBy = typeof body.createdBy === "string" && body.createdBy ? body.createdBy : null;
 
-  await ensureLeadTimesSeeded(c.var.DB);
-  await ensureHookkaDDBufferSeeded(c.var.DB);
-
   if (kind === "leadTime") {
     const deptCode = String(body.deptCode ?? "").trim();
     if (!deptCode) {
       return c.json({ success: false, error: "deptCode is required for kind=leadTime" }, 400);
     }
-
-    // Auto-baseline: only when scheduling a future row AND no prior history
-    // for this (category, deptCode) exists yet.
-    const today = todayIso();
-    if (effectiveFrom > today) {
-      const existing = await c.var.DB
-        .prepare(
-          `SELECT id FROM production_lead_times_history
-            WHERE category = ? AND dept_code = ? LIMIT 1`,
-        )
-        .bind(category, deptCode)
-        .first<{ id: string }>();
-      if (!existing) {
-        // Resolve the current effective value from the (already-seeded)
-        // baseline so the auto-baseline reflects what users see today.
-        const liveMap = await loadLeadTimes(c.var.DB, today);
-        const liveDays = liveMap[category]?.[deptCode];
-        if (typeof liveDays === "number") {
-          await c.var.DB
-            .prepare(
-              `INSERT INTO production_lead_times_history
-                 (id, category, dept_code, days, effective_from, notes, created_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .bind(
-              genLeadTimeRowId(),
-              category,
-              deptCode,
-              liveDays,
-              today,
-              "Auto-baseline (captured before scheduled change)",
-              createdBy,
-            )
-            .run();
-        }
-      }
-    }
-
     const id = genLeadTimeRowId();
     await c.var.DB
       .prepare(
         `INSERT INTO production_lead_times_history
            (id, category, dept_code, days, effective_from, notes, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (category, dept_code, effective_from)
+         DO UPDATE SET days = EXCLUDED.days,
+                       notes = EXCLUDED.notes,
+                       created_by = EXCLUDED.created_by,
+                       created_at = (to_char(NOW() AT TIME ZONE 'UTC',
+                         'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
       )
       .bind(id, category, deptCode, days, effectiveFrom, notes, createdBy)
       .run();
@@ -540,44 +513,18 @@ app.post("/schedule", async (c) => {
   }
 
   // kind === "hookkaBuffer"
-  const today = todayIso();
-  if (effectiveFrom > today) {
-    const existing = await c.var.DB
-      .prepare(
-        `SELECT id FROM hookka_dd_buffer_history
-          WHERE category = ? LIMIT 1`,
-      )
-      .bind(category)
-      .first<{ id: string }>();
-    if (!existing) {
-      const liveMap = await loadHookkaDDBuffer(c.var.DB, today);
-      const liveDays = liveMap[category as Category];
-      if (typeof liveDays === "number") {
-        await c.var.DB
-          .prepare(
-            `INSERT INTO hookka_dd_buffer_history
-               (id, category, days, effective_from, notes, created_by)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-          )
-          .bind(
-            genHookkaBufferRowId(),
-            category,
-            liveDays,
-            today,
-            "Auto-baseline (captured before scheduled change)",
-            createdBy,
-          )
-          .run();
-      }
-    }
-  }
-
   const id = genHookkaBufferRowId();
   await c.var.DB
     .prepare(
       `INSERT INTO hookka_dd_buffer_history
          (id, category, days, effective_from, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (category, effective_from)
+       DO UPDATE SET days = EXCLUDED.days,
+                     notes = EXCLUDED.notes,
+                     created_by = EXCLUDED.created_by,
+                     created_at = (to_char(NOW() AT TIME ZONE 'UTC',
+                       'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
     )
     .bind(id, category, days, effectiveFrom, notes, createdBy)
     .run();

@@ -79,25 +79,23 @@ export async function ensureLeadTimesSeeded(db: D1Database): Promise<void> {
 }
 
 // Load the (category, deptCode) → days map effective ON or BEFORE `asOfDate`
-// (default: today, ISO YYYY-MM-DD).
+// (default: today, ISO YYYY-MM-DD). Single source of truth: the *_history
+// tables. Both inline /planning Save and the dialog Schedule flow write
+// here; this resolver picks the latest effective_from <= asOf per (cat,
+// dept), tiebreaking on created_at.
 //
-// Resolution order, per (category, dept_code):
-//   1. Newest production_lead_times_history row with effective_from <= asOf
-//      (mirrors the product_prices pattern from migration 0066).
-//   2. Fall back to the legacy production_lead_times baseline row.
-//   3. Fall back to the in-file DEFAULT_LEAD_DAYS so callers never hit
-//      undefined; BEDFRAME values are the fallback for unknown categories
-//      (ACCESSORY, etc.).
+// Migration 0105 created the table; 0106 backfilled the legacy
+// production_lead_times baseline rows in with effective_from='2020-01-01'
+// so any historical SO confirm finds a value. Falls back to the in-file
+// DEFAULT_LEAD_DAYS only when neither history nor backfill has a row for
+// that (cat, dept) — which in practice only happens on a fresh install
+// where 0106 hasn't run yet, or for new categories added to the constant.
 //
 // Postgres column is `dept_code` (snake_case). The D1Compat adapter
 // translates camelCase identifiers in the SQL string to snake_case for
-// the underlying query, but does NOT camelCase the result rows — so a
-// SELECT by `deptCode` returns rows keyed `dept_code` and reading
-// `row.deptCode` is undefined. The bug silently filled the lead-times
-// map with defaults and every new SO's job_card dueDates ignored the
-// user-saved configuration. Aliasing in SQL and accepting both keys on
-// the result row covers both runtime modes (raw Postgres in tests, D1
-// + adapter in workers).
+// the underlying query, but does NOT camelCase the result rows. SELECT
+// `dept_code AS "deptCode"` covers both runtime modes (raw Postgres in
+// tests, D1 + adapter in workers).
 export async function loadLeadTimes(
   db: D1Database,
   asOfDate?: string,
@@ -105,7 +103,7 @@ export async function loadLeadTimes(
   const asOf = asOfDate || new Date().toISOString().slice(0, 10);
   const map: LeadTimeMap = { BEDFRAME: {}, SOFA: {} };
 
-  // Layer 1: history (latest effective_from <= asOf wins per (cat, dept)).
+  // History → latest effective_from <= asOf wins per (cat, dept).
   // DISTINCT ON keeps the first row in each (category, dept_code) group;
   // ORDER BY pins the newest effective_from + tiebreaks on created_at.
   const histRes = await db
@@ -125,22 +123,7 @@ export async function loadLeadTimes(
     map[row.category][dept] = row.days;
   }
 
-  // Layer 2: legacy baseline. Fills any (cat, dept) that history didn't cover.
-  const baseRes = await db
-    .prepare(
-      'SELECT category, dept_code AS "deptCode", days FROM production_lead_times',
-    )
-    .all<{ category: string; deptCode?: string; dept_code?: string; days: number }>();
-  for (const row of baseRes.results ?? []) {
-    if (!map[row.category]) map[row.category] = {};
-    const dept = row.deptCode ?? row.dept_code;
-    if (typeof dept !== "string" || !dept) continue;
-    if (map[row.category][dept] == null) {
-      map[row.category][dept] = row.days;
-    }
-  }
-
-  // Layer 3: in-file defaults for anything still missing.
+  // Final fallback: in-file defaults for anything still missing.
   for (const cat of Object.keys(DEFAULT_LEAD_DAYS)) {
     if (!map[cat]) map[cat] = {};
     for (const dept of Object.keys(DEFAULT_LEAD_DAYS[cat])) {
@@ -196,17 +179,16 @@ export async function ensureHookkaDDBufferSeeded(db: D1Database): Promise<void> 
 }
 
 // Load { BEDFRAME, SOFA } buffer map effective ON or BEFORE `asOfDate`
-// (default: today). Same three-layer resolution as loadLeadTimes:
-// history → legacy baseline → in-file defaults.
+// (default: today). Single source of truth: hookka_dd_buffer_history.
+// Migration 0106 backfilled the legacy hookka_dd_buffer rows with
+// effective_from='2020-01-01'.
 export async function loadHookkaDDBuffer(
   db: D1Database,
   asOfDate?: string,
 ): Promise<HookkaDDBuffer> {
   const asOf = asOfDate || new Date().toISOString().slice(0, 10);
   const map: HookkaDDBuffer = { ...DEFAULT_HOOKKA_DD_BUFFER };
-  const seen = new Set<string>();
 
-  // Layer 1: history (latest effective_from <= asOf wins per category).
   const histRes = await db
     .prepare(
       `SELECT DISTINCT ON (category) category, days
@@ -218,20 +200,6 @@ export async function loadHookkaDDBuffer(
     .all<{ category: string; days: number }>();
   for (const row of histRes.results ?? []) {
     if (row.category === "BEDFRAME" || row.category === "SOFA") {
-      if (Number.isFinite(row.days) && row.days >= 0) {
-        map[row.category] = row.days;
-        seen.add(row.category);
-      }
-    }
-  }
-
-  // Layer 2: legacy baseline for any category not covered by history.
-  const baseRes = await db
-    .prepare("SELECT category, days FROM hookka_dd_buffer")
-    .all<{ category: string; days: number }>();
-  for (const row of baseRes.results ?? []) {
-    if (row.category === "BEDFRAME" || row.category === "SOFA") {
-      if (seen.has(row.category)) continue;
       if (Number.isFinite(row.days) && row.days >= 0) {
         map[row.category] = row.days;
       }

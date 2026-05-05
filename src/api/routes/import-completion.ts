@@ -7337,7 +7337,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     await db
       .prepare(
         `UPDATE sales_orders
-            SET subtotalSen = ?, grandTotalSen = ?, updated_at = ?
+            SET subtotalSen = ?, totalSen = ?, updated_at = ?
           WHERE id = ?`,
       )
       .bind(sub, sub, new Date().toISOString(), soId)

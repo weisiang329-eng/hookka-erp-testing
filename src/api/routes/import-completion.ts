@@ -7705,16 +7705,15 @@ app.post("/supplier-bindings-from-history", async (c) => {
 //   4. one grn_items per item with non-null materialCode
 //   5. rm_batches + cost_ledger + raw_materials.balanceQty bump (replicated
 //      from grn.ts postGRNToStock)
-//   6. one purchase_invoices row (status=APPROVED) — single amountSen total
+//   6. one purchase_invoices row (status=APPROVED) — amountSen = sum of
+//      ALL resolved lines (stocked + fee + rebate + tax)
+//   7. one purchase_invoice_items per resolved item (migration 0107).
+//      Stocked items keep their material_code; non-stocked lines (fees,
+//      tax, rebate, discount) are categorised with a description-based
+//      line_type heuristic so the detail screen can render them clearly.
 //
 // Idempotency: skip if a purchase_invoices row with piNo = docNo already
 // exists.
-//
-// Schema note: purchase_invoices in this codebase has NO line items table
-// (see migration 0057). It stores a single amountSen total + supplier + PO/PI
-// link. So fee/rebate (materialCode=null) lines DO get summed into the PI
-// total, but they don't get a per-line PI row anywhere — that's the
-// schema we have. The PO + GRN exclude those lines (only stocked items).
 // ---------------------------------------------------------------------------
 type BackfillDocItem = {
   materialCode?: string | null;
@@ -8051,6 +8050,51 @@ app.post("/historical-purchases-backfill", async (c) => {
             nowIso,
           ),
       );
+
+      // ----- PI line items -----
+      // Migration 0107 added purchase_invoice_items so we now persist the
+      // per-line breakdown that was previously dropped on import. Stocked
+      // items keep their materialCode link; non-stocked lines (fees, tax,
+      // rebate, discount) are tagged with a heuristic line_type derived
+      // from the description so the detail screen can render them as
+      // labelled non-stock rows instead of stocked items.
+      for (let i = 0; i < resolved.length; i++) {
+        const it = resolved[i];
+        const piItemId = `pii-${piId}-${i + 1}`;
+        const lineTotal = Math.round(it.qty * it.unitPriceSen);
+        let lineType: "STOCKED" | "FEE" | "TAX" | "REBATE" | "DISCOUNT" | "OTHER";
+        if (it.rmId !== null) {
+          lineType = "STOCKED";
+        } else {
+          const desc = it.materialName || "";
+          if (/SST/i.test(desc)) lineType = "TAX";
+          else if (/TRANSPORT|FEE|CHARGES/i.test(desc)) lineType = "FEE";
+          else if (/REBATE/i.test(desc)) lineType = "REBATE";
+          else if (/DISCOUNT/i.test(desc)) lineType = "DISCOUNT";
+          else lineType = "OTHER";
+        }
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO purchase_invoice_items (id, pi_id, material_code,
+                 material_name, supplier_sku, qty, unit_price_sen,
+                 line_total_sen, line_type, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+            )
+            .bind(
+              piItemId,
+              piId,
+              it.materialCode,
+              it.materialName,
+              it.supplierSKU,
+              it.qty,
+              it.unitPriceSen,
+              lineTotal,
+              lineType,
+              nowIso,
+            ),
+        );
+      }
 
       await db.batch(statements);
 

@@ -7351,4 +7351,68 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/resync-so-totals
+//
+// Single-purpose resync: walk every active SO, set subtotal_sen + total_sen
+// = SUM(sales_order_items.line_total_sen) for that SO. Idempotent.
+//
+// Needed because the first live run of recompute-so-sofa-prices crashed
+// mid-execution on a wrong column name (grand_total vs total) — the line-
+// item UPDATEs landed but the SO total UPDATEs didn't, leaving 41-of-60
+// sampled SOs with stale subtotals.
+// ---------------------------------------------------------------------------
+app.post("/resync-so-totals", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  const sosRes = await db
+    .prepare(
+      `SELECT id, subtotalSen, totalSen
+         FROM sales_orders
+        WHERE status IN ('IN_PRODUCTION','READY_TO_SHIP','CONFIRMED','DRAFT')`,
+    )
+    .all<{ id: string; subtotalSen: number; totalSen: number }>();
+  const sos = sosRes.results ?? [];
+
+  let outOfSync = 0;
+  let updated = 0;
+  const samples: Array<{ soId: string; oldSub: number; newSub: number; diff: number }> = [];
+  const now = new Date().toISOString();
+
+  for (const so of sos) {
+    const sumRes = await db
+      .prepare(
+        `SELECT COALESCE(SUM(lineTotalSen), 0) AS sub
+           FROM sales_order_items WHERE salesOrderId = ?`,
+      )
+      .bind(so.id)
+      .first<{ sub: number }>();
+    const newSub = sumRes?.sub ?? 0;
+    if (newSub === so.subtotalSen && newSub === so.totalSen) continue;
+    outOfSync++;
+    if (samples.length < 10) {
+      samples.push({ soId: so.id, oldSub: so.subtotalSen, newSub, diff: newSub - so.subtotalSen });
+    }
+    if (!dryRun) {
+      await db
+        .prepare(
+          `UPDATE sales_orders
+              SET subtotalSen = ?, totalSen = ?, updated_at = ?
+            WHERE id = ?`,
+        )
+        .bind(newSub, newSub, now, so.id)
+        .run();
+      updated++;
+    }
+  }
+
+  return c.json({
+    success: true, dryRun,
+    soCount: sos.length, outOfSync, updated, samples,
+  });
+});
+
 export default app;

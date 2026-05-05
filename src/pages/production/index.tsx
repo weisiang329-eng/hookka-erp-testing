@@ -128,10 +128,24 @@ export default function ProductionPage({
       if (!el) return;
       sharedDateChangeRef.current = onChange;
       el.value = seed ? seed.slice(0, 10) : "";
+      // Position + SIZE the hidden input to overlay the clicked cell. Chromium
+      // anchors showPicker() to where the input physically renders — a 1×1
+      // node at the corner ends up dragging the popup to the page's top-left
+      // (the symptom Wei Siang flagged 2026-05-05). Resizing to the cell box
+      // forces the popup to anchor right under the cell.
       if (anchor instanceof HTMLElement) {
         const r = anchor.getBoundingClientRect();
         el.style.left = `${r.left}px`;
-        el.style.top = `${r.bottom}px`;
+        el.style.top = `${r.top}px`;
+        el.style.width = `${Math.max(r.width, 1)}px`;
+        el.style.height = `${Math.max(r.height, 1)}px`;
+      } else {
+        // No anchor — fall back to current viewport top-left (legacy callers
+        // that don't pass an anchor; still useful for keyboard shortcuts).
+        el.style.left = "0px";
+        el.style.top = "0px";
+        el.style.width = "1px";
+        el.style.height = "1px";
       }
       if (typeof el.showPicker === "function") {
         try { el.showPicker(); return; } catch { /* showPicker not supported — fall through to focus/click */ }
@@ -393,6 +407,23 @@ export default function ProductionPage({
     refreshOrders();
   }, [refreshOrders]);
 
+  // Pending JC PATCHes (optimistic). Any JC ID in this set has an in-flight
+  // server write that hasn't confirmed yet — the cache merger below skips
+  // those JCs when overlaying refetch results so a tab-switch refetch can't
+  // wipe a Completion Date / PIC the user JUST clicked. ref (not state) so
+  // the merger reads the latest value without re-rendering on every PATCH.
+  const pendingJcPatchesRef = useRef<Set<string>>(new Set());
+
+  // Last successful refetch timestamp — gates the visibilitychange auto
+  // refresh so quick tab-flips (Sheets / WhatsApp / Alt-Tab to look up an
+  // order number) don't keep stomping mid-edit state. 30s is short enough
+  // that returning to the tab after a real break still picks up server
+  // changes, long enough that incidental focus loss is a no-op.
+  // Init at 0 (not Date.now()) to keep the useRef call pure — react-hooks/
+  // purity flags Date.now() during render. The first refetch via the cache
+  // merger below stamps the real timestamp.
+  const lastFetchAtRef = useRef<number>(0);
+
   // Auto-refresh on tab visibility return. Use visibilitychange ONLY
   // (not window.focus) — focus fires when ANY in-page popup closes
   // (native date picker, autocomplete, browser context menu) which
@@ -401,9 +432,19 @@ export default function ProductionPage({
   // itself before the user could pick a date because the React tree
   // reconciled). visibilitychange only fires on tab switch / window
   // minimize / programmatic hide, so date pickers stay interactive.
+  //
+  // Throttle: only fire if it's been >30s since the last fetch AND no
+  // optimistic PATCH is in-flight. The latter prevents the classic race
+  // where the user edits a PIC, glances at another tab, comes back, and
+  // the visibility refetch lands BEFORE the PATCH commits — wiping the
+  // edit they just made.
   useEffect(() => {
     const onVisibility = () => {
-      if (document.visibilityState === "visible") fetchOrders();
+      if (document.visibilityState !== "visible") return;
+      if (pendingJcPatchesRef.current.size > 0) return;
+      if (Date.now() - lastFetchAtRef.current < 30_000) return;
+      lastFetchAtRef.current = Date.now();
+      fetchOrders();
     };
     document.addEventListener("visibilitychange", onVisibility);
     return () => {
@@ -411,14 +452,46 @@ export default function ProductionPage({
     };
   }, [fetchOrders]);
 
-  // Sync cached orders response into local state so optimistic PATCHes keep working.
-  const [lastSeenOrdersResp, setLastSeenOrdersResp] = useState<typeof ordersResp>(null);
-  if (ordersResp !== lastSeenOrdersResp) {
-    setLastSeenOrdersResp(ordersResp);
+  // Sync cached orders response into local state so optimistic PATCHes keep
+  // working. When refetch lands while an optimistic PATCH is still in-flight
+  // (pendingJcPatchesRef), preserve the prior local JC for those IDs so the
+  // server's stale snapshot doesn't blank out the value the user just typed.
+  // useEffect (not set-state-during-render) because we also need to mutate
+  // lastFetchAtRef and read pendingJcPatchesRef.current — both forbidden
+  // during render under react-hooks/purity + react-hooks/refs.
+  useEffect(() => {
+    if (!ordersResp) return;
+    lastFetchAtRef.current = Date.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const d: any = ordersResp;
-    if (d) setOrders(d.success ? d.data : Array.isArray(d) ? d : []);
-  }
+    const fresh: ProductionOrder[] = d?.success
+      ? d.data
+      : Array.isArray(d)
+        ? d
+        : [];
+    const pending = pendingJcPatchesRef.current;
+    if (pending.size === 0) {
+      setOrders(fresh);
+      return;
+    }
+    // Splice the optimistic JC version back over the server snapshot so the
+    // PATCH-in-flight value the user can see survives the refetch.
+    setOrders((prev) => {
+      const prevJcMap = new Map<string, JobCard>();
+      for (const po of prev) {
+        for (const jc of po.jobCards) {
+          if (pending.has(jc.id)) prevJcMap.set(jc.id, jc);
+        }
+      }
+      if (prevJcMap.size === 0) return fresh;
+      return fresh.map((po) => ({
+        ...po,
+        jobCards: po.jobCards.map((jc) =>
+          prevJcMap.has(jc.id) ? (prevJcMap.get(jc.id) as JobCard) : jc,
+        ),
+      }));
+    });
+  }, [ordersResp]);
 
   // Fetch the 20 warehouse racks once so the Packing Rack dropdown is populated.
   const [lastSeenWarehouseResp, setLastSeenWarehouseResp] = useState<typeof warehouseResp>(null);
@@ -456,7 +529,14 @@ export default function ProductionPage({
 
   // Optimistic PATCH helper for inline job-card edits (due date, completion,
   // PIC1, PIC2). Updates local state immediately so the grid reflows, then
-  // fires the server request in the background and refetches on success.
+  // fires the server request and only clears the in-flight marker once the
+  // server confirms. The marker (pendingJcPatchesRef) protects against the
+  // tab-switch race where a visibilitychange refetch lands before the PATCH
+  // commits and overwrites the optimistic value with a stale server snapshot
+  // — the cache merger above splices the optimistic JC back when its id is
+  // in the pending set. PATCH failures surface as a toast so the operator
+  // knows to retry instead of silently losing the edit (was console.error
+  // only; you'd never see it).
   const patchJobCard = useCallback(
     async (
       poId: string,
@@ -475,22 +555,30 @@ export default function ProductionPage({
               },
         ),
       );
-      // Fire-and-forget PATCH. Replacing the whole PO with the server
-      // response on every edit caused a second full-table re-render per
-      // click (457 rows × closures), which felt laggy. Optimistic state is
-      // enough; explicit refetch only happens on mount / tab switch.
-      // Fire-and-forget — no invalidation. Optimistic setOrders above already
-      // reflects the edit; invalidating the list prefix would force a full
-      // re-download on every single inline edit (hundreds of rows).
-      fetch(`/api/production-orders/${poId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ jobCardId, ...patch }),
-      }).catch((err) => {
-        console.error("[patchJobCard] network error", err);
-      });
+      pendingJcPatchesRef.current.add(jobCardId);
+      try {
+        const res = await fetch(`/api/production-orders/${poId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jobCardId, ...patch }),
+        });
+        if (!res.ok) {
+          let msg = `HTTP ${res.status}`;
+          try {
+            const body = (await res.json()) as { error?: string } | null;
+            if (body && typeof body.error === "string") msg = body.error;
+          } catch { /* non-json body — keep status code */ }
+          throw new Error(msg);
+        }
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : "network error";
+        console.error("[patchJobCard]", detail);
+        toast.error(`Save failed (${detail}). Refresh and retry.`);
+      } finally {
+        pendingJcPatchesRef.current.delete(jobCardId);
+      }
     },
-    [],
+    [toast],
   );
 
   // Optimistic PATCH for the Packing Rack dropdown. Writes rackingNumber to
@@ -2923,32 +3011,13 @@ export default function ProductionPage({
             Refresh
           </button>
         )}
-        {(fltSearch || fltState || fltCustomer || fltDueFrom || fltDueTo ||
-          fltCategory || fltItemType || fltModel ||
-          fltDateAxis !== "dueDate") && (
-          <button
-            onClick={() => {
-              // One atomic URL write for all 9 URL-backed filters; the
-              // debounced search-input mirror is regular useState and stays
-              // outside the batch.
-              setFltSearchInput("");
-              setUrlBatch({
-                q: null,
-                state: null,
-                customer: null,
-                from: null,
-                to: null,
-                cat: null,
-                itype: null,
-                model: null,
-                axis: null,
-              });
-            }}
-            className="text-[10px] text-[#6B5C32] hover:underline"
-          >
-            Clear all
-          </button>
-        )}
+        {/* Removed 2026-05-05: the "Clear all" button wiped from/to dates as
+            part of the URL batch, which caused a full-table refetch (~9k JCs)
+            + grid re-render that froze the main thread for 1-2s and broke
+            the date picker pop. Operators preferred just adjusting the
+            from/to inputs directly (or using "Load all"), so the shortcut
+            is gone. The URL params themselves still work — sharing a link
+            with explicit q/state/customer/cat etc. params still filters. */}
         <span className="ml-auto text-[10px] text-[#8A7F73]">
           {shouldFetch
             ? `${filteredOrders.length} of ${orders.length} orders`

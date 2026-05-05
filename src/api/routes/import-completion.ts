@@ -6914,7 +6914,9 @@ app.post("/recompute-so-sofa-prices", async (c) => {
   const soIds = sos.map(s => s.id);
   const soById = new Map(sos.map(s => [s.id, s] as const));
 
-  // 3. All sofa line items for those SOs.
+  // 3. All SOFA + BEDFRAME + ACCESSORY line items for those SOs. SOFA uses
+  //    the seatHeightPrices matrix keyed on (height, tier); BEDFRAME and
+  //    ACCESSORY use the SKU-level basePriceSen directly (no matrix).
   const itemsRes = await db
     .prepare(
       `SELECT id, salesOrderId, productId, productCode, itemCategory, sizeCode,
@@ -6922,14 +6924,18 @@ app.post("/recompute-so-sofa-prices", async (c) => {
               legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
               basePriceSen, unitPriceSen, lineTotalSen
          FROM sales_order_items
-        WHERE itemCategory = 'SOFA'
+        WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
           AND salesOrderId IN (${soIds.map(() => "?").join(",")})`,
     )
     .bind(...soIds)
     .all<SoiRow>();
   const items = (itemsRes.results ?? []).filter((it) => {
     if (!it.productCode) return false;
-    return SOFA_TARGET_BASES.some((b) => it.productCode!.startsWith(b + "-"));
+    if (it.itemCategory === "SOFA") {
+      return SOFA_TARGET_BASES.some((b) => it.productCode!.startsWith(b + "-"));
+    }
+    // BEDFRAME + ACCESSORY — accept all (no whitelist).
+    return it.itemCategory === "BEDFRAME" || it.itemCategory === "ACCESSORY";
   });
 
   // 4. Pre-load customer_product_prices history for every (customerId,
@@ -7051,9 +7057,17 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       newLineRM: null,
     };
     if (!active) { plan.skipReason = "no active price row (cust + master both missing)"; plans.push(plan); continue; }
-    if (!it.sizeCode) { plan.skipReason = "missing sizeCode (seat height)"; plans.push(plan); continue; }
-    const priceSen = lookupSeatHeight(active.entries, it.sizeCode, tier);
-    if (priceSen == null) { plan.skipReason = `no seat-height entry for ${it.sizeCode}/${tier}`; plans.push(plan); continue; }
+    let priceSen: number | null = null;
+    if (it.itemCategory === "SOFA") {
+      // Sofa uses the per-(seatHeight, tier) matrix.
+      if (!it.sizeCode) { plan.skipReason = "missing sizeCode (seat height)"; plans.push(plan); continue; }
+      priceSen = lookupSeatHeight(active.entries, it.sizeCode, tier);
+      if (priceSen == null) { plan.skipReason = `no seat-height entry for ${it.sizeCode}/${tier}`; plans.push(plan); continue; }
+    } else {
+      // BEDFRAME / ACCESSORY — basePriceSen is per-SKU; product code already
+      // encodes the size (e.g. "1003-(Q)"). No tier lookup needed.
+      priceSen = active.basePriceSen;
+    }
     const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
     const newLine = newUnit * it.quantity;
     plan.newBaseRM = priceSen / 100;

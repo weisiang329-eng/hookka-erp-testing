@@ -31,6 +31,65 @@ type PurchaseInvoiceRow = {
   updated_at: string | null;
 };
 
+// Line-item type. Mirrors purchase_order_items / grn_items with two
+// PI-specific additions: materialCode is nullable for fee/rebate/tax lines
+// that don't link to a stocked raw_material, and lineType labels the
+// non-stocked categories so the UI can render a small badge instead of an
+// item-code link.
+export type PurchaseInvoiceItemLineType =
+  | "STOCKED"
+  | "FEE"
+  | "TAX"
+  | "REBATE"
+  | "DISCOUNT"
+  | "OTHER";
+
+export type PurchaseInvoiceItem = {
+  id: string;
+  piId: string;
+  materialCode: string | null;
+  materialName: string;
+  supplierSku: string | null;
+  qty: number;
+  unitPriceSen: number;
+  lineTotalSen: number;
+  lineType: PurchaseInvoiceItemLineType;
+  notes: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+type PurchaseInvoiceItemRow = {
+  id: string;
+  pi_id?: string;
+  piId?: string;
+  material_code?: string | null;
+  materialCode?: string | null;
+  material_name?: string;
+  materialName?: string;
+  supplier_sku?: string | null;
+  supplierSku?: string | null;
+  qty: number;
+  unit_price_sen?: number;
+  unitPriceSen?: number;
+  line_total_sen?: number;
+  lineTotalSen?: number;
+  line_type?: string;
+  lineType?: string;
+  notes: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+};
+
+const VALID_LINE_TYPES: PurchaseInvoiceItemLineType[] = [
+  "STOCKED",
+  "FEE",
+  "TAX",
+  "REBATE",
+  "DISCOUNT",
+  "OTHER",
+];
+
 const VALID_TRANSITIONS: Record<string, string[]> = {
   DRAFT: ["PENDING_APPROVAL", "APPROVED"],
   PENDING_APPROVAL: ["APPROVED", "DRAFT"],
@@ -55,6 +114,120 @@ function rowToPI(r: PurchaseInvoiceRow) {
     created_at: r.created_at ?? "",
     updated_at: r.updated_at ?? "",
   };
+}
+
+// D1Compat translates camelCase identifiers in the SQL string but does NOT
+// camelCase result rows, so we accept both shapes (raw Postgres in tests vs.
+// D1 in workers — same pattern as src/api/lib/lead-times.ts).
+function rowToItem(r: PurchaseInvoiceItemRow): PurchaseInvoiceItem {
+  const lineType = (r.line_type ?? r.lineType ?? "STOCKED") as PurchaseInvoiceItemLineType;
+  return {
+    id: r.id,
+    piId: r.pi_id ?? r.piId ?? "",
+    materialCode: r.material_code ?? r.materialCode ?? null,
+    materialName: r.material_name ?? r.materialName ?? "",
+    supplierSku: r.supplier_sku ?? r.supplierSku ?? null,
+    qty: Number(r.qty) || 0,
+    unitPriceSen: Number(r.unit_price_sen ?? r.unitPriceSen) || 0,
+    lineTotalSen: Number(r.line_total_sen ?? r.lineTotalSen) || 0,
+    lineType: VALID_LINE_TYPES.includes(lineType) ? lineType : "OTHER",
+    notes: r.notes ?? null,
+    created_at: r.created_at ?? null,
+    updated_at: r.updated_at ?? null,
+  };
+}
+
+type PurchaseInvoiceItemInput = {
+  materialCode?: string | null;
+  materialName?: string;
+  supplierSku?: string | null;
+  qty?: number;
+  unitPriceSen?: number;
+  lineType?: string;
+  notes?: string | null;
+};
+
+// Validate + normalize an items[] payload. Returns either an array of
+// ready-to-insert rows (with computed line_total_sen) or an error string.
+function normalizeItems(
+  items: unknown,
+): { ok: true; rows: Array<{
+    id: string;
+    materialCode: string | null;
+    materialName: string;
+    supplierSku: string | null;
+    qty: number;
+    unitPriceSen: number;
+    lineTotalSen: number;
+    lineType: PurchaseInvoiceItemLineType;
+    notes: string | null;
+  }> } | { ok: false; error: string } {
+  if (!Array.isArray(items)) {
+    return { ok: false, error: "items must be an array" };
+  }
+  const rows: Array<{
+    id: string;
+    materialCode: string | null;
+    materialName: string;
+    supplierSku: string | null;
+    qty: number;
+    unitPriceSen: number;
+    lineTotalSen: number;
+    lineType: PurchaseInvoiceItemLineType;
+    notes: string | null;
+  }> = [];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i] as PurchaseInvoiceItemInput;
+    if (!it || typeof it !== "object") {
+      return { ok: false, error: `items[${i}]: not an object` };
+    }
+    const qty = Number(it.qty);
+    const unitPriceSen = Math.round(Number(it.unitPriceSen));
+    const materialName = String(it.materialName ?? "").trim();
+    if (!materialName) {
+      return { ok: false, error: `items[${i}]: materialName is required` };
+    }
+    if (!Number.isFinite(qty) || qty < 0) {
+      return { ok: false, error: `items[${i}]: qty must be >= 0` };
+    }
+    if (!Number.isFinite(unitPriceSen) || unitPriceSen < 0) {
+      return { ok: false, error: `items[${i}]: unitPriceSen must be >= 0` };
+    }
+    const lineType = (it.lineType ?? "STOCKED") as PurchaseInvoiceItemLineType;
+    if (!VALID_LINE_TYPES.includes(lineType)) {
+      return {
+        ok: false,
+        error: `items[${i}]: lineType must be one of ${VALID_LINE_TYPES.join(", ")}`,
+      };
+    }
+    const matCode = it.materialCode == null ? null : String(it.materialCode).trim() || null;
+    const supSku = it.supplierSku == null ? null : String(it.supplierSku).trim() || null;
+    rows.push({
+      id: `pii-${crypto.randomUUID().slice(0, 8)}`,
+      materialCode: matCode,
+      materialName,
+      supplierSku: supSku,
+      qty,
+      unitPriceSen,
+      lineTotalSen: Math.round(qty * unitPriceSen),
+      lineType,
+      notes: it.notes == null ? null : String(it.notes),
+    });
+  }
+  return { ok: true, rows };
+}
+
+async function loadItemsForPI(
+  db: D1Database,
+  piId: string,
+): Promise<PurchaseInvoiceItem[]> {
+  const res = await db
+    .prepare(
+      "SELECT * FROM purchase_invoice_items WHERE pi_id = ? ORDER BY created_at ASC, id ASC",
+    )
+    .bind(piId)
+    .all<PurchaseInvoiceItemRow>();
+  return (res.results ?? []).map(rowToItem);
 }
 
 // Generate next PI number for the current YYMM. Pattern: PI-YYMM-NNN.
@@ -120,13 +293,14 @@ app.get("/", async (c) => {
 // ---------------------------------------------------------------------------
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const row = await c.var.DB.prepare(
-    "SELECT * FROM purchase_invoices WHERE id = ?",
-  )
+  const db = c.var.DB;
+  const row = await db
+    .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
     .first<PurchaseInvoiceRow>();
   if (!row) return c.json({ success: false, error: "PI not found" }, 404);
-  return c.json({ success: true, data: rowToPI(row) });
+  const items = await loadItemsForPI(db, id);
+  return c.json({ success: true, data: { ...rowToPI(row), items } });
 });
 
 // ---------------------------------------------------------------------------
@@ -149,6 +323,7 @@ app.post("/", async (c) => {
     amountSen?: number;
     remarks?: string;
     status?: string;
+    items?: PurchaseInvoiceItemInput[];
   };
 
   if (!body.supplierId || !body.supplierName) {
@@ -160,6 +335,15 @@ app.post("/", async (c) => {
   const status = body.status || "DRAFT";
   if (!VALID_TRANSITIONS[status] && status !== "DRAFT") {
     return c.json({ success: false, error: `Invalid initial status: ${status}` }, 400);
+  }
+
+  // Validate items[] up-front so we can fail before any insert.
+  let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
+  if (body.items !== undefined) {
+    normalizedItems = normalizeItems(body.items);
+    if (!normalizedItems.ok) {
+      return c.json({ success: false, error: normalizedItems.error }, 400);
+    }
   }
 
   // Resolve poRef from purchaseOrderId if given.
@@ -176,43 +360,91 @@ app.post("/", async (c) => {
   const id = `pi-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
 
-  await db
-    .prepare(
-      `INSERT INTO purchase_invoices (
-         id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
-         invoiceDate, dueDate, amountSen, status, remarks,
-         created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-    .bind(
-      id,
-      piNo,
-      body.purchaseOrderId ?? null,
-      poRef,
-      body.supplierId,
-      body.supplierName,
-      body.invoiceDate ?? null,
-      body.dueDate ?? null,
-      body.amountSen ?? 0,
-      status,
-      body.remarks ?? null,
-      now,
-      now,
-    )
-    .run();
+  // When items[] is provided, the PI's amountSen is the sum of line totals
+  // (overrides any explicit body.amountSen). When omitted, fall back to
+  // body.amountSen for backward compat with the header-only API shape.
+  const amountSen = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
+    : body.amountSen ?? 0;
+
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `INSERT INTO purchase_invoices (
+           id, piNo, purchaseOrderId, poRef, supplierId, supplierName,
+           invoiceDate, dueDate, amountSen, status, remarks,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        piNo,
+        body.purchaseOrderId ?? null,
+        poRef,
+        body.supplierId,
+        body.supplierName,
+        body.invoiceDate ?? null,
+        body.dueDate ?? null,
+        amountSen,
+        status,
+        body.remarks ?? null,
+        now,
+        now,
+      ),
+  ];
+
+  if (normalizedItems && normalizedItems.ok) {
+    for (const r of normalizedItems.rows) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO purchase_invoice_items (
+               id, pi_id, material_code, material_name, supplier_sku,
+               qty, unit_price_sen, line_total_sen, line_type, notes,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            r.id,
+            id,
+            r.materialCode,
+            r.materialName,
+            r.supplierSku,
+            r.qty,
+            r.unitPriceSen,
+            r.lineTotalSen,
+            r.lineType,
+            r.notes,
+            now,
+            null,
+          ),
+      );
+    }
+  }
+
+  await db.batch(statements);
 
   await emitAudit(c, {
     resource: "purchase-invoices",
     resourceId: id,
     action: "create",
-    after: { piNo, status, amountSen: body.amountSen ?? 0 },
+    after: {
+      piNo,
+      status,
+      amountSen,
+      itemCount: normalizedItems && normalizedItems.ok ? normalizedItems.rows.length : 0,
+    },
   });
 
   const created = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
     .first<PurchaseInvoiceRow>();
-  return c.json({ success: true, data: created ? rowToPI(created) : null });
+  const items = await loadItemsForPI(db, id);
+  return c.json({
+    success: true,
+    data: created ? { ...rowToPI(created), items } : null,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -237,6 +469,7 @@ app.put("/:id", async (c) => {
     invoiceDate?: string;
     dueDate?: string;
     amountSen?: number;
+    items?: PurchaseInvoiceItemInput[];
   };
 
   // Status transition guard.
@@ -253,52 +486,114 @@ app.put("/:id", async (c) => {
     }
   }
 
+  // If items[] is given, validate and use it to recompute amountSen.
+  // If items[] is omitted, leave existing items + amountSen logic untouched.
+  let normalizedItems: ReturnType<typeof normalizeItems> | null = null;
+  if (body.items !== undefined) {
+    normalizedItems = normalizeItems(body.items);
+    if (!normalizedItems.ok) {
+      return c.json({ success: false, error: normalizedItems.error }, 400);
+    }
+  }
+
+  const recomputedAmount = normalizedItems && normalizedItems.ok
+    ? normalizedItems.rows.reduce((s, r) => s + r.lineTotalSen, 0)
+    : null;
+
   const merged = {
     status: body.status ?? existing.status,
     remarks: body.remarks ?? existing.remarks,
     invoiceDate: body.invoiceDate ?? existing.invoiceDate,
     dueDate: body.dueDate ?? existing.dueDate,
-    amountSen: body.amountSen ?? existing.amountSen,
+    amountSen: recomputedAmount ?? body.amountSen ?? existing.amountSen,
   };
   const now = new Date().toISOString();
 
-  await db
-    .prepare(
-      `UPDATE purchase_invoices SET
-         status = ?, remarks = ?, invoiceDate = ?, dueDate = ?, amountSen = ?,
-         updated_at = ?
-       WHERE id = ?`,
-    )
-    .bind(
-      merged.status,
-      merged.remarks,
-      merged.invoiceDate,
-      merged.dueDate,
-      merged.amountSen,
-      now,
-      id,
-    )
-    .run();
+  const statements: D1PreparedStatement[] = [
+    db
+      .prepare(
+        `UPDATE purchase_invoices SET
+           status = ?, remarks = ?, invoiceDate = ?, dueDate = ?, amountSen = ?,
+           updated_at = ?
+         WHERE id = ?`,
+      )
+      .bind(
+        merged.status,
+        merged.remarks,
+        merged.invoiceDate,
+        merged.dueDate,
+        merged.amountSen,
+        now,
+        id,
+      ),
+  ];
+
+  // Replace-all semantics for items[] when provided: DELETE existing, then
+  // INSERT new. CASCADE on the FK doesn't help us here — that's only on PI
+  // delete. Doing it inside the same batch keeps the swap atomic.
+  if (normalizedItems && normalizedItems.ok) {
+    statements.push(
+      db.prepare("DELETE FROM purchase_invoice_items WHERE pi_id = ?").bind(id),
+    );
+    for (const r of normalizedItems.rows) {
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO purchase_invoice_items (
+               id, pi_id, material_code, material_name, supplier_sku,
+               qty, unit_price_sen, line_total_sen, line_type, notes,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            r.id,
+            id,
+            r.materialCode,
+            r.materialName,
+            r.supplierSku,
+            r.qty,
+            r.unitPriceSen,
+            r.lineTotalSen,
+            r.lineType,
+            r.notes,
+            now,
+            null,
+          ),
+      );
+    }
+  }
+
+  await db.batch(statements);
 
   await emitAudit(c, {
     resource: "purchase-invoices",
     resourceId: id,
     action: "update",
     before: existing,
-    after: merged,
+    after: {
+      ...merged,
+      itemsReplaced: normalizedItems && normalizedItems.ok
+        ? normalizedItems.rows.length
+        : undefined,
+    },
   });
 
   const updated = await db
     .prepare("SELECT * FROM purchase_invoices WHERE id = ?")
     .bind(id)
     .first<PurchaseInvoiceRow>();
-  return c.json({ success: true, data: updated ? rowToPI(updated) : null });
+  const items = await loadItemsForPI(db, id);
+  return c.json({
+    success: true,
+    data: updated ? { ...rowToPI(updated), items } : null,
+  });
 });
 
 // ---------------------------------------------------------------------------
 // DELETE /api/purchase-invoices/:id — only DRAFT rows are deletable.
 // Approved / paid PIs are kept for audit (use PUT to flip back to DRAFT
-// first if you really need to delete one).
+// first if you really need to delete one). Line items are removed by the
+// purchase_invoice_items.pi_id ON DELETE CASCADE FK — no app-side delete.
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {
   const denied = await requirePermission(c, "purchase-invoices", "delete");

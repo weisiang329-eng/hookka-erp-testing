@@ -7828,4 +7828,691 @@ app.post("/resync-so-totals", async (c) => {
   });
 });
 
+// ===========================================================================
+// Historical-purchase backfill — three one-shot endpoints used by the driver
+// at scripts/import-historical-purchases.py. We're back-filling 1206 source
+// PI line items across 19 suppliers from a CSV-style xlsx export.
+//
+// Per-project rule (project_migration_in_progress): these endpoints are
+// scheduled for deletion post-migration. Don't refactor or extract shared
+// helpers between them — duplication is OK here, removal is the next move.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// POST /api/import/suppliers-from-history
+//
+// Body: { suppliers: [{ code, name }, ...] }
+// Insert if not exists by code. Defaults: status=ACTIVE, isActive=1.
+// ---------------------------------------------------------------------------
+type SupplierFromHistory = { code?: string; name?: string };
+type SuppliersFromHistoryBody = { suppliers?: SupplierFromHistory[] };
+
+app.post("/suppliers-from-history", async (c) => {
+  const denied = await requirePermission(c, "suppliers", "create");
+  if (denied) return denied;
+
+  let body: SuppliersFromHistoryBody;
+  try {
+    body = (await c.req.json()) as SuppliersFromHistoryBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const list = Array.isArray(body.suppliers) ? body.suppliers : null;
+  if (!list) {
+    return c.json(
+      { success: false, error: "body.suppliers must be an array" },
+      400,
+    );
+  }
+
+  const db = c.var.DB;
+  let inserted = 0;
+  let skipped = 0;
+  const errors: { code: string; message: string }[] = [];
+
+  for (const s of list) {
+    const code = String(s?.code ?? "").trim();
+    const name = String(s?.name ?? "").trim();
+    if (!code || !name) {
+      errors.push({ code, message: "code and name are required" });
+      continue;
+    }
+    try {
+      const existing = await db
+        .prepare("SELECT id FROM suppliers WHERE code = ? LIMIT 1")
+        .bind(code)
+        .first<{ id: string }>();
+      if (existing) {
+        skipped++;
+        continue;
+      }
+      const id = `sup-${crypto.randomUUID().slice(0, 8)}`;
+      await db
+        .prepare(
+          `INSERT INTO suppliers (id, code, name, contactPerson, phone, email,
+             address, state, paymentTerms, status, rating,
+             currency, statementType, agingOn, creditTerm,
+             isActive, isGroupCompany, outstandingSen)
+           VALUES (?, ?, ?, '', '', '', '', '', 'NET30', 'ACTIVE', 3,
+                   'MYR', 'OPEN_ITEM', 'INVOICE_DATE', 'C.O.D.',
+                   1, 0, 0)`,
+        )
+        .bind(id, code, name)
+        .run();
+      inserted++;
+    } catch (err) {
+      errors.push({
+        code,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    total: list.length,
+    inserted,
+    skipped,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/supplier-bindings-from-history
+//
+// Body: { bindings: [{ materialCode, supplierCode, supplierSKU,
+//                       unitPriceSen, isMainSupplier }, ...] }
+// Look up supplier_id by code; UPSERT into supplier_material_bindings keyed
+// on (materialCode, supplierId). leadTimeDays=0, moq=1 on insert; unitPrice
+// + isMainSupplier are always updated.
+// ---------------------------------------------------------------------------
+type BindingInput = {
+  materialCode?: string;
+  supplierCode?: string;
+  supplierSKU?: string;
+  unitPriceSen?: number;
+  isMainSupplier?: number | boolean;
+};
+type BindingsFromHistoryBody = { bindings?: BindingInput[] };
+
+app.post("/supplier-bindings-from-history", async (c) => {
+  const denied = await requirePermission(c, "supplier-materials", "create");
+  if (denied) return denied;
+
+  let body: BindingsFromHistoryBody;
+  try {
+    body = (await c.req.json()) as BindingsFromHistoryBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const list = Array.isArray(body.bindings) ? body.bindings : null;
+  if (!list) {
+    return c.json(
+      { success: false, error: "body.bindings must be an array" },
+      400,
+    );
+  }
+
+  const db = c.var.DB;
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: { ref: string; message: string }[] = [];
+
+  // Cache supplier code → id within one request to avoid repeated lookups.
+  const supplierCache = new Map<string, string | null>();
+  // Cache material existence — silently skip bindings whose materialCode
+  // doesn't exist in raw_materials yet (Phase A should have created them).
+  const materialCache = new Map<string, boolean>();
+
+  async function resolveSupplier(code: string): Promise<string | null> {
+    if (supplierCache.has(code)) return supplierCache.get(code) ?? null;
+    const row = await db
+      .prepare("SELECT id FROM suppliers WHERE code = ? LIMIT 1")
+      .bind(code)
+      .first<{ id: string }>();
+    const id = row?.id ?? null;
+    supplierCache.set(code, id);
+    return id;
+  }
+  async function materialExists(code: string): Promise<boolean> {
+    if (materialCache.has(code)) return materialCache.get(code) === true;
+    const row = await db
+      .prepare("SELECT 1 AS x FROM raw_materials WHERE itemCode = ? LIMIT 1")
+      .bind(code)
+      .first<{ x: number }>();
+    const exists = !!row;
+    materialCache.set(code, exists);
+    return exists;
+  }
+
+  for (const b of list) {
+    const materialCode = String(b?.materialCode ?? "").trim();
+    const supplierCode = String(b?.supplierCode ?? "").trim();
+    const supplierSKU = String(b?.supplierSKU ?? "").trim();
+    const unitPrice = Math.round(Number(b?.unitPriceSen) || 0);
+    const isMain =
+      b?.isMainSupplier === true ||
+      Number(b?.isMainSupplier) === 1
+        ? 1
+        : 0;
+    const ref = `${supplierCode}::${materialCode}`;
+
+    if (!materialCode || !supplierCode || !supplierSKU) {
+      errors.push({
+        ref,
+        message: "materialCode, supplierCode, supplierSKU required",
+      });
+      continue;
+    }
+    try {
+      const supplierId = await resolveSupplier(supplierCode);
+      if (!supplierId) {
+        errors.push({ ref, message: `unknown supplier code ${supplierCode}` });
+        continue;
+      }
+      if (!(await materialExists(materialCode))) {
+        skipped++;
+        continue;
+      }
+
+      // We need materialName to satisfy the NOT NULL constraint on the
+      // supplier_material_bindings table. Pull it from the raw_materials row.
+      const rmRow = await db
+        .prepare(
+          "SELECT description FROM raw_materials WHERE itemCode = ? LIMIT 1",
+        )
+        .bind(materialCode)
+        .first<{ description: string }>();
+      const materialName = rmRow?.description ?? materialCode;
+
+      const existing = await db
+        .prepare(
+          `SELECT id FROM supplier_material_bindings
+            WHERE materialCode = ? AND supplierId = ? LIMIT 1`,
+        )
+        .bind(materialCode, supplierId)
+        .first<{ id: string }>();
+
+      if (existing) {
+        await db
+          .prepare(
+            `UPDATE supplier_material_bindings
+                SET supplierSku = ?, unitPrice = ?, isMainSupplier = ?,
+                    materialName = ?
+              WHERE id = ?`,
+          )
+          .bind(supplierSKU, unitPrice, isMain, materialName, existing.id)
+          .run();
+        updated++;
+      } else {
+        const id = `smb-${crypto.randomUUID().slice(0, 8)}`;
+        await db
+          .prepare(
+            `INSERT INTO supplier_material_bindings (id, supplierId, materialCode,
+               materialName, supplierSku, unitPrice, currency, leadTimeDays,
+               paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
+             VALUES (?, ?, ?, ?, ?, ?, 'MYR', 0, 'NET30', 1, ?, '2030-12-31', ?)`,
+          )
+          .bind(
+            id,
+            supplierId,
+            materialCode,
+            materialName,
+            supplierSKU,
+            unitPrice,
+            new Date().toISOString().slice(0, 10),
+            isMain,
+          )
+          .run();
+        inserted++;
+      }
+    } catch (err) {
+      errors.push({
+        ref,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    total: list.length,
+    inserted,
+    updated,
+    skipped,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/historical-purchases-backfill
+//
+// Body: { documents: [{ docNo, docDate, supplierCode, items: [...] }, ...] }
+// For each document, atomically create:
+//   1. one purchase_orders row (status=CLOSED)
+//   2. one purchase_order_items per item with non-null materialCode
+//   3. one grns row (status=POSTED, qcStatus=PASSED) — triggers stock post
+//   4. one grn_items per item with non-null materialCode
+//   5. rm_batches + cost_ledger + raw_materials.balanceQty bump (replicated
+//      from grn.ts postGRNToStock)
+//   6. one purchase_invoices row (status=APPROVED) — amountSen = sum of
+//      ALL resolved lines (stocked + fee + rebate + tax)
+//   7. one purchase_invoice_items per resolved item (migration 0107).
+//      Stocked items keep their material_code; non-stocked lines (fees,
+//      tax, rebate, discount) are categorised with a description-based
+//      line_type heuristic so the detail screen can render them clearly.
+//
+// Idempotency: skip if a purchase_invoices row with piNo = docNo already
+// exists.
+// ---------------------------------------------------------------------------
+type BackfillDocItem = {
+  materialCode?: string | null;
+  supplierSKU?: string | null;
+  description?: string | null;
+  qty?: number;
+  unitPriceSen?: number;
+};
+type BackfillDoc = {
+  docNo?: string;
+  docDate?: string;
+  supplierCode?: string;
+  items?: BackfillDocItem[];
+};
+type BackfillBody = { documents?: BackfillDoc[] };
+
+app.post("/historical-purchases-backfill", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  let body: BackfillBody;
+  try {
+    body = (await c.req.json()) as BackfillBody;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const docs = Array.isArray(body.documents) ? body.documents : null;
+  if (!docs) {
+    return c.json(
+      { success: false, error: "body.documents must be an array" },
+      400,
+    );
+  }
+
+  const db = c.var.DB;
+  let posCreated = 0;
+  let grnsCreated = 0;
+  let pisCreated = 0;
+  let lineItemsTotal = 0;
+  let documentsProcessed = 0;
+  let skipped = 0;
+  const errors: { docNo: string; message: string }[] = [];
+
+  // Per-batch caches (one request worth of docs).
+  const supplierCache = new Map<
+    string,
+    { id: string; name: string } | null
+  >();
+  const rmCache = new Map<string, { id: string; description: string } | null>();
+
+  async function resolveSupplier(code: string) {
+    if (supplierCache.has(code)) return supplierCache.get(code) ?? null;
+    const row = await db
+      .prepare("SELECT id, name FROM suppliers WHERE code = ? LIMIT 1")
+      .bind(code)
+      .first<{ id: string; name: string }>();
+    supplierCache.set(code, row ?? null);
+    return row ?? null;
+  }
+  async function resolveRm(code: string) {
+    if (rmCache.has(code)) return rmCache.get(code) ?? null;
+    const row = await db
+      .prepare(
+        "SELECT id, description FROM raw_materials WHERE itemCode = ? LIMIT 1",
+      )
+      .bind(code)
+      .first<{ id: string; description: string }>();
+    rmCache.set(code, row ?? null);
+    return row ?? null;
+  }
+
+  for (const doc of docs) {
+    const docNo = String(doc?.docNo ?? "").trim();
+    const docDate = String(doc?.docDate ?? "").trim();
+    const supplierCode = String(doc?.supplierCode ?? "").trim();
+    const itemsIn = Array.isArray(doc?.items) ? doc.items : [];
+
+    if (!docNo || !docDate || !supplierCode || itemsIn.length === 0) {
+      errors.push({
+        docNo: docNo || "(missing)",
+        message: "docNo, docDate, supplierCode, items required",
+      });
+      continue;
+    }
+
+    try {
+      // Idempotency: skip if a PI with this piNo already exists.
+      const existingPi = await db
+        .prepare("SELECT id FROM purchase_invoices WHERE piNo = ? LIMIT 1")
+        .bind(docNo)
+        .first<{ id: string }>();
+      if (existingPi) {
+        skipped++;
+        continue;
+      }
+
+      const supplier = await resolveSupplier(supplierCode);
+      if (!supplier) {
+        errors.push({
+          docNo,
+          message: `unknown supplier code ${supplierCode}`,
+        });
+        continue;
+      }
+
+      // Resolve items. Stocked items (materialCode set + RM exists) feed the
+      // PO/GRN; non-stocked items (null materialCode, or unresolved code) are
+      // PI-only (added to PI amountSen total).
+      type Resolved = {
+        materialCode: string | null;
+        materialName: string;
+        supplierSKU: string;
+        qty: number;
+        unitPriceSen: number;
+        rmId: string | null;
+      };
+      const resolved: Resolved[] = [];
+      for (const it of itemsIn) {
+        const qty = Number(it?.qty) || 0;
+        const unitPriceSen = Math.round(Number(it?.unitPriceSen) || 0);
+        const desc = String(it?.description ?? "").trim();
+        const matCode = it?.materialCode
+          ? String(it.materialCode).trim()
+          : null;
+        const supSku = String(it?.supplierSKU ?? matCode ?? "").trim();
+        let rmRow: { id: string; description: string } | null = null;
+        if (matCode) {
+          rmRow = await resolveRm(matCode);
+        }
+        resolved.push({
+          materialCode: rmRow ? matCode : null,
+          materialName: rmRow?.description ?? desc ?? matCode ?? "",
+          supplierSKU: supSku,
+          qty,
+          unitPriceSen,
+          rmId: rmRow?.id ?? null,
+        });
+      }
+      const stockedItems = resolved.filter((r) => r.rmId !== null);
+
+      // Compute totals.
+      const stockedSubtotal = stockedItems.reduce(
+        (s, r) => s + r.qty * r.unitPriceSen,
+        0,
+      );
+      const piAmountSen = resolved.reduce(
+        (s, r) => s + r.qty * r.unitPriceSen,
+        0,
+      );
+
+      // ----- PO -----
+      const poId = `po-${crypto.randomUUID().slice(0, 8)}`;
+      const poNo = `PO-IMPORT-${docNo}`;
+      const nowIso = new Date().toISOString();
+      const grnId = `grn-${crypto.randomUUID().slice(0, 8)}`;
+      const grnNumber = `GRN-IMPORT-${docNo}`;
+      const piId = `pi-${crypto.randomUUID().slice(0, 8)}`;
+
+      // Build the per-document statement bundle. We push into one D1 batch
+      // so the whole document is atomic — D1 batch is transactional.
+      const statements: D1PreparedStatement[] = [];
+
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
+               subtotalSen, totalSen, status, orderDate, expectedDate,
+               receivedDate, notes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'CLOSED', ?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            poId,
+            poNo,
+            supplier.id,
+            supplier.name,
+            stockedSubtotal,
+            stockedSubtotal,
+            docDate,
+            docDate,
+            docDate,
+            `Imported from historical PI ${docNo}`,
+            nowIso,
+            nowIso,
+          ),
+      );
+
+      // PO items + GRN items in matching order. poItemIndex links GRN line N
+      // to PO line N — same convention as POST /api/grn.
+      for (let i = 0; i < stockedItems.length; i++) {
+        const it = stockedItems[i];
+        const poItemId = `poi-${crypto.randomUUID().slice(0, 8)}`;
+        const lineTotal = it.qty * it.unitPriceSen;
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO purchase_order_items (id, purchaseOrderId,
+                 materialCategory, materialName, supplierSKU, quantity,
+                 unitPriceSen, totalSen, receivedQty, unit)
+               VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, 'pcs')`,
+            )
+            .bind(
+              poItemId,
+              poId,
+              it.materialName,
+              it.supplierSKU,
+              it.qty,
+              it.unitPriceSen,
+              lineTotal,
+              it.qty, // mark as fully received since GRN is POSTED
+            ),
+        );
+      }
+
+      // ----- GRN -----
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
+               supplierName, receiveDate, receivedBy, totalAmount, qcStatus,
+               status, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 'PASSED', 'POSTED', ?)`,
+          )
+          .bind(
+            grnId,
+            grnNumber,
+            poId,
+            poNo,
+            supplier.id,
+            supplier.name,
+            docDate,
+            stockedSubtotal,
+            `Imported from historical PI ${docNo}`,
+          ),
+      );
+
+      // GRN items + the rm_batches / cost_ledger / balanceQty cascade.
+      // The grn.ts postGRNToStock() helper would normally do this on the
+      // DRAFT → POSTED transition, but we're inserting straight as POSTED,
+      // so we replicate the side-effects inline.
+      const receivedIso = `${docDate}T00:00:00.000Z`;
+      for (let i = 0; i < stockedItems.length; i++) {
+        const it = stockedItems[i];
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO grn_items (grnId, poItemIndex, materialCode,
+                 materialName, orderedQty, receivedQty, acceptedQty,
+                 rejectedQty, rejectionReason, unitPrice)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)`,
+            )
+            .bind(
+              grnId,
+              i,
+              it.supplierSKU,
+              it.materialName,
+              it.qty,
+              it.qty,
+              it.qty,
+              it.unitPriceSen,
+            ),
+        );
+
+        if (it.rmId && it.qty > 0) {
+          const batchId = `rmb-grn-${grnId}-${i + 1}`;
+          const ledgerId = `cl-${crypto.randomUUID().slice(0, 8)}`;
+          const totalCostSen = Math.round(it.qty * it.unitPriceSen);
+          statements.push(
+            db
+              .prepare(
+                `INSERT INTO rm_batches (id, rmId, source, sourceRefId,
+                   receivedDate, originalQty, remainingQty, unitCostSen,
+                   created_at, notes)
+                 VALUES (?, ?, 'GRN', ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .bind(
+                batchId,
+                it.rmId,
+                grnId,
+                receivedIso,
+                it.qty,
+                it.qty,
+                it.unitPriceSen,
+                nowIso,
+                `GRN ${grnNumber} line ${i + 1}`,
+              ),
+            db
+              .prepare(
+                `INSERT INTO cost_ledger (id, date, type, itemType, itemId,
+                   batchId, qty, direction, unitCostSen, totalCostSen,
+                   refType, refId, notes)
+                 VALUES (?, ?, 'RM_RECEIPT', 'RM', ?, ?, ?, 'IN', ?, ?,
+                         'GRN', ?, ?)`,
+              )
+              .bind(
+                ledgerId,
+                receivedIso,
+                it.rmId,
+                batchId,
+                it.qty,
+                it.unitPriceSen,
+                totalCostSen,
+                grnId,
+                `Received via ${grnNumber}`,
+              ),
+            db
+              .prepare(
+                "UPDATE raw_materials SET balanceQty = balanceQty + ? WHERE id = ?",
+              )
+              .bind(it.qty, it.rmId),
+          );
+        }
+      }
+
+      // ----- PI -----
+      statements.push(
+        db
+          .prepare(
+            `INSERT INTO purchase_invoices (id, piNo, purchaseOrderId, poRef,
+               supplierId, supplierName, invoiceDate, dueDate, amountSen,
+               status, remarks, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, 'APPROVED', ?, ?, ?)`,
+          )
+          .bind(
+            piId,
+            docNo,
+            poId,
+            poNo,
+            supplier.id,
+            supplier.name,
+            docDate,
+            piAmountSen,
+            `Imported from historical PI ${docNo}; GRN ${grnNumber}`,
+            nowIso,
+            nowIso,
+          ),
+      );
+
+      // ----- PI line items -----
+      // Migration 0107 added purchase_invoice_items so we now persist the
+      // per-line breakdown that was previously dropped on import. Stocked
+      // items keep their materialCode link; non-stocked lines (fees, tax,
+      // rebate, discount) are tagged with a heuristic line_type derived
+      // from the description so the detail screen can render them as
+      // labelled non-stock rows instead of stocked items.
+      for (let i = 0; i < resolved.length; i++) {
+        const it = resolved[i];
+        const piItemId = `pii-${piId}-${i + 1}`;
+        const lineTotal = Math.round(it.qty * it.unitPriceSen);
+        let lineType: "STOCKED" | "FEE" | "TAX" | "REBATE" | "DISCOUNT" | "OTHER";
+        if (it.rmId !== null) {
+          lineType = "STOCKED";
+        } else {
+          const desc = it.materialName || "";
+          if (/SST/i.test(desc)) lineType = "TAX";
+          else if (/TRANSPORT|FEE|CHARGES/i.test(desc)) lineType = "FEE";
+          else if (/REBATE/i.test(desc)) lineType = "REBATE";
+          else if (/DISCOUNT/i.test(desc)) lineType = "DISCOUNT";
+          else lineType = "OTHER";
+        }
+        statements.push(
+          db
+            .prepare(
+              `INSERT INTO purchase_invoice_items (id, pi_id, material_code,
+                 material_name, supplier_sku, qty, unit_price_sen,
+                 line_total_sen, line_type, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL)`,
+            )
+            .bind(
+              piItemId,
+              piId,
+              it.materialCode,
+              it.materialName,
+              it.supplierSKU,
+              it.qty,
+              it.unitPriceSen,
+              lineTotal,
+              lineType,
+              nowIso,
+            ),
+        );
+      }
+
+      await db.batch(statements);
+
+      posCreated++;
+      grnsCreated++;
+      pisCreated++;
+      lineItemsTotal += resolved.length;
+      documentsProcessed++;
+    } catch (err) {
+      errors.push({
+        docNo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    total: docs.length,
+    documentsProcessed,
+    posCreated,
+    grnsCreated,
+    pisCreated,
+    lineItemsTotal,
+    skipped,
+    errors,
+  });
+});
+
 export default app;

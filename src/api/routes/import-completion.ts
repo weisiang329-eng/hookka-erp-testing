@@ -7138,8 +7138,14 @@ app.post("/recompute-so-sofa-prices", async (c) => {
       if (sortedRule.length !== sortedLine.length) return false;
       return sortedRule.every((v, i) => v === sortedLine[i]);
     }
-    const sizeSet = new Set(sizes);
-    return (groups as string[][]).every((g) => g.some((v) => sizeSet.has(v)));
+    // Strict: line size set must equal flattened group options exactly
+    // (multiset equality). Mirrors the new create.tsx logic — extras like
+    // a 1NA on a 2A+L combo line should NOT snowball into the discount.
+    const flat = (groups as string[][]).flat();
+    const sortedFlat = flat.slice().sort();
+    const sortedLine = sizes.slice().sort();
+    if (sortedFlat.length !== sortedLine.length) return false;
+    return sortedFlat.every((v, i) => v === sortedLine[i]);
   }
   // Index plans by SO for grouping. Sofa-only.
   const plansBySo = new Map<string, ChangePlan[]>();

@@ -1089,9 +1089,21 @@ function CreateSalesOrderPage() {
       if (sortedRule.length !== sortedLine.length) return false;
       return sortedRule.every((v, i) => v === sortedLine[i]);
     }
-    // OR-group shape: every group must have at least one matching line size.
-    const sizeSet = new Set(sizes);
-    return (groups as string[][]).every((g) => g.some((v) => sizeSet.has(v)));
+    // OR-group shape (strict, Wei Siang 2026-05-05):
+    //   - Every group must have at least one matching line size.
+    //   - Every line size must appear in some group (no extras).
+    //   - Total line count must equal sum of OR options across groups, so
+    //     a line set with an extra piece (e.g. 2A+L+1NA against a 2A+L
+    //     combo) doesn't snowball the 1NA into the combo discount.
+    // Pre-strict, OR-group was lenient: only required every group to have
+    // at least one match, which let extras silently inherit the combo
+    // discount via the redistribute pass. That matched ~5 unintended
+    // groups across active SOs and overcharged customers.
+    const flat = (groups as string[][]).flat();
+    const sortedFlat = flat.slice().sort();
+    const sortedLine = sizes.slice().sort();
+    if (sortedFlat.length !== sortedLine.length) return false;
+    return sortedFlat.every((v, i) => v === sortedLine[i]);
   };
   const lineFabricTier = (line: LineItem): "PRICE_1" | "PRICE_2" | "PRICE_3" | null => {
     // Combo detection only fires for sofa lines, so resolve via the

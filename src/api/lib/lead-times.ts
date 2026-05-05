@@ -82,14 +82,28 @@ export async function ensureLeadTimesSeeded(db: D1Database): Promise<void> {
 // DEFAULT_LEAD_DAYS for any missing (category, deptCode) pair so callers
 // never hit undefined. BEDFRAME values are used as the fallback category
 // (ACCESSORY, etc.).
+//
+// Postgres column is `dept_code` (snake_case). The D1Compat adapter
+// translates camelCase identifiers in the SQL string to snake_case for
+// the underlying query, but does NOT camelCase the result rows — so a
+// SELECT by `deptCode` returns rows keyed `dept_code` and reading
+// `row.deptCode` is undefined. The bug silently filled the lead-times
+// map with defaults and every new SO's job_card dueDates ignored the
+// user-saved configuration. Aliasing in SQL and accepting both keys on
+// the result row covers both runtime modes (raw Postgres in tests, D1
+// + adapter in workers).
 export async function loadLeadTimes(db: D1Database): Promise<LeadTimeMap> {
   const res = await db
-    .prepare("SELECT category, deptCode, days FROM production_lead_times")
-    .all<{ category: string; deptCode: string; days: number }>();
+    .prepare(
+      'SELECT category, dept_code AS "deptCode", days FROM production_lead_times',
+    )
+    .all<{ category: string; deptCode?: string; dept_code?: string; days: number }>();
   const map: LeadTimeMap = { BEDFRAME: {}, SOFA: {} };
   for (const row of res.results ?? []) {
     if (!map[row.category]) map[row.category] = {};
-    map[row.category][row.deptCode] = row.days;
+    const dept = row.deptCode ?? row.dept_code;
+    if (typeof dept !== "string" || !dept) continue;
+    map[row.category][dept] = row.days;
   }
   // Merge defaults for any missing entries.
   for (const cat of Object.keys(DEFAULT_LEAD_DAYS)) {

@@ -7096,6 +7096,167 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     plans.push(plan);
   }
 
+  // 6. Combo pass — mirrors src/pages/sales/create.tsx:1103-1267. Sofa lines
+  //    on the same SO that share baseModel + fabric tier + seat height and
+  //    whose component sizes match a sofa_combo_rule's componentSizes get
+  //    re-distributed so the GROUP SUM == comboTotal (rule price for that
+  //    seatHeight). Without this pass, recompute restores full-retail
+  //    per-piece prices and silently strips the combo discount.
+  type ComboRule = {
+    baseModel: string;
+    componentSizes: unknown; // string[] | string[][]
+    fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY";
+    pricesByHeight: Record<string, number>;
+    customerId: string | null;
+    effectiveFrom: string;
+  };
+  const comboRes = await db
+    .prepare(
+      `SELECT baseModel, componentSizes, fabricTier, pricesByHeight,
+              customerId, effectiveFrom
+         FROM sofa_combo_rules
+        WHERE effectiveFrom <= ?`,
+    )
+    .bind(today)
+    .all<{
+      baseModel: string; componentSizes: string;
+      fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY";
+      pricesByHeight: string; customerId: string | null; effectiveFrom: string;
+    }>();
+  const comboRules: ComboRule[] = (comboRes.results ?? []).map((r) => ({
+    baseModel: r.baseModel, fabricTier: r.fabricTier,
+    customerId: r.customerId, effectiveFrom: r.effectiveFrom,
+    componentSizes: (() => { try { return JSON.parse(r.componentSizes); } catch { return []; } })(),
+    pricesByHeight: (() => { try { return JSON.parse(r.pricesByHeight); } catch { return {}; } })(),
+  }));
+  function matchesGroup(groups: unknown, sizes: string[]): boolean {
+    if (!Array.isArray(groups) || groups.length === 0) return false;
+    const isGrouped = Array.isArray(groups[0]);
+    if (!isGrouped) {
+      const sortedRule = (groups as string[]).slice().sort();
+      const sortedLine = sizes.slice().sort();
+      if (sortedRule.length !== sortedLine.length) return false;
+      return sortedRule.every((v, i) => v === sortedLine[i]);
+    }
+    const sizeSet = new Set(sizes);
+    return (groups as string[][]).every((g) => g.some((v) => sizeSet.has(v)));
+  }
+  // Index plans by SO for grouping. Sofa-only.
+  const plansBySo = new Map<string, ChangePlan[]>();
+  for (const p of plans) {
+    if (p.skipReason || p.newLineRM == null) continue;
+    const arr = plansBySo.get(p.soId) ?? [];
+    arr.push(p);
+    plansBySo.set(p.soId, arr);
+  }
+  let comboMatches = 0;
+  for (const [soId, soPlans] of plansBySo) {
+    const so = soById.get(soId)!;
+    const sofaPlans = soPlans.filter((p) => {
+      const it = items.find(i => i.id === p.itemId);
+      return it?.itemCategory === "SOFA";
+    });
+    if (sofaPlans.length < 2) continue;
+    // Group by baseModel.
+    const byBase = new Map<string, ChangePlan[]>();
+    for (const p of sofaPlans) {
+      const baseModel = (p.productCode || "").split("-")[0];
+      const arr = byBase.get(baseModel) ?? [];
+      arr.push(p);
+      byBase.set(baseModel, arr);
+    }
+    for (const [baseModel, group] of byBase) {
+      if (group.length < 2) continue;
+      // Uniform tier + seatHeight required.
+      const tiers = new Set(group.map((g) => g.fabricTier));
+      if (tiers.size > 1) continue;
+      const heights = new Set(group.map((g) => g.sizeCode));
+      if (heights.size > 1) continue;
+      const seatHeight = [...heights][0]!;
+      const groupTier = [...tiers][0]!;
+      // Compartment variants — strip the productCode prefix.
+      // For combo matching we need the variant token (e.g. "1A(LHF)") not
+      // the seatHeight. The line item.productCode is "<base>-<variant>";
+      // pull the variant from after the first dash.
+      const variants = group.map((g) => {
+        const code = g.productCode || "";
+        const dash = code.indexOf("-");
+        return dash >= 0 ? code.slice(dash + 1) : "";
+      }).filter(Boolean);
+      // Find best matching rule, priority customer+tier > customer+ANY >
+      // master+tier > master+ANY (mirrors create.tsx).
+      const candidates = comboRules.filter((r) =>
+        r.baseModel === baseModel
+          && (r.effectiveFrom <= (so.companySODate || so.createdAt || today))
+          && matchesGroup(r.componentSizes, variants)
+      );
+      if (candidates.length === 0) continue;
+      const priorityOf = (r: ComboRule): number => {
+        const isCustomer = r.customerId === so.customerId && so.customerId;
+        const tierMatch = r.fabricTier === groupTier;
+        if (isCustomer && tierMatch) return 4;
+        if (isCustomer && r.fabricTier === "ANY") return 3;
+        if (!r.customerId && tierMatch) return 2;
+        if (!r.customerId && r.fabricTier === "ANY") return 1;
+        return 0;
+      };
+      const best = candidates
+        .map((r) => ({ r, p: priorityOf(r) }))
+        .filter((x) => x.p > 0)
+        .sort((a, b) =>
+          b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1),
+        )[0];
+      if (!best) continue;
+      const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
+      if (comboTotalRM <= 0) continue;
+      const groupSumRM = group.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+      if (groupSumRM <= comboTotalRM) continue; // no discount applicable
+      const ratio = comboTotalRM / groupSumRM;
+      // Distribute proportionally — adjust each line's basePriceSen so the
+      // group sum lands on comboTotal (with rounding residual rebalanced
+      // into the highest-priced line, matching create.tsx exactly).
+      let runningGroupSumSen = 0;
+      const adjusted: ChangePlan[] = [];
+      for (const p of group) {
+        const it = items.find(i => i.id === p.itemId)!;
+        const oldLineSen = (p.newLineRM ?? 0) * 100;
+        const adjustedLineSen = Math.floor(oldLineSen * ratio);
+        const surchargesPerUnit =
+          it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const adjustedUnitSen = Math.max(
+          0, Math.round(adjustedLineSen / Math.max(1, it.quantity)),
+        );
+        const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
+        const newUnitSen = newBaseSen + surchargesPerUnit;
+        const newLineSen = newUnitSen * it.quantity;
+        p.newBaseRM = newBaseSen / 100;
+        p.newUnitRM = newUnitSen / 100;
+        p.newLineRM = newLineSen / 100;
+        runningGroupSumSen += newLineSen;
+        adjusted.push(p);
+      }
+      // Rounding residual → push into highest-base line in group.
+      const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
+      if (residualSen !== 0 && adjusted.length > 0) {
+        const target = adjusted.slice().sort(
+          (a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0),
+        )[0];
+        const it = items.find(i => i.id === target.itemId)!;
+        const surchargesPerUnit =
+          it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const cur = (target.newBaseRM ?? 0) * 100;
+        const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
+        const newBase = Math.max(0, adj);
+        const newUnit = newBase + surchargesPerUnit;
+        const newLine = newUnit * it.quantity;
+        target.newBaseRM = newBase / 100;
+        target.newUnitRM = newUnit / 100;
+        target.newLineRM = newLine / 100;
+      }
+      comboMatches++;
+    }
+  }
+
   // Summary stats
   const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
   const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
@@ -7110,6 +7271,7 @@ app.post("/recompute-so-sofa-prices", async (c) => {
     skipReasons: skipped.reduce<Record<string, number>>((acc, p) => {
       acc[p.skipReason!] = (acc[p.skipReason!] || 0) + 1; return acc;
     }, {}),
+    comboMatchedGroups: comboMatches,
     sumLineDiffRM: Math.round(sumDiff * 100) / 100,
   };
 

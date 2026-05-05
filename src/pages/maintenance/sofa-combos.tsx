@@ -10,7 +10,7 @@
 // price) lives in sales/create.tsx and is rolling out in Phase 3c — this
 // page is the rule-management surface only.
 // ---------------------------------------------------------------------------
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Card,
   CardContent,
@@ -276,6 +276,9 @@ export default function SofaCombosPage() {
   const [filterBaseModel, setFilterBaseModel] = useState<string>("ALL");
   const [filterCustomer, setFilterCustomer] = useState<string>("ALL");
   const [showCreate, setShowCreate] = useState(false);
+  // editingRule drives the same dialog component used for create. Setting
+  // it pops the dialog open in edit mode pre-filled with the row's values.
+  const [editingRule, setEditingRule] = useState<SofaComboRule | null>(null);
 
   const filteredRules = useMemo(() => {
     return rules.filter((r) => {
@@ -436,6 +439,7 @@ export default function SofaCombosPage() {
                     historyCount={g.rules.length}
                     onDelete={() => handleDelete(g.representative.id)}
                     onOpenHistory={() => setHistoryKey(g.key)}
+                    onEdit={() => setEditingRule(g.representative)}
                   />
                 ))}
               </div>
@@ -470,6 +474,22 @@ export default function SofaCombosPage() {
           }}
         />
       )}
+
+      {/* Edit dialog — same component, fed an editingRule. */}
+      {editingRule && (
+        <CreateComboDialog
+          baseModels={baseModels}
+          sizesByBaseModel={sizesByBaseModel}
+          customers={customers}
+          editingRule={editingRule}
+          onClose={() => setEditingRule(null)}
+          onSaved={() => {
+            invalidateCachePrefix("/api/sofa-combos");
+            refreshRules();
+            setEditingRule(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -482,11 +502,13 @@ function ComboCard({
   historyCount,
   onDelete,
   onOpenHistory,
+  onEdit,
 }: {
   rule: SofaComboRule;
   historyCount: number;
   onDelete: () => void;
   onOpenHistory: () => void;
+  onEdit: () => void;
 }) {
   return (
     <Card>
@@ -537,9 +559,9 @@ function ComboCard({
           <div className="flex items-center gap-2">
             {statusBadge(rule.effectiveFrom)}
             <button
-              onClick={onOpenHistory}
+              onClick={onEdit}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-[#6B5C32] text-white hover:bg-[#5A4E2A] transition-colors"
-              title="Schedule a new effective-dated price (or view full history)"
+              title="Edit this combo's components, fabric tier, prices, customer, and effective date in place"
             >
               <Pencil className="h-3 w-3" />
               Edit
@@ -563,7 +585,10 @@ function ComboCard({
 }
 
 // ---------------------------------------------------------------------------
-// Create dialog
+// Combo form dialog — used for BOTH create and edit. When `editingRule` is
+// provided, the form pre-fills from that row + submits via PUT to update
+// in-place. When omitted, the form starts blank + submits via POST (one
+// per selected customer when multi-select is used).
 // ---------------------------------------------------------------------------
 function CreateComboDialog({
   baseModels,
@@ -571,25 +596,57 @@ function CreateComboDialog({
   customers,
   onClose,
   onSaved,
+  editingRule,
 }: {
   baseModels: string[];
   sizesByBaseModel: Record<string, string[]>;
   customers: Customer[];
   onClose: () => void;
   onSaved: () => void;
+  editingRule?: SofaComboRule | null;
 }) {
-  const [baseModel, setBaseModel] = useState<string>(baseModels[0] ?? "");
+  const isEdit = !!editingRule;
+
+  // Helpers to derive initial state from an editingRule.
+  const initialGroups: string[][] = (() => {
+    if (!editingRule) return [[]];
+    const sizes = editingRule.componentSizes;
+    if (!Array.isArray(sizes) || sizes.length === 0) return [[]];
+    if (Array.isArray(sizes[0])) return (sizes as string[][]).map((g) => [...g]);
+    return [(sizes as string[]).slice()];
+  })();
+  const initialPricesRm: Record<string, string> = (() => {
+    if (!editingRule) return {};
+    const out: Record<string, string> = {};
+    for (const [h, sen] of Object.entries(editingRule.pricesByHeight)) {
+      out[h] = (Number(sen) / 100).toFixed(2);
+    }
+    return out;
+  })();
+  const initialCustomerIds: Set<string> = editingRule?.customerId
+    ? new Set([editingRule.customerId])
+    : new Set();
+
+  const [baseModel, setBaseModel] = useState<string>(
+    editingRule?.baseModel ?? baseModels[0] ?? "",
+  );
   // Explicit OR-group editor: each compartment is one group of "any-of"
   // modules. Across compartments must all match (AND). Default: one empty
   // compartment so the operator immediately sees the structure.
-  const [groups, setGroups] = useState<string[][]>([[]]);
-  const [fabricTier, setFabricTier] = useState<FabricTier>("ANY");
-  const [pricesRm, setPricesRm] = useState<Record<string, string>>({});
+  const [groups, setGroups] = useState<string[][]>(initialGroups);
+  const [fabricTier, setFabricTier] = useState<FabricTier>(
+    editingRule?.fabricTier ?? "ANY",
+  );
+  const [pricesRm, setPricesRm] = useState<Record<string, string>>(initialPricesRm);
   // Multi-select: empty Set = company-wide; 1+ ids = create one row per
   // selected customer (server is single-customerId per row, frontend loops).
-  const [customerIds, setCustomerIds] = useState<Set<string>>(new Set());
-  const [effectiveFrom, setEffectiveFrom] = useState(todayIso());
-  const [notes, setNotes] = useState("");
+  // Edit mode: customer is single (PUT updates one row), multi-select UI
+  // still works but only first selection is honored.
+  const [customerIds, setCustomerIds] = useState<Set<string>>(initialCustomerIds);
+  const [effectiveFrom, setEffectiveFrom] = useState(
+    editingRule?.effectiveFrom ?? todayIso(),
+  );
+  const [notes, setNotes] = useState(editingRule?.notes ?? "");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -605,11 +662,18 @@ function CreateComboDialog({
   }, [onClose]);
 
   // Reset compartments when baseModel changes — old selection won't match
-  // the new model's size set.
+  // the new model's size set. Skip in edit mode on first render so the
+  // pre-filled groups from editingRule survive (they came from the same
+  // baseModel anyway). Subsequent baseModel edits in either mode reset.
   /* eslint-disable react-hooks/set-state-in-effect */
+  const baseModelMounted = useRef(false);
   useEffect(() => {
+    if (isEdit && !baseModelMounted.current) {
+      baseModelMounted.current = true;
+      return;
+    }
     setGroups([[]]);
-  }, [baseModel]);
+  }, [baseModel, isEdit]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   function toggleSizeInGroup(groupIdx: number, sz: string) {
@@ -677,8 +741,6 @@ function CreateComboDialog({
 
     setSaving(true);
     try {
-      const targets: (string | null)[] =
-        customerIds.size === 0 ? [null] : Array.from(customerIds);
       const baseBody = {
         baseModel,
         componentSizes: componentSizeGroups,
@@ -687,26 +749,47 @@ function CreateComboDialog({
         effectiveFrom,
         notes: notes.trim() || null,
       };
-      // Fire one POST per customer (or one with null for company-wide).
-      // Stop on first failure so the operator sees the error rather than
-      // half-applying the change.
-      const results = await Promise.all(
-        targets.map((cid) =>
-          fetch("/api/sofa-combos", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...baseBody, customerId: cid }),
-          }).then(async (r) => ({
-            ok: r.ok,
-            json: (await r.json().catch(() => ({}))) as ApiSingle<unknown>,
-          })),
-        ),
-      );
-      const failed = results.find((r) => !r.ok || !r.json.success);
-      if (failed) {
-        setErr(failed.json.error ?? "Failed to create combo rule");
-        setSaving(false);
-        return;
+      if (isEdit && editingRule) {
+        // PUT updates a single existing row in place. Multi-select UI
+        // collapses to the first selected customer (or null = company-
+        // wide); the rule's customerId is set from that.
+        const customerIdForEdit: string | null =
+          customerIds.size === 0 ? null : (Array.from(customerIds)[0] ?? null);
+        const r = await fetch(`/api/sofa-combos/${editingRule.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...baseBody, customerId: customerIdForEdit }),
+        });
+        const json = (await r.json().catch(() => ({}))) as ApiSingle<unknown>;
+        if (!r.ok || !json.success) {
+          setErr(json.error ?? "Failed to update combo rule");
+          setSaving(false);
+          return;
+        }
+      } else {
+        // Create mode: fire one POST per selected customer (or one with
+        // null for company-wide). Stop on first failure so the operator
+        // sees the error rather than half-applying the change.
+        const targets: (string | null)[] =
+          customerIds.size === 0 ? [null] : Array.from(customerIds);
+        const results = await Promise.all(
+          targets.map((cid) =>
+            fetch("/api/sofa-combos", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ ...baseBody, customerId: cid }),
+            }).then(async (r) => ({
+              ok: r.ok,
+              json: (await r.json().catch(() => ({}))) as ApiSingle<unknown>,
+            })),
+          ),
+        );
+        const failed = results.find((r) => !r.ok || !r.json.success);
+        if (failed) {
+          setErr(failed.json.error ?? "Failed to create combo rule");
+          setSaving(false);
+          return;
+        }
       }
       onSaved();
     } catch (ex) {
@@ -720,7 +803,7 @@ function CreateComboDialog({
       <Card className="w-full max-w-2xl max-h-[90vh] overflow-y-auto">
         <CardHeader className="pb-3 sticky top-0 bg-white z-10 border-b border-[#E2DDD8]">
           <div className="flex items-center justify-between">
-            <CardTitle className="text-base">New Sofa Combo</CardTitle>
+            <CardTitle className="text-base">{isEdit ? "Edit Sofa Combo" : "New Sofa Combo"}</CardTitle>
             <Button variant="ghost" size="icon" onClick={onClose}>
               <X className="h-4 w-4" />
             </Button>
@@ -998,7 +1081,7 @@ function CreateComboDialog({
                 ) : (
                   <>
                     <Plus className="h-4 w-4" />
-                    Save Combo
+                    {isEdit ? "Save Changes" : "Save Combo"}
                   </>
                 )}
               </Button>

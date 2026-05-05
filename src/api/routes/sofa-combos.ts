@@ -419,6 +419,152 @@ app.post("/copy-from-master", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// PUT /api/sofa-combos/:id — in-place edit of an existing combo rule.
+//
+// Mirrors the POST validation rules. Accepts the SAME body shape as POST so
+// the FE can reuse the create form for editing.
+//
+// Note: this is an IN-PLACE update — it does NOT create a new effective-
+// dated row. If the operator wants to schedule a price change with a new
+// effectiveFrom, they should use POST (which creates a new row + leaves
+// the old one as past history). Use PUT only when the original row was
+// entered with wrong data (typo, wrong customer, wrong tier, etc.).
+// ---------------------------------------------------------------------------
+app.put("/:id", async (c) => {
+  const denied = await requirePermission(c, "sofa-combos", "update");
+  if (denied) return denied;
+  const id = c.req.param("id");
+
+  const existing = await c.var.DB.prepare(
+    "SELECT id FROM sofa_combo_rules WHERE id = ?",
+  )
+    .bind(id)
+    .first<{ id: string }>();
+  if (!existing) {
+    return c.json({ success: false, error: "Combo rule not found" }, 404);
+  }
+
+  try {
+    const body = await c.req.json();
+    const baseModel = String(body.baseModel ?? "").trim();
+    const fabricTier = body.fabricTier;
+    const effectiveFrom = String(body.effectiveFrom ?? "").trim();
+
+    if (!baseModel) {
+      return c.json({ success: false, error: "baseModel is required" }, 400);
+    }
+    if (!isValidFabricTier(fabricTier)) {
+      return c.json(
+        {
+          success: false,
+          error: `fabricTier must be one of ${FABRIC_TIERS.join(", ")}`,
+        },
+        400,
+      );
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+      return c.json(
+        { success: false, error: "effectiveFrom (YYYY-MM-DD) is required" },
+        400,
+      );
+    }
+
+    const sizes = canonicalSizes(body.componentSizes);
+    if (!sizes) {
+      return c.json(
+        {
+          success: false,
+          error: "componentSizes must be a non-empty array of strings",
+        },
+        400,
+      );
+    }
+    if (!isValidPricesByHeight(body.pricesByHeight)) {
+      return c.json(
+        {
+          success: false,
+          error:
+            "pricesByHeight must be a non-empty object of seatHeight -> sen (>=0)",
+        },
+        400,
+      );
+    }
+
+    const customerId = body.customerId ? String(body.customerId) : null;
+    if (customerId) {
+      const cust = await c.var.DB.prepare(
+        "SELECT id FROM customers WHERE id = ?",
+      )
+        .bind(customerId)
+        .first<{ id: string }>();
+      if (!cust) {
+        return c.json(
+          { success: false, error: "customerId not found" },
+          400,
+        );
+      }
+    }
+
+    const sizesJson = JSON.stringify(sizes);
+    const pricesJson = JSON.stringify(body.pricesByHeight);
+    const notes = body.notes !== undefined ? (body.notes ? String(body.notes) : null) : undefined;
+
+    await c.var.DB
+      .prepare(
+        `UPDATE sofa_combo_rules
+            SET baseModel = ?,
+                componentSizes = ?,
+                fabricTier = ?,
+                pricesByHeight = ?,
+                customerId = ?,
+                effectiveFrom = ?
+                ${notes !== undefined ? ", notes = ?" : ""}
+          WHERE id = ?`,
+      )
+      .bind(
+        ...(notes !== undefined
+          ? [baseModel, sizesJson, fabricTier, pricesJson, customerId, effectiveFrom, notes, id]
+          : [baseModel, sizesJson, fabricTier, pricesJson, customerId, effectiveFrom, id]),
+      )
+      .run();
+
+    const row = await c.var.DB.prepare(
+      `SELECT scr.*, cu.name AS "customerName"
+         FROM sofa_combo_rules scr
+         LEFT JOIN customers cu ON cu.id = scr.customerId
+         WHERE scr.id = ?`,
+    )
+      .bind(id)
+      .first<JoinedRow>();
+
+    return c.json({
+      success: true,
+      data: row
+        ? {
+            id: row.id,
+            baseModel: row.baseModel,
+            componentSizes: parseJson<string[][]>(row.componentSizes, []),
+            fabricTier: row.fabricTier,
+            pricesByHeight: parseJson<Record<string, number>>(
+              row.pricesByHeight,
+              {},
+            ),
+            customerId: row.customerId,
+            customerName: row.customerName,
+            effectiveFrom: row.effectiveFrom,
+            notes: row.notes ?? "",
+            createdAt: row.createdAt,
+            createdBy: row.createdBy,
+          }
+        : null,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Invalid request body";
+    return c.json({ success: false, error: msg }, 400);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // DELETE /api/sofa-combos/:id
 // ---------------------------------------------------------------------------
 app.delete("/:id", async (c) => {

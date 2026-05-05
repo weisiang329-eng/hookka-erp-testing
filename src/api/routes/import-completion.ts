@@ -8515,4 +8515,232 @@ app.post("/historical-purchases-backfill", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/migrate-do-from-excel?dryRun=true|false
+//
+// Bulk DO migration. Body: { entries: [{ custPO, doNo }, ...], deliveryDate?: "YYYY-MM-DD" }
+//
+// For each Cust_PO with a known DO number from the legacy Excel sheet:
+//   1. Find the matching sales_order by customerPOId
+//   2. Stamp ALL its production_orders' PACKING JCs as COMPLETED 2026-05-05
+//   3. Insert a delivery_orders row with do_no = the legacy DO number,
+//      status = LOADED (= "Dispatched" UI label per
+//      src/pages/delivery/index.tsx:170-178)
+//   4. Insert delivery_order_items rows mirroring each PO
+//   5. Update the SO's status to DISPATCHED-equivalent (depends on enum)
+//
+// Idempotent: if a delivery_orders row already exists with that do_no, skip.
+// ---------------------------------------------------------------------------
+app.post("/migrate-do-from-excel", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const today = new Date().toISOString().slice(0, 10);
+  let body: { entries?: Array<{ custPO: string; doNo: string }>; deliveryDate?: string };
+  try { body = await c.req.json(); } catch { return c.json({ success: false, error: "Invalid JSON" }, 400); }
+  const entries = (body?.entries ?? []).filter(e => typeof e?.custPO === "string" && typeof e?.doNo === "string" && e.custPO && e.doNo);
+  if (entries.length === 0) {
+    return c.json({ success: false, error: "Provide entries: [{custPO, doNo}, ...]" }, 400);
+  }
+  const deliveryDate = (body.deliveryDate ?? today).slice(0, 10);
+
+  // 1. Get every existing DO's do_no (idempotency check).
+  const existingDoRes = await db
+    .prepare(`SELECT doNo FROM delivery_orders`)
+    .all<{ doNo: string }>();
+  const existingDoNos = new Set((existingDoRes.results ?? []).map(r => r.doNo));
+
+  // 2. Pre-fetch all SOs (with customerPOId) + production_orders (with PACKING JCs) in 2 passes.
+  const soRes = await db
+    .prepare(
+      `SELECT id, customerPOId, customerId, customerName, customerState,
+              companySO, companySOId, hubId
+         FROM sales_orders
+        WHERE customerPOId IS NOT NULL AND customerPOId <> ''`,
+    )
+    .all<{
+      id: string; customerPOId: string; customerId: string;
+      customerName: string; customerState: string | null;
+      companySO: string | null; companySOId: string | null; hubId: string | null;
+    }>();
+  const soByCustPo = new Map<string, typeof soRes.results[number]>();
+  for (const s of (soRes.results ?? [])) {
+    soByCustPo.set(s.customerPOId, s);
+  }
+
+  type Plan = {
+    custPO: string; doNo: string; soId?: string;
+    customerId?: string; companySOId?: string;
+    poIds: string[];
+    packingJcsToStamp: Array<{ poId: string; jcId: string }>;
+    skipReason?: string;
+  };
+  const plans: Plan[] = [];
+  for (const e of entries) {
+    const plan: Plan = { custPO: e.custPO, doNo: e.doNo, poIds: [], packingJcsToStamp: [] };
+    if (existingDoNos.has(e.doNo)) { plan.skipReason = "DO already exists"; plans.push(plan); continue; }
+    const so = soByCustPo.get(e.custPO);
+    if (!so) { plan.skipReason = "No matching SO"; plans.push(plan); continue; }
+    plan.soId = so.id;
+    plan.customerId = so.customerId;
+    plan.companySOId = so.companySOId ?? undefined;
+    // Find production_orders for this SO + their PACKING JCs.
+    const poRes = await db
+      .prepare(
+        `SELECT id, poNo FROM production_orders
+          WHERE salesOrderId = ?
+            AND status NOT IN ('CANCELLED')`,
+      )
+      .bind(so.id)
+      .all<{ id: string; poNo: string | null }>();
+    const poIds = (poRes.results ?? []).map(p => p.id);
+    plan.poIds = poIds;
+    if (poIds.length > 0) {
+      const placeholders = poIds.map(() => "?").join(",");
+      const jcRes = await db
+        .prepare(
+          `SELECT id, productionOrderId, status, completedDate
+             FROM job_cards
+            WHERE departmentCode = 'PACKING'
+              AND productionOrderId IN (${placeholders})`,
+        )
+        .bind(...poIds)
+        .all<{ id: string; productionOrderId: string; status: string; completedDate: string | null }>();
+      for (const jc of (jcRes.results ?? [])) {
+        if (["COMPLETED","TRANSFERRED","CANCELLED"].includes(jc.status)) continue;
+        plan.packingJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id });
+      }
+    }
+    plans.push(plan);
+  }
+
+  const usable = plans.filter(p => !p.skipReason);
+  const skipped = plans.filter(p => p.skipReason);
+  const summary = {
+    entries: entries.length,
+    existingDoSkipped: skipped.filter(p => p.skipReason === "DO already exists").length,
+    noSoMatch: skipped.filter(p => p.skipReason === "No matching SO").length,
+    usableCount: usable.length,
+    totalPackingJcsToStamp: usable.reduce((s, p) => s + p.packingJcsToStamp.length, 0),
+    totalPOsToBundle: usable.reduce((s, p) => s + p.poIds.length, 0),
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, summary,
+      sample: usable.slice(0, 5).map(p => ({
+        custPO: p.custPO, doNo: p.doNo,
+        soId: p.soId, poIds: p.poIds, packingJcsCount: p.packingJcsToStamp.length,
+      })),
+    });
+  }
+
+  // Live execute. Per-plan: stamp PACKING JCs + INSERT delivery_orders + items.
+  let dosCreated = 0, packingStamped = 0;
+  const errors: Array<{ custPO: string; error: string }> = [];
+  for (const plan of usable) {
+    try {
+      const stmts: ReturnType<D1Database["prepare"]>[] = [];
+      // Stamp PACKING JCs
+      for (const j of plan.packingJcsToStamp) {
+        stmts.push(
+          db.prepare(
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+              WHERE id = ?`,
+          ).bind(today, j.jcId),
+        );
+      }
+      // INSERT delivery_orders header
+      const doId = `do-${crypto.randomUUID().slice(0, 8)}`;
+      const so = soByCustPo.get(plan.custPO)!;
+      // Compute total_m3 + total_items by joining PO+products
+      const placeholders = plan.poIds.map(() => "?").join(",");
+      const totalsRes = plan.poIds.length > 0
+        ? await db.prepare(
+            `SELECT COALESCE(SUM(po.quantity * COALESCE(p.unitM3, 0)), 0) AS totalM3,
+                    COALESCE(SUM(po.quantity), 0) AS totalItems
+               FROM production_orders po
+               LEFT JOIN products p ON p.code = po.productCode
+              WHERE po.id IN (${placeholders})`,
+          ).bind(...plan.poIds).first<{ totalM3: number; totalItems: number }>()
+        : { totalM3: 0, totalItems: 0 };
+      stmts.push(
+        db.prepare(
+          `INSERT INTO delivery_orders
+             (id, doNo, salesOrderId, companySO, companySOId, customerId,
+              customerPOId, customerName, customerState, hubId,
+              deliveryDate, totalM3, totalItems, status, dispatchedAt,
+              created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LOADED', ?, ?, ?)`,
+        ).bind(
+          doId, plan.doNo, plan.soId ?? null, so.companySO, so.companySOId,
+          so.customerId, plan.custPO, so.customerName, so.customerState ?? null,
+          so.hubId ?? null, deliveryDate, totalsRes?.totalM3 ?? 0,
+          totalsRes?.totalItems ?? 0,
+          new Date().toISOString(),
+          new Date().toISOString(), new Date().toISOString(),
+        ),
+      );
+      // INSERT delivery_order_items — one per production_order
+      if (plan.poIds.length > 0) {
+        const poItemsRes = await db.prepare(
+          `SELECT po.id, po.poNo, po.productCode, po.productName, po.sizeLabel,
+                  po.fabricCode, po.quantity, po.rackingNumber, po.salesOrderNo,
+                  COALESCE(p.unitM3, 0) AS unitM3
+             FROM production_orders po
+             LEFT JOIN products p ON p.code = po.productCode
+            WHERE po.id IN (${placeholders})`,
+        ).bind(...plan.poIds).all<{
+          id: string; poNo: string | null; productCode: string | null;
+          productName: string | null; sizeLabel: string | null;
+          fabricCode: string | null; quantity: number;
+          rackingNumber: string | null; salesOrderNo: string | null;
+          unitM3: number;
+        }>();
+        for (const r of (poItemsRes.results ?? [])) {
+          const itemId = `doi-${crypto.randomUUID().slice(0, 8)}`;
+          stmts.push(
+            db.prepare(
+              `INSERT INTO delivery_order_items
+                 (id, deliveryOrderId, productionOrderId, poNo, productCode,
+                  productName, sizeLabel, fabricCode, quantity, itemM3,
+                  rackingNumber, packingStatus, salesOrderNo)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?)`,
+            ).bind(
+              itemId, doId, r.id, r.poNo ?? "", r.productCode ?? "",
+              r.productName ?? "", r.sizeLabel ?? "", r.fabricCode ?? "",
+              r.quantity, r.quantity * r.unitM3,
+              r.rackingNumber ?? "", r.salesOrderNo ?? "",
+            ),
+          );
+        }
+      }
+      // Update SO status to READY_TO_SHIP if not already past
+      stmts.push(
+        db.prepare(
+          `UPDATE sales_orders SET status = 'READY_TO_SHIP', updated_at = ?
+            WHERE id = ?
+              AND status IN ('IN_PRODUCTION','CONFIRMED','DRAFT')`,
+        ).bind(new Date().toISOString(), plan.soId ?? ""),
+      );
+      // Batch in groups of 50
+      for (let i = 0; i < stmts.length; i += 50) {
+        await db.batch(stmts.slice(i, i + 50));
+      }
+      dosCreated++;
+      packingStamped += plan.packingJcsToStamp.length;
+    } catch (err) {
+      errors.push({ custPO: plan.custPO, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return c.json({
+    success: true, dryRun: false, summary,
+    dosCreated, packingStamped,
+    errorCount: errors.length, errors: errors.slice(0, 10),
+  });
+});
+
 export default app;

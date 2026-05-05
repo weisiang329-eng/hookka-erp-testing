@@ -393,11 +393,38 @@ export default function SofaCombosPage() {
   const [historyKey, setHistoryKey] = useState<string | null>(null);
   const historyRules = useMemo<SofaComboRule[] | null>(() => {
     if (!historyKey) return null;
+    let card: ComboGroup | undefined;
     for (const cards of Object.values(combosByBase)) {
-      const card = cards.find((g) => g.key === historyKey);
-      if (card) return card.rules;
+      const found = cards.find((g) => g.key === historyKey);
+      if (found) {
+        card = found;
+        break;
+      }
     }
-    return null;
+    if (!card) return null;
+    // Card collapses identical-price rules across multiple customers, so
+    // the .rules list contains 1 row per (effectiveFrom × customer).
+    // Dedup the dialog by (effectiveFrom + sorted-pricesJson) so each
+    // unique price-event shows ONCE — multiple customers with the same
+    // price at the same date are surfaced via the customer chips on the
+    // card, not as repeated rows in the timeline.
+    const sortedKeys = (p: Record<string, number>) =>
+      JSON.stringify(
+        Object.keys(p).sort().reduce<Record<string, number>>((acc, k) => {
+          acc[k] = p[k];
+          return acc;
+        }, {}),
+      );
+    const seen = new Map<string, SofaComboRule>();
+    for (const r of card.rules) {
+      const k = `${r.effectiveFrom}|${sortedKeys(r.pricesByHeight)}`;
+      const existing = seen.get(k);
+      // Prefer master (NULL customerId) over customer-specific so the
+      // "Auto-baseline" / "Mirrored from Master" notes propagate.
+      if (!existing) seen.set(k, r);
+      else if (existing.customerId && !r.customerId) seen.set(k, r);
+    }
+    return Array.from(seen.values());
   }, [combosByBase, historyKey]);
 
   async function handleDelete(id: string) {
@@ -528,7 +555,26 @@ export default function SofaCombosPage() {
                     <ComboCard
                       key={g.key}
                       rule={g.representative}
-                      historyCount={g.rules.length}
+                      historyCount={
+                        // Distinct (date, prices) tuples — matches what
+                        // the dedup'd History dialog will render.
+                        new Set(
+                          g.rules.map(
+                            (r) =>
+                              `${r.effectiveFrom}|${JSON.stringify(
+                                Object.keys(r.pricesByHeight)
+                                  .sort()
+                                  .reduce<Record<string, number>>(
+                                    (acc, k) => {
+                                      acc[k] = r.pricesByHeight[k];
+                                      return acc;
+                                    },
+                                    {},
+                                  ),
+                              )}`,
+                          ),
+                        ).size
+                      }
                       customerNames={customerNames}
                       onDelete={() => handleDelete(g.representative.id)}
                       onOpenHistory={() => setHistoryKey(g.key)}

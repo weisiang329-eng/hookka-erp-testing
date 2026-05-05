@@ -334,16 +334,22 @@ app.post("/copy-from-master", async (c) => {
       );
     }
 
-    // Master combos = the latest effective row per (baseModel, componentSizes,
-    // fabricTier) where customerId IS NULL. Group + take the most-recent so
-    // the customer doesn't inherit obsolete past pricing.
+    // Mirror EVERY master combo row (full effective-dated history) into
+    // the customer scope. Previously only the newest row per (baseModel,
+    // componentSizes, fabricTier) was copied — that hid the master's
+    // pricing timeline from the customer-side history dialog. Wei Siang
+    // explicitly asked for parity with the SKU price-history flow.
+    //
+    // Idempotency: dedup by (baseModel, componentSizes, fabricTier,
+    // effectiveFrom). Re-running this on a customer with partial mirror
+    // backfills only the missing rows.
     const masterRes = await c.var.DB.prepare(
       `SELECT id, baseModel, componentSizes, fabricTier, pricesByHeight,
               effectiveFrom, notes
          FROM sofa_combo_rules
         WHERE customerId IS NULL
         ORDER BY baseModel, componentSizes, fabricTier,
-                 effectiveFrom DESC, created_at DESC`,
+                 effectiveFrom ASC, created_at ASC`,
     ).all<{
       id: string;
       baseModel: string;
@@ -354,40 +360,42 @@ app.post("/copy-from-master", async (c) => {
       notes: string | null;
     }>();
     const masterRows = masterRes.results ?? [];
-    const seenKey = new Set<string>();
-    const newest: typeof masterRows = [];
-    for (const r of masterRows) {
-      const k = `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`;
-      if (seenKey.has(k)) continue;
-      seenKey.add(k);
-      newest.push(r);
-    }
 
-    // Existing customer-scoped rules — used to skip duplicates so the
-    // operation is safe to re-run.
+    // Existing customer-scoped rules — keyed by (baseModel,
+    // componentSizes, fabricTier, effectiveFrom) so historical mirrored
+    // rows aren't overwritten on re-run.
     const existingRes = await c.var.DB.prepare(
-      `SELECT baseModel, componentSizes, fabricTier
+      `SELECT baseModel, componentSizes, fabricTier, effectiveFrom
          FROM sofa_combo_rules
         WHERE customerId = ?`,
     )
       .bind(customerId)
-      .all<{ baseModel: string; componentSizes: string; fabricTier: string }>();
+      .all<{
+        baseModel: string;
+        componentSizes: string;
+        fabricTier: string;
+        effectiveFrom: string;
+      }>();
     const existingKeys = new Set(
       (existingRes.results ?? []).map(
-        (r) => `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`,
+        (r) =>
+          `${r.baseModel}|${r.componentSizes}|${r.fabricTier}|${r.effectiveFrom}`,
       ),
     );
 
     const inserts: D1PreparedStatement[] = [];
     let copied = 0;
     let skipped = 0;
-    for (const r of newest) {
-      const k = `${r.baseModel}|${r.componentSizes}|${r.fabricTier}`;
+    for (const r of masterRows) {
+      const k = `${r.baseModel}|${r.componentSizes}|${r.fabricTier}|${r.effectiveFrom}`;
       if (existingKeys.has(k)) {
         skipped++;
         continue;
       }
       copied++;
+      // Preserve master row's effectiveFrom so the customer's history
+      // dialog shows the same timeline (not a single snapshot dated
+      // today). Notes prefixed so the source is visible.
       inserts.push(
         c.var.DB.prepare(
           `INSERT INTO sofa_combo_rules
@@ -401,17 +409,29 @@ app.post("/copy-from-master", async (c) => {
           r.fabricTier,
           r.pricesByHeight,
           customerId,
-          effectiveFrom,
-          r.notes,
+          r.effectiveFrom,
+          r.notes
+            ? `Mirrored from Master: ${r.notes}`
+            : `Mirrored from Master ${r.effectiveFrom}`,
           null,
         ),
       );
     }
-    if (inserts.length > 0) await c.var.DB.batch(inserts);
+    // Batch in chunks of 50 (D1 statement-per-batch cap).
+    for (let i = 0; i < inserts.length; i += 50) {
+      await c.var.DB.batch(inserts.slice(i, i + 50));
+    }
 
     return c.json({
       success: true,
-      data: { copied, skipped, sourceMasterRules: newest.length },
+      data: {
+        copied,
+        skipped,
+        sourceMasterRules: masterRows.length,
+        // effectiveFrom from body retained for backward-compat clients
+        // that look at it (now unused — each row uses master's own date).
+        effectiveFromIgnored: effectiveFrom,
+      },
     });
   } catch {
     return c.json({ success: false, error: "Invalid request body" }, 400);

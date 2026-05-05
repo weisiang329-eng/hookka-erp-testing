@@ -970,9 +970,20 @@ function CreateComboDialog({
                 Customers
               </label>
               <p className="text-[11px] text-[#6B7280] mb-2">
-                Pick none → company-wide (visible to every customer). Pick one
-                or more → creates a separate combo row for each selected
-                customer (only those customers see the deal).
+                {isEdit ? (
+                  <>
+                    Edit mode: this row's customer is updated in place. Pick
+                    none → company-wide; pick one customer → that customer
+                    sees the deal. To copy this combo to ANOTHER customer,
+                    cancel + open a new combo from the create button.
+                  </>
+                ) : (
+                  <>
+                    Pick none → company-wide (visible to every customer). Pick
+                    one or more → creates a separate combo row for each
+                    selected customer (only those customers see the deal).
+                  </>
+                )}
               </p>
               <div className="flex items-center gap-2 mb-2">
                 <button

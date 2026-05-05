@@ -6168,11 +6168,20 @@ app.post("/queen-price-correction-rm5", async (c) => {
   const dryRun = c.req.query("dryRun") === "true";
   const today = new Date().toISOString().slice(0, 10);
 
-  // 1. Queen BEDFRAME product ids.
+  // 1. Queen-class BEDFRAME product ids. The "Queen" cohort isn't just
+  // sizeCode='Q' — three other sizeCodes are functionally Queen too
+  // (variants on 152CM / 153CM width that the catalog tracks separately):
+  //   Q       → 5FT canonical Queen        (32 SKUs)
+  //   152X200 → 152CMX200CM                ( 3 SKUs)
+  //   153X200 → 153CMX200CM                ( 1 SKU)
+  //   153     → 153CMX210CM (e.g. DIVAN)   ( 1 SKU)
+  // → 37 total. Wei Siang flagged 2026-05-05 that all four buckets had
+  // the same +RM30 surcharge applied 4/26 and need the same -RM5 fix.
   const queenRes = await db
     .prepare(
       `SELECT id, code FROM products
-        WHERE sizeCode = 'Q' AND category = 'BEDFRAME'`,
+        WHERE category = 'BEDFRAME'
+          AND sizeCode IN ('Q', '152X200', '153X200', '153')`,
     )
     .all<{ id: string; code: string }>();
   const queen = queenRes.results ?? [];

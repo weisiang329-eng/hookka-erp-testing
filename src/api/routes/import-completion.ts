@@ -1811,6 +1811,124 @@ app.post("/uph-pofold-backfill", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/sync-maintenance-history-from-kv?dryRun=true|false
+//
+// One-shot sync that captures the LIVE kv_config('variants-config[:cust]')
+// blob into maintenance_config_history when the latest history snapshot
+// differs from the live blob. Symptom this fixes: a customer's
+// MaintenanceItemHistoryDialog shows old prices (e.g. RM 150) while the
+// inline list shows the current edited value (RM 160) — meaning a prior
+// kv_config write didn't create a corresponding history snapshot.
+//
+// Idempotent: skips scopes whose latest snapshot already matches the
+// live blob.
+// ---------------------------------------------------------------------------
+app.post("/sync-maintenance-history-from-kv", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Load every kv_config row that's a maintenance blob.
+  const kvRes = await db
+    .prepare(
+      `SELECT key, value FROM kv_config
+        WHERE key = 'variants-config' OR key LIKE 'variants-config:%'`,
+    )
+    .all<{ key: string; value: string }>();
+  const kvRows = kvRes.results ?? [];
+
+  const candidates: Array<{
+    scope: string;
+    kvKey: string;
+    liveLen: number;
+    latestSnapshotEffectiveFrom: string | null;
+    latestSnapshotLen: number | null;
+    needsSync: boolean;
+  }> = [];
+  let willInsert = 0;
+  for (const kv of kvRows) {
+    const scope =
+      kv.key === "variants-config"
+        ? "master"
+        : `customer:${kv.key.slice("variants-config:".length)}`;
+    // Latest snapshot for this scope.
+    const latestRes = await db
+      .prepare(
+        `SELECT effective_from AS "effectiveFrom", config
+           FROM maintenance_config_history
+          WHERE scope = ?
+          ORDER BY effective_from DESC, created_at DESC
+          LIMIT 1`,
+      )
+      .bind(scope)
+      .all<Record<string, unknown>>();
+    const lr = (latestRes.results ?? [])[0];
+    const lrEff =
+      typeof lr?.effectiveFrom === "string"
+        ? (lr.effectiveFrom as string)
+        : typeof lr?.effective_from === "string"
+          ? (lr.effective_from as string)
+          : null;
+    const lrCfg = typeof lr?.config === "string" ? (lr.config as string) : null;
+    const needsSync = lrCfg !== kv.value;
+    candidates.push({
+      scope,
+      kvKey: kv.key,
+      liveLen: kv.value.length,
+      latestSnapshotEffectiveFrom: lrEff,
+      latestSnapshotLen: lrCfg ? lrCfg.length : null,
+      needsSync,
+    });
+    if (needsSync) willInsert++;
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      totalScopes: candidates.length,
+      willInsert,
+      sample: candidates.slice(0, 20),
+    });
+  }
+
+  let inserted = 0;
+  for (const c0 of candidates) {
+    if (!c0.needsSync) continue;
+    const kv = kvRows.find((k) => k.key === c0.kvKey);
+    if (!kv) continue;
+    const newId = `mch-sync-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+    await db
+      .prepare(
+        `INSERT INTO maintenance_config_history
+           (id, scope, config, effective_from, notes, created_by)
+         VALUES (?, ?, ?, ?, ?, NULL)
+         ON CONFLICT (id) DO NOTHING`,
+      )
+      .bind(
+        newId,
+        c0.scope,
+        kv.value,
+        today,
+        "Auto-synced from kv_config (live edit not previously captured)",
+      )
+      .run();
+    inserted++;
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    totalScopes: candidates.length,
+    willInsert,
+    inserted,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/cleanup-snapshot-from-master-rows?dryRun=true|false
 //
 // One-shot DELETE for the redundant "Snapshot from Master <date>" rows

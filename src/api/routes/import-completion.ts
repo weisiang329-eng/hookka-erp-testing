@@ -1811,6 +1811,310 @@ app.post("/uph-pofold-backfill", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/derive-historical-price-baselines?dryRun=true|false
+//
+// One-shot helper to seed `customer_product_prices` + `product_prices`
+// baseline rows from historical SO line snapshots, all anchored at a
+// single fixed date (2020-01-01) per Wei Siang's request:
+// "把最开始的价钱记录进 2020 年 1 月 1 号".
+//
+// Why this is needed: the auto-baseline UI logic (customer-products.ts:
+// 467, products.ts:954) only fires when scheduling a FUTURE-dated row
+// with NO existing history. Wei Siang's manual data entry was past-
+// dated (the actual price-change events landed on 2026-04-01 and
+// 2026-04-26), so auto-baseline never fired and the pre-2026 baseline
+// is missing. The resolver then falls back to the legacy
+// `customer_products.basePriceSen` column — which has been overwritten
+// with the latest price — and historical SOs would resolve to the
+// wrong "as-of-then" price.
+//
+// Algorithm:
+//   1. For each customer_products row that has any existing history:
+//      - Find the EARLIEST existing history effectiveFrom for that cp.
+//      - Find the OLDEST sales_order_items row with matching
+//        (productCode, customerId via SO) where SO.companySODate <
+//        the earliest history date.
+//      - INSERT a customer_product_prices baseline row dated 2020-01-01
+//        with basePriceSen = that line's basePriceSen.
+//   2. Same for product_prices (master): for each product with history,
+//      derive baseline from the oldest SO line (any customer) for that
+//      productCode predating the master's earliest history date,
+//      anchored at 2020-01-01.
+//
+// Constraints:
+//   - BEDFRAME / ACCESSORY only. SOFA seatHeightPrices is a per-(height,
+//     tier) matrix that cannot be safely derived from a single SO line —
+//     manual entry required.
+//   - Skips lines with basePriceSen = 0 (bad data / sample lines).
+//   - Skips (product, customer) combos that already have a 2020-01-01
+//     row (idempotency guard).
+//   - If multiple historical SO prices exist for the same (product,
+//     customer) before the existing history, only the OLDEST is captured.
+//
+// Idempotent: re-running on already-baselined cps is a no-op.
+// Permission: production-orders:update (admin proxy).
+// ---------------------------------------------------------------------------
+const PRICE_BASELINE_DATE = "2020-01-01";
+
+type BaselineCandidate = {
+  scope: "customer" | "master";
+  cpId: string | null;            // customer_products.id when scope='customer'
+  productId: string;
+  productCode: string;
+  customerId: string | null;
+  baselineDate: string;
+  basePriceSen: number;
+  sourceSoLineId: string;
+  sourceSoCompanySODate: string;
+};
+
+app.post("/derive-historical-price-baselines", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // --- 1. Customer-product baselines ---------------------------------------
+  // For each customer_products row that has history, the earliest existing
+  // history.effectiveFrom marks where pre-existing data ends. Anything
+  // before that date is a gap we may be able to fill from SO snapshots.
+  const cpRowsRes = await db
+    .prepare(
+      `SELECT cp.id           AS cpId,
+              cp.productId    AS productId,
+              cp.customerId   AS customerId,
+              p.code          AS productCode,
+              p.category      AS category,
+              MIN(cph.effectiveFrom) AS earliestHistory
+         FROM customer_products cp
+         JOIN products p ON p.id = cp.productId
+         LEFT JOIN customer_product_prices cph
+                ON cph.customerProductId = cp.id
+        GROUP BY cp.id, cp.productId, cp.customerId, p.code, p.category`,
+    )
+    .all<{
+      cpId: string;
+      productId: string;
+      customerId: string;
+      productCode: string;
+      category: string;
+      earliestHistory: string | null;
+    }>();
+  const cpRows = cpRowsRes.results ?? [];
+
+  const candidates: BaselineCandidate[] = [];
+  const skipped: Array<{ scope: string; key: string; reason: string }> = [];
+
+  for (const cp of cpRows) {
+    if (cp.category === "SOFA") {
+      skipped.push({
+        scope: "customer",
+        key: `${cp.productCode}|${cp.customerId}`,
+        reason: "SOFA matrix not auto-derived",
+      });
+      continue;
+    }
+    // Cutoff: anything strictly before the earliest existing history row.
+    // If no history exists yet, treat cutoff as infinity (any SO qualifies).
+    const cutoff = cp.earliestHistory ?? "9999-12-31";
+
+    // Find OLDEST SO line for this (productCode, customerId) below cutoff.
+    const oldestLine = await db
+      .prepare(
+        `SELECT soi.id           AS lineId,
+                soi.basePriceSen AS basePriceSen,
+                so.companySODate AS soDate
+           FROM sales_order_items soi
+           JOIN sales_orders so ON so.id = soi.salesOrderId
+          WHERE soi.productCode = ?
+            AND so.customerId   = ?
+            AND so.companySODate IS NOT NULL
+            AND so.companySODate != ''
+            AND so.companySODate < ?
+            AND soi.basePriceSen > 0
+          ORDER BY so.companySODate ASC, soi.id ASC
+          LIMIT 1`,
+      )
+      .bind(cp.productCode, cp.customerId, cutoff)
+      .first<{ lineId: string; basePriceSen: number; soDate: string }>();
+
+    if (!oldestLine) {
+      skipped.push({
+        scope: "customer",
+        key: `${cp.productCode}|${cp.customerId}`,
+        reason: cp.earliestHistory
+          ? `no SO line predates ${cutoff}`
+          : "no historical SO line found",
+      });
+      continue;
+    }
+
+    candidates.push({
+      scope: "customer",
+      cpId: cp.cpId,
+      productId: cp.productId,
+      productCode: cp.productCode,
+      customerId: cp.customerId,
+      baselineDate: PRICE_BASELINE_DATE,
+      basePriceSen: oldestLine.basePriceSen,
+      sourceSoLineId: oldestLine.lineId,
+      sourceSoCompanySODate: oldestLine.soDate,
+    });
+  }
+
+  // --- 2. Master-product baselines ----------------------------------------
+  // For each product (BF/ACC), if its earliest existing master history is
+  // after some SO line's date, derive a master baseline from the oldest SO
+  // line for that productCode (any customer).
+  const prodRowsRes = await db
+    .prepare(
+      `SELECT p.id          AS productId,
+              p.code        AS productCode,
+              p.category    AS category,
+              MIN(pp.effectiveFrom) AS earliestHistory
+         FROM products p
+         LEFT JOIN product_prices pp ON pp.productId = p.id
+        WHERE p.category IN ('BEDFRAME','ACCESSORY')
+        GROUP BY p.id, p.code, p.category`,
+    )
+    .all<{
+      productId: string;
+      productCode: string;
+      category: string;
+      earliestHistory: string | null;
+    }>();
+  const prodRows = prodRowsRes.results ?? [];
+
+  for (const p of prodRows) {
+    const cutoff = p.earliestHistory ?? "9999-12-31";
+    const oldestLine = await db
+      .prepare(
+        `SELECT soi.id           AS lineId,
+                soi.basePriceSen AS basePriceSen,
+                so.companySODate AS soDate
+           FROM sales_order_items soi
+           JOIN sales_orders so ON so.id = soi.salesOrderId
+          WHERE soi.productCode = ?
+            AND so.companySODate IS NOT NULL
+            AND so.companySODate != ''
+            AND so.companySODate < ?
+            AND soi.basePriceSen > 0
+          ORDER BY so.companySODate ASC, soi.id ASC
+          LIMIT 1`,
+      )
+      .bind(p.productCode, cutoff)
+      .first<{ lineId: string; basePriceSen: number; soDate: string }>();
+    if (!oldestLine) continue;
+    candidates.push({
+      scope: "master",
+      cpId: null,
+      productId: p.productId,
+      productCode: p.productCode,
+      customerId: null,
+      baselineDate: PRICE_BASELINE_DATE,
+      basePriceSen: oldestLine.basePriceSen,
+      sourceSoLineId: oldestLine.lineId,
+      sourceSoCompanySODate: oldestLine.soDate,
+    });
+  }
+
+  const sample = candidates.slice(0, 15);
+  const byScope = candidates.reduce<Record<string, number>>((acc, c) => {
+    acc[c.scope] = (acc[c.scope] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      planned: candidates.length,
+      byScope,
+      skipped: skipped.slice(0, 30),
+      skippedTotal: skipped.length,
+      sample,
+    });
+  }
+
+  let inserted = 0;
+  const errors: Array<{ key: string; message: string }> = [];
+
+  for (const cand of candidates) {
+    try {
+      if (cand.scope === "customer" && cand.cpId) {
+        // Re-check (idempotency): another concurrent request might have
+        // inserted between the candidate scan and this loop.
+        const exists = await db
+          .prepare(
+            "SELECT id FROM customer_product_prices WHERE customerProductId = ? AND effectiveFrom = ? LIMIT 1",
+          )
+          .bind(cand.cpId, cand.baselineDate)
+          .first<{ id: string }>();
+        if (exists) continue;
+        await db
+          .prepare(
+            `INSERT INTO customer_product_prices
+               (id, customerProductId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL)`,
+          )
+          .bind(
+            `cph-${crypto.randomUUID().slice(0, 8)}`,
+            cand.cpId,
+            cand.basePriceSen,
+            cand.baselineDate,
+            `Auto-baseline derived from SO line ${cand.sourceSoLineId} (${cand.sourceSoCompanySODate})`,
+          )
+          .run();
+        inserted++;
+      } else if (cand.scope === "master") {
+        const exists = await db
+          .prepare(
+            "SELECT id FROM product_prices WHERE productId = ? AND effectiveFrom = ? LIMIT 1",
+          )
+          .bind(cand.productId, cand.baselineDate)
+          .first<{ id: string }>();
+        if (exists) continue;
+        await db
+          .prepare(
+            `INSERT INTO product_prices
+               (id, productId, basePriceSen, price1Sen, seatHeightPrices,
+                effectiveFrom, notes, createdBy)
+             VALUES (?, ?, ?, NULL, NULL, ?, ?, NULL)`,
+          )
+          .bind(
+            `pp-${crypto.randomUUID().slice(0, 8)}`,
+            cand.productId,
+            cand.basePriceSen,
+            cand.baselineDate,
+            `Auto-baseline derived from SO line ${cand.sourceSoLineId} (${cand.sourceSoCompanySODate})`,
+          )
+          .run();
+        inserted++;
+      }
+    } catch (err) {
+      errors.push({
+        key: `${cand.scope}:${cand.productCode}|${cand.customerId ?? "*"}`,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    planned: candidates.length,
+    inserted,
+    errors,
+    byScope,
+    skipped: skipped.slice(0, 30),
+    skippedTotal: skipped.length,
+    sample,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/fab-cut-pofold-backfill?dryRun=true|false
 //
 // Companion to /uph-pofold-backfill that handles the merged FAB_CUT JC.

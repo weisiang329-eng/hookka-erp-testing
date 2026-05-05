@@ -182,6 +182,94 @@ async function nextCompanyCOId(db: D1Database, now: Date): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// cascadeCOStatusToPOs — CO-side mirror of cascadeSOStatusToPOs.
+//
+// When a CO flips to CANCELLED, every non-terminal child production_order
+// (and its non-terminal job_cards) must follow. Without this cascade, the
+// CN page's "Planning" + "Pending CN" filters keep surfacing those POs
+// because they still look active (status=PENDING / IN_PROGRESS), which
+// is exactly the leak Wei Siang flagged 2026-05-05 on CO-2605-004.
+//
+// Returns the bound UPDATE statements + a summary so the caller can
+// execute them in the same batch as its own UPDATE (atomicity).
+// ---------------------------------------------------------------------------
+type COCascadeResult = {
+  statements: ReturnType<D1Database["prepare"]>[];
+  affectedPoCount: number;
+  affectedJcCount: number;
+  poNos: string[];
+};
+
+async function cascadeCOStatusToPOs(
+  db: D1Database,
+  coId: string,
+  newStatus: string,
+  now: string,
+): Promise<COCascadeResult> {
+  const result: COCascadeResult = {
+    statements: [],
+    affectedPoCount: 0,
+    affectedJcCount: 0,
+    poNos: [],
+  };
+  // Only CANCELLED is wired today. ON_HOLD / RESUME (the SO equivalents
+  // that mirror PAUSED/RESUMED) aren't in CO's status enum yet — when
+  // they land, extend this function the same way cascadeSOStatusToPOs
+  // grew its branches.
+  if (newStatus !== "CANCELLED") return result;
+
+  const posRes = await db
+    .prepare(
+      "SELECT id, poNo, status FROM production_orders WHERE consignmentOrderId = ?",
+    )
+    .bind(coId)
+    .all<{ id: string; poNo: string; status: string }>();
+  const pos = posRes.results ?? [];
+  if (pos.length === 0) return result;
+
+  const affected = pos.filter(
+    (p) => p.status !== "COMPLETED" && p.status !== "CANCELLED",
+  );
+  if (affected.length === 0) return result;
+
+  for (const p of affected) {
+    result.statements.push(
+      db
+        .prepare(
+          "UPDATE production_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+        )
+        .bind(now, p.id),
+    );
+    result.poNos.push(p.poNo);
+  }
+  result.affectedPoCount = affected.length;
+
+  // Also cancel non-terminal job_cards under those POs.
+  const poIds = affected.map((p) => p.id);
+  const placeholders = poIds.map(() => "?").join(", ");
+  const jcRes = await db
+    .prepare(
+      `SELECT id FROM job_cards
+         WHERE productionOrderId IN (${placeholders})
+           AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
+    )
+    .bind(...poIds)
+    .all<{ id: string }>();
+  const jcIds = (jcRes.results ?? []).map((r) => r.id);
+  for (const jcId of jcIds) {
+    result.statements.push(
+      db
+        .prepare(
+          "UPDATE job_cards SET status = 'CANCELLED' WHERE id = ?",
+        )
+        .bind(jcId),
+    );
+  }
+  result.affectedJcCount = jcIds.length;
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/consignment-orders — list
 // ---------------------------------------------------------------------------
 app.get("/", async (c) => {
@@ -1171,6 +1259,20 @@ app.put("/:id", async (c) => {
       ),
     );
 
+    // Cascade CANCELLED through to the CO's child production_orders +
+    // job_cards. Mirrors cascadeSOStatusToPOs in routes/sales-orders.ts.
+    // Without this, the CN page's Planning + Pending CN filters keep
+    // surfacing the leaked POs (Wei Siang, 2026-05-05).
+    if (merged.status === "CANCELLED" && existing.status !== "CANCELLED") {
+      const cascade = await cascadeCOStatusToPOs(
+        c.var.DB,
+        id,
+        "CANCELLED",
+        now,
+      );
+      stmts.push(...cascade.statements);
+    }
+
     await c.var.DB.batch(stmts);
 
     const [updated, items] = await Promise.all([
@@ -1298,17 +1400,30 @@ app.post("/:id/cancel", async (c) => {
   }
 
   const now = new Date().toISOString();
-  await c.var.DB
-    .prepare(
-      `UPDATE consignment_orders
-          SET status = 'CANCELLED',
-              cancelled_at = ?,
-              cancellation_reason = ?,
-              updated_at = ?
-        WHERE id = ?`,
-    )
-    .bind(now, reason, now, id)
-    .run();
+
+  // Build cascade statements BEFORE the CO UPDATE so they all run in one
+  // batch. Without this, the CO's child POs stay PENDING/IN_PROGRESS and
+  // leak into the CN Planning view (Wei Siang, 2026-05-05).
+  const cascade = await cascadeCOStatusToPOs(
+    c.var.DB,
+    id,
+    "CANCELLED",
+    now,
+  );
+  const stmts: ReturnType<D1Database["prepare"]>[] = [
+    c.var.DB
+      .prepare(
+        `UPDATE consignment_orders
+            SET status = 'CANCELLED',
+                cancelled_at = ?,
+                cancellation_reason = ?,
+                updated_at = ?
+          WHERE id = ?`,
+      )
+      .bind(now, reason, now, id),
+    ...cascade.statements,
+  ];
+  await c.var.DB.batch(stmts);
 
   const [updated, items] = await Promise.all([
     c.var.DB.prepare("SELECT * FROM consignment_orders WHERE id = ?")
@@ -1329,6 +1444,11 @@ app.post("/:id/cancel", async (c) => {
   return c.json({
     success: true,
     data: rowToCO(updated, items.results ?? []),
+    cascade: {
+      affectedPoCount: cascade.affectedPoCount,
+      affectedJcCount: cascade.affectedJcCount,
+      poNos: cascade.poNos,
+    },
   });
 });
 

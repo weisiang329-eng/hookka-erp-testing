@@ -6326,4 +6326,102 @@ app.post("/queen-price-correction-rm5", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/cancel-leaked-co-pos?dryRun=true|false
+//
+// Backfill for the CO-cancel cascade gap (Wei Siang, 2026-05-05): every
+// production_order whose parent consignment_order is CANCELLED but whose
+// own status is still active (anything other than COMPLETED / CANCELLED)
+// gets flipped to CANCELLED. Non-terminal job_cards under those POs also
+// flip to CANCELLED so the production page stops surfacing them.
+//
+// Idempotent — re-running it after the first pass returns 0/0.
+// Migration-temp. Safe to delete once the leak is verified clean.
+// ---------------------------------------------------------------------------
+app.post("/cancel-leaked-co-pos", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const now = new Date().toISOString();
+
+  // POs whose parent CO is CANCELLED but they themselves aren't.
+  const leakRes = await db
+    .prepare(
+      `SELECT po.id AS poId, po.poNo, po.status AS poStatus,
+              co.id AS coId, co.companyCOId, co.status AS coStatus
+         FROM production_orders po
+         JOIN consignment_orders co ON co.id = po.consignmentOrderId
+        WHERE co.status = 'CANCELLED'
+          AND po.status NOT IN ('COMPLETED', 'CANCELLED')`,
+    )
+    .all<{
+      poId: string;
+      poNo: string;
+      poStatus: string;
+      coId: string;
+      companyCOId: string;
+      coStatus: string;
+    }>();
+  const leaks = leakRes.results ?? [];
+
+  // Non-terminal job_cards under those POs.
+  let jcLeakCount = 0;
+  let jcSample: Array<{ id: string; departmentCode: string | null }> = [];
+  if (leaks.length > 0) {
+    const poIds = leaks.map((l) => l.poId);
+    const placeholders = poIds.map(() => "?").join(", ");
+    const jcRes = await db
+      .prepare(
+        `SELECT id, departmentCode FROM job_cards
+           WHERE productionOrderId IN (${placeholders})
+             AND status NOT IN ('COMPLETED', 'TRANSFERRED', 'CANCELLED')`,
+      )
+      .bind(...poIds)
+      .all<{ id: string; departmentCode: string | null }>();
+    jcLeakCount = (jcRes.results ?? []).length;
+    jcSample = (jcRes.results ?? []).slice(0, 5);
+
+    if (!dryRun) {
+      const stmts: ReturnType<D1Database["prepare"]>[] = [];
+      for (const l of leaks) {
+        stmts.push(
+          db
+            .prepare(
+              "UPDATE production_orders SET status = 'CANCELLED', updated_at = ? WHERE id = ?",
+            )
+            .bind(now, l.poId),
+        );
+      }
+      for (const jc of jcRes.results ?? []) {
+        stmts.push(
+          db
+            .prepare(
+              "UPDATE job_cards SET status = 'CANCELLED' WHERE id = ?",
+            )
+            .bind(jc.id),
+        );
+      }
+      // Batch in chunks of 50 to stay well under D1's per-batch budget.
+      for (let i = 0; i < stmts.length; i += 50) {
+        await db.batch(stmts.slice(i, i + 50));
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    leakedPoCount: leaks.length,
+    leakedJobCardCount: jcLeakCount,
+    leaks: leaks.map((l) => ({
+      poNo: l.poNo,
+      poStatus: l.poStatus,
+      companyCOId: l.companyCOId,
+    })),
+    sampleJobCards: jcSample,
+  });
+});
+
 export default app;

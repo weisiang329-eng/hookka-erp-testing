@@ -856,14 +856,17 @@ function CreateComboDialog({
         notes: notes.trim() || null,
       };
       if (isEdit && editingRule) {
-        // SMART SAVE — protects historical rows from accidental overwrite:
-        //   - PRICES UNCHANGED → PUT (in-place fix; covers typo on date,
-        //     compartments, fabric tier, customer, notes — none of these
-        //     are "new history events", just data corrections).
-        //   - PRICES CHANGED   → POST a NEW row (additive history; old
-        //     row preserved as Past). Mirrors product master price-
-        //     history flow: every price change creates a new effective-
-        //     dated row.
+        // SMART SAVE — only "scheduling a new effective-dated price"
+        // creates a new row. Everything else updates in place to avoid
+        // duplicate rows at the same date.
+        //
+        //   - Date CHANGED + Price CHANGED → POST (new history event:
+        //     scheduling a new price for a new date).
+        //   - Date CHANGED, Price SAME      → PUT (date typo / shift).
+        //   - Date SAME, Price CHANGED      → PUT (correcting a wrong
+        //     price for the SAME date — there can only be one price
+        //     per date in the timeline).
+        //   - Both SAME                     → PUT (metadata-only edit).
         //
         // Customer broadcast: additional selected customers always POST
         // new rows (one per customer) regardless of edit mode.
@@ -873,29 +876,16 @@ function CreateComboDialog({
             ? null
             : (selectedCustomers[0] ?? null);
         const additionalCustomerIds = selectedCustomers.slice(1);
-        const pricesUnchanged =
-          JSON.stringify(pricesByHeight) ===
+        const dateChanged = effectiveFrom !== editingRule.effectiveFrom;
+        const pricesChanged =
+          JSON.stringify(pricesByHeight) !==
           JSON.stringify(editingRule.pricesByHeight);
+        const shouldPostNewRow = dateChanged && pricesChanged;
 
         // 1. Save THIS row.
-        if (pricesUnchanged) {
-          // PUT in place — non-price edit (date typo, compartment fix,
-          // tier change, customer reassignment, notes). History timeline
-          // not affected because the price level didn't change.
-          const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
-          });
-          const putJson = (await putR.json().catch(() => ({}))) as ApiSingle<unknown>;
-          if (!putR.ok || !putJson.success) {
-            setErr(putJson.error ?? "Failed to update combo rule");
-            setSaving(false);
-            return;
-          }
-        } else {
-          // POST a new row — price level changed; the operator is
-          // scheduling a new effective-dated price. Old row preserved.
+        if (shouldPostNewRow) {
+          // POST a new row — operator is scheduling a new effective-
+          // dated price change. Old row preserved as Past.
           const postR = await fetch("/api/sofa-combos", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -904,6 +894,20 @@ function CreateComboDialog({
           const postJson = (await postR.json().catch(() => ({}))) as ApiSingle<unknown>;
           if (!postR.ok || !postJson.success) {
             setErr(postJson.error ?? "Failed to add new effective-dated row");
+            setSaving(false);
+            return;
+          }
+        } else {
+          // PUT in place — date OR price typo correction (or metadata-
+          // only edit). No duplicate row at same date.
+          const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
+          });
+          const putJson = (await putR.json().catch(() => ({}))) as ApiSingle<unknown>;
+          if (!putR.ok || !putJson.success) {
+            setErr(putJson.error ?? "Failed to update combo rule");
             setSaving(false);
             return;
           }

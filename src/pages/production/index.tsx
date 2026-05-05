@@ -3155,11 +3155,15 @@ export default function ProductionPage({
             // history. Mirrors the operator's request: fewer rows
             // means faster page open and a more focused live view.
             defaultExcludedValues={{ status: ["COMPLETED", "TRANSFERRED"] }}
-            // Fab Sew dept routinely renders 1,200+ rows; without
-            // windowing this contributed to ~383k DOM elements + ~525MB
-            // heap on the live perf test (2026-04-25). Virtualization
-            // keeps only ~30 visible rows + overscan in the live DOM.
-            virtualize
+            // Virtualization disabled (2026-05-04): the virtualizer +
+            // sticky header + frozen-left columns combination drifts the
+            // frozen track by one row when scrolled — user reported the
+            // SO ID column lining up against the column header instead of
+            // the matching data row. The earlier perf gain (5c8aad7) only
+            // matters on Fab Sew (~1,200 rows); other depts top out around
+            // 500 and render fine without windowing. Re-enable once
+            // DataGrid's frozen track gets its own sticky-header offset
+            // pass, or split Fab Sew onto its own virtualized variant.
             // ON_HOLD → amber background; CANCELLED → grey + strikethrough.
             // rowClassName appends onto the grid's default row class so alt-row
             // striping still works when no lifecycle class applies.

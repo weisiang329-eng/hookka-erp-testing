@@ -88,12 +88,79 @@ app.post("/:customerId/copy-from-master", async (c) => {
     .bind(customerKey, masterRow.value, now)
     .run();
 
+  // Mirror EVERY master maintenance_config_history snapshot into the
+  // customer scope so the customer-side per-item history dialog shows
+  // the same timeline as the products side. Without this, the customer
+  // scope has zero history rows and the dialog displays only the
+  // synthesized "Auto-baseline from kv_config" stub. Idempotent:
+  // skip rows that already exist for this customer scope at the same
+  // (effective_from, config) pair.
+  const customerScope = `customer:${customerId}`;
+  const masterHistRes = await c.var.DB
+    .prepare(
+      `SELECT effective_from, config, notes
+         FROM maintenance_config_history
+        WHERE scope = 'master'`,
+    )
+    .all<{
+      effective_from: string;
+      config: string;
+      notes: string | null;
+    }>();
+  const masterHistRows = masterHistRes.results ?? [];
+  let mirroredHistoryRows = 0;
+  if (masterHistRows.length > 0) {
+    const existingCustHistRes = await c.var.DB
+      .prepare(
+        `SELECT effective_from, config
+           FROM maintenance_config_history
+          WHERE scope = ?`,
+      )
+      .bind(customerScope)
+      .all<{ effective_from: string; config: string }>();
+    const existingKeys = new Set(
+      (existingCustHistRes.results ?? []).map(
+        (r) => `${r.effective_from}|${r.config.length}|${r.config.slice(0, 64)}`,
+      ),
+    );
+    const insertStmts = [];
+    for (const row of masterHistRows) {
+      const key = `${row.effective_from}|${row.config.length}|${row.config.slice(0, 64)}`;
+      if (existingKeys.has(key)) continue;
+      const newId = `mch-mirror-${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      insertStmts.push(
+        c.var.DB
+          .prepare(
+            `INSERT INTO maintenance_config_history
+               (id, scope, config, effective_from, notes, created_by)
+             VALUES (?, ?, ?, ?, ?, NULL)
+             ON CONFLICT (id) DO NOTHING`,
+          )
+          .bind(
+            newId,
+            customerScope,
+            row.config,
+            row.effective_from,
+            row.notes
+              ? `Mirrored from Master: ${row.notes}`
+              : `Mirrored from Master snapshot ${row.effective_from}`,
+          ),
+      );
+      existingKeys.add(key);
+      mirroredHistoryRows += 1;
+    }
+    for (let i = 0; i < insertStmts.length; i += 50) {
+      await c.var.DB.batch(insertStmts.slice(i, i + 50));
+    }
+  }
+
   return c.json({
     success: true,
     data: {
       customerId,
       key: customerKey,
       copiedAt: now,
+      mirroredHistoryRows,
     },
   });
 });

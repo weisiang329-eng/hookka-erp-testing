@@ -750,21 +750,52 @@ function CreateComboDialog({
         notes: notes.trim() || null,
       };
       if (isEdit && editingRule) {
-        // PUT updates a single existing row in place. Multi-select UI
-        // collapses to the first selected customer (or null = company-
-        // wide); the rule's customerId is set from that.
-        const customerIdForEdit: string | null =
-          customerIds.size === 0 ? null : (Array.from(customerIds)[0] ?? null);
-        const r = await fetch(`/api/sofa-combos/${editingRule.id}`, {
+        // Edit mode: PUT the existing row + broadcast to additional
+        // selected customers as new rows. Lets the operator both
+        // correct the current row AND copy the same deal to other
+        // customers in one save action.
+        //
+        // Customer list semantics:
+        //   - Empty Set      → update THIS row to company-wide (NULL)
+        //   - 1 selected     → update THIS row to that customer
+        //   - N selected     → update THIS row to FIRST selected,
+        //                      POST N-1 new rows for the others
+        const selectedCustomers = Array.from(customerIds);
+        const primaryCustomerId: string | null =
+          selectedCustomers.length === 0
+            ? null
+            : (selectedCustomers[0] ?? null);
+        const additionalCustomerIds = selectedCustomers.slice(1);
+
+        // 1. Update THIS row.
+        const putR = await fetch(`/api/sofa-combos/${editingRule.id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ...baseBody, customerId: customerIdForEdit }),
+          body: JSON.stringify({ ...baseBody, customerId: primaryCustomerId }),
         });
-        const json = (await r.json().catch(() => ({}))) as ApiSingle<unknown>;
-        if (!r.ok || !json.success) {
-          setErr(json.error ?? "Failed to update combo rule");
+        const putJson = (await putR.json().catch(() => ({}))) as ApiSingle<unknown>;
+        if (!putR.ok || !putJson.success) {
+          setErr(putJson.error ?? "Failed to update combo rule");
           setSaving(false);
           return;
+        }
+
+        // 2. Broadcast: POST a clone for each additional customer.
+        //    Sequential so any failure surfaces clearly.
+        for (const cid of additionalCustomerIds) {
+          const postR = await fetch("/api/sofa-combos", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...baseBody, customerId: cid }),
+          });
+          const postJson = (await postR.json().catch(() => ({}))) as ApiSingle<unknown>;
+          if (!postR.ok || !postJson.success) {
+            setErr(
+              `Updated this row, but failed to broadcast to additional customer ${cid}: ${postJson.error ?? "unknown error"}`,
+            );
+            setSaving(false);
+            return;
+          }
         }
       } else {
         // Create mode: fire one POST per selected customer (or one with
@@ -972,10 +1003,10 @@ function CreateComboDialog({
               <p className="text-[11px] text-[#6B7280] mb-2">
                 {isEdit ? (
                   <>
-                    Edit mode: this row's customer is updated in place. Pick
-                    none → company-wide; pick one customer → that customer
-                    sees the deal. To copy this combo to ANOTHER customer,
-                    cancel + open a new combo from the create button.
+                    Edit mode: THIS row's customer is updated to the FIRST
+                    selected customer (or company-wide if none). Selecting
+                    additional customers BROADCASTS a clone of this combo
+                    to each of them as a new row.
                   </>
                 ) : (
                   <>

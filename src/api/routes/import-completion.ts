@@ -8826,4 +8826,69 @@ app.post("/migrate-do-from-excel", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/revert-dos-to-draft
+//
+// One-shot test helper. Flips every LOADED DO back to DRAFT (= "Pending
+// Dispatch" in the UI) so the user can re-test the dispatch flow on the
+// previously-migrated DOs. Optionally back-fills dispatchedAt / deliveryDate
+// from the legacy Aut/aiy DO Date map (body.dateMap = { doNo: "YYYY-MM-DD" }).
+//
+// Bypasses the regular PUT /api/delivery-orders/:id reversal logic — does NOT
+// unstamp PACKING JCs (they stay COMPLETED, since the items physically ARE
+// packed).
+// ---------------------------------------------------------------------------
+app.post("/revert-dos-to-draft", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  let body: { dateMap?: Record<string, string> } = {};
+  try { body = await c.req.json(); } catch { /* allow empty body */ }
+  const dateMap = body.dateMap ?? {};
+
+  // Pull every LOADED DO
+  const res = await db
+    .prepare(`SELECT id, doNo, status, dispatchedAt FROM delivery_orders WHERE status = 'LOADED'`)
+    .all<{ id: string; doNo: string; status: string; dispatchedAt: string | null }>();
+  const loadedDOs = res.results ?? [];
+
+  let reverted = 0;
+  let datesBackfilled = 0;
+  const stmts: ReturnType<D1Database["prepare"]>[] = [];
+  for (const d of loadedDOs) {
+    const legacyDate = dateMap[d.doNo];
+    if (legacyDate) {
+      stmts.push(
+        db.prepare(
+          `UPDATE delivery_orders
+              SET status = 'DRAFT',
+                  dispatchedAt = ?,
+                  deliveryDate = ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        ).bind(`${legacyDate}T00:00:00.000Z`, legacyDate, new Date().toISOString(), d.id),
+      );
+      datesBackfilled++;
+    } else {
+      stmts.push(
+        db.prepare(
+          `UPDATE delivery_orders
+              SET status = 'DRAFT', updated_at = ?
+            WHERE id = ?`,
+        ).bind(new Date().toISOString(), d.id),
+      );
+    }
+    reverted++;
+  }
+  for (let i = 0; i < stmts.length; i += 50) {
+    await db.batch(stmts.slice(i, i + 50));
+  }
+  return c.json({
+    success: true,
+    loadedDOsFound: loadedDOs.length,
+    reverted,
+    datesBackfilled,
+  });
+});
+
 export default app;

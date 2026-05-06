@@ -124,6 +124,325 @@ app.get("/", async (c) => {
   return c.json(data);
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/three-way-match/by-po/:poId
+//
+// Phase 4.3 — per-line PO ↔ GRN ↔ PI quantity / value comparison for the
+// procurement detail "Three-Way Match" tab. Computed live from the source
+// tables so it stays current without re-running POST.
+//
+// Response shape:
+//   {
+//     success: true,
+//     data: {
+//       poId, poNo,
+//       supplierId, supplierName,
+//       lines: [{
+//         materialCode, materialName, materialCategory, unit,
+//         poQty, grnQty, piQty,
+//         poUnitPriceSen, grnUnitPriceSen, piUnitPriceSen,
+//         poLineSen, grnLineSen, piLineSen,
+//         qtyVarianceVsPo,        // grnQty - poQty
+//         piVsPoQtyVariance,       // piQty - poQty
+//         senVarianceVsPo,         // grnLineSen - poLineSen
+//         piVsPoSenVariance,       // piLineSen - poLineSen
+//         fabricVariancePct,       // (grnQty-poQty)/poQty for FABRIC lines
+//         status,                  // 'MATCH' | 'VARIANCE'
+//       }],
+//       summary: {
+//         overBilledSen,           // sum(max(piLineSen - poLineSen, 0))
+//         underDeliveredSen,       // sum(max(poLineSen - grnLineSen, 0))
+//         poTotalSen, grnTotalSen, piTotalSen,
+//       }
+//     }
+//   }
+//
+// Material aggregation key: materialCode (falls back to materialName when
+// missing). One PO line per material — historical PO imports don't always
+// dedupe, so we sum within material.
+// ---------------------------------------------------------------------------
+type PoLineRow = {
+  id: string;
+  materialCategory: string | null;
+  materialName: string | null;
+  supplierSKU: string | null;
+  quantity: number;
+  unitPriceSen: number;
+  totalSen: number;
+  unit: string | null;
+};
+
+type GrnLineRow = {
+  materialCode: string | null;
+  materialName: string | null;
+  receivedQty: number;
+  acceptedQty: number;
+  unitPrice: number;
+};
+
+type PiLineRow = {
+  materialCode: string | null;
+  materialName: string | null;
+  qty: number;
+  unitPriceSen: number;
+  lineTotalSen: number;
+  lineType: string | null;
+};
+
+type LineAgg = {
+  materialCode: string;
+  materialName: string;
+  materialCategory: string;
+  unit: string;
+  poQty: number;
+  grnQty: number;
+  piQty: number;
+  poLineSen: number;
+  grnLineSen: number;
+  piLineSen: number;
+  poUnitPriceSen: number;
+  grnUnitPriceSen: number;
+  piUnitPriceSen: number;
+};
+
+function deriveMatCode(name: string | null, fallback: string | null): string {
+  // PO line items store "RM-CODE - description" in materialName. Split on
+  // " - " to recover the code.
+  if (fallback && fallback.trim().length > 0) return fallback.trim();
+  if (!name) return "";
+  const idx = name.indexOf(" - ");
+  return idx > 0 ? name.slice(0, idx).trim() : name.trim();
+}
+
+app.get("/by-po/:poId", async (c) => {
+  const denied = await requirePermission(c, "three-way-match", "read");
+  if (denied) return denied;
+
+  const poId = c.req.param("poId");
+
+  const po = await c.var.DB.prepare(
+    `SELECT id, poNo, supplierId, supplierName, totalSen
+     FROM purchase_orders WHERE id = ?`,
+  )
+    .bind(poId)
+    .first<{
+      id: string;
+      poNo: string;
+      supplierId: string | null;
+      supplierName: string | null;
+      totalSen: number;
+    }>();
+  if (!po) {
+    return c.json({ success: false, error: "Purchase order not found" }, 404);
+  }
+
+  const [poItemsRes, grnsRes, pisRes] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT id, materialCategory, materialName, supplierSKU, quantity,
+              unitPriceSen, totalSen, unit
+       FROM purchase_order_items
+       WHERE purchaseOrderId = ?
+       ORDER BY id`,
+    )
+      .bind(poId)
+      .all<PoLineRow>(),
+    c.var.DB.prepare(
+      `SELECT id FROM grns WHERE poId = ? AND status = 'POSTED'`,
+    )
+      .bind(poId)
+      .all<{ id: string }>(),
+    c.var.DB.prepare(
+      `SELECT id FROM purchase_invoices WHERE purchaseOrderId = ?`,
+    )
+      .bind(poId)
+      .all<{ id: string }>(),
+  ]);
+
+  const grnIds = (grnsRes.results ?? []).map((g) => g.id);
+  const piIds = (pisRes.results ?? []).map((p) => p.id);
+
+  let grnLines: GrnLineRow[] = [];
+  let piLines: PiLineRow[] = [];
+  if (grnIds.length > 0) {
+    const ph = grnIds.map(() => "?").join(",");
+    const gRes = await c.var.DB.prepare(
+      `SELECT materialCode, materialName, receivedQty, acceptedQty, unitPrice
+       FROM grn_items WHERE grnId IN (${ph})`,
+    )
+      .bind(...grnIds)
+      .all<GrnLineRow>();
+    grnLines = gRes.results ?? [];
+  }
+  if (piIds.length > 0) {
+    const ph = piIds.map(() => "?").join(",");
+    // purchase_invoice_items uses snake_case columns natively (pi_id,
+    // line_type, etc.) — see purchase-invoices.ts loadItemsForPI for the
+    // same pattern. Aliasing back to camelCase so the row-typed handler
+    // doesn't have to dual-key.
+    const pRes = await c.var.DB.prepare(
+      `SELECT material_code AS "materialCode",
+              material_name AS "materialName",
+              qty,
+              unit_price_sen AS "unitPriceSen",
+              line_total_sen AS "lineTotalSen",
+              line_type AS "lineType"
+       FROM purchase_invoice_items
+       WHERE pi_id IN (${ph})`,
+    )
+      .bind(...piIds)
+      .all<PiLineRow>();
+    // Only STOCKED lines compare against PO/GRN qty. FEE/TAX/REBATE/etc.
+    // are excluded — they have no PO match and would distort variance.
+    piLines = (pRes.results ?? []).filter(
+      (l) => (l.lineType ?? "STOCKED") === "STOCKED",
+    );
+  }
+
+  // Aggregate per material code
+  const agg = new Map<string, LineAgg>();
+  const ensure = (key: string): LineAgg => {
+    let v = agg.get(key);
+    if (!v) {
+      v = {
+        materialCode: key,
+        materialName: "",
+        materialCategory: "",
+        unit: "",
+        poQty: 0,
+        grnQty: 0,
+        piQty: 0,
+        poLineSen: 0,
+        grnLineSen: 0,
+        piLineSen: 0,
+        poUnitPriceSen: 0,
+        grnUnitPriceSen: 0,
+        piUnitPriceSen: 0,
+      };
+      agg.set(key, v);
+    }
+    return v;
+  };
+
+  for (const it of poItemsRes.results ?? []) {
+    const code = deriveMatCode(it.materialName, it.supplierSKU);
+    if (!code) continue;
+    const a = ensure(code);
+    if (!a.materialName) a.materialName = it.materialName ?? code;
+    if (!a.materialCategory) a.materialCategory = it.materialCategory ?? "";
+    if (!a.unit) a.unit = it.unit ?? "";
+    a.poQty += it.quantity;
+    a.poLineSen += it.totalSen;
+    if (a.poUnitPriceSen === 0) a.poUnitPriceSen = it.unitPriceSen;
+  }
+
+  for (const gl of grnLines) {
+    const code = deriveMatCode(gl.materialName, gl.materialCode);
+    if (!code) continue;
+    const a = ensure(code);
+    if (!a.materialName) a.materialName = gl.materialName ?? code;
+    a.grnQty += gl.acceptedQty;
+    a.grnLineSen += gl.acceptedQty * gl.unitPrice;
+    if (a.grnUnitPriceSen === 0) a.grnUnitPriceSen = gl.unitPrice;
+  }
+
+  for (const pl of piLines) {
+    const code = deriveMatCode(pl.materialName, pl.materialCode);
+    if (!code) continue;
+    const a = ensure(code);
+    if (!a.materialName) a.materialName = pl.materialName ?? code;
+    a.piQty += pl.qty;
+    a.piLineSen += pl.lineTotalSen;
+    if (a.piUnitPriceSen === 0) a.piUnitPriceSen = pl.unitPriceSen;
+  }
+
+  const QTY_TOL = 1e-6;
+  const FABRIC_TOL_PCT = 2;
+
+  const lines = Array.from(agg.values()).map((a) => {
+    const qtyVarianceVsPo = a.grnQty - a.poQty;
+    const piVsPoQtyVariance = a.piQty - a.poQty;
+    const senVarianceVsPo = a.grnLineSen - a.poLineSen;
+    const piVsPoSenVariance = a.piLineSen - a.poLineSen;
+
+    const isFabric =
+      a.materialCategory.toUpperCase().includes("FABR") ||
+      a.materialCategory.toUpperCase() === "FABRIC";
+    const fabricVariancePct =
+      isFabric && a.poQty > 0
+        ? Math.round(((a.grnQty - a.poQty) / a.poQty) * 10000) / 100
+        : null;
+    const fabricFlagged =
+      fabricVariancePct !== null && Math.abs(fabricVariancePct) > FABRIC_TOL_PCT;
+
+    const piMatched =
+      a.piQty === 0
+        ? true
+        : Math.abs(piVsPoQtyVariance) < QTY_TOL && piVsPoSenVariance === 0;
+    const grnMatched =
+      a.grnQty === 0
+        ? true
+        : Math.abs(qtyVarianceVsPo) < QTY_TOL && senVarianceVsPo === 0;
+    const status = grnMatched && piMatched ? "MATCH" : "VARIANCE";
+
+    return {
+      materialCode: a.materialCode,
+      materialName: a.materialName,
+      materialCategory: a.materialCategory,
+      unit: a.unit,
+      poQty: a.poQty,
+      grnQty: a.grnQty,
+      piQty: a.piQty,
+      poUnitPriceSen: a.poUnitPriceSen,
+      grnUnitPriceSen: a.grnUnitPriceSen,
+      piUnitPriceSen: a.piUnitPriceSen,
+      poLineSen: a.poLineSen,
+      grnLineSen: a.grnLineSen,
+      piLineSen: a.piLineSen,
+      qtyVarianceVsPo,
+      piVsPoQtyVariance,
+      senVarianceVsPo,
+      piVsPoSenVariance,
+      fabricVariancePct,
+      fabricFlagged,
+      status,
+    };
+  });
+
+  // Per-supplier summary footer
+  let overBilledSen = 0;
+  let underDeliveredSen = 0;
+  let poTotalSen = 0;
+  let grnTotalSen = 0;
+  let piTotalSen = 0;
+  for (const l of lines) {
+    poTotalSen += l.poLineSen;
+    grnTotalSen += l.grnLineSen;
+    piTotalSen += l.piLineSen;
+    if (l.piLineSen > l.poLineSen) overBilledSen += l.piLineSen - l.poLineSen;
+    if (l.grnLineSen < l.poLineSen) underDeliveredSen += l.poLineSen - l.grnLineSen;
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      poId: po.id,
+      poNo: po.poNo,
+      supplierId: po.supplierId ?? "",
+      supplierName: po.supplierName ?? "",
+      hasGRN: grnIds.length > 0,
+      hasPI: piIds.length > 0,
+      lines,
+      summary: {
+        poTotalSen,
+        grnTotalSen,
+        piTotalSen,
+        overBilledSen,
+        underDeliveredSen,
+      },
+    },
+  });
+});
+
 // POST /api/three-way-match — compute + persist a new match
 //
 // Spec asked for `three-way-match:approve` here, but the 0045 seed only

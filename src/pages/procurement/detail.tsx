@@ -19,6 +19,7 @@ import type {
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
   CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle, Mail,
+  GitCompare, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
@@ -1117,8 +1118,224 @@ export default function PurchaseOrderDetailPage() {
         />
       )}
 
+      {/* Three-Way Match panel (Phase 4.3) — collapsible "tab" surfacing
+          PO ↔ GRN ↔ PI variance per material. Hidden until the user clicks
+          to expand. Source: GET /api/three-way-match/by-po/:poId. */}
+      {po && <ThreeWayMatchPanel poId={po.id} />}
+
       {/* Audit trail for this PO */}
       {po && <AuditHistoryPanel resource="purchase-orders" resourceId={po.id} />}
     </div>
+  );
+}
+
+// ============================================================
+// Phase 4.3 — Three-Way Match panel
+// ============================================================
+type TwmLine = {
+  materialCode: string;
+  materialName: string;
+  materialCategory: string;
+  unit: string;
+  poQty: number;
+  grnQty: number;
+  piQty: number;
+  poUnitPriceSen: number;
+  grnUnitPriceSen: number;
+  piUnitPriceSen: number;
+  poLineSen: number;
+  grnLineSen: number;
+  piLineSen: number;
+  qtyVarianceVsPo: number;
+  piVsPoQtyVariance: number;
+  senVarianceVsPo: number;
+  piVsPoSenVariance: number;
+  fabricVariancePct: number | null;
+  fabricFlagged: boolean;
+  status: "MATCH" | "VARIANCE";
+};
+
+type TwmData = {
+  poId: string;
+  poNo: string;
+  supplierId: string;
+  supplierName: string;
+  hasGRN: boolean;
+  hasPI: boolean;
+  lines: TwmLine[];
+  summary: {
+    poTotalSen: number;
+    grnTotalSen: number;
+    piTotalSen: number;
+    overBilledSen: number;
+    underDeliveredSen: number;
+  };
+};
+
+function ThreeWayMatchPanel({ poId }: { poId: string }) {
+  const [open, setOpen] = useState(false);
+  // Fetch only when the panel is opened — avoids a useless query on every
+  // PO detail render.
+  const { data: resp, loading } = useCachedJson<{
+    success?: boolean;
+    data?: TwmData;
+    error?: string;
+  }>(open ? `/api/three-way-match/by-po/${poId}` : null);
+
+  const data: TwmData | null = useMemo(
+    () => (resp?.success ? resp.data ?? null : null),
+    [resp],
+  );
+
+  const totalVariances = useMemo(() => {
+    if (!data) return 0;
+    return data.lines.filter((l) => l.status === "VARIANCE").length;
+  }, [data]);
+
+  return (
+    <Card>
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm flex items-center justify-between">
+          <span className="flex items-center gap-2">
+            <GitCompare className="h-4 w-4 text-[#6B5C32]" />
+            Three-Way Match
+            {data && (
+              <span className="text-xs font-normal text-[#6B7280]">
+                — {data.lines.length} line{data.lines.length === 1 ? "" : "s"}
+                {totalVariances > 0 && (
+                  <span className="ml-1 text-[#9A3A2D] font-medium">
+                    · {totalVariances} variance{totalVariances === 1 ? "" : "s"}
+                  </span>
+                )}
+              </span>
+            )}
+          </span>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setOpen((v) => !v)}
+          >
+            {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            {open ? "Hide" : "Show"}
+          </Button>
+        </CardTitle>
+      </CardHeader>
+      {open && (
+        <CardContent>
+          {loading && (
+            <p className="text-sm text-[#9CA3AF] py-4 text-center">Loading…</p>
+          )}
+          {!loading && !data && (
+            <p className="text-sm text-[#9CA3AF] py-4 text-center">
+              No reconciliation data available.
+            </p>
+          )}
+          {data && (
+            <>
+              {(!data.hasGRN || !data.hasPI) && (
+                <div className="mb-3 p-2 rounded border border-amber-200 bg-amber-50 text-xs text-amber-800">
+                  {!data.hasGRN && !data.hasPI && "No posted GRN and no PI yet — only PO line is shown."}
+                  {data.hasGRN && !data.hasPI && "GRN posted; awaiting purchase invoice for full reconciliation."}
+                  {!data.hasGRN && data.hasPI && "Purchase invoice received but no posted GRN yet."}
+                </div>
+              )}
+              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                      <th className="h-9 px-3 text-left font-medium text-[#374151]">Material</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">PO</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">GRN</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">PI</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Δ Qty (vs PO)</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Δ Value</th>
+                      <th className="h-9 px-3 text-right font-medium text-[#374151]">Fabric Δ%</th>
+                      <th className="h-9 px-3 text-center font-medium text-[#374151]">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.lines.map((l, idx) => {
+                      const grnDelta = l.qtyVarianceVsPo;
+                      const senDelta = l.senVarianceVsPo;
+                      return (
+                        <tr key={l.materialCode || idx} className={`border-b border-[#E2DDD8] last:border-b-0 ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
+                          <td className="h-9 px-3">
+                            <span className="font-medium text-[#6B5C32]">{l.materialCode}</span>
+                            <span className="text-[#6B7280] ml-1">{l.materialName.replace(/^[^ ]+ - /, "")}</span>
+                            {l.materialCategory && (
+                              <span className="text-[#9CA3AF] ml-1 text-[10px]">[{l.materialCategory}]</span>
+                            )}
+                          </td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{l.poQty.toFixed(2)}</td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{l.grnQty.toFixed(2)}</td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{l.piQty.toFixed(2)}</td>
+                          <td className={`h-9 px-3 text-right font-medium ${grnDelta === 0 ? "text-[#4F7C3A]" : grnDelta < 0 ? "text-[#9A3A2D]" : "text-[#9C6F1E]"}`}>
+                            {grnDelta > 0 ? "+" : ""}{grnDelta.toFixed(2)}
+                          </td>
+                          <td className={`h-9 px-3 text-right font-medium ${senDelta === 0 ? "text-[#4F7C3A]" : senDelta < 0 ? "text-[#9A3A2D]" : "text-[#9C6F1E]"}`}>
+                            {senDelta > 0 ? "+" : ""}{formatCurrency(senDelta)}
+                          </td>
+                          <td className="h-9 px-3 text-right">
+                            {l.fabricVariancePct === null ? (
+                              <span className="text-[#9CA3AF]">—</span>
+                            ) : (
+                              <span className={`inline-flex items-center gap-1 ${l.fabricFlagged ? "text-[#9A3A2D] font-medium" : "text-[#4B5563]"}`}>
+                                {l.fabricFlagged && <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#9A3A2D]" />}
+                                {l.fabricVariancePct > 0 ? "+" : ""}{l.fabricVariancePct.toFixed(2)}%
+                              </span>
+                            )}
+                          </td>
+                          <td className="h-9 px-3 text-center">
+                            {l.status === "MATCH" ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700 border border-green-200">
+                                <CheckCircle className="h-3 w-3" />
+                                Match
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                                <AlertTriangle className="h-3 w-3" />
+                                Variance
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#F0ECE9]">
+                      <td className="h-10 px-3 font-semibold text-[#374151]">
+                        Totals — {data.supplierName || data.supplierId}
+                      </td>
+                      <td className="h-10 px-3 text-right font-semibold text-[#374151]">{formatCurrency(data.summary.poTotalSen)}</td>
+                      <td className="h-10 px-3 text-right font-semibold text-[#374151]">{formatCurrency(data.summary.grnTotalSen)}</td>
+                      <td className="h-10 px-3 text-right font-semibold text-[#374151]">{formatCurrency(data.summary.piTotalSen)}</td>
+                      <td className="h-10 px-3"></td>
+                      <td className="h-10 px-3"></td>
+                      <td className="h-10 px-3"></td>
+                      <td className="h-10 px-3"></td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              <div className="mt-3 grid gap-3 grid-cols-1 sm:grid-cols-2">
+                <div className="p-3 rounded border border-[#E2DDD8] bg-white">
+                  <p className="text-xs text-[#6B7280]">Over-billed (PI &gt; PO)</p>
+                  <p className={`text-lg font-bold ${data.summary.overBilledSen > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
+                    {formatCurrency(data.summary.overBilledSen)}
+                  </p>
+                </div>
+                <div className="p-3 rounded border border-[#E2DDD8] bg-white">
+                  <p className="text-xs text-[#6B7280]">Under-delivered (GRN &lt; PO)</p>
+                  <p className={`text-lg font-bold ${data.summary.underDeliveredSen > 0 ? "text-[#9C6F1E]" : "text-[#1F1D1B]"}`}>
+                    {formatCurrency(data.summary.underDeliveredSen)}
+                  </p>
+                </div>
+              </div>
+            </>
+          )}
+        </CardContent>
+      )}
+    </Card>
   );
 }

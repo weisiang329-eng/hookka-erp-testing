@@ -8,7 +8,7 @@ import { SearchableSelect } from "@/components/ui/searchable-select";
 import { Badge } from "@/components/ui/badge";
 import { formatCurrency } from "@/lib/utils";
 import { hasMixedSofaBedframe, SO_MIXED_CATEGORY_ERROR } from "@/lib/so-category";
-import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
+import { ArrowLeft, Plus, Trash2, Save, AlertTriangle, ChevronDown, ChevronUp, X } from "lucide-react";
 import type { Customer, Product, FabricItem, SalesOrder } from "@/types";
 import {
   SEAT_HEIGHT_OPTIONS,
@@ -21,6 +21,12 @@ import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
 import { PresenceBanner } from "@/components/presence-banner";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
+
+// Free-text custom special order on a SO line (migration 0074). Operator-typed
+// description + surcharge for edge cases not in the master Specials config.
+// Folded into specialOrderPriceSen and suffixed into the `specialOrder` text
+// column as "OTHER: <desc>" so legacy display paths render them as-is.
+type CustomSpecial = { description: string; surchargeSen: number };
 
 type LineItem = {
   id?: string;
@@ -47,6 +53,7 @@ type LineItem = {
   specialOrders: string[];
   specialOrder: string;
   specialOrderPriceSen: number;
+  customSpecials: CustomSpecial[];
   notes: string;
 };
 
@@ -56,7 +63,8 @@ const EMPTY_LINE: LineItem = {
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
-  specialOrders: [], specialOrder: "", specialOrderPriceSen: 0, notes: "",
+  specialOrders: [], specialOrder: "", specialOrderPriceSen: 0,
+  customSpecials: [], notes: "",
 };
 
 /** Parse inches from a height string like '14"', '10.5"', or 'No Leg'.
@@ -205,7 +213,9 @@ export default function EditSalesOrderPage() {
         seatHeight: it.seatHeight, gapInches: it.gapInches,
         divanHeightInches: it.divanHeightInches,
         legHeightInches: it.legHeightInches,
-        specialOrders: it.specialOrders, notes: it.notes,
+        specialOrders: it.specialOrders,
+        customSpecials: it.customSpecials,
+        notes: it.notes,
       })),
     }),
     [
@@ -378,28 +388,103 @@ export default function EditSalesOrderPage() {
     });
   };
 
+  // Sum of custom-special surcharges, treating non-numeric / negative as 0.
+  const sumCustomSpecials = (customs: CustomSpecial[]): number =>
+    customs.reduce(
+      (s, c) =>
+        s +
+        (Number.isFinite(c.surchargeSen) && c.surchargeSen > 0
+          ? Math.round(c.surchargeSen)
+          : 0),
+      0,
+    );
+
+  // Build the joined `specialOrder` text — predefined names first, then
+  // "OTHER: <desc>" tokens for each non-empty custom entry.
+  const buildSpecialOrderText = (
+    codes: string[],
+    customs: CustomSpecial[],
+  ): string => {
+    const predefinedTokens = codes
+      .map((c) => specialOrderOptions.find((o) => o.code === c)?.name || c);
+    const customTokens = customs
+      .map((c) => c.description.trim())
+      .filter(Boolean)
+      .map((d) => `OTHER: ${d}`);
+    return [...predefinedTokens, ...customTokens].join("; ");
+  };
+
+  const calcPredefinedSurcharge = (
+    codes: string[],
+    isSofa: boolean,
+  ): number => {
+    const available = getAvailableSpecials(isSofa);
+    const sumSurcharge = codes.reduce((s, c) => {
+      const opt = available.find((o) => o.code === c);
+      if (!opt) return s;
+      return s + getConfigSurcharge(isSofa ? "sofaSpecials" : "specials", opt.name, opt.surcharge);
+    }, 0);
+    const combinedSurcharge = calcSpecialOrderSurcharge(codes);
+    return isSofa ? sumSurcharge : combinedSurcharge;
+  };
+
   const toggleSpecialOrder = (idx: number, code: string) => {
     const item = items[idx];
     const isSofa = item.itemCategory === "SOFA";
     const next = item.specialOrders.includes(code)
       ? item.specialOrders.filter((c) => c !== code)
       : [...item.specialOrders, code];
-    const available = getAvailableSpecials(isSofa);
-    const sumSurcharge = next.reduce((s, c) => {
-      const opt = available.find((o) => o.code === c);
-      if (!opt) return s;
-      return s + getConfigSurcharge(isSofa ? "sofaSpecials" : "specials", opt.name, opt.surcharge);
-    }, 0);
-    const combinedSurcharge = calcSpecialOrderSurcharge(next);
-    const surcharge = isSofa ? sumSurcharge : combinedSurcharge;
-    const label = next
-      .map((c) => specialOrderOptions.find((o) => o.code === c)?.name || c)
-      .join("; ");
+    const surcharge =
+      calcPredefinedSurcharge(next, isSofa) + sumCustomSpecials(item.customSpecials);
+    const label = buildSpecialOrderText(next, item.customSpecials);
     updateItem(idx, {
       specialOrders: next,
       specialOrder: label,
       specialOrderPriceSen: surcharge,
     });
+  };
+
+  // Apply a new customSpecials array, recomputing the joined text and the
+  // total surcharge (predefined + custom). Edit page mirrors create.tsx.
+  const applyCustomSpecials = (idx: number, customs: CustomSpecial[]) => {
+    const item = items[idx];
+    const isSofa = item.itemCategory === "SOFA";
+    const surcharge =
+      calcPredefinedSurcharge(item.specialOrders, isSofa) + sumCustomSpecials(customs);
+    const label = buildSpecialOrderText(item.specialOrders, customs);
+    updateItem(idx, {
+      customSpecials: customs,
+      specialOrder: label,
+      specialOrderPriceSen: surcharge,
+    });
+  };
+
+  const addCustomSpecial = (idx: number) => {
+    const item = items[idx];
+    applyCustomSpecials(idx, [
+      ...item.customSpecials,
+      { description: "", surchargeSen: 0 },
+    ]);
+  };
+
+  const updateCustomSpecial = (
+    idx: number,
+    csIdx: number,
+    patch: Partial<CustomSpecial>,
+  ) => {
+    const item = items[idx];
+    const next = item.customSpecials.map((c, i) =>
+      i === csIdx ? { ...c, ...patch } : c,
+    );
+    applyCustomSpecials(idx, next);
+  };
+
+  const removeCustomSpecial = (idx: number, csIdx: number) => {
+    const item = items[idx];
+    applyCustomSpecials(
+      idx,
+      item.customSpecials.filter((_, i) => i !== csIdx),
+    );
   };
 
   // Load existing order + edit-eligibility verdict in parallel. The
@@ -492,6 +577,8 @@ export default function EditSalesOrderPage() {
                 const raw = (item.specialOrder as string) || "";
                 const tokens = raw.split(/[;,]+/).map((s) => s.trim()).filter(Boolean);
                 return tokens
+                  // Skip "OTHER: <desc>" tokens — they belong to customSpecials.
+                  .filter((tok) => !tok.toUpperCase().startsWith("OTHER:"))
                   .map((tok) => {
                     const matched = specialOrderOptions.find((o) => o.name === tok);
                     if (matched) return matched.code;
@@ -501,6 +588,22 @@ export default function EditSalesOrderPage() {
               })(),
               specialOrder: (item.specialOrder as string) || "",
               specialOrderPriceSen: (item.specialOrderPriceSen as number) || 0,
+              // customSpecials is delivered as a parsed array by rowToItem
+              // in the API. Older SOs without the column come back as []. As
+              // a defense, fall back to [] when the field is missing or
+              // arrives in an unexpected shape.
+              customSpecials: Array.isArray(item.customSpecials)
+                ? (item.customSpecials as Array<Record<string, unknown>>)
+                    .filter(
+                      (e) =>
+                        typeof e?.description === "string" &&
+                        typeof e?.surchargeSen === "number",
+                    )
+                    .map((e) => ({
+                      description: e.description as string,
+                      surchargeSen: e.surchargeSen as number,
+                    }))
+                : [],
               notes: (item.notes as string) || "",
             };
           }));
@@ -1206,6 +1309,78 @@ export default function EditSalesOrderPage() {
                           })}
                         </div>
                       )}
+
+                      {/* Custom (free-text) specials — see create.tsx for
+                          design rationale. Mirrored here so an existing SO
+                          can be edited end-to-end without losing custom
+                          entries. Migration 0074. */}
+                      <div className="mt-3">
+                        <div className="flex items-center justify-between mb-1.5">
+                          <span className="text-xs font-medium text-[#374151]">
+                            Other (custom)
+                            {item.customSpecials.length > 0 && (
+                              <span className="text-[#9CA3AF] font-normal ml-1">
+                                ({item.customSpecials.length})
+                              </span>
+                            )}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => addCustomSpecial(idx)}
+                            className="text-xs font-medium text-[#6B5C32] hover:text-[#4A3F22] transition-colors flex items-center gap-1"
+                          >
+                            <Plus className="h-3 w-3" />
+                            Add custom
+                          </button>
+                        </div>
+                        {item.customSpecials.length > 0 && (
+                          <div className="space-y-1.5">
+                            {item.customSpecials.map((cs, csIdx) => (
+                              <div
+                                key={csIdx}
+                                className="flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2"
+                              >
+                                <Input
+                                  value={cs.description}
+                                  onChange={(e) =>
+                                    updateCustomSpecial(idx, csIdx, {
+                                      description: e.target.value,
+                                    })
+                                  }
+                                  placeholder="e.g. Custom Foam Density 35D"
+                                  className="h-8 flex-1 text-sm"
+                                />
+                                <div className="flex items-center gap-1">
+                                  <span className="text-xs text-[#9CA3AF]">RM</span>
+                                  <Input
+                                    type="number"
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    min={0}
+                                    step={0.01}
+                                    value={cs.surchargeSen / 100}
+                                    onChange={(e) =>
+                                      updateCustomSpecial(idx, csIdx, {
+                                        surchargeSen: Math.round(
+                                          parseFloat(e.target.value || "0") * 100,
+                                        ),
+                                      })
+                                    }
+                                    className="h-8 w-24 text-right text-sm"
+                                  />
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => removeCustomSpecial(idx, csIdx)}
+                                  className="p-1 rounded text-[#9CA3AF] hover:text-[#B91C1C] hover:bg-[#FEE2E2] transition-colors"
+                                  aria-label="Remove custom special"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   );
                 })()}

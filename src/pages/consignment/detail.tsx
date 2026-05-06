@@ -1061,11 +1061,13 @@ export default function SalesOrderDetailPage() {
                       <td className="px-3 py-3 text-right font-medium">{item.quantity}</td>
                       <td className="px-3 py-3">
                         <div className="flex flex-wrap gap-1">
-                          {item.gapInches && <span className="text-xs bg-[#E0EDF0] text-[#3E6570] px-1.5 py-0.5 rounded">Gap {item.gapInches}&quot;</span>}
-                          {item.divanHeightInches && <span className="text-xs bg-[#F1E6F0] text-[#6B4A6D] px-1.5 py-0.5 rounded">Divan {item.divanHeightInches}&quot;</span>}
-                          {item.legHeightInches && <span className="text-xs bg-[#FAEFCB] text-[#9C6F1E] px-1.5 py-0.5 rounded">Leg {item.legHeightInches}&quot;</span>}
+                          {/* `0 && <span>` short-circuits to the number 0, */}
+                          {/* which React renders as literal "0" — guard with > 0. */}
+                          {(item.gapInches ?? 0) > 0 && <span className="text-xs bg-[#E0EDF0] text-[#3E6570] px-1.5 py-0.5 rounded">Gap {item.gapInches}&quot;</span>}
+                          {(item.divanHeightInches ?? 0) > 0 && <span className="text-xs bg-[#F1E6F0] text-[#6B4A6D] px-1.5 py-0.5 rounded">Divan {item.divanHeightInches}&quot;</span>}
+                          {(item.legHeightInches ?? 0) > 0 && <span className="text-xs bg-[#FAEFCB] text-[#9C6F1E] px-1.5 py-0.5 rounded">Leg {item.legHeightInches}&quot;</span>}
                           {item.specialOrder && <span className="text-xs bg-[#F9E1DA] text-[#9A3A2D] px-1.5 py-0.5 rounded">{item.specialOrder.replace(/_/g, " ")}</span>}
-                          {!item.gapInches && !item.divanHeightInches && !item.legHeightInches && !item.specialOrder && <span className="text-xs text-[#9CA3AF]">-</span>}
+                          {!(item.gapInches && item.gapInches > 0) && !(item.divanHeightInches && item.divanHeightInches > 0) && !(item.legHeightInches && item.legHeightInches > 0) && !item.specialOrder && <span className="text-xs text-[#9CA3AF]">-</span>}
                         </div>
                         {/* Surcharge price annotations */}
                         {(item.divanPriceSen > 0 || item.legPriceSen > 0 || item.specialOrderPriceSen > 0) && (

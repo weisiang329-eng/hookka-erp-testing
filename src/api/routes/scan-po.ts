@@ -86,6 +86,11 @@ type CatalogCustomer = {
   id: string;
   code: string;
   name: string;
+  // Per-customer OCR rules — operator-authored prose injected into the
+  // prompt so Claude knows that customer's quirks (notation, urgency cues,
+  // size codes, diagram conventions). null/empty when the customer has no
+  // bespoke rules yet — in which case nothing extra is injected.
+  ocrPromptRules: string | null;
   hubs: { id: string; shortName: string; state: string | null }[];
 };
 type CatalogProduct = { code: string; name: string; sizeLabel: string | null };
@@ -124,10 +129,10 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
   const [custRes, hubRes, prodRes, fabRes, kvRes] = await Promise.all([
     db
       .prepare(
-        "SELECT id, code, name FROM customers WHERE orgId = ? AND isActive = 1 ORDER BY code",
+        "SELECT id, code, name, ocrPromptRules FROM customers WHERE orgId = ? AND isActive = 1 ORDER BY code",
       )
       .bind(orgId)
-      .all<{ id: string; code: string; name: string }>(),
+      .all<{ id: string; code: string; name: string; ocrPromptRules: string | null }>(),
     db
       .prepare(
         "SELECT id, customerId, shortName, state FROM delivery_hubs WHERE orgId = ?",
@@ -163,6 +168,7 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
     id: c.id,
     code: c.code,
     name: c.name,
+    ocrPromptRules: c.ocrPromptRules ?? null,
     hubs: hubsByCust.get(c.id) ?? [],
   }));
 
@@ -276,12 +282,67 @@ function formatCatalog(c: Catalog): string {
   return lines.join("\n");
 }
 
+// Self-applying migration — adds the `ocrPromptRules` column to `customers`
+// the first time any /extract or /customer-rules call runs in a fresh
+// isolate. Mirrors the `ensurePendingMigrations` pattern in sales-orders.ts
+// so Supabase stays forward-compatible without a separate deploy step.
+let scanPoColumnsPromise: Promise<void> | null = null;
+function ensureScanPoColumns(db: DBLike): Promise<void> {
+  if (scanPoColumnsPromise) return scanPoColumnsPromise;
+  scanPoColumnsPromise = (async () => {
+    const stmts = [
+      "ALTER TABLE customers ADD COLUMN IF NOT EXISTS ocrPromptRules TEXT",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).bind().run();
+      } catch {
+        // best-effort; column may already exist or DDL transiently rejected
+      }
+    }
+  })();
+  return scanPoColumnsPromise;
+}
+
+// Per-customer rules are injected as a separate prompt block tagged with the
+// customer code. We render ALL customers' blocks (even empty ones) and tell
+// Claude to consult only the block for the customer it identifies. This keeps
+// the prefix cacheable (single shape that only changes when rules change in
+// the DB) and avoids the chicken-and-egg of needing the customer ID before
+// the LLM call. Customers with no rules render as a stub so Claude doesn't
+// hunt for a missing block.
+function formatCustomerRules(c: Catalog): string {
+  const lines: string[] = [];
+  lines.push("=== CUSTOMER-SPECIFIC OCR RULES ===");
+  lines.push(
+    "Each block below is keyed by the customer code from the CUSTOMERS catalog. " +
+      "AFTER you identify the issuing customer (top-of-page letterhead → match against the CUSTOMERS catalog), " +
+      "consult ONLY the block whose code matches that customer. Ignore all other blocks. " +
+      "If no block matches (or the customer's block says 'no special rules'), follow the universal rules above only.",
+  );
+  lines.push("");
+  for (const cu of c.customers) {
+    const body = (cu.ocrPromptRules ?? "").trim();
+    lines.push(`<customer code="${cu.code}" name="${cu.name}">`);
+    if (body.length === 0) {
+      lines.push("(no customer-specific rules — apply universal rules only)");
+    } else {
+      lines.push(body);
+    }
+    lines.push(`</customer>`);
+    lines.push("");
+  }
+  return lines.join("\n");
+}
+
 // ===========================================================================
 // Prompt
 // ===========================================================================
 const SYSTEM_PROMPT = `You extract structured data from furniture purchase order PDFs at Hookka Manufacturing.
 
 PDFs frequently contain MULTIPLE separate POs (one per page). Extract each into its own pos[] entry.
+
+Two reference sections follow this prompt: a global CATALOG (customers, products, fabrics, variants) and a CUSTOMER-SPECIFIC OCR RULES block keyed by customer code. The universal rules below ALWAYS apply. After you identify the issuing customer (top-of-page letterhead → CUSTOMERS catalog), ALSO consult the matching <customer code="..."> block in the CUSTOMER-SPECIFIC OCR RULES section and apply any extra conventions it contains. If a customer-specific rule conflicts with a universal rule, the customer-specific rule wins for that PO. If no block matches or the matched block is empty, just follow the universal rules.
 
 EXTRACTION RULES
 ================
@@ -835,6 +896,7 @@ app.get("/catalog", async (c) => {
   const denied = await requirePermission(c, "purchase-orders", "create");
   if (denied) return denied;
   const orgId = getOrgId(c);
+  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
   const catalog = await loadCatalog(c.var.DB as unknown as DBLike, orgId);
   return c.json({
     success: true,
@@ -920,15 +982,20 @@ app.post("/extract", async (c) => {
   const pdfBase64 = toBase64(arrayBuffer);
 
   const orgId = getOrgId(c);
+  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
   const catalog = await loadCatalog(c.var.DB as unknown as DBLike, orgId);
   const catalogText = formatCatalog(catalog);
+  const customerRulesText = formatCustomerRules(catalog);
 
   const createdBy = (c.get("userId" as never) as string | undefined) ?? null;
   const customerHintGuess = name.split(/[-_ .]/)[0]?.slice(0, 40) ?? null;
 
-  // Cached prefix = SYSTEM_PROMPT + catalog. Refreshes only when DB changes.
-  // Anthropic prompt-caching gives ~90% discount on cache hits within 5 min.
-  const cachedPrefix = `${SYSTEM_PROMPT}\n\nCATALOG\n=======\n${catalogText}`;
+  // Cached prefix = SYSTEM_PROMPT + catalog + per-customer rules. Refreshes
+  // only when DB changes (catalog row, fabric, or customer.ocrPromptRules
+  // edit). Anthropic prompt-caching gives ~90% discount on cache hits within
+  // 5 min, so a stable shape across requests matters more than cherry-picking
+  // only the matched customer's block.
+  const cachedPrefix = `${SYSTEM_PROMPT}\n\nCATALOG\n=======\n${catalogText}\n\n${customerRulesText}`;
 
   // Phase 5: pull a few-shot pool of operator-confirmed extractions. Gold-
   // marked rows (operator hit "Mark as gold reference") win over plain
@@ -1241,6 +1308,100 @@ app.patch("/samples/by-po/:poIdentifier", async (c) => {
     poIdentifier,
     gold: goldFlag === 1,
     updated: result.meta.changes,
+  });
+});
+
+// ===========================================================================
+// GET /api/scan-po/customer-rules/:customerId — read this customer's rules
+// PUT /api/scan-po/customer-rules/:customerId — replace this customer's rules
+//
+// Operator workflow: hit GET to see the current value, edit the prose, PUT
+// it back. Rules are plain text (Markdown-ish). Empty string clears the rules
+// (the customer's <customer> block in the prompt will render as a stub).
+// RBAC: gated by `customers:update` so the same role that can edit other
+// customer fields can edit OCR rules.
+// ===========================================================================
+app.get("/customer-rules/:customerId", async (c) => {
+  const denied = await requirePermission(c, "customers", "read");
+  if (denied) return denied;
+  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+  const customerId = c.req.param("customerId");
+  const orgId = getOrgId(c);
+  const row = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      "SELECT id, code, name, ocrPromptRules FROM customers WHERE id = ? AND orgId = ?",
+    )
+    .bind(customerId, orgId)
+    .first<{ id: string; code: string; name: string; ocrPromptRules: string | null }>();
+  if (!row) {
+    return c.json({ success: false, error: "Customer not found." }, 404);
+  }
+  return c.json({
+    success: true,
+    data: {
+      customerId: row.id,
+      customerCode: row.code,
+      customerName: row.name,
+      ocrPromptRules: row.ocrPromptRules ?? "",
+    },
+  });
+});
+
+app.put("/customer-rules/:customerId", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+  const customerId = c.req.param("customerId");
+  const orgId = getOrgId(c);
+
+  let body: { ocrPromptRules?: unknown };
+  try {
+    body = (await c.req.json()) as { ocrPromptRules?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body." }, 400);
+  }
+  if (typeof body.ocrPromptRules !== "string") {
+    return c.json(
+      { success: false, error: "Missing or non-string `ocrPromptRules`." },
+      400,
+    );
+  }
+
+  // Soft cap so a runaway paste can't blow up the prompt cache. ~32k chars
+  // ≈ ~8k tokens — generous for any single customer's quirks doc.
+  const value = body.ocrPromptRules;
+  if (value.length > 32_000) {
+    return c.json(
+      { success: false, error: "ocrPromptRules too long (max 32000 chars)." },
+      400,
+    );
+  }
+
+  // Empty string is allowed — it clears the rules so the <customer> block in
+  // the prompt renders as a stub. Store as NULL when blank to keep the column
+  // tidy.
+  const stored = value.trim().length === 0 ? null : value;
+
+  const result = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      "UPDATE customers SET ocrPromptRules = ? WHERE id = ? AND orgId = ?",
+    )
+    .bind(stored, customerId, orgId)
+    .run();
+
+  if (!result.success || result.meta.changes === 0) {
+    return c.json(
+      { success: false, error: "Customer not found or update failed." },
+      404,
+    );
+  }
+
+  return c.json({
+    success: true,
+    data: {
+      customerId,
+      ocrPromptRules: stored ?? "",
+    },
   });
 });
 

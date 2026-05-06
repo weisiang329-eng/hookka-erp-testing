@@ -1471,6 +1471,28 @@ app.post("/:id/override-edit-lock", async (c) => {
   });
 });
 
+// Self-applying migration 0108 — column added at first POST per isolate.
+// `ALTER ... ADD COLUMN IF NOT EXISTS` is idempotent + cheap, so running it
+// here removes the deploy ordering footgun that used to break SO creates
+// when the migration hadn't been applied to Supabase yet. Module-level
+// promise ensures one ALTER per isolate boot, not per request.
+let migration0108Promise: Promise<void> | null = null;
+function ensureMigration0108(db: D1Database): Promise<void> {
+  if (migration0108Promise) return migration0108Promise;
+  migration0108Promise = db
+    .prepare(
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS customerPOImageB64 TEXT",
+    )
+    .run()
+    .then(() => undefined)
+    .catch(() => {
+      // Best-effort. If it fails (permission, transient error), the SO insert
+      // below will fail loudly with the real error — better than silent skip.
+      migration0108Promise = null;
+    });
+  return migration0108Promise;
+}
+
 // ---------------------------------------------------------------------------
 // POST /api/sales-orders — create a new SO + items atomically
 // ---------------------------------------------------------------------------
@@ -1478,6 +1500,7 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3) — only roles with sales-orders:create may create SOs.
   const denied = await requirePermission(c, "sales-orders", "create");
   if (denied) return denied;
+  await ensureMigration0108(c.var.DB);
 
   // Sprint 3 #4 — idempotency. If the client sends an `Idempotency-Key`
   // header, the handler is wrapped so a duplicate retry returns the

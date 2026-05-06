@@ -15,8 +15,10 @@ type Props = {
 
 type StepState = "upload" | "preview" | "creating" | "done";
 
-// Shape returned by POST /api/scan-po/extract.
+// Shape returned by POST /api/scan-po/extract — see scan-po.ts. Keep these
+// types in lockstep with the server-side ExtractedItem / ExtractedPO.
 type ClaudeExtractedItem = {
+  category: "BEDFRAME" | "SOFA" | "ACCESSORY";
   productCode: string;
   description: string | null;
   quantity: number;
@@ -25,21 +27,37 @@ type ClaudeExtractedItem = {
   divanHeightInches: number | null;
   legHeightInches: number | null;
   gapInches: number | null;
+  noLeg: boolean;
   specialOrder: string | null;
+  specialNotes: string | null;
   unitPrice: number | null;
+  transferredSO: string | null;
 };
 
 type ClaudeExtractedPO = {
   customerPO: string;
   customerName: string;
+  customerCode: string | null;
+  customerId: string | null;
   customerState: string | null;
+  deliveryHub: string | null;
+  yourRefNo: string | null;
   deliveryDate: string | null;
+  isUrgent: boolean;
   items: ClaudeExtractedItem[];
+};
+
+type ClaudeWarning = {
+  field: string;
+  value: string;
+  message: string;
+  itemIdx?: number;
 };
 
 type ClaudeScanRow = {
   sampleId: string;
   extracted: ClaudeExtractedPO;
+  warnings: ClaudeWarning[];
   file: File;
 };
 
@@ -107,29 +125,47 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     const claudeFailures: File[] = [];
     const claudeWarnings: string[] = [];
 
-    for (const file of pdfFiles) {
-      try {
+    // Process all PDFs in parallel — Claude calls are independent so the
+    // total wall-clock = max(per-file latency) instead of sum.
+    const claudeResults = await Promise.allSettled(
+      pdfFiles.map(async (file) => {
         const fd = new FormData();
         fd.append("file", file);
         const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
         const data = await res.json() as {
           success?: boolean;
           error?: string;
-          data?: { sampleId: string; extracted: ClaudeExtractedPO };
+          data?: {
+            samples?: Array<{ sampleId: string; extracted: ClaudeExtractedPO; warnings: ClaudeWarning[] }>;
+          };
         };
-        if (res.ok && data.success && data.data?.extracted) {
-          claudeSuccesses.push({
-            sampleId: data.data.sampleId,
-            extracted: data.data.extracted,
-            file,
-          });
-        } else {
-          claudeFailures.push(file);
-          claudeWarnings.push(`${file.name}: ${data.error || `HTTP ${res.status}`}`);
+        if (res.ok && data.success && Array.isArray(data.data?.samples)) {
+          return { kind: "ok" as const, file, samples: data.data.samples };
         }
-      } catch (err) {
-        claudeFailures.push(file);
-        claudeWarnings.push(`${file.name}: ${err instanceof Error ? err.message : "Network error"}`);
+        return { kind: "fail" as const, file, error: data.error || `HTTP ${res.status}` };
+      }),
+    );
+
+    for (const r of claudeResults) {
+      if (r.status === "rejected") {
+        const err = r.reason instanceof Error ? r.reason.message : "Network error";
+        claudeWarnings.push(`(unknown file): ${err}`);
+        continue;
+      }
+      const v = r.value;
+      if (v.kind === "ok") {
+        // Each backend sample = one PO. Flatten so 1 PDF → N preview cards.
+        for (const s of v.samples) {
+          claudeSuccesses.push({
+            sampleId: s.sampleId,
+            extracted: s.extracted,
+            warnings: s.warnings ?? [],
+            file: v.file,
+          });
+        }
+      } else {
+        claudeFailures.push(v.file);
+        claudeWarnings.push(`${v.file.name}: ${v.error}`);
       }
     }
 
@@ -219,31 +255,59 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           body: JSON.stringify({ correctedJson: po }),
         }).catch(() => {});
 
+        // Hub resolution priority:
+        //   1. PDF-extracted "Purchase Location" (po.deliveryHub) — most accurate.
+        //   2. Heuristic from customer name + state — legacy fallback.
         const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
+        const resolvedHubId = po.deliveryHub || hub.hubId;
 
         const soItems = po.items.map((item, idx) => ({
           lineNo: idx + 1,
           lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
           productCode: item.productCode,
           productName: item.description ?? item.productCode,
+          itemCategory: item.category,
           sizeLabel: item.sizeLabel ?? "",
           fabricCode: item.fabricCode ?? "",
           quantity: item.quantity || 1,
           gapInches: item.gapInches ?? 0,
           divanHeightInches: item.divanHeightInches ?? 0,
-          legHeightInches: item.legHeightInches ?? 0,
+          // noLeg=true is encoded as legHeightInches=null. Backend treats
+          // null/0 the same in cost calc, but null preserves the boolean
+          // intent for future read-back.
+          legHeightInches: item.noLeg ? null : item.legHeightInches,
           specialOrder: item.specialOrder ?? "",
-          notes: "",
+          // Unit price is in RM (decimal) on the PDF; backend stores sen
+          // (integer). Multiply + round to avoid float drift.
+          basePriceSen:
+            item.unitPrice != null && item.unitPrice > 0
+              ? Math.round(item.unitPrice * 100)
+              : 0,
+          // transferredSO links this SO line back to the original SO it
+          // amends/replaces — operator can use it to mark the prior SO
+          // superseded after creation.
+          transferredFromSO: item.transferredSO ?? null,
+          notes: item.specialNotes ?? "",
         }));
 
+        // customerId comes from the backend's catalog match (validateAndEnrichPO).
+        // If null, the SO create call will fail — surface a clearer error.
+        if (!po.customerId) {
+          errs.push(`${po.customerPO}: Customer "${po.customerName}" not in catalog. Add the customer first, then re-scan.`);
+          continue;
+        }
+
         const body = {
-          customerId: "",
+          customerId: po.customerId,
           customerName: po.customerName,
+          customerCode: po.customerCode ?? null,
           customerState: po.customerState ?? hub.state ?? "",
           customerPOId: po.customerPO,
-          deliveryHubId: hub.hubId,
+          yourRefNo: po.yourRefNo ?? null,
+          deliveryHubId: resolvedHubId,
           companySODate: new Date().toISOString().split("T")[0],
           hookkaExpectedDD: po.deliveryDate,
+          isUrgent: po.isUrgent ?? false,
           items: soItems,
           source: "PO_SCAN_CLAUDE",
         };
@@ -696,7 +760,37 @@ function ClaudePOCard({
                 <Sparkles className="h-3 w-3 inline mr-0.5" /> {row.file.name}
               </Badge>
               <span>{po.items.length} items, {totalQty} qty</span>
+              {po.isUrgent && (
+                <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
+              )}
+              {po.deliveryHub && (
+                <Badge className="border border-[#D1D5DB]">{po.deliveryHub}</Badge>
+              )}
+              {po.yourRefNo && (
+                <span className="text-[#9CA3AF]">Ref: {po.yourRefNo}</span>
+              )}
+              {po.customerCode === null && (
+                <Badge className="bg-amber-50 text-amber-700 border border-amber-200">
+                  <AlertTriangle className="h-3 w-3 inline mr-0.5" /> Customer unmatched
+                </Badge>
+              )}
             </div>
+
+            {row.warnings.length > 0 && (
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-2 space-y-0.5">
+                {row.warnings.map((w, i) => (
+                  <p key={i} className="text-xs text-amber-700 flex items-start gap-1.5">
+                    <AlertTriangle className="h-3 w-3 mt-0.5 flex-shrink-0" />
+                    <span>
+                      <span className="font-medium">{w.field}</span>
+                      {w.value ? <span className="text-amber-600"> &quot;{w.value}&quot;</span> : null}
+                      {" — "}
+                      {w.message}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            )}
 
             {expanded && (
               <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-hidden">

@@ -427,6 +427,7 @@
   "labourHours": "labour_hours",
   "labourLogs": "labour_logs",
   "landedCost": "landed_cost",
+  "lastEmailedAt": "last_emailed_at",
   "lastLoginAt": "last_login_at",
   "lastMaintenanceDate": "last_maintenance_date",
   "lastMonthUsage": "last_month_usage",

@@ -31,6 +31,10 @@ type PurchaseOrderRow = {
   expectedDate: string | null;
   receivedDate: string | null;
   notes: string | null;
+  // 3.1 — manual "Email to Supplier" button stamps this on each send so
+  // the FE can show "Last sent: …" + a Resend affordance. Nullable until
+  // first send. Column added by ensurePendingMigrations() below.
+  lastEmailedAt: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -92,6 +96,7 @@ function rowToPO(row: PurchaseOrderRow, items: PurchaseOrderItemRow[] = []) {
     expectedDate: row.expectedDate ?? "",
     receivedDate: row.receivedDate,
     notes: row.notes ?? "",
+    lastEmailedAt: row.lastEmailedAt ?? null,
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -513,6 +518,97 @@ app.put("/:id", async (c) => {
       return c.json({ success: false, error: "Invalid JSON in request body" }, 400);
     }
     return c.json({ success: false, error: msg || "Internal error updating purchase order" }, 500);
+  }
+});
+
+// 3.1 — Self-applying migration for the lastEmailedAt column. Same module-
+// level promise pattern as sales-orders.ts:1531. Idempotent ALTER so the
+// column appears on first POST per isolate without a separate migration
+// deploy. Translated by supabase-compat: lastEmailedAt → last_emailed_at
+// (added to column-rename-map.json).
+let pendingMigrations: Promise<void> | null = null;
+function ensurePendingMigrations(db: D1Database): Promise<void> {
+  if (pendingMigrations) return pendingMigrations;
+  pendingMigrations = (async () => {
+    try {
+      await db
+        .prepare(
+          "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS lastEmailedAt TEXT",
+        )
+        .run();
+    } catch {
+      // Column may already exist or DDL transiently rejected — best effort.
+    }
+  })();
+  return pendingMigrations;
+}
+
+// POST /api/purchase-orders/:id/email — manual "Email to Supplier" send.
+// Reuses the same enqueueEmail flow as the auto-cascade on DRAFT→SUBMITTED
+// (line ~488 above). The cron drain (.github/workflows/process-email-outbox.yml)
+// is what actually contacts Resend, so this returns immediately on the
+// outbox INSERT — no Resend round-trip on the user's request thread.
+//
+// Visible on SUBMITTED+ statuses (gate enforced at the FE; backend is
+// permissive — even DRAFT can be emailed manually if a permission grant
+// reaches here).
+app.post("/:id/email", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "update");
+  if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+
+  const id = c.req.param("id");
+  const po = await c.var.DB
+    .prepare("SELECT * FROM purchase_orders WHERE id = ?")
+    .bind(id)
+    .first<PurchaseOrderRow>();
+  if (!po) {
+    return c.json({ success: false, error: "Purchase order not found" }, 404);
+  }
+
+  const supplierRow = await c.var.DB
+    .prepare("SELECT email FROM suppliers WHERE id = ? LIMIT 1")
+    .bind(po.supplierId)
+    .first<{ email: string | null }>();
+  if (!supplierRow?.email) {
+    return c.json(
+      {
+        success: false,
+        error: `Supplier ${po.supplierName ?? po.supplierId} has no email on file`,
+      },
+      400,
+    );
+  }
+
+  try {
+    const tpl = supplierPoEmailTemplate({
+      poNo: po.poNo,
+      supplierName: po.supplierName ?? "",
+    });
+    await enqueueEmail(c, {
+      to: supplierRow.email,
+      subject: tpl.subject,
+      html: tpl.html,
+      text: tpl.text,
+    });
+    const now = new Date().toISOString();
+    await c.var.DB
+      .prepare(
+        "UPDATE purchase_orders SET lastEmailedAt = ?, updated_at = ? WHERE id = ?",
+      )
+      .bind(now, now, id)
+      .run();
+    return c.json({
+      success: true,
+      data: { lastEmailedAt: now, to: supplierRow.email },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error("[POST /api/purchase-orders/:id/email] failed:", msg, err);
+    return c.json(
+      { success: false, error: msg || "Failed to enqueue email" },
+      500,
+    );
   }
 });
 

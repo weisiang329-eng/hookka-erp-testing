@@ -523,6 +523,9 @@ export type PurchaseOrder = {
   expectedDate: string;
   receivedDate: string | null;
   notes: string;
+  // 3.1 — set by the manual "Email to Supplier" button on detail.tsx.
+  // Null until the operator hits send for the first time.
+  lastEmailedAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };

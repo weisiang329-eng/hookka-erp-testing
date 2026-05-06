@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/ui/toast";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, formatDateTime } from "@/lib/utils";
 // PDF generators dynamic-imported at click handlers so the 1MB jspdf
 // vendor chunk only ships when the user actually downloads.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -18,7 +18,7 @@ import type {
 } from "@/types";
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
-  CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle,
+  CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle, Mail,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { useParams } from "react-router-dom";
@@ -138,6 +138,9 @@ export default function PurchaseOrderDetailPage() {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [cancelling, setCancelling] = useState(false);
+
+  // ------- Email-PO state (3.1) -------
+  const [emailing, setEmailing] = useState(false);
 
   const resolveSupplierName = useCallback(
     (sid: string): string => {
@@ -380,6 +383,34 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
+  // 3.1 — Manual "Email to Supplier" send. Hits the new
+  // POST /api/purchase-orders/:id/email endpoint, which enqueues to
+  // outbox_emails and stamps lastEmailedAt. The cron drain
+  // (.github/workflows/process-email-outbox.yml) is what actually contacts
+  // Resend, so a Resend outage doesn't delay the toast.
+  const sendEmail = async () => {
+    if (!po) return;
+    setEmailing(true);
+    try {
+      const res = await fetch(`/api/purchase-orders/${po.id}/email`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to email (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-orders");
+      fetchPO();
+      toast.success("Queued for delivery");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error sending email");
+    } finally {
+      setEmailing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -406,6 +437,12 @@ export default function PurchaseOrderDetailPage() {
   const currentStepIdx = getStepIndex(po.status);
   const isCancelled = po.status === "CANCELLED";
   const isDraft = po.status === "DRAFT";
+  // 3.1 — Email button visible once the PO has left DRAFT. RECEIVED + CLOSED
+  // included so the operator can resend "FYI for your records" copies after
+  // partial-receive disputes. Excluded on CANCELLED for obvious reasons.
+  const canEmail = ["SUBMITTED", "CONFIRMED", "PARTIAL_RECEIVED", "RECEIVED"].includes(
+    po.status,
+  );
   // 2.2 — Cancel-with-reason gate: SUBMITTED / CONFIRMED / PARTIAL_RECEIVED.
   // DRAFT keeps its existing one-click Cancel (no reason needed for a PO
   // that never left the office). RECEIVED / CLOSED / CANCELLED are terminal.
@@ -465,6 +502,23 @@ export default function PurchaseOrderDetailPage() {
             <Button variant="outline" onClick={startEdit}>
               <Pencil className="h-4 w-4" /> Edit
             </Button>
+          )}
+          {canEmail && !editing && (
+            <div className="flex items-center gap-2">
+              {po.lastEmailedAt && (
+                <span className="text-xs text-[#6B7280]" title={po.lastEmailedAt}>
+                  Last sent: {formatDateTime(po.lastEmailedAt)}
+                </span>
+              )}
+              <Button
+                variant="outline"
+                onClick={sendEmail}
+                disabled={emailing}
+                title={po.lastEmailedAt ? "Resend PO to supplier" : "Email PO to supplier"}
+              >
+                <Mail className="h-4 w-4" /> {po.lastEmailedAt ? (emailing ? "Resending…" : "Resend Email") : (emailing ? "Sending…" : "Email to Supplier")}
+              </Button>
+            </div>
           )}
           <Button variant="outline" onClick={async () => {
             const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");

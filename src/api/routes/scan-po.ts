@@ -766,6 +766,13 @@ app.post("/extract", async (c) => {
       body: JSON.stringify({
         model: CLAUDE_MODEL,
         max_tokens: 8192,
+        // temperature=0 makes Claude maximally deterministic. Critical for
+        // OCR — the operator reported "first run correct, second run
+        // wrong" with the default temperature=1.0. With t=0 the same PDF
+        // + same prompt should produce identical output every time, so
+        // any wrong field becomes a reproducible bug we can prompt-fix
+        // instead of a flaky lottery.
+        temperature: 0,
         messages: [
           {
             role: "user",

@@ -627,6 +627,47 @@ app.post("/extract", async (c) => {
   // Anthropic prompt-caching gives ~90% discount on cache hits within 5 min.
   const cachedPrefix = `${SYSTEM_PROMPT}\n\nCATALOG\n=======\n${catalogText}`;
 
+  // Phase 5: pull a few-shot pool of operator-confirmed extractions. Gold-
+  // marked rows (operator hit "Mark as gold reference") win over plain
+  // confirms; rows from the same customer hint win over generic. Capped
+  // at 3 examples to keep tokens reasonable. Loaded outside the cache
+  // boundary so adding a new gold sample doesn't invalidate the catalog
+  // cache for everyone.
+  let fewShotText = "";
+  try {
+    const examples = await (c.var.DB as unknown as DBLike)
+      .prepare(
+        `SELECT id, correctedJson, isGold, customerHint
+           FROM po_scan_samples
+           WHERE correctedJson IS NOT NULL
+           ORDER BY
+             (CASE WHEN customerHint = ? THEN 0 ELSE 1 END),
+             COALESCE(isGold, 0) DESC,
+             createdAt DESC
+           LIMIT 3`,
+      )
+      .bind(customerHintGuess ?? "")
+      .all<{
+        id: string;
+        correctedJson: string | null;
+        isGold: number | null;
+        customerHint: string | null;
+      }>();
+    const rows = examples.results ?? [];
+    if (rows.length > 0) {
+      const blocks = rows
+        .map((r, i) => {
+          const tag = r.isGold ? "gold reference" : "operator-confirmed";
+          return `Example ${i + 1} (${tag}):\n${r.correctedJson}`;
+        })
+        .join("\n\n");
+      fewShotText = `FEW-SHOT EXAMPLES (apply the same field conventions and inference rules):\n\n${blocks}`;
+    }
+  } catch {
+    // Few-shot is best-effort. If the column isn't there yet (migration
+    // hasn't applied) we just skip it.
+  }
+
   let claudeText = "";
   let parseOk = false;
   let parsed: ExtractionResult | null = null;
@@ -654,6 +695,9 @@ app.post("/extract", async (c) => {
                 text: cachedPrefix,
                 cache_control: { type: "ephemeral" },
               },
+              ...(fewShotText
+                ? [{ type: "text", text: fewShotText }]
+                : []),
               {
                 type: "document",
                 source: {
@@ -796,9 +840,9 @@ app.post("/samples/:id/confirm", async (c) => {
     return c.json({ success: false, error: "Missing sample id." }, 400);
   }
 
-  let body: { correctedJson?: unknown };
+  let body: { correctedJson?: unknown; gold?: unknown };
   try {
-    body = (await c.req.json()) as { correctedJson?: unknown };
+    body = (await c.req.json()) as { correctedJson?: unknown; gold?: unknown };
   } catch {
     return c.json({ success: false, error: "Invalid JSON body." }, 400);
   }
@@ -811,10 +855,24 @@ app.post("/samples/:id/confirm", async (c) => {
     typeof body.correctedJson === "string"
       ? body.correctedJson
       : JSON.stringify(body.correctedJson);
+  const goldFlag = body.gold === true ? 1 : 0;
+
+  // Self-apply the isGold column so older Supabase instances stay
+  // forward-compatible without needing a deploy-ordered migration.
+  try {
+    await (c.var.DB as unknown as DBLike)
+      .prepare(
+        "ALTER TABLE po_scan_samples ADD COLUMN IF NOT EXISTS isGold INTEGER NOT NULL DEFAULT 0",
+      )
+      .bind()
+      .run();
+  } catch {
+    /* best-effort */
+  }
 
   const result = await (c.var.DB as unknown as DBLike)
-    .prepare("UPDATE po_scan_samples SET correctedJson = ? WHERE id = ?")
-    .bind(payload, id)
+    .prepare("UPDATE po_scan_samples SET correctedJson = ?, isGold = ? WHERE id = ?")
+    .bind(payload, goldFlag, id)
     .run();
 
   if (!result.success || result.meta.changes === 0) {

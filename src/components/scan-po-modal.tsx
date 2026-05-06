@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { parsePOText, mapDeliveryHub, type ParsedPO, type POParseResult } from "@/lib/po-parser";
-import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles } from "lucide-react";
+import { Upload, FileText, CheckCircle, AlertTriangle, X, ChevronDown, ChevronRight, Loader2, Sparkles, Star } from "lucide-react";
 
 type Props = {
   open: boolean;
@@ -71,6 +71,11 @@ type ClaudeScanRow = {
   // display the original document as proof when a customer disputes.
   // Lazy-loaded after parse to keep the upload-step fast.
   pageImageB64: string | null;
+  // Phase 5: when the operator inspects an unedited extraction and clicks
+  // "Mark as gold reference", we mark this row so the confirm call sets
+  // isGold=1 in po_scan_samples. Gold rows win over plain corrections when
+  // the next OCR call picks few-shot examples.
+  markedGold: boolean;
 };
 
 // Slim catalog payload from GET /api/scan-po/catalog. Drives inline-edit
@@ -242,6 +247,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             warnings: s.warnings ?? [],
             file: v.job.file,
             pageImageB64: null,
+            markedGold: false,
           });
         }
       } else {
@@ -327,17 +333,16 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     for (const row of selectedClaude) {
       const po = row.extracted;
       try {
-        // Few-shot integrity: only confirm samples the operator actually
-        // edited. Sending unedited Claude output back as a "corrected"
-        // example was polluting the few-shot pool with Claude's own
-        // (potentially wrong) output. Compare canonical JSON.
+        // Few-shot integrity: confirm a sample either when the operator
+        // edited it, or when they explicitly marked it as a gold
+        // reference. Plain unedited Claude output is not stored back.
         const wasEdited =
           JSON.stringify(po) !== JSON.stringify(row.original);
-        if (wasEdited) {
+        if (wasEdited || row.markedGold) {
           fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ correctedJson: po }),
+            body: JSON.stringify({ correctedJson: po, gold: row.markedGold }),
           }).catch(() => {});
         }
 
@@ -757,6 +762,9 @@ function PreviewStep({
       };
     }));
   };
+  const toggleGold = (rowIdx: number) => {
+    setClaudeRows(prev => prev.map((r, i) => i === rowIdx ? { ...r, markedGold: !r.markedGold } : r));
+  };
 
   return (
     <div className="space-y-4">
@@ -803,6 +811,7 @@ function PreviewStep({
             onUpdateItem={(itemIdx, patch) => updateClaudeItem(idx, itemIdx, patch)}
             onAddItem={() => addClaudeItem(idx)}
             onRemoveItem={(itemIdx) => removeClaudeItem(idx, itemIdx)}
+            onToggleGold={() => toggleGold(idx)}
           />
         ))}
         {fallbackPOs.map((po, idx) => {
@@ -838,7 +847,7 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem,
+  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onToggleGold,
 }: {
   row: ClaudeScanRow;
   catalog: ScanCatalog | null;
@@ -850,6 +859,7 @@ function ClaudePOCard({
   onUpdateItem: (itemIdx: number, patch: Partial<ClaudeExtractedItem>) => void;
   onAddItem: () => void;
   onRemoveItem: (itemIdx: number) => void;
+  onToggleGold: () => void;
 }) {
   const po = row.extracted;
   const totalQty = po.items.reduce((s, i) => s + (i.quantity || 1), 0);
@@ -931,6 +941,19 @@ function ClaudePOCard({
                   <AlertTriangle className="h-3 w-3 inline mr-0.5" /> Customer unmatched
                 </Badge>
               )}
+              <button
+                type="button"
+                onClick={onToggleGold}
+                className={`ml-auto text-[10px] px-2 py-0.5 rounded border transition-colors ${
+                  row.markedGold
+                    ? "bg-amber-100 text-amber-800 border-amber-300"
+                    : "bg-white text-[#6B7280] border-[#D1D5DB] hover:border-amber-300"
+                }`}
+                title="Mark this extraction as a gold reference — future OCR calls will use it as a few-shot example"
+              >
+                <Star className={`h-3 w-3 inline mr-0.5 ${row.markedGold ? "fill-amber-500 text-amber-500" : ""}`} />
+                {row.markedGold ? "Gold reference" : "Mark as gold"}
+              </button>
             </div>
 
             {row.warnings.length > 0 && (

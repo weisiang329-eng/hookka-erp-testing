@@ -1585,6 +1585,8 @@ app.post("/", async (c) => {
     const items = await Promise.all(
       rawItems.map(async (item, idx) => {
         const productCode = String(item.productCode ?? "");
+        const incomingItemCategory = String(item.itemCategory ?? "");
+        const isSofaItem = incomingItemCategory === "SOFA";
         let resolvedProduct: {
           id: string;
           name: string;
@@ -1674,6 +1676,52 @@ app.post("/", async (c) => {
         const lineNo = idx + 1;
         const lineSuffix = `-${String(lineNo).padStart(2, "0")}`;
 
+        // Fabric ID resolution from fabricCode — Scan PO OCR only ships
+        // the snapshot fabricCode (e.g. "KN390-2"); we need fabricId so
+        // the Edit form's fabric dropdown (keyed by id) pre-selects.
+        // Best-effort: a missing fabric leaves fabricId blank (legacy
+        // behavior).
+        const incomingFabricId = String(item.fabricId ?? "");
+        const incomingFabricCode = String(item.fabricCode ?? "");
+        let resolvedFabricId = incomingFabricId;
+        if (!resolvedFabricId && incomingFabricCode) {
+          try {
+            const fabRow = await c.var.DB.prepare(
+              "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
+            )
+              .bind(incomingFabricCode)
+              .first<{ id: string }>();
+            if (fabRow?.id) resolvedFabricId = fabRow.id;
+          } catch {
+            // Non-fatal — leave fabricId blank, frontend has its own fallback.
+          }
+        }
+
+        // Sofa seat-size normalization. The OCR pipeline ships sizeLabel
+        // as a bare number (e.g. "28") matching the SOFA Sizes catalog
+        // entry, but the Edit/Detail dropdowns key against quoted values
+        // (e.g. '28"'). Normalize once at the storage boundary so every
+        // downstream reader (Edit form, production sheet, etc.) sees the
+        // same shape. Only applies to SOFA items — bedframe sizeLabel is
+        // a free-form string like "Queen 5FT".
+        let normalizedSizeLabel =
+          (item.sizeLabel as string) ||
+          resolvedProduct?.sizeLabel ||
+          (item.sizeCode as string) ||
+          "";
+        if (
+          isSofaItem &&
+          normalizedSizeLabel &&
+          /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
+        ) {
+          normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
+        }
+        let normalizedSizeCode =
+          (item.sizeCode as string) || resolvedProduct?.sizeCode || "";
+        if (isSofaItem && !normalizedSizeCode && normalizedSizeLabel) {
+          normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
+        }
+
         return {
           id: (item.id as string) || genItemId(),
           lineNo,
@@ -1686,15 +1734,10 @@ app.post("/", async (c) => {
             (item.itemCategory as string) ||
             resolvedProduct?.category ||
             "BEDFRAME",
-          sizeCode:
-            (item.sizeCode as string) || resolvedProduct?.sizeCode || "",
-          sizeLabel:
-            (item.sizeLabel as string) ||
-            resolvedProduct?.sizeLabel ||
-            (item.sizeCode as string) ||
-            "",
-          fabricId: (item.fabricId as string) || "",
-          fabricCode: (item.fabricCode as string) || "",
+          sizeCode: normalizedSizeCode,
+          sizeLabel: normalizedSizeLabel,
+          fabricId: resolvedFabricId,
+          fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,
           divanHeightInches: item.divanHeightInches ?? null,
@@ -2733,6 +2776,39 @@ app.put("/:id", async (c) => {
               }
             : null;
 
+        // Same fabricId / sofa-sizeLabel normalization as the POST path —
+        // ensures editing+saving an OCR-created SO writes back cleaned
+        // values (so subsequent re-edits don't have to re-derive them).
+        const itemCategory = (item.itemCategory as string) || "BEDFRAME";
+        const isSofaItem = itemCategory === "SOFA";
+        const incomingFabricId = String(item.fabricId ?? "");
+        const incomingFabricCode = String(item.fabricCode ?? "");
+        let resolvedFabricId = incomingFabricId;
+        if (!resolvedFabricId && incomingFabricCode) {
+          try {
+            const fabRow = await c.var.DB.prepare(
+              "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
+            )
+              .bind(incomingFabricCode)
+              .first<{ id: string }>();
+            if (fabRow?.id) resolvedFabricId = fabRow.id;
+          } catch {
+            // Non-fatal.
+          }
+        }
+        let normalizedSizeLabel = (item.sizeLabel as string) || "";
+        if (
+          isSofaItem &&
+          normalizedSizeLabel &&
+          /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
+        ) {
+          normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
+        }
+        let normalizedSizeCode = (item.sizeCode as string) || "";
+        if (isSofaItem && !normalizedSizeCode && normalizedSizeLabel) {
+          normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
+        }
+
         return {
           id: (item.id as string) || genItemId(),
           lineNo,
@@ -2740,11 +2816,11 @@ app.put("/:id", async (c) => {
           productId: (item.productId as string) || "",
           productCode: (item.productCode as string) || "",
           productName: (item.productName as string) || "",
-          itemCategory: (item.itemCategory as string) || "BEDFRAME",
-          sizeCode: (item.sizeCode as string) || "",
-          sizeLabel: (item.sizeLabel as string) || "",
-          fabricId: (item.fabricId as string) || "",
-          fabricCode: (item.fabricCode as string) || "",
+          itemCategory,
+          sizeCode: normalizedSizeCode,
+          sizeLabel: normalizedSizeLabel,
+          fabricId: resolvedFabricId,
+          fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,
           divanHeightInches: item.divanHeightInches ?? null,

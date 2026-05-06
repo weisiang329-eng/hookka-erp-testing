@@ -215,12 +215,18 @@ export default function EditSalesOrderPage() {
     ],
   );
   const [initialSig, setInitialSig] = useState<string | null>(null);
+  // Track whether the deferred fabricId backfill (declared in the load-
+  // effect block below) has had a chance to run. The dirty-state
+  // baseline must wait for it — otherwise OCR-created SOs would flag
+  // themselves dirty the moment /api/fabrics arrives, for a backfill
+  // the user never triggered.
+  const [fabricBackfillDone, setFabricBackfillDone] = useState(false);
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- one-shot baseline snapshot when the loaded order arrives; deliberately excludes formSig so later edits don't reset the baseline */
   useEffect(() => {
-    if (!loading && order && initialSig === null) {
+    if (!loading && order && fabricBackfillDone && initialSig === null) {
       setInitialSig(formSig);
     }
-  }, [loading, order, initialSig]);
+  }, [loading, order, fabricBackfillDone, initialSig]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   const isDirty =
     !saving && !loading && initialSig !== null && initialSig !== formSig;
@@ -389,14 +395,24 @@ export default function EditSalesOrderPage() {
             //     (the DB doesn't carry a separate baseModel column on
             //     sales_order_items; we re-derive it so the Model dropdown
             //     pre-selects on edit instead of showing blank).
-            //   - seatHeight comes from sizeLabel e.g. '28"' (sizeCode is
-            //     just the numeric portion like "28").
+            //   - seatHeight comes from sizeLabel e.g. '28"'. Scan-PO OCR
+            //     ships sizeLabel as a bare number ("28") matching the
+            //     SOFA Sizes catalog entry; the Seat Size dropdown keys
+            //     against quoted values (e.g. '28"'), so when the stored
+            //     value is bare-numeric we append the inch suffix.
             const parsed = isSofa ? parseSofaCode(productCode) : { baseModel: "", module: "" };
             const rawSizeLabel = (item.sizeLabel as string) || "";
             const rawSizeCode = (item.sizeCode as string) || "";
+            const normalizeSeat = (s: string): string => {
+              const t = s.trim();
+              if (!t) return "";
+              if (t.includes('"')) return t;
+              return /^\d+(\.\d+)?$/.test(t) ? `${t}"` : t;
+            };
             const seatHeight = isSofa
               ? ((item.seatHeight as string) ||
-                 (rawSizeLabel.includes('"') ? rawSizeLabel : (rawSizeCode ? `${rawSizeCode}"` : "")))
+                 normalizeSeat(rawSizeLabel) ||
+                 normalizeSeat(rawSizeCode))
               : "";
             return {
               id: item.id as string,
@@ -408,9 +424,12 @@ export default function EditSalesOrderPage() {
                 ? parsed.baseModel
                 : ((item.baseModel as string) || productCode || ""),
               sizeCode: rawSizeCode,
-              sizeLabel: rawSizeLabel,
-              fabricId: item.fabricId as string,
-              fabricCode: item.fabricCode as string,
+              // Mirror the seat-size normalization into sizeLabel for
+              // sofa items so the Seat Size dropdown reads the same value
+              // it pre-selected against. Bedframes keep sizeLabel verbatim.
+              sizeLabel: isSofa && seatHeight ? seatHeight : rawSizeLabel,
+              fabricId: (item.fabricId as string) || "",
+              fabricCode: (item.fabricCode as string) || "",
               quantity: item.quantity as number,
               basePriceSen: item.basePriceSen as number,
               seatHeight,
@@ -419,11 +438,22 @@ export default function EditSalesOrderPage() {
               divanPriceSen: (item.divanPriceSen as number) || 0,
               legHeightInches: item.legHeightInches as number | null,
               legPriceSen: (item.legPriceSen as number) || 0,
+              // Special-orders multi-select pre-fill. Parse the stored
+              // comma/semicolon-joined string and resolve each token's
+              // canonical code. Hardcoded specialOrderOptions covers the
+              // legacy options; for user-added entries (added via Product
+              // Maintenance) we fall back to the same derived-code shape
+              // used by getAvailableSpecials so the multi-select checkbox
+              // still round-trips.
               specialOrders: (() => {
                 const raw = (item.specialOrder as string) || "";
                 const tokens = raw.split(/[;,]+/).map((s) => s.trim()).filter(Boolean);
                 return tokens
-                  .map((tok) => specialOrderOptions.find((o) => o.name === tok)?.code)
+                  .map((tok) => {
+                    const matched = specialOrderOptions.find((o) => o.name === tok);
+                    if (matched) return matched.code;
+                    return tok.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+                  })
                   .filter((c): c is string => Boolean(c));
               })(),
               specialOrder: (item.specialOrder as string) || "",
@@ -435,6 +465,35 @@ export default function EditSalesOrderPage() {
         setLoading(false);
       })();
   }, [orderResp, id]);
+
+  // Deferred fabricId backfill — when the loaded SO carries fabricCode
+  // but blank fabricId (the typical Scan-PO OCR shape), look up the id
+  // from the cached fabrics list as soon as it lands so the Fabric
+  // dropdown pre-selects. The mapping is a no-op once every line already
+  // has a fabricId, so user edits during the session aren't disturbed.
+  // Flips `fabricBackfillDone` (declared above) once both inputs have
+  // settled so the dirty-state baseline waits before snapshotting.
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot post-load
+     mutation: items is mutated only when fabricCode→fabricId resolves,
+     which happens once per SO load; the no-op-on-clean check above
+     guarantees idempotence on later renders. */
+  useEffect(() => {
+    if (loading) return;
+    if (fabricsResp === undefined) return;
+    setItems((prev) => {
+      let changed = false;
+      const next = prev.map((it) => {
+        if (it.fabricId || !it.fabricCode) return it;
+        const match = fabrics.find((f) => f.code === it.fabricCode);
+        if (!match) return it;
+        changed = true;
+        return { ...it, fabricId: match.id };
+      });
+      return changed ? next : prev;
+    });
+    setFabricBackfillDone(true);
+  }, [fabrics, loading, fabricsResp]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
 

@@ -2686,6 +2686,29 @@ function DepartmentLaborTab({
           gridId="department-labor"
           emptyMessage={loading ? "Loading..." : "No working hours in the selected date range."}
         />
+        {/* TOTAL row mirrors the top metric cards — added 2026-05-06 per
+            user request "添加 total labor 让我看到数额". Appears below the
+            grid as a prominent strip so the labor cost grand total is
+            visible alongside the per-department breakdown without forcing
+            the operator to scroll back to the top metric tiles. */}
+        {rows.length > 0 && (
+          <div className="mt-2 grid grid-cols-12 items-center rounded-lg border border-[#6B5C32]/30 bg-[#FAF7F0] px-4 py-3 text-sm font-semibold text-[#1F1D1B]">
+            <div className="col-span-5 flex items-center gap-2">
+              <DollarSign className="h-4 w-4 text-[#6B5C32]" />
+              <span>TOTAL</span>
+              <span className="text-xs font-normal text-[#6B7280]">
+                ({totals.depts} dept{totals.depts === 1 ? "" : "s"} with activity)
+              </span>
+            </div>
+            <div className="col-span-3 text-right tabular-nums">
+              {totals.hours.toFixed(1)}h
+            </div>
+            <div className="col-span-1 text-center text-[#6B7280]">—</div>
+            <div className="col-span-3 text-right tabular-nums text-[#6B5C32]">
+              {formatRM(totals.cost)}
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );

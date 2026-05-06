@@ -50,7 +50,13 @@ import {
 } from "./production-orders";
 import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
-import { loadLeadTimes, type LeadTimeMap } from "../lib/lead-times";
+import {
+  loadLeadTimes,
+  loadHookkaDDBuffer,
+  hookkaDDBufferFor,
+  addDays,
+  type LeadTimeMap,
+} from "../lib/lead-times";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import { getOrgId } from "../lib/tenant";
 
@@ -8904,6 +8910,47 @@ app.post("/revert-dos-to-draft", async (c) => {
 //
 // Will be deleted once the OCR migration window closes.
 // ---------------------------------------------------------------------------
+// One-shot backfill of sales_orders.hookkaExpectedDD = customerDeliveryDate - per-category buffer.
+// Picks up SOs where the column was left empty (early OCR-flow deploys before
+// the auto-derive fix landed, or any other path that skipped the calc).
+// Idempotent: only fills empty values.
+app.post("/backfill-so-expected-dd", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+  const buf = await loadHookkaDDBuffer(db);
+
+  const targetsRes = await db
+    .prepare(
+      `SELECT so.id, so.customerDeliveryDate,
+              (SELECT itemCategory FROM sales_order_items
+                WHERE salesOrderId = so.id ORDER BY lineNo LIMIT 1) AS firstCat
+         FROM sales_orders so
+        WHERE so.orgId = ?
+          AND (so.hookkaExpectedDD IS NULL OR so.hookkaExpectedDD = '')
+          AND so.customerDeliveryDate IS NOT NULL
+          AND so.customerDeliveryDate <> ''`,
+    )
+    .bind(orgId)
+    .all<{ id: string; customerDeliveryDate: string; firstCat: string | null }>();
+  const targets = targetsRes.results ?? [];
+
+  let updated = 0;
+  for (const t of targets) {
+    const cat = t.firstCat || "BEDFRAME";
+    const days = hookkaDDBufferFor(buf, cat);
+    const expected = addDays(t.customerDeliveryDate.slice(0, 10), -days);
+    await db
+      .prepare("UPDATE sales_orders SET hookkaExpectedDD = ? WHERE id = ?")
+      .bind(expected, t.id)
+      .run();
+    updated++;
+  }
+
+  return c.json({ success: true, targetsFound: targets.length, updated });
+});
+
 app.post("/backfill-so-reference", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "update");
   if (denied) return denied;

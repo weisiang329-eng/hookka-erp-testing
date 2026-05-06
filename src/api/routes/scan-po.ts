@@ -1492,6 +1492,246 @@ app.put("/customer-rules/:customerId", async (c) => {
   });
 });
 
+// ===========================================================================
+// POST /api/scan-po/customer-rules/:customerId/distill
+//
+// Phase 6 Layer 3 — auto-distill a per-customer rules block from the gold
+// sample pool. Loads every gold-marked sample for this customer, ships them
+// to Claude with a meta-prompt that asks for a concise customer-specific
+// rule block (sizes, fabric codes, special-order phrasings, drawer
+// conventions, sofa shorthand, anything bespoke), and stores the returned
+// text into customers.ocrPromptRules — REPLACING any existing value (this
+// is "regenerate from gold pool", not "merge with existing").
+//
+// Sample selection:
+//   • isGold = 1 only (operator-confirmed, high-quality extractions)
+//   • Match by customerHint = customer.name OR poIdentifier prefix matching
+//     the customer's PO format (cheap LIKE on customer.code prefix as a
+//     fallback heuristic — POs commonly start with the customer code).
+//   • Cap at 50 most-recent rows to keep input tokens bounded.
+//   • Floor at 2 — fewer than 2 samples and we refuse without burning an
+//     API call (one example isn't a pattern).
+//
+// RBAC: customers:update (same gate as the PUT /customer-rules endpoint).
+// ===========================================================================
+const DISTILL_META_PROMPT = `You are reviewing operator-confirmed correct extractions of customer Purchase Orders for a furniture manufacturer (Hookka). Your task is to write a concise customer-specific OCR rule block that captures the patterns unique to THIS customer's POs so a future OCR call applies them automatically.
+
+Look at the patterns in the confirmed extractions below and identify what is BESPOKE TO THIS CUSTOMER:
+  • Their PO number format (prefix, length, letter/digit pattern).
+  • The size codes they use (e.g. "(K)", "(Q)", "K-size", "Queen", etc.).
+  • Their fabric code conventions (prefix families like PC151-*, KN390-*, BO315-*).
+  • Their spec-line shorthand for divan / leg / gap / drawer / no-leg phrasings.
+  • Sofa module shorthand (1+1+1, 2+L, 1R+1R, "3 Seater" splits, etc.).
+  • Special-order phrasings they use in handwritten notes (urgency cues, fabric overrides, backrest specials).
+  • Any letterhead / header layout cues that identify them.
+  • Hub / state defaults if they consistently ship to one location.
+  • Quirks that conflict with the universal rules — call those out explicitly.
+
+DO NOT restate universal rules that apply to all customers.
+DO NOT enumerate every line item from the examples.
+DO NOT write a generic OCR primer.
+DO write 100-300 words of plain prose, focused on what is DIFFERENT about this customer.
+DO use bullet points or short paragraphs. No markdown headers, no fences, no preamble, no closing.
+
+Output ONLY the rule text. The very first character of your response must be a letter or a bullet marker (•, -, *). Anything else will be stored verbatim into the prompt and corrupt downstream extractions.`;
+
+app.post("/customer-rules/:customerId/distill", async (c) => {
+  const denied = await requirePermission(c, "customers", "update");
+  if (denied) return denied;
+
+  const apiKey = c.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return c.json(
+      {
+        success: false,
+        error:
+          "ANTHROPIC_API_KEY not configured. Run `npx wrangler secret put ANTHROPIC_API_KEY` to enable rule distillation.",
+      },
+      500,
+    );
+  }
+
+  await ensureScanPoColumns(c.var.DB as unknown as DBLike);
+  // Self-apply isGold column too — the distill endpoint depends on it and
+  // older Supabase isolates may not have run the confirm endpoint yet.
+  try {
+    await (c.var.DB as unknown as DBLike)
+      .prepare(
+        "ALTER TABLE po_scan_samples ADD COLUMN IF NOT EXISTS isGold INTEGER NOT NULL DEFAULT 0",
+      )
+      .bind()
+      .run();
+  } catch {
+    /* best-effort */
+  }
+
+  const customerId = c.req.param("customerId");
+  const orgId = getOrgId(c);
+  const customer = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      "SELECT id, code, name FROM customers WHERE id = ? AND orgId = ?",
+    )
+    .bind(customerId, orgId)
+    .first<{ id: string; code: string; name: string }>();
+  if (!customer) {
+    return c.json({ success: false, error: "Customer not found." }, 404);
+  }
+
+  // Sample selection: gold rows whose customerHint matches the customer's
+  // name (case-insensitive exact) OR whose poIdentifier starts with the
+  // customer's code (cheap heuristic — operator POs typically use the
+  // customer code as a prefix). 50 row cap, newest first.
+  const samplesRes = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      `SELECT id, correctedJson, customerHint, poIdentifier, createdAt
+         FROM po_scan_samples
+         WHERE isGold = 1
+           AND correctedJson IS NOT NULL
+           AND (
+                 UPPER(customerHint) = UPPER(?)
+              OR UPPER(poIdentifier) LIKE UPPER(?)
+           )
+         ORDER BY createdAt DESC
+         LIMIT 50`,
+    )
+    .bind(customer.name, `${customer.code}%`)
+    .all<{
+      id: string;
+      correctedJson: string | null;
+      customerHint: string | null;
+      poIdentifier: string | null;
+      createdAt: string | null;
+    }>();
+  const rows = (samplesRes.results ?? []).filter((r) => r.correctedJson);
+
+  if (rows.length < 2) {
+    return c.json(
+      {
+        success: false,
+        error: `Need at least 2 gold samples to distill rules; this customer has ${rows.length}.`,
+      },
+      400,
+    );
+  }
+
+  // Pack the examples into a single user-message block. Keep them as raw
+  // JSON so Claude can see the structured fields (productCode, fabricCode,
+  // rawSpec, specialOrder, etc.) — that's where the patterns live.
+  const examplesText = rows
+    .map((r, i) => `Example ${i + 1} (PO: ${r.poIdentifier ?? "—"}):\n${r.correctedJson}`)
+    .join("\n\n");
+
+  const userPayload =
+    `Customer: ${customer.name} (code: ${customer.code})\n\n` +
+    `Here are ${rows.length} confirmed correct extractions for this customer. Look at the patterns in their PO format and write the customer-specific rule block:\n\n` +
+    examplesText;
+
+  let distilledText = "";
+  let errorMsg: string | null = null;
+  let tokensIn = 0;
+  let tokensOut = 0;
+
+  try {
+    const resp = await fetch(ANTHROPIC_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: CLAUDE_MODEL,
+        max_tokens: 2048,
+        // Determinism: same gold pool → same distilled rules. Matches the
+        // rest of scan-po.ts.
+        temperature: 0,
+        system: DISTILL_META_PROMPT,
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: userPayload }],
+          },
+        ],
+      }),
+    });
+
+    const bodyText = await resp.text();
+    if (!resp.ok) {
+      errorMsg = `Anthropic ${resp.status}: ${bodyText.slice(0, 500)}`;
+    } else {
+      let parsedResp: AnthropicResponse & {
+        usage?: {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        };
+      };
+      try {
+        parsedResp = JSON.parse(bodyText);
+      } catch {
+        errorMsg = `Anthropic returned non-JSON: ${bodyText.slice(0, 300)}`;
+        parsedResp = {};
+      }
+      if (parsedResp.error) {
+        errorMsg = `Anthropic: ${parsedResp.error.type}: ${parsedResp.error.message}`;
+      } else {
+        tokensIn = parsedResp.usage?.input_tokens ?? 0;
+        tokensOut = parsedResp.usage?.output_tokens ?? 0;
+        const firstText =
+          parsedResp.content?.find((b) => b.type === "text")?.text ?? "";
+        // The distill output is plain prose, not JSON — but Claude
+        // sometimes wraps in fences anyway. Strip fences but DO NOT use
+        // stripJsonFences (that one slices to first/last brace and would
+        // truncate the prose). Just remove leading/trailing ``` blocks.
+        let cleaned = firstText.trim();
+        const fenceRe = /^```(?:\w+)?\s*\n?([\s\S]*?)\n?```\s*$/;
+        const m = cleaned.match(fenceRe);
+        if (m) cleaned = m[1].trim();
+        distilledText = cleaned;
+      }
+    }
+  } catch (e) {
+    errorMsg = `Network/fetch error: ${(e as Error).message}`;
+  }
+
+  if (errorMsg || !distilledText) {
+    return c.json(
+      { success: false, error: errorMsg ?? "Claude returned empty rules." },
+      502,
+    );
+  }
+
+  // Soft cap — same 32k char ceiling as the PUT endpoint so the cached
+  // prefix doesn't blow up if Claude produces an unexpectedly long block.
+  if (distilledText.length > 32_000) {
+    distilledText = distilledText.slice(0, 32_000);
+  }
+
+  // REPLACE existing rules (regenerate-from-gold-pool, not merge).
+  const result = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      "UPDATE customers SET ocrPromptRules = ? WHERE id = ? AND orgId = ?",
+    )
+    .bind(distilledText, customerId, orgId)
+    .run();
+
+  if (!result.success || result.meta.changes === 0) {
+    return c.json(
+      { success: false, error: "Customer update failed after distillation." },
+      500,
+    );
+  }
+
+  return c.json({
+    success: true,
+    rulesGenerated: distilledText,
+    sampleCount: rows.length,
+    tokensIn,
+    tokensOut,
+  });
+});
+
 // Silences "imported but unused" — the type is only used as a structural hint.
 export type { SampleRow };
 

@@ -1,16 +1,24 @@
-import { useMemo } from "react";
+import { useMemo, useState, useCallback } from "react";
 import { AuditHistoryPanel } from "@/components/audit/AuditHistoryPanel";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { useToast } from "@/components/ui/toast";
 import { formatCurrency, formatDate } from "@/lib/utils";
 // PDF generators dynamic-imported at click handlers so the 1MB jspdf
 // vendor chunk only ships when the user actually downloads.
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
-import type { PurchaseOrder } from "@/types";
+import type {
+  PurchaseOrder,
+  POItem,
+  Supplier,
+  RawMaterial,
+  SupplierMaterialBinding,
+} from "@/types";
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
-  CheckCircle, Send, Lock,
+  CheckCircle, Send, Lock, Pencil, Save, X, Trash2,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
@@ -32,14 +40,110 @@ function getStepIndex(status: string): number {
   return idx >= 0 ? idx : 0;
 }
 
+// Edit-mode line item shape — mirrors POFormDialog's POLineItem so the
+// inline edit form is identical to creation. We carry through the
+// existing item id (when present) so the PUT replace-all picks up the
+// same row identity, and we split materialName ("rmCode - description")
+// back into its parts so the operator gets the same fields they see in
+// the create modal.
+type EditLine = {
+  id?: string;
+  rmCode: string;
+  rmDescription: string;
+  supplierId: string;
+  supplierName: string;
+  supplierSku: string;
+  quantity: number;
+  unitPriceSen: number;
+  unit: string;
+  materialCategory: string;
+  receivedQty: number;
+};
+
+function poItemToEditLine(it: POItem): EditLine {
+  const name = it.materialName || "";
+  const dashIdx = name.indexOf(" - ");
+  const rmCode = dashIdx > 0 ? name.slice(0, dashIdx).trim() : name.trim();
+  const rmDescription = dashIdx > 0 ? name.slice(dashIdx + 3).trim() : "";
+  return {
+    id: it.id,
+    rmCode,
+    rmDescription,
+    supplierId: "",
+    supplierName: "",
+    supplierSku: it.supplierSKU,
+    quantity: it.quantity,
+    unitPriceSen: it.unitPriceSen,
+    unit: it.unit,
+    materialCategory: it.materialCategory,
+    receivedQty: it.receivedQty,
+  };
+}
+
 export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
+  const { toast } = useToast();
   const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
     () => (resp?.success ? resp.data ?? null : null),
     [resp]
   );
   const error: string | null = fetchError ?? (resp && resp.success === false ? resp.error || "Purchase order not found" : null);
+
+  // Auxiliary data needed for inline edit. Same endpoints procurement/index
+  // already pulls — useCachedJson dedupes if the user navigated from there.
+  const { data: supResp } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
+  const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
+  const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
+
+  const allSuppliers: Supplier[] = useMemo(
+    () => (supResp?.success ? supResp.data ?? [] : []),
+    [supResp]
+  );
+  const rawMaterials: RawMaterial[] = useMemo(
+    () => (invResp?.success ? invResp.data?.rawMaterials ?? [] : []),
+    [invResp]
+  );
+  const supplierMaterialBindings: SupplierMaterialBinding[] = useMemo(() => {
+    const bindings = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
+    return Array.isArray(bindings) ? bindings : [];
+  }, [bindingsResp]);
+
+  // ------- Edit mode state -------
+  const [editing, setEditing] = useState(false);
+  const [editExpectedDate, setEditExpectedDate] = useState("");
+  const [editNotes, setEditNotes] = useState("");
+  const [editLines, setEditLines] = useState<EditLine[]>([]);
+  const [rmSearch, setRmSearch] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const resolveSupplierName = useCallback(
+    (sid: string): string => {
+      const sup = allSuppliers.find((s) => s.id === sid);
+      return sup ? `${sup.code} - ${sup.name}` : sid;
+    },
+    [allSuppliers],
+  );
+
+  // Snapshot the current PO into edit-mode state. Called from the Edit
+  // button click handler (not via useEffect) — react-hooks/set-state-in-effect
+  // explicitly forbids synchronous setState chains inside an effect, and
+  // the snapshot only ever needs to happen once per Edit click anyway.
+  const snapshotForEdit = useCallback((source: PurchaseOrder) => {
+    setEditExpectedDate(source.expectedDate ?? "");
+    setEditNotes(source.notes ?? "");
+    setEditLines(
+      source.items.map((it) => {
+        const base = poItemToEditLine(it);
+        const sid = source.supplierId ?? "";
+        return {
+          ...base,
+          supplierId: sid,
+          supplierName: sid ? resolveSupplierName(sid) : "",
+        };
+      }),
+    );
+  }, [resolveSupplierName]);
 
   const handleAdvanceStatus = async (newStatus: string) => {
     if (!po) return;
@@ -58,6 +162,139 @@ export default function PurchaseOrderDetailPage() {
       fetchPO();
     } catch {
       console.error("Failed to update status");
+    }
+  };
+
+  // ---- Edit-mode helpers ----
+  const filteredRMs = useMemo(() => {
+    const active = rawMaterials.filter((rm) => rm.isActive);
+    if (!rmSearch.trim()) return active;
+    const q = rmSearch.toLowerCase();
+    return active.filter(
+      (rm) =>
+        rm.itemCode.toLowerCase().includes(q) ||
+        rm.description.toLowerCase().includes(q),
+    );
+  }, [rawMaterials, rmSearch]);
+
+  const addLineFromRM = (rmCode: string) => {
+    const rm = rawMaterials.find((r) => r.itemCode === rmCode);
+    if (!rm) return;
+    const bindings = supplierMaterialBindings.filter((b) => b.materialCode === rmCode);
+    const main = bindings.find((b) => b.isMainSupplier) ?? bindings[0];
+    const sid = main?.supplierId ?? "";
+    setEditLines((prev) => [
+      ...prev,
+      {
+        rmCode: rm.itemCode,
+        rmDescription: rm.description,
+        supplierId: sid,
+        supplierName: sid ? resolveSupplierName(sid) : "",
+        supplierSku: main?.supplierSku ?? "",
+        quantity: main?.moq ?? 1,
+        unitPriceSen: main?.unitPrice ?? 0,
+        unit: rm.baseUOM,
+        materialCategory: rm.itemGroup,
+        receivedQty: 0,
+      },
+    ]);
+    setRmSearch("");
+  };
+
+  const removeLine = (idx: number) => {
+    setEditLines((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const updateLine = (idx: number, patch: Partial<EditLine>) => {
+    setEditLines((prev) => {
+      const next = [...prev];
+      next[idx] = { ...next[idx], ...patch };
+      return next;
+    });
+  };
+
+  const switchLineSupplier = (idx: number, sid: string) => {
+    if (!sid) return;
+    const line = editLines[idx];
+    const binding = supplierMaterialBindings.find(
+      (b) => b.materialCode === line.rmCode && b.supplierId === sid,
+    );
+    updateLine(idx, {
+      supplierId: sid,
+      supplierName: resolveSupplierName(sid),
+      supplierSku: binding?.supplierSku ?? line.supplierSku,
+      unitPriceSen: binding?.unitPrice ?? line.unitPriceSen,
+    });
+  };
+
+  // Header supplier is derived from line items (single-supplier invariant
+  // matches the create flow). Mixed-supplier blocks save.
+  const headerSupplierId = editLines.length > 0 ? editLines[0].supplierId : "";
+  const editHasMixed =
+    editLines.length > 1 && editLines.some((l) => l.supplierId !== editLines[0].supplierId);
+  const editHasUnbound = editLines.some((l) => !l.supplierId);
+  const editSubtotalSen = editLines.reduce((s, l) => s + l.quantity * l.unitPriceSen, 0);
+
+  const startEdit = () => {
+    if (po) snapshotForEdit(po);
+    setEditing(true);
+  };
+  const cancelEdit = () => {
+    setEditing(false);
+    setRmSearch("");
+  };
+
+  const saveEdits = async () => {
+    if (!po) return;
+    if (editLines.length === 0) {
+      toast.error("PO must have at least one line item");
+      return;
+    }
+    if (editHasUnbound) {
+      toast.error("Pick a supplier for every line");
+      return;
+    }
+    if (editHasMixed) {
+      toast.error("Lines must share a single supplier");
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        supplierId: headerSupplierId,
+        supplierName: editLines[0].supplierName || resolveSupplierName(headerSupplierId),
+        expectedDate: editExpectedDate,
+        notes: editNotes,
+        items: editLines.map((l) => ({
+          id: l.id,
+          materialCategory: l.materialCategory,
+          materialName: `${l.rmCode} - ${l.rmDescription}`,
+          supplierSKU: l.supplierSku,
+          quantity: l.quantity,
+          unitPriceSen: l.unitPriceSen,
+          unit: l.unit,
+          receivedQty: l.receivedQty,
+        })),
+      };
+      const res = await fetch(`/api/purchase-orders/${po.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to save (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grns");
+      fetchPO();
+      toast.success("Purchase order updated");
+      setEditing(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error saving PO");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -86,6 +323,7 @@ export default function PurchaseOrderDetailPage() {
 
   const currentStepIdx = getStepIndex(po.status);
   const isCancelled = po.status === "CANCELLED";
+  const isDraft = po.status === "DRAFT";
 
   // Determine available status advancement actions
   const statusActions: { label: string; status: string; variant: "primary" | "outline" }[] = [];
@@ -126,6 +364,11 @@ export default function PurchaseOrderDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {isDraft && !editing && (
+            <Button variant="outline" onClick={startEdit}>
+              <Pencil className="h-4 w-4" /> Edit
+            </Button>
+          )}
           <Button variant="outline" onClick={async () => {
             const { generatePurchaseOrderPdf } = await import("@/lib/generate-purchase-order-pdf");
             generatePurchaseOrderPdf(po);
@@ -201,124 +444,353 @@ export default function PurchaseOrderDetailPage() {
         </CardContent>
       </Card>
 
-      {/* PO Details + Items */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left: Details */}
-        <Card className="lg:col-span-1">
+      {/* Edit-mode form (DRAFT only). Replaces the read-only details/items
+          cards while editing — the operator sees the same shape they get
+          from the Create modal so there's no UI drift. */}
+      {editing && isDraft && (
+        <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <FileText className="h-4 w-4 text-[#6B5C32]" /> Order Details
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <div className="grid grid-cols-2 gap-y-3 text-sm">
-              <span className="text-[#6B7280]">PO Number</span>
-              <span className="font-medium text-[#1F1D1B]">{po.poNo}</span>
-
-              <span className="text-[#6B7280]">Supplier</span>
-              <span className="font-medium text-[#1F1D1B]">{po.supplierName}</span>
-
-              <span className="text-[#6B7280]">Order Date</span>
-              <span className="text-[#4B5563]">{formatDate(po.orderDate)}</span>
-
-              <span className="text-[#6B7280]">Expected Date</span>
-              <span className="text-[#4B5563]">{po.expectedDate ? formatDate(po.expectedDate) : "-"}</span>
-
-              <span className="text-[#6B7280]">Received Date</span>
-              <span className="text-[#4B5563]">{po.receivedDate ? formatDate(po.receivedDate) : "-"}</span>
-
-              <span className="text-[#6B7280]">Status</span>
-              <span><Badge variant="status" status={po.status} /></span>
-
-              <span className="text-[#6B7280]">Received</span>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Pencil className="h-4 w-4 text-[#6B5C32]" /> Edit Purchase Order
+              </CardTitle>
               <div className="flex items-center gap-2">
-                <div className="w-16 h-2 bg-[#E2DDD8] rounded-full overflow-hidden">
-                  <div className="h-full bg-[#6B5C32] rounded-full" style={{ width: `${receivePct}%` }} />
+                <Button type="button" variant="outline" onClick={cancelEdit} disabled={saving}>
+                  <X className="h-4 w-4" /> Cancel
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={saveEdits}
+                  disabled={saving || editLines.length === 0 || editHasUnbound || editHasMixed}
+                  title={
+                    editHasUnbound
+                      ? "Pick a supplier for every line"
+                      : editHasMixed
+                        ? "Lines must share a single supplier"
+                        : editLines.length === 0
+                          ? "Add at least one line"
+                          : undefined
+                  }
+                >
+                  <Save className="h-4 w-4" /> {saving ? "Saving…" : "Save Changes"}
+                </Button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Supplier (from line items)</label>
+                <div className="flex h-10 w-full items-center rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-[#374151]">
+                  {editLines.length === 0
+                    ? "Add items to determine supplier"
+                    : editHasMixed
+                      ? "Mixed suppliers (multiple)"
+                      : (editLines[0].supplierName || "Pick supplier on line(s) below")}
                 </div>
-                <span className="text-xs text-[#6B7280]">{receivePct}%</span>
+                {editHasMixed && (
+                  <p className="text-xs text-[#9A3A2D] mt-1 font-medium">
+                    Lines must share a single supplier
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-[#6B7280] mb-1">Expected Date</label>
+                <Input
+                  type="date"
+                  value={editExpectedDate}
+                  onChange={(e) => setEditExpectedDate(e.target.value)}
+                />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-[#6B7280] mb-1">Notes</label>
+                <Input
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  placeholder="Order notes…"
+                />
               </div>
             </div>
 
-            {po.notes && (
-              <div className="pt-3 border-t border-[#E2DDD8]">
-                <p className="text-xs font-medium text-[#6B7280] mb-1">Notes</p>
-                <p className="text-sm text-[#4B5563]">{po.notes}</p>
+            {/* Add line by RM code */}
+            <div className="relative">
+              <label className="block text-xs text-[#6B7280] mb-1">Add material by RM code</label>
+              <Input
+                className="h-9 text-sm"
+                value={rmSearch}
+                onChange={(e) => setRmSearch(e.target.value)}
+                placeholder="Search by RM code or description..."
+              />
+              {rmSearch.trim() && filteredRMs.length > 0 && (
+                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md shadow-lg">
+                  {filteredRMs.slice(0, 20).map((rm) => (
+                    <button
+                      key={rm.id}
+                      type="button"
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0"
+                      onClick={() => addLineFromRM(rm.itemCode)}
+                    >
+                      <span className="font-medium text-[#1F1D1B]">{rm.itemCode}</span>
+                      <span className="text-[#6B7280] ml-2">{rm.description}</span>
+                      <span className="text-[#9CA3AF] ml-2">({rm.baseUOM})</span>
+                    </button>
+                  ))}
+                  {filteredRMs.length > 20 && (
+                    <div className="px-3 py-2 text-xs text-[#9CA3AF]">
+                      Showing 20 of {filteredRMs.length}. Refine search.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Line items */}
+            {editLines.length > 0 && (
+              <div className="space-y-2">
+                {editLines.map((line, idx) => {
+                  const bindings = supplierMaterialBindings.filter((b) => b.materialCode === line.rmCode);
+                  return (
+                    <div key={idx} className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
+                      <div className="grid grid-cols-8 gap-2 items-end">
+                        <div className="col-span-2">
+                          <label className="block text-xs text-[#6B7280] mb-1">RM Code</label>
+                          <div className="h-8 flex items-center px-2 text-xs font-medium text-[#1F1D1B] bg-white rounded border border-[#E2DDD8]">
+                            {line.rmCode}
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs text-[#6B7280] mb-1">Description</label>
+                          <div className="h-8 flex items-center px-2 text-xs text-[#374151] bg-white rounded border border-[#E2DDD8] truncate" title={line.rmDescription}>
+                            {line.rmDescription || "-"}
+                          </div>
+                        </div>
+                        <div className="col-span-2">
+                          <label className="block text-xs text-[#6B7280] mb-1">
+                            Supplier{!line.supplierId && <span className="ml-1 text-[#9A3A2D]">*</span>}
+                          </label>
+                          {bindings.length > 0 ? (
+                            <select
+                              className="flex h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
+                              value={line.supplierId}
+                              onChange={(e) => switchLineSupplier(idx, e.target.value)}
+                            >
+                              <option value="">Pick supplier…</option>
+                              {bindings.map((b) => (
+                                <option key={b.id} value={b.supplierId}>
+                                  {resolveSupplierName(b.supplierId)}{b.isMainSupplier ? " (main)" : ""}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <select
+                              className={`flex h-8 w-full rounded border bg-white px-2 text-xs ${
+                                line.supplierId ? "border-[#E2DDD8]" : "border-[#9A3A2D]"
+                              }`}
+                              value={line.supplierId}
+                              onChange={(e) =>
+                                updateLine(idx, {
+                                  supplierId: e.target.value,
+                                  supplierName: e.target.value ? resolveSupplierName(e.target.value) : "",
+                                })
+                              }
+                            >
+                              <option value="">Pick supplier…</option>
+                              {allSuppliers.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.code} - {s.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-xs text-[#6B7280] mb-1">SKU</label>
+                          <Input
+                            className="h-8 text-xs"
+                            value={line.supplierSku}
+                            onChange={(e) => updateLine(idx, { supplierSku: e.target.value })}
+                          />
+                        </div>
+                        <div className="flex justify-end">
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 text-[#9A3A2D] hover:text-[#7A2E24]"
+                            onClick={() => removeLine(idx)}
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-8 gap-2 items-end mt-2">
+                        <div>
+                          <label className="block text-xs text-[#6B7280] mb-1">Qty</label>
+                          <Input
+                            className="h-8 text-xs"
+                            type="number"
+                            min={0}
+                            onFocus={(e) => e.currentTarget.select()}
+                            value={line.quantity}
+                            onChange={(e) => updateLine(idx, { quantity: Number(e.target.value) })}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-[#6B7280] mb-1">Price (sen)</label>
+                          <Input
+                            className="h-8 text-xs"
+                            type="number"
+                            min={0}
+                            onFocus={(e) => e.currentTarget.select()}
+                            value={line.unitPriceSen}
+                            onChange={(e) => updateLine(idx, { unitPriceSen: Number(e.target.value) })}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-[#6B7280] mb-1">Unit</label>
+                          <div className="h-8 flex items-center px-2 text-xs text-[#374151] bg-white rounded border border-[#E2DDD8]">
+                            {line.unit}
+                          </div>
+                        </div>
+                        <div className="col-span-5 flex items-end justify-end">
+                          <span className="text-xs font-medium text-[#1F1D1B]">
+                            Line total: {formatCurrency(line.quantity * line.unitPriceSen)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="text-right text-sm font-semibold text-[#1F1D1B] pr-2">
+                  Total: {formatCurrency(editSubtotalSen)}
+                </div>
               </div>
             )}
-
-            {/* Amount summary */}
-            <div className="pt-3 border-t border-[#E2DDD8] space-y-1">
-              <div className="flex justify-between text-sm">
-                <span className="text-[#6B7280]">Subtotal</span>
-                <span className="text-[#1F1D1B]">{formatCurrency(po.subtotalSen)}</span>
-              </div>
-              <div className="flex justify-between text-sm font-bold">
-                <span className="text-[#6B5C32]">Total</span>
-                <span className="text-[#6B5C32]">{formatCurrency(po.totalSen)}</span>
-              </div>
-            </div>
           </CardContent>
         </Card>
+      )}
 
-        {/* Right: Items Table */}
-        <Card className="lg:col-span-2">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex items-center gap-2 text-sm">
-              <Package className="h-4 w-4 text-[#6B5C32]" /> Items ({po.items.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
-                    <th className="h-10 px-4 text-left font-medium text-[#374151]">#</th>
-                    <th className="h-10 px-4 text-left font-medium text-[#374151]">Item Code</th>
-                    <th className="h-10 px-4 text-left font-medium text-[#374151]">Description</th>
-                    <th className="h-10 px-4 text-center font-medium text-[#374151]">Unit</th>
-                    <th className="h-10 px-4 text-right font-medium text-[#374151]">Qty</th>
-                    <th className="h-10 px-4 text-right font-medium text-[#374151]">Received</th>
-                    <th className="h-10 px-4 text-right font-medium text-[#374151]">Unit Price</th>
-                    <th className="h-10 px-4 text-right font-medium text-[#374151]">Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {po.items.map((item, idx) => {
-                    const isComplete = item.receivedQty >= item.quantity;
-                    const hasPartial = item.receivedQty > 0 && item.receivedQty < item.quantity;
-                    return (
-                      <tr key={item.id} className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
-                        <td className="h-12 px-4 text-[#6B7280]">{idx + 1}</td>
-                        <td className="h-12 px-4 font-medium text-[#6B5C32]">{item.supplierSKU}</td>
-                        <td className="h-12 px-4 text-[#1F1D1B]">{item.materialName}</td>
-                        <td className="h-12 px-4 text-center text-[#6B7280]">{item.unit}</td>
-                        <td className="h-12 px-4 text-right text-[#4B5563]">{item.quantity}</td>
-                        <td className={`h-12 px-4 text-right font-medium ${isComplete ? "text-green-600" : hasPartial ? "text-amber-600" : "text-[#6B7280]"}`}>
-                          {item.receivedQty}
-                        </td>
-                        <td className="h-12 px-4 text-right text-[#4B5563]">{formatCurrency(item.unitPriceSen)}</td>
-                        <td className="h-12 px-4 text-right font-medium text-[#1F1D1B]">{formatCurrency(item.totalSen)}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr className="bg-[#F0ECE9]">
-                    <td colSpan={4} className="h-10 px-4 font-semibold text-[#374151]">Total</td>
-                    <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalOrdered}</td>
-                    <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalReceived}</td>
-                    <td className="h-10 px-4"></td>
-                    <td className="h-10 px-4 text-right font-bold text-[#6B5C32]">{formatCurrency(po.totalSen)}</td>
-                  </tr>
-                </tfoot>
-              </table>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+      {/* PO Details + Items (read-only — hidden while editing) */}
+      {!editing && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          {/* Left: Details */}
+          <Card className="lg:col-span-1">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <FileText className="h-4 w-4 text-[#6B5C32]" /> Order Details
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-2 gap-y-3 text-sm">
+                <span className="text-[#6B7280]">PO Number</span>
+                <span className="font-medium text-[#1F1D1B]">{po.poNo}</span>
+
+                <span className="text-[#6B7280]">Supplier</span>
+                <span className="font-medium text-[#1F1D1B]">{po.supplierName}</span>
+
+                <span className="text-[#6B7280]">Order Date</span>
+                <span className="text-[#4B5563]">{formatDate(po.orderDate)}</span>
+
+                <span className="text-[#6B7280]">Expected Date</span>
+                <span className="text-[#4B5563]">{po.expectedDate ? formatDate(po.expectedDate) : "-"}</span>
+
+                <span className="text-[#6B7280]">Received Date</span>
+                <span className="text-[#4B5563]">{po.receivedDate ? formatDate(po.receivedDate) : "-"}</span>
+
+                <span className="text-[#6B7280]">Status</span>
+                <span><Badge variant="status" status={po.status} /></span>
+
+                <span className="text-[#6B7280]">Received</span>
+                <div className="flex items-center gap-2">
+                  <div className="w-16 h-2 bg-[#E2DDD8] rounded-full overflow-hidden">
+                    <div className="h-full bg-[#6B5C32] rounded-full" style={{ width: `${receivePct}%` }} />
+                  </div>
+                  <span className="text-xs text-[#6B7280]">{receivePct}%</span>
+                </div>
+              </div>
+
+              {po.notes && (
+                <div className="pt-3 border-t border-[#E2DDD8]">
+                  <p className="text-xs font-medium text-[#6B7280] mb-1">Notes</p>
+                  <p className="text-sm text-[#4B5563] whitespace-pre-line">{po.notes}</p>
+                </div>
+              )}
+
+              {/* Amount summary */}
+              <div className="pt-3 border-t border-[#E2DDD8] space-y-1">
+                <div className="flex justify-between text-sm">
+                  <span className="text-[#6B7280]">Subtotal</span>
+                  <span className="text-[#1F1D1B]">{formatCurrency(po.subtotalSen)}</span>
+                </div>
+                <div className="flex justify-between text-sm font-bold">
+                  <span className="text-[#6B5C32]">Total</span>
+                  <span className="text-[#6B5C32]">{formatCurrency(po.totalSen)}</span>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Right: Items Table */}
+          <Card className="lg:col-span-2">
+            <CardHeader className="pb-3">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Package className="h-4 w-4 text-[#6B5C32]" /> Items ({po.items.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="rounded-md border border-[#E2DDD8] overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                      <th className="h-10 px-4 text-left font-medium text-[#374151]">#</th>
+                      <th className="h-10 px-4 text-left font-medium text-[#374151]">Item Code</th>
+                      <th className="h-10 px-4 text-left font-medium text-[#374151]">Description</th>
+                      <th className="h-10 px-4 text-center font-medium text-[#374151]">Unit</th>
+                      <th className="h-10 px-4 text-right font-medium text-[#374151]">Qty</th>
+                      <th className="h-10 px-4 text-right font-medium text-[#374151]">Received</th>
+                      <th className="h-10 px-4 text-right font-medium text-[#374151]">Unit Price</th>
+                      <th className="h-10 px-4 text-right font-medium text-[#374151]">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {po.items.map((item, idx) => {
+                      const isComplete = item.receivedQty >= item.quantity;
+                      const hasPartial = item.receivedQty > 0 && item.receivedQty < item.quantity;
+                      return (
+                        <tr key={item.id} className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
+                          <td className="h-12 px-4 text-[#6B7280]">{idx + 1}</td>
+                          <td className="h-12 px-4 font-medium text-[#6B5C32]">{item.supplierSKU}</td>
+                          <td className="h-12 px-4 text-[#1F1D1B]">{item.materialName}</td>
+                          <td className="h-12 px-4 text-center text-[#6B7280]">{item.unit}</td>
+                          <td className="h-12 px-4 text-right text-[#4B5563]">{item.quantity}</td>
+                          <td className={`h-12 px-4 text-right font-medium ${isComplete ? "text-green-600" : hasPartial ? "text-amber-600" : "text-[#6B7280]"}`}>
+                            {item.receivedQty}
+                          </td>
+                          <td className="h-12 px-4 text-right text-[#4B5563]">{formatCurrency(item.unitPriceSen)}</td>
+                          <td className="h-12 px-4 text-right font-medium text-[#1F1D1B]">{formatCurrency(item.totalSen)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                  <tfoot>
+                    <tr className="bg-[#F0ECE9]">
+                      <td colSpan={4} className="h-10 px-4 font-semibold text-[#374151]">Total</td>
+                      <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalOrdered}</td>
+                      <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalReceived}</td>
+                      <td className="h-10 px-4"></td>
+                      <td className="h-10 px-4 text-right font-bold text-[#6B5C32]">{formatCurrency(po.totalSen)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Action Buttons */}
-      {!isCancelled && statusActions.length > 0 && (
+      {!isCancelled && !editing && statusActions.length > 0 && (
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">

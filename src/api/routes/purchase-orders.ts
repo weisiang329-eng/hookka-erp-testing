@@ -108,9 +108,10 @@ function genPoId(): string {
 function genItemId(): string {
   return `poi-${crypto.randomUUID().slice(0, 8)}`;
 }
-// Generate next PO number by scanning existing poNo for the current YYMM
-// prefix and incrementing the max sequence. Falls back to 001.
-async function generatePoNo(db: D1Database): Promise<string> {
+
+// Compute the next-suffix poNo for the current YYMM prefix. Pure scan-and-
+// increment — concurrency safety lives in the retry wrapper below.
+async function nextPoNoCandidate(db: D1Database): Promise<string> {
   const now = new Date();
   const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
   const prefix = `PO-${yymm}-`;
@@ -122,6 +123,34 @@ async function generatePoNo(db: D1Database): Promise<string> {
     .first<{ poNo: string }>();
   const seq = res?.poNo ? Number(res.poNo.split("-").pop()) + 1 : 1;
   return `${prefix}${String(seq).padStart(3, "0")}`;
+}
+
+// 5.3 — concurrency-safe poNo generator. Two simultaneous POSTs in the
+// same month would otherwise collide on the bare scan above — both see
+// the same max suffix, both compute the same next number, the second
+// INSERT trips the new ux_purchase_orders_po_no UNIQUE index. We catch
+// that 23505 / "UNIQUE" error path, re-scan, and retry up to 5 times
+// (each retry races against any other in-flight inserts so it's not a
+// fixed answer — re-scan picks up whichever insert just landed).
+//
+// NOTE: callers consume this poNo immediately in the same INSERT. If
+// the INSERT fails with a UNIQUE collision, the caller catches and
+// retries via tryGeneratePoNoAndInsert below.
+const generatePoNo = nextPoNoCandidate;
+
+const PO_NO_RETRY_LIMIT = 5;
+
+function isPoNoUniqueViolation(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  // Postgres 23505 / SQLite "UNIQUE constraint failed" / generic "duplicate"
+  // are all surfaced through the same DB layer here.
+  return (
+    msg.includes("23505") ||
+    msg.includes("UNIQUE constraint failed") ||
+    /duplicate key/i.test(msg) ||
+    /ux_purchase_orders_po_no/i.test(msg)
+  );
 }
 
 async function fetchPOWithItems(db: D1Database, id: string) {
@@ -168,6 +197,10 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3-followup) — purchase-orders:create.
   const denied = await requirePermission(c, "purchase-orders", "create");
   if (denied) return denied;
+  // 5.3 — make sure the unique-poNo index exists before we rely on it for
+  // concurrency safety. Idempotent + cheap; same one-shot promise pattern
+  // as sales-orders.ts.
+  await ensurePendingMigrations(c.var.DB);
   try {
     const body = await c.req.json();
     const { supplierId, supplierName } = body;
@@ -193,7 +226,6 @@ app.post("/", async (c) => {
     }
 
     const poId = genPoId();
-    const poNo = await generatePoNo(c.var.DB);
     const now = new Date().toISOString();
     const today = now.split("T")[0];
 
@@ -215,49 +247,75 @@ app.post("/", async (c) => {
     const subtotalSen = items.reduce((sum, i) => sum + i.totalSen, 0);
     const status: string = body.status ?? "DRAFT";
 
-    const statements = [
-      c.var.DB.prepare(
-        `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
-           subtotalSen, totalSen, status, orderDate, expectedDate, receivedDate,
-           notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).bind(
-        poId,
-        poNo,
-        supplierId,
-        supplierName,
-        subtotalSen,
-        subtotalSen,
-        status,
-        body.orderDate ?? today,
-        body.expectedDate ?? "",
-        null,
-        body.notes ?? "",
-        now,
-        now,
-      ),
-      ...items.map((item) =>
+    // 5.3 — retry-on-unique-collision. Two concurrent POSTs in the same
+    // YYMM bucket would otherwise both compute the same suffix and the
+    // second INSERT would trip ux_purchase_orders_po_no. We catch the
+    // 23505 path, re-scan max+1 (which now includes whichever insert
+    // just landed), and try again. After 5 attempts we give up and let
+    // the operator retry — by then the contention storm is real.
+    let poNo = await generatePoNo(c.var.DB);
+    let lastErr: unknown = null;
+    for (let attempt = 0; attempt < PO_NO_RETRY_LIMIT; attempt++) {
+      const statements = [
         c.var.DB.prepare(
-          `INSERT INTO purchase_order_items (id, purchaseOrderId,
-             materialCategory, materialName, supplierSKU, quantity,
-             unitPriceSen, totalSen, receivedQty, unit)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO purchase_orders (id, poNo, supplierId, supplierName,
+             subtotalSen, totalSen, status, orderDate, expectedDate, receivedDate,
+             notes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
-          item.id,
           poId,
-          item.materialCategory,
-          item.materialName,
-          item.supplierSKU,
-          item.quantity,
-          item.unitPriceSen,
-          item.totalSen,
-          item.receivedQty,
-          item.unit,
+          poNo,
+          supplierId,
+          supplierName,
+          subtotalSen,
+          subtotalSen,
+          status,
+          body.orderDate ?? today,
+          body.expectedDate ?? "",
+          null,
+          body.notes ?? "",
+          now,
+          now,
         ),
-      ),
-    ];
+        ...items.map((item) =>
+          c.var.DB.prepare(
+            `INSERT INTO purchase_order_items (id, purchaseOrderId,
+               materialCategory, materialName, supplierSKU, quantity,
+               unitPriceSen, totalSen, receivedQty, unit)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          ).bind(
+            item.id,
+            poId,
+            item.materialCategory,
+            item.materialName,
+            item.supplierSKU,
+            item.quantity,
+            item.unitPriceSen,
+            item.totalSen,
+            item.receivedQty,
+            item.unit,
+          ),
+        ),
+      ];
 
-    await c.var.DB.batch(statements);
+      try {
+        await c.var.DB.batch(statements);
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (!isPoNoUniqueViolation(err)) {
+          throw err;
+        }
+        // Re-scan to pick up whichever concurrent insert just won.
+        poNo = await generatePoNo(c.var.DB);
+      }
+    }
+    if (lastErr) {
+      throw new Error(
+        "PO number generation failed after 5 retries — concurrent insert storm",
+      );
+    }
 
     const created = await fetchPOWithItems(c.var.DB, poId);
     if (!created) {
@@ -526,18 +584,35 @@ app.put("/:id", async (c) => {
 // column appears on first POST per isolate without a separate migration
 // deploy. Translated by supabase-compat: lastEmailedAt → last_emailed_at
 // (added to column-rename-map.json).
+//
+// 5.3 — additionally creates the UNIQUE index ux_purchase_orders_po_no so
+// concurrent POSTs collide cleanly instead of double-issuing the same
+// poNo. CREATE UNIQUE INDEX IF NOT EXISTS is idempotent on Postgres + D1.
+// IMPORTANT: this will fail loudly on first run if duplicate poNos already
+// exist on the table — that's intentional. The probe at GET
+// /api/import/po-no-duplicates must return zero before this rolls out;
+// otherwise the catch below swallows the error (best-effort) and the
+// subsequent INSERT will keep working without uniqueness protection. To
+// detect that case, call the probe explicitly before relying on retry
+// behaviour.
 let pendingMigrations: Promise<void> | null = null;
 function ensurePendingMigrations(db: D1Database): Promise<void> {
   if (pendingMigrations) return pendingMigrations;
   pendingMigrations = (async () => {
-    try {
-      await db
-        .prepare(
-          "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS lastEmailedAt TEXT",
-        )
-        .run();
-    } catch {
-      // Column may already exist or DDL transiently rejected — best effort.
+    const stmts = [
+      "ALTER TABLE purchase_orders ADD COLUMN IF NOT EXISTS lastEmailedAt TEXT",
+      // 5.3 — concurrency guard for generatePoNo. The retry wrapper in
+      // POST / depends on this index existing.
+      "CREATE UNIQUE INDEX IF NOT EXISTS ux_purchase_orders_po_no ON purchase_orders(poNo)",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch {
+        // ignore — column/index may already exist or DDL transiently
+        // rejected. A real schema mismatch will resurface on the INSERT
+        // path (or as a UNIQUE collision the retry loop handles).
+      }
     }
   })();
   return pendingMigrations;

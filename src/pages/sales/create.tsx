@@ -18,7 +18,7 @@ import {
   gapHeightOptions,
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/pricing-options";
-import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
+import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
@@ -224,6 +224,24 @@ function CreateSalesOrderPage() {
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, MaintenanceConfigValue[]> | null>(null);
 
   const [customerId, setCustomerId] = useState("");
+
+  // [variantsTick] forces the variants-config effect to re-run when a
+  // kv-config update lands (same-tab via subscribeKvConfig, cross-tab via
+  // BroadcastChannel). Without this, an operator editing Maintenance in
+  // one tab and switching back to Sales/Create would be stuck on the
+  // picker that hydrated on first mount until they manually refreshed.
+  // Mirrors the same hook on sales/edit.tsx.
+  const [variantsTick, setVariantsTick] = useState(0);
+  useEffect(() => {
+    const unsubMaster = subscribeKvConfig(VARIANTS_CONFIG_KEY, () => setVariantsTick((t) => t + 1));
+    const unsubCustomer = customerId
+      ? subscribeKvConfig(`${VARIANTS_CONFIG_KEY}:${customerId}`, () => setVariantsTick((t) => t + 1))
+      : null;
+    return () => {
+      unsubMaster();
+      if (unsubCustomer) unsubCustomer();
+    };
+  }, [customerId]);
 
   // Sofa combo rules (Phase 5c). Loaded once per customer change — pulls
   // both the customer-scoped rules AND the company-wide rules in one
@@ -583,7 +601,7 @@ function CreateSalesOrderPage() {
     });
 
     return () => { cancelled = true; };
-  }, [customerId]);
+  }, [customerId, variantsTick]);
 
   // Load clone data from localStorage if navigated from Clone button.
   /* eslint-disable react-hooks/set-state-in-effect -- one-shot hydrate from localStorage clone payload on mount */

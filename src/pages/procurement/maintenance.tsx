@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,6 +16,7 @@ import {
   Pencil,
   Trash2,
   CheckCircle2,
+  TrendingUp,
 } from "lucide-react";
 
 type InventoryItem = {
@@ -561,6 +563,7 @@ function SKUFormDialog({
 type TabId = "suppliers" | "sku-costing";
 
 export default function SupplierMaintenancePage() {
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<TabId>("suppliers");
 
   // Supplier state — D1 is source of truth; MOCK_SUPPLIERS kept only as
@@ -722,6 +725,11 @@ export default function SupplierMaintenancePage() {
     () =>
       (row: Supplier): ContextMenuItem[] => [
         {
+          label: "View Scorecard",
+          icon: <TrendingUp className="h-3.5 w-3.5" />,
+          action: () => navigate(`/suppliers/${row.id}`),
+        },
+        {
           label: "Edit",
           icon: <Pencil className="h-3.5 w-3.5" />,
           action: () => { setEditingSupplier(row); setShowSupplierForm(true); },
@@ -736,7 +744,7 @@ export default function SupplierMaintenancePage() {
           },
         },
       ],
-    []
+    [navigate]
   );
 
   const handleSaveSupplier = (data: Omit<Supplier, "id">) => {

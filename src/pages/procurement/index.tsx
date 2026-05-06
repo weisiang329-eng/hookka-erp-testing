@@ -577,6 +577,18 @@ export default function ProcurementPage() {
     "/api/inventory/shortage-forecast",
   );
 
+  // 4.1 — supplier OTR map. Single fetch, used by both the procurement
+  // table column and any future widgets. Server-side endpoint computes OTR
+  // live from purchase_orders so it stays in sync without a cron.
+  type OtrMap = Record<string, { onTimeRate: number; totalPOs: number; onTimeCount: number }>;
+  const { data: otrResp } = useCachedJson<{ success?: boolean; data?: OtrMap }>(
+    "/api/supplier-scorecards/summary",
+  );
+  const otrMap: OtrMap = useMemo(
+    () => (otrResp?.success ? otrResp.data ?? {} : {}),
+    [otrResp],
+  );
+
   const allSuppliers: Supplier[] = useMemo(
     () => (supResp?.success ? supResp.data ?? [] : Array.isArray(supResp) ? supResp : []),
     [supResp]
@@ -844,6 +856,32 @@ export default function ProcurementPage() {
   const poGridColumns: Column<PurchaseOrder>[] = useMemo(() => [
     { key: "poNo", label: "PO No", type: "docno", width: "120px", sortable: true },
     { key: "supplierName", label: "Supplier", type: "text", sortable: true },
+    {
+      key: "supplierOtr",
+      label: "Supplier OTR%",
+      type: "number",
+      width: "110px",
+      align: "right" as const,
+      sortable: false,
+      render: (_v: unknown, row: PurchaseOrder) => {
+        const stat = otrMap[row.supplierId];
+        if (!stat || stat.totalPOs === 0) {
+          return <span className="text-[#9CA3AF]">—</span>;
+        }
+        const rate = stat.onTimeRate;
+        const tone =
+          rate >= 90
+            ? "text-[#4F7C3A]"
+            : rate >= 75
+              ? "text-[#9C6F1E]"
+              : "text-[#9A3A2D]";
+        return (
+          <span className={`font-medium ${tone}`} title={`${stat.onTimeCount}/${stat.totalPOs} on time`}>
+            {rate.toFixed(0)}%
+          </span>
+        );
+      },
+    },
     { key: "orderDate", label: "Order Date", type: "date", width: "110px", sortable: true },
     { key: "expectedDate", label: "Expected Date", type: "date", width: "110px", sortable: true },
     { key: "items.length", label: "Items", type: "number", width: "70px", align: "right", sortable: true,
@@ -881,7 +919,7 @@ export default function ProcurementPage() {
     },
     { key: "totalSen", label: "Total", type: "currency", width: "120px", sortable: true },
     { key: "status", label: "Status", type: "status", width: "120px", sortable: true },
-  ], []);
+  ], [otrMap]);
 
   const poGridContextMenu = useCallback((row: PurchaseOrder): ContextMenuItem[] => {
     return [

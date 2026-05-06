@@ -56,6 +56,7 @@ const ProcurementMaintenance = lazy(() => import('./pages/procurement/maintenanc
 const PI = lazy(() => import('./pages/procurement/pi'))
 const PIDetail = lazy(() => import('./pages/procurement/PurchaseInvoiceDetail'))
 const ProcurementPricing = lazy(() => import('./pages/procurement/pricing'))
+const SupplierDetail = lazy(() => import('./pages/suppliers/detail'))
 
 // Inventory
 const Inventory = lazy(() => import('./pages/inventory'))
@@ -260,6 +261,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
   { path: '/procurement/pi', element: <S><PI /></S> },
   { path: '/procurement/pi/:id', element: <S><PIDetail /></S> },
   { path: '/procurement/pricing', element: <S><ProcurementPricing /></S> },
+
+  // Suppliers — Phase 4.1 supplier scorecard panel
+  { path: '/suppliers/:id', element: <S><SupplierDetail /></S> },
 
   // Inventory
   { path: '/inventory', element: <S><Inventory /></S> },

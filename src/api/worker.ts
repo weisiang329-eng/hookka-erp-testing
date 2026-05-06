@@ -669,6 +669,18 @@ app.route("/api/stock-value", stockValue);
 app.route("/api/goods-in-transit", goodsInTransit);
 app.route("/api/suppliers", suppliers);
 app.route("/api/supplier-materials", supplierMaterials);
+// Compat redirect — older browser tabs / external bookmarks hit
+// /api/supplier-material-bindings (the legacy plural name). The route
+// was renamed to /api/supplier-materials but stale references kept
+// 404-ing. 308 preserves the HTTP method on POST/PUT/DELETE so write
+// calls don't silently downgrade to GET.
+app.all("/api/supplier-material-bindings", (c) =>
+  c.redirect("/api/supplier-materials", 308),
+);
+app.all("/api/supplier-material-bindings/*", (c) => {
+  const suffix = c.req.path.replace("/api/supplier-material-bindings", "");
+  return c.redirect(`/api/supplier-materials${suffix}`, 308);
+});
 app.route("/api/supplier-scorecards", supplierScorecards);
 app.route("/api/price-history", priceHistory);
 // Auth

@@ -103,11 +103,14 @@ function POFormDialog({
 
     const mainBinding = getMainBinding(rmItemCode);
 
+    // No binding for this RM → leave supplierId empty. The line will render
+    // an inline supplier dropdown (allSuppliers) and the Create button stays
+    // disabled until the user picks one. See pickSupplierForUnbound below.
     const newItem: POLineItem = {
       rmCode: rm.itemCode,
       rmDescription: rm.description,
       supplierId: mainBinding?.supplierId ?? "",
-      supplierName: mainBinding ? resolveSupplierName(mainBinding.supplierId) : "(no supplier)",
+      supplierName: mainBinding ? resolveSupplierName(mainBinding.supplierId) : "",
       supplierSku: mainBinding?.supplierSku ?? "",
       quantity: mainBinding?.moq ?? 1,
       unitPriceSen: mainBinding?.unitPrice ?? 0,
@@ -119,6 +122,21 @@ function POFormDialog({
 
     setItems((prev) => [...prev, newItem]);
     setRmSearch("");
+  };
+
+  /** Set supplier on a line that has no binding yet — picked from allSuppliers
+   *  rather than the (empty) supplierMaterialBindings list. supplierSku is
+   *  left blank so the operator can fill it on the supplier-side later, or
+   *  add a permanent binding via Maintenance. */
+  const pickSupplierForUnbound = (idx: number, supplierId: string) => {
+    if (!supplierId) return;
+    const updated = [...items];
+    updated[idx] = {
+      ...updated[idx],
+      supplierId,
+      supplierName: resolveSupplierName(supplierId),
+    };
+    setItems(updated);
   };
 
   const switchSupplier = (idx: number, supplierId: string) => {
@@ -157,6 +175,10 @@ function POFormDialog({
   const headerSupplierId = items.length > 0 ? items[0].supplierId : "";
   const headerSupplierName = items.length > 0 ? items[0].supplierName : "";
   const hasMixedSuppliers = items.length > 1 && items.some((it) => it.supplierId !== items[0].supplierId);
+  // Any line that came from an RM with no binding and the operator hasn't
+  // picked a supplier yet. Blocks Create PO submission.
+  const hasUnboundLines = items.some((it) => !it.supplierId);
+  const unboundCount = items.filter((it) => !it.supplierId).length;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -199,7 +221,7 @@ function POFormDialog({
                   ? "Add items to determine supplier"
                   : hasMixedSuppliers
                     ? "Mixed suppliers (multiple)"
-                    : headerSupplierName || "(no supplier bound)"}
+                    : headerSupplierName || "Pick supplier on line(s) below"}
               </div>
               {hasMixedSuppliers && (
                 <p className="text-xs text-[#9C6F1E] mt-1">Lines have different suppliers. The PO header will use the first line's supplier.</p>
@@ -279,7 +301,12 @@ function POFormDialog({
                           </div>
                         </div>
                         <div className="col-span-2">
-                          <label className="block text-xs text-[#6B7280] mb-1">Supplier</label>
+                          <label className="block text-xs text-[#6B7280] mb-1">
+                            Supplier
+                            {bindings.length === 0 && (
+                              <span className="ml-1 text-[#9A3A2D]">*</span>
+                            )}
+                          </label>
                           {bindings.length > 0 ? (
                             <select
                               className="flex h-8 w-full rounded border border-[#E2DDD8] bg-white px-2 text-xs"
@@ -293,9 +320,25 @@ function POFormDialog({
                               ))}
                             </select>
                           ) : (
-                            <div className="h-8 flex items-center px-2 text-xs text-[#9CA3AF] bg-white rounded border border-[#E2DDD8]">
-                              No supplier bound
-                            </div>
+                            // No binding for this RM — let the operator pick
+                            // any supplier from allSuppliers. Line stays
+                            // "incomplete" (Create disabled) until populated.
+                            <select
+                              className={`flex h-8 w-full rounded border bg-white px-2 text-xs ${
+                                item.supplierId
+                                  ? "border-[#E2DDD8]"
+                                  : "border-[#9A3A2D] focus:ring-[#9A3A2D]/30"
+                              }`}
+                              value={item.supplierId}
+                              onChange={(e) => pickSupplierForUnbound(idx, e.target.value)}
+                            >
+                              <option value="">Pick supplier…</option>
+                              {allSuppliers.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.code} - {s.name}
+                                </option>
+                              ))}
+                            </select>
                           )}
                         </div>
                         <div>
@@ -356,9 +399,29 @@ function POFormDialog({
             )}
           </div>
 
-          <div className="flex justify-end gap-3 pt-4 border-t border-[#E2DDD8]">
-            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" variant="primary" disabled={items.length === 0}>Create PO</Button>
+          <div className="flex flex-col gap-2 pt-4 border-t border-[#E2DDD8]">
+            {hasUnboundLines && (
+              <p className="text-xs text-[#9A3A2D] text-right">
+                Pick supplier for unbound material{unboundCount === 1 ? "" : "s"} ({unboundCount})
+              </p>
+            )}
+            <div className="flex justify-end gap-3">
+              <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={items.length === 0 || hasUnboundLines}
+                title={
+                  hasUnboundLines
+                    ? "Pick supplier for unbound material(s)"
+                    : items.length === 0
+                      ? "Add at least one item"
+                      : undefined
+                }
+              >
+                Create PO
+              </Button>
+            </div>
           </div>
         </form>
       </div>

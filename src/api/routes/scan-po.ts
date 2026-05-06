@@ -55,11 +55,28 @@ function toBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
+// Try several recovery strategies to coerce Claude's output into a JSON
+// string — Claude sometimes wraps the result in fences, sometimes adds a
+// "Looking at the PDF..." preamble, sometimes both. We'd rather parse a
+// best-effort substring than fail the whole extraction.
 function stripJsonFences(text: string): string {
-  const trimmed = text.trim();
+  let trimmed = text.trim();
+
+  // 1) ```json … ``` or ``` … ```
   const fenceRe = /^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/;
-  const m = trimmed.match(fenceRe);
-  return (m ? m[1] : trimmed).trim();
+  const fenceMatch = trimmed.match(fenceRe);
+  if (fenceMatch) trimmed = fenceMatch[1].trim();
+
+  // 2) Strip any chain-of-thought preamble Claude prefixes. The valid
+  //    payload always starts with `{` (object) — find the first one and
+  //    take from there to the matching closing brace at end.
+  const firstBrace = trimmed.indexOf("{");
+  const lastBrace = trimmed.lastIndexOf("}");
+  if (firstBrace > 0 && lastBrace > firstBrace) {
+    trimmed = trimmed.slice(firstBrace, lastBrace + 1).trim();
+  }
+
+  return trimmed;
 }
 
 // ===========================================================================
@@ -771,7 +788,9 @@ app.post("/extract", async (c) => {
               },
               {
                 type: "text",
-                text: "Extract all POs from the PDF above using the rules + catalog. Return strict JSON only.",
+                text:
+                  "Extract all POs from the PDF above using the rules + catalog. " +
+                  "OUTPUT FORMAT: Your response must be VALID JSON ONLY. Do NOT write any preamble, explanation, analysis, or chain-of-thought. Do NOT start with phrases like 'Looking at the PDF…', 'I can see…', 'Let me analyze…'. Do NOT wrap in markdown fences. The very first character of your response must be '{' and the very last must be '}'. Anything else will break our JSON parser.",
               },
             ],
           },

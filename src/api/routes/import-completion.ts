@@ -9427,6 +9427,35 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     }
   }
 
+  // Diagnostic probe: re-fetch by exact code via a fresh prepared statement.
+  // If this returns rows but the LEFT JOIN didn't match, it tells us the
+  // problem is with the JOIN evaluation (not data availability).
+  const probeCodes = ["5531-1A(LHF)", "1013-(Q)", "5531-L(LHF)"];
+  const probes: Record<string, { hits: number; sample: string | null }> = {};
+  for (const pc of probeCodes) {
+    const r = await db
+      .prepare("SELECT code, name FROM products WHERE code = ?")
+      .bind(pc)
+      .all<{ code: string; name: string }>();
+    const rows = r.results ?? [];
+    probes[pc] = {
+      hits: rows.length,
+      sample: rows[0]?.name ?? null,
+    };
+  }
+
+  // Also: same JOIN logic via a fresh query with one specific SOI to verify.
+  const joinProbe = await db
+    .prepare(
+      `SELECT soi.productCode AS soiCode, p.code AS pCode, p.name AS pName
+         FROM sales_order_items soi
+         LEFT JOIN products p ON p.code = soi.productCode
+        WHERE soi.productCode = ?
+        LIMIT 1`,
+    )
+    .bind("5531-1A(LHF)")
+    .first<{ soiCode: string; pCode: string | null; pName: string | null }>();
+
   return c.json({
     success: true,
     candidates: candidates.length,
@@ -9437,6 +9466,8 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     nullCanonName,
     alreadyMatches,
     notUpdatedSamples,
+    probes,
+    joinProbe,
   });
 });
 

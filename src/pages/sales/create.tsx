@@ -1730,11 +1730,18 @@ function CreateSalesOrderPage() {
               // this customer. When no customer is selected, fall through
               // to the full master list — stays compatible with workflows
               // that build the line set before picking a customer.
-              products={
-                customerProductsMap.size > 0
-                  ? products.filter((p) => customerProductsMap.has(p.id))
-                  : products
-              }
+              // Always show every master product (added 2026-05-06 per
+              // user request "全部自动 api 过去 要不然我选不到再 sales
+              // order 里面"). Previously the picker filtered to only the
+              // customer's `customer_products` rows, which left newly-
+              // added master variants invisible until somebody clicked
+              // "Assign SKU" per customer. The customerProductsMap is
+              // still consulted on selectProduct for per-customer price
+              // overrides — see seedPrice1 at ~line 775 — so a customer
+              // who HAS overridden a SKU's price still gets that override
+              // applied, but customers who never assigned the SKU now see
+              // it (with master pricing) instead of the picker hiding it.
+              products={products}
               fabrics={fabrics}
               onSelectProduct={selectProduct}
               onSelectFabric={selectFabric}

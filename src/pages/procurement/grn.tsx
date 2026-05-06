@@ -256,7 +256,7 @@ export default function GRNPage() {
         body: JSON.stringify(data),
       });
       if (res.ok) {
-        invalidateCachePrefix("/api/grns");
+        invalidateCachePrefix("/api/grn");
         invalidateCachePrefix("/api/purchase-orders");
         invalidateCachePrefix("/api/inventory");
         invalidateCachePrefix("/api/raw-materials");
@@ -391,7 +391,7 @@ export default function GRNPage() {
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ status: "CONFIRMED" }),
             });
-            invalidateCachePrefix("/api/grns");
+            invalidateCachePrefix("/api/grn");
             invalidateCachePrefix("/api/purchase-orders");
             invalidateCachePrefix("/api/inventory");
             invalidateCachePrefix("/api/raw-materials");

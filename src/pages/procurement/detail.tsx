@@ -200,7 +200,7 @@ export default function PurchaseOrderDetailPage() {
         return;
       }
       invalidateCachePrefix("/api/purchase-orders");
-      invalidateCachePrefix("/api/grns");
+      invalidateCachePrefix("/api/grn");
       fetchPO();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Network error advancing status");
@@ -329,7 +329,7 @@ export default function PurchaseOrderDetailPage() {
         return;
       }
       invalidateCachePrefix("/api/purchase-orders");
-      invalidateCachePrefix("/api/grns");
+      invalidateCachePrefix("/api/grn");
       fetchPO();
       toast.success("Purchase order updated");
       setEditing(false);
@@ -368,7 +368,7 @@ export default function PurchaseOrderDetailPage() {
         return;
       }
       invalidateCachePrefix("/api/purchase-orders");
-      invalidateCachePrefix("/api/grns");
+      invalidateCachePrefix("/api/grn");
       fetchPO();
       toast.success("Purchase order cancelled");
       setShowCancelModal(false);

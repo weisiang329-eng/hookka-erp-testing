@@ -626,7 +626,7 @@ export default function ProcurementPage() {
         return false;
       }
       invalidateCachePrefix("/api/purchase-orders");
-      invalidateCachePrefix("/api/grns");
+      invalidateCachePrefix("/api/grn");
       refreshPOs();
       closePOForm();
       toast.success("Purchase order created");
@@ -680,7 +680,7 @@ export default function ProcurementPage() {
     }
 
     invalidateCachePrefix("/api/purchase-orders");
-    invalidateCachePrefix("/api/grns");
+    invalidateCachePrefix("/api/grn");
     refreshPOs();
 
     if (failures.length === 0) {

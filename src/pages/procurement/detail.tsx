@@ -20,7 +20,7 @@ import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
   CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useParams } from "react-router-dom";
 
 // Status timeline steps
@@ -82,6 +82,7 @@ function poItemToEditLine(it: POItem): EditLine {
 
 export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { toast } = useToast();
   const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
@@ -95,6 +96,9 @@ export default function PurchaseOrderDetailPage() {
   const { data: supResp } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
   const { data: invResp } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
+  // 2.3 — GRN list, used to gate the Mark Received button. Endpoint is
+  // singular /api/grn (NOT /api/grns).
+  const { data: grnResp } = useCachedJson<{ success?: boolean; data?: Array<{ id: string; poId: string | null; status: string | null }> }>("/api/grn");
 
   const allSuppliers: Supplier[] = useMemo(
     () => (supResp?.success ? supResp.data ?? [] : []),
@@ -108,6 +112,19 @@ export default function PurchaseOrderDetailPage() {
     const bindings = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
     return Array.isArray(bindings) ? bindings : [];
   }, [bindingsResp]);
+  const grns = useMemo(
+    () => (grnResp?.success ? grnResp.data ?? [] : []),
+    [grnResp],
+  );
+  // Has a posted (or confirmed) GRN attached to this PO? Drives 2.3 —
+  // gate the Mark Received button + show a Create GRN CTA when the
+  // operator's at CONFIRMED / PARTIAL_RECEIVED with no GRN yet.
+  const hasPostedGrn = useMemo(() => {
+    if (!po) return false;
+    return grns.some(
+      (g) => g.poId === po.id && (g.status === "POSTED" || g.status === "CONFIRMED"),
+    );
+  }, [grns, po]);
 
   // ------- Edit mode state -------
   const [editing, setEditing] = useState(false);
@@ -152,21 +169,41 @@ export default function PurchaseOrderDetailPage() {
 
   const handleAdvanceStatus = async (newStatus: string) => {
     if (!po) return;
+    // 2.3 — Mirror the backend gate so the click never reaches a 412.
+    // We still hit the server; a stale GRN cache here would be caught
+    // by the backend's hard check.
+    if (newStatus === "RECEIVED" && !hasPostedGrn) {
+      toast.error("Create + post a GRN before marking received");
+      return;
+    }
     try {
       const body: Record<string, unknown> = { status: newStatus };
       if (newStatus === "RECEIVED") {
         body.receivedDate = new Date().toISOString().split("T")[0];
       }
-      await fetch(`/api/purchase-orders/${po.id}`, {
+      const res = await fetch(`/api/purchase-orders/${po.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
+      const data = await res.json().catch(() => ({})) as {
+        success?: boolean;
+        error?: string;
+        requiresGrn?: boolean;
+      };
+      if (!res.ok || !data.success) {
+        if (res.status === 412 && data.requiresGrn) {
+          toast.error(data.error || "Create + post a GRN before marking received");
+        } else {
+          toast.error(data.error || `Failed to advance status (HTTP ${res.status})`);
+        }
+        return;
+      }
       invalidateCachePrefix("/api/purchase-orders");
       invalidateCachePrefix("/api/grns");
       fetchPO();
-    } catch {
-      console.error("Failed to update status");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error advancing status");
     }
   };
 
@@ -374,7 +411,10 @@ export default function PurchaseOrderDetailPage() {
   // that never left the office). RECEIVED / CLOSED / CANCELLED are terminal.
   const canCancelWithReason = ["SUBMITTED", "CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status);
 
-  // Determine available status advancement actions
+  // Determine available status advancement actions. 2.3 — Mark Received
+  // only renders when a POSTED GRN exists for this PO; otherwise the
+  // operator sees a "Create GRN" CTA (rendered separately below) that
+  // routes them to the GRN flow scoped to this PO.
   const statusActions: { label: string; status: string; variant: "primary" | "outline" }[] = [];
   if (po.status === "DRAFT") {
     statusActions.push({ label: "Send to Supplier", status: "SUBMITTED", variant: "primary" });
@@ -382,12 +422,20 @@ export default function PurchaseOrderDetailPage() {
     statusActions.push({ label: "Mark Confirmed", status: "CONFIRMED", variant: "primary" });
   } else if (po.status === "CONFIRMED") {
     statusActions.push({ label: "Mark Partially Received", status: "PARTIAL_RECEIVED", variant: "outline" });
-    statusActions.push({ label: "Mark Fully Received", status: "RECEIVED", variant: "primary" });
+    if (hasPostedGrn) {
+      statusActions.push({ label: "Mark Fully Received", status: "RECEIVED", variant: "primary" });
+    }
   } else if (po.status === "PARTIAL_RECEIVED") {
-    statusActions.push({ label: "Mark Fully Received", status: "RECEIVED", variant: "primary" });
+    if (hasPostedGrn) {
+      statusActions.push({ label: "Mark Fully Received", status: "RECEIVED", variant: "primary" });
+    }
   } else if (po.status === "RECEIVED") {
     statusActions.push({ label: "Close PO", status: "CLOSED", variant: "outline" });
   }
+  // CTA to start a GRN scoped to this PO. Routes to the existing GRN
+  // page with a poId hint so the dialog opens pre-filtered.
+  const showCreateGrnCta =
+    !hasPostedGrn && ["CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status);
 
   const totalOrdered = po.items.reduce((s, i) => s + i.quantity, 0);
   const totalReceived = po.items.reduce((s, i) => s + i.receivedQty, 0);
@@ -839,12 +887,20 @@ export default function PurchaseOrderDetailPage() {
       )}
 
       {/* Action Buttons */}
-      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason) && (
+      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason || showCreateGrnCta) && (
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <p className="text-xs text-[#6B7280]">Advance this Purchase Order to the next status:</p>
               <div className="flex items-center gap-2 flex-wrap">
+                {showCreateGrnCta && (
+                  <Button
+                    variant="primary"
+                    onClick={() => navigate(`/procurement/grn?poId=${po.id}`)}
+                  >
+                    <Package className="h-4 w-4" /> Create GRN
+                  </Button>
+                )}
                 {statusActions.map((action) => (
                   <Button
                     key={action.status}

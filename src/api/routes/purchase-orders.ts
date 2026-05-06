@@ -103,27 +103,6 @@ function genPoId(): string {
 function genItemId(): string {
   return `poi-${crypto.randomUUID().slice(0, 8)}`;
 }
-function genGrnId(): string {
-  return `grn-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-// Mirror of grn.ts generateGrnNumber — scans existing GRN numbers for the
-// current YYMM prefix and increments. Duplicated locally so the cascade is
-// fully contained in this file.
-async function generateGrnNumber(db: D1Database): Promise<string> {
-  const now = new Date();
-  const yymm = `${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, "0")}`;
-  const prefix = `GRN-${yymm}-`;
-  const res = await db
-    .prepare(
-      "SELECT grnNumber FROM grns WHERE grnNumber LIKE ? ORDER BY grnNumber DESC LIMIT 1",
-    )
-    .bind(`${prefix}%`)
-    .first<{ grnNumber: string }>();
-  const seq = res?.grnNumber ? Number(res.grnNumber.split("-").pop()) + 1 : 1;
-  return `${prefix}${String(seq).padStart(3, "0")}`;
-}
-
 // Generate next PO number by scanning existing poNo for the current YYMM
 // prefix and incrementing the max sequence. Falls back to 001.
 async function generatePoNo(db: D1Database): Promise<string> {
@@ -358,6 +337,34 @@ app.put("/:id", async (c) => {
         const denied = await requirePermission(c, "purchase-orders", "receive");
         if (denied) return denied;
       }
+
+      // 2.3 — Block direct PO→RECEIVED unless a POSTED GRN exists. The
+      // previous behaviour auto-created an empty DRAFT GRN here as a
+      // cascade, but that's worse than useful: it lets operators flip
+      // RECEIVED without ever posting receipts to inventory, leaving
+      // rm_batches + cost_ledger empty. Now: requires the operator to
+      // create + post a GRN first. CONFIRMED is treated as committed
+      // for this check (rare but legal — see grn.ts COMMITTED_STATUSES).
+      if (body.status === "RECEIVED") {
+        const postedGrn = await c.var.DB.prepare(
+          `SELECT id FROM grns
+            WHERE poId = ?
+              AND status IN ('POSTED','CONFIRMED')
+            LIMIT 1`,
+        )
+          .bind(id)
+          .first<{ id: string }>();
+        if (!postedGrn) {
+          return c.json(
+            {
+              success: false,
+              error: "Create + post a GRN before marking received",
+              requiresGrn: true,
+            },
+            412,
+          );
+        }
+      }
     }
 
     const statements: D1PreparedStatement[] = [];
@@ -453,94 +460,11 @@ app.put("/:id", async (c) => {
       ),
     );
 
-    // ---------------------------------------------------------------------
-    // Procurement cascade — PO RECEIVED triggers auto-creation of a DRAFT
-    // GRN so the warehouse team can walk the aisle and fill in actual
-    // received quantities. Idempotent via an existence check on grns.poId.
-    // Uses the item list we resolved above (either body.items when the
-    // request replaced them, or the existing rows in the DB).
-    // ---------------------------------------------------------------------
-    const isReceivedTransition =
-      body.status === "RECEIVED" && existing.status !== "RECEIVED";
-    if (isReceivedTransition) {
-      const existingGrn = await c.var.DB.prepare(
-        "SELECT id FROM grns WHERE poId = ? LIMIT 1",
-      )
-        .bind(id)
-        .first<{ id: string }>();
-      if (!existingGrn) {
-        // Gather the line set we want GRN items for. If body.items was
-        // present the batch above will have replaced the rows; otherwise
-        // we fall back to the current DB state.
-        const poItemRows: PurchaseOrderItemRow[] = await (async () => {
-          if (body.items !== undefined) {
-            const raw = Array.isArray(body.items)
-              ? (body.items as Array<Record<string, unknown>>)
-              : [];
-            return raw.map((item) => ({
-              id: String(item.id ?? ""),
-              purchaseOrderId: id,
-              materialCategory: (item.materialCategory as string) ?? "",
-              materialName: (item.materialName as string) ?? "",
-              supplierSKU: (item.supplierSKU as string) ?? "",
-              quantity: Number(item.quantity) || 0,
-              unitPriceSen: Number(item.unitPriceSen) || 0,
-              totalSen:
-                (Number(item.quantity) || 0) *
-                (Number(item.unitPriceSen) || 0),
-              receivedQty: Number(item.receivedQty) || 0,
-              unit: (item.unit as string) ?? "pcs",
-            }));
-          }
-          const existingItems = await c.var.DB.prepare(
-            "SELECT * FROM purchase_order_items WHERE purchaseOrderId = ?",
-          )
-            .bind(id)
-            .all<PurchaseOrderItemRow>();
-          return existingItems.results ?? [];
-        })();
-
-        const grnId = genGrnId();
-        const grnNumber = await generateGrnNumber(c.var.DB);
-        const today = now.split("T")[0];
-        statements.push(
-          c.var.DB.prepare(
-            `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
-               supplierName, receiveDate, receivedBy, totalAmount,
-               qcStatus, status, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 'DRAFT', ?)`,
-          ).bind(
-            grnId,
-            grnNumber,
-            id,
-            existing.poNo,
-            merged.supplierId,
-            merged.supplierName,
-            today,
-            "",
-            0,
-            "Auto-created on PO receive",
-          ),
-        );
-        poItemRows.forEach((item, idx) => {
-          statements.push(
-            c.var.DB.prepare(
-              `INSERT INTO grn_items (grnId, poItemIndex, materialCode,
-                 materialName, orderedQty, receivedQty, acceptedQty,
-                 rejectedQty, rejectionReason, unitPrice)
-               VALUES (?, ?, ?, ?, ?, 0, 0, 0, NULL, ?)`,
-            ).bind(
-              grnId,
-              idx,
-              item.supplierSKU ?? "",
-              item.materialName ?? "",
-              item.quantity,
-              item.unitPriceSen,
-            ),
-          );
-        });
-      }
-    }
+    // 2.3 — Procurement cascade removed (formerly auto-created an empty
+    // DRAFT GRN on PO→RECEIVED). The pre-flight check above now requires
+    // a POSTED GRN before RECEIVED is allowed at all, so the auto-create
+    // cascade was a no-op in practice and misleading in code: removed
+    // to keep the receipt path single-sourced through grn.ts.
 
     await c.var.DB.batch(statements);
 

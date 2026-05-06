@@ -383,7 +383,7 @@ const ALL_PO_STATUSES = [
 // MAIN PROCUREMENT PAGE
 // ============================================================
 export default function ProcurementPage() {
-  useToast();
+  const { toast } = useToast();
   const navigate = useNavigate();
 
   // Dialog
@@ -428,19 +428,31 @@ export default function ProcurementPage() {
   }, [refreshSuppliers, refreshPOs, refreshInventory, refreshBindings]);
 
   // ---- PO CRUD ----
-  const handleCreatePO = async (data: Record<string, unknown>) => {
+  // Returns true on success so callers (e.g. Split-by-Supplier loop) can
+  // know whether to keep going. Error path surfaces server's `data.error`
+  // via toast and keeps the modal open for correction.
+  const handleCreatePO = async (data: Record<string, unknown>): Promise<boolean> => {
     try {
-      await fetch("/api/purchase-orders", {
+      const res = await fetch("/api/purchase-orders", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(data),
       });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to create PO (HTTP ${res.status})`);
+        return false;
+      }
       invalidateCachePrefix("/api/purchase-orders");
       invalidateCachePrefix("/api/grns");
       refreshPOs();
       setShowPOForm(false);
+      toast.success("Purchase order created");
+      return true;
     } catch (err) {
       console.error("Failed to create PO:", err);
+      toast.error(err instanceof Error ? err.message : "Network error creating PO");
+      return false;
     }
   };
 

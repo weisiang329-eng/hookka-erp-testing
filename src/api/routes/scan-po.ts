@@ -508,6 +508,27 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     ),
   );
 
+  // Resolve customerId FIRST — hub normalisation below depends on knowing
+  // which customer's hubs to scope the match to.
+  let matchedCustomer: CatalogCustomer | undefined;
+  if (po.customerCode) {
+    matchedCustomer = customerByCode.get(po.customerCode.toUpperCase());
+  }
+  if (!matchedCustomer && po.customerName) {
+    matchedCustomer = customerByName.get(po.customerName.toUpperCase());
+  }
+  if (matchedCustomer) {
+    po.customerId = matchedCustomer.id;
+    if (!po.customerCode) po.customerCode = matchedCustomer.code;
+  } else {
+    po.customerId = null;
+    warnings.push({
+      field: "customerName",
+      value: po.customerName ?? "",
+      message: "Customer not in catalog — please match manually before creating SO.",
+    });
+  }
+
   // Normalise reference fields to upper case — these are short alphanumeric
   // identifiers (e.g. "hc8799", "TCF0431", "HC14096") and the operator
   // wants a single canonical casing on screen.
@@ -543,26 +564,6 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     }
     // Transferred-SO references.
     if (item.transferredSO) item.transferredSO = item.transferredSO.toUpperCase();
-  }
-
-  // Resolve customerId — try code first, then name.
-  let matchedCustomer: CatalogCustomer | undefined;
-  if (po.customerCode) {
-    matchedCustomer = customerByCode.get(po.customerCode.toUpperCase());
-  }
-  if (!matchedCustomer && po.customerName) {
-    matchedCustomer = customerByName.get(po.customerName.toUpperCase());
-  }
-  if (matchedCustomer) {
-    po.customerId = matchedCustomer.id;
-    if (!po.customerCode) po.customerCode = matchedCustomer.code;
-  } else {
-    po.customerId = null;
-    warnings.push({
-      field: "customerName",
-      value: po.customerName ?? "",
-      message: "Customer not in catalog — please match manually before creating SO.",
-    });
   }
 
   if (po.deliveryHub) {

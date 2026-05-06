@@ -231,25 +231,60 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     const runOne = async (job: PageJob): Promise<JobRes> => {
       const fd = new FormData();
       fd.append("file", job.pageFile);
-      // Single retry on 429 — Anthropic returns Retry-After in seconds.
-      for (let attempt = 0; attempt < 2; attempt++) {
+      // Retry policy: Anthropic flakes for several reasons that all warrant
+      // backing off and trying again rather than dropping the page on the
+      // floor:
+      //   429  rate limit (Retry-After header present)
+      //   500  upstream internal error (transient, no header)
+      //   502  bad-gateway from our worker wrapping the Anthropic body
+      //   503  service unavailable
+      //   504  gateway timeout
+      //   529  Anthropic-specific "Overloaded" — common during peak hours
+      // Up to 3 attempts with exponential-ish backoff (5s, 15s, 35s) — the
+      // Anthropic Retry-After header overrides the default delay when given.
+      const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504, 529]);
+      const BASE_DELAYS = [5, 15, 35]; // seconds between attempts
+      const MAX_ATTEMPTS = 3;
+      let lastError = "";
+      for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
         const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
-        if (res.status === 429 && attempt === 0) {
-          const wait = Number(res.headers.get("retry-after") || "5");
-          await new Promise((r) => setTimeout(r, Math.min(60, wait) * 1000));
-          continue;
-        }
-        const data = await res.json() as {
-          success?: boolean;
-          error?: string;
-          data?: { samples?: Array<{ sampleId: string; extracted: ClaudeExtractedPO; warnings: ClaudeWarning[] }> };
-        };
+        const data = await res
+          .json()
+          .catch(() => ({ success: false, error: `HTTP ${res.status} (non-JSON body)` }))
+          .then(
+            (j) =>
+              j as {
+                success?: boolean;
+                error?: string;
+                data?: {
+                  samples?: Array<{
+                    sampleId: string;
+                    extracted: ClaudeExtractedPO;
+                    warnings: ClaudeWarning[];
+                  }>;
+                };
+              },
+          );
         if (res.ok && data.success && Array.isArray(data.data?.samples)) {
           return { kind: "ok", job, samples: data.data.samples };
         }
-        return { kind: "fail", job, error: data.error || `HTTP ${res.status}` };
+        lastError = data.error || `HTTP ${res.status}`;
+        // Detect upstream retryable failures by HTTP status OR by sniffing
+        // the error string the backend forwarded (`"Anthropic 500: ..."`,
+        // `"Anthropic: overloaded_error: Overloaded"`).
+        const statusRetryable = RETRYABLE_STATUS.has(res.status);
+        const messageRetryable =
+          /Anthropic\s+(?:429|500|502|503|504|529)\b/i.test(lastError) ||
+          /overloaded_error|overloaded|rate_limit/i.test(lastError);
+        const shouldRetry = (statusRetryable || messageRetryable) && attempt < MAX_ATTEMPTS - 1;
+        if (!shouldRetry) {
+          return { kind: "fail", job, error: lastError };
+        }
+        const headerWait = Number(res.headers.get("retry-after") || "0");
+        const waitSec = headerWait > 0 ? Math.min(60, headerWait) : BASE_DELAYS[attempt];
+        await new Promise((r) => setTimeout(r, waitSec * 1000));
       }
-      return { kind: "fail", job, error: "rate limit retry exhausted" };
+      return { kind: "fail", job, error: lastError || "retry exhausted" };
     };
 
     // Concurrency picked to fit the operator's Anthropic tier rate limit

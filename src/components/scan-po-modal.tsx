@@ -1198,9 +1198,11 @@ function ClaudePOCard({
                           <td className="px-1.5 py-1">
                             <input
                               list={`spc-${row.sampleId}-${i}`}
-                              className="w-32 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                              className="w-56 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
                               value={item.specialOrder ?? ""}
                               onChange={(e) => onUpdateItem(i, { specialOrder: e.target.value || null })}
+                              placeholder="comma-separated for multiple"
+                              title="For multiple specials, separate with commas: 'Back Fully Cover, Bottom Wrap Nylon'"
                             />
                             <datalist id={`spc-${row.sampleId}-${i}`}>
                               {specialList.map((c) => <option key={c} value={c} />)}

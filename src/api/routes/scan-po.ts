@@ -370,10 +370,26 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   • Strip "HK" prefix, trim quotes/spaces.
   • Module shorthand mapping: "2 Seater" → 2A, "3 Seater" → 3S, "L"/"Lshape" → L, "1 Seater" → 1A, "Stool" → STOOL, "CNR" → CNR. Default to (LHF) when LHF/RHF not specified — operator will fix in preview.
   • Multi-module configurations like "2+L Seater" produce MULTIPLE items[] entries (one per module). Quantity divides equally — most often qty=1 per module.
+
+  CRITICAL — Mirror-pair / multi-armchair patterns ALWAYS split into MULTIPLE line items:
+  • "1R+1R" / "1A+1A" / "1L+1R" / "1+1" with a hand-drawn diagram showing two separate boxes → produces TWO line items, NOT one with qty=2. Inspect the diagram: the two boxes are typically a mirrored pair (one LHF, one RHF). Output: { 5536-1A(LHF), qty=1 } AND { 5536-1A(RHF), qty=1 }.
+  • "2A(R)+2A(L)" → two items, one (RHF) one (LHF).
+  • "2+1+1" → three items (2A + 1A + 1A). Default the 1As to (LHF)/(RHF) mirror unless diagram specifies otherwise.
+  • Whenever the configuration shows + signs joining single-seater letters (1, 1A, R, L), each addend is its own line item.
+
 - sizeLabel: seat height in inches (24/26/28/30/32/35). Catalog: SOFA Sizes.
-- fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog.
+- fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog. Sometimes a fabric appears as "BO315-2 Feather" — capture the code "BO315-2" only (drop the trailing variant word).
 - legHeightInches: sofa leg height (catalog: SOFA Leg Heights). null if not stated.
-- specialOrder: match against SOFA Specials.
+- specialOrder: match against SOFA Specials. MULTIPLE specials are common on sofa POs — they often appear as bullet points in handwritten margin notes alongside the diagram. Inspect handwritten notes (in any language: English, Bahasa, Chinese) and pick all that match. Format: comma-separated string e.g. "Nylon Fabric, 5537 Backrest, Back Fully Cover".
+  Pattern recognition cheat-sheet for handwriting:
+    • "back fully cover" / "back rest fully cover" → "Back Fully Cover"
+    • "bottom wrap nylon" / "wrap bottom to nylon" / "bottom wrap to umbrella fabric" / "umbrella fabric" / "umbra fabric" → "Nylon Fabric"  (umbrella/umbra fabric IS nylon fabric — same thing)
+    • "headrest firm" / "head rest firm a little" → "Headrest Firm"
+    • "back rest tak mahu pasang" / "don't install backrest" / "install at customer house" / "back rest tak mau pasang" → "Backrest Install at Customer Site"
+    • "seat cushion fully cover" / "back fully cover" → "Seat Cushion Fully Cover"
+    • "Replace 5540 headrest" / "5540 headrest" / "8030 headrest" / "5540 = 5537" → "5537 Backrest"  (5540 and 8030 are model numbers that map to the 5537 Backrest spec)
+    • "Separate Backrest Packing" → "Separate Backrest Packing"
+  Always inspect ALL handwritten margin notes (with #/* bullets) and red-pen annotations — they carry production-critical specials that aren't in the printed Description line.
 - divanHeightInches/gapInches/noLeg: bedframe-only — leave null.
 
 [ACCESSORY]

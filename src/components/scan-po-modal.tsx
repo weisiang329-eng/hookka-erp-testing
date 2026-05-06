@@ -377,7 +377,12 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           yourRefNo: po.yourRefNo ?? null,
           deliveryHubId: resolvedHubId,
           companySODate: new Date().toISOString().split("T")[0],
-          hookkaExpectedDD: po.deliveryDate,
+          // The "Delivery Date" on a customer PO is what the customer
+          // expects — that's customerDeliveryDate. hookkaExpectedDD is
+          // computed downstream by Production Planning (customer DD minus
+          // departmental lead times); we deliberately leave it null so
+          // the planning module fills it in once the SO is confirmed.
+          customerDeliveryDate: po.deliveryDate,
           isUrgent: po.isUrgent ?? false,
           customerPOImageB64: pageImageB64,
           items: soItems,

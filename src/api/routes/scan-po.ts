@@ -275,7 +275,7 @@ EXTRACTION RULES
 5. yourRefNo = "Your Ref No." field value.
 6. transferredSO = "Transferred SO" column on each line item (may be null).
 7. deliveryHub = "Purchase Location" or hub shortName (KL/PG/JB/...). Match against the customer's hubs in CUSTOMERS catalog.
-8. deliveryDate = "Delivery Date" field as YYYY-MM-DD.
+8. deliveryDate = "Delivery Date" field as YYYY-MM-DD. CRITICAL — hand-written corrections override printed dates: when the printed date has a strikethrough line through it AND a hand-written date appears nearby (often in red ink, sometimes also written in the Purchase Location field or beside the line items), USE THE HAND-WRITTEN DATE. Example: printed "2026/06/27" with red diagonal strike + hand-written "27.05.2026" beside it → deliveryDate = "2026-05-27". Hand-written DD.MM.YYYY format converts to YYYY-MM-DD.
 9. isUrgent = true when PDF shows "URGENT", "SUPER URGENT", or similar emphasis (often red).
 10. pageNumbers = 1-indexed list of source PDF pages this PO occupies. Most POs span exactly one page (e.g. [3]); a multi-page PO lists every page (e.g. [4, 5]). Used to attach the original page image to the SO for customer disputes — accuracy here matters.
 
@@ -284,28 +284,59 @@ ITEM EXTRACTION (CATEGORY-AWARE)
 Identify each item's category by matching productCode against the catalog (BEDFRAME / SOFA / ACCESSORY).
 
 [BEDFRAME]
-- productCode: match against BEDFRAME PRODUCTS. Bedframe codes typically look like "HOK-1007 (K)" or "1003-(Q)" — keep punctuation/spaces as-is.
-- sizeLabel: the size suffix in parens (K=King, Q=Queen, S=Single, SS=SuperSingle, SK=SuperKing, SP=SuperPlus).
+- productCode: match against BEDFRAME PRODUCTS. Different customers write the same SKU differently — normalize before matching:
+  • "2009(A)Trion" / "Trion 2009(A)" / "HOK-2009(A)" → look up "2009(A)" stem with the size suffix to find catalog code (e.g. "2009(A)-(K)").
+  • "1013Jager" / "Jager 1013" → "1013" stem.
+  • "HOK-1007 (K)" → already normalized.
+  • Strip family-name words like "Trion", "Jager", "Cody", "Fenrir", "Regal", "Hilton", "Celene" — they're descriptive aliases of the numeric model.
+  • Strip "HOK-" prefix when matching (catalog may have it or not).
+  • Combine the model stem with the size token to find an exact catalog match. If no exact match, leave productCode as the original text + add specialNotes "unmatched product".
+- sizeLabel: the size, normalized to short code: King→(K), Queen→(Q), Single→(S), SuperSingle→(SS), SuperKing→(SK), SuperPlus→(SP). Sometimes already in catalog form like "(K)", "(Q)".
+- "Fab3" / "Fab2" / "Fab1" tokens = fabric price tier (PRICE_3/2/1). NOT a fabric code. Do NOT put into fabricCode. Drop it from productCode matching.
 - fabricCode: the COLOR/COL/Col value (e.g. "PC151-02"). Match against FABRICS catalog. Common keys: "Col", "COL", "color", "COLOR", "col".
-- divanHeightInches: parse number BEFORE the "+" in spec (e.g. "Divan10+4" → 10, "Divan:8inch+noleg" → 8).
-- legHeightInches: parse number AFTER the "+" (e.g. "Divan10+4" → 4). null when "no leg"/"NOLEG"/"no legs".
-- gapInches: parse from "Gap"/"M.Gap"/"M'GP"/"MATTRESSGAP" keyword (e.g. "gap12" → 12).
+- divanHeightInches: parse the FULL number BEFORE the "+" in spec. ALWAYS use the entire number, not just the leading digit.
+    "Divan10+4" → divanHeightInches=10 (NOT 1)
+    "Divan:8inch+noleg" → divanHeightInches=8
+    "DRAWER:12"" → divanHeightInches=12 (NOT 1; the drawer height IS the divan height)
+    "DRAWER:14"" → 14 (NOT 1)
+    "8"DIVAN+2"LEG" → divanHeightInches=8
+    "divan:10inch+noleg" → 10
+- legHeightInches: parse the FULL number AFTER the "+" sign. NEVER strip digits.
+    "Divan10+4" → legHeightInches=4
+    "Divan10+1" → 1
+    "8"DIVAN+2"LEG" → 2
+    null when followed by "no leg"/"NOLEG"/"no legs"/"+nolegs".
+- gapInches: parse the FULL number after "Gap"/"gap"/"GAP"/"M.Gap"/"M'GP"/"MATTRESSGAP"/"MATTRESS GAP" keyword. ALWAYS use entire number.
+    "gap12" → gapInches=12 (NOT 1)
+    "MATTRESSGAP:14"" → 14 (NOT 1)
+    "Gap:13"" → 13
+    "M.Gap:12"" → 12
+    "12"MATTRESS GAP" → 12
+
+CRITICAL: when spec says "10", "12", "14", "16" — these are TWO-digit inch measurements. Return the full number (10, 12, 14, 16). Never truncate to the first digit (1).
 - noLeg: true if spec contains any case of "no leg", "noleg", "no legs". When true, legHeightInches MUST be null.
 - specialOrder: match against BEDFRAME Specials catalog. Examples:
     "HB straight"/"HB STR" → "HB Straight"
-    "DRAWER" with no side → "Front Drawer" (default)
-    "Left Drawer"/"L DRAWER" → "Left Drawer"
-    "Right Drawer"/"R DRAWER" → "Right Drawer"
-    "Divan above full cover" → "Divan Top Fully Cover"
+    "Left Drawer"/"L DRAWER" / "L'DRAWER" → "Left Drawer"
+    "Right Drawer"/"R DRAWER" / "R'DRAWER" → "Right Drawer"
+    "Front Drawer"/"FRONT DRAWER" → "Front Drawer"
+    "Divan above full cover" / "Divan top fully cover" → "Divan Top Fully Cover"
     "Divan full cover" → "Divan Full Cover"
     "HB fully cover" → "HB Fully Cover"
+  CRITICAL — when only "DRAWER" is written without L/R/F label: LOOK AT THE HAND-DRAWN DIAGRAM in the PDF body. Arrows pointing LEFT (←) at the headboard end → "Left Drawer". Arrows pointing RIGHT (→) → "Right Drawer". Arrows pointing toward the FOOT of the bed (↓ at the bottom or front) → "Front Drawer". When no diagram is present and side is unclear, pick "Front Drawer" + add specialNotes "drawer side unclear".
 - specialNotes: free-form remainder when no special matches (e.g. handwritten urgency dates).
 
 [SOFA]
-- productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Keep parens.
-- sizeLabel: seat height (24/26/28/30/32/35) — match against SOFA Sizes catalog.
-- fabricCode: match against FABRICS catalog.
-- legHeightInches: sofa leg height (catalog: SOFA Leg Heights).
+- productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Customer PDFs often abbreviate — normalize before matching:
+  • "HK5531/28"(2+L Seater)" / "HK5531/24"(3 Seater)" → model 5531 with seat height 28/24, configuration "2-Seater + L-piece" (means TWO line items: a 2A module + an L module).
+  • "HK5531/24"(2 Seater + Lshape)" → same as "2+L Seater": split into 5531-2A + 5531-L.
+  • "HK5531/28"(2+LSeater)" → same.
+  • Strip "HK" prefix, trim quotes/spaces.
+  • Module shorthand mapping: "2 Seater" → 2A, "3 Seater" → 3S, "L"/"Lshape" → L, "1 Seater" → 1A, "Stool" → STOOL, "CNR" → CNR. Default to (LHF) when LHF/RHF not specified — operator will fix in preview.
+  • Multi-module configurations like "2+L Seater" produce MULTIPLE items[] entries (one per module). Quantity divides equally — most often qty=1 per module.
+- sizeLabel: seat height in inches (24/26/28/30/32/35). Catalog: SOFA Sizes.
+- fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog.
+- legHeightInches: sofa leg height (catalog: SOFA Leg Heights). null if not stated.
 - specialOrder: match against SOFA Specials.
 - divanHeightInches/gapInches/noLeg: bedframe-only — leave null.
 

@@ -453,16 +453,27 @@ type Warning = {
 // Validation
 // ===========================================================================
 // Side-effect: enriches `po` with customerId when customerCode/customerName
-// matches a row in the catalog. Returns warnings for everything that didn't
-// match — UI shows them as red badges per card.
+// matches a row in the catalog AND normalises text fields to their canonical
+// catalog casing (e.g. "pc151-01" → "PC151-01", "hc8799" → "HC8799").
+// Returns warnings for everything that didn't match — UI shows them as red
+// badges per card.
 function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   const warnings: Warning[] = [];
+
+  // Build canonical-casing lookup tables: upper-case key → catalog form.
+  // Lets us swap "pc151-01" → "PC151-01" without changing schema.
   const productCodes = new Set(
     [...catalog.bedframes, ...catalog.sofas, ...catalog.accessories].map((p) =>
       p.code.toUpperCase(),
     ),
   );
+  const productCanon = new Map<string, string>();
+  for (const p of [...catalog.bedframes, ...catalog.sofas, ...catalog.accessories]) {
+    productCanon.set(p.code.toUpperCase(), p.code);
+  }
   const fabricCodes = new Set(catalog.fabrics.map((f) => f.code.toUpperCase()));
+  const fabricCanon = new Map<string, string>();
+  for (const f of catalog.fabrics) fabricCanon.set(f.code.toUpperCase(), f.code);
   const customerByCode = new Map(
     catalog.customers.map((c) => [c.code.toUpperCase(), c]),
   );
@@ -474,6 +485,27 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
       c.hubs.map((h) => h.shortName.toUpperCase()),
     ),
   );
+
+  // Normalise reference fields to upper case — these are short alphanumeric
+  // identifiers (e.g. "hc8799", "TCF0431", "HC14096") and the operator
+  // wants a single canonical casing on screen.
+  if (po.yourRefNo) po.yourRefNo = po.yourRefNo.toUpperCase();
+  if (po.deliveryHub) po.deliveryHub = po.deliveryHub.toUpperCase();
+  for (const item of po.items) {
+    // Fabric: snap to catalog canonical casing if matched, else just upper.
+    if (item.fabricCode) {
+      const upper = item.fabricCode.toUpperCase();
+      item.fabricCode = fabricCanon.get(upper) ?? upper;
+    }
+    // Product: snap to catalog form so "hok-1007 (k)" → "HOK-1007 (K)".
+    if (item.productCode) {
+      const upper = item.productCode.toUpperCase();
+      const canon = productCanon.get(upper);
+      if (canon) item.productCode = canon;
+    }
+    // Transferred-SO references.
+    if (item.transferredSO) item.transferredSO = item.transferredSO.toUpperCase();
+  }
 
   // Resolve customerId — try code first, then name.
   let matchedCustomer: CatalogCustomer | undefined;

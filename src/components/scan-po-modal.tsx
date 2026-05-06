@@ -202,24 +202,46 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       }
     }
 
-    const claudeResults = await Promise.allSettled(
-      allJobs.map(async (job) => {
-        const fd = new FormData();
-        fd.append("file", job.pageFile);
+    // Concurrency limiter — Anthropic tier-1 caps at 30K input tokens / min
+    // (~2 of our catalog-injected requests in flight at once). Going wider
+    // hits 429s on every page after the first. Sequential pairs keep us
+    // under the limit while still ~5× faster than fully serial. Once the
+    // operator's Anthropic tier is raised this can be bumped.
+    type JobRes =
+      | { kind: "ok"; job: PageJob; samples: Array<{ sampleId: string; extracted: ClaudeExtractedPO; warnings: ClaudeWarning[] }> }
+      | { kind: "fail"; job: PageJob; error: string };
+
+    const runOne = async (job: PageJob): Promise<JobRes> => {
+      const fd = new FormData();
+      fd.append("file", job.pageFile);
+      // Single retry on 429 — Anthropic returns Retry-After in seconds.
+      for (let attempt = 0; attempt < 2; attempt++) {
         const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
+        if (res.status === 429 && attempt === 0) {
+          const wait = Number(res.headers.get("retry-after") || "5");
+          await new Promise((r) => setTimeout(r, Math.min(60, wait) * 1000));
+          continue;
+        }
         const data = await res.json() as {
           success?: boolean;
           error?: string;
-          data?: {
-            samples?: Array<{ sampleId: string; extracted: ClaudeExtractedPO; warnings: ClaudeWarning[] }>;
-          };
+          data?: { samples?: Array<{ sampleId: string; extracted: ClaudeExtractedPO; warnings: ClaudeWarning[] }> };
         };
         if (res.ok && data.success && Array.isArray(data.data?.samples)) {
-          return { kind: "ok" as const, job, samples: data.data.samples };
+          return { kind: "ok", job, samples: data.data.samples };
         }
-        return { kind: "fail" as const, job, error: data.error || `HTTP ${res.status}` };
-      }),
-    );
+        return { kind: "fail", job, error: data.error || `HTTP ${res.status}` };
+      }
+      return { kind: "fail", job, error: "rate limit retry exhausted" };
+    };
+
+    const CONCURRENCY = 2;
+    const claudeResults: PromiseSettledResult<JobRes>[] = [];
+    for (let i = 0; i < allJobs.length; i += CONCURRENCY) {
+      const batch = allJobs.slice(i, i + CONCURRENCY);
+      const settled = await Promise.allSettled(batch.map(runOne));
+      claudeResults.push(...settled);
+    }
 
     for (const r of claudeResults) {
       if (r.status === "rejected") {

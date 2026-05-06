@@ -1108,16 +1108,17 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     if (item.category !== "SOFA" && item.category !== "ACCESSORY") {
       reparseSpec(item);
     }
-    // Fabric: snap to catalog canonical casing if matched, else fall back
-    // to a normalized lookup so "KN-390-01" / "KN.390-001" / "KN390-1"
-    // all resolve to the same catalog code.
+    // Fabric: snap to catalog canonical, else CLEAR. Per operator rule —
+    // OCR can only suggest catalog-bound values; if no catalog match,
+    // leave the field empty so the modal flags it and the operator picks
+    // from the dropdown. We DON'T persist the raw OCR text.
     if (item.fabricCode) {
       const upper = item.fabricCode.toUpperCase();
       let canon = fabricCanon.get(upper);
       if (!canon) canon = fabricCanonByNorm.get(normalizeForMatch(item.fabricCode));
-      item.fabricCode = canon ?? upper;
+      item.fabricCode = canon ?? "";
     }
-    // Product: snap to catalog form so "hok-1007 (k)" → "HOK-1007 (K)".
+    // Product: snap to catalog, else CLEAR (same rule as fabric).
     // Match priority: exact-upper → drop "1" before letter ("5531-1L" →
     // "5531-L") → add "1" before letter ("5531-L" → "5531-1L") →
     // separator/leading-zero-tolerant normalized lookup.
@@ -1137,7 +1138,7 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
       if (!canon) {
         canon = productCanonByNorm.get(normalizeForMatch(item.productCode));
       }
-      if (canon) item.productCode = canon;
+      item.productCode = canon ?? "";
     }
     // Transferred-SO references.
     if (item.transferredSO) item.transferredSO = item.transferredSO.toUpperCase();

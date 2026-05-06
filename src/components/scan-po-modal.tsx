@@ -419,40 +419,64 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         // sizeLabel, sizeCode) is left empty so the SO create endpoint
         // resolves them from the product master / catalog. The PDF text
         // is reference-only — never persisted as the canonical value.
-        const soItems = po.items.map((item, idx) => ({
-          lineNo: idx + 1,
-          lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
-          productCode: item.productCode,
-          productName: "", // backend → resolvedProduct.name
-          itemCategory: item.category,
-          sizeLabel: "", // backend → resolvedProduct.sizeLabel ("5FT" etc)
-          sizeCode: "", // backend → resolvedProduct.sizeCode
-          fabricCode: item.fabricCode ?? "",
-          // For sofa: seat height is the variant. Send as seatHeight so
-          // the price resolver can find it in product.seatHeightPrices.
-          // Strip parens / quotes that Claude may include — keep just the
-          // number. "28" → "28", '(28")' → "28".
-          seatHeight:
-            item.category === "SOFA" && item.sizeLabel
-              ? item.sizeLabel.replace(/[^\d.]/g, "")
-              : "",
-          quantity: item.quantity || 1,
-          gapInches: item.gapInches ?? 0,
-          divanHeightInches: item.divanHeightInches ?? 0,
-          legHeightInches: item.noLeg ? null : item.legHeightInches,
-          specialOrder: item.specialOrder ?? "",
-          // Unit price is in RM (decimal) on the PDF; backend stores sen
-          // (integer). Multiply + round to avoid float drift.
-          basePriceSen:
-            item.unitPrice != null && item.unitPrice > 0
-              ? Math.round(item.unitPrice * 100)
-              : 0,
-          // transferredSO links this SO line back to the original SO it
-          // amends/replaces — operator can use it to mark the prior SO
-          // superseded after creation.
-          transferredFromSO: item.transferredSO ?? null,
-          notes: item.specialNotes ?? "",
-        }));
+        //
+        // specialOrder: Claude may return free-form tokens that don't
+        // match the catalog Specials list (e.g. "Nylon Fabric, Headrest
+        // Firm" when only "Headrest Firm" is a real special). The chip
+        // editor only adds catalog values, but if the operator never
+        // opens the chip the raw Claude string would persist. Filter
+        // here at save-time so non-catalog tokens are dropped silently.
+        const soItems = po.items.map((item, idx) => {
+          const specialList =
+            item.category === "SOFA"
+              ? (catalog?.sofaSpecials ?? [])
+              : (catalog?.bedframeSpecials ?? []);
+          const cleanedSpecialOrder = (item.specialOrder ?? "")
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .filter((tok) =>
+              specialList.length === 0
+                ? true // no catalog loaded → don't drop, fall back to raw
+                : specialList.some((c) => c.toLowerCase() === tok.toLowerCase()),
+            )
+            .join(", ");
+
+          return {
+            lineNo: idx + 1,
+            lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
+            productCode: item.productCode,
+            productName: "", // backend → resolvedProduct.name
+            itemCategory: item.category,
+            sizeLabel: "", // backend → resolvedProduct.sizeLabel ("5FT" etc)
+            sizeCode: "", // backend → resolvedProduct.sizeCode
+            fabricCode: item.fabricCode ?? "",
+            // For sofa: seat height is the variant. Send as seatHeight so
+            // the price resolver can find it in product.seatHeightPrices.
+            // Strip parens / quotes that Claude may include — keep just the
+            // number. "28" → "28", '(28")' → "28".
+            seatHeight:
+              item.category === "SOFA" && item.sizeLabel
+                ? item.sizeLabel.replace(/[^\d.]/g, "")
+                : "",
+            quantity: item.quantity || 1,
+            gapInches: item.gapInches ?? 0,
+            divanHeightInches: item.divanHeightInches ?? 0,
+            legHeightInches: item.noLeg ? null : item.legHeightInches,
+            specialOrder: cleanedSpecialOrder,
+            // Unit price is in RM (decimal) on the PDF; backend stores sen
+            // (integer). Multiply + round to avoid float drift.
+            basePriceSen:
+              item.unitPrice != null && item.unitPrice > 0
+                ? Math.round(item.unitPrice * 100)
+                : 0,
+            // transferredSO links this SO line back to the original SO it
+            // amends/replaces — operator can use it to mark the prior SO
+            // superseded after creation.
+            transferredFromSO: item.transferredSO ?? null,
+            notes: item.specialNotes ?? "",
+          };
+        });
 
         // customerId comes from the backend's catalog match (validateAndEnrichPO).
         // If null, the SO create call will fail — surface a clearer error.
@@ -461,11 +485,24 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           continue;
         }
 
+        // Catalog-bound: prefer values from the loaded catalog over the
+        // PDF-extracted ones. If the catalog hasn't loaded yet (best-effort
+        // fetch) we fall back to po.* — still safer than blank because the
+        // backend only persists customerId/customerCode is dropped anyway.
+        const catalogCust = catalog?.customers.find((c) => c.id === po.customerId);
+        const catalogCustomerName = catalogCust?.name ?? po.customerName;
+        const catalogCustomerCode = catalogCust?.code ?? po.customerCode ?? null;
+        const catalogCustomerState =
+          catalogCust?.hubs.find((h) => h.id === resolvedHubId)?.state ??
+          po.customerState ??
+          hub.state ??
+          "";
+
         const body = {
           customerId: po.customerId,
-          customerName: po.customerName,
-          customerCode: po.customerCode ?? null,
-          customerState: po.customerState ?? hub.state ?? "",
+          customerName: catalogCustomerName,
+          customerCode: catalogCustomerCode,
+          customerState: catalogCustomerState,
           customerPOId: po.customerPO,
           // Customer's own reference goes into the SO header's `reference`
           // field — that's what the SO list / detail page reads. Sending

@@ -9086,4 +9086,245 @@ app.post("/backfill-so-reference", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-ocr-so-fields
+//
+// One-shot cleanup for SOs created via the Scan PO modal before the
+// catalog-bound rule was enforced (commits ea7f08b, 83a699a, and the
+// follow-up scan-po-modal cleanup). The earlier OCR path persisted PDF
+// text directly into category-A fields (productName, sizeLabel, sizeCode,
+// fabricId, specialOrder), which now diverge from the catalog values
+// after a maintenance edit.
+//
+// What it does (idempotent — only rewrites obvious wrongs):
+//   1. Targets sales_order_items belonging to SOs that look OCR-created:
+//        - parent SO has customerPOImageB64 NOT NULL (proxy for
+//          PO_SCAN_CLAUDE source — added in migration 0108), OR
+//        - productName matches one of the junk patterns (literal
+//          productCode, contains "/", "HK", "COL:", "COLOUR:").
+//   2. Re-resolves productName / sizeCode / sizeLabel from products.code.
+//   3. For SOFA items: snaps sizeLabel to the quoted '28"' shape the
+//      Edit dropdown keys against; fills sizeCode from sizeLabel if blank.
+//   4. Resolves fabricId from fabric_trackings.fabricCode when fabricCode
+//      is set but fabricId is empty (mirrors the SO create path's
+//      resolver added later — old rows missed it).
+//   5. Cleans specialOrder: drops any comma-token that doesn't appear in
+//      the variants-config catalog (Specials list, scoped per category).
+//      Tokens are matched case-insensitively but stored with the catalog
+//      casing. Empty result becomes "".
+//
+// Returns: { candidates, productNameUpdated, sizeUpdated, fabricIdUpdated,
+//            specialOrderCleaned }.
+//
+// Permission: sales-orders:update (same gate as the PATCH handler).
+// ---------------------------------------------------------------------------
+app.post("/backfill-ocr-so-fields", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  // ----- 1. Load variants-config Specials lists (per category) -----------
+  // Same shape the scan-po catalog endpoint reads. Tolerant of both string
+  // entries and {value:...} priced-option entries.
+  const cfgRow = await db
+    .prepare("SELECT value FROM kv_config WHERE key = ?")
+    .bind("variants-config")
+    .first<{ value: string }>();
+
+  const extractValues = (arr: unknown): string[] => {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((x: unknown) => {
+        if (typeof x === "string") return x;
+        if (x && typeof x === "object" && "value" in x) {
+          const v = (x as { value?: unknown }).value;
+          return typeof v === "string" ? v : "";
+        }
+        return "";
+      })
+      .filter(Boolean);
+  };
+  let bedframeSpecials: string[] = [];
+  let sofaSpecials: string[] = [];
+  if (cfgRow?.value) {
+    try {
+      const cfg = JSON.parse(cfgRow.value) as Record<string, unknown>;
+      bedframeSpecials = extractValues(cfg.specials);
+      sofaSpecials = extractValues(cfg.sofaSpecials);
+    } catch {
+      // Bad JSON — leave catalogs empty. We'll skip specialOrder cleaning
+      // entirely (safer than dropping all tokens).
+    }
+  }
+
+  // ----- 2. Find candidate items ----------------------------------------
+  // Two-track match:
+  //   a) parent SO has a PO image (definitive OCR signal)
+  //   b) productName looks like PDF junk (catches old rows from before
+  //      the image column existed in migration 0108)
+  const targetsRes = await db
+    .prepare(
+      `SELECT soi.id,
+              soi.productCode,
+              soi.productName,
+              soi.itemCategory,
+              soi.sizeCode,
+              soi.sizeLabel,
+              soi.fabricId,
+              soi.fabricCode,
+              soi.specialOrder,
+              p.id   AS canonProductId,
+              p.name AS canonName,
+              p.sizeCode  AS canonSizeCode,
+              p.sizeLabel AS canonSizeLabel,
+              p.category  AS canonCategory
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+         LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
+        WHERE so.orgId = ?
+          AND (so.customerPOImageB64 IS NOT NULL
+               OR soi.productName = soi.productCode
+               OR soi.productName LIKE '%/%'
+               OR soi.productName LIKE 'HK%'
+               OR soi.productName LIKE '%COL:%'
+               OR soi.productName LIKE '%COLOUR:%')`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string;
+      productCode: string | null;
+      productName: string | null;
+      itemCategory: string | null;
+      sizeCode: string | null;
+      sizeLabel: string | null;
+      fabricId: string | null;
+      fabricCode: string | null;
+      specialOrder: string | null;
+      canonProductId: string | null;
+      canonName: string | null;
+      canonSizeCode: string | null;
+      canonSizeLabel: string | null;
+      canonCategory: string | null;
+    }>();
+  const candidates = targetsRes.results ?? [];
+
+  let productNameUpdated = 0;
+  let sizeUpdated = 0;
+  let fabricIdUpdated = 0;
+  let specialOrderCleaned = 0;
+
+  // Cache fabricCode → fabricId lookups across rows.
+  const fabricIdCache = new Map<string, string | null>();
+  const resolveFabricId = async (code: string): Promise<string | null> => {
+    if (fabricIdCache.has(code)) return fabricIdCache.get(code) ?? null;
+    const row = await db
+      .prepare("SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1")
+      .bind(code)
+      .first<{ id: string }>();
+    const id = row?.id ?? null;
+    fabricIdCache.set(code, id);
+    return id;
+  };
+
+  for (const r of candidates) {
+    // -- productName -----------------------------------------------------
+    const looksJunk =
+      r.productName === "" ||
+      r.productName === null ||
+      (r.productCode && r.productName === r.productCode) ||
+      (r.productName != null &&
+        /(?:^HK\d|COL:|COLOUR:|\/)/i.test(r.productName));
+    if (looksJunk && r.canonName && r.productName !== r.canonName) {
+      await db
+        .prepare("UPDATE sales_order_items SET productName = ? WHERE id = ?")
+        .bind(r.canonName, r.id)
+        .run();
+      productNameUpdated++;
+    }
+
+    // -- size (sizeCode / sizeLabel) ------------------------------------
+    // Only rewrite when the stored value is empty OR clearly wrong (sofa
+    // stored as bare number "28" → snap to '28"'; or junky bedframe size
+    // like "5FT/QUEEN" mismatched against the catalog).
+    const isSofa =
+      (r.itemCategory ?? r.canonCategory) === "SOFA";
+    let newSizeLabel = r.sizeLabel ?? "";
+    let newSizeCode = r.sizeCode ?? "";
+
+    if (!newSizeLabel && r.canonSizeLabel) newSizeLabel = r.canonSizeLabel;
+    if (!newSizeCode && r.canonSizeCode) newSizeCode = r.canonSizeCode;
+
+    if (isSofa && newSizeLabel && /^\d+(\.\d+)?$/.test(newSizeLabel.trim())) {
+      newSizeLabel = `${newSizeLabel.trim()}"`;
+    }
+    if (isSofa && !newSizeCode && newSizeLabel) {
+      newSizeCode = newSizeLabel.replace(/"/g, "").trim();
+    }
+    const sizeChanged =
+      newSizeLabel !== (r.sizeLabel ?? "") ||
+      newSizeCode !== (r.sizeCode ?? "");
+    if (sizeChanged) {
+      await db
+        .prepare(
+          "UPDATE sales_order_items SET sizeLabel = ?, sizeCode = ? WHERE id = ?",
+        )
+        .bind(newSizeLabel, newSizeCode, r.id)
+        .run();
+      sizeUpdated++;
+    }
+
+    // -- fabricId from fabricCode ---------------------------------------
+    if ((r.fabricId == null || r.fabricId === "") && r.fabricCode) {
+      const fid = await resolveFabricId(r.fabricCode);
+      if (fid) {
+        await db
+          .prepare("UPDATE sales_order_items SET fabricId = ? WHERE id = ?")
+          .bind(fid, r.id)
+          .run();
+        fabricIdUpdated++;
+      }
+    }
+
+    // -- specialOrder cleaning ------------------------------------------
+    // Only when we have a catalog loaded — otherwise we'd risk wiping
+    // valid values just because the kv_config row is unreadable.
+    if (r.specialOrder && r.specialOrder.trim() !== "") {
+      const specialList = isSofa ? sofaSpecials : bedframeSpecials;
+      if (specialList.length > 0) {
+        const tokens = r.specialOrder
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const cleaned: string[] = [];
+        for (const t of tokens) {
+          const match = specialList.find(
+            (c) => c.toLowerCase() === t.toLowerCase(),
+          );
+          if (match) cleaned.push(match);
+        }
+        const cleanedStr = cleaned.join(", ");
+        if (cleanedStr !== r.specialOrder) {
+          await db
+            .prepare(
+              "UPDATE sales_order_items SET specialOrder = ? WHERE id = ?",
+            )
+            .bind(cleanedStr, r.id)
+            .run();
+          specialOrderCleaned++;
+        }
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    candidates: candidates.length,
+    productNameUpdated,
+    sizeUpdated,
+    fabricIdUpdated,
+    specialOrderCleaned,
+  });
+});
+
 export default app;

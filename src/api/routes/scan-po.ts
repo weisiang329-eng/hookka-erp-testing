@@ -365,17 +365,44 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
 [SOFA]
 - productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Customer PDFs use a fixed module taxonomy — internalise this BEFORE attempting any extraction:
 
-  HOOKKA SOFA MODULE TAXONOMY
-  ===========================
-  Each catalog code is "MODEL-MODULE(SIDE)" e.g. "5530-2A(LHF)". Modules:
-  • "1A" — single-seater with ONE armrest. Always mirrored: comes in 1A(LHF) and 1A(RHF).
-  • "2A" — two-seater with ONE armrest. Mirrored: 2A(LHF) and 2A(RHF).
-  • "1NA" — single-seater with NO armrest (used as middle piece).
-  • "2NA" — two-seater with NO armrest (middle piece).
-  • "3S" — three-seater single piece (one armrest left, one right, no centre split). Use ONLY when the customer literally orders one whole 3-seater unit, not when "3 boxes side-by-side" is drawn.
-  • "1L" / "L" — L-shape extension. Mirrored: L(LHF) / L(RHF). Sometimes combined with "CNR".
-  • "CNR" — corner piece (joins two perpendicular sections).
-  • "STOOL" — ottoman / footstool.
+  HOOKKA SOFA MODULE CATALOG (memorise — use these EXACT codes)
+  ==============================================================
+  Catalog format: "MODEL-MODULE(SIDE)" e.g. "5530-2A(LHF)".
+
+  SINGLE-SEATER (1 person):
+    • 1A(LHF)  — single armed, arm on LEFT  (use when 1-seater is leftmost in chain or pair)
+    • 1A(RHF)  — single armed, arm on RIGHT (use when 1-seater is rightmost)
+    • 1NA      — single NO arm (sandwiched between other pieces)
+
+  DOUBLE-SEATER (2 people):
+    • 2A(LHF)  — double armed, arm on LEFT  (leftmost in chain)
+    • 2A(RHF)  — double armed, arm on RIGHT (rightmost in chain)
+    • 2NA      — double NO arm (sandwiched)
+
+  STANDALONE PIECES (S-suffix = single continuous body, BOTH arms):
+    • 1S       — standalone single-seater armchair (BOTH arms, not chained). Different from 1A.
+    • 2S       — standalone 2-seater (BOTH arms, single body, not part of a multi-module chain).
+    • 3S       — standalone 3-seater (BOTH arms, single body — one armrest on each end with no centre split).
+    Use the S-variant when:
+      - The diagram shows ONE continuous box (not joined with "+" to other modules).
+      - The PDF text doesn't break into "+"-joined parts.
+    Use the A / NA variants when:
+      - Diagram shows multiple boxes chained with "+" or drawn side-by-side.
+      - PDF text uses "1+1+1", "1+2+L", "2+L", etc.
+
+  3NA — three-piece no arm (rare; only when sandwiched and 3 seats wide).
+
+  L-PIECE / CHAISE:
+    • 1L(LHF)  — L-shape, left version  (leftmost in chain)
+    • 1L(RHF)  — L-shape, right version (rightmost in chain)
+    Catalog sometimes writes these as "L(LHF)" / "L(RHF)" without the leading 1 — both forms are valid, match either.
+
+  CORNER / ACCESSORY:
+    • CNR      — corner connector (joins two perpendicular sections at 90°)
+    • STOOL    — ottoman / footstool
+
+  MIRROR-PAIR LOGIC (CRITICAL):
+    LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side. The leftmost piece in the diagram (or chain when reading left → right) gets LHF; the rightmost gets RHF. Inner pieces never have a side suffix because they have no arms.
 
   ARM-INFERENCE RULE (master rule for resolving NA vs A):
   For any chain of modules joined by "+" signs:
@@ -400,6 +427,14 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   • "3 Seater" with THREE separate drawn boxes → 1A(LHF) + 1NA + 1A(RHF).
 
   GOLDEN RULE: every "+" in the config string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Inner numeric pieces become NA; outer pieces become A / L / CNR. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew ONE continuous box.
+
+  ★ ALWAYS INSPECT THE HAND-DRAWN DIAGRAM ★
+  The printed text spec ("(1+2+L)", "1R+1R", "3 Seater") is OFTEN AMBIGUOUS by itself — you cannot reliably tell A vs S vs NA from text alone. The diagram is the source of truth:
+    - Count the BOXES — that's the line-item count.
+    - Look at the gaps/joiners — boxes joined with "+" are separate modules; boxes drawn merged (no "+", no gap) are one body (use S-variant).
+    - Read box positions left → right — leftmost arm-piece is LHF, rightmost is RHF, sandwiched are NA.
+    - Look at any small flap/L-shape on the side — that indicates an arm OR an L-extension on that side.
+  When the printed text and the diagram conflict, the DIAGRAM WINS.
 
   Naming conventions:
   • Strip "HK" prefix when matching ("HK5531" → "5531").

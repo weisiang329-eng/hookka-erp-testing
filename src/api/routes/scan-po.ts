@@ -363,19 +363,39 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   This field is the source of truth for the server-side regex post-processor; do NOT rephrase or simplify the spec line.
 
 [SOFA]
-- productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Customer PDFs often abbreviate — normalize before matching:
-  • "HK5531/28"(2+L Seater)" / "HK5531/24"(3 Seater)" → model 5531 with seat height 28/24, configuration "2-Seater + L-piece" (means TWO line items: a 2A module + an L module).
-  • "HK5531/24"(2 Seater + Lshape)" → same as "2+L Seater": split into 5531-2A + 5531-L.
-  • "HK5531/28"(2+LSeater)" → same.
-  • Strip "HK" prefix, trim quotes/spaces.
-  • Module shorthand mapping: "2 Seater" → 2A, "3 Seater" → 3S, "L"/"Lshape" → L, "1 Seater" → 1A, "Stool" → STOOL, "CNR" → CNR. Default to (LHF) when LHF/RHF not specified — operator will fix in preview.
-  • Multi-module configurations like "2+L Seater" produce MULTIPLE items[] entries (one per module). Quantity divides equally — most often qty=1 per module.
+- productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Customer PDFs use a fixed module taxonomy — internalise this BEFORE attempting any extraction:
 
-  CRITICAL — Mirror-pair / multi-armchair patterns ALWAYS split into MULTIPLE line items:
-  • "1R+1R" / "1A+1A" / "1L+1R" / "1+1" with a hand-drawn diagram showing two separate boxes → produces TWO line items, NOT one with qty=2. Inspect the diagram: the two boxes are typically a mirrored pair (one LHF, one RHF). Output: { 5536-1A(LHF), qty=1 } AND { 5536-1A(RHF), qty=1 }.
-  • "2A(R)+2A(L)" → two items, one (RHF) one (LHF).
-  • "2+1+1" → three items (2A + 1A + 1A). Default the 1As to (LHF)/(RHF) mirror unless diagram specifies otherwise.
-  • Whenever the configuration shows + signs joining single-seater letters (1, 1A, R, L), each addend is its own line item.
+  HOOKKA SOFA MODULE TAXONOMY
+  ===========================
+  Each catalog code is "MODEL-MODULE(SIDE)" e.g. "5530-2A(LHF)". Modules:
+  • "1A" — single-seater with ONE armrest. Always mirrored: comes in 1A(LHF) and 1A(RHF).
+  • "2A" — two-seater with ONE armrest. Mirrored: 2A(LHF) and 2A(RHF).
+  • "1NA" — single-seater with NO armrest (used as middle piece).
+  • "2NA" — two-seater with NO armrest (middle piece).
+  • "3S" — three-seater single piece (one armrest left, one right, no centre split). Use ONLY when the customer literally orders one whole 3-seater unit, not when "3 boxes side-by-side" is drawn.
+  • "1L" / "L" — L-shape extension. Mirrored: L(LHF) / L(RHF). Sometimes combined with "CNR".
+  • "CNR" — corner piece (joins two perpendicular sections).
+  • "STOOL" — ottoman / footstool.
+
+  PDF-shorthand → catalog mapping:
+  • "1R" alone in a multi-box diagram → 1A; if it pairs with another "1R" / "1L" the pair is a mirror, output 1A(LHF) + 1A(RHF).
+  • "1R+1R" / "1A+1A" / "1L+1R" / two single-seater boxes drawn side-by-side → TWO line items: 1A(LHF) + 1A(RHF) (each qty=1).
+  • "1R+1NA+1R" / "1A+1NA+1A" / three boxes (left-arm + middle no-arm + right-arm) → THREE line items: 1A(LHF) + 1NA + 1A(RHF).
+  • "2+L Seater" / "2A+L" → 2A(LHF or as drawn) + L(LHF or as drawn).
+  • "2A(R)+2A(L)" → 2A(RHF) + 2A(LHF).
+  • "2+1+1" → 2A + 1A + 1A (default mirror for the two 1As).
+  • "L+L+CNR" → L(LHF) + L(RHF) + CNR.
+  • "3 Seater" with ONE single drawn box → 3S (not split).
+  • "3 Seater" with THREE drawn boxes → 1A(LHF) + 1NA + 1A(RHF) (it's drawn modular).
+
+  GOLDEN RULE: every "+" in the configuration string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew one continuous box.
+
+  Naming conventions:
+  • Strip "HK" prefix when matching ("HK5531" → "5531").
+  • Strip family-name aliases on bedframe; sofa codes are pure numeric models like 5530, 5531, 5536, 9068, 9028.
+  • Old model numbers (8030, 9068, 9028, 5540) may map to current codes — operator will correct, output original if unsure.
+  • Default to (LHF) when only ONE armed module appears and the diagram doesn't disambiguate; operator flips in preview.
+  • In a mirrored pair ALWAYS output one (LHF) + one (RHF) — never two of the same side.
 
 - sizeLabel: seat height in inches (24/26/28/30/32/35). Catalog: SOFA Sizes.
 - fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog. Sometimes a fabric appears as "BO315-2 Feather" — capture the code "BO315-2" only (drop the trailing variant word).

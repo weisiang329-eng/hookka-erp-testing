@@ -1742,7 +1742,7 @@ export default function DeliveryPage() {
         sortable: false,
         render: (_v, row) => {
           if ((row.itemCategory || "").toUpperCase() !== "SOFA") {
-            return <span className="text-[#9CA3AF]">\u2014</span>;
+            return <span className="text-[#9CA3AF]">{"\u2014"}</span>;
           }
           if (row.setComplete) {
             return (
@@ -1757,7 +1757,7 @@ export default function DeliveryPage() {
               className="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-200 tabular-nums"
               title={`Set incomplete \u2014 ${remaining} sibling PO${remaining === 1 ? "" : "s"} still in production. Selection disabled.`}
             >
-              {row.setReadySiblings}/{row.setTotalSiblings} \u2014 {remaining} pending
+              {row.setReadySiblings}/{row.setTotalSiblings} {"\u2014"} {remaining} pending
             </span>
           );
         },

@@ -9904,4 +9904,164 @@ app.post("/rebuild-production-orders-from-soi", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-supplier-material-bindings
+//
+// One-shot maintenance endpoint that seeds supplier_material_bindings rows
+// for every active raw_material that doesn't already have a binding, using
+// the most-recent purchase_order_items mention of that material as the
+// source of truth for {supplierId, supplierSku, unitPrice}.
+//
+// Why: the procurement Create-PO modal silently drops lines that have no
+// binding. After Phase 1.2 the operator can manually pick a supplier for
+// such lines, but this endpoint catches up the historical RMs in one shot
+// so most lines already auto-fill.
+//
+// Logic per RM:
+//   1. SELECT itemCode, description FROM raw_materials
+//      WHERE NOT EXISTS (SELECT 1 FROM supplier_material_bindings smb
+//                          WHERE smb.materialCode = rm.itemCode)
+//   2. Look up the most-recent purchase_order_items row whose
+//      materialName LIKE '%<itemCode>%', joined to purchase_orders
+//      to get supplierId. Order by po.created_at DESC.
+//   3. If found: INSERT one binding with isMainSupplier=1, moq=1,
+//      leadTimeDays=0, supplierSku=itemCode (operator can refine later).
+//   4. If no PO history mentions the itemCode: skip (operator must seed
+//      manually via Maintenance).
+//
+// Idempotent: only inserts when no existing binding for that materialCode.
+// Returns {scanned, seeded, skippedNoHistory, errors} with sample arrays
+// for a quick spot-check before/after running.
+//
+// Body: { dryRun?: boolean }
+// ---------------------------------------------------------------------------
+type BackfillBindingsBody = { dryRun?: boolean };
+
+app.post("/backfill-supplier-material-bindings", async (c) => {
+  // Same gate as POST /api/purchase-orders — anyone who can create a PO can
+  // seed bindings (this is operator-driven cleanup, not admin-only).
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  let body: BackfillBindingsBody = {};
+  try {
+    body = (await c.req.json().catch(() => ({}))) as BackfillBindingsBody;
+  } catch {
+    body = {};
+  }
+  const dryRun = body.dryRun === true;
+
+  const db = c.var.DB;
+
+  // Find every RM that has no binding yet. NOT EXISTS keeps it idempotent —
+  // RMs already covered (manually or by a previous run) are skipped.
+  // Postgres alias quoting (AS "fooBar") preserves case on D1 as well.
+  const candidatesRes = await db
+    .prepare(
+      `SELECT rm.itemCode    AS "itemCode",
+              rm.description AS "description",
+              rm.itemGroup   AS "itemGroup"
+         FROM raw_materials rm
+        WHERE NOT EXISTS (
+                SELECT 1 FROM supplier_material_bindings smb
+                 WHERE smb.materialCode = rm.itemCode
+              )`,
+    )
+    .all<{ itemCode: string; description: string; itemGroup: string }>();
+  const candidates = candidatesRes.results ?? [];
+
+  let seeded = 0;
+  let skippedNoHistory = 0;
+  const seededSamples: {
+    itemCode: string;
+    supplierId: string;
+    unitPriceSen: number;
+  }[] = [];
+  const skippedSamples: { itemCode: string; description: string }[] = [];
+  const errors: { itemCode: string; message: string }[] = [];
+
+  for (const rm of candidates) {
+    try {
+      // Look up the most-recent PO line item that mentions this RM's
+      // itemCode anywhere in materialName. Procurement modal stores
+      // materialName as "<rmCode> - <description>", so the LIKE catches
+      // both that path and historical Excel-import variants.
+      const hit = await db
+        .prepare(
+          `SELECT po.supplierId    AS "supplierId",
+                  poi.unitPriceSen AS "unitPriceSen",
+                  poi.supplierSKU  AS "supplierSKU"
+             FROM purchase_order_items poi
+             JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+            WHERE poi.materialName LIKE ?
+            ORDER BY po.created_at DESC, po.id DESC
+            LIMIT 1`,
+        )
+        .bind(`%${rm.itemCode}%`)
+        .first<{ supplierId: string; unitPriceSen: number; supplierSKU: string | null }>();
+
+      if (!hit || !hit.supplierId) {
+        skippedNoHistory++;
+        if (skippedSamples.length < 10) {
+          skippedSamples.push({
+            itemCode: rm.itemCode,
+            description: rm.description,
+          });
+        }
+        continue;
+      }
+
+      if (!dryRun) {
+        const id = `smb-${crypto.randomUUID().slice(0, 8)}`;
+        await db
+          .prepare(
+            `INSERT INTO supplier_material_bindings (id, supplierId, materialCode,
+               materialName, supplierSku, unitPrice, currency, leadTimeDays,
+               paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
+             VALUES (?, ?, ?, ?, ?, ?, 'MYR', 0, 'NET30', 1, ?, '2030-12-31', 1)`,
+          )
+          .bind(
+            id,
+            hit.supplierId,
+            rm.itemCode,
+            rm.description,
+            // supplierSku falls back to the rm itemCode when historical PO
+            // line had nothing useful; this is conservative — operator can
+            // refine per real supplier catalog later.
+            hit.supplierSKU || rm.itemCode,
+            hit.unitPriceSen || 0,
+            new Date().toISOString().slice(0, 10),
+          )
+          .run();
+      }
+
+      seeded++;
+      if (seededSamples.length < 10) {
+        seededSamples.push({
+          itemCode: rm.itemCode,
+          supplierId: hit.supplierId,
+          unitPriceSen: hit.unitPriceSen || 0,
+        });
+      }
+    } catch (err) {
+      errors.push({
+        itemCode: rm.itemCode,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    scanned: candidates.length,
+    seeded,
+    skippedNoHistory,
+    errorCount: errors.length,
+    seededSamples,
+    skippedSamples,
+    errors,
+  });
+});
+
 export default app;

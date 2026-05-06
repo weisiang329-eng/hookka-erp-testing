@@ -71,6 +71,10 @@ export type SalesOrderRow = {
   totalSen: number;
   status: string;
   overdue: string | null;
+  // Project Order flag — when 1, SOFA items split per-piece (one PO per qty)
+  // and the FAB_CUT cross-PO merge is disabled. Default 0 = legacy behavior
+  // (SOFA × N stays as one PO with quantity=N). See migration 0073.
+  isProjectOrder: number | null;
   notes: string | null;
   // Base64-encoded PNG of the original customer PO page(s) when this SO was
   // created from a Scan PO upload. Nullable — populated only by PO_SCAN_CLAUDE.
@@ -185,6 +189,7 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     totalSen: row.totalSen,
     status: row.status,
     overdue: row.overdue ?? "PENDING",
+    isProjectOrder: row.isProjectOrder === 1,
     notes: row.notes ?? "",
     customerPOImageB64: row.customerPOImageB64 ?? null,
     createdAt: row.createdAt ?? "",
@@ -346,6 +351,9 @@ export async function createProductionOrdersForSO(
       customerState: so.customerState,
       hookkaExpectedDD: so.hookkaExpectedDD,
       customerDeliveryDate: so.customerDeliveryDate,
+      // 1 = SO opted into Project Order on the create page; SOFA fans out
+      // per-piece. 0 / null = legacy (SOFA stays merged as one PO).
+      isProjectOrder: so.isProjectOrder === 1,
     },
     items.map((it) => ({
       lineNo: it.lineNo,
@@ -1720,9 +1728,9 @@ app.post("/", async (c) => {
            customerSO, customerSOId, reference, customerId, customerName,
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
-           subtotalSen, totalSen, status, overdue, notes, customerPOImageB64,
-           created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           subtotalSen, totalSen, status, overdue, isProjectOrder, notes,
+           customerPOImageB64, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -1746,6 +1754,10 @@ app.post("/", async (c) => {
         subtotalSen,
         "DRAFT",
         "PENDING",
+        // SO header toggle (2026-05-06): when true, SOFA items fan out
+        // per-piece in the production cascade (mirrors BEDFRAME). Default
+        // false preserves legacy single-PO-per-sofa-set behavior.
+        body.isProjectOrder === true ? 1 : 0,
         body.notes ?? "",
         customerPOImageB64,
         now,
@@ -2561,6 +2573,19 @@ app.put("/:id", async (c) => {
     }
 
     // --- Merge scalar fields ---
+    // isProjectOrder: only mutable while the SO is still DRAFT — once
+    // confirmed, the production cascade has already fanned POs out per the
+    // current setting and flipping the flag would leave the data in an
+    // inconsistent split state (the existing POs wouldn't match what the
+    // new flag implies). Confirmed/in-prod SOs ignore body.isProjectOrder
+    // and keep the existing value.
+    const canEditProjectFlag = existing.status === "DRAFT" || existing.status === "PENDING";
+    const incomingIsProject = typeof body.isProjectOrder === "boolean"
+      ? body.isProjectOrder
+      : existing.isProjectOrder === 1;
+    const mergedIsProjectOrder = canEditProjectFlag
+      ? incomingIsProject
+      : existing.isProjectOrder === 1;
     const merged = {
       customerPO: body.customerPO ?? existing.customerPO ?? "",
       customerPOId: body.customerPOId ?? existing.customerPOId ?? "",
@@ -2577,6 +2602,7 @@ app.put("/:id", async (c) => {
       hookkaDeliveryOrder:
         body.hookkaDeliveryOrder ?? existing.hookkaDeliveryOrder ?? "",
       overdue: body.overdue ?? existing.overdue ?? "PENDING",
+      isProjectOrder: mergedIsProjectOrder,
       notes: body.notes ?? existing.notes ?? "",
     };
 
@@ -2777,7 +2803,8 @@ app.put("/:id", async (c) => {
            customerId = ?, customerName = ?, customerState = ?,
            hubId = ?, hubName = ?, companySO = ?, companySODate = ?,
            customerDeliveryDate = ?, hookkaExpectedDD = ?, hookkaDeliveryOrder = ?,
-           subtotalSen = ?, totalSen = ?, status = ?, overdue = ?, notes = ?,
+           subtotalSen = ?, totalSen = ?, status = ?, overdue = ?,
+           isProjectOrder = ?, notes = ?,
            updated_at = ?
          WHERE id = ?`,
       ).bind(
@@ -2801,6 +2828,7 @@ app.put("/:id", async (c) => {
         totalSen,
         newStatus,
         merged.overdue,
+        merged.isProjectOrder ? 1 : 0,
         merged.notes,
         now,
         id,

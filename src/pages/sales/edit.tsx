@@ -175,6 +175,10 @@ export default function EditSalesOrderPage() {
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([{ ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
+  // Project Order flag — only mutable while SO is DRAFT/PENDING; locked to
+  // its current value once the SO is CONFIRMED/IN_PRODUCTION/etc. The UI
+  // disables the input in those states (server enforces too).
+  const [isProjectOrder, setIsProjectOrder] = useState(false);
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, unknown> | null>(getVariantsConfigSync());
   const [showSpecialOrdersIdx, setShowSpecialOrdersIdx] = useState<number | null>(null);
 
@@ -188,6 +192,7 @@ export default function EditSalesOrderPage() {
     () => JSON.stringify({
       customerId, customerPOId, customerSOId, reference,
       companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
+      isProjectOrder,
       items: items.map((it) => ({
         productId: it.productId, fabricId: it.fabricId, quantity: it.quantity,
         seatHeight: it.seatHeight, gapInches: it.gapInches,
@@ -199,6 +204,7 @@ export default function EditSalesOrderPage() {
     [
       customerId, customerPOId, customerSOId, reference,
       companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
+      isProjectOrder,
     ],
   );
   const [initialSig, setInitialSig] = useState<string | null>(null);
@@ -349,6 +355,7 @@ export default function EditSalesOrderPage() {
           setCustomerDeliveryDate(so.customerDeliveryDate ? so.customerDeliveryDate.split("T")[0] : "");
           setHookkaExpectedDD(so.hookkaExpectedDD ? so.hookkaExpectedDD.split("T")[0] : "");
           setNotes(so.notes || "");
+          setIsProjectOrder(so.isProjectOrder ?? false);
           setItems(so.items.map((item: Record<string, unknown>) => {
             const productCode = (item.productCode as string) || "";
             const itemCategory = (item.itemCategory as string) || "";
@@ -507,6 +514,11 @@ export default function EditSalesOrderPage() {
           customerId, customerPOId, customerSOId, reference,
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
           items: itemsForServer,
+          // isProjectOrder — server only honors this while the SO is still
+          // DRAFT/PENDING; it's silently ignored once the SO is CONFIRMED
+          // or further along. The UI also disables the input in those
+          // states so the user knows it can't be flipped post-cascade.
+          isProjectOrder,
           // Forward the admin-issued override token (if any). The backend
           // PUT verifies + atomically consumes it, then skips the Rule-3
           // production_window pre-flight. Token is NOT included on
@@ -681,6 +693,59 @@ export default function EditSalesOrderPage() {
                 <Input type="date" value={hookkaExpectedDD} onChange={(e) => setHookkaExpectedDD(e.target.value)} />
               </div>
             </div>
+
+            {/* Project Order toggle — only mutable while SO is DRAFT/PENDING.
+                After CONFIRMED the cascade has already fired, so flipping
+                this would create stale POs vs. the new fan-out shape. The
+                input is disabled with an explanatory tooltip in that case.
+                (PENDING isn't in the current SOStatus union, but the server
+                accepts it as a synonym for DRAFT — the cast keeps both
+                client + server checks in sync without widening the type.) */}
+            {(() => {
+              const status = order.status as string;
+              const projectOrderLocked =
+                status !== "DRAFT" && status !== "PENDING";
+              const lockedTooltip =
+                "Locked — SO already confirmed; cancel POs and re-create to change.";
+              return (
+                <label
+                  className={`flex items-start gap-3 rounded-md border px-3 py-2.5 transition-colors ${
+                    projectOrderLocked
+                      ? "bg-[#F5F4F1] border-[#E2DDD8] cursor-not-allowed opacity-70"
+                      : isProjectOrder
+                        ? "bg-[#6B5C32]/10 border-[#6B5C32]/40 cursor-pointer"
+                        : "bg-white border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                  }`}
+                  title={projectOrderLocked ? lockedTooltip : undefined}
+                >
+                  <input
+                    type="checkbox"
+                    checked={isProjectOrder}
+                    disabled={projectOrderLocked}
+                    onChange={(e) => setIsProjectOrder(e.target.checked)}
+                    className="mt-0.5 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]/20 disabled:cursor-not-allowed"
+                  />
+                  <div className="flex-1">
+                    <div
+                      className={`text-sm font-medium ${
+                        projectOrderLocked
+                          ? "text-[#6B7280]"
+                          : isProjectOrder
+                            ? "text-[#6B5C32]"
+                            : "text-[#374151]"
+                      }`}
+                    >
+                      Project Order
+                    </div>
+                    <div className="text-xs text-[#6B7280]">
+                      {projectOrderLocked
+                        ? lockedTooltip
+                        : "Split sofa items per piece (each sofa gets its own production order, like bedframes)"}
+                    </div>
+                  </div>
+                </label>
+              );
+            })()}
 
             {selectedCustomer && (
               <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">

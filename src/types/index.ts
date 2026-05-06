@@ -243,6 +243,11 @@ export type SalesOrder = {
    *  future customer demand (companySOId uses "SOH-" prefix). When a real
    *  customer order lands, this SO is renamed in-place. Optional for legacy. */
   isStock?: boolean;
+  /** Project Order flag — when true, SOFA items in this SO fan out per-piece
+   *  in the production cascade (each sofa gets its own PO, mirroring the
+   *  bedframe split). Lets the operator track each sofa independently and
+   *  partial-ship. Only mutable while the SO is DRAFT/PENDING. */
+  isProjectOrder?: boolean;
   /** Base64 PNG of the original customer PO page(s) when the SO was created
    *  via the Scan PO flow. Used by the SO detail page's "View original PO"
    *  button as proof-of-source for customer disputes. Null otherwise. */

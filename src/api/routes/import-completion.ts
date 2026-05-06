@@ -10064,4 +10064,204 @@ app.post("/backfill-supplier-material-bindings", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Phase 2.4 — Phantom GRN backfill for historical RECEIVED POs.
+//
+// 556 historical POs imported from Google Sheets are at status='RECEIVED'
+// but have no GRN row attached. Three-way match, GRN-derived analytics,
+// and the new 2.3 gate (PO→RECEIVED requires a POSTED GRN) all assume
+// the GRN row is the source of truth for what was received. This endpoint
+// fills that gap WITHOUT re-posting to inventory: the historical balanceQty
+// is already correct from the PI import path, so we skip postGRNToStock
+// (no rm_batches + no cost_ledger writes) and just record the receipt
+// envelope.
+//
+// Idempotent: only POs with NO GRN at all get a phantom row. Re-running
+// the endpoint is safe.
+// ---------------------------------------------------------------------------
+type BackfillPhantomGrnsBody = { dryRun?: boolean };
+
+app.post("/backfill-historical-grns", async (c) => {
+  // Same gate as POST /api/purchase-orders.
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  let body: BackfillPhantomGrnsBody = {};
+  try {
+    body = (await c.req.json().catch(() => ({}))) as BackfillPhantomGrnsBody;
+  } catch {
+    body = {};
+  }
+  // Also support ?dryRun=true on the query string for parity with other
+  // backfill endpoints that read it from URL params.
+  const dryRunQuery = c.req.query("dryRun");
+  const dryRun = body.dryRun === true || dryRunQuery === "true";
+
+  const db = c.var.DB;
+
+  // Find every RECEIVED PO with no GRN. Postgres alias quoting (AS "fooBar")
+  // preserves case so the JS side gets the field names back as-is.
+  const candidatesRes = await db
+    .prepare(
+      `SELECT po.id           AS "poId",
+              po.poNo         AS "poNo",
+              po.supplierId   AS "supplierId",
+              po.supplierName AS "supplierName",
+              po.receivedDate AS "receivedDate",
+              po.orderDate    AS "orderDate"
+         FROM purchase_orders po
+        WHERE po.status = 'RECEIVED'
+          AND NOT EXISTS (
+                SELECT 1 FROM grns g WHERE g.poId = po.id
+              )
+        ORDER BY po.poNo`,
+    )
+    .all<{
+      poId: string;
+      poNo: string;
+      supplierId: string;
+      supplierName: string | null;
+      receivedDate: string | null;
+      orderDate: string | null;
+    }>();
+  const candidates = candidatesRes.results ?? [];
+
+  // Pre-scan the existing PHANTOM GRN sequence so we can keep numbering
+  // contiguous across multiple runs. Format: GRN-PHANTOM-NNN.
+  const seqRes = await db
+    .prepare(
+      `SELECT grnNumber FROM grns
+        WHERE grnNumber LIKE 'GRN-PHANTOM-%'
+        ORDER BY grnNumber DESC
+        LIMIT 1`,
+    )
+    .first<{ grnNumber: string }>();
+  let nextSeq = seqRes?.grnNumber
+    ? Number(seqRes.grnNumber.split("-").pop()) + 1
+    : 1;
+
+  let created = 0;
+  const errors: { poNo: string; message: string }[] = [];
+  const sample: { poNo: string; grnNumber: string; lineCount: number }[] = [];
+
+  for (const cand of candidates) {
+    try {
+      // Pull the parent PO's items so we can mirror them onto the GRN.
+      // Each GRN line gets receivedQty = orderedQty = quantity, accepted
+      // = received, rejected = 0 — matches "fully received per the PO".
+      const itemsRes = await db
+        .prepare(
+          `SELECT id           AS "id",
+                  materialName AS "materialName",
+                  supplierSKU  AS "supplierSKU",
+                  quantity     AS "quantity",
+                  unitPriceSen AS "unitPriceSen"
+             FROM purchase_order_items
+            WHERE purchaseOrderId = ?`,
+        )
+        .bind(cand.poId)
+        .all<{
+          id: string;
+          materialName: string | null;
+          supplierSKU: string | null;
+          quantity: number;
+          unitPriceSen: number;
+        }>();
+      const items = itemsRes.results ?? [];
+      if (items.length === 0) {
+        // No PO items → nothing to mirror. Surface as an error so the
+        // caller can spot-check (could indicate orphan data in 5.4).
+        errors.push({
+          poNo: cand.poNo,
+          message: "PO has no line items — skipped",
+        });
+        continue;
+      }
+
+      const grnNumber = `GRN-PHANTOM-${String(nextSeq).padStart(3, "0")}`;
+      nextSeq++;
+      const grnId = `grn-${crypto.randomUUID().slice(0, 8)}`;
+      // Receive date defaults to the PO's receivedDate, then orderDate,
+      // then today — keep the timeline coherent for downstream reports.
+      const receiveDate =
+        cand.receivedDate || cand.orderDate || new Date().toISOString().slice(0, 10);
+      const totalAmount = items.reduce(
+        (s, it) => s + (it.quantity || 0) * (it.unitPriceSen || 0),
+        0,
+      );
+
+      if (!dryRun) {
+        const stmts: D1PreparedStatement[] = [];
+        stmts.push(
+          db
+            .prepare(
+              `INSERT INTO grns (id, grnNumber, poId, poNumber, supplierId,
+                 supplierName, receiveDate, receivedBy, totalAmount,
+                 qcStatus, status, notes)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PASSED', 'POSTED', ?)`,
+            )
+            .bind(
+              grnId,
+              grnNumber,
+              cand.poId,
+              cand.poNo,
+              cand.supplierId,
+              cand.supplierName ?? "",
+              receiveDate,
+              "phantom-backfill",
+              totalAmount,
+              "Phantom backfill — historical RECEIVED PO, inventory already correct",
+            ),
+        );
+        items.forEach((item, idx) => {
+          stmts.push(
+            db
+              .prepare(
+                `INSERT INTO grn_items (grnId, poItemIndex, materialCode,
+                   materialName, orderedQty, receivedQty, acceptedQty,
+                   rejectedQty, rejectionReason, unitPrice)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, ?)`,
+              )
+              .bind(
+                grnId,
+                idx,
+                item.supplierSKU ?? "",
+                item.materialName ?? "",
+                item.quantity,
+                item.quantity,
+                item.quantity,
+                item.unitPriceSen,
+              ),
+          );
+        });
+
+        await db.batch(stmts);
+      }
+
+      created++;
+      if (sample.length < 5) {
+        sample.push({
+          poNo: cand.poNo,
+          grnNumber,
+          lineCount: items.length,
+        });
+      }
+    } catch (err) {
+      errors.push({
+        poNo: cand.poNo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    candidates: candidates.length,
+    created,
+    errors,
+    sample,
+  });
+});
+
 export default app;

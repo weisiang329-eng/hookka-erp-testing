@@ -8951,6 +8951,50 @@ app.post("/backfill-so-expected-dd", async (c) => {
   return c.json({ success: true, targetsFound: targets.length, updated });
 });
 
+// Backfill sales_order_items.productName from product master where the
+// stored name looks like the OCR's PDF description (contains common PDF
+// markers like "HK", "COL:", or matches the productCode).
+app.post("/backfill-so-item-product-name", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  const targetsRes = await db
+    .prepare(
+      `SELECT soi.id, soi.productCode, soi.productName, p.name AS canonName
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+         LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
+        WHERE so.orgId = ?
+          AND soi.productCode IS NOT NULL AND soi.productCode <> ''
+          AND p.name IS NOT NULL`,
+    )
+    .bind(orgId)
+    .all<{ id: string; productCode: string; productName: string; canonName: string }>();
+  const all = targetsRes.results ?? [];
+
+  let updated = 0;
+  for (const r of all) {
+    // Only overwrite when current name looks like PDF junk:
+    // - contains "HK" or "COL:" or "COLOUR:" (PDF description tokens)
+    // - or matches productCode literally (which would mean no real name)
+    // - or contains a slash (PDFs love slashes; product names don't)
+    const looksJunk =
+      /(?:^HK\d|COL:|COLOUR:|\/)/i.test(r.productName) ||
+      r.productName === r.productCode ||
+      r.productName === "";
+    if (!looksJunk) continue;
+    if (r.productName === r.canonName) continue;
+    await db
+      .prepare("UPDATE sales_order_items SET productName = ? WHERE id = ?")
+      .bind(r.canonName, r.id)
+      .run();
+    updated++;
+  }
+  return c.json({ success: true, candidates: all.length, updated });
+});
+
 app.post("/backfill-so-reference", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "update");
   if (denied) return denied;

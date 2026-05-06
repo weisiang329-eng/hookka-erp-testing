@@ -418,7 +418,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           lineNo: idx + 1,
           lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
           productCode: item.productCode,
-          productName: item.description ?? item.productCode,
+          // Don't pre-fill productName from PDF description — that's
+          // human-readable junk like 'HK5531/24"(2 Seater+L)/COL:GARFIELD'.
+          // Backend looks up the canonical name from product master via
+          // resolvedProduct.name when this is empty.
+          productName: "",
           itemCategory: item.category,
           sizeLabel: item.sizeLabel ?? "",
           fabricCode: item.fabricCode ?? "",

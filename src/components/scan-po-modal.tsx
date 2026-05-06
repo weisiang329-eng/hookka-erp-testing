@@ -1110,15 +1110,14 @@ function ClaudePOCard({
                             </select>
                           </td>
                           <td className="px-1.5 py-1">
-                            <input
-                              list={`prod-${row.sampleId}-${i}`}
-                              className={`w-32 px-1 py-0.5 text-xs border rounded ${isUnknownProduct ? "border-amber-400 bg-amber-50" : "border-transparent hover:border-[#E2DDD8]"}`}
+                            <SearchableSelect
                               value={item.productCode}
-                              onChange={(e) => onUpdateItem(i, { productCode: e.target.value })}
+                              options={productList}
+                              onChange={(v) => onUpdateItem(i, { productCode: v })}
+                              placeholder="Search SKU…"
+                              widthClass="w-40"
+                              warning={!!isUnknownProduct}
                             />
-                            <datalist id={`prod-${row.sampleId}-${i}`}>
-                              {productList.map((c) => <option key={c} value={c} />)}
-                            </datalist>
                           </td>
                           <td className="px-1.5 py-1">
                             <input
@@ -1128,15 +1127,14 @@ function ClaudePOCard({
                             />
                           </td>
                           <td className="px-1.5 py-1">
-                            <input
-                              list={`fab-${row.sampleId}-${i}`}
-                              className={`w-24 px-1 py-0.5 text-xs border rounded ${isUnknownFabric ? "border-amber-400 bg-amber-50" : "border-transparent hover:border-[#E2DDD8]"}`}
+                            <SearchableSelect
                               value={item.fabricCode ?? ""}
-                              onChange={(e) => onUpdateItem(i, { fabricCode: e.target.value || null })}
+                              options={fabricList}
+                              onChange={(v) => onUpdateItem(i, { fabricCode: v || null })}
+                              placeholder="Search fabric…"
+                              widthClass="w-32"
+                              warning={!!isUnknownFabric}
                             />
-                            <datalist id={`fab-${row.sampleId}-${i}`}>
-                              {fabricList.map((c) => <option key={c} value={c} />)}
-                            </datalist>
                           </td>
                           <td className="px-1.5 py-1 text-center">
                             <input
@@ -1456,6 +1454,115 @@ async function extractPdfText(file: File): Promise<string> {
   }
 
   return textParts.join("\n\n--- PAGE BREAK ---\n\n");
+}
+
+// Searchable single-value combobox — replaces the browser-native
+// <input list="…"> + <datalist> combo, which had two annoying quirks:
+//   1. On click, browsers usually show the WHOLE list — not filtered.
+//   2. No keyboard nav, no clear way to discover that you should type.
+// This component shows a labeled input that, on focus or click, opens
+// a popover with type-to-filter. Click an option to commit. Click
+// outside or press Esc to close.
+function SearchableSelect({
+  value,
+  options,
+  onChange,
+  placeholder,
+  widthClass,
+  warning,
+}: {
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+  placeholder?: string;
+  widthClass?: string;
+  warning?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, [open]);
+
+  const q = query.trim().toLowerCase();
+  const filtered = q
+    ? options.filter((o) => o.toLowerCase().includes(q))
+    : options;
+
+  return (
+    <div ref={ref} className={`relative inline-block ${widthClass ?? "w-40"}`}>
+      <button
+        type="button"
+        onClick={() => {
+          setOpen((o) => !o);
+          setQuery("");
+        }}
+        className={`w-full text-left px-1.5 py-0.5 text-xs border rounded truncate ${
+          warning
+            ? "border-amber-400 bg-amber-50 text-[#9C6F1E]"
+            : "border-[#E2DDD8] hover:border-[#9CA3AF] bg-white"
+        }`}
+        title={value || placeholder}
+      >
+        {value || <span className="text-[#9CA3AF]">{placeholder ?? "Select…"}</span>}
+        <span className="float-right text-[#9CA3AF]">▾</span>
+      </button>
+      {open && (
+        <div className="absolute z-30 mt-1 left-0 w-64 bg-white border border-[#E2DDD8] rounded-md shadow-lg">
+          <input
+            autoFocus
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") setOpen(false);
+              if (e.key === "Enter" && filtered[0]) {
+                onChange(filtered[0]);
+                setOpen(false);
+              }
+            }}
+            placeholder="Type to search…"
+            className="w-full px-2 py-1 text-xs border-b border-[#E2DDD8] focus:outline-none"
+          />
+          <div className="max-h-60 overflow-y-auto">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-[#9CA3AF]">No matches</div>
+            ) : (
+              filtered.slice(0, 100).map((opt) => (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => {
+                    onChange(opt);
+                    setOpen(false);
+                  }}
+                  className={`block w-full text-left px-3 py-1.5 text-xs hover:bg-[#FAF9F7] ${
+                    opt === value ? "bg-[#F5F0EB] font-medium" : ""
+                  }`}
+                >
+                  {opt}
+                </button>
+              ))
+            )}
+            {filtered.length > 100 && (
+              <div className="px-3 py-1 text-[10px] text-[#9CA3AF] border-t border-[#E2DDD8]">
+                Showing first 100 of {filtered.length} — narrow your search to see more.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Multi-select chip component for the Special Orders cell. Stores as

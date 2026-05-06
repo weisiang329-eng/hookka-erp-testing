@@ -1536,6 +1536,62 @@ app.post("/samples/:id/confirm", async (c) => {
 });
 
 // ===========================================================================
+// GET /api/scan-po/samples/by-po/:poIdentifier — debug: latest extraction
+// for a customer PO. Returns rawExtracted/correctedJson so the operator
+// (and we) can inspect what Claude actually reported (tvPosition,
+// diagramOrder) to diagnose why server-side LHF/RHF flips look wrong.
+// ===========================================================================
+app.get("/samples/by-po/:poIdentifier", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+  const poIdentifier = c.req.param("poIdentifier");
+  if (!poIdentifier) {
+    return c.json({ success: false, error: "Missing poIdentifier." }, 400);
+  }
+  const row = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      `SELECT id, customerHint, poIdentifier, rawExtracted, correctedJson, isGold, createdAt
+         FROM po_scan_samples
+         WHERE poIdentifier = ?
+         ORDER BY createdAt DESC
+         LIMIT 1`,
+    )
+    .bind(poIdentifier)
+    .first<{
+      id: string;
+      customerHint: string | null;
+      poIdentifier: string | null;
+      rawExtracted: string | null;
+      correctedJson: string | null;
+      isGold: number | null;
+      createdAt: string | null;
+    }>();
+  if (!row) {
+    return c.json({ success: false, error: "Sample not found." }, 404);
+  }
+  let raw: unknown = null;
+  let corrected: unknown = null;
+  try {
+    if (row.rawExtracted) raw = JSON.parse(row.rawExtracted);
+  } catch { /* return as string */ raw = row.rawExtracted; }
+  try {
+    if (row.correctedJson) corrected = JSON.parse(row.correctedJson);
+  } catch { corrected = row.correctedJson; }
+  return c.json({
+    success: true,
+    data: {
+      id: row.id,
+      customerHint: row.customerHint,
+      poIdentifier: row.poIdentifier,
+      isGold: row.isGold === 1,
+      createdAt: row.createdAt,
+      rawExtracted: raw,
+      correctedJson: corrected,
+    },
+  });
+});
+
+// ===========================================================================
 // PATCH /api/scan-po/samples/by-po/:poIdentifier — bulk-unmark gold by PO
 // (or set, with body { gold: true }). Lets the operator undo a misclick on
 // the gold-reference button without hunting for individual sample IDs.

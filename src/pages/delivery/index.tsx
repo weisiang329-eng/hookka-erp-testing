@@ -231,6 +231,19 @@ type ReadyPORow = {
   hookkaExpectedDD: string;
   currentDepartment: string;
   progress: number;
+  // Sibling-set check (added 2026-05-06) — only meaningful for SOFA rows.
+  // setTotalSiblings: total active POs of this row's parent SO (excludes
+  // CANCELLED / already-in-DO / consignment); setReadySiblings: subset of
+  // those whose upholstery JCs are all COMPLETED. setComplete = the entire
+  // sofa set is ready to ship as one unit. When false on a SOFA row, the
+  // grid disables selection so an operator can't accidentally Create DO
+  // with a partial set (user pain point: shipped 3 of 5 compartments
+  // because the other 2 weren't visible in Pending Delivery).
+  // BF/ACC rows ship independently per piece — no sibling concern, fields
+  // default to total=1, ready=1, complete=true.
+  setTotalSiblings: number;
+  setReadySiblings: number;
+  setComplete: boolean;
 };
 
 // Same rule as src/pages/sales/detail.tsx:39 and the production grid:
@@ -559,8 +572,44 @@ export default function DeliveryPage() {
 
           const allPOs = poRes.data as ProductionOrderApiShape[];
 
+          // ---------------------------------------------------------------
+          // Sibling-set readiness map (added 2026-05-06).
+          // For each SO we count how many of its active POs (not CANCELLED,
+          // not in DO, not consignment) have ALL their upholstery JCs done.
+          // The Pending Delivery grid uses this to flag SOFA rows that are
+          // visually "ready" but whose set is INCOMPLETE — preventing the
+          // operator from shipping a partial sofa (3 of 5 compartments
+          // bug user hit 2026-05-06).
+          // BF/ACC are independently shippable so we still compute but the
+          // row defaults treat them as complete (set total/ready = 1).
+          // ---------------------------------------------------------------
+          const allUphDone = (po: ProductionOrderApiShape): boolean => {
+            const uph = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            if (uph.length === 0) return false;
+            return uph.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+          };
+          const siblingsBySo = new Map<string, { total: number; ready: number }>();
+          for (const po of allPOs) {
+            if (po.status === "CANCELLED") continue;
+            if (po.consignmentOrderId) continue;
+            if (linkedPOIds.has(po.id)) continue;
+            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            if (uphCards.length === 0) continue;
+            const soId = po.salesOrderId || "";
+            if (!siblingsBySo.has(soId)) siblingsBySo.set(soId, { total: 0, ready: 0 });
+            const slot = siblingsBySo.get(soId)!;
+            slot.total += 1;
+            if (allUphDone(po)) slot.ready += 1;
+          }
+
           const mapPO = (po: ProductionOrderApiShape): ReadyPORow => {
             const soInfo = soMap.get(po.salesOrderId || "");
+            const isSofa = (po.itemCategory || "").toUpperCase() === "SOFA";
+            // BF/ACC: each row is its own set (siblings don't matter for
+            // shipping decisions). SOFA: pull the parent SO's tally.
+            const sib = isSofa
+              ? siblingsBySo.get(po.salesOrderId || "") ?? { total: 1, ready: 1 }
+              : { total: 1, ready: 1 };
             return {
               id: po.id,
               poNo: po.poNo,
@@ -588,6 +637,9 @@ export default function DeliveryPage() {
               hookkaExpectedDD: soInfo?.hookkaExpectedDD || po.targetEndDate || "",
               currentDepartment: po.currentDepartment || "",
               progress: po.progress || 0,
+              setTotalSiblings: sib.total,
+              setReadySiblings: sib.ready,
+              setComplete: sib.ready === sib.total,
             };
           };
 
@@ -1677,6 +1729,40 @@ export default function DeliveryPage() {
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
       {
+        // Set Status column (added 2026-05-06) \u2014 flags SOFA rows whose
+        // sibling compartments aren't all ready, so an operator doesn't
+        // ship a partial set (e.g. 3 of 5). BF/ACC render "\u2014" since each
+        // piece ships independently. Selection is also guarded in
+        // onSelectionChange so incomplete-set rows can't reach Create DO.
+        key: "setStatus" as keyof ReadyPORow,
+        label: "Set Status",
+        type: "text",
+        width: "160px",
+        align: "left",
+        sortable: false,
+        render: (_v, row) => {
+          if ((row.itemCategory || "").toUpperCase() !== "SOFA") {
+            return <span className="text-[#9CA3AF]">\u2014</span>;
+          }
+          if (row.setComplete) {
+            return (
+              <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200 tabular-nums">
+                {row.setReadySiblings}/{row.setTotalSiblings} Ship
+              </span>
+            );
+          }
+          const remaining = row.setTotalSiblings - row.setReadySiblings;
+          return (
+            <span
+              className="inline-flex items-center rounded-full bg-red-50 px-2 py-0.5 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-200 tabular-nums"
+              title={`Set incomplete \u2014 ${remaining} sibling PO${remaining === 1 ? "" : "s"} still in production. Selection disabled.`}
+            >
+              {row.setReadySiblings}/{row.setTotalSiblings} \u2014 {remaining} pending
+            </span>
+          );
+        },
+      },
+      {
         key: "unitM3",
         label: "Unit (m\u00B3)",
         type: "number",
@@ -2266,7 +2352,14 @@ export default function DeliveryPage() {
               groupBy="customerState"
               selectable
               onSelectionChange={(rows) =>
-                setSelectedReadyPOs(new Set(rows.map((r) => r.id)))
+                // Drop incomplete SOFA sets defensively — even if the user
+                // clicks the row's checkbox, an incomplete set can't make
+                // it into selectedReadyPOs and therefore can't reach the
+                // Create DO POST. setComplete is true for BF/ACC and for
+                // ready SOFA sets, false only for partial SOFA sets.
+                setSelectedReadyPOs(
+                  new Set(rows.filter((r) => r.setComplete).map((r) => r.id)),
+                )
               }
             />
           </CardContent>

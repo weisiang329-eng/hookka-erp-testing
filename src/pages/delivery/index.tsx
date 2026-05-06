@@ -231,6 +231,16 @@ type ReadyPORow = {
   hookkaExpectedDD: string;
   currentDepartment: string;
   progress: number;
+  // Outstanding column — Pending Delivery shows ALL pending POs (not only
+  // those with all upholstery JCs done). For SOFA we collapse multiple POs
+  // belonging to the same SO into a single grouped row (a sofa is shipped
+  // as a complete set), so the row may represent N member POs. BF/ACC rows
+  // stay 1-to-1 (memberPOIds = [self.id], outstandingTotal = 1).
+  rowKind: "BF" | "SOFA_GROUP";
+  outstandingDone: number;
+  outstandingTotal: number;
+  isReady: boolean;
+  memberPOIds: string[];
 };
 
 // Same rule as src/pages/sales/detail.tsx:39 and the production grid:
@@ -310,6 +320,11 @@ export default function DeliveryPage() {
   const [podDialog, setPodDialog] = useState<DeliveryOrderRow | null>(null);
   const [invoiceLoading, setInvoiceLoading] = useState(false);
   const [selectedReadyPOs, setSelectedReadyPOs] = useState<Set<string>>(new Set());
+  // Map from synthetic SOFA group row id ('sofa-group:<salesOrderId>') to
+  // the underlying per-PO ReadyPORow entries. Populated whenever the
+  // Pending Delivery list is rebuilt; used to expand a SOFA_GROUP back into
+  // individual POs when the user creates a DO.
+  const [sofaGroupMembers, setSofaGroupMembers] = useState<Map<string, ReadyPORow[]>>(new Map());
   const [creatingDOFromPO, setCreatingDOFromPO] = useState(false);
   const [dragDropIdx, setDragDropIdx] = useState<number | null>(null);
 
@@ -559,8 +574,19 @@ export default function DeliveryPage() {
 
           const allPOs = poRes.data as ProductionOrderApiShape[];
 
+          // True when every UPHOLSTERY job_card on this PO is in a terminal
+          // state. Mirrors the legacy Pending Delivery filter — used now as
+          // a per-row "ready to ship" signal (Outstanding column) plus the
+          // BF row's done/total arithmetic.
+          const allUphDone = (po: ProductionOrderApiShape): boolean => {
+            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            if (uphCards.length === 0) return false;
+            return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
+          };
+
           const mapPO = (po: ProductionOrderApiShape): ReadyPORow => {
             const soInfo = soMap.get(po.salesOrderId || "");
+            const uphDone = allUphDone(po);
             return {
               id: po.id,
               poNo: po.poNo,
@@ -588,6 +614,13 @@ export default function DeliveryPage() {
               hookkaExpectedDD: soInfo?.hookkaExpectedDD || po.targetEndDate || "",
               currentDepartment: po.currentDepartment || "",
               progress: po.progress || 0,
+              // Default: BF/ACC shape, 1-to-1 with this PO. SOFA groups
+              // overwrite these below when collapsing per-SO.
+              rowKind: "BF",
+              outstandingDone: uphDone ? 1 : 0,
+              outstandingTotal: 1,
+              isReady: uphDone,
+              memberPOIds: [po.id],
             };
           };
 
@@ -609,24 +642,104 @@ export default function DeliveryPage() {
             .map(mapPO);
           setPlanningPOs(planning);
 
-          // Pending Delivery: production complete, not yet on a real DO.
-          // Exclude POs that came from a Consignment Order (have
-          // consignmentOrderId set) - those route to the Consignment
-          // Note flow, not the Delivery Order flow. Bug fix 2026-04-28
-          // per user: a CO that finished production was wrongly
-          // appearing in DO's "Ready for DO" list.
-          const ready = allPOs
-            .filter((po) => {
-              if (po.status === "CANCELLED") return false;
-              if (po.consignmentOrderId) return false;
-              // Check that upholstery cards exist and ALL are done
-              const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
-              if (uphCards.length === 0) return false;
-              return uphCards.every((j) => j.status === "COMPLETED" || j.status === "TRANSFERRED");
-            })
-            .filter((po) => !linkedPOIds.has(po.id))
-            .map(mapPO);
-          setReadyPOs(ready);
+          // Pending Delivery: ALL pending POs (any upholstery completion
+          // status), partitioned by category. SOFA POs are collapsed per
+          // SO into one grouped row (a sofa ships as a complete set);
+          // BF/ACC stays one row per PO. The legacy "all upholstery JCs
+          // done" requirement is now per-row via the Outstanding column
+          // (isReady flag), not a hard filter.
+          //
+          // Same exclusions as before:
+          //   - CANCELLED POs
+          //   - CO-sourced POs (consignmentOrderId set → CN flow, not DO)
+          //   - POs already linked to a non-cancelled DO
+          //   - POs with no upholstery job_card at all
+          const pendingPOs = allPOs.filter((po) => {
+            if (po.status === "CANCELLED") return false;
+            if (po.consignmentOrderId) return false;
+            if (linkedPOIds.has(po.id)) return false;
+            const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
+            if (uphCards.length === 0) return false;
+            return true;
+          });
+
+          const sofaRaw = pendingPOs.filter((po) => (po.itemCategory || "").toUpperCase() === "SOFA");
+          const bfRaw = pendingPOs.filter((po) => (po.itemCategory || "").toUpperCase() !== "SOFA");
+
+          // BF/ACC — one row per PO, mapPO already populates the
+          // outstanding fields with the BF defaults.
+          const bfRows: ReadyPORow[] = bfRaw.map(mapPO);
+
+          // SOFA — group by salesOrderId. Each group becomes one synthetic
+          // row carrying the SO's variant codes joined with "+", summed
+          // m³, and outstanding = (members with all uph done) / total.
+          const sofaBySo = new Map<string, ProductionOrderApiShape[]>();
+          for (const po of sofaRaw) {
+            const k = po.salesOrderId || "";
+            const arr = sofaBySo.get(k);
+            if (arr) arr.push(po);
+            else sofaBySo.set(k, [po]);
+          }
+
+          const newSofaGroupMembers = new Map<string, ReadyPORow[]>();
+          const sofaRows: ReadyPORow[] = [];
+          for (const [salesOrderId, group] of sofaBySo) {
+            const memberRows = group.map(mapPO);
+            const groupId = `sofa-group:${salesOrderId}`;
+            newSofaGroupMembers.set(groupId, memberRows);
+
+            const first = memberRows[0];
+            const doneCount = group.filter(allUphDone).length;
+            const total = group.length;
+            // productCode → join variant codes ("5530-2A+L"). Falls back to
+            // first.productCode if the group is somehow empty.
+            const codes = memberRows.map((r) => r.productCode).filter(Boolean);
+            const joinedCode = codes.length > 0 ? codes.join("+") : first.productCode;
+            // Latest among the per-PO uph completed dates — null unless
+            // every member is done (any pending = group not done yet).
+            const allDone = doneCount === total && total > 0;
+            const uphDates = memberRows
+              .map((r) => r.uphCompletedDate)
+              .filter((d): d is string => !!d);
+            const latestUphDate = allDone && uphDates.length > 0
+              ? uphDates.slice().sort().reverse()[0]
+              : null;
+            const racking = memberRows.map((r) => r.rackingNumber).find((s) => !!s) || "";
+            const summedM3 = memberRows.reduce((s, r) => s + (r.unitM3 || 0), 0);
+
+            sofaRows.push({
+              id: groupId,
+              poNo: first.poNo,
+              salesOrderId,
+              salesOrderNo: first.salesOrderNo,
+              customerId: first.customerId,
+              customerName: first.customerName,
+              customerState: first.customerState,
+              productCode: joinedCode,
+              productName: first.productName,
+              itemCategory: "SOFA",
+              sizeLabel: first.sizeLabel,
+              fabricCode: first.fabricCode,
+              // Compartment count (one PO per upholstered piece) so the
+              // operator sees how many pieces this set is.
+              quantity: total,
+              unitM3: summedM3,
+              completedDate: null,
+              uphCompletedDate: latestUphDate,
+              rackingNumber: racking,
+              hookkaExpectedDD: first.hookkaExpectedDD,
+              currentDepartment: first.currentDepartment,
+              progress: first.progress,
+              rowKind: "SOFA_GROUP",
+              outstandingDone: doneCount,
+              outstandingTotal: total,
+              isReady: allDone,
+              memberPOIds: memberRows.map((r) => r.id),
+            });
+          }
+
+          setSofaGroupMembers(newSofaGroupMembers);
+          setReadyPOs([...bfRows, ...sofaRows]);
         }
       }
     }
@@ -1188,9 +1301,20 @@ export default function DeliveryPage() {
       // user reported "Selected production orders span multiple customers
       // or states" toast even though only 1 row showed as selected — the
       // dialog snapshot was stale).
-      const poIds = readyPOs
-        .filter((po) => selectedReadyPOs.has(po.id))
-        .map((po) => po.id);
+      //
+      // SOFA_GROUP rows carry a synthetic id that is not a real PO id —
+      // expand them via sofaGroupMembers before posting so the backend
+      // gets actual production_order ids.
+      const poIds: string[] = [];
+      for (const row of readyPOs) {
+        if (!selectedReadyPOs.has(row.id)) continue;
+        if (row.rowKind === "SOFA_GROUP") {
+          const members = sofaGroupMembers.get(row.id) || [];
+          for (const m of members) poIds.push(m.id);
+        } else {
+          poIds.push(row.id);
+        }
+      }
       if (poIds.length === 0) {
         setCreateDODialog(null);
         return;
@@ -1676,6 +1800,30 @@ export default function DeliveryPage() {
       { key: "customerName", label: "Customer", type: "text", width: "120px", sortable: true },
       { key: "customerState", label: "State", type: "text", width: "60px", sortable: true },
       { key: "quantity", label: "Qty", type: "number", width: "60px", align: "right", sortable: true },
+      {
+        // Visual signal for ship-readiness. Green "Ship" pill = every
+        // upholstery JC on this row (BF) or every member PO (SOFA group)
+        // is done. Amber "n/total" pill = this many members are still
+        // waiting for upholstery; operator sees the row but cannot
+        // select it for DO creation (onSelectionChange filters non-ready
+        // ids out below).
+        key: "outstanding",
+        label: "Outstanding",
+        type: "text",
+        width: "110px",
+        align: "left",
+        sortable: false,
+        render: (_v, row) =>
+          row.isReady ? (
+            <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-200">
+              Ship
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 ring-1 ring-inset ring-amber-200 tabular-nums">
+              {row.outstandingTotal - row.outstandingDone}/{row.outstandingTotal}
+            </span>
+          ),
+      },
       {
         key: "unitM3",
         label: "Unit (m\u00B3)",
@@ -2241,8 +2389,22 @@ export default function DeliveryPage() {
                     // Multi-customer/multi-state selections are allowed
                     // (user request 2026-04-27). One DO can carry POs
                     // for multiple destinations — operator's call.
+                    //
+                    // Expand any selected SOFA_GROUP row into its
+                    // underlying per-PO rows so the dialog body (which
+                    // expects per-PO entries — one DO line item each)
+                    // sees the real PO ids, not the synthetic group id.
                     const selected = readyPOs.filter((po) => selectedReadyPOs.has(po.id));
-                    openCreateDODialog(selected);
+                    const expanded: ReadyPORow[] = [];
+                    for (const row of selected) {
+                      if (row.rowKind === "SOFA_GROUP") {
+                        const members = sofaGroupMembers.get(row.id) || [];
+                        for (const m of members) expanded.push(m);
+                      } else {
+                        expanded.push(row);
+                      }
+                    }
+                    openCreateDODialog(expanded);
                   }}
                 >
                   {creatingDOFromPO ? (
@@ -2265,9 +2427,19 @@ export default function DeliveryPage() {
               emptyMessage="No items pending delivery."
               groupBy="customerState"
               selectable
+              // Only ready rows can be selected for DO creation. The grid
+              // still lets the user click the checkbox on a non-ready row
+              // visually, but we silently drop it from the selection set
+              // here so Create DO can never include a not-yet-finished PO.
               onSelectionChange={(rows) =>
-                setSelectedReadyPOs(new Set(rows.map((r) => r.id)))
+                setSelectedReadyPOs(
+                  new Set(rows.filter((r) => r.isReady).map((r) => r.id)),
+                )
               }
+              // Gray out non-ready rows so the operator sees at a glance
+              // that they cannot ship yet. The amber Outstanding pill
+              // already conveys it; the dimming reinforces.
+              rowClassName={(row) => (row.isReady ? "" : "opacity-60")}
             />
           </CardContent>
         </Card>

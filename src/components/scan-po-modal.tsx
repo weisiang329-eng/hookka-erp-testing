@@ -1654,11 +1654,16 @@ function SpecialMultiSelect({
   };
 
   return (
-    <div className="relative inline-flex flex-wrap items-center gap-1 min-w-[14rem]">
+    <div className="relative w-[14rem] max-w-[14rem]">
+      {/* Inner row scrolls horizontally so all selected chips remain reachable */}
+      {/* without forcing the cell wider (which would crush the rest of the */}
+      {/* line item table). Chips themselves are nowrap so labels don't break */}
+      {/* mid-word. */}
+      <div className="flex flex-nowrap items-center gap-1 overflow-x-auto scrollbar-thin pb-0.5">
       {selected.map((s) => (
         <span
           key={s}
-          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8]"
+          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8] whitespace-nowrap shrink-0"
         >
           {s}
           <button
@@ -1675,11 +1680,12 @@ function SpecialMultiSelect({
         <button
           type="button"
           onClick={() => setPicking((p) => !p)}
-          className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32]"
+          className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32] whitespace-nowrap shrink-0"
         >
           + Add
         </button>
       )}
+      </div>
       {picking && remaining.length > 0 && (
         <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-60 overflow-y-auto min-w-[14rem]">
           {remaining.map((opt) => (

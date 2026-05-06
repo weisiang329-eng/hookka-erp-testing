@@ -9640,4 +9640,268 @@ app.post("/migrate-nonstandard-sofa-sizes", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/rebuild-production-orders-from-soi
+//
+// Option D one-shot fixer (2026-05-06). Finds every SO whose
+// SUM(non-cancelled items.quantity) doesn't match
+// SUM(non-cancelled production_orders.quantity) — meaning the items table
+// (the new single source of truth) has drifted from the cached PO fan-out
+// (e.g. an SO was edited via the legacy PUT path that didn't rebuild POs).
+// For each affected SO, if every JC is still WAITING/CANCELLED (the same
+// gate the PUT handler enforces), teardown all POs/JCs/fg_units and rebuild
+// from sales_order_items via createProductionOrdersForOrder. Locked SOs are
+// reported but skipped.
+//
+// Auth: sales-orders:update (same as the audit endpoints in this file).
+// Tenant: getOrgId(c) is invoked for parity with the other admin endpoints,
+// even though sales_orders + production_orders aren't tenant-scoped on this
+// schema (single-tenant deployment for the migration window).
+// ---------------------------------------------------------------------------
+app.post("/rebuild-production-orders-from-soi", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  void getOrgId(c); // parity with sibling admin endpoints
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Find every SO with a SUM(items.quantity) vs SUM(po.quantity) mismatch
+  //    over non-cancelled rows. NULL SUMs (no items / no POs) coalesce to 0.
+  const candRes = await db
+    .prepare(
+      `SELECT so.id AS soId,
+              so.companySOId AS companySOId,
+              so.status AS status,
+              COALESCE(soi.qty, 0) AS expected,
+              COALESCE(po.qty, 0) AS actual
+         FROM sales_orders so
+         LEFT JOIN (
+           SELECT salesOrderId, SUM(quantity) AS qty
+             FROM sales_order_items
+            GROUP BY salesOrderId
+         ) soi ON soi.salesOrderId = so.id
+         LEFT JOIN (
+           SELECT salesOrderId, SUM(quantity) AS qty
+             FROM production_orders
+            WHERE status <> 'CANCELLED'
+            GROUP BY salesOrderId
+         ) po ON po.salesOrderId = so.id
+        WHERE so.status IN ('CONFIRMED', 'IN_PRODUCTION')
+          AND COALESCE(soi.qty, 0) <> COALESCE(po.qty, 0)`,
+    )
+    .all<{
+      soId: string;
+      companySOId: string | null;
+      status: string;
+      expected: number;
+      actual: number;
+    }>();
+  const candidates = candRes.results ?? [];
+
+  type CandidateReport = {
+    soId: string;
+    companySOId: string | null;
+    status: string;
+    expected: number;
+    actual: number;
+  };
+  type LockedReport = CandidateReport & {
+    reason: string;
+    jcStatus: string;
+    deptCode: string;
+  };
+  type RebuiltReport = CandidateReport & {
+    deletedPoCount: number;
+    createdPoNos: string[];
+  };
+  type ErrorReport = CandidateReport & { error: string };
+
+  const candidateReports: CandidateReport[] = candidates.map((r) => ({
+    soId: r.soId,
+    companySOId: r.companySOId,
+    status: r.status,
+    expected: r.expected,
+    actual: r.actual,
+  }));
+  const locked: LockedReport[] = [];
+  const rebuilt: RebuiltReport[] = [];
+  const errors: ErrorReport[] = [];
+
+  for (const cand of candidates) {
+    const cr: CandidateReport = {
+      soId: cand.soId,
+      companySOId: cand.companySOId,
+      status: cand.status,
+      expected: cand.expected,
+      actual: cand.actual,
+    };
+
+    // 2. JC lock — same Option D gate as PUT /:id. Any JC past WAITING/CANCELLED
+    //    means production has started and we can't safely rebuild.
+    const startedRes = await db
+      .prepare(
+        `SELECT jc.status, jc.departmentCode
+           FROM job_cards jc
+           JOIN production_orders po ON po.id = jc.productionOrderId
+          WHERE po.salesOrderId = ?
+            AND jc.status NOT IN ('WAITING', 'CANCELLED')
+          ORDER BY jc.sequence ASC, jc.id ASC
+          LIMIT 1`,
+      )
+      .bind(cand.soId)
+      .first<{ status: string | null; departmentCode: string | null }>();
+    if (startedRes && startedRes.status) {
+      locked.push({
+        ...cr,
+        reason: "production_started",
+        jcStatus: startedRes.status,
+        deptCode: startedRes.departmentCode || "",
+      });
+      continue;
+    }
+
+    if (dryRun) {
+      // Dry-run still reports as a rebuild candidate (no writes).
+      rebuilt.push({ ...cr, deletedPoCount: 0, createdPoNos: [] });
+      continue;
+    }
+
+    // 3. Teardown + rebuild — same shape as PUT /:id (fg_units → job_cards
+    //    → production_orders; rebuild via createProductionOrdersForOrder).
+    try {
+      const so = await db
+        .prepare("SELECT * FROM sales_orders WHERE id = ?")
+        .bind(cand.soId)
+        .first<{
+          id: string;
+          companySOId: string | null;
+          companySODate: string | null;
+          customerPOId: string | null;
+          reference: string | null;
+          customerName: string;
+          customerState: string | null;
+          hookkaExpectedDD: string | null;
+          customerDeliveryDate: string | null;
+          isProjectOrder: number | null;
+        }>();
+      if (!so) {
+        errors.push({ ...cr, error: "Sales order disappeared mid-run" });
+        continue;
+      }
+      const itemsRes = await db
+        .prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ?")
+        .bind(cand.soId)
+        .all<{
+          lineNo: number;
+          productId: string | null;
+          productCode: string | null;
+          productName: string | null;
+          itemCategory: string | null;
+          sizeCode: string | null;
+          sizeLabel: string | null;
+          fabricCode: string | null;
+          quantity: number;
+          gapInches: number | null;
+          divanHeightInches: number | null;
+          legHeightInches: number | null;
+          specialOrder: string | null;
+          notes: string | null;
+        }>();
+      const items = itemsRes.results ?? [];
+      if (items.length === 0) {
+        errors.push({ ...cr, error: "Sales order has no items" });
+        continue;
+      }
+
+      const built = await createProductionOrdersForOrder(
+        db,
+        {
+          id: so.id,
+          sourceType: "SO",
+          companyOrderId: so.companySOId ?? "",
+          companyOrderDate: so.companySODate,
+          customerPOId: so.customerPOId,
+          reference: so.reference,
+          customerName: so.customerName,
+          customerState: so.customerState,
+          hookkaExpectedDD: so.hookkaExpectedDD,
+          customerDeliveryDate: so.customerDeliveryDate,
+          isProjectOrder: so.isProjectOrder === 1,
+        },
+        items.map((it) => ({
+          lineNo: it.lineNo,
+          productId: it.productId,
+          productCode: it.productCode,
+          productName: it.productName,
+          itemCategory: it.itemCategory,
+          sizeCode: it.sizeCode,
+          sizeLabel: it.sizeLabel,
+          fabricCode: it.fabricCode,
+          quantity: it.quantity,
+          gapInches: it.gapInches,
+          divanHeightInches: it.divanHeightInches,
+          legHeightInches: it.legHeightInches,
+          specialOrder: it.specialOrder,
+          notes: it.notes,
+        })),
+        { forceRebuild: true },
+      );
+
+      // Count existing POs before delete so the report shows what was wiped.
+      const existingPosRes = await db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM production_orders WHERE salesOrderId = ?",
+        )
+        .bind(cand.soId)
+        .first<{ n: number }>();
+      const deletedPoCount = existingPosRes?.n ?? 0;
+
+      const deleteFgUnitsStmt = db
+        .prepare(
+          `DELETE FROM fg_units WHERE po_id IN (
+             SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+        )
+        .bind(cand.soId);
+      const deleteJcsStmt = db
+        .prepare(
+          `DELETE FROM job_cards WHERE productionOrderId IN (
+             SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+        )
+        .bind(cand.soId);
+      const deletePosStmt = db
+        .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
+        .bind(cand.soId);
+
+      await db.batch([
+        deleteFgUnitsStmt,
+        deleteJcsStmt,
+        deletePosStmt,
+        ...built.statements,
+      ]);
+
+      rebuilt.push({
+        ...cr,
+        deletedPoCount,
+        createdPoNos: built.created.map((p) => p.poNo),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      errors.push({ ...cr, error: msg });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    candidateCount: candidateReports.length,
+    rebuiltCount: rebuilt.length,
+    lockedCount: locked.length,
+    errorCount: errors.length,
+    candidates: candidateReports,
+    rebuilt,
+    locked,
+    errors,
+  });
+});
+
 export default app;

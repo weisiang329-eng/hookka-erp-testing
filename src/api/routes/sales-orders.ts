@@ -1233,39 +1233,50 @@ app.get("/:id/edit-eligibility", async (c) => {
     });
   }
 
-  // IN_PRODUCTION — only the dept-completed gate matters now. Operator
-  // policy (2026-05-06): the 2-day production_window soft lock is OFF;
-  // SOs stay editable / cancellable as long as no JC has been stamped
-  // COMPLETED. Rule 1 (status) + Rule 2 (dept completion) are the only
-  // hard locks remaining.
-  const completedRes = await c.var.DB
+  // IN_PRODUCTION — Option D unified rule (2026-05-06): the SO is editable
+  // only when EVERY job_card under its POs is still WAITING or CANCELLED.
+  // Once any JC has been stamped IN_PROGRESS / COMPLETED / TRANSFERRED, real
+  // production is underway and a teardown+rebuild from sales_order_items
+  // would orphan that work — so we hard-lock structural edits. This subsumes
+  // the old "dept_completed" rule (which only checked completedDate) and the
+  // 2-day production_window soft lock (already removed earlier).
+  const productionStartedRes = await c.var.DB
     .prepare(
-      `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+      `SELECT jc.departmentName, jc.departmentCode, jc.status, jc.completedDate
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE po.salesOrderId = ?
-          AND jc.completedDate IS NOT NULL
-          AND jc.completedDate <> ''
-        ORDER BY jc.completedDate ASC
+          AND jc.status NOT IN ('WAITING', 'CANCELLED')
+        ORDER BY jc.sequence ASC, jc.id ASC
         LIMIT 1`,
     )
     .bind(id)
-    .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>();
+    .first<{
+      departmentName: string | null;
+      departmentCode: string | null;
+      status: string | null;
+      completedDate: string | null;
+    }>();
 
-  // Rule 2: any dept stamped a completion → fully locked.
-  if (completedRes && completedRes.completedDate) {
+  // Rule 2 (Option D): any JC has moved past WAITING → fully locked.
+  if (productionStartedRes && productionStartedRes.status) {
     return c.json({
       success: true,
       editable: false,
-      reason: "dept_completed",
+      reason: "production_started",
       status: so.status,
-      completedDept: completedRes.departmentName || completedRes.departmentCode || "A department",
-      completedAt: completedRes.completedDate,
+      startedDept:
+        productionStartedRes.departmentName ||
+        productionStartedRes.departmentCode ||
+        "A department",
+      startedDeptCode: productionStartedRes.departmentCode || "",
+      jcStatus: productionStartedRes.status,
+      completedAt: productionStartedRes.completedDate || null,
     });
   }
 
-  // IN_PRODUCTION + no JC done yet → editable. (Old 2-day window guard
-  // removed.)
+  // IN_PRODUCTION + every JC still WAITING/CANCELLED → editable. PUT will
+  // teardown + rebuild POs/JCs from sales_order_items on save.
   return c.json({
     success: true,
     editable: true,
@@ -2449,58 +2460,54 @@ app.put("/:id", async (c) => {
 
     // ---------------------------------------------------------------------
     // Edit-eligibility re-check (defense-in-depth, mirrors the
-    // /:id/edit-eligibility GET endpoint logic). Rule 1 is implicit in the
-    // existing status-transition validator further down. Rule 2
-    // (dept_completed) and Rule 3 (production_window) get explicit checks
-    // here so a malicious / stale FE can't bypass them by hitting PUT
-    // directly. Status-only edits skip BOTH checks (an admin closing or
-    // cancelling shouldn't be blocked by these).
+    // /:id/edit-eligibility GET endpoint logic).
     //
-    // overrideToken bypass: SUPER_ADMIN / ADMIN can mint a one-shot token
-    // via POST /:id/override-edit-lock and forward it on this PUT body to
-    // skip Rule 3 ONLY. Rules 1 and 2 are NOT bypassable — they protect
-    // committed production output and state-machine validity, which no
-    // amount of admin override can safely waive.
+    // Option D unified rule (2026-05-06): structural edits are allowed
+    // while every JC under the SO is still WAITING (or CANCELLED). The
+    // moment any JC has been stamped IN_PROGRESS / COMPLETED / TRANSFERRED
+    // we hard-lock the SO — a teardown+rebuild from sales_order_items
+    // would orphan that work. Subsumes the old dept_completed rule.
+    //
+    // Status-only edits skip the gate (an admin closing/cancelling
+    // shouldn't be blocked).
     // ---------------------------------------------------------------------
     if (
       !isStatusOnly &&
       (existing.status === "IN_PRODUCTION" ||
         existing.status === "CONFIRMED")
     ) {
-      // Only Rule 2 (dept_completed) remains. Rule 3 (production_window
-      // 2-day soft lock) was removed per operator policy 2026-05-06: SOs
-      // stay editable / cancellable as long as no JC has been stamped
-      // COMPLETED. The override-edit-lock endpoint is now a no-op but is
-      // left in place for FE compat.
-      const completedRes = await c.var.DB
+      const productionStartedRes = await c.var.DB
         .prepare(
-          `SELECT jc.completedDate, jc.departmentName, jc.departmentCode
+          `SELECT jc.status, jc.departmentName, jc.departmentCode, jc.completedDate
              FROM job_cards jc
              JOIN production_orders po ON po.id = jc.productionOrderId
             WHERE po.salesOrderId = ?
-              AND jc.completedDate IS NOT NULL
-              AND jc.completedDate <> ''
+              AND jc.status NOT IN ('WAITING', 'CANCELLED')
+            ORDER BY jc.sequence ASC, jc.id ASC
             LIMIT 1`,
         )
         .bind(id)
         .first<{
-          completedDate: string | null;
+          status: string | null;
           departmentName: string | null;
           departmentCode: string | null;
+          completedDate: string | null;
         }>();
 
-      // Rule 2 — dept_completed. NOT bypassable: real production output
-      // exists, editing items would orphan finished WIP.
-      if (completedRes && completedRes.completedDate) {
+      if (productionStartedRes && productionStartedRes.status) {
         const dept =
-          completedRes.departmentName ||
-          completedRes.departmentCode ||
+          productionStartedRes.departmentName ||
+          productionStartedRes.departmentCode ||
           "A department";
         return c.json(
           {
             success: false,
-            error: `Cannot edit — ${dept} has completed work on this order. Editing items would orphan finished WIP.`,
-            reason: "dept_completed",
+            error: `Cannot edit — ${dept} has started production (job card status: ${productionStartedRes.status}). Editing items would orphan in-flight work.`,
+            reason: "production_started",
+            startedDept: dept,
+            startedDeptCode: productionStartedRes.departmentCode || "",
+            jcStatus: productionStartedRes.status,
+            completedAt: productionStartedRes.completedDate || null,
           },
           403,
         );
@@ -3126,6 +3133,123 @@ app.put("/:id", async (c) => {
     }
 
     await c.var.DB.batch(statements);
+
+    // ---------------------------------------------------------------------
+    // Option D — pre-production rebuild (2026-05-06).
+    //
+    // When the SO is CONFIRMED or IN_PRODUCTION (NOT DRAFT) and the operator
+    // edited items, treat sales_order_items as the single source of truth:
+    // teardown every existing production_orders + job_cards row for this SO
+    // and re-fan-out from the freshly-written items. The Rule 2 gate above
+    // already proved no JC has moved past WAITING, so this is safe.
+    //
+    // Skipped when:
+    //   * isStatusOnly — no items changed, nothing to rebuild.
+    //   * isDraftToConfirmed — the confirm cascade above already created POs
+    //     from the new items via createProductionOrdersForSO; rebuilding now
+    //     would double-fire (existing-PO short-circuit returns the just-made
+    //     ones, but we'd also re-DELETE+rebuild needlessly).
+    //   * existing.status === "DRAFT" and not transitioning — DRAFT has no
+    //     POs yet by definition.
+    //
+    // Order matters in the DELETE: fg_units → job_cards → production_orders.
+    // fg_units.po_id is a NOT-NULL FK without CASCADE; its presence on a
+    // PENDING / fan-out-stub row would FK-block the PO delete. Pre-WAITING
+    // SOs only have PENDING fg_units stubs (the Rule 2 gate forbids any PO
+    // with non-PENDING fg_units), so removing them is lossless. job_cards
+    // CASCADE on productionOrderId, but we DELETE explicitly to be defensive
+    // against schema drift. piece_pics CASCADE on jobCardId.
+    // ---------------------------------------------------------------------
+    const itemsChanged = !!body.items;
+    const shouldRebuild =
+      itemsChanged &&
+      !isStatusOnly &&
+      !isDraftToConfirmed &&
+      existing.status !== "DRAFT" &&
+      existing.status !== "PENDING" &&
+      // Skip rebuild on terminal/cancelled transitions — cascade already
+      // handled the JC/PO state for those.
+      newStatus !== "CANCELLED" &&
+      newStatus !== "ON_HOLD";
+
+    if (shouldRebuild) {
+      // Re-fetch the freshly-written SO + items so the rebuild uses the
+      // PUT's mutated state (not the pre-batch `existing` snapshot).
+      const freshSO = await c.var.DB
+        .prepare("SELECT * FROM sales_orders WHERE id = ?")
+        .bind(id)
+        .first<SalesOrderRow>();
+      const freshItemsRes = await c.var.DB
+        .prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ?")
+        .bind(id)
+        .all<SalesOrderItemRow>();
+      const freshItems = freshItemsRes.results ?? [];
+
+      if (freshSO && freshItems.length > 0) {
+        // Build the rebuild statements FIRST (read-only), then run DELETE
+        // + INSERTs in one batch. forceRebuild=true so the builder doesn't
+        // bail on the about-to-be-deleted POs (deterministic poId
+        // pord-{soId}-NN collides with the existing rows, but the DELETE
+        // in the same batch frees them first).
+        const built = await createProductionOrdersForOrder(
+          c.var.DB,
+          {
+            id: freshSO.id,
+            sourceType: "SO",
+            companyOrderId: freshSO.companySOId ?? "",
+            companyOrderDate: freshSO.companySODate,
+            customerPOId: freshSO.customerPOId,
+            reference: freshSO.reference,
+            customerName: freshSO.customerName,
+            customerState: freshSO.customerState,
+            hookkaExpectedDD: freshSO.hookkaExpectedDD,
+            customerDeliveryDate: freshSO.customerDeliveryDate,
+            isProjectOrder: freshSO.isProjectOrder === 1,
+          },
+          freshItems.map((it) => ({
+            lineNo: it.lineNo,
+            productId: it.productId,
+            productCode: it.productCode,
+            productName: it.productName,
+            itemCategory: it.itemCategory,
+            sizeCode: it.sizeCode,
+            sizeLabel: it.sizeLabel,
+            fabricCode: it.fabricCode,
+            quantity: it.quantity,
+            gapInches: it.gapInches,
+            divanHeightInches: it.divanHeightInches,
+            legHeightInches: it.legHeightInches,
+            specialOrder: it.specialOrder,
+            notes: it.notes,
+          })),
+          { forceRebuild: true },
+        );
+
+        const deleteFgUnitsStmt = c.var.DB
+          .prepare(
+            `DELETE FROM fg_units WHERE po_id IN (
+               SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+          )
+          .bind(id);
+        const deleteJcsStmt = c.var.DB
+          .prepare(
+            `DELETE FROM job_cards WHERE productionOrderId IN (
+               SELECT id FROM production_orders WHERE salesOrderId = ?)`,
+          )
+          .bind(id);
+        const deletePosStmt = c.var.DB
+          .prepare("DELETE FROM production_orders WHERE salesOrderId = ?")
+          .bind(id);
+
+        await c.var.DB.batch([
+          deleteFgUnitsStmt,
+          deleteJcsStmt,
+          deletePosStmt,
+          ...built.statements,
+        ]);
+        createdProductionOrders = built.created;
+      }
+    }
 
     const updated = await fetchSOWithItems(c.var.DB, id);
     return c.json({

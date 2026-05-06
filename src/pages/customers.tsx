@@ -705,20 +705,25 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
         </div>
         </>)}
       </CardHeader>
+      {/* Assign SKU modal — full-screen overlay. Mounted OUTSIDE the
+          collapsed branch so the "Assign SKU" button on the header still
+          opens it when the panel itself is collapsed. Was inside the
+          {!collapsed && ...} block before 2026-05-06, which left the
+          button silently no-op'd whenever the panel was collapsed
+          (default since 7923f04 — user reported "Assign SKU 没反应"). */}
+      <AssignSkuModal
+        open={showAssign}
+        customerName={customerName}
+        candidates={allProducts.filter((p) => !assignedIds.has(p.id))}
+        picked={assignPicked}
+        togglePick={toggleAssignPick}
+        setPicked={setAssignPicked}
+        saving={assignSaving}
+        onClose={() => { setShowAssign(false); setAssignPicked(new Set()); setAssignQuery(""); }}
+        onSubmit={submitAssign}
+      />
       {!collapsed && (
       <CardContent>
-        {/* Assign SKU modal — full-screen overlay. The old inline expand didn't scale for bulk assign. */}
-        <AssignSkuModal
-          open={showAssign}
-          customerName={customerName}
-          candidates={allProducts.filter((p) => !assignedIds.has(p.id))}
-          picked={assignPicked}
-          togglePick={toggleAssignPick}
-          setPicked={setAssignPicked}
-          saving={assignSaving}
-          onClose={() => { setShowAssign(false); setAssignPicked(new Set()); setAssignQuery(""); }}
-          onSubmit={submitAssign}
-        />
 
         {/* Per-product price-history dialog (calendar icon next to code). */}
         {historyTargetRow && (

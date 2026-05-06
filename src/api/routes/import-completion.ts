@@ -8960,9 +8960,13 @@ app.post("/backfill-so-item-product-name", async (c) => {
   const db = c.var.DB;
   const orgId = getOrgId(c);
 
+  // Note: Postgres lowercases unquoted identifiers, so aliases must be
+  // double-quoted to round-trip as camelCase ("canonName" not "canonname").
+  // Without the quotes, .all<{ canonName: string }>() returns undefined
+  // for r.canonName and silently skips every row.
   const targetsRes = await db
     .prepare(
-      `SELECT soi.id, soi.productCode, soi.productName, p.name AS canonName
+      `SELECT soi.id, soi.productCode, soi.productName, p.name AS "canonName"
          FROM sales_order_items soi
          JOIN sales_orders so ON so.id = soi.salesOrderId
          LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
@@ -9267,11 +9271,11 @@ app.post("/backfill-ocr-so-fields", async (c) => {
               soi.fabricId,
               soi.fabricCode,
               soi.specialOrder,
-              p.id   AS canonProductId,
-              p.name AS canonName,
-              p.sizeCode  AS canonSizeCode,
-              p.sizeLabel AS canonSizeLabel,
-              p.category  AS canonCategory
+              p.id   AS "canonProductId",
+              p.name AS "canonName",
+              p.sizeCode  AS "canonSizeCode",
+              p.sizeLabel AS "canonSizeLabel",
+              p.category  AS "canonCategory"
          FROM sales_order_items soi
          JOIN sales_orders so ON so.id = soi.salesOrderId
          LEFT JOIN products p ON p.code = soi.productCode
@@ -9427,35 +9431,6 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     }
   }
 
-  // Diagnostic probe: re-fetch by exact code via a fresh prepared statement.
-  // If this returns rows but the LEFT JOIN didn't match, it tells us the
-  // problem is with the JOIN evaluation (not data availability).
-  const probeCodes = ["5531-1A(LHF)", "1013-(Q)", "5531-L(LHF)"];
-  const probes: Record<string, { hits: number; sample: string | null }> = {};
-  for (const pc of probeCodes) {
-    const r = await db
-      .prepare("SELECT code, name FROM products WHERE code = ?")
-      .bind(pc)
-      .all<{ code: string; name: string }>();
-    const rows = r.results ?? [];
-    probes[pc] = {
-      hits: rows.length,
-      sample: rows[0]?.name ?? null,
-    };
-  }
-
-  // Also: same JOIN logic via a fresh query with one specific SOI to verify.
-  const joinProbe = await db
-    .prepare(
-      `SELECT soi.productCode AS soiCode, p.code AS pCode, p.name AS pName
-         FROM sales_order_items soi
-         LEFT JOIN products p ON p.code = soi.productCode
-        WHERE soi.productCode = ?
-        LIMIT 1`,
-    )
-    .bind("5531-1A(LHF)")
-    .first<{ soiCode: string; pCode: string | null; pName: string | null }>();
-
   return c.json({
     success: true,
     candidates: candidates.length,
@@ -9466,8 +9441,6 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     nullCanonName,
     alreadyMatches,
     notUpdatedSamples,
-    probes,
-    joinProbe,
   });
 });
 

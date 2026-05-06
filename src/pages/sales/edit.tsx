@@ -232,11 +232,12 @@ export default function EditSalesOrderPage() {
     !saving && !loading && initialSig !== null && initialSig !== formSig;
   useUnsavedChanges(isDirty);
 
-  // Customer-aware variants-config — mirror sales/create.tsx behaviour:
+  // Customer-aware variants-config — read-time merge (added 2026-05-06,
+  // same fix as sales/create.tsx):
   //   * No customer → master `variants-config`.
-  //   * Customer + seeded blob → `variants-config:<customerId>`.
-  //   * Customer but not seeded → fall back to master so prices still
-  //     resolve (UI stays usable until someone runs Copy from Master).
+  //   * Customer → MERGE master + customer snapshot. Customer overrides
+  //     master per-`value`; master entries the customer doesn't have
+  //     (i.e. newly-added master variants) flow through automatically.
   //
   // [variantsTick] is bumped whenever a kv-config change is received
   // (cross-tab via BroadcastChannel, or same-tab via subscribeKvConfig).
@@ -255,6 +256,54 @@ export default function EditSalesOrderPage() {
   }, [customerId]);
 
   useEffect(() => {
+    type CfgItem = { value?: string } & Record<string, unknown>;
+    const mergeCfg = (
+      master: Record<string, unknown> | null,
+      customer: Record<string, unknown> | null,
+    ): Record<string, unknown> | null => {
+      if (!master && !customer) return null;
+      const out: Record<string, unknown> = {};
+      const keys = new Set([...Object.keys(master ?? {}), ...Object.keys(customer ?? {})]);
+      for (const k of keys) {
+        const m = master?.[k];
+        const c = customer?.[k];
+        if (Array.isArray(m) && Array.isArray(c)) {
+          const cByValue = new Map<string, CfgItem>();
+          for (const it of c as CfgItem[]) {
+            if (it && typeof it.value === "string") cByValue.set(it.value, it);
+          }
+          const merged: CfgItem[] = [];
+          const seen = new Set<string>();
+          for (const it of m as CfgItem[]) {
+            if (!it || typeof it.value !== "string") { merged.push(it); continue; }
+            merged.push(cByValue.get(it.value) ?? it);
+            seen.add(it.value);
+          }
+          for (const it of c as CfgItem[]) {
+            if (it && typeof it.value === "string" && !seen.has(it.value)) merged.push(it);
+          }
+          out[k] = merged;
+          continue;
+        }
+        if (Array.isArray(m) || Array.isArray(c)) {
+          const seen = new Set<string>();
+          const merged: unknown[] = [];
+          for (const arr of [m, c]) {
+            if (Array.isArray(arr)) for (const v of arr) {
+              const key = typeof v === "string" ? v : JSON.stringify(v);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              merged.push(v);
+            }
+          }
+          out[k] = merged;
+          continue;
+        }
+        out[k] = c ?? m;
+      }
+      return out;
+    };
+
     let cancelled = false;
     if (!customerId) {
       fetchVariantsConfig()
@@ -262,25 +311,19 @@ export default function EditSalesOrderPage() {
         .catch(() => { /* ignore */ });
       return () => { cancelled = true; };
     }
-    fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
-      .then((j) => {
-        if (cancelled) return;
-        if (j?.success && j.data) {
-          setMaintenanceConfig(j.data as Record<string, unknown>);
-        } else {
-          fetchVariantsConfig()
-            .then((cfg) => { if (!cancelled) setMaintenanceConfig(cfg as Record<string, unknown> | null); })
-            .catch(() => { /* ignore */ });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) {
-          fetchVariantsConfig()
-            .then((cfg) => { if (!cancelled) setMaintenanceConfig(cfg as Record<string, unknown> | null); })
-            .catch(() => { /* ignore */ });
-        }
-      });
+    Promise.all([
+      fetch("/api/kv-config/variants-config")
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => (j?.success ? (j.data as Record<string, unknown> | null) : null))
+        .catch(() => null),
+      fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => (j?.success ? (j.data as Record<string, unknown> | null) : null))
+        .catch(() => null),
+    ]).then(([master, customer]) => {
+      if (cancelled) return;
+      setMaintenanceConfig(mergeCfg(master, customer));
+    });
     return () => { cancelled = true; };
   }, [customerId, variantsTick]);
 

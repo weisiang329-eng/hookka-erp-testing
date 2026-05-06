@@ -495,12 +495,81 @@ function CreateSalesOrderPage() {
       }
     };
 
-    // Customer-aware variants-config:
+    // Customer-aware variants-config (read-time merge — added 2026-05-06):
     //   * No customer selected → master `variants-config`.
-    //   * Customer selected + customer-keyed blob exists →
-    //     `variants-config:<customerId>` (per-customer surcharge snapshot).
-    //   * Customer selected but not yet seeded → fall back to master so
-    //     the form keeps working until someone runs Copy from Master.
+    //   * Customer selected → MERGE master + customer snapshot so new master
+    //     variants automatically appear in every customer's picker without
+    //     needing a Copy-from-Master refresh per customer. Per-category, for
+    //     each entry in master we look up the same `value` in customer; if
+    //     present, we use the customer override (preserves custom pricing);
+    //     otherwise we use the master entry. Customer-only entries (rare —
+    //     would mean the customer added a variant master doesn't have)
+    //     survive the merge so nothing the user explicitly added is lost.
+    //
+    //   This replaces the old "snapshot completely shadows master" rule —
+    //   that left customer pickers stuck on whatever was current the last
+    //   time someone ran Copy-from-Master, which is the bug user hit
+    //   2026-05-06: "我在 product code 添加了 items, 为什么 sales order
+    //   search 不出来" — the Carress snapshot had been frozen.
+    type CfgItem = { value?: string; priceSen?: number } & Record<string, unknown>;
+    const mergeCfg = (
+      master: Record<string, unknown> | null,
+      customer: Record<string, unknown> | null,
+    ): Record<string, unknown> | null => {
+      if (!master && !customer) return null;
+      const out: Record<string, unknown> = {};
+      const keys = new Set([
+        ...Object.keys(master ?? {}),
+        ...Object.keys(customer ?? {}),
+      ]);
+      for (const k of keys) {
+        const m = master?.[k];
+        const c = customer?.[k];
+        // Both arrays — merge per `value`. master ordering wins so newly-
+        // added master items appear in the place the user added them; any
+        // customer-only items go after.
+        if (Array.isArray(m) && Array.isArray(c)) {
+          const cByValue = new Map<string, CfgItem>();
+          for (const it of c as CfgItem[]) {
+            if (it && typeof it.value === "string") cByValue.set(it.value, it);
+          }
+          const merged: CfgItem[] = [];
+          const seen = new Set<string>();
+          for (const it of m as CfgItem[]) {
+            if (!it || typeof it.value !== "string") { merged.push(it); continue; }
+            const override = cByValue.get(it.value);
+            merged.push(override ?? it);
+            seen.add(it.value);
+          }
+          for (const it of c as CfgItem[]) {
+            if (it && typeof it.value === "string" && !seen.has(it.value)) {
+              merged.push(it);
+            }
+          }
+          out[k] = merged;
+          continue;
+        }
+        // Plain string-array category (e.g. `gaps`) — union, master order first.
+        if (Array.isArray(m) || Array.isArray(c)) {
+          const seen = new Set<string>();
+          const merged: unknown[] = [];
+          for (const arr of [m, c]) {
+            if (Array.isArray(arr)) for (const v of arr) {
+              const key = typeof v === "string" ? v : JSON.stringify(v);
+              if (seen.has(key)) continue;
+              seen.add(key);
+              merged.push(v);
+            }
+          }
+          out[k] = merged;
+          continue;
+        }
+        // Non-array (object) category — customer wins if present, else master.
+        out[k] = c ?? m;
+      }
+      return out;
+    };
+
     let cancelled = false;
     if (!customerId) {
       applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
@@ -511,34 +580,20 @@ function CreateSalesOrderPage() {
       return () => { cancelled = true; };
     }
 
-    // Customer selected. Attempt the customer-keyed blob first, fall back
-    // to master if the customer hasn't been seeded yet (404 / null data).
-    fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
-      .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
-      .then((j) => {
-        if (cancelled) return;
-        if (j?.success && j.data) {
-          applyCfg(j.data as Record<string, unknown>);
-        } else {
-          // Not seeded — fall back to master so the picker doesn't go empty.
-          fetch("/api/kv-config/variants-config")
-            .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
-            .then((jm) => {
-              if (cancelled) return;
-              if (jm?.success && jm.data) {
-                applyCfg(jm.data as Record<string, unknown>);
-              } else {
-                applyCfg(null);
-              }
-            })
-            .catch(() => {
-              if (!cancelled) applyCfg(null);
-            });
-        }
-      })
-      .catch(() => {
-        if (!cancelled) applyCfg(getVariantsConfigSync() as Record<string, unknown> | null);
-      });
+    // Customer selected — fetch BOTH in parallel, merge.
+    Promise.all([
+      fetch("/api/kv-config/variants-config")
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => (j?.success ? (j.data as Record<string, unknown> | null) : null))
+        .catch(() => null),
+      fetch(`/api/kv-config/${encodeURIComponent(`variants-config:${customerId}`)}`)
+        .then((r) => r.json() as Promise<{ success?: boolean; data?: unknown }>)
+        .then((j) => (j?.success ? (j.data as Record<string, unknown> | null) : null))
+        .catch(() => null),
+    ]).then(([master, customer]) => {
+      if (cancelled) return;
+      applyCfg(mergeCfg(master, customer));
+    });
 
     return () => { cancelled = true; };
   }, [customerId, variantsTick]);

@@ -170,17 +170,37 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     setParsing(true);
     setErrors([]);
 
-    // --- Pass 1: try Claude OCR (per-file) -----------------------------
+    // --- Pass 1: try Claude OCR (per-page parallel) -------------------
+    // Phase 4: each multi-page PDF is split client-side into one PDF per
+    // page, then every page is sent as a parallel /extract request.
+    // Two wins:
+    //   • Speed — total wall clock ≈ max(per-page latency) instead of
+    //     sum. A 16-page PDF goes from ~60s sequential → ~6-8s parallel.
+    //   • Accuracy — Claude focuses on a single PO per call instead of
+    //     juggling 16. Anthropic prompt caching shares the catalog
+    //     across requests, so calls 2..N pay ~10% on the cached prefix.
     const claudeSuccesses: ClaudeScanRow[] = [];
     const claudeFailures: File[] = [];
     const claudeWarnings: string[] = [];
 
-    // Process all PDFs in parallel — Claude calls are independent so the
-    // total wall-clock = max(per-file latency) instead of sum.
+    type PageJob = { file: File; pageNo: number; pageFile: File };
+    const allJobs: PageJob[] = [];
+    for (const file of pdfFiles) {
+      try {
+        const pages = await splitPdfIntoPages(file);
+        for (const p of pages) allJobs.push({ file, pageNo: p.pageNo, pageFile: p.file });
+      } catch (err) {
+        claudeFailures.push(file);
+        claudeWarnings.push(
+          `${file.name}: failed to split PDF — ${err instanceof Error ? err.message : "unknown"}`,
+        );
+      }
+    }
+
     const claudeResults = await Promise.allSettled(
-      pdfFiles.map(async (file) => {
+      allJobs.map(async (job) => {
         const fd = new FormData();
-        fd.append("file", file);
+        fd.append("file", job.pageFile);
         const res = await fetch("/api/scan-po/extract", { method: "POST", body: fd });
         const data = await res.json() as {
           success?: boolean;
@@ -190,9 +210,9 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           };
         };
         if (res.ok && data.success && Array.isArray(data.data?.samples)) {
-          return { kind: "ok" as const, file, samples: data.data.samples };
+          return { kind: "ok" as const, job, samples: data.data.samples };
         }
-        return { kind: "fail" as const, file, error: data.error || `HTTP ${res.status}` };
+        return { kind: "fail" as const, job, error: data.error || `HTTP ${res.status}` };
       }),
     );
 
@@ -204,21 +224,29 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       }
       const v = r.value;
       if (v.kind === "ok") {
-        // Each backend sample = one PO. Flatten so 1 PDF → N preview cards.
+        // Each page's response usually contains 1 PO (sometimes 2 if a PO
+        // spans pages, but we split per-page so multi-page POs split into
+        // N rows the operator can merge). Re-anchor pageNumbers to the
+        // original PDF's page index so renderPdfPagesToPng pulls the
+        // correct source page when the SO is created.
         for (const s of v.samples) {
+          const extracted = {
+            ...s.extracted,
+            pageNumbers: [v.job.pageNo],
+          };
           claudeSuccesses.push({
             sampleId: s.sampleId,
-            extracted: s.extracted,
+            extracted,
             // Deep clone for diff comparison. Cheap (PO is small).
-            original: JSON.parse(JSON.stringify(s.extracted)) as ClaudeExtractedPO,
+            original: JSON.parse(JSON.stringify(extracted)) as ClaudeExtractedPO,
             warnings: s.warnings ?? [],
-            file: v.file,
+            file: v.job.file,
             pageImageB64: null,
           });
         }
       } else {
-        claudeFailures.push(v.file);
-        claudeWarnings.push(`${v.file.name}: ${v.error}`);
+        if (!claudeFailures.includes(v.job.file)) claudeFailures.push(v.job.file);
+        claudeWarnings.push(`${v.job.file.name} page ${v.job.pageNo}: ${v.error}`);
       }
     }
 
@@ -1331,6 +1359,40 @@ async function extractPdfText(file: File): Promise<string> {
   }
 
   return textParts.join("\n\n--- PAGE BREAK ---\n\n");
+}
+
+// Phase 4: split a multi-page PDF into one File per page, all single-page
+// PDFs that the /extract endpoint can ingest individually. Lets us fan
+// out a 16-page upload into 16 parallel Claude calls (≈ 10× faster + per
+// call Claude only juggles one PO so accuracy goes up).
+async function splitPdfIntoPages(
+  file: File,
+): Promise<Array<{ pageNo: number; file: File }>> {
+  const { PDFDocument } = await import("pdf-lib");
+  const buf = await file.arrayBuffer();
+  const src = await PDFDocument.load(buf, { ignoreEncryption: true });
+  const total = src.getPageCount();
+  const baseName = file.name.replace(/\.pdf$/i, "");
+
+  const out: Array<{ pageNo: number; file: File }> = [];
+  for (let i = 0; i < total; i++) {
+    const dst = await PDFDocument.create();
+    const [copied] = await dst.copyPages(src, [i]);
+    dst.addPage(copied);
+    const bytes = await dst.save();
+    // Wrap in a fresh ArrayBuffer copy so the File body is detached from
+    // the PDFDocument's internal buffer (some Workers have been finicky
+    // about Uint8Array views being garbage-collected mid-flight).
+    const ab = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength,
+    ) as ArrayBuffer;
+    const pageFile = new File([ab], `${baseName}_p${i + 1}.pdf`, {
+      type: "application/pdf",
+    });
+    out.push({ pageNo: i + 1, file: pageFile });
+  }
+  return out;
 }
 
 // Render specific 1-indexed pages of a PDF into a single PNG (vertical

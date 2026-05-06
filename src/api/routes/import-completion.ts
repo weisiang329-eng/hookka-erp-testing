@@ -8995,6 +8995,95 @@ app.post("/backfill-so-item-product-name", async (c) => {
   return c.json({ success: true, candidates: all.length, updated });
 });
 
+// Cascade-backfill productName/sizeLabel/sizeCode/fabricCode to downstream
+// snapshot tables (production_orders, delivery_order_items, invoice_items)
+// from the canonical sales_order_items values. Run AFTER
+// /backfill-ocr-so-fields so SO items are clean first.
+app.post("/backfill-downstream-product-names", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  const cleanItems = await db
+    .prepare(
+      `SELECT soi.salesOrderId, soi.lineNo, soi.productCode, soi.productName,
+              soi.sizeLabel, soi.sizeCode, soi.fabricCode
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE so.orgId = ?`,
+    )
+    .bind(orgId)
+    .all<{
+      salesOrderId: string;
+      lineNo: number;
+      productCode: string | null;
+      productName: string | null;
+      sizeLabel: string | null;
+      sizeCode: string | null;
+      fabricCode: string | null;
+    }>();
+
+  let poUpdated = 0;
+  let doUpdated = 0;
+  let invUpdated = 0;
+
+  for (const item of cleanItems.results ?? []) {
+    if (!item.productName) continue;
+    const poRes = await db
+      .prepare(
+        `UPDATE production_orders SET productName = ?, sizeLabel = ?, sizeCode = ?, fabricCode = ?
+           WHERE salesOrderId = ? AND lineNo = ?`,
+      )
+      .bind(
+        item.productName,
+        item.sizeLabel ?? "",
+        item.sizeCode ?? "",
+        item.fabricCode ?? "",
+        item.salesOrderId,
+        item.lineNo,
+      )
+      .run()
+      .catch(() => ({ meta: { changes: 0 } }));
+    poUpdated += poRes.meta?.changes ?? 0;
+
+    const doRes = await db
+      .prepare(
+        `UPDATE delivery_order_items SET productName = ?, sizeLabel = ?, sizeCode = ?, fabricCode = ?
+           WHERE salesOrderId = ? AND lineNo = ?`,
+      )
+      .bind(
+        item.productName,
+        item.sizeLabel ?? "",
+        item.sizeCode ?? "",
+        item.fabricCode ?? "",
+        item.salesOrderId,
+        item.lineNo,
+      )
+      .run()
+      .catch(() => ({ meta: { changes: 0 } }));
+    doUpdated += doRes.meta?.changes ?? 0;
+
+    const invRes = await db
+      .prepare(
+        `UPDATE invoice_items SET productName = ?
+           WHERE salesOrderId = ? AND lineNo = ?`,
+      )
+      .bind(item.productName, item.salesOrderId, item.lineNo)
+      .run()
+      .catch(() => ({ meta: { changes: 0 } }));
+    invUpdated += invRes.meta?.changes ?? 0;
+  }
+
+  return c.json({
+    success: true,
+    cleanItemsScanned: cleanItems.results?.length ?? 0,
+    productionOrdersUpdated: poUpdated,
+    deliveryOrderItemsUpdated: doUpdated,
+    invoiceItemsUpdated: invUpdated,
+  });
+});
+
 app.post("/backfill-so-reference", async (c) => {
   const denied = await requirePermission(c, "sales-orders", "update");
   if (denied) return denied;

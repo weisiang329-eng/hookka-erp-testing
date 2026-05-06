@@ -973,6 +973,23 @@ function applySofaLhfRhfFromTv(po: ExtractedPO): Warning[] {
 // catalog casing (e.g. "pc151-01" → "PC151-01", "hc8799" → "HC8799").
 // Returns warnings for everything that didn't match — UI shows them as red
 // badges per card.
+// Normalize a code for tolerant matching: uppercase, drop every
+// non-alphanumeric separator, then strip leading zeros from each
+// numeric run. Examples (all collapse to the same key):
+//   "KN-390-01" → "KN3901"
+//   "KN.390-001" → "KN3901"
+//   "KN 390-1" → "KN3901"
+//   "KN390-1" → "KN3901"
+// Use as a fallback when the exact-uppercase lookup misses.
+function normalizeForMatch(s: string): string {
+  return s
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean)
+    .map((seg) => seg.replace(/(?:^|(?<=\D))0+(?=\d)/g, ""))
+    .join("");
+}
+
 function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   const warnings: Warning[] = [];
 
@@ -990,6 +1007,17 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   const fabricCodes = new Set(catalog.fabrics.map((f) => f.code.toUpperCase()));
   const fabricCanon = new Map<string, string>();
   for (const f of catalog.fabrics) fabricCanon.set(f.code.toUpperCase(), f.code);
+  // Tolerant lookup: separator-stripped + leading-zeros-removed key →
+  // canonical catalog code. Lets "KN-390-01", "KN.390-001", "KN 390-1"
+  // all snap to "KN390-1". Same idea for product codes.
+  const fabricCanonByNorm = new Map<string, string>();
+  for (const f of catalog.fabrics) {
+    fabricCanonByNorm.set(normalizeForMatch(f.code), f.code);
+  }
+  const productCanonByNorm = new Map<string, string>();
+  for (const p of [...catalog.bedframes, ...catalog.sofas, ...catalog.accessories]) {
+    productCanonByNorm.set(normalizeForMatch(p.code), p.code);
+  }
   const customerByCode = new Map(
     catalog.customers.map((c) => [c.code.toUpperCase(), c]),
   );
@@ -1080,16 +1108,19 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     if (item.category !== "SOFA" && item.category !== "ACCESSORY") {
       reparseSpec(item);
     }
-    // Fabric: snap to catalog canonical casing if matched, else just upper.
+    // Fabric: snap to catalog canonical casing if matched, else fall back
+    // to a normalized lookup so "KN-390-01" / "KN.390-001" / "KN390-1"
+    // all resolve to the same catalog code.
     if (item.fabricCode) {
       const upper = item.fabricCode.toUpperCase();
-      item.fabricCode = fabricCanon.get(upper) ?? upper;
+      let canon = fabricCanon.get(upper);
+      if (!canon) canon = fabricCanonByNorm.get(normalizeForMatch(item.fabricCode));
+      item.fabricCode = canon ?? upper;
     }
     // Product: snap to catalog form so "hok-1007 (k)" → "HOK-1007 (K)".
-    // Also handle 1-prefix mismatch — Claude sometimes outputs
-    // "5531-1L(LHF)" but the catalog stores "5531-L(LHF)" (or vice
-    // versa for some models). Try toggling the "1" prefix before the
-    // module letter and snap to whichever form the catalog has.
+    // Match priority: exact-upper → drop "1" before letter ("5531-1L" →
+    // "5531-L") → add "1" before letter ("5531-L" → "5531-1L") →
+    // separator/leading-zero-tolerant normalized lookup.
     if (item.productCode) {
       const upper = item.productCode.toUpperCase();
       let canon = productCanon.get(upper);
@@ -1102,6 +1133,9 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
         // "5531-L(LHF)" → "5531-1L(LHF)"
         const addOne = upper.replace(/-([A-Z])(\(|$)/, "-1$1$2");
         if (addOne !== upper) canon = productCanon.get(addOne);
+      }
+      if (!canon) {
+        canon = productCanonByNorm.get(normalizeForMatch(item.productCode));
       }
       if (canon) item.productCode = canon;
     }

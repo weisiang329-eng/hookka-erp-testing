@@ -1127,13 +1127,13 @@ function ClaudePOCard({
                       <th className="px-1.5 py-1 text-left">#</th>
                       <th className="px-1.5 py-1 text-left">Cat</th>
                       <th className="px-1.5 py-1 text-left">Product</th>
+                      <th className="px-1.5 py-1 text-center">Qty</th>
                       <th className="px-1.5 py-1 text-left">Size</th>
                       <th className="px-1.5 py-1 text-left">Fabric</th>
                       <th className="px-1.5 py-1 text-center">Divan</th>
                       <th className="px-1.5 py-1 text-center">Leg</th>
                       <th className="px-1.5 py-1 text-center">Gap</th>
                       <th className="px-1.5 py-1 text-left">Special</th>
-                      <th className="px-1.5 py-1 text-center">Qty</th>
                       <th className="px-1.5 py-1 text-right">Price (RM)</th>
                       <th className="px-1.5 py-1"></th>
                     </tr>
@@ -1179,6 +1179,15 @@ function ClaudePOCard({
                               placeholder="Search SKU…"
                               widthClass="w-40"
                               warning={!!isUnknownProduct}
+                            />
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <input
+                              type="number"
+                              onFocus={(e) => e.currentTarget.select()}
+                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              value={item.quantity}
+                              onChange={(e) => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
                             />
                           </td>
                           <td className="px-1.5 py-1">
@@ -1267,15 +1276,6 @@ function ClaudePOCard({
                               onChange={(next) =>
                                 onUpdateItem(i, { specialOrder: next || null })
                               }
-                            />
-                          </td>
-                          <td className="px-1.5 py-1 text-center">
-                            <input
-                              type="number"
-                              onFocus={(e) => e.currentTarget.select()}
-                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
-                              value={item.quantity}
-                              onChange={(e) => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
                             />
                           </td>
                           <td className="px-1.5 py-1 text-right">

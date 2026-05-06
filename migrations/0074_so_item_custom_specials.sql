@@ -19,5 +19,8 @@
 -- detail page) continue to render the full list without code changes.
 -- ============================================================================
 
+-- Snake-case to match the project's Postgres convention (see
+-- column-rename-map.json — d1compat translates camelCase JS field names
+-- to snake_case at runtime).
 ALTER TABLE sales_order_items
-  ADD COLUMN IF NOT EXISTS customSpecials TEXT;
+  ADD COLUMN IF NOT EXISTS custom_specials TEXT;

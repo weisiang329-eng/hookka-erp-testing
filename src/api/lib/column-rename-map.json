@@ -134,6 +134,7 @@
   "customerSOId": "customer_so_id",
   "customerState": "customer_state",
   "customerTIN": "customer_tin",
+  "customSpecials": "custom_specials",
   "customsClearanceDate": "customs_clearance_date",
   "customsDuty": "customs_duty",
   "customsStatus": "customs_status",

@@ -556,6 +556,10 @@ export default function ProcurementPage() {
   const [filterDateFrom, setFilterDateFrom] = useState("");
   const [filterDateTo, setFilterDateTo] = useState("");
   const [showFilters, setShowFilters] = useState(false);
+  // 4.2 — when the aging widget is clicked, only show POs whose
+  // expectedDate has passed and that aren't already received / closed /
+  // cancelled. Toggles off when the user clicks the widget again.
+  const [filterOverdueOnly, setFilterOverdueOnly] = useState(false);
 
   const { data: supResp, loading: supLoading, refresh: refreshSuppliers } = useCachedJson<{ success?: boolean; data?: Supplier[] }>("/api/suppliers");
   const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] }>("/api/purchase-orders");
@@ -710,17 +714,43 @@ export default function ProcurementPage() {
 
 
   // ---- Filters ----
-  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo;
+  const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterOverdueOnly;
 
   const clearFilters = () => {
     setFilterStatus("");
     setFilterSupplier("");
     setFilterDateFrom("");
     setFilterDateTo("");
+    setFilterOverdueOnly(false);
   };
+
+  // 4.2 — overdue predicate. Reused both by the widget aggregation below
+  // and the filter pipeline so "click widget to filter" matches the widget
+  // count exactly.
+  const todayStr = useMemo(() => new Date().toISOString().split("T")[0], []);
+  const isOverdue = useCallback(
+    (po: PurchaseOrder): boolean => {
+      if (!po.expectedDate) return false;
+      const exp = po.expectedDate.split("T")[0];
+      if (exp >= todayStr) return false;
+      return !["RECEIVED", "CLOSED", "CANCELLED"].includes(po.status);
+    },
+    [todayStr],
+  );
+  const daysLate = useCallback(
+    (po: PurchaseOrder): number => {
+      if (!po.expectedDate) return 0;
+      const exp = new Date(po.expectedDate.split("T")[0]).getTime();
+      const now = new Date(todayStr).getTime();
+      if (!Number.isFinite(exp) || !Number.isFinite(now)) return 0;
+      return Math.max(0, Math.floor((now - exp) / 86400000));
+    },
+    [todayStr],
+  );
 
   const filteredOrders = useMemo(() => {
     return purchaseOrders.filter(po => {
+      if (filterOverdueOnly && !isOverdue(po)) return false;
       if (filterStatus && po.status !== filterStatus) return false;
       if (filterSupplier && po.supplierId !== filterSupplier) return false;
       if (filterDateFrom) {
@@ -733,7 +763,34 @@ export default function ProcurementPage() {
       }
       return true;
     });
-  }, [purchaseOrders, filterStatus, filterSupplier, filterDateFrom, filterDateTo]);
+  }, [purchaseOrders, filterStatus, filterSupplier, filterDateFrom, filterDateTo, filterOverdueOnly, isOverdue]);
+
+  // 4.2 — aging buckets across overdue POs (count of yellow / orange / red).
+  // The widget surfaces an aggregate color = the worst bucket present.
+  const overduePoList = useMemo(
+    () => purchaseOrders.filter(isOverdue),
+    [purchaseOrders, isOverdue],
+  );
+  const agingBuckets = useMemo(() => {
+    let yellow = 0;
+    let orange = 0;
+    let red = 0;
+    for (const po of overduePoList) {
+      const d = daysLate(po);
+      if (d >= 31) red += 1;
+      else if (d >= 8) orange += 1;
+      else if (d >= 1) yellow += 1;
+    }
+    return { yellow, orange, red };
+  }, [overduePoList, daysLate]);
+  const overdueWidgetTone =
+    agingBuckets.red > 0
+      ? { bg: "bg-red-50", border: "border-red-200", text: "text-red-700", subtle: "text-red-500" }
+      : agingBuckets.orange > 0
+        ? { bg: "bg-orange-50", border: "border-orange-200", text: "text-orange-700", subtle: "text-orange-500" }
+        : agingBuckets.yellow > 0
+          ? { bg: "bg-amber-50", border: "border-amber-200", text: "text-amber-700", subtle: "text-amber-500" }
+          : { bg: "bg-[#F0ECE9]", border: "border-[#E2DDD8]", text: "text-[#1F1D1B]", subtle: "text-[#9CA3AF]" };
 
   // ---- Export CSV ----
   const exportCSV = () => {
@@ -765,12 +822,8 @@ export default function ProcurementPage() {
   };
 
   // ---- Summary stats ----
-  const today = new Date().toISOString().split("T")[0];
+  // Note: 4.2 widget consumes overduePoList from the filter section above.
   const pendingDelivery = purchaseOrders.filter((po) => ["SUBMITTED", "CONFIRMED"].includes(po.status)).length;
-  const overduePOs = purchaseOrders.filter((po) =>
-    ["SUBMITTED", "CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status) &&
-    po.expectedDate && po.expectedDate < today
-  ).length;
   const totalOutstandingQty = purchaseOrders
     .filter((po) => !["RECEIVED", "CANCELLED"].includes(po.status))
     .reduce((sum, po) => sum + po.items.reduce((s, it) => s + Math.max(0, it.quantity - (it.receivedQty || 0)), 0), 0);
@@ -993,15 +1046,39 @@ export default function ProcurementPage() {
             <Truck className="h-5 w-5 text-[#3E6570]" />
           </CardContent>
         </Card>
-        <Card>
-          <CardContent className="p-2.5 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-[#6B7280]">Overdue</p>
-              <p className={`text-xl font-bold ${overduePOs > 0 ? "text-[#9A3A2D]" : "text-[#1F1D1B]"}`}>
-                {overduePOs}
-              </p>
+        {/* 4.2 — Aging widget. Click toggles the overdue-only filter on the
+            PO table below. Background colour is graded by the most-overdue
+            PO in the set (yellow 1-7d / orange 8-30d / red 30d+). The
+            inline aging-bar shows the count distribution. */}
+        <Card
+          className={`cursor-pointer transition-colors ${overduePoList.length > 0 ? `${overdueWidgetTone.bg} ${overdueWidgetTone.border}` : ""} ${filterOverdueOnly ? "ring-2 ring-[#6B5C32]" : ""}`}
+          onClick={() => {
+            if (overduePoList.length === 0) return;
+            setFilterOverdueOnly((v) => !v);
+          }}
+          title={
+            overduePoList.length === 0
+              ? "No overdue POs"
+              : filterOverdueOnly
+                ? "Click to clear overdue filter"
+                : "Click to filter the table to overdue POs only"
+          }
+        >
+          <CardContent className="p-2.5">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-xs text-[#6B7280]">Overdue POs</p>
+                <p className={`text-xl font-bold ${overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#1F1D1B]"}`}>
+                  {overduePoList.length}
+                </p>
+              </div>
+              <AlertTriangle className={`h-5 w-5 ${overduePoList.length > 0 ? overdueWidgetTone.text : "text-[#E2DDD8]"}`} />
             </div>
-            <AlertTriangle className={`h-5 w-5 ${overduePOs > 0 ? "text-[#9A3A2D]" : "text-[#E2DDD8]"}`} />
+            {overduePoList.length > 0 && (
+              <p className={`mt-1 text-[11px] ${overdueWidgetTone.subtle}`}>
+                {agingBuckets.yellow} yellow · {agingBuckets.orange} orange · {agingBuckets.red} red
+              </p>
+            )}
           </CardContent>
         </Card>
         <Card>

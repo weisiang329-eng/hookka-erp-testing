@@ -402,7 +402,24 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     • STOOL    — ottoman / footstool
 
   MIRROR-PAIR LOGIC (CRITICAL):
-    LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side. The leftmost piece in the diagram (or chain when reading left → right) gets LHF; the rightmost gets RHF. Inner pieces never have a side suffix because they have no arms.
+    LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side.
+
+  ★ LHF / RHF VIEWPOINT CONVENTION (READ THIS CAREFULLY) ★
+  Hookka's LHF / RHF designation is from the perspective of someone STANDING IN FRONT OF the sofa, looking AT it (i.e. standing where the TV is, looking back). This is OPPOSITE of the diagram's left-right ordering, because the diagram is drawn as a floor-plan view from above with the TV typically at the top.
+
+  Conversion rule:
+    • The piece that appears LEFTMOST in the diagram → assign RHF.
+    • The piece that appears RIGHTMOST in the diagram → assign LHF.
+    • Inner / sandwiched pieces stay NA (no side suffix).
+
+  Worked example using a real PO:
+    Diagram shows (left → right):  [ 28" 28" joined ] + [ 28" with L-flap ]
+    With "TV" drawn at the top of the page.
+    The joined 28"+28" pair is on the diagram's LEFT, so it's on the TV-viewer's RIGHT → 2A(RHF).
+    The separated L-piece is on the diagram's RIGHT, so it's on the TV-viewer's LEFT → 1L(LHF).
+    Output: 5531-1L(LHF) + 5531-2A(RHF).
+
+  When the diagram does NOT show a TV marker, fall back to the "leftmost = RHF, rightmost = LHF" rule by default — Hookka's house convention always uses the front-facing viewpoint.
 
   ARM-INFERENCE RULE (master rule for resolving NA vs A):
   For any chain of modules joined by "+" signs:
@@ -1143,6 +1160,53 @@ app.post("/samples/:id/confirm", async (c) => {
   }
 
   return c.json({ success: true });
+});
+
+// ===========================================================================
+// PATCH /api/scan-po/samples/by-po/:poIdentifier — bulk-unmark gold by PO
+// (or set, with body { gold: true }). Lets the operator undo a misclick on
+// the gold-reference button without hunting for individual sample IDs.
+// ===========================================================================
+app.patch("/samples/by-po/:poIdentifier", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+  const poIdentifier = c.req.param("poIdentifier");
+  if (!poIdentifier) {
+    return c.json({ success: false, error: "Missing poIdentifier." }, 400);
+  }
+  let body: { gold?: unknown };
+  try {
+    body = (await c.req.json()) as { gold?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body." }, 400);
+  }
+  const goldFlag = body.gold === true ? 1 : 0;
+
+  // Self-apply isGold column in case migration hasn't propagated.
+  try {
+    await (c.var.DB as unknown as DBLike)
+      .prepare(
+        "ALTER TABLE po_scan_samples ADD COLUMN IF NOT EXISTS isGold INTEGER NOT NULL DEFAULT 0",
+      )
+      .bind()
+      .run();
+  } catch {
+    /* best-effort */
+  }
+
+  const result = await (c.var.DB as unknown as DBLike)
+    .prepare(
+      "UPDATE po_scan_samples SET isGold = ? WHERE poIdentifier = ?",
+    )
+    .bind(goldFlag, poIdentifier)
+    .run();
+
+  return c.json({
+    success: true,
+    poIdentifier,
+    gold: goldFlag === 1,
+    updated: result.meta.changes,
+  });
 });
 
 // Silences "imported but unused" — the type is only used as a structural hint.

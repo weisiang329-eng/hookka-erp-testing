@@ -507,10 +507,42 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     is L(RHF). This should agree with what STEP 2 told you — if it
     doesn't, re-check the TV position.
 
-  STEP 4: When the diagram has NO TV marker AND no other facing cue:
-    Default to "TV at top" (the most common Hookka convention). Set
-    specialNotes to "TV position not marked — default front-facing assumed,
-    operator to verify L/R" so the operator knows to double-check.
+  STEP 4: When the diagram has NO TV marker — find the FRONT another way.
+    The viewer stands at the FRONT of the sofa (opposite the backrest).
+    Identify the front using these cues IN ORDER:
+
+    (a) BACKREST DIRECTION (most reliable — Hookka's primary cue):
+        The backrest is drawn as a longer/thicker line, sometimes with a
+        small flap or "back" annotation, along ONE edge of the seat
+        boxes. The OPPOSITE edge of the seat boxes is the FRONT — that's
+        where the viewer / TV stands.
+          • Backrest at the TOP of the diagram → viewer at the bottom →
+            sofa faces DOWN. LHF = diagram-LEFT, RHF = diagram-RIGHT.
+          • Backrest at the BOTTOM of the diagram → viewer at the top →
+            sofa faces UP. LHF = diagram-RIGHT, RHF = diagram-LEFT.
+          • Backrest on the LEFT edge → viewer on the right (90° rotation).
+          • Backrest on the RIGHT edge → viewer on the left.
+
+    (b) L-PIECE EXTENSION DIRECTION (when present):
+        The L-extension's chaise opening faces the FRONT (you lie on
+        the chaise with your feet toward the TV). If the L-extension
+        sticks OUT in a direction PERPENDICULAR to the main sofa row,
+        that's still in the seating plane — the seat-front is along the
+        long axis of the chaise, not the short edge. Cross-check this
+        with the backrest cue (they should agree).
+
+    (c) DIMENSION ARROWS (fallback):
+        If a longer dimension is labelled along one axis (e.g. "298cm"
+        spanning the whole sofa) and another along the perpendicular
+        (e.g. "120cm"), the LONG axis is the seat row and the SHORT
+        axis is the front-back depth. The FRONT is on whichever short
+        edge has the dimension arrow / label closer to it. Weak cue —
+        only use when (a) and (b) both fail.
+
+    (d) NO CUE AT ALL:
+        Output the items but set the LHF/RHF suffix to whichever side
+        you guess + add specialNotes "no front-facing cue in diagram —
+        operator to verify L/R orientation". Don't silently pick one.
 
   CRITICAL: Inner / sandwiched pieces always stay NA (no LHF / RHF suffix)
   regardless of viewpoint, because they have no arms.

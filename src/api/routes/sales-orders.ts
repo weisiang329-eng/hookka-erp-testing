@@ -1479,26 +1479,34 @@ app.post("/:id/override-edit-lock", async (c) => {
   });
 });
 
-// Self-applying migration 0108 — column added at first POST per isolate.
+// Self-applying migrations — columns added at first POST per isolate.
 // `ALTER ... ADD COLUMN IF NOT EXISTS` is idempotent + cheap, so running it
-// here removes the deploy ordering footgun that used to break SO creates
-// when the migration hadn't been applied to Supabase yet. Module-level
-// promise ensures one ALTER per isolate boot, not per request.
-let migration0108Promise: Promise<void> | null = null;
-function ensureMigration0108(db: D1Database): Promise<void> {
-  if (migration0108Promise) return migration0108Promise;
-  migration0108Promise = db
-    .prepare(
+// here removes the deploy ordering footgun where new columns aren't applied
+// to Supabase yet (the legacy `migrations/` D1 folder doesn't auto-replay
+// on Postgres). Module-level promise ensures one round of ALTERs per
+// isolate boot, not per request.
+let pendingMigrations: Promise<void> | null = null;
+function ensurePendingMigrations(db: D1Database): Promise<void> {
+  if (pendingMigrations) return pendingMigrations;
+  pendingMigrations = (async () => {
+    // Each ALTER runs independently so a permission failure on one doesn't
+    // mask the others. Best-effort: a real schema-mismatch error will
+    // resurface on the INSERT below with a clearer message.
+    const stmts = [
+      // 0108 — customer PO PNG attachment for dispute proof.
       "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS customerPOImageB64 TEXT",
-    )
-    .run()
-    .then(() => undefined)
-    .catch(() => {
-      // Best-effort. If it fails (permission, transient error), the SO insert
-      // below will fail loudly with the real error — better than silent skip.
-      migration0108Promise = null;
-    });
-  return migration0108Promise;
+      // 0073 (D1 legacy, not auto-applied to Postgres) — Project Order flag.
+      "ALTER TABLE sales_orders ADD COLUMN IF NOT EXISTS isProjectOrder INTEGER NOT NULL DEFAULT 0",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch {
+        // ignore — column may already exist or DDL transiently rejected
+      }
+    }
+  })();
+  return pendingMigrations;
 }
 
 // ---------------------------------------------------------------------------
@@ -1508,7 +1516,7 @@ app.post("/", async (c) => {
   // RBAC gate (P3.3) — only roles with sales-orders:create may create SOs.
   const denied = await requirePermission(c, "sales-orders", "create");
   if (denied) return denied;
-  await ensureMigration0108(c.var.DB);
+  await ensurePendingMigrations(c.var.DB);
 
   // Sprint 3 #4 — idempotency. If the client sends an `Idempotency-Key`
   // header, the handler is wrapped so a duplicate retry returns the

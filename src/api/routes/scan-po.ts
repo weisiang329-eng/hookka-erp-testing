@@ -317,13 +317,20 @@ CRITICAL: when spec says "10", "12", "14", "16" — these are TWO-digit inch mea
 - noLeg: true if spec contains any case of "no leg", "noleg", "no legs". When true, legHeightInches MUST be null.
 - specialOrder: match against BEDFRAME Specials catalog. Examples:
     "HB straight"/"HB STR" → "HB Straight"
-    "Left Drawer"/"L DRAWER" / "L'DRAWER" → "Left Drawer"
-    "Right Drawer"/"R DRAWER" / "R'DRAWER" → "Right Drawer"
-    "Front Drawer"/"FRONT DRAWER" → "Front Drawer"
     "Divan above full cover" / "Divan top fully cover" → "Divan Top Fully Cover"
     "Divan full cover" → "Divan Full Cover"
     "HB fully cover" → "HB Fully Cover"
-  CRITICAL — when only "DRAWER" is written without L/R/F label: LOOK AT THE HAND-DRAWN DIAGRAM in the PDF body. Arrows pointing LEFT (←) at the headboard end → "Left Drawer". Arrows pointing RIGHT (→) → "Right Drawer". Arrows pointing toward the FOOT of the bed (↓ at the bottom or front) → "Front Drawer". When no diagram is present and side is unclear, pick "Front Drawer" + add specialNotes "drawer side unclear".
+
+  DRAWER position rule (priority order, stop at first match):
+    1. Explicit text wins: "Left Drawer" / "L Drawer" / "L'DRAWER" / "LEFT DRAWER" → "Left Drawer".
+    2. "Right Drawer" / "R Drawer" / "R'DRAWER" / "RIGHT DRAWER" → "Right Drawer".
+    3. "Front Drawer" / "F Drawer" / "FRONT DRAWER" → "Front Drawer".
+    4. Only "DRAWER" / "DRAWERS" written with NO L/R/F label → LOOK AT THE HAND-DRAWN DIAGRAM on the same page. The diagram is usually a rectangle (the bed) with arrow marks (←, →, ↑, ↓) showing which side the drawer slides out from:
+       • Arrows on the LEFT edge of the rectangle pointing left (←) → "Left Drawer".
+       • Arrows on the RIGHT edge pointing right (→) → "Right Drawer".
+       • Arrows on the BOTTOM/FOOT edge pointing down or out of the foot → "Front Drawer".
+       • If the diagram clearly shows multiple arrows on one side, that's the answer.
+    5. Only if NO diagram is present AND no L/R/F label: leave specialOrder=null + add specialNotes="drawer side missing — operator to confirm".
 - specialNotes: free-form remainder when no special matches (e.g. handwritten urgency dates).
 
 [SOFA]

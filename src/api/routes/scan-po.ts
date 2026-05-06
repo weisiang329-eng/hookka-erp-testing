@@ -650,15 +650,16 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
 - fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog. Sometimes a fabric appears as "BO315-2 Feather" — capture the code "BO315-2" only (drop the trailing variant word).
 - legHeightInches: sofa leg height (catalog: SOFA Leg Heights). null if not stated.
 - specialOrder: match against SOFA Specials. MULTIPLE specials are common on sofa POs — they often appear as bullet points in handwritten margin notes alongside the diagram. Inspect handwritten notes (in any language: English, Bahasa, Chinese) and pick all that match. Format: comma-separated string e.g. "Nylon Fabric, 5537 Backrest, Back Fully Cover".
+
+  Non-standard sizes go HERE (not sizeLabel): if a STOOL or accessory module shows a size like "24 x 24", "24" x 37"", "44", "12" — anything that isn't a standard seat height (24"/26"/28"/30"/32"/35") — DON'T set sizeLabel. Instead append the literal dimension to specialOrder so it stays attached to the line for the operator to review (e.g. specialOrder: "STOOL 24" x 37"" or "Custom 24 x 24"). sizeLabel should only contain catalog-listed standard seat heights.
   Pattern recognition cheat-sheet for handwriting:
     • "back fully cover" / "back rest fully cover" → "Back Fully Cover"
     • "bottom wrap nylon" / "wrap bottom to nylon" / "bottom wrap to umbrella fabric" / "umbrella fabric" / "umbra fabric" → "Nylon Fabric"  (umbrella/umbra fabric IS nylon fabric — same thing)
     • "headrest firm" / "head rest firm a little" → "Headrest Firm"
-    • "back rest tak mahu pasang" / "don't install backrest" / "install at customer house" / "back rest tak mau pasang" → "Backrest Install at Customer Site"
+    • "back rest tak mahu pasang" / "don't install backrest" / "install at customer house" / "back rest tak mau pasang" / "backrest install at customer site" / "separate backrest packing" / "pack backrest separately" / "backrest separate" / "分开 packing" / "backrest 分开" → "Separate Backrest Packing"  (all variants of "ship the backrest detached so the customer site team installs it" map to ONE canonical token)
     • "seat cushion fully cover" / "back fully cover" → "Seat Cushion Fully Cover"
     • "Replace 5540 headrest" / "Backrest change 5540" / "5540 headrest" / "8030 headrest" / "5540 = 5537" / "change to 5540" / "headrest change 5540" → "5537 Backrest"  (5540 and 8030 are model numbers that map to the 5537 Backrest spec)
     • "Bottom change to umbrella fabric" / "Bottom change to nylon" / "bottom umbrella" → "Nylon Fabric"
-    • "Separate Backrest Packing" → "Separate Backrest Packing"
   Always inspect ALL handwritten margin notes (with #/* bullets) and red-pen annotations — they carry production-critical specials that aren't in the printed Description line.
 - divanHeightInches/gapInches/noLeg: bedframe-only — leave null.
 

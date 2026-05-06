@@ -1722,6 +1722,34 @@ app.post("/", async (c) => {
       (typeof body.customerState === "string" ? body.customerState : "") ??
       "";
 
+    // Auto-derive Hookka Expected DD = customer DD - per-category buffer.
+    // Filled at create time so the SO list / detail page show it right
+    // away (don't wait for confirm cascade). Operator can still override
+    // by passing body.hookkaExpectedDD explicitly. Mirrors what
+    // production-order-builder does on confirm — but eagerly.
+    let resolvedHookkaExpectedDD =
+      typeof body.hookkaExpectedDD === "string" && body.hookkaExpectedDD
+        ? body.hookkaExpectedDD
+        : "";
+    if (!resolvedHookkaExpectedDD && body.customerDeliveryDate) {
+      try {
+        const buf = await loadHookkaDDBuffer(c.var.DB);
+        // Use the dominant item category — mixed-category SOs are
+        // forbidden upstream by hasMixedSofaBedframe so first item is
+        // representative.
+        const dominantCat =
+          (items[0]?.itemCategory as string | undefined) || "BEDFRAME";
+        const days = hookkaDDBufferFor(buf, dominantCat);
+        resolvedHookkaExpectedDD = addDays(
+          String(body.customerDeliveryDate).slice(0, 10),
+          -days,
+        );
+      } catch {
+        // Lead-time table missing or malformed — fall through with empty
+        // string. Cascade will fill it on confirm.
+      }
+    }
+
     // Customer PO image is optional — only PO_SCAN_CLAUDE source supplies it.
     // Stored inline as base64 PNG so the SO detail page can render it as
     // proof-of-source when a customer disputes a delivery.
@@ -1756,7 +1784,7 @@ app.post("/", async (c) => {
         companySOId,
         body.companySODate ?? today,
         body.customerDeliveryDate ?? "",
-        body.hookkaExpectedDD ?? "",
+        resolvedHookkaExpectedDD,
         body.hookkaDeliveryOrder ?? "",
         subtotalSen,
         subtotalSen,

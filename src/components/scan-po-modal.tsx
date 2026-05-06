@@ -44,6 +44,7 @@ type ClaudeExtractedPO = {
   deliveryHub: string | null;
   deliveryHubId: string | null;
   yourRefNo: string | null;
+  customerSO: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
   pageNumbers: number[];
@@ -452,6 +453,10 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           // dropped by the SO create endpoint.
           reference: po.yourRefNo ?? null,
           yourRefNo: po.yourRefNo ?? null,
+          // Customer's internal SO number from the PDF's "S/O No." field —
+          // populates sales_orders.customerSOId so the SO list shows it
+          // alongside Customer PO.
+          customerSOId: po.customerSO ?? null,
           deliveryHubId: resolvedHubId,
           companySODate: new Date().toISOString().split("T")[0],
           // The "Delivery Date" on a customer PO is what the customer

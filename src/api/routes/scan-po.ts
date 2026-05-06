@@ -290,6 +290,7 @@ EXTRACTION RULES
 3. customerPO = the PO number (e.g. "PO-008711"). The exact field label varies.
 4. customerState = the issuing customer's state from their address.
 5. yourRefNo = "Your Ref No." field value.
+5b. customerSO = "S/O No." field value (the customer's own internal SO number, often equal to yourRefNo but sometimes different — extract whichever is printed in the S/O No. row).
 6. transferredSO = "Transferred SO" column on each line item (may be null).
 7. deliveryHub = "Purchase Location" or hub shortName (KL/PG/JB/...). Match against the customer's hubs in CUSTOMERS catalog.
 8. deliveryDate = "Delivery Date" field as YYYY-MM-DD. CRITICAL — strikethrough means INVALIDATED: when the printed date has a strikethrough/crossout line through it, that date is no longer valid. Look elsewhere on the same page for the replacement date — anywhere it appears (handwritten, in red, beside line items, in the Purchase Location field, near the signature, etc.). Whatever you find is the real deliveryDate. Same rule applies to per-line item dates in the "Transferred SO" column. DD.MM.YYYY / DD/MM/YYYY format converts to YYYY-MM-DD.
@@ -514,6 +515,7 @@ Return STRICT JSON, no markdown fences, no prose:
       "customerState": string | null,
       "deliveryHub": string | null,
       "yourRefNo": string | null,
+      "customerSO": string | null,
       "deliveryDate": "YYYY-MM-DD" | null,
       "isUrgent": boolean,
       "pageNumbers": number[],
@@ -577,6 +579,10 @@ type ExtractedPO = {
   // in the SO create body. Frontend can also set this from the dropdown.
   deliveryHubId: string | null;
   yourRefNo: string | null;
+  // Customer's internal SO number from the "S/O No." field on the PDF.
+  // Often equal to yourRefNo on HOUZS / CARRES POs, sometimes different.
+  // Maps to sales_orders.customerSOId in the SO create body.
+  customerSO: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
   // 1-indexed page numbers from the source PDF that this PO occupies. Used
@@ -718,6 +724,7 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   // identifiers (e.g. "hc8799", "TCF0431", "HC14096") and the operator
   // wants a single canonical casing on screen.
   if (po.yourRefNo) po.yourRefNo = po.yourRefNo.toUpperCase();
+  if (po.customerSO) po.customerSO = po.customerSO.toUpperCase();
   if (po.deliveryHub) po.deliveryHub = po.deliveryHub.toUpperCase();
 
   // Hub matching is customer-scoped. Catalog hub shortNames are
@@ -742,6 +749,20 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   if (!po.deliveryHubId && po.deliveryHub == null) {
     po.deliveryHubId = null;
   }
+  // Hookka house convention: list sofa items in LHF → NA / inner → RHF
+  // order, regardless of how Claude returned them. Operator wants the
+  // leftmost (LHF) piece always at line 1 so production planning sees a
+  // consistent layout.
+  if (po.items.some((i) => i.category === "SOFA")) {
+    const sideRank = (code: string): number => {
+      const c = (code || "").toUpperCase();
+      if (c.includes("(LHF)")) return 0;
+      if (c.includes("(RHF)")) return 2;
+      return 1; // NA / standalone (1S/2S/3S/CNR/STOOL)
+    };
+    po.items.sort((a, b) => sideRank(a.productCode) - sideRank(b.productCode));
+  }
+
   for (const item of po.items) {
     // Regex re-parse the spec line to overrule any Claude truncation
     // mistakes (e.g. "10" reported as 1). Bedframe-specific; skipped for

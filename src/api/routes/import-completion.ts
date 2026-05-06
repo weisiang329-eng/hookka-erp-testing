@@ -8911,28 +8911,27 @@ app.post("/backfill-so-reference", async (c) => {
   const db = c.var.DB;
   const orgId = getOrgId(c);
 
-  // SOs that need a reference. Limit to ones with empty reference so
-  // re-runs don't clobber operator-edited values.
+  // SOs that need either reference OR customerSOId. Match any with
+  // empty value so re-runs don't clobber operator-edited values.
   const targetsRes = await db
     .prepare(
-      `SELECT id, customerPOId
+      `SELECT id, customerPOId, reference, customerSOId
          FROM sales_orders
         WHERE orgId = ?
-          AND (reference IS NULL OR reference = '')
+          AND ((reference IS NULL OR reference = '')
+               OR (customerSOId IS NULL OR customerSOId = ''))
           AND customerPOId IS NOT NULL
           AND customerPOId <> ''`,
     )
     .bind(orgId)
-    .all<{ id: string; customerPOId: string }>();
+    .all<{ id: string; customerPOId: string; reference: string | null; customerSOId: string | null }>();
   const targets = targetsRes.results ?? [];
 
-  let updated = 0;
+  let updatedReference = 0;
+  let updatedCustomerSO = 0;
   const skipped: { soId: string; customerPO: string; reason: string }[] = [];
 
   for (const t of targets) {
-    // Find the most recent po_scan_samples row for this customer PO and
-    // pull yourRefNo out of the JSON. correctedJson wins over rawExtracted
-    // if it exists (operator may have edited the ref number).
     const sampleRes = await db
       .prepare(
         `SELECT correctedJson, rawExtracted
@@ -8949,32 +8948,49 @@ app.post("/backfill-so-reference", async (c) => {
     }
 
     const blob = sampleRes.correctedJson || sampleRes.rawExtracted || "";
-    let yourRefNo: string | null = null;
+    let parsed: { yourRefNo?: unknown; customerSO?: unknown };
     try {
-      const parsed = JSON.parse(blob) as { yourRefNo?: unknown };
-      if (typeof parsed.yourRefNo === "string" && parsed.yourRefNo) {
-        yourRefNo = parsed.yourRefNo;
-      }
+      parsed = JSON.parse(blob) as { yourRefNo?: unknown; customerSO?: unknown };
     } catch {
       skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "bad JSON" });
       continue;
     }
-    if (!yourRefNo) {
-      skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "no yourRefNo" });
+
+    const newRef =
+      typeof parsed.yourRefNo === "string" && parsed.yourRefNo
+        ? parsed.yourRefNo
+        : null;
+    const newCustSO =
+      typeof parsed.customerSO === "string" && parsed.customerSO
+        ? parsed.customerSO
+        : null;
+
+    if (!newRef && !newCustSO) {
+      skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "no fields" });
       continue;
     }
 
-    await db
-      .prepare("UPDATE sales_orders SET reference = ? WHERE id = ?")
-      .bind(yourRefNo, t.id)
-      .run();
-    updated++;
+    if (newRef && (!t.reference || t.reference === "")) {
+      await db
+        .prepare("UPDATE sales_orders SET reference = ? WHERE id = ?")
+        .bind(newRef, t.id)
+        .run();
+      updatedReference++;
+    }
+    if (newCustSO && (!t.customerSOId || t.customerSOId === "")) {
+      await db
+        .prepare("UPDATE sales_orders SET customerSOId = ? WHERE id = ?")
+        .bind(newCustSO, t.id)
+        .run();
+      updatedCustomerSO++;
+    }
   }
 
   return c.json({
     success: true,
     targetsFound: targets.length,
-    updated,
+    updatedReference,
+    updatedCustomerSO,
     skipped,
   });
 });

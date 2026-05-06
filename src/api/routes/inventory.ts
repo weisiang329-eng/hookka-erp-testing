@@ -168,6 +168,226 @@ app.get("/", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/inventory/shortage-forecast (Phase 2.6)
+//
+// Forward-looking material shortage projection. Walks every CONFIRMED /
+// IN_PRODUCTION sales_order, sums per-RM consumption from the BOM
+// (bom_templates.wipComponents), subtracts current balanceQty, and adds
+// expected-incoming PO quantities (status NOT IN RECEIVED/CLOSED/CANCELLED
+// AND expectedDate <= today + 14 days). Returns the rows with
+// shortBy > 0 sorted by largest shortfall.
+//
+// Different from the reorder banner (2.5):
+//   • banner = "currently below minStock" — operational floor
+//   • forecast = "will be short for committed SOs" — planning horizon
+//
+// BOM walk mirrors the MRP collectMaterials pattern (see mrp.ts) but is
+// SO-driven instead of PO-driven, so the projection answers "what do I
+// need to buy NOW so the SOs in the queue can actually ship". For SOFAs
+// where 5-15m of fabric per piece is normal, this catches shortfalls
+// days before the operator notices via minStock alone.
+// ---------------------------------------------------------------------------
+type BomMaterial = {
+  code?: string;
+  inventoryCode?: string;
+  qty?: number;
+};
+type BomWipNode = {
+  quantity?: number;
+  materials?: BomMaterial[];
+  children?: BomWipNode[];
+};
+
+function collectBomMaterials(
+  node: BomWipNode,
+  unitsToBuild: number,
+  parentQty: number,
+  out: Map<string, number>,
+): void {
+  const effective = (node.quantity || 1) * parentQty;
+  for (const mat of node.materials || []) {
+    const key = mat.inventoryCode || mat.code;
+    if (!key) continue;
+    const baseQty = mat.qty || 0;
+    if (baseQty <= 0) continue;
+    const total = baseQty * effective * unitsToBuild;
+    out.set(key, (out.get(key) || 0) + total);
+  }
+  for (const child of node.children || []) {
+    collectBomMaterials(child, unitsToBuild, effective, out);
+  }
+}
+
+app.get("/shortage-forecast", async (c) => {
+  const denied = await requirePermission(c, "inventory", "read");
+  if (denied) return denied;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const horizonDate = (() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 14);
+    return d.toISOString().slice(0, 10);
+  })();
+
+  const [soiRes, bomRes, rmRes, poiRes] = await Promise.all([
+    // Open SOs and their items. We pull per-line so the BOM walk can
+    // attribute shortage back to the originating SO (companySO id).
+    c.var.DB.prepare(
+      `SELECT so.id            AS "soId",
+              so.companySO     AS "companySO",
+              so.companySOId   AS "companySOId",
+              soi.productCode  AS "productCode",
+              soi.quantity     AS "quantity"
+         FROM sales_orders so
+         JOIN sales_order_items soi ON soi.salesOrderId = so.id
+        WHERE so.status IN ('CONFIRMED','IN_PRODUCTION')
+          AND soi.productCode IS NOT NULL`,
+    ).all<{
+      soId: string;
+      companySO: string | null;
+      companySOId: string | null;
+      productCode: string | null;
+      quantity: number | null;
+    }>(),
+    c.var.DB.prepare(
+      `SELECT productCode, wipComponents
+         FROM bom_templates
+        WHERE versionStatus = 'ACTIVE'`,
+    ).all<{ productCode: string; wipComponents: string | null }>(),
+    c.var.DB.prepare(
+      "SELECT itemCode, description, itemGroup, balanceQty FROM raw_materials WHERE isActive = 1",
+    ).all<{
+      itemCode: string;
+      description: string;
+      itemGroup: string;
+      balanceQty: number;
+    }>(),
+    // Expected incoming: open POs arriving within the forecast horizon.
+    c.var.DB.prepare(
+      `SELECT poi.materialName  AS "materialName",
+              poi.supplierSKU   AS "supplierSKU",
+              poi.quantity      AS "quantity",
+              poi.receivedQty   AS "receivedQty"
+         FROM purchase_order_items poi
+         JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+        WHERE po.status NOT IN ('RECEIVED','CLOSED','CANCELLED')
+          AND po.expectedDate IS NOT NULL
+          AND po.expectedDate != ''
+          AND po.expectedDate <= ?`,
+    )
+      .bind(horizonDate)
+      .all<{
+        materialName: string | null;
+        supplierSKU: string | null;
+        quantity: number;
+        receivedQty: number;
+      }>(),
+  ]);
+
+  // Index BOM by productCode, parsing wipComponents JSON defensively
+  // (matches the MRP path).
+  const bomByProduct = new Map<string, BomWipNode[]>();
+  for (const b of bomRes.results ?? []) {
+    if (!b.productCode || !b.wipComponents) continue;
+    try {
+      const parsed = JSON.parse(b.wipComponents);
+      if (Array.isArray(parsed)) {
+        bomByProduct.set(b.productCode, parsed as BomWipNode[]);
+      } else if (Array.isArray(parsed?.components)) {
+        bomByProduct.set(b.productCode, parsed.components as BomWipNode[]);
+      }
+    } catch {
+      // skip malformed BOM
+    }
+  }
+
+  // Aggregate gross requirement per RM code, plus the originating SOs
+  // for the criticalSOs list in the response.
+  const requiredByRm = new Map<string, number>();
+  const criticalByRm = new Map<string, Set<string>>();
+  for (const line of soiRes.results ?? []) {
+    if (!line.productCode || !line.quantity) continue;
+    const bom = bomByProduct.get(line.productCode);
+    if (!bom) continue;
+    const localMap = new Map<string, number>();
+    for (const wip of bom) collectBomMaterials(wip, line.quantity, 1, localMap);
+    const soTag = line.companySO || line.companySOId || line.soId;
+    for (const [rm, qty] of localMap) {
+      requiredByRm.set(rm, (requiredByRm.get(rm) || 0) + qty);
+      const set = criticalByRm.get(rm) || new Set<string>();
+      set.add(soTag);
+      criticalByRm.set(rm, set);
+    }
+  }
+
+  // Incoming = sum of (quantity - receivedQty) across open PO lines.
+  // Match by either supplierSKU OR the leading "<rmCode> -" prefix in
+  // materialName so we catch both create-modal lines and historical
+  // Excel-import lines.
+  const incomingByRm = new Map<string, number>();
+  for (const poi of poiRes.results ?? []) {
+    const remain = Math.max(0, (poi.quantity || 0) - (poi.receivedQty || 0));
+    if (remain <= 0) continue;
+    // Try supplierSKU first (matches our binding-driven create flow).
+    let rmCode = "";
+    if (poi.supplierSKU) {
+      rmCode = poi.supplierSKU;
+    } else if (poi.materialName) {
+      const dashIdx = poi.materialName.indexOf(" - ");
+      rmCode = dashIdx > 0 ? poi.materialName.slice(0, dashIdx).trim() : poi.materialName.trim();
+    }
+    if (!rmCode) continue;
+    incomingByRm.set(rmCode, (incomingByRm.get(rmCode) || 0) + remain);
+  }
+
+  const rmIndex = new Map<string, { description: string; itemGroup: string; balanceQty: number }>();
+  for (const rm of rmRes.results ?? []) {
+    rmIndex.set(rm.itemCode, {
+      description: rm.description,
+      itemGroup: rm.itemGroup,
+      balanceQty: rm.balanceQty,
+    });
+  }
+
+  // Build response rows. Only emit rows where shortBy > 0.
+  const rows: Array<{
+    itemCode: string;
+    description: string;
+    itemGroup: string;
+    balanceQty: number;
+    neededQty: number;
+    incomingQty: number;
+    shortBy: number;
+    criticalSOs: string[];
+  }> = [];
+  for (const [rmCode, needed] of requiredByRm) {
+    const meta = rmIndex.get(rmCode);
+    if (!meta) continue;
+    const incoming = incomingByRm.get(rmCode) || 0;
+    const shortBy = needed - meta.balanceQty - incoming;
+    if (shortBy <= 0) continue;
+    rows.push({
+      itemCode: rmCode,
+      description: meta.description,
+      itemGroup: meta.itemGroup,
+      balanceQty: meta.balanceQty,
+      neededQty: Number(needed.toFixed(3)),
+      incomingQty: Number(incoming.toFixed(3)),
+      shortBy: Number(shortBy.toFixed(3)),
+      criticalSOs: Array.from(criticalByRm.get(rmCode) ?? []).slice(0, 20),
+    });
+  }
+  rows.sort((a, b) => b.shortBy - a.shortBy);
+
+  return c.json({
+    success: true,
+    asOf: today,
+    horizonDate,
+    data: rows,
+  });
+});
+
 // POST /api/inventory/raw-materials — create a raw material row
 app.post("/raw-materials", async (c) => {
   const denied = await requirePermission(c, "inventory", "create");

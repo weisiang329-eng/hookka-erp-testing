@@ -12,7 +12,7 @@ import type { Supplier, PurchaseOrder, SupplierMaterialBinding, RawMaterial } fr
 import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
-  Eye, Pencil, Printer, RefreshCw,
+  Eye, Pencil, Printer, RefreshCw, TrendingDown, ChevronDown, ChevronUp,
 } from "lucide-react";
 // generatePurchaseOrderPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a PO.
@@ -561,6 +561,21 @@ export default function ProcurementPage() {
   const { data: poResp, loading: poLoading, refresh: refreshPOs } = useCachedJson<{ success?: boolean; data?: PurchaseOrder[] }>("/api/purchase-orders");
   const { data: invResp, loading: invLoading, refresh: refreshInventory } = useCachedJson<{ success?: boolean; data?: { rawMaterials?: RawMaterial[] } }>("/api/inventory");
   const { data: bindingsResp, loading: bindingsLoading, refresh: refreshBindings } = useCachedJson<{ success?: boolean; data?: SupplierMaterialBinding[] } | SupplierMaterialBinding[]>("/api/supplier-materials");
+  // 2.6 — forward-looking shortage forecast based on open SOs + BOM walk.
+  // Lazy-fetched on first render; the card stays hidden if no shortages.
+  type ShortageRow = {
+    itemCode: string;
+    description: string;
+    itemGroup: string;
+    balanceQty: number;
+    neededQty: number;
+    incomingQty: number;
+    shortBy: number;
+    criticalSOs: string[];
+  };
+  const { data: forecastResp } = useCachedJson<{ success?: boolean; data?: ShortageRow[]; horizonDate?: string }>(
+    "/api/inventory/shortage-forecast",
+  );
 
   const allSuppliers: Supplier[] = useMemo(
     () => (supResp?.success ? supResp.data ?? [] : Array.isArray(supResp) ? supResp : []),
@@ -578,6 +593,12 @@ export default function ProcurementPage() {
     const bindings = (bindingsResp as { data?: SupplierMaterialBinding[] } | undefined)?.data ?? bindingsResp;
     return Array.isArray(bindings) ? bindings : [];
   }, [bindingsResp]);
+  const shortageRows: ShortageRow[] = useMemo(
+    () => (forecastResp?.success ? forecastResp.data ?? [] : []),
+    [forecastResp],
+  );
+  const forecastHorizon = forecastResp?.horizonDate ?? "";
+  const [shortagePanelOpen, setShortagePanelOpen] = useState(false);
 
   const loading = supLoading || poLoading || invLoading || bindingsLoading;
 
@@ -956,10 +977,11 @@ export default function ProcurementPage() {
         </Card>
       </div>
 
-      {/* 2.5 — Low-stock reorder banner. Click opens the Create PO modal
-          pre-populated with all low-stock RMs grouped by category. Hidden
-          when there are no low-stock items so the page stays calm in the
-          common case. */}
+      {/* 2.5 + 2.6 — reorder banner (current minStock breach) and forecast
+          card (BOM-driven projection). Side-by-side at md+. The two answer
+          different questions: "what's already low" vs "what will be short
+          for committed SOs". */}
+      <div className={`grid gap-3 ${shortageRows.length > 0 && lowStockRMs.length > 0 ? "md:grid-cols-2" : ""}`}>
       {lowStockRMs.length > 0 && (
         <Card className="border-[#9C6F1E]/30 bg-[#FEF8EC]">
           <CardContent className="p-3 flex items-center justify-between gap-3 flex-wrap">
@@ -980,6 +1002,81 @@ export default function ProcurementPage() {
           </CardContent>
         </Card>
       )}
+
+      {/* 2.6 — Forecasted shortages card. Click expands a panel with the
+          top shortages by qty short. Hidden when no shortages so the page
+          stays calm. */}
+      {shortageRows.length > 0 && (
+        <Card className="border-[#9A3A2D]/30 bg-[#FBEEE9]">
+          <CardContent className="p-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-start gap-3">
+                <TrendingDown className="h-5 w-5 text-[#9A3A2D] mt-0.5 flex-shrink-0" />
+                <div>
+                  <p className="text-sm font-semibold text-[#1F1D1B]">
+                    Forecasted shortages: {shortageRows.length} item{shortageRows.length === 1 ? "" : "s"} short before {forecastHorizon || "+14 days"}
+                  </p>
+                  <p className="text-xs text-[#6B7280] mt-0.5">
+                    BOM-driven projection across CONFIRMED + IN_PRODUCTION sales orders, after current balance + open POs.
+                  </p>
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShortagePanelOpen((v) => !v)}
+              >
+                {shortagePanelOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+                {shortagePanelOpen ? "Hide" : "View"} Top Shortages
+              </Button>
+            </div>
+            {shortagePanelOpen && (
+              <div className="mt-3 pt-3 border-t border-[#9A3A2D]/20">
+                <div className="rounded-md border border-[#E2DDD8] overflow-hidden bg-white">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
+                        <th className="h-9 px-3 text-left font-medium text-[#374151]">Item</th>
+                        <th className="h-9 px-3 text-left font-medium text-[#374151]">Group</th>
+                        <th className="h-9 px-3 text-right font-medium text-[#374151]">On hand</th>
+                        <th className="h-9 px-3 text-right font-medium text-[#374151]">Needed</th>
+                        <th className="h-9 px-3 text-right font-medium text-[#374151]">Incoming</th>
+                        <th className="h-9 px-3 text-right font-medium text-[#374151]">Short by</th>
+                        <th className="h-9 px-3 text-left font-medium text-[#374151]">Critical SOs</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {shortageRows.slice(0, 25).map((row) => (
+                        <tr key={row.itemCode} className="border-b border-[#E2DDD8] last:border-b-0">
+                          <td className="h-9 px-3">
+                            <span className="font-medium text-[#6B5C32]">{row.itemCode}</span>
+                            <span className="text-[#6B7280] ml-1">{row.description}</span>
+                          </td>
+                          <td className="h-9 px-3 text-[#6B7280]">{row.itemGroup}</td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{row.balanceQty}</td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{row.neededQty}</td>
+                          <td className="h-9 px-3 text-right text-[#4B5563]">{row.incomingQty}</td>
+                          <td className="h-9 px-3 text-right font-bold text-[#9A3A2D]">{row.shortBy}</td>
+                          <td className="h-9 px-3 text-[#6B7280] truncate max-w-[200px]" title={row.criticalSOs.join(", ")}>
+                            {row.criticalSOs.slice(0, 3).join(", ")}
+                            {row.criticalSOs.length > 3 ? ` +${row.criticalSOs.length - 3}` : ""}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {shortageRows.length > 25 && (
+                  <p className="text-xs text-[#6B7280] mt-2">
+                    Showing 25 of {shortageRows.length} shortage rows. Refer to MRP for the full plan.
+                  </p>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
+      </div>
 
       {/* Filters */}
       <Card>

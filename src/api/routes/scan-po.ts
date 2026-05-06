@@ -277,6 +277,7 @@ EXTRACTION RULES
 7. deliveryHub = "Purchase Location" or hub shortName (KL/PG/JB/...). Match against the customer's hubs in CUSTOMERS catalog.
 8. deliveryDate = "Delivery Date" field as YYYY-MM-DD.
 9. isUrgent = true when PDF shows "URGENT", "SUPER URGENT", or similar emphasis (often red).
+10. pageNumbers = 1-indexed list of source PDF pages this PO occupies. Most POs span exactly one page (e.g. [3]); a multi-page PO lists every page (e.g. [4, 5]). Used to attach the original page image to the SO for customer disputes — accuracy here matters.
 
 ITEM EXTRACTION (CATEGORY-AWARE)
 =================================
@@ -334,6 +335,7 @@ Return STRICT JSON, no markdown fences, no prose:
       "yourRefNo": string | null,
       "deliveryDate": "YYYY-MM-DD" | null,
       "isUrgent": boolean,
+      "pageNumbers": number[],
       "items": [{
         "category": "BEDFRAME" | "SOFA" | "ACCESSORY",
         "productCode": string,
@@ -387,6 +389,10 @@ type ExtractedPO = {
   yourRefNo: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
+  // 1-indexed page numbers from the source PDF that this PO occupies. Used
+  // by the frontend to render that page set into a single PNG attachment
+  // for the SO (proof-of-source for customer disputes).
+  pageNumbers: number[];
   items: ExtractedItem[];
 };
 

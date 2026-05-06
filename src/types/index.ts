@@ -243,6 +243,10 @@ export type SalesOrder = {
    *  future customer demand (companySOId uses "SOH-" prefix). When a real
    *  customer order lands, this SO is renamed in-place. Optional for legacy. */
   isStock?: boolean;
+  /** Base64 PNG of the original customer PO page(s) when the SO was created
+   *  via the Scan PO flow. Used by the SO detail page's "View original PO"
+   *  button as proof-of-source for customer disputes. Null otherwise. */
+  customerPOImageB64?: string | null;
   createdAt: string;
   updatedAt: string;
 };

@@ -998,7 +998,32 @@ export default function SalesOrderDetailPage() {
                 </p>
                 <p className="text-xs text-[#9CA3AF]">{order.customerState || "—"}</p>
               </div>
-              <div><p className="text-xs text-[#9CA3AF]">Customer PO</p><p className="font-medium doc-number">{order.customerPOId || "-"}</p></div>
+              <div>
+                <p className="text-xs text-[#9CA3AF]">Customer PO</p>
+                <p className="font-medium doc-number">
+                  {order.customerPOId || "-"}
+                  {order.customerPOImageB64 && (
+                    <button
+                      type="button"
+                      className="ml-2 text-xs text-[#6B5C32] underline hover:text-[#4a3f22]"
+                      onClick={() => {
+                        // Pop the original PO image into a new tab so the
+                        // operator can show / download / send to the customer.
+                        const img = order.customerPOImageB64!;
+                        const w = window.open();
+                        if (w) {
+                          w.document.write(
+                            `<html><head><title>Original PO — ${order.customerPOId || order.companySOId}</title></head><body style="margin:0;background:#222;text-align:center"><img src="${img}" style="max-width:100%;height:auto"/></body></html>`,
+                          );
+                        }
+                      }}
+                      title="Open the original customer PO page in a new tab"
+                    >
+                      View original
+                    </button>
+                  )}
+                </p>
+              </div>
               <div><p className="text-xs text-[#9CA3AF]">Customer SO</p><p className="font-medium doc-number">{order.customerSOId || "-"}</p></div>
               <div><p className="text-xs text-[#9CA3AF]">Reference</p><p className="font-medium">{order.reference || "-"}</p></div>
               <div><p className="text-xs text-[#9CA3AF]">Company SO Date</p><p className="font-medium">{formatDate(order.companySODate)}</p></div>

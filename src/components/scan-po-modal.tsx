@@ -44,6 +44,7 @@ type ClaudeExtractedPO = {
   yourRefNo: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
+  pageNumbers: number[];
   items: ClaudeExtractedItem[];
 };
 
@@ -65,6 +66,11 @@ type ClaudeScanRow = {
   original: ClaudeExtractedPO;
   warnings: ClaudeWarning[];
   file: File;
+  // Base64 PNG of the PDF page(s) this PO covers — rendered client-side via
+  // pdfjs-dist. Sent to the SO create endpoint so the SO detail page can
+  // display the original document as proof when a customer disputes.
+  // Lazy-loaded after parse to keep the upload-step fast.
+  pageImageB64: string | null;
 };
 
 // Slim catalog payload from GET /api/scan-po/catalog. Drives inline-edit
@@ -207,6 +213,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             original: JSON.parse(JSON.stringify(s.extracted)) as ClaudeExtractedPO,
             warnings: s.warnings ?? [],
             file: v.file,
+            pageImageB64: null,
           });
         }
       } else {
@@ -306,6 +313,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           }).catch(() => {});
         }
 
+        // Render the source PDF page(s) for this PO into a PNG attachment.
+        // Done lazily here (rather than at parse time) so the UI doesn't
+        // pay the rendering cost for POs the operator deselects.
+        let pageImageB64 = row.pageImageB64;
+        if (!pageImageB64 && po.pageNumbers && po.pageNumbers.length > 0) {
+          try {
+            pageImageB64 = await renderPdfPagesToPng(row.file, po.pageNumbers);
+          } catch {
+            // Non-fatal — proceed without attachment if rendering fails.
+            pageImageB64 = null;
+          }
+        }
+
         // Hub resolution priority:
         //   1. PDF-extracted "Purchase Location" (po.deliveryHub) — most accurate.
         //   2. Heuristic from customer name + state — legacy fallback.
@@ -359,6 +379,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           companySODate: new Date().toISOString().split("T")[0],
           hookkaExpectedDD: po.deliveryDate,
           isUrgent: po.isUrgent ?? false,
+          customerPOImageB64: pageImageB64,
           items: soItems,
           source: "PO_SCAN_CLAUDE",
         };
@@ -1305,4 +1326,57 @@ async function extractPdfText(file: File): Promise<string> {
   }
 
   return textParts.join("\n\n--- PAGE BREAK ---\n\n");
+}
+
+// Render specific 1-indexed pages of a PDF into a single PNG (vertical
+// stack). The result is a base64-encoded PNG used as the SO's customer-PO
+// attachment. Rendering scale = 1.5 keeps the image readable while staying
+// under ~200KB per page.
+async function renderPdfPagesToPng(file: File, pages: number[]): Promise<string> {
+  const pdfjsLib = await import("pdfjs-dist");
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs";
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  const renderScale = 1.5;
+  const sortedPages = [...new Set(pages)]
+    .filter((p) => p >= 1 && p <= pdf.numPages)
+    .sort((a, b) => a - b);
+  if (sortedPages.length === 0) return "";
+
+  type Rendered = { canvas: HTMLCanvasElement; w: number; h: number };
+  const rendered: Rendered[] = [];
+  for (const pageNo of sortedPages) {
+    const page = await pdf.getPage(pageNo);
+    const viewport = page.getViewport({ scale: renderScale });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) continue;
+    await page.render({ canvasContext: ctx, viewport, canvas }).promise;
+    rendered.push({ canvas, w: canvas.width, h: canvas.height });
+  }
+  if (rendered.length === 0) return "";
+
+  // Single page → return its PNG directly. Multi-page → stack vertically.
+  if (rendered.length === 1) {
+    return rendered[0].canvas.toDataURL("image/png");
+  }
+  const totalW = Math.max(...rendered.map((r) => r.w));
+  const totalH = rendered.reduce((s, r) => s + r.h, 0);
+  const out = document.createElement("canvas");
+  out.width = totalW;
+  out.height = totalH;
+  const ctx = out.getContext("2d");
+  if (!ctx) return rendered[0].canvas.toDataURL("image/png");
+  ctx.fillStyle = "white";
+  ctx.fillRect(0, 0, totalW, totalH);
+  let y = 0;
+  for (const r of rendered) {
+    ctx.drawImage(r.canvas, 0, y);
+    y += r.h;
+  }
+  return out.toDataURL("image/png");
 }

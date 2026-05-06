@@ -72,6 +72,9 @@ export type SalesOrderRow = {
   status: string;
   overdue: string | null;
   notes: string | null;
+  // Base64-encoded PNG of the original customer PO page(s) when this SO was
+  // created from a Scan PO upload. Nullable — populated only by PO_SCAN_CLAUDE.
+  customerPOImageB64: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 };
@@ -183,6 +186,7 @@ function rowToSO(row: SalesOrderRow, items: SalesOrderItemRow[] = []) {
     status: row.status,
     overdue: row.overdue ?? "PENDING",
     notes: row.notes ?? "",
+    customerPOImageB64: row.customerPOImageB64 ?? null,
     createdAt: row.createdAt ?? "",
     updatedAt: row.updatedAt ?? "",
   };
@@ -1679,14 +1683,23 @@ app.post("/", async (c) => {
       (typeof body.customerState === "string" ? body.customerState : "") ??
       "";
 
+    // Customer PO image is optional — only PO_SCAN_CLAUDE source supplies it.
+    // Stored inline as base64 PNG so the SO detail page can render it as
+    // proof-of-source when a customer disputes a delivery.
+    const customerPOImageB64 =
+      typeof body.customerPOImageB64 === "string" && body.customerPOImageB64
+        ? body.customerPOImageB64
+        : null;
+
     const statements = [
       c.var.DB.prepare(
         `INSERT INTO sales_orders (id, customerPO, customerPOId, customerPODate,
            customerSO, customerSOId, reference, customerId, customerName,
            customerState, hubId, hubName, companySO, companySOId, companySODate,
            customerDeliveryDate, hookkaExpectedDD, hookkaDeliveryOrder,
-           subtotalSen, totalSen, status, overdue, notes, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           subtotalSen, totalSen, status, overdue, notes, customerPOImageB64,
+           created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).bind(
         soId,
         body.customerPO ?? "",
@@ -1711,6 +1724,7 @@ app.post("/", async (c) => {
         "DRAFT",
         "PENDING",
         body.notes ?? "",
+        customerPOImageB64,
         now,
         now,
       ),

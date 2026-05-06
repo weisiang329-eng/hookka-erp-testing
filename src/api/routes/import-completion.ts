@@ -9379,6 +9379,20 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     if (isSofa && !newSizeCode && newSizeLabel) {
       newSizeCode = newSizeLabel.replace(/"/g, "").trim();
     }
+    // SOFA sizeCode should be the numeric seat height ("24"), NOT the
+    // catalog variant tag ("1A(LHF)"). The old POST path fell back to
+    // resolvedProduct.sizeCode (which IS the variant tag for SOFA
+    // products) whenever the client didn't send sizeCode. Heal those:
+    // when sizeCode contains letters/parens but sizeLabel is a clean
+    // numeric value, derive numeric sizeCode from sizeLabel.
+    if (isSofa && newSizeCode && newSizeLabel) {
+      const looksVariantTag = /[A-Za-z()]/.test(newSizeCode);
+      const labelStripped = newSizeLabel.replace(/"/g, "").trim();
+      const labelLooksNumeric = /^\d+(\.\d+)?$/.test(labelStripped);
+      if (looksVariantTag && labelLooksNumeric) {
+        newSizeCode = labelStripped;
+      }
+    }
 
     // BEDFRAME junk fix — when sizeLabel got back-doored as the productCode
     // suffix (e.g. "(K)" instead of catalog's "6FT"), snap it to canon.

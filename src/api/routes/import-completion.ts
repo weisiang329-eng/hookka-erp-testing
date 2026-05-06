@@ -9375,6 +9375,22 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     if (isSofa && !newSizeCode && newSizeLabel) {
       newSizeCode = newSizeLabel.replace(/"/g, "").trim();
     }
+
+    // BEDFRAME junk fix — when sizeLabel got back-doored as the productCode
+    // suffix (e.g. "(K)" instead of catalog's "6FT"), snap it to canon.
+    // Triggers when sizeLabel is wrapped in parens AND its inner content
+    // matches sizeCode — that's the OCR-suffix-copy signature.
+    if (!isSofa && newSizeLabel && r.canonSizeLabel) {
+      const inner = newSizeLabel.replace(/^\(|\)$/g, "").trim();
+      const looksLikeSuffix =
+        /^\(.+\)$/.test(newSizeLabel) &&
+        (inner === (r.sizeCode ?? "") ||
+          inner === (r.canonSizeCode ?? "") ||
+          inner.toUpperCase() === (r.canonSizeCode ?? "").toUpperCase());
+      if (looksLikeSuffix) {
+        newSizeLabel = r.canonSizeLabel;
+      }
+    }
     const sizeChanged =
       newSizeLabel !== (r.sizeLabel ?? "") ||
       newSizeCode !== (r.sizeCode ?? "");

@@ -1672,35 +1672,56 @@ app.post("/", async (c) => {
         // downstream reader (Edit form, production sheet, etc.) sees the
         // same shape. Only applies to SOFA items — bedframe sizeLabel is
         // a free-form string like "Queen 5FT".
-        let normalizedSizeLabel =
-          (item.sizeLabel as string) ||
-          resolvedProduct?.sizeLabel ||
-          (item.sizeCode as string) ||
-          "";
-        if (
-          isSofaItem &&
-          normalizedSizeLabel &&
-          /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
-        ) {
-          normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
-        }
-        let normalizedSizeCode =
-          (item.sizeCode as string) || resolvedProduct?.sizeCode || "";
-        if (isSofaItem && !normalizedSizeCode && normalizedSizeLabel) {
-          normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
+        // Catalog vs client priority depends on category:
+        //   BEDFRAME — sizeLabel IS catalog data ("6FT" / "5FT" etc.).
+        //              Catalog ALWAYS wins. Shuts the OCR back-door where
+        //              the modal could persist PDF junk like "(K)".
+        //   SOFA — sizeLabel is the seat height the user picked (e.g.
+        //          "24""). Catalog's SOFA sizeLabel is the variant tag
+        //          ("1A(LHF)"), which is NOT what we store on the SO line.
+        //          Client wins, falls back to catalog only when missing.
+        let normalizedSizeLabel: string;
+        let normalizedSizeCode: string;
+        if (isSofaItem) {
+          normalizedSizeLabel =
+            (item.sizeLabel as string) ||
+            (item.sizeCode as string) ||
+            "";
+          if (
+            normalizedSizeLabel &&
+            /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
+          ) {
+            normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
+          }
+          normalizedSizeCode = (item.sizeCode as string) || "";
+          if (!normalizedSizeCode && normalizedSizeLabel) {
+            normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
+          }
+        } else {
+          // BEDFRAME / ACCESSORY — catalog wins for both.
+          normalizedSizeLabel =
+            resolvedProduct?.sizeLabel ||
+            (item.sizeLabel as string) ||
+            "";
+          normalizedSizeCode =
+            resolvedProduct?.sizeCode ||
+            (item.sizeCode as string) ||
+            "";
         }
 
         return {
           id: (item.id as string) || genItemId(),
           lineNo,
           lineSuffix,
-          productId: (item.productId as string) || resolvedProduct?.id || "",
+          productId: resolvedProduct?.id || (item.productId as string) || "",
           productCode,
+          // Catalog wins. If productCode resolves to a product, its name
+          // is what we persist — the client can't shove PDF text through.
           productName:
-            (item.productName as string) || resolvedProduct?.name || productCode,
+            resolvedProduct?.name || (item.productName as string) || productCode,
           itemCategory:
-            (item.itemCategory as string) ||
             resolvedProduct?.category ||
+            (item.itemCategory as string) ||
             "BEDFRAME",
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,

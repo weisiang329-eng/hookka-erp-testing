@@ -101,6 +101,14 @@ export type SalesOrderItemRow = {
   legPriceSen: number;
   specialOrder: string | null;
   specialOrderPriceSen: number;
+  // Free-text custom specials per line. Stored as JSON string of
+  // Array<{ description: string; surchargeSen: number }>. NULL/empty when
+  // the operator hasn't attached any. The aggregate surcharge is folded
+  // into specialOrderPriceSen at write time and the descriptions are
+  // suffixed into `specialOrder` as "OTHER: <desc>" tokens so legacy
+  // readers (DO print, invoice, detail page) still see the full list.
+  // See migration 0074.
+  customSpecials: string | null;
   basePriceSen: number;
   unitPriceSen: number;
   lineTotalSen: number;
@@ -130,6 +138,64 @@ type PriceOverrideRow = {
   timestamp: string;
 };
 
+// Parse the customSpecials JSON column into a plain array. Always returns
+// an array — invalid JSON / non-array shapes fall back to [] so the
+// frontend can iterate without null checks. See migration 0074.
+function parseCustomSpecials(
+  raw: string | null,
+): Array<{ description: string; surchargeSen: number }> {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(
+        (e): e is { description: string; surchargeSen: number } =>
+          !!e &&
+          typeof e === "object" &&
+          typeof (e as { description?: unknown }).description === "string" &&
+          typeof (e as { surchargeSen?: unknown }).surchargeSen === "number",
+      )
+      .map((e) => ({
+        description: e.description,
+        surchargeSen: e.surchargeSen,
+      }));
+  } catch {
+    return [];
+  }
+}
+
+// Sanitize an incoming `customSpecials` payload from a POST/PUT body. Drops
+// entries with empty descriptions, coerces surchargeSen to a non-negative
+// integer, and returns the cleaned list. Non-array input → [].
+type IncomingCustomSpecial = { description: string; surchargeSen: number };
+function sanitizeCustomSpecials(raw: unknown): IncomingCustomSpecial[] {
+  if (!Array.isArray(raw)) return [];
+  const out: IncomingCustomSpecial[] = [];
+  for (const e of raw) {
+    if (!e || typeof e !== "object") continue;
+    const obj = e as Record<string, unknown>;
+    const desc =
+      typeof obj.description === "string" ? obj.description.trim() : "";
+    if (!desc) continue;
+    const surcharge = Number(obj.surchargeSen);
+    out.push({
+      description: desc,
+      surchargeSen: Number.isFinite(surcharge) && surcharge > 0
+        ? Math.round(surcharge)
+        : 0,
+    });
+  }
+  return out;
+}
+
+// Serialize the cleaned customSpecials list for storage. Returns null when
+// the list is empty so the column stays NULL rather than '"[]"' — keeps
+// legacy reads (and the parser) cheap.
+function serializeCustomSpecials(list: IncomingCustomSpecial[]): string | null {
+  return list.length === 0 ? null : JSON.stringify(list);
+}
+
 function rowToItem(r: SalesOrderItemRow) {
   return {
     id: r.id,
@@ -151,6 +217,10 @@ function rowToItem(r: SalesOrderItemRow) {
     legPriceSen: r.legPriceSen,
     specialOrder: r.specialOrder ?? "",
     specialOrderPriceSen: r.specialOrderPriceSen,
+    // Hand the parsed array to the frontend, not the raw JSON string.
+    // The form pages mutate this list directly; serialization back to
+    // JSON happens on the POST/PUT path.
+    customSpecials: parseCustomSpecials(r.customSpecials),
     basePriceSen: r.basePriceSen,
     unitPriceSen: r.unitPriceSen,
     lineTotalSen: r.lineTotalSen,
@@ -1638,6 +1708,13 @@ app.post("/", async (c) => {
         const lineTotalSen = calculateLineTotal(unitPriceSen, quantity);
         const lineNo = idx + 1;
         const lineSuffix = `-${String(lineNo).padStart(2, "0")}`;
+        // Free-text custom specials per line (migration 0074). Sanitized
+        // here — empty descriptions dropped, surcharge coerced to ≥0 sen.
+        // Stored as JSON string in sales_order_items.customSpecials. The
+        // aggregate surcharge is already folded into specialOrderPriceSen
+        // by the client; we trust the client value rather than recomputing
+        // (the existing flow does the same for predefined specials).
+        const cleanedCustomSpecials = sanitizeCustomSpecials(item.customSpecials);
 
         return {
           id: (item.id as string) || genItemId(),
@@ -1668,6 +1745,7 @@ app.post("/", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
           lineTotalSen,
@@ -1733,8 +1811,8 @@ app.post("/", async (c) => {
              productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
              fabricId, fabricCode, quantity, gapInches, divanHeightInches,
              divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-             specialOrderPriceSen, basePriceSen, unitPriceSen, lineTotalSen, notes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).bind(
           item.id,
           soId,
@@ -1756,6 +1834,7 @@ app.post("/", async (c) => {
           item.legPriceSen,
           item.specialOrder,
           item.specialOrderPriceSen,
+          serializeCustomSpecials(item.customSpecials),
           item.basePriceSen,
           item.unitPriceSen,
           item.lineTotalSen,
@@ -2661,6 +2740,12 @@ app.put("/:id", async (c) => {
               }
             : null;
 
+        // Free-text custom specials per line (migration 0074). Same
+        // sanitization as the POST path — empty descriptions dropped, the
+        // surcharge sum is already folded into specialOrderPriceSen
+        // client-side.
+        const cleanedCustomSpecials = sanitizeCustomSpecials(item.customSpecials);
+
         return {
           id: (item.id as string) || genItemId(),
           lineNo,
@@ -2681,6 +2766,7 @@ app.put("/:id", async (c) => {
           legPriceSen,
           specialOrder: (item.specialOrder as string) || "",
           specialOrderPriceSen,
+          customSpecials: cleanedCustomSpecials,
           basePriceSen,
           unitPriceSen,
           lineTotalSen,
@@ -2706,8 +2792,8 @@ app.put("/:id", async (c) => {
                productId, productCode, productName, itemCategory, sizeCode, sizeLabel,
                fabricId, fabricCode, quantity, gapInches, divanHeightInches,
                divanPriceSen, legHeightInches, legPriceSen, specialOrder,
-               specialOrderPriceSen, basePriceSen, unitPriceSen, lineTotalSen, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+               specialOrderPriceSen, customSpecials, basePriceSen, unitPriceSen, lineTotalSen, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           ).bind(
             item.id,
             id,
@@ -2729,6 +2815,7 @@ app.put("/:id", async (c) => {
             item.legPriceSen,
             item.specialOrder,
             item.specialOrderPriceSen,
+            serializeCustomSpecials(item.customSpecials),
             item.basePriceSen,
             item.unitPriceSen,
             item.lineTotalSen,
@@ -2827,6 +2914,9 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            customSpecials: serializeCustomSpecials(
+              sanitizeCustomSpecials(item.customSpecials),
+            ),
             basePriceSen: Number(item.basePriceSen) || 0,
             unitPriceSen: 0,
             lineTotalSen: 0,
@@ -2901,6 +2991,9 @@ app.put("/:id", async (c) => {
             legPriceSen: Number(item.legPriceSen) || 0,
             specialOrder: (item.specialOrder as string) || "",
             specialOrderPriceSen: Number(item.specialOrderPriceSen) || 0,
+            customSpecials: serializeCustomSpecials(
+              sanitizeCustomSpecials(item.customSpecials),
+            ),
             basePriceSen: Number(item.basePriceSen) || 0,
             unitPriceSen: 0,
             lineTotalSen: 0,

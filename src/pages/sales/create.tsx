@@ -25,6 +25,14 @@ import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
 
 type SeatHeightTier = { height: string; priceSen: number };
 
+// Free-text custom special order on a SO line (migration 0074). Unlike
+// the master-config "Specials" list, these are typed by the operator per
+// SO line for edge-case asks ("Custom Foam 35D", "Special leg ferrules"
+// etc.). Folded into specialOrderPriceSen and suffixed into the
+// `specialOrder` text column as "OTHER: <desc>" so legacy display paths
+// (DO print, invoice, detail page) keep rendering them without changes.
+type CustomSpecial = { description: string; surchargeSen: number };
+
 // Maintenance config (kv_config 'variants-config') values are either bare
 // strings (e.g. '4"') or { value, priceSen } pairs. Each consumer narrows
 // the union further.
@@ -64,7 +72,8 @@ type LineItem = {
   totalHeightPriceSen: number; // surcharge from total height config
   specialOrders: string[]; // array of codes
   specialOrderPriceSen: number;
-  specialOrder: string; // comma-joined text for submission
+  specialOrder: string; // comma-joined text for submission (predefined names + "OTHER: <desc>" suffixes)
+  customSpecials: CustomSpecial[]; // free-text per-line specials
   notes: string;
   // Price hints cached on the line so seat-height / fabric pickers can resolve
   // the correct tier without re-fetching. Populated from the customer-aware
@@ -83,7 +92,7 @@ const makeEmptyLine = (): LineItem => ({
   quantity: 1, basePriceSen: 0, seatHeight: "", selectedModules: [],
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
-  specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", notes: "",
+  specialOrders: [], specialOrderPriceSen: 0, specialOrder: "", customSpecials: [], notes: "",
   price1Sen: null, seatHeightPrices: [],
 });
 
@@ -631,6 +640,9 @@ function CreateSalesOrderPage() {
               _uid: crypto.randomUUID(),
               seatHeight: it.seatHeight || "",
               specialOrders: it.specialOrders || (it.specialOrder ? it.specialOrder.split(/[;,]/).map((s: string) => s.trim()).filter(Boolean) : []),
+              // Carry custom specials through the clone path. EMPTY_LINE
+              // gives [] when source predates the field.
+              customSpecials: Array.isArray(it.customSpecials) ? it.customSpecials : [],
             }));
             setItems(migrated);
           }
@@ -885,13 +897,26 @@ function CreateSalesOrderPage() {
         ? { fabricId: defaultFabric.id, fabricCode: defaultFabric.code }
         : {}),
       // Specials prefill — codes (LineItem.specialOrders) + comma-joined
-      // display string for the saved specialOrder field + surcharge.
+      // display string for the saved specialOrder field + surcharge. We
+      // preserve any custom specials the user already typed on this line
+      // and re-suffix them into the joined text so picking a different
+      // product doesn't silently drop "OTHER: <desc>" tokens.
       specialOrders: defaultSpecialCodes,
-      specialOrder: defaultSpecialCodes
-        .map((c) => specialOrderOptions.find((o) => o.code === c)?.name ?? "")
-        .filter(Boolean)
-        .join(", "),
-      specialOrderPriceSen: defaultSpecialSurcharge,
+      specialOrder: [
+        ...defaultSpecialCodes
+          .map((c) => specialOrderOptions.find((o) => o.code === c)?.name ?? "")
+          .filter(Boolean),
+        ...items[idx].customSpecials
+          .map((cs) => cs.description.trim())
+          .filter(Boolean)
+          .map((d) => `OTHER: ${d}`),
+      ].join("; "),
+      specialOrderPriceSen:
+        defaultSpecialSurcharge +
+        items[idx].customSpecials.reduce(
+          (s, c) => s + (Number.isFinite(c.surchargeSen) && c.surchargeSen > 0 ? Math.round(c.surchargeSen) : 0),
+          0,
+        ),
       // Category-specific dimension prefills.
       seatHeight: sofaSeat,
       gapInches: isSofa ? null : (bfGapInches ?? items[idx].gapInches),
@@ -1058,6 +1083,61 @@ function CreateSalesOrderPage() {
     });
   };
 
+  // Sum the predefined specials surcharge for a given code list, honoring
+  // the HB+Divan combined-cover rule and the maintenance-config overrides.
+  // Pulled out of toggleSpecialOrder so it can be reused when the custom
+  // specials list changes (since both feed the same specialOrderPriceSen).
+  const calcPredefinedSurcharge = (codes: string[], isSofa: boolean): number => {
+    const cfgKey = isSofa ? "sofaSpecials" : "specials";
+    const cfgSpecials = maintenanceConfig?.[cfgKey];
+    if (!cfgSpecials || !Array.isArray(cfgSpecials)) {
+      return calcSpecialOrderSurcharge(codes);
+    }
+    let surcharge = 0;
+    const hasHBCover = codes.includes("HB_FULL_COVER");
+    const hasDivanBtmCover = codes.includes("DIVAN_BTM_COVER");
+    for (const c of codes) {
+      const opt = specialOrderOptions.find(o => o.code === c);
+      if (!opt) continue;
+      if (hasHBCover && hasDivanBtmCover && (c === "HB_FULL_COVER" || c === "DIVAN_BTM_COVER")) continue;
+      const cfgEntry = cfgSpecials.find((e: {value:string; priceSen:number} | string) =>
+        typeof e === "object" && e.value === opt.name
+      );
+      surcharge += (cfgEntry && typeof cfgEntry === "object") ? cfgEntry.priceSen : opt.surcharge;
+    }
+    if (hasHBCover && hasDivanBtmCover) surcharge += 10000;
+    return surcharge;
+  };
+
+  // Build the joined `specialOrder` text column from predefined codes and
+  // the custom-special list. Predefined names come first, "OTHER: <desc>"
+  // tokens follow — this is the format legacy readers (DO print, invoice,
+  // detail page) already render verbatim.
+  const buildSpecialOrderText = (codes: string[], customs: CustomSpecial[]): string => {
+    const predefinedTokens = codes
+      .map(c => specialOrderOptions.find(o => o.code === c)?.name || c);
+    const customTokens = customs
+      .map(c => c.description.trim())
+      .filter(Boolean)
+      .map(d => `OTHER: ${d}`);
+    return [...predefinedTokens, ...customTokens].join("; ");
+  };
+
+  // Total surcharge for both predefined + custom specials. Custom entries
+  // can have any non-negative sen amount (no combined-cover rule).
+  const calcTotalSpecialSurcharge = (
+    codes: string[],
+    customs: CustomSpecial[],
+    isSofa: boolean,
+  ): number => {
+    const predef = calcPredefinedSurcharge(codes, isSofa);
+    const customSum = customs.reduce(
+      (s, c) => s + (Number.isFinite(c.surchargeSen) && c.surchargeSen > 0 ? Math.round(c.surchargeSen) : 0),
+      0,
+    );
+    return predef + customSum;
+  };
+
   const toggleSpecialOrder = (idx: number, code: string) => {
     const item = items[idx];
     const isSofa = item?.itemCategory === "SOFA";
@@ -1066,34 +1146,8 @@ function CreateSalesOrderPage() {
       ? current.filter(c => c !== code)
       : [...current, code];
 
-    // Try to use maintenance config surcharges first
-    const cfgKey = isSofa ? "sofaSpecials" : "specials";
-    const cfgSpecials = maintenanceConfig?.[cfgKey];
-    let surcharge: number;
-
-    if (cfgSpecials && Array.isArray(cfgSpecials)) {
-      // Calculate from config
-      surcharge = 0;
-      const hasHBCover = next.includes("HB_FULL_COVER");
-      const hasDivanBtmCover = next.includes("DIVAN_BTM_COVER");
-      for (const c of next) {
-        const opt = specialOrderOptions.find(o => o.code === c);
-        if (!opt) continue;
-        if (hasHBCover && hasDivanBtmCover && (c === "HB_FULL_COVER" || c === "DIVAN_BTM_COVER")) continue;
-        // Look up surcharge from config by name
-        const cfgEntry = cfgSpecials.find((e: {value:string; priceSen:number} | string) =>
-          typeof e === "object" && e.value === opt.name
-        );
-        surcharge += (cfgEntry && typeof cfgEntry === "object") ? cfgEntry.priceSen : opt.surcharge;
-      }
-      if (hasHBCover && hasDivanBtmCover) surcharge += 10000;
-    } else {
-      surcharge = calcSpecialOrderSurcharge(next);
-    }
-
-    // Persist as semicolon-separated canonical names; each token is guaranteed
-    // to come from the config dropdown, so no free text leaks into specialOrder.
-    const label = next.map(c => specialOrderOptions.find(o => o.code === c)?.name || c).join("; ");
+    const surcharge = calcTotalSpecialSurcharge(next, item.customSpecials, isSofa);
+    const label = buildSpecialOrderText(next, item.customSpecials);
     const patch = {
       specialOrders: next,
       specialOrder: label,
@@ -1106,6 +1160,53 @@ function CreateSalesOrderPage() {
     } else {
       updateItem(idx, patch);
     }
+  };
+
+  // Apply a new customSpecials array to a line — updates the joined
+  // specialOrder text and recomputes the line's surcharge total. Sofa
+  // siblings cascade together (mirrors toggleSpecialOrder's behavior).
+  const applyCustomSpecials = (idx: number, customs: CustomSpecial[]) => {
+    const item = items[idx];
+    const isSofa = item?.itemCategory === "SOFA";
+    const surcharge = calcTotalSpecialSurcharge(item.specialOrders, customs, isSofa);
+    const label = buildSpecialOrderText(item.specialOrders, customs);
+    const patch: Partial<LineItem> = {
+      customSpecials: customs,
+      specialOrder: label,
+      specialOrderPriceSen: surcharge,
+    };
+    if (isSofa) {
+      propagateSofaVariant(idx, patch);
+    } else {
+      updateItem(idx, patch);
+    }
+  };
+
+  const addCustomSpecial = (idx: number) => {
+    const item = items[idx];
+    const next: CustomSpecial[] = [
+      ...item.customSpecials,
+      { description: "", surchargeSen: 0 },
+    ];
+    applyCustomSpecials(idx, next);
+  };
+
+  const updateCustomSpecial = (
+    idx: number,
+    csIdx: number,
+    patch: Partial<CustomSpecial>,
+  ) => {
+    const item = items[idx];
+    const next = item.customSpecials.map((c, i) =>
+      i === csIdx ? { ...c, ...patch } : c,
+    );
+    applyCustomSpecials(idx, next);
+  };
+
+  const removeCustomSpecial = (idx: number, csIdx: number) => {
+    const item = items[idx];
+    const next = item.customSpecials.filter((_, i) => i !== csIdx);
+    applyCustomSpecials(idx, next);
   };
 
   const getUnitPrice = (item: LineItem) =>
@@ -1768,6 +1869,9 @@ function CreateSalesOrderPage() {
               onSelectLeg={selectLeg}
               onSelectSeatHeight={selectSeatHeight}
               onToggleSpecialOrder={toggleSpecialOrder}
+              onAddCustomSpecial={addCustomSpecial}
+              onUpdateCustomSpecial={updateCustomSpecial}
+              onRemoveCustomSpecial={removeCustomSpecial}
               onAddSofaModules={addSofaModules}
               onUpdate={updateItem}
               onRemove={removeItem}
@@ -1798,6 +1902,9 @@ type LineItemCardProps = {
   onSelectLeg: (idx: number, v: string) => void;
   onSelectSeatHeight: (idx: number, v: string) => void;
   onToggleSpecialOrder: (idx: number, code: string) => void;
+  onAddCustomSpecial: (idx: number) => void;
+  onUpdateCustomSpecial: (idx: number, csIdx: number, patch: Partial<CustomSpecial>) => void;
+  onRemoveCustomSpecial: (idx: number, csIdx: number) => void;
   onAddSofaModules: (idx: number, moduleProductIds: string[]) => void;
   onUpdate: (idx: number, u: Partial<LineItem>) => void;
   onRemove: (idx: number) => void;
@@ -1812,7 +1919,9 @@ function LineItemCard({
   item, idx, products, fabrics,
   onSelectProduct, onSelectFabric,
   onSelectGap, onSelectDivan, onSelectLeg, onSelectSeatHeight,
-  onToggleSpecialOrder, onAddSofaModules, onUpdate, onRemove, canRemove,
+  onToggleSpecialOrder,
+  onAddCustomSpecial, onUpdateCustomSpecial, onRemoveCustomSpecial,
+  onAddSofaModules, onUpdate, onRemove, canRemove,
   getUnitPrice, getLineTotal, getTotalHeight, maintenanceConfig,
 }: LineItemCardProps) {
   const [showSpecialOrders, setShowSpecialOrders] = useState(false);
@@ -2299,6 +2408,79 @@ function LineItemCard({
             })}
           </div>
         )}
+
+        {/* Custom (free-text) specials — for edge cases not in the master
+            Specials maintenance config. Each entry has its own description
+            + surcharge; the values are appended to the line's specialOrder
+            text as "OTHER: <desc>" so legacy display paths render them
+            without changes. Migration 0074. */}
+        <div className="mt-3">
+          <div className="flex items-center justify-between mb-1.5">
+            <span className="text-xs font-medium text-[#374151]">
+              Other (custom)
+              {item.customSpecials.length > 0 && (
+                <span className="text-[#9CA3AF] font-normal ml-1">
+                  ({item.customSpecials.length})
+                </span>
+              )}
+            </span>
+            <button
+              type="button"
+              onClick={() => onAddCustomSpecial(idx)}
+              className="text-xs font-medium text-[#6B5C32] hover:text-[#4A3F22] transition-colors flex items-center gap-1"
+            >
+              <Plus className="h-3 w-3" />
+              Add custom
+            </button>
+          </div>
+          {item.customSpecials.length > 0 && (
+            <div className="space-y-1.5">
+              {item.customSpecials.map((cs, csIdx) => (
+                <div
+                  key={csIdx}
+                  className="flex items-center gap-2 rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-2"
+                >
+                  <Input
+                    value={cs.description}
+                    onChange={(e) =>
+                      onUpdateCustomSpecial(idx, csIdx, {
+                        description: e.target.value,
+                      })
+                    }
+                    placeholder="e.g. Custom Foam Density 35D"
+                    className="h-8 flex-1 text-sm"
+                  />
+                  <div className="flex items-center gap-1">
+                    <span className="text-xs text-[#9CA3AF]">RM</span>
+                    <Input
+                      type="number"
+                      onFocus={(e) => e.currentTarget.select()}
+                      min={0}
+                      step={0.01}
+                      value={cs.surchargeSen / 100}
+                      onChange={(e) =>
+                        onUpdateCustomSpecial(idx, csIdx, {
+                          surchargeSen: Math.round(
+                            parseFloat(e.target.value || "0") * 100,
+                          ),
+                        })
+                      }
+                      className="h-8 w-24 text-right text-sm"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveCustomSpecial(idx, csIdx)}
+                    className="p-1 rounded text-[#9CA3AF] hover:text-[#B91C1C] hover:bg-[#FEE2E2] transition-colors"
+                    aria-label="Remove custom special"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
       )}
 
@@ -2402,6 +2584,25 @@ function LineItemCard({
               <span>RM 100.00</span>
             </div>
           )}
+          {/* Custom specials breakdown — descriptions are operator-typed
+              so we show them as "Other: <desc>" lines mirroring how they
+              appear in the saved specialOrder text. Zero-surcharge entries
+              still render so the operator can see what they typed. */}
+          {item.customSpecials.map((cs, csIdx) => {
+            const desc = cs.description.trim();
+            if (!desc) return null;
+            const sc = Number.isFinite(cs.surchargeSen) && cs.surchargeSen > 0
+              ? Math.round(cs.surchargeSen)
+              : 0;
+            return (
+              <div key={`cs-${csIdx}`} className="flex justify-between">
+                <span>Other: {desc}:</span>
+                <span className={sc > 0 ? "text-[#9C6F1E]" : ""}>
+                  {sc > 0 ? `+${formatCurrency(sc)}` : "RM 0"}
+                </span>
+              </div>
+            );
+          })}
           <div className="flex justify-between border-t border-dashed border-[#D1D5DB] pt-1 mt-1 text-sm font-semibold text-[#1F1D1B]">
             <span>Unit Price:</span>
             <span>{formatCurrency(unitPrice)}</span>

@@ -205,6 +205,10 @@ export type SalesOrderItem = {
   legPriceSen: number;
   specialOrder: string;
   specialOrderPriceSen: number;
+  // Free-text custom specials per line. API parses the JSON column into
+  // this array — empty array when no custom entries (or column NULL).
+  // See migration 0074 + sales-orders.ts rowToItem.
+  customSpecials?: Array<{ description: string; surchargeSen: number }>;
   basePriceSen: number;
   unitPriceSen: number;
   lineTotalSen: number;

@@ -446,6 +446,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           customerCode: po.customerCode ?? null,
           customerState: po.customerState ?? hub.state ?? "",
           customerPOId: po.customerPO,
+          // Customer's own reference goes into the SO header's `reference`
+          // field — that's what the SO list / detail page reads. Sending
+          // it as `yourRefNo` (the PDF field name) was being silently
+          // dropped by the SO create endpoint.
+          reference: po.yourRefNo ?? null,
           yourRefNo: po.yourRefNo ?? null,
           deliveryHubId: resolvedHubId,
           companySODate: new Date().toISOString().split("T")[0],

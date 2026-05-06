@@ -52,6 +52,7 @@ import { postJobCardLabor } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import { loadLeadTimes, type LeadTimeMap } from "../lib/lead-times";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -8888,6 +8889,93 @@ app.post("/revert-dos-to-draft", async (c) => {
     loadedDOsFound: loadedDOs.length,
     reverted,
     datesBackfilled,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-so-reference
+//
+// One-shot fix for SOs created via the Scan PO modal before the
+// `reference` field was wired up. The customer's Ref No was extracted by
+// Claude into po_scan_samples but never landed on sales_orders. Walks
+// every PO_SCAN_CLAUDE-source SO and copies yourRefNo from the matching
+// po_scan_samples row (joined by customerPOId / poIdentifier) into
+// sales_orders.reference. Idempotent: only fills when reference is empty.
+//
+// Will be deleted once the OCR migration window closes.
+// ---------------------------------------------------------------------------
+app.post("/backfill-so-reference", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  // SOs that need a reference. Limit to ones with empty reference so
+  // re-runs don't clobber operator-edited values.
+  const targetsRes = await db
+    .prepare(
+      `SELECT id, customerPOId
+         FROM sales_orders
+        WHERE orgId = ?
+          AND (reference IS NULL OR reference = '')
+          AND customerPOId IS NOT NULL
+          AND customerPOId <> ''`,
+    )
+    .bind(orgId)
+    .all<{ id: string; customerPOId: string }>();
+  const targets = targetsRes.results ?? [];
+
+  let updated = 0;
+  const skipped: { soId: string; customerPO: string; reason: string }[] = [];
+
+  for (const t of targets) {
+    // Find the most recent po_scan_samples row for this customer PO and
+    // pull yourRefNo out of the JSON. correctedJson wins over rawExtracted
+    // if it exists (operator may have edited the ref number).
+    const sampleRes = await db
+      .prepare(
+        `SELECT correctedJson, rawExtracted
+           FROM po_scan_samples
+          WHERE poIdentifier = ?
+          ORDER BY createdAt DESC
+          LIMIT 1`,
+      )
+      .bind(t.customerPOId)
+      .first<{ correctedJson: string | null; rawExtracted: string | null }>();
+    if (!sampleRes) {
+      skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "no sample" });
+      continue;
+    }
+
+    const blob = sampleRes.correctedJson || sampleRes.rawExtracted || "";
+    let yourRefNo: string | null = null;
+    try {
+      const parsed = JSON.parse(blob) as { yourRefNo?: unknown };
+      if (typeof parsed.yourRefNo === "string" && parsed.yourRefNo) {
+        yourRefNo = parsed.yourRefNo;
+      }
+    } catch {
+      skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "bad JSON" });
+      continue;
+    }
+    if (!yourRefNo) {
+      skipped.push({ soId: t.id, customerPO: t.customerPOId, reason: "no yourRefNo" });
+      continue;
+    }
+
+    await db
+      .prepare("UPDATE sales_orders SET reference = ? WHERE id = ?")
+      .bind(yourRefNo, t.id)
+      .run();
+    updated++;
+  }
+
+  return c.json({
+    success: true,
+    targetsFound: targets.length,
+    updated,
+    skipped,
   });
 });
 

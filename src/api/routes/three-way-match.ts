@@ -16,6 +16,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
 
@@ -117,9 +118,12 @@ app.get("/", async (c) => {
   // RBAC gate (P3.3-followup) — three-way-match:read.
   const denied = await requirePermission(c, "three-way-match", "read");
   if (denied) return denied;
+  const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
-    "SELECT * FROM three_way_matches",
-  ).all<ThreeWayMatchRow>();
+    "SELECT * FROM three_way_matches WHERE orgId = ?",
+  )
+    .bind(orgId)
+    .all<ThreeWayMatchRow>();
   const data = (res.results ?? []).map(rowToMatch);
   return c.json(data);
 });
@@ -218,13 +222,14 @@ app.get("/by-po/:poId", async (c) => {
   const denied = await requirePermission(c, "three-way-match", "read");
   if (denied) return denied;
 
+  const orgId = getOrgId(c);
   const poId = c.req.param("poId");
 
   const po = await c.var.DB.prepare(
     `SELECT id, poNo, supplierId, supplierName, totalSen
-     FROM purchase_orders WHERE id = ?`,
+     FROM purchase_orders WHERE id = ? AND orgId = ?`,
   )
-    .bind(poId)
+    .bind(poId, orgId)
     .first<{
       id: string;
       poNo: string;

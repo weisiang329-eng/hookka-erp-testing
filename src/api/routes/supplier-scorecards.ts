@@ -17,6 +17,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { getOrgId } from "../lib/tenant";
+import { requirePermission } from "../lib/rbac";
 
 const app = new Hono<Env>();
 
@@ -44,6 +45,8 @@ function rowToScorecard(r: ScorecardRow) {
 
 // GET /api/supplier-scorecards?supplierId=...
 app.get("/", async (c) => {
+  const denied = await requirePermission(c, "supplier-scorecards", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const supplierId = c.req.query("supplierId");
   if (supplierId) {
@@ -89,6 +92,8 @@ function isReceivedOnTime(r: PoStatRow): boolean | null {
 }
 
 app.get("/summary", async (c) => {
+  const denied = await requirePermission(c, "supplier-scorecards", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const res = await c.var.DB.prepare(
     `SELECT supplierId, expectedDate, receivedDate, status
@@ -164,6 +169,8 @@ type GrnQcRow = {
 };
 
 app.get("/:supplierId", async (c) => {
+  const denied = await requirePermission(c, "supplier-scorecards", "read");
+  if (denied) return denied;
   const orgId = getOrgId(c);
   const supplierId = c.req.param("supplierId");
 

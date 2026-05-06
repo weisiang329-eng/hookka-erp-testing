@@ -608,10 +608,13 @@ function ensurePendingMigrations(db: D1Database): Promise<void> {
     for (const sql of stmts) {
       try {
         await db.prepare(sql).run();
-      } catch {
-        // ignore — column/index may already exist or DDL transiently
-        // rejected. A real schema mismatch will resurface on the INSERT
-        // path (or as a UNIQUE collision the retry loop handles).
+      } catch (err) {
+        console.warn(
+          "[purchase-orders] migration: CREATE UNIQUE INDEX failed " +
+            "(usually means duplicate poNos exist — run /api/import/po-no-duplicates to investigate). " +
+            "Worker will continue without uniqueness enforcement.",
+          err instanceof Error ? err.message : String(err),
+        );
       }
     }
   })();

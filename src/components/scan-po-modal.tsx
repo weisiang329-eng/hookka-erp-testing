@@ -414,24 +414,31 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
         const resolvedHubId = po.deliveryHubId || hub.hubId;
 
+        // OCR rule: only productCode + variant numerics + fabricCode +
+        // specialOrder go into the SO body. EVERYTHING ELSE (productName,
+        // sizeLabel, sizeCode) is left empty so the SO create endpoint
+        // resolves them from the product master / catalog. The PDF text
+        // is reference-only — never persisted as the canonical value.
         const soItems = po.items.map((item, idx) => ({
           lineNo: idx + 1,
           lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
           productCode: item.productCode,
-          // Don't pre-fill productName from PDF description — that's
-          // human-readable junk like 'HK5531/24"(2 Seater+L)/COL:GARFIELD'.
-          // Backend looks up the canonical name from product master via
-          // resolvedProduct.name when this is empty.
-          productName: "",
+          productName: "", // backend → resolvedProduct.name
           itemCategory: item.category,
-          sizeLabel: item.sizeLabel ?? "",
+          sizeLabel: "", // backend → resolvedProduct.sizeLabel ("5FT" etc)
+          sizeCode: "", // backend → resolvedProduct.sizeCode
           fabricCode: item.fabricCode ?? "",
+          // For sofa: seat height is the variant. Send as seatHeight so
+          // the price resolver can find it in product.seatHeightPrices.
+          // Strip parens / quotes that Claude may include — keep just the
+          // number. "28" → "28", '(28")' → "28".
+          seatHeight:
+            item.category === "SOFA" && item.sizeLabel
+              ? item.sizeLabel.replace(/[^\d.]/g, "")
+              : "",
           quantity: item.quantity || 1,
           gapInches: item.gapInches ?? 0,
           divanHeightInches: item.divanHeightInches ?? 0,
-          // noLeg=true is encoded as legHeightInches=null. Backend treats
-          // null/0 the same in cost calc, but null preserves the boolean
-          // intent for future read-back.
           legHeightInches: item.noLeg ? null : item.legHeightInches,
           specialOrder: item.specialOrder ?? "",
           // Unit price is in RM (decimal) on the PDF; backend stores sen

@@ -483,6 +483,40 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
 }
 
 // ===========================================================================
+// GET /api/scan-po/catalog — slim catalog payload for the preview modal.
+// Lets inline-edit dropdowns (fabric, divan, special, etc.) source values
+// directly from maintenance instead of the operator typing free text.
+// ===========================================================================
+app.get("/catalog", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+  const orgId = getOrgId(c);
+  const catalog = await loadCatalog(c.var.DB as unknown as DBLike, orgId);
+  return c.json({
+    success: true,
+    data: {
+      customers: catalog.customers.map((c) => ({
+        id: c.id,
+        code: c.code,
+        name: c.name,
+        hubs: c.hubs.map((h) => h.shortName),
+      })),
+      bedframes: catalog.bedframes.map((p) => p.code),
+      sofas: catalog.sofas.map((p) => p.code),
+      accessories: catalog.accessories.map((p) => p.code),
+      fabrics: catalog.fabrics.map((f) => f.code),
+      bedframeDivans: catalog.variants.bedframe.divanHeights,
+      bedframeLegs: catalog.variants.bedframe.legHeights,
+      bedframeGaps: catalog.variants.bedframe.gaps,
+      bedframeSpecials: catalog.variants.bedframe.specials,
+      sofaSizes: catalog.variants.sofa.sizes,
+      sofaLegs: catalog.variants.sofa.legHeights,
+      sofaSpecials: catalog.variants.sofa.specials,
+    },
+  });
+});
+
+// ===========================================================================
 // POST /api/scan-po/extract
 // ===========================================================================
 type SampleRow = { id: string; correctedJson: string | null };

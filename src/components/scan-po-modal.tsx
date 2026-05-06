@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -57,8 +57,31 @@ type ClaudeWarning = {
 type ClaudeScanRow = {
   sampleId: string;
   extracted: ClaudeExtractedPO;
+  // `original` is a frozen snapshot of `extracted` at parse time. We compare
+  // against it on confirm to decide whether to write the row back as a few-
+  // shot example: unedited Claude output isn't useful as training data
+  // (it's just Claude's own response echoed back) and was previously
+  // polluting the example pool.
+  original: ClaudeExtractedPO;
   warnings: ClaudeWarning[];
   file: File;
+};
+
+// Slim catalog payload from GET /api/scan-po/catalog. Drives inline-edit
+// dropdowns so the operator picks from maintenance values, not free text.
+type ScanCatalog = {
+  customers: { id: string; code: string; name: string; hubs: string[] }[];
+  bedframes: string[];
+  sofas: string[];
+  accessories: string[];
+  fabrics: string[];
+  bedframeDivans: string[];
+  bedframeLegs: string[];
+  bedframeGaps: string[];
+  bedframeSpecials: string[];
+  sofaSizes: string[];
+  sofaLegs: string[];
+  sofaSpecials: string[];
 };
 
 type CreateSOResponse = {
@@ -79,7 +102,28 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
   const [, setCreating] = useState(false);
   const [createdSOs, setCreatedSOs] = useState<{ soNo: string; poNo: string; itemCount: number }[]>([]);
   const [errors, setErrors] = useState<string[]>([]);
+  const [catalog, setCatalog] = useState<ScanCatalog | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Pull the slim catalog once when the modal first opens. Cached for the
+  // lifetime of the modal instance.
+  useEffect(() => {
+    if (!open || catalog) return;
+    let cancelled = false;
+    fetch("/api/scan-po/catalog")
+      .then((r) => r.json() as Promise<{ success?: boolean; data?: ScanCatalog }>)
+      .then((d) => {
+        if (cancelled) return;
+        if (d.success && d.data) setCatalog(d.data);
+      })
+      .catch(() => {
+        // Catalog is best-effort: dropdowns fall back to free-text inputs
+        // when this fails.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, catalog]);
 
   const reset = () => {
     setStep("upload");
@@ -159,6 +203,8 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           claudeSuccesses.push({
             sampleId: s.sampleId,
             extracted: s.extracted,
+            // Deep clone for diff comparison. Cheap (PO is small).
+            original: JSON.parse(JSON.stringify(s.extracted)) as ClaudeExtractedPO,
             warnings: s.warnings ?? [],
             file: v.file,
           });
@@ -246,14 +292,19 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
     for (const row of selectedClaude) {
       const po = row.extracted;
       try {
-        // Feedback loop: save the (edited) JSON back so future extractions
-        // can use it as a few-shot example. Fire-and-forget — a failure
-        // here shouldn't block SO creation.
-        fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ correctedJson: po }),
-        }).catch(() => {});
+        // Few-shot integrity: only confirm samples the operator actually
+        // edited. Sending unedited Claude output back as a "corrected"
+        // example was polluting the few-shot pool with Claude's own
+        // (potentially wrong) output. Compare canonical JSON.
+        const wasEdited =
+          JSON.stringify(po) !== JSON.stringify(row.original);
+        if (wasEdited) {
+          fetch(`/api/scan-po/samples/${row.sampleId}/confirm`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ correctedJson: po }),
+          }).catch(() => {});
+        }
 
         // Hub resolution priority:
         //   1. PDF-extracted "Purchase Location" (po.deliveryHub) — most accurate.
@@ -469,6 +520,7 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
               onExpandPO={setExpandedPO}
               onBack={() => { setStep("upload"); setParseResult(null); setClaudeRows([]); }}
               onConfirm={handleCreateSOs}
+              catalog={catalog}
             />
           )}
 
@@ -585,7 +637,7 @@ function InfoCard({ icon, title, desc }: { icon: string; title: string; desc: st
 }
 
 function PreviewStep({
-  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, onTogglePO, onExpandPO, onBack, onConfirm,
+  claudeRows, setClaudeRows, usedClaude, result, selectedPOs, expandedPO, onTogglePO, onExpandPO, onBack, onConfirm, catalog,
 }: {
   claudeRows: ClaudeScanRow[];
   setClaudeRows: React.Dispatch<React.SetStateAction<ClaudeScanRow[]>>;
@@ -597,6 +649,7 @@ function PreviewStep({
   onExpandPO: (i: number | null) => void;
   onBack: () => void;
   onConfirm: () => void;
+  catalog: ScanCatalog | null;
 }) {
   const fallbackPOs = result?.purchaseOrders ?? [];
   const totalCount = claudeRows.length + fallbackPOs.length;
@@ -612,6 +665,40 @@ function PreviewStep({
         extracted: {
           ...r.extracted,
           items: r.extracted.items.map((it, j) => j === itemIdx ? { ...it, ...patch } : it),
+        },
+      };
+    }));
+  };
+  const addClaudeItem = (rowIdx: number) => {
+    setClaudeRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      const blank: ClaudeExtractedItem = {
+        category: "BEDFRAME",
+        productCode: "",
+        description: null,
+        quantity: 1,
+        sizeLabel: null,
+        fabricCode: null,
+        divanHeightInches: null,
+        legHeightInches: null,
+        gapInches: null,
+        noLeg: false,
+        specialOrder: null,
+        specialNotes: null,
+        unitPrice: null,
+        transferredSO: null,
+      };
+      return { ...r, extracted: { ...r.extracted, items: [...r.extracted.items, blank] } };
+    }));
+  };
+  const removeClaudeItem = (rowIdx: number, itemIdx: number) => {
+    setClaudeRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      return {
+        ...r,
+        extracted: {
+          ...r.extracted,
+          items: r.extracted.items.filter((_, j) => j !== itemIdx),
         },
       };
     }));
@@ -653,12 +740,15 @@ function PreviewStep({
           <ClaudePOCard
             key={`claude-${idx}`}
             row={row}
+            catalog={catalog}
             selected={selectedPOs.has(idx)}
             expanded={expandedPO === idx}
             onToggle={() => onTogglePO(idx)}
             onExpand={() => onExpandPO(expandedPO === idx ? null : idx)}
             onUpdate={(patch) => updateClaudeRow(idx, patch)}
             onUpdateItem={(itemIdx, patch) => updateClaudeItem(idx, itemIdx, patch)}
+            onAddItem={() => addClaudeItem(idx)}
+            onRemoveItem={(itemIdx) => removeClaudeItem(idx, itemIdx)}
           />
         ))}
         {fallbackPOs.map((po, idx) => {
@@ -694,18 +784,31 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem,
+  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem,
 }: {
   row: ClaudeScanRow;
+  catalog: ScanCatalog | null;
   selected: boolean;
   expanded: boolean;
   onToggle: () => void;
   onExpand: () => void;
   onUpdate: (patch: Partial<ClaudeExtractedPO>) => void;
   onUpdateItem: (itemIdx: number, patch: Partial<ClaudeExtractedItem>) => void;
+  onAddItem: () => void;
+  onRemoveItem: (itemIdx: number) => void;
 }) {
   const po = row.extracted;
   const totalQty = po.items.reduce((s, i) => s + (i.quantity || 1), 0);
+
+  // Strip the trailing inch-mark on catalog values like '8"' so we can compare
+  // / show as plain numbers in the divan/leg/gap inputs.
+  const stripInch = (s: string): number | null => {
+    const m = s.replace(/[^0-9.]/g, "");
+    return m ? Number(m) : null;
+  };
+  const divanValues = (catalog?.bedframeDivans ?? []).map(stripInch).filter((n): n is number => n != null);
+  const legValues = (catalog?.bedframeLegs ?? []).map(stripInch).filter((n): n is number => n != null);
+  const gapValues = (catalog?.bedframeGaps ?? []).map(stripInch).filter((n): n is number => n != null);
 
   return (
     <Card className={`border-2 transition-colors ${selected ? "border-[#6B5C32] bg-[#FAFAF9]" : "border-[#E2DDD8]"}`}>
@@ -794,58 +897,216 @@ function ClaudePOCard({
 
             {expanded && (
               <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-hidden">
-                <table className="w-full text-sm">
+                <table className="w-full text-xs">
                   <thead>
-                    <tr className="bg-[#F5F5F5] text-xs text-[#6B7280]">
-                      <th className="px-2 py-1 text-left">#</th>
-                      <th className="px-2 py-1 text-left">Product</th>
-                      <th className="px-2 py-1 text-left">Size</th>
-                      <th className="px-2 py-1 text-left">Fabric</th>
-                      <th className="px-2 py-1 text-center">Qty</th>
+                    <tr className="bg-[#F5F5F5] text-[#6B7280]">
+                      <th className="px-1.5 py-1 text-left">#</th>
+                      <th className="px-1.5 py-1 text-left">Cat</th>
+                      <th className="px-1.5 py-1 text-left">Product</th>
+                      <th className="px-1.5 py-1 text-left">Size</th>
+                      <th className="px-1.5 py-1 text-left">Fabric</th>
+                      <th className="px-1.5 py-1 text-center">Divan</th>
+                      <th className="px-1.5 py-1 text-center">Leg</th>
+                      <th className="px-1.5 py-1 text-center">Gap</th>
+                      <th className="px-1.5 py-1 text-left">Special</th>
+                      <th className="px-1.5 py-1 text-center">Qty</th>
+                      <th className="px-1.5 py-1 text-right">Price (RM)</th>
+                      <th className="px-1.5 py-1"></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {po.items.map((item, i) => (
-                      // Composite key: row's sampleId + position. Items don't
-                      // reorder/insert/delete in this modal (set once on
-                      // parse), so position is stable; sampleId scopes the
-                      // key per uploaded file so two cards expanded at once
-                      // never collide.
-                      <tr key={`${row.sampleId}-${i}`} className="border-t border-[#E2DDD8]">
-                        <td className="px-2 py-1 text-[#9CA3AF]">{i + 1}</td>
-                        <td className="px-2 py-1">
-                          <input
-                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
-                            value={item.productCode}
-                            onChange={e => onUpdateItem(i, { productCode: e.target.value })}
-                          />
-                        </td>
-                        <td className="px-2 py-1">
-                          <input
-                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
-                            value={item.sizeLabel ?? ""}
-                            onChange={e => onUpdateItem(i, { sizeLabel: e.target.value || null })}
-                          />
-                        </td>
-                        <td className="px-2 py-1">
-                          <input
-                            className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
-                            value={item.fabricCode ?? ""}
-                            onChange={e => onUpdateItem(i, { fabricCode: e.target.value || null })}
-                          />
-                        </td>
-                        <td className="px-2 py-1 text-center">
-                          <input
-                            type="number" onFocus={(e) => e.currentTarget.select()}
-                            className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
-                            value={item.quantity}
-                            onChange={e => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
-                          />
-                        </td>
-                      </tr>
-                    ))}
+                    {po.items.map((item, i) => {
+                      const productList =
+                        item.category === "SOFA" ? (catalog?.sofas ?? [])
+                          : item.category === "ACCESSORY" ? (catalog?.accessories ?? [])
+                          : (catalog?.bedframes ?? []);
+                      const fabricList = catalog?.fabrics ?? [];
+                      const specialList =
+                        item.category === "SOFA"
+                          ? (catalog?.sofaSpecials ?? [])
+                          : (catalog?.bedframeSpecials ?? []);
+                      const isUnknownProduct =
+                        item.productCode &&
+                        productList.length > 0 &&
+                        !productList.some((c) => c.toUpperCase() === item.productCode.toUpperCase());
+                      const isUnknownFabric =
+                        item.fabricCode &&
+                        fabricList.length > 0 &&
+                        !fabricList.some((c) => c.toUpperCase() === item.fabricCode!.toUpperCase());
+                      return (
+                        <tr key={`${row.sampleId}-${i}`} className="border-t border-[#E2DDD8] align-top">
+                          <td className="px-1.5 py-1 text-[#9CA3AF]">{i + 1}</td>
+                          <td className="px-1.5 py-1">
+                            <select
+                              className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent"
+                              value={item.category}
+                              onChange={(e) => onUpdateItem(i, { category: e.target.value as ClaudeExtractedItem["category"] })}
+                            >
+                              <option value="BEDFRAME">BF</option>
+                              <option value="SOFA">SF</option>
+                              <option value="ACCESSORY">AC</option>
+                            </select>
+                          </td>
+                          <td className="px-1.5 py-1">
+                            <input
+                              list={`prod-${row.sampleId}-${i}`}
+                              className={`w-32 px-1 py-0.5 text-xs border rounded ${isUnknownProduct ? "border-amber-400 bg-amber-50" : "border-transparent hover:border-[#E2DDD8]"}`}
+                              value={item.productCode}
+                              onChange={(e) => onUpdateItem(i, { productCode: e.target.value })}
+                            />
+                            <datalist id={`prod-${row.sampleId}-${i}`}>
+                              {productList.map((c) => <option key={c} value={c} />)}
+                            </datalist>
+                          </td>
+                          <td className="px-1.5 py-1">
+                            <input
+                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                              value={item.sizeLabel ?? ""}
+                              onChange={(e) => onUpdateItem(i, { sizeLabel: e.target.value || null })}
+                            />
+                          </td>
+                          <td className="px-1.5 py-1">
+                            <input
+                              list={`fab-${row.sampleId}-${i}`}
+                              className={`w-24 px-1 py-0.5 text-xs border rounded ${isUnknownFabric ? "border-amber-400 bg-amber-50" : "border-transparent hover:border-[#E2DDD8]"}`}
+                              value={item.fabricCode ?? ""}
+                              onChange={(e) => onUpdateItem(i, { fabricCode: e.target.value || null })}
+                            />
+                            <datalist id={`fab-${row.sampleId}-${i}`}>
+                              {fabricList.map((c) => <option key={c} value={c} />)}
+                            </datalist>
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <input
+                              list={`div-${row.sampleId}-${i}`}
+                              type="number"
+                              step="0.5"
+                              onFocus={(e) => e.currentTarget.select()}
+                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              value={item.divanHeightInches ?? ""}
+                              onChange={(e) => {
+                                const v = e.target.value === "" ? null : Number(e.target.value);
+                                onUpdateItem(i, { divanHeightInches: v });
+                              }}
+                              disabled={item.category !== "BEDFRAME"}
+                            />
+                            <datalist id={`div-${row.sampleId}-${i}`}>
+                              {divanValues.map((v) => <option key={v} value={v} />)}
+                            </datalist>
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <input
+                                list={`leg-${row.sampleId}-${i}`}
+                                type="number"
+                                step="0.5"
+                                onFocus={(e) => e.currentTarget.select()}
+                                className="w-10 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center disabled:opacity-50"
+                                value={item.noLeg ? "" : (item.legHeightInches ?? "")}
+                                onChange={(e) => {
+                                  const v = e.target.value === "" ? null : Number(e.target.value);
+                                  onUpdateItem(i, { legHeightInches: v, noLeg: false });
+                                }}
+                                disabled={item.noLeg || item.category === "ACCESSORY"}
+                              />
+                              <datalist id={`leg-${row.sampleId}-${i}`}>
+                                {legValues.map((v) => <option key={v} value={v} />)}
+                              </datalist>
+                              <label
+                                className="text-[10px] text-[#6B7280] cursor-pointer"
+                                title="No leg"
+                              >
+                                <input
+                                  type="checkbox"
+                                  className="mr-0.5 align-middle"
+                                  checked={item.noLeg}
+                                  onChange={(e) => onUpdateItem(i, {
+                                    noLeg: e.target.checked,
+                                    legHeightInches: e.target.checked ? null : item.legHeightInches,
+                                  })}
+                                />
+                                NL
+                              </label>
+                            </div>
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <input
+                              list={`gap-${row.sampleId}-${i}`}
+                              type="number"
+                              step="0.5"
+                              onFocus={(e) => e.currentTarget.select()}
+                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              value={item.gapInches ?? ""}
+                              onChange={(e) => {
+                                const v = e.target.value === "" ? null : Number(e.target.value);
+                                onUpdateItem(i, { gapInches: v });
+                              }}
+                              disabled={item.category !== "BEDFRAME"}
+                            />
+                            <datalist id={`gap-${row.sampleId}-${i}`}>
+                              {gapValues.map((v) => <option key={v} value={v} />)}
+                            </datalist>
+                          </td>
+                          <td className="px-1.5 py-1">
+                            <input
+                              list={`spc-${row.sampleId}-${i}`}
+                              className="w-32 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                              value={item.specialOrder ?? ""}
+                              onChange={(e) => onUpdateItem(i, { specialOrder: e.target.value || null })}
+                            />
+                            <datalist id={`spc-${row.sampleId}-${i}`}>
+                              {specialList.map((c) => <option key={c} value={c} />)}
+                            </datalist>
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <input
+                              type="number"
+                              onFocus={(e) => e.currentTarget.select()}
+                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              value={item.quantity}
+                              onChange={(e) => onUpdateItem(i, { quantity: Number(e.target.value) || 0 })}
+                            />
+                          </td>
+                          <td className="px-1.5 py-1 text-right">
+                            <input
+                              type="number"
+                              step="0.01"
+                              onFocus={(e) => e.currentTarget.select()}
+                              className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-right"
+                              value={item.unitPrice ?? ""}
+                              onChange={(e) => {
+                                const v = e.target.value === "" ? null : Number(e.target.value);
+                                onUpdateItem(i, { unitPrice: v });
+                              }}
+                            />
+                          </td>
+                          <td className="px-1.5 py-1 text-center">
+                            <button
+                              type="button"
+                              onClick={() => onRemoveItem(i)}
+                              className="text-[#9CA3AF] hover:text-red-600"
+                              title="Remove line"
+                            >
+                              <X className="h-3 w-3" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
+                <div className="px-2 py-1 bg-[#FAFAF9] border-t border-[#E2DDD8] flex justify-between items-center">
+                  <button
+                    type="button"
+                    onClick={onAddItem}
+                    className="text-xs text-[#6B5C32] hover:underline"
+                  >
+                    + Add line
+                  </button>
+                  <span className="text-[10px] text-[#9CA3AF]">
+                    NL = No Leg · BF/SF/AC = Bedframe/Sofa/Accessory
+                  </span>
+                </div>
               </div>
             )}
           </div>

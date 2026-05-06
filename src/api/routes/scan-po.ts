@@ -1087,18 +1087,22 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   // tvPosition="none" so the operator double-checks in preview.
   warnings.push(...applySofaLhfRhfFromTv(po));
 
-  // Hookka house convention: list sofa items in LHF → NA / inner → RHF
-  // order, regardless of how Claude returned them. Operator wants the
-  // leftmost (LHF) piece always at line 1 so production planning sees a
-  // consistent layout.
-  if (po.items.some((i) => i.category === "SOFA")) {
-    const sideRank = (code: string): number => {
-      const c = (code || "").toUpperCase();
+  // Hookka house convention for line ordering:
+  //   LHF → NA / inner → RHF → STOOL → ACCESSORY (pillows etc.)
+  // Sofa modules first in left-to-right TV order; stools and any
+  // ACCESSORY category items always trail at the end so production
+  // planning sees the seating set as a contiguous block before the
+  // add-ons.
+  if (po.items.some((i) => i.category === "SOFA" || i.category === "ACCESSORY")) {
+    const itemRank = (item: ExtractedItem): number => {
+      if (item.category === "ACCESSORY") return 4;
+      const c = (item.productCode || "").toUpperCase();
+      if (c.includes("STOOL")) return 3;
       if (c.includes("(LHF)")) return 0;
       if (c.includes("(RHF)")) return 2;
-      return 1; // NA / standalone (1S/2S/3S/CNR/STOOL)
+      return 1; // NA / standalone (1S/2S/3S/CNR)
     };
-    po.items.sort((a, b) => sideRank(a.productCode) - sideRank(b.productCode));
+    po.items.sort((a, b) => itemRank(a) - itemRank(b));
   }
 
   for (const item of po.items) {

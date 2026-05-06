@@ -357,6 +357,8 @@ EXTRACTION RULES
 8. deliveryDate = "Delivery Date" field as YYYY-MM-DD. CRITICAL — strikethrough means INVALIDATED: when the printed date has a strikethrough/crossout line through it, that date is no longer valid. Look elsewhere on the same page for the replacement date — anywhere it appears (handwritten, in red, beside line items, in the Purchase Location field, near the signature, etc.). Whatever you find is the real deliveryDate. Same rule applies to per-line item dates in the "Transferred SO" column. DD.MM.YYYY / DD/MM/YYYY format converts to YYYY-MM-DD.
 9. isUrgent = true when PDF shows "URGENT", "SUPER URGENT", or similar emphasis (often red).
 10. pageNumbers = 1-indexed list of source PDF pages this PO occupies. Most POs span exactly one page (e.g. [3]); a multi-page PO lists every page (e.g. [4, 5]). Used to attach the original page image to the SO for customer disputes — accuracy here matters.
+11. tvPosition = where the TV / front-facing reference appears in the SOFA diagram for this PO. One of "top" | "bottom" | "left" | "right" | "none". Use "none" when no TV box, no "TV" label, and no front-facing arrow/marker is drawn. The server uses tvPosition + each item's diagramOrder to deterministically compute LHF/RHF — DO NOT try to do that swap math yourself. Just report what you SEE in the diagram.
+12. itemsOrder = output sofa items in DIAGRAM ORDER (left-to-right as drawn). Each sofa item gets a diagramOrder field with the 0-indexed position from the left edge of the diagram (leftmost drawn box = 0, next = 1, etc.). For ACCESSORY items and any non-spatial item, set diagramOrder = null.
 
 ITEM EXTRACTION (CATEGORY-AWARE)
 =================================
@@ -466,12 +468,34 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   MIRROR-PAIR LOGIC (CRITICAL):
     LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side.
 
-  ★★★ LHF / RHF VIEWPOINT CONVENTION — DEPENDS ON TV POSITION ★★★
+  ★★★ LHF / RHF — DO NOT COMPUTE; THE SERVER DOES THIS ★★★
 
-  Hookka's LHF / RHF designation is from the perspective of someone STANDING
-  WHERE THE TV IS, FACING the sofa. The mapping from diagram-positions to
-  LHF / RHF therefore DEPENDS on where the TV is drawn in the diagram. There
-  is NO universal "flip everything" rule — you must locate the TV first.
+  Stop. Read this section carefully.
+
+  You used to be asked to compute LHF/RHF based on where the TV is drawn. We
+  found you get the swap math wrong consistently. The SERVER now does this
+  deterministically using two facts you must report instead:
+
+    • tvPosition (PO-level field): where the TV / front marker is drawn —
+      "top" | "bottom" | "left" | "right" | "none".
+    • diagramOrder (per item): the item's 0-indexed position from the LEFT
+      of the diagram (leftmost drawn box = 0).
+
+  The server applies a lookup table on those two facts and OVERWRITES your
+  productCode's (LHF)/(RHF) suffix. So:
+
+    • Spend your effort identifying the SPATIAL LAYOUT correctly — count the
+      boxes left-to-right, give each its diagramOrder, and report tvPosition
+      based on what you actually see drawn.
+    • You MAY still output your best-guess (LHF) or (RHF) in productCode for
+      armed pieces — the server will override if it disagrees with the
+      tvPosition lookup. Don't agonise over this.
+    • If you can't find any TV/front marker in the diagram, set
+      tvPosition="none" and the server will warn the operator that the
+      automatic flip didn't run.
+
+  For background only — DO NOT apply this logic yourself; just report what
+  you see:
 
   STEP 1: Locate the TV / facing reference in the diagram.
     Look for a small box labelled "TV" or for written cues like
@@ -594,6 +618,14 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
 
   GOLDEN RULE: every "+" in the config string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Inner numeric pieces become NA; outer pieces become A / L / CNR. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew ONE continuous box.
 
+  ITEM ORDER + diagramOrder (REQUIRED for sofas):
+  Output sofa items in DIAGRAM ORDER — left-to-right as drawn in the PDF.
+  For each sofa item, set diagramOrder to its 0-indexed position from the
+  LEFT edge of the diagram: leftmost drawn box = 0, the next = 1, etc.
+  Standalone S-pieces (1S/2S/3S) and CNR/STOOL get a diagramOrder too based
+  on where they sit in the row. ACCESSORY items always get diagramOrder=null.
+  The server uses diagramOrder + tvPosition to apply LHF/RHF deterministically.
+
   ★ ALWAYS INSPECT THE HAND-DRAWN DIAGRAM ★
   The printed text spec ("(1+2+L)", "1R+1R", "3 Seater") is OFTEN AMBIGUOUS by itself — you cannot reliably tell A vs S vs NA from text alone. The diagram is the source of truth:
     - Count the BOXES — that's the line-item count.
@@ -653,6 +685,7 @@ Return STRICT JSON, no markdown fences, no prose:
       "deliveryDate": "YYYY-MM-DD" | null,
       "isUrgent": boolean,
       "pageNumbers": number[],
+      "tvPosition": "top" | "bottom" | "left" | "right" | "none",
       "items": [{
         "category": "BEDFRAME" | "SOFA" | "ACCESSORY",
         "productCode": string,
@@ -668,7 +701,8 @@ Return STRICT JSON, no markdown fences, no prose:
         "specialNotes": string | null,
         "unitPrice": number | null,
         "transferredSO": string | null,
-        "rawSpec": string | null
+        "rawSpec": string | null,
+        "diagramOrder": number | null
       }]
     }
   ]
@@ -696,6 +730,11 @@ type ExtractedItem = {
   // server-side regex to overrule Claude when number extraction looks
   // off (LLMs occasionally truncate "10" to "1" even at temperature 0).
   rawSpec: string | null;
+  // 0-indexed position in the SOFA diagram from LEFT (leftmost drawn box = 0).
+  // Reported by Claude. The server uses this + ExtractedPO.tvPosition to
+  // deterministically compute (LHF)/(RHF) — Claude can't be trusted to do
+  // the swap math itself. null for ACCESSORY / non-spatial items.
+  diagramOrder: number | null;
 };
 
 type ExtractedPO = {
@@ -723,6 +762,11 @@ type ExtractedPO = {
   // by the frontend to render that page set into a single PNG attachment
   // for the SO (proof-of-source for customer disputes).
   pageNumbers: number[];
+  // Where Claude saw the TV / front marker in the SOFA diagram. The server
+  // uses this + each item's diagramOrder to deterministically apply LHF/RHF.
+  // "none" = no TV/marker drawn → server leaves Claude's best-guess sides
+  // alone and adds a warning so the operator double-checks in preview.
+  tvPosition: "top" | "bottom" | "left" | "right" | "none";
   items: ExtractedItem[];
 };
 
@@ -794,6 +838,126 @@ function reparseSpec(item: ExtractedItem): void {
     const v = Number(gapMatch[1]);
     if (Number.isFinite(v)) item.gapInches = v;
   }
+}
+
+// ===========================================================================
+// SOFA LHF/RHF enforcer.
+//
+// Background: Claude consistently flips LHF/RHF the wrong way when asked to
+// reason about TV-position-relative viewpoint, even with worked examples in
+// the prompt. So we now have Claude report SPATIAL FACTS only (tvPosition +
+// per-item diagramOrder) and apply the swap deterministically server-side.
+//
+// Hookka convention: LHF/RHF is from the perspective of someone STANDING AT
+// THE TV looking at the sofa. So:
+//   • TV at TOP of diagram     → viewer faces DOWN → diagram L=RHF, R=LHF.
+//   • TV at BOTTOM of diagram  → viewer faces UP   → diagram L=LHF, R=RHF.
+//   • TV on LEFT of diagram    → viewer faces RIGHT (rotated 90° CW) →
+//                                top-of-diagram = viewer's LEFT (LHF),
+//                                bottom-of-diagram = viewer's RIGHT (RHF).
+//                                For 1D-from-left "diagramOrder": leftmost
+//                                box (closest to TV) sits on the wall behind
+//                                the viewer; we treat leftmost as LHF
+//                                (operator-verified default).
+//   • TV on RIGHT of diagram   → mirror of LEFT → leftmost = RHF.
+//   • tvPosition = "none"      → leave Claude's guess alone and warn.
+//
+// We only flip OUTERMOST armed pieces (lowest and highest diagramOrder among
+// pieces whose productCode contains "(LHF)" or "(RHF)"). Middle armed pieces
+// are extremely rare and ambiguous so we leave them alone.
+// ===========================================================================
+function setSideSuffix(code: string, side: "LHF" | "RHF"): string {
+  // Replace any (LHF) or (RHF) substring with the desired side. Case-
+  // insensitive on the existing suffix; preserves the rest of the code.
+  return code.replace(/\((?:LHF|RHF)\)/gi, `(${side})`);
+}
+
+function applySofaLhfRhfFromTv(po: ExtractedPO): Warning[] {
+  const warnings: Warning[] = [];
+  const sofaItems = po.items
+    .map((it, idx) => ({ it, idx }))
+    .filter((x) => x.it.category === "SOFA");
+  if (sofaItems.length === 0) return warnings;
+
+  const armed = sofaItems.filter((x) =>
+    /\((?:LHF|RHF)\)/i.test(x.it.productCode || ""),
+  );
+  if (armed.length < 2) {
+    // 0 or 1 armed pieces — no mirror pair to enforce. Leave as-is.
+    if (po.tvPosition === "none" && armed.length > 0) {
+      warnings.push({
+        field: "tvPosition",
+        value: "none",
+        message:
+          "TV/front marker not detected in sofa diagram — LHF/RHF may be wrong; verify in preview.",
+      });
+    }
+    return warnings;
+  }
+
+  if (po.tvPosition === "none") {
+    warnings.push({
+      field: "tvPosition",
+      value: "none",
+      message:
+        "TV/front marker not detected in sofa diagram — LHF/RHF may be wrong; verify in preview.",
+    });
+    return warnings;
+  }
+
+  // Sort armed pieces by diagramOrder (nulls go to the end so they don't
+  // become "leftmost" by accident). When diagramOrder is missing, fall back
+  // to original array order — better than nothing.
+  const sortedArmed = [...armed].sort((a, b) => {
+    const aOrder = a.it.diagramOrder;
+    const bOrder = b.it.diagramOrder;
+    if (aOrder == null && bOrder == null) return a.idx - b.idx;
+    if (aOrder == null) return 1;
+    if (bOrder == null) return -1;
+    return aOrder - bOrder;
+  });
+
+  const leftmost = sortedArmed[0];
+  const rightmost = sortedArmed[sortedArmed.length - 1];
+
+  // Lookup: what side does the leftmost-in-diagram piece become?
+  let leftmostSide: "LHF" | "RHF";
+  let rightmostSide: "LHF" | "RHF";
+  switch (po.tvPosition) {
+    case "top":
+      // viewer faces DOWN → diagram LEFT becomes viewer's RIGHT.
+      leftmostSide = "RHF";
+      rightmostSide = "LHF";
+      break;
+    case "bottom":
+      leftmostSide = "LHF";
+      rightmostSide = "RHF";
+      break;
+    case "left":
+      // operator-verified default: leftmost = LHF.
+      leftmostSide = "LHF";
+      rightmostSide = "RHF";
+      break;
+    case "right":
+      leftmostSide = "RHF";
+      rightmostSide = "LHF";
+      break;
+    default:
+      return warnings;
+  }
+
+  // Apply.
+  po.items[leftmost.idx] = {
+    ...leftmost.it,
+    productCode: setSideSuffix(leftmost.it.productCode || "", leftmostSide),
+  };
+  if (rightmost.idx !== leftmost.idx) {
+    po.items[rightmost.idx] = {
+      ...rightmost.it,
+      productCode: setSideSuffix(rightmost.it.productCode || "", rightmostSide),
+    };
+  }
+  return warnings;
 }
 
 // ===========================================================================
@@ -883,6 +1047,13 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   if (!po.deliveryHubId && po.deliveryHub == null) {
     po.deliveryHubId = null;
   }
+  // Server-side LHF/RHF enforcer. MUST run BEFORE the LHF-first sort below
+  // so the sort operates on post-flip productCodes. Reads tvPosition +
+  // diagramOrder (which Claude reports) and rewrites armed sofa items'
+  // productCode suffixes deterministically. Adds a warning when
+  // tvPosition="none" so the operator double-checks in preview.
+  warnings.push(...applySofaLhfRhfFromTv(po));
+
   // Hookka house convention: list sofa items in LHF → NA / inner → RHF
   // order, regardless of how Claude returned them. Operator wants the
   // leftmost (LHF) piece always at line 1 so production planning sees a
@@ -1261,6 +1432,19 @@ app.post("/extract", async (c) => {
   }
 
   for (const po of parsed.pos) {
+    // Defensive defaults — older Claude responses (or cached prefixes that
+    // haven't refreshed yet) may omit the new tvPosition / diagramOrder
+    // fields. Treat missing tvPosition as "none" so the server-side
+    // enforcer warns instead of silently flipping with no data, and
+    // missing diagramOrder as null so positional logic skips that item.
+    if (po.tvPosition === undefined || po.tvPosition === null) {
+      po.tvPosition = "none";
+    }
+    if (Array.isArray(po.items)) {
+      for (const it of po.items) {
+        if (it.diagramOrder === undefined) it.diagramOrder = null;
+      }
+    }
     const sampleId = genId();
     try {
       await (c.var.DB as unknown as DBLike)

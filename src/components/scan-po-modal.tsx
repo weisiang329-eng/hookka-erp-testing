@@ -33,6 +33,10 @@ type ClaudeExtractedItem = {
   unitPrice: number | null;
   transferredSO: string | null;
   rawSpec: string | null;
+  // 0-indexed left-to-right position in the SOFA diagram. Server uses this
+  // + ExtractedPO.tvPosition to deterministically apply LHF/RHF. Internal
+  // diagnostic — no UI; operator overrides via the productCode dropdown.
+  diagramOrder: number | null;
 };
 
 type ClaudeExtractedPO = {
@@ -48,6 +52,11 @@ type ClaudeExtractedPO = {
   deliveryDate: string | null;
   isUrgent: boolean;
   pageNumbers: number[];
+  // Where Claude saw the TV / front-facing marker in the sofa diagram. Server
+  // uses this + each sofa item's diagramOrder to deterministically apply
+  // LHF/RHF. Internal diagnostic — no UI; operator overrides via the
+  // productCode dropdown if the auto-flip is wrong.
+  tvPosition: "top" | "bottom" | "left" | "right" | "none";
   items: ClaudeExtractedItem[];
 };
 
@@ -796,6 +805,7 @@ function PreviewStep({
         unitPrice: null,
         transferredSO: null,
         rawSpec: null,
+        diagramOrder: null,
       };
       return { ...r, extracted: { ...r.extracted, items: [...r.extracted.items, blank] } };
     }));

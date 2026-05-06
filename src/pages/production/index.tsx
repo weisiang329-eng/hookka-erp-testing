@@ -213,6 +213,10 @@ export default function ProductionPage({
     useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
   const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
   const [fltModel, setFltModel] = useUrlState<string>("model", "");
+  // Hide CANCELLED POs by default (2026-05-06 user request — they were
+  // showing as strikethrough rows that cluttered the daily view). Toggle
+  // via ?showCancelled=1 in the URL when needed.
+  const [showCancelled] = useUrlState<string>("showCancelled", "");
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
@@ -708,10 +712,12 @@ export default function ProductionPage({
             : (o.createdAt || "")) || "";
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
+      // Hide CANCELLED POs unless explicitly opted in via ?showCancelled=1.
+      if (!showCancelled && o.status === "CANCELLED") return false;
       // (Lifecycle filter removed 2026-04-27 — moved to per-column Status
-      // filter on the grid. ON_HOLD / CANCELLED / COMPLETED rows still
-      // get the colored row background via rowClassName so they stay
-      // visually distinct in the unfiltered view.)
+      // filter on the grid. ON_HOLD / COMPLETED rows still get the colored
+      // row background via rowClassName so they stay visually distinct in
+      // the unfiltered view.)
       return true;
     });
   }, [
@@ -719,6 +725,7 @@ export default function ProductionPage({
     fltSearch, fltState, fltCustomer,
     fltDueFrom, fltDueTo, fltDateAxis,
     fltCategory, fltItemType, fltModel,
+    showCancelled,
   ]);
 
   const visibleOrders = useMemo(() => {

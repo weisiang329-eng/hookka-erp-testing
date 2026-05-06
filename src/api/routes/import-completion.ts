@@ -7374,6 +7374,397 @@ app.post("/recompute-so-sofa-prices", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/recompute-co-sofa-prices?dryRun=true|false&statuses=...
+//
+// CO twin of /recompute-so-sofa-prices — same logic, different tables.
+// Rebuilds basePriceSen / unitPriceSen / lineTotalSen on every CO line item
+// in active consignment_orders, with the same per-line price resolution
+// (customer override → master fallback at companyCODate, fabric tier from
+// fabric_trackings.sofaPriceTier or bedframePriceTier) and the same sofa-
+// combo subset matching pass (extras keep master price, no discount bleed).
+//
+// CO create flow doesn't currently bake combo discount, so this is also
+// the first time CO line items get combo redistribution.
+// ---------------------------------------------------------------------------
+app.post("/recompute-co-sofa-prices", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const statusFilter = (c.req.query("statuses") || "").trim()
+    ? c.req.query("statuses")!.split(",").map(s => s.trim()).filter(Boolean)
+    : ["IN_PRODUCTION", "READY_TO_SHIP", "CONFIRMED", "DRAFT"];
+  const today = new Date().toISOString().slice(0, 10);
+
+  // Fabric → tier maps (same as SO version).
+  const ftRes = await db
+    .prepare(
+      `SELECT fabricCode, sofaPriceTier, bedframePriceTier, priceTier
+         FROM fabric_trackings`,
+    )
+    .all<{ fabricCode: string; sofaPriceTier: string | null; bedframePriceTier: string | null; priceTier: string | null }>();
+  const fabricSofaTierMap = new Map<string, string>();
+  const fabricBedframeTierMap = new Map<string, string>();
+  for (const r of (ftRes.results ?? [])) {
+    fabricSofaTierMap.set(r.fabricCode, r.sofaPriceTier ?? r.priceTier ?? "PRICE_2");
+    fabricBedframeTierMap.set(r.fabricCode, r.bedframePriceTier ?? r.priceTier ?? "PRICE_2");
+  }
+
+  // Pull COs in scope.
+  const coPlaceholders = statusFilter.map(() => "?").join(",");
+  const coRes = await db
+    .prepare(
+      `SELECT id, companyCOId, customerId, customerName, status,
+              companyCODate, created_at AS createdAt
+         FROM consignment_orders
+        WHERE status IN (${coPlaceholders})`,
+    )
+    .bind(...statusFilter)
+    .all<{ id: string; companyCOId: string | null; customerId: string | null; customerName: string | null; status: string | null; companyCODate: string | null; createdAt: string | null }>();
+  const cos = coRes.results ?? [];
+  if (cos.length === 0) {
+    return c.json({ success: true, dryRun, scope: statusFilter, coCount: 0 });
+  }
+  const coIds = cos.map(s => s.id);
+  const coById = new Map(cos.map(s => [s.id, s] as const));
+
+  type CoiRow = SoiRow & { consignmentOrderId: string };
+  const itemsRes = await db
+    .prepare(
+      `SELECT id, consignmentOrderId AS salesOrderId, productId, productCode, itemCategory, sizeCode,
+              fabricCode, quantity, gapInches, divanHeightInches, divanPriceSen,
+              legHeightInches, legPriceSen, specialOrder, specialOrderPriceSen,
+              basePriceSen, unitPriceSen, lineTotalSen
+         FROM consignment_order_items
+        WHERE itemCategory IN ('SOFA','BEDFRAME','ACCESSORY')
+          AND consignmentOrderId IN (${coIds.map(() => "?").join(",")})`,
+    )
+    .bind(...coIds)
+    .all<CoiRow>();
+  const items = (itemsRes.results ?? []).filter((it) => {
+    if (!it.productCode) return false;
+    if (it.itemCategory === "SOFA") {
+      return SOFA_TARGET_BASES.some((b) => it.productCode!.startsWith(b + "-"));
+    }
+    return it.itemCategory === "BEDFRAME" || it.itemCategory === "ACCESSORY";
+  });
+
+  // Pre-load customer + master price history (mirrors SO version).
+  const cpKeys = Array.from(new Set(items.map((it) => {
+    const co = coById.get(it.salesOrderId);
+    if (!co?.customerId || !it.productId) return null;
+    return `${co.customerId}|${it.productId}`;
+  }).filter((k): k is string => k !== null)));
+  const cpHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const k of cpKeys) {
+    const [customerId, productId] = k.split("|");
+    const cpRes = await db
+      .prepare(
+        `SELECT cpp.basePriceSen, cpp.seatHeightPrices, cpp.effectiveFrom
+           FROM customer_products cp
+           JOIN customer_product_prices cpp ON cpp.customerProductId = cp.id
+          WHERE cp.customerId = ? AND cp.productId = ?
+          ORDER BY cpp.effectiveFrom DESC`,
+      )
+      .bind(customerId, productId)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    cpHistMap.set(k, cpRes.results ?? []);
+  }
+  const productIds = Array.from(new Set(items.map(it => it.productId).filter((p): p is string => !!p)));
+  const masterHistMap = new Map<string, Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>>();
+  for (const pid of productIds) {
+    const mhRes = await db
+      .prepare(
+        `SELECT basePriceSen, seatHeightPrices, effectiveFrom
+           FROM product_prices
+          WHERE productId = ?
+          ORDER BY effectiveFrom DESC`,
+      )
+      .bind(pid)
+      .all<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>();
+    masterHistMap.set(pid, mhRes.results ?? []);
+  }
+
+  type SeatHeightEntry = { height: string; priceSen: number; tier?: string };
+  function pickActive(rows: Array<{ basePriceSen: number | null; seatHeightPrices: string | null; effectiveFrom: string }>, asOf: string) {
+    const usable = rows.filter((r) => r.effectiveFrom <= asOf && r.basePriceSen != null).sort((a, b) => b.effectiveFrom.localeCompare(a.effectiveFrom));
+    const r = usable[0];
+    if (!r) return null;
+    let entries: SeatHeightEntry[] = [];
+    try { entries = (JSON.parse(r.seatHeightPrices ?? "[]") || []) as SeatHeightEntry[]; } catch { /* ignore */ }
+    return { basePriceSen: r.basePriceSen!, entries };
+  }
+  function lookupSeatHeight(entries: SeatHeightEntry[], height: string, tier: string): number | null {
+    let m = entries.find(e => e.height === height && e.tier === tier);
+    if (m) return m.priceSen;
+    if (tier === "PRICE_2") {
+      m = entries.find(e => e.height === height && !e.tier);
+      if (m) return m.priceSen;
+    }
+    return null;
+  }
+
+  type ChangePlan2 = {
+    coId: string; companyCOId: string | null; customerName: string | null; status: string | null;
+    itemId: string; productCode: string | null; sizeCode: string | null;
+    fabricCode: string | null; fabricTier: string | null; quantity: number;
+    oldBaseRM: number; newBaseRM: number | null;
+    oldUnitRM: number; newUnitRM: number | null;
+    oldLineRM: number; newLineRM: number | null;
+    skipReason?: string;
+  };
+  const plans: ChangePlan2[] = [];
+  for (const it of items) {
+    const co = coById.get(it.salesOrderId)!;
+    const tier = it.fabricCode
+      ? (it.itemCategory === "BEDFRAME"
+          ? fabricBedframeTierMap.get(it.fabricCode)
+          : fabricSofaTierMap.get(it.fabricCode)) || "PRICE_2"
+      : "PRICE_2";
+    const asOf = (co.companyCODate || co.createdAt || today).slice(0, 10);
+    const cpKey = co.customerId && it.productId ? `${co.customerId}|${it.productId}` : null;
+    const cpHist = cpKey ? cpHistMap.get(cpKey) ?? [] : [];
+    const masterHist = it.productId ? masterHistMap.get(it.productId) ?? [] : [];
+    const cpActive = cpHist.length ? pickActive(cpHist, asOf) : null;
+    const masterActive = pickActive(masterHist, asOf);
+    const active = cpActive ?? masterActive;
+    const plan: ChangePlan2 = {
+      coId: it.salesOrderId, companyCOId: co.companyCOId, customerName: co.customerName, status: co.status,
+      itemId: it.id, productCode: it.productCode, sizeCode: it.sizeCode,
+      fabricCode: it.fabricCode, fabricTier: tier, quantity: it.quantity,
+      oldBaseRM: it.basePriceSen / 100, newBaseRM: null,
+      oldUnitRM: it.unitPriceSen / 100, newUnitRM: null,
+      oldLineRM: it.lineTotalSen / 100, newLineRM: null,
+    };
+    if (!active) { plan.skipReason = "no active price row"; plans.push(plan); continue; }
+    let priceSen: number | null = null;
+    if (it.itemCategory === "SOFA") {
+      if (!it.sizeCode) { plan.skipReason = "missing sizeCode"; plans.push(plan); continue; }
+      priceSen = lookupSeatHeight(active.entries, it.sizeCode, tier);
+      if (priceSen == null) { plan.skipReason = `no seat-height entry for ${it.sizeCode}/${tier}`; plans.push(plan); continue; }
+    } else {
+      priceSen = active.basePriceSen;
+    }
+    const newUnit = priceSen + it.legPriceSen + it.divanPriceSen + it.specialOrderPriceSen;
+    const newLine = newUnit * it.quantity;
+    plan.newBaseRM = priceSen / 100;
+    plan.newUnitRM = newUnit / 100;
+    plan.newLineRM = newLine / 100;
+    plans.push(plan);
+  }
+
+  // Sofa combo subset pass (mirrors SO version).
+  type ComboRule = { baseModel: string; componentSizes: unknown; fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY"; pricesByHeight: Record<string, number>; customerId: string | null; effectiveFrom: string };
+  const comboRes = await db
+    .prepare(
+      `SELECT baseModel, componentSizes, fabricTier, pricesByHeight, customerId, effectiveFrom
+         FROM sofa_combo_rules
+        WHERE effectiveFrom <= ?`,
+    )
+    .bind(today)
+    .all<{ baseModel: string; componentSizes: string; fabricTier: "PRICE_1" | "PRICE_2" | "PRICE_3" | "ANY"; pricesByHeight: string; customerId: string | null; effectiveFrom: string }>();
+  const comboRules: ComboRule[] = (comboRes.results ?? []).map((r) => ({
+    baseModel: r.baseModel, fabricTier: r.fabricTier, customerId: r.customerId, effectiveFrom: r.effectiveFrom,
+    componentSizes: (() => { try { return JSON.parse(r.componentSizes); } catch { return []; } })(),
+    pricesByHeight: (() => { try { return JSON.parse(r.pricesByHeight); } catch { return {}; } })(),
+  }));
+  function findComboSubsetCo(groups: unknown, items2: Array<{ variant: string; plan: ChangePlan2 }>): ChangePlan2[] | null {
+    if (!Array.isArray(groups) || groups.length === 0) return null;
+    const isGrouped = Array.isArray(groups[0]);
+    const remaining = items2.slice();
+    const matched: ChangePlan2[] = [];
+    if (!isGrouped) {
+      for (const ruleSize of (groups as string[])) {
+        const idx = remaining.findIndex((it) => it.variant === ruleSize);
+        if (idx === -1) return null;
+        matched.push(remaining[idx].plan); remaining.splice(idx, 1);
+      }
+      return matched;
+    }
+    for (const groupOpts of (groups as string[][])) {
+      const idx = remaining.findIndex((it) => groupOpts.includes(it.variant));
+      if (idx === -1) return null;
+      matched.push(remaining[idx].plan); remaining.splice(idx, 1);
+    }
+    return matched;
+  }
+
+  const plansByCo = new Map<string, ChangePlan2[]>();
+  for (const p of plans) {
+    if (p.skipReason || p.newLineRM == null) continue;
+    const arr = plansByCo.get(p.coId) ?? [];
+    arr.push(p); plansByCo.set(p.coId, arr);
+  }
+  let comboMatches = 0;
+  for (const [coId, coPlans] of plansByCo) {
+    const co = coById.get(coId)!;
+    const sofaPlans = coPlans.filter((p) => {
+      const it = items.find(i => i.id === p.itemId);
+      return it?.itemCategory === "SOFA";
+    });
+    if (sofaPlans.length < 2) continue;
+    const byBase = new Map<string, ChangePlan2[]>();
+    for (const p of sofaPlans) {
+      const baseModel = (p.productCode || "").split("-")[0];
+      const arr = byBase.get(baseModel) ?? [];
+      arr.push(p); byBase.set(baseModel, arr);
+    }
+    for (const [baseModel, group] of byBase) {
+      if (group.length < 2) continue;
+      const tiers = new Set(group.map((g) => g.fabricTier));
+      if (tiers.size > 1) continue;
+      const heights = new Set(group.map((g) => g.sizeCode));
+      if (heights.size > 1) continue;
+      const seatHeight = [...heights][0]!;
+      const groupTier = [...tiers][0]!;
+      const groupItems = group.map((g) => {
+        const code = g.productCode || "";
+        const dash = code.indexOf("-");
+        return { variant: dash >= 0 ? code.slice(dash + 1) : "", plan: g };
+      }).filter((x) => x.variant);
+      const candidates = comboRules
+        .filter((r) => r.baseModel === baseModel && r.effectiveFrom <= (co.companyCODate || co.createdAt || today))
+        .map((r) => ({ r, subset: findComboSubsetCo(r.componentSizes, groupItems) }))
+        .filter((x): x is { r: ComboRule; subset: ChangePlan2[] } => x.subset !== null);
+      if (candidates.length === 0) continue;
+      const priorityOf = (r: ComboRule): number => {
+        const isCustomer = r.customerId === co.customerId && co.customerId;
+        const tierMatch = r.fabricTier === groupTier;
+        if (isCustomer && tierMatch) return 4;
+        if (isCustomer && r.fabricTier === "ANY") return 3;
+        if (!r.customerId && tierMatch) return 2;
+        if (!r.customerId && r.fabricTier === "ANY") return 1;
+        return 0;
+      };
+      const best = candidates
+        .map(({ r, subset }) => ({ r, subset, p: priorityOf(r) }))
+        .filter((x) => x.p > 0)
+        .sort((a, b) => b.p - a.p || (a.r.effectiveFrom < b.r.effectiveFrom ? 1 : -1))[0];
+      if (!best) continue;
+      const comboTotalRM = (best.r.pricesByHeight[seatHeight] ?? 0) / 100;
+      if (comboTotalRM <= 0) continue;
+      const subsetSumRM = best.subset.reduce((s, p) => s + (p.newLineRM ?? 0), 0);
+      if (subsetSumRM <= comboTotalRM) continue;
+      const ratio = comboTotalRM / subsetSumRM;
+      let runningGroupSumSen = 0;
+      const adjusted: ChangePlan2[] = [];
+      for (const p of best.subset) {
+        const it = items.find(i => i.id === p.itemId)!;
+        const oldLineSen = (p.newLineRM ?? 0) * 100;
+        const adjustedLineSen = Math.floor(oldLineSen * ratio);
+        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const adjustedUnitSen = Math.max(0, Math.round(adjustedLineSen / Math.max(1, it.quantity)));
+        const newBaseSen = Math.max(0, adjustedUnitSen - surchargesPerUnit);
+        const newUnitSen = newBaseSen + surchargesPerUnit;
+        const newLineSen = newUnitSen * it.quantity;
+        p.newBaseRM = newBaseSen / 100; p.newUnitRM = newUnitSen / 100; p.newLineRM = newLineSen / 100;
+        runningGroupSumSen += newLineSen; adjusted.push(p);
+      }
+      const residualSen = (comboTotalRM * 100) - runningGroupSumSen;
+      if (residualSen !== 0 && adjusted.length > 0) {
+        const target = adjusted.slice().sort((a, b) => (b.newBaseRM ?? 0) - (a.newBaseRM ?? 0))[0];
+        const it = items.find(i => i.id === target.itemId)!;
+        const surchargesPerUnit = it.divanPriceSen + it.legPriceSen + it.specialOrderPriceSen;
+        const cur = (target.newBaseRM ?? 0) * 100;
+        const adj = cur + Math.round(residualSen / Math.max(1, it.quantity));
+        const newBase = Math.max(0, adj);
+        const newUnit = newBase + surchargesPerUnit;
+        const newLine = newUnit * it.quantity;
+        target.newBaseRM = newBase / 100; target.newUnitRM = newUnit / 100; target.newLineRM = newLine / 100;
+      }
+      comboMatches++;
+    }
+  }
+
+  const willChange = plans.filter(p => p.newLineRM != null && p.newLineRM !== p.oldLineRM);
+  const noChange = plans.filter(p => p.newLineRM != null && p.newLineRM === p.oldLineRM);
+  const skipped = plans.filter(p => p.skipReason);
+  const sumDiff = willChange.reduce((s, p) => s + ((p.newLineRM ?? 0) - p.oldLineRM), 0);
+  const summary = {
+    coCount: cos.length, itemsConsidered: items.length, willChange: willChange.length,
+    noChange: noChange.length, skipped: skipped.length,
+    skipReasons: skipped.reduce<Record<string, number>>((acc, p) => { acc[p.skipReason!] = (acc[p.skipReason!] || 0) + 1; return acc; }, {}),
+    comboMatchedGroups: comboMatches,
+    sumLineDiffRM: Math.round(sumDiff * 100) / 100,
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, scope: statusFilter, summary,
+      sampleChanges: willChange.slice(0, 20).map(p => ({
+        co: p.companyCOId, cust: p.customerName, status: p.status,
+        product: p.productCode, sz: p.sizeCode, fab: p.fabricCode, tier: p.fabricTier,
+        oldBase: p.oldBaseRM, newBase: p.newBaseRM,
+        oldLine: p.oldLineRM, newLine: p.newLineRM,
+        diff: Math.round(((p.newLineRM ?? 0) - p.oldLineRM) * 100) / 100,
+        qty: p.quantity,
+      })),
+    });
+  }
+
+  let itemsUpdated = 0;
+  const dirtyCoIds = new Set<string>();
+  for (let i = 0; i < willChange.length; i += 50) {
+    const batch = willChange.slice(i, i + 50);
+    const stmts: ReturnType<D1Database["prepare"]>[] = [];
+    for (const p of batch) {
+      stmts.push(
+        db.prepare(`UPDATE consignment_order_items SET basePriceSen = ?, unitPriceSen = ?, lineTotalSen = ? WHERE id = ?`)
+          .bind(Math.round((p.newBaseRM ?? 0) * 100), Math.round((p.newUnitRM ?? 0) * 100), Math.round((p.newLineRM ?? 0) * 100), p.itemId),
+      );
+      dirtyCoIds.add(p.coId);
+    }
+    if (stmts.length > 0) await db.batch(stmts);
+    itemsUpdated += batch.length;
+  }
+  let cosUpdated = 0;
+  for (const coId of dirtyCoIds) {
+    const sumRes = await db
+      .prepare(`SELECT COALESCE(SUM(lineTotalSen), 0) AS sub FROM consignment_order_items WHERE consignmentOrderId = ?`)
+      .bind(coId).first<{ sub: number }>();
+    const sub = sumRes?.sub ?? 0;
+    await db.prepare(`UPDATE consignment_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?`)
+      .bind(sub, sub, new Date().toISOString(), coId).run();
+    cosUpdated++;
+  }
+  return c.json({ success: true, dryRun: false, scope: statusFilter, summary, itemsUpdated, cosUpdated });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/resync-co-totals — CO twin of resync-so-totals.
+// ---------------------------------------------------------------------------
+app.post("/resync-co-totals", async (c) => {
+  const denied = await requirePermission(c, "consignments", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const cosRes = await db.prepare(
+    `SELECT id, subtotalSen, totalSen FROM consignment_orders
+      WHERE status IN ('IN_PRODUCTION','READY_TO_SHIP','CONFIRMED','DRAFT')`,
+  ).all<{ id: string; subtotalSen: number; totalSen: number }>();
+  const cos = cosRes.results ?? [];
+  let outOfSync = 0, updated = 0;
+  const samples: Array<{ coId: string; oldSub: number; newSub: number; diff: number }> = [];
+  const now = new Date().toISOString();
+  for (const co of cos) {
+    const sumRes = await db.prepare(
+      `SELECT COALESCE(SUM(lineTotalSen), 0) AS sub FROM consignment_order_items WHERE consignmentOrderId = ?`,
+    ).bind(co.id).first<{ sub: number }>();
+    const newSub = sumRes?.sub ?? 0;
+    if (newSub === co.subtotalSen && newSub === co.totalSen) continue;
+    outOfSync++;
+    if (samples.length < 10) samples.push({ coId: co.id, oldSub: co.subtotalSen, newSub, diff: newSub - co.subtotalSen });
+    if (!dryRun) {
+      await db.prepare(`UPDATE consignment_orders SET subtotalSen = ?, totalSen = ?, updated_at = ? WHERE id = ?`)
+        .bind(newSub, newSub, now, co.id).run();
+      updated++;
+    }
+  }
+  return c.json({ success: true, dryRun, coCount: cos.length, outOfSync, updated, samples });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/import/resync-so-totals
 //
 // Single-purpose resync: walk every active SO, set subtotal_sen + total_sen
@@ -8121,6 +8512,382 @@ app.post("/historical-purchases-backfill", async (c) => {
     lineItemsTotal,
     skipped,
     errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/migrate-do-from-excel?dryRun=true|false
+//
+// Bulk DO migration. Body: { entries: [{ custPO, doNo }, ...], deliveryDate?: "YYYY-MM-DD" }
+//
+// For each Cust_PO with a known DO number from the legacy Excel sheet:
+//   1. Find the matching sales_order by customerPOId
+//   2. Stamp ALL its production_orders' PACKING JCs as COMPLETED 2026-05-05
+//   3. Insert a delivery_orders row with do_no = the legacy DO number,
+//      status = LOADED (= "Dispatched" UI label per
+//      src/pages/delivery/index.tsx:170-178)
+//   4. Insert delivery_order_items rows mirroring each PO
+//   5. Update the SO's status to DISPATCHED-equivalent (depends on enum)
+//
+// Idempotent: if a delivery_orders row already exists with that do_no, skip.
+// ---------------------------------------------------------------------------
+app.post("/migrate-do-from-excel", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "create");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+  const today = new Date().toISOString().slice(0, 10);
+  let body: { entries?: Array<{ custPO: string; doNo: string; dispatchDate?: string }>; deliveryDate?: string };
+  try { body = await c.req.json(); } catch { return c.json({ success: false, error: "Invalid JSON" }, 400); }
+  const entries = (body?.entries ?? []).filter(e => typeof e?.custPO === "string" && typeof e?.doNo === "string" && e.custPO && e.doNo);
+  if (entries.length === 0) {
+    return c.json({ success: false, error: "Provide entries: [{custPO, doNo}, ...]" }, 400);
+  }
+  const defaultDeliveryDate = (body.deliveryDate ?? today).slice(0, 10);
+  // Per-entry dispatchDate (from Aut/aiy DO Date column) is used for the DO's
+  // dispatchedAt timestamp + JC completedDate. Fallback to body.deliveryDate
+  // when not supplied.
+  const dispatchDateByEntry = new Map<string, string>();
+  for (const e of entries) {
+    const k = `${e.custPO}|${e.doNo}`;
+    if (e.dispatchDate) dispatchDateByEntry.set(k, String(e.dispatchDate).slice(0, 10));
+  }
+
+  // 1. Get every existing DO's (doNo, id) so we can append line items to
+  //    an existing DO when the legacy Excel has multiple custPOs sharing
+  //    one DO number (multi-SO-per-DO is common in the old system).
+  const existingDoRes = await db
+    .prepare(`SELECT id, doNo FROM delivery_orders`)
+    .all<{ id: string; doNo: string }>();
+  const existingDoMap = new Map<string, string>(
+    (existingDoRes.results ?? []).map(r => [r.doNo, r.id]),
+  );
+
+  // 2. Pre-fetch all SOs (with customerPOId) + production_orders (with PACKING JCs) in 2 passes.
+  const soRes = await db
+    .prepare(
+      `SELECT id, customerPOId, customerId, customerName, customerState,
+              companySO, companySOId, hubId
+         FROM sales_orders
+        WHERE customerPOId IS NOT NULL AND customerPOId <> ''`,
+    )
+    .all<{
+      id: string; customerPOId: string; customerId: string;
+      customerName: string; customerState: string | null;
+      companySO: string | null; companySOId: string | null; hubId: string | null;
+    }>();
+  const soByCustPo = new Map<string, typeof soRes.results[number]>();
+  for (const s of (soRes.results ?? [])) {
+    soByCustPo.set(s.customerPOId, s);
+  }
+
+  // 2b. Pre-fetch every PO that is already in some delivery_order_items row
+  //     so we can skip custPOs already migrated (idempotency).
+  const alreadyMigratedRes = await db
+    .prepare(`SELECT DISTINCT productionOrderId FROM delivery_order_items WHERE productionOrderId IS NOT NULL`)
+    .all<{ productionOrderId: string }>();
+  const migratedPoIds = new Set<string>(
+    (alreadyMigratedRes.results ?? []).map(r => r.productionOrderId),
+  );
+
+  type Plan = {
+    custPO: string; doNo: string; soId?: string;
+    customerId?: string; companySOId?: string;
+    poIds: string[];
+    packingJcsToStamp: Array<{ poId: string; jcId: string }>;
+    upstreamJcsToStamp: Array<{ poId: string; jcId: string; departmentCode: string }>;
+    skipReason?: string;
+  };
+  // When ?stampUpstream=true, also stamp non-PACKING JCs (FAB_CUT, FAB_SEW,
+  // WOOD_CUT, FOAM, FRAMING, WEBBING, BONDING, UPHOLSTERY) as COMPLETED. Used
+  // when the legacy system already shipped the goods but our digital twin's
+  // upstream JCs are still WIP.
+  const stampUpstream = c.req.query("stampUpstream") === "true";
+
+  const plans: Plan[] = [];
+  for (const e of entries) {
+    const plan: Plan = { custPO: e.custPO, doNo: e.doNo, poIds: [], packingJcsToStamp: [], upstreamJcsToStamp: [] };
+    const so = soByCustPo.get(e.custPO);
+    if (!so) { plan.skipReason = "No matching SO"; plans.push(plan); continue; }
+    plan.soId = so.id;
+    plan.customerId = so.customerId;
+    plan.companySOId = so.companySOId ?? undefined;
+    // Find production_orders for this SO + their PACKING JCs.
+    const poRes = await db
+      .prepare(
+        `SELECT id, poNo FROM production_orders
+          WHERE salesOrderId = ?
+            AND status NOT IN ('CANCELLED')`,
+      )
+      .bind(so.id)
+      .all<{ id: string; poNo: string | null }>();
+    const poIds = (poRes.results ?? []).map(p => p.id);
+    // Idempotency: if every PO of this SO is already in delivery_order_items,
+    // skip — this custPO was already migrated.
+    if (poIds.length > 0 && poIds.every(id => migratedPoIds.has(id))) {
+      plan.skipReason = "Already migrated";
+      plans.push(plan);
+      continue;
+    }
+    plan.poIds = poIds;
+    if (poIds.length > 0) {
+      const placeholders = poIds.map(() => "?").join(",");
+      const jcRes = await db
+        .prepare(
+          `SELECT id, productionOrderId, status, completedDate, departmentCode
+             FROM job_cards
+            WHERE productionOrderId IN (${placeholders})`,
+        )
+        .bind(...poIds)
+        .all<{ id: string; productionOrderId: string; status: string; completedDate: string | null; departmentCode: string }>();
+      for (const jc of (jcRes.results ?? [])) {
+        if (["COMPLETED","TRANSFERRED","CANCELLED"].includes(jc.status)) continue;
+        if (jc.departmentCode === "PACKING") {
+          plan.packingJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id });
+        } else if (stampUpstream) {
+          plan.upstreamJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id, departmentCode: jc.departmentCode });
+        }
+      }
+    }
+    plans.push(plan);
+  }
+
+  const usable = plans.filter(p => !p.skipReason);
+  const skipped = plans.filter(p => p.skipReason);
+  const summary = {
+    entries: entries.length,
+    noSoMatch: skipped.filter(p => p.skipReason === "No matching SO").length,
+    alreadyMigrated: skipped.filter(p => p.skipReason === "Already migrated").length,
+    usableCount: usable.length,
+    totalPackingJcsToStamp: usable.reduce((s, p) => s + p.packingJcsToStamp.length, 0),
+    totalUpstreamJcsToStamp: usable.reduce((s, p) => s + p.upstreamJcsToStamp.length, 0),
+    totalPOsToBundle: usable.reduce((s, p) => s + p.poIds.length, 0),
+  };
+
+  if (dryRun) {
+    return c.json({
+      success: true, dryRun: true, summary,
+      sample: usable.slice(0, 5).map(p => ({
+        custPO: p.custPO, doNo: p.doNo,
+        soId: p.soId, poIds: p.poIds, packingJcsCount: p.packingJcsToStamp.length,
+      })),
+    });
+  }
+
+  // Live execute. Per-plan: stamp PACKING JCs + INSERT or APPEND delivery_orders + items.
+  // Multiple legacy custPOs commonly share one DO number (multi-SO-per-DO).
+  // First entry with a given doNo creates the header; subsequent entries with
+  // the same doNo append their items to the existing DO and update totals.
+  let dosCreated = 0, dosAppendedTo = 0, packingStamped = 0, upstreamStamped = 0;
+  const errors: Array<{ custPO: string; error: string }> = [];
+  for (const plan of usable) {
+    try {
+      const stmts: ReturnType<D1Database["prepare"]>[] = [];
+      const planKey = `${plan.custPO}|${plan.doNo}`;
+      const planDispatchDate = dispatchDateByEntry.get(planKey) ?? defaultDeliveryDate;
+      const planDispatchedAt = `${planDispatchDate}T00:00:00.000Z`;
+      // Stamp upstream JCs (when stampUpstream=true) — use dispatch date so the
+      // historical timeline is preserved (legacy DO date = when it was actually done).
+      for (const j of plan.upstreamJcsToStamp) {
+        stmts.push(
+          db.prepare(
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+              WHERE id = ?`,
+          ).bind(planDispatchDate, j.jcId),
+        );
+      }
+      // Stamp PACKING JCs
+      for (const j of plan.packingJcsToStamp) {
+        stmts.push(
+          db.prepare(
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+              WHERE id = ?`,
+          ).bind(planDispatchDate, j.jcId),
+        );
+      }
+      const so = soByCustPo.get(plan.custPO)!;
+      const placeholders = plan.poIds.map(() => "?").join(",");
+      const totalsRes = plan.poIds.length > 0
+        ? await db.prepare(
+            `SELECT COALESCE(SUM(po.quantity * COALESCE(p.unitM3, 0)), 0) AS totalM3,
+                    COALESCE(SUM(po.quantity), 0) AS totalItems
+               FROM production_orders po
+               LEFT JOIN products p ON p.code = po.productCode
+              WHERE po.id IN (${placeholders})`,
+          ).bind(...plan.poIds).first<{ totalM3: number; totalItems: number }>()
+        : { totalM3: 0, totalItems: 0 };
+
+      let doId = existingDoMap.get(plan.doNo);
+      const isAppend = !!doId;
+      if (!doId) {
+        doId = `do-${crypto.randomUUID().slice(0, 8)}`;
+        stmts.push(
+          db.prepare(
+            `INSERT INTO delivery_orders
+               (id, doNo, salesOrderId, companySO, companySOId, customerId,
+                customerPOId, customerName, customerState, hubId,
+                deliveryDate, totalM3, totalItems, status, dispatchedAt,
+                created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'LOADED', ?, ?, ?)`,
+          ).bind(
+            doId, plan.doNo, plan.soId ?? null, so.companySO, so.companySOId,
+            so.customerId, plan.custPO, so.customerName, so.customerState ?? null,
+            so.hubId ?? null, planDispatchDate, totalsRes?.totalM3 ?? 0,
+            totalsRes?.totalItems ?? 0,
+            planDispatchedAt,
+            new Date().toISOString(), new Date().toISOString(),
+          ),
+        );
+        existingDoMap.set(plan.doNo, doId);
+      } else {
+        // Append: increment totals on the existing DO header AND back-fill the
+        // dispatchedAt/deliveryDate with the legacy DO date when the entry
+        // carries one. Earlier runs without per-entry dispatchDate stamped
+        // dispatchedAt = run-time, which the user wants overwritten with the
+        // real legacy DO date.
+        stmts.push(
+          db.prepare(
+            `UPDATE delivery_orders
+                SET totalM3 = totalM3 + ?,
+                    totalItems = totalItems + ?,
+                    dispatchedAt = COALESCE(?, dispatchedAt),
+                    deliveryDate = COALESCE(?, deliveryDate),
+                    updated_at = ?
+              WHERE id = ?`,
+          ).bind(
+            totalsRes?.totalM3 ?? 0,
+            totalsRes?.totalItems ?? 0,
+            dispatchDateByEntry.has(planKey) ? planDispatchedAt : null,
+            dispatchDateByEntry.has(planKey) ? planDispatchDate : null,
+            new Date().toISOString(),
+            doId,
+          ),
+        );
+      }
+      // INSERT delivery_order_items — one per production_order
+      if (plan.poIds.length > 0) {
+        const poItemsRes = await db.prepare(
+          `SELECT po.id, po.poNo, po.productCode, po.productName, po.sizeLabel,
+                  po.fabricCode, po.quantity, po.rackingNumber, po.salesOrderNo,
+                  COALESCE(p.unitM3, 0) AS unitM3
+             FROM production_orders po
+             LEFT JOIN products p ON p.code = po.productCode
+            WHERE po.id IN (${placeholders})`,
+        ).bind(...plan.poIds).all<{
+          id: string; poNo: string | null; productCode: string | null;
+          productName: string | null; sizeLabel: string | null;
+          fabricCode: string | null; quantity: number;
+          rackingNumber: string | null; salesOrderNo: string | null;
+          unitM3: number;
+        }>();
+        for (const r of (poItemsRes.results ?? [])) {
+          const itemId = `doi-${crypto.randomUUID().slice(0, 8)}`;
+          stmts.push(
+            db.prepare(
+              `INSERT INTO delivery_order_items
+                 (id, deliveryOrderId, productionOrderId, poNo, productCode,
+                  productName, sizeLabel, fabricCode, quantity, itemM3,
+                  rackingNumber, packingStatus, salesOrderNo)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'COMPLETED', ?)`,
+            ).bind(
+              itemId, doId, r.id, r.poNo ?? "", r.productCode ?? "",
+              r.productName ?? "", r.sizeLabel ?? "", r.fabricCode ?? "",
+              r.quantity, r.quantity * r.unitM3,
+              r.rackingNumber ?? "", r.salesOrderNo ?? "",
+            ),
+          );
+        }
+      }
+      // Update SO status to READY_TO_SHIP if not already past
+      stmts.push(
+        db.prepare(
+          `UPDATE sales_orders SET status = 'READY_TO_SHIP', updated_at = ?
+            WHERE id = ?
+              AND status IN ('IN_PRODUCTION','CONFIRMED','DRAFT')`,
+        ).bind(new Date().toISOString(), plan.soId ?? ""),
+      );
+      // Batch in groups of 50
+      for (let i = 0; i < stmts.length; i += 50) {
+        await db.batch(stmts.slice(i, i + 50));
+      }
+      if (isAppend) dosAppendedTo++; else dosCreated++;
+      packingStamped += plan.packingJcsToStamp.length;
+      upstreamStamped += plan.upstreamJcsToStamp.length;
+    } catch (err) {
+      errors.push({ custPO: plan.custPO, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return c.json({
+    success: true, dryRun: false, summary,
+    dosCreated, dosAppendedTo, packingStamped, upstreamStamped,
+    errorCount: errors.length, errors: errors.slice(0, 10),
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/revert-dos-to-draft
+//
+// One-shot test helper. Flips every LOADED DO back to DRAFT (= "Pending
+// Dispatch" in the UI) so the user can re-test the dispatch flow on the
+// previously-migrated DOs. Optionally back-fills dispatchedAt / deliveryDate
+// from the legacy Aut/aiy DO Date map (body.dateMap = { doNo: "YYYY-MM-DD" }).
+//
+// Bypasses the regular PUT /api/delivery-orders/:id reversal logic — does NOT
+// unstamp PACKING JCs (they stay COMPLETED, since the items physically ARE
+// packed).
+// ---------------------------------------------------------------------------
+app.post("/revert-dos-to-draft", async (c) => {
+  const denied = await requirePermission(c, "delivery-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  let body: { dateMap?: Record<string, string> } = {};
+  try { body = await c.req.json(); } catch { /* allow empty body */ }
+  const dateMap = body.dateMap ?? {};
+
+  // Pull every LOADED DO
+  const res = await db
+    .prepare(`SELECT id, doNo, status, dispatchedAt FROM delivery_orders WHERE status = 'LOADED'`)
+    .all<{ id: string; doNo: string; status: string; dispatchedAt: string | null }>();
+  const loadedDOs = res.results ?? [];
+
+  let reverted = 0;
+  let datesBackfilled = 0;
+  const stmts: ReturnType<D1Database["prepare"]>[] = [];
+  for (const d of loadedDOs) {
+    const legacyDate = dateMap[d.doNo];
+    if (legacyDate) {
+      stmts.push(
+        db.prepare(
+          `UPDATE delivery_orders
+              SET status = 'DRAFT',
+                  dispatchedAt = ?,
+                  deliveryDate = ?,
+                  updated_at = ?
+            WHERE id = ?`,
+        ).bind(`${legacyDate}T00:00:00.000Z`, legacyDate, new Date().toISOString(), d.id),
+      );
+      datesBackfilled++;
+    } else {
+      stmts.push(
+        db.prepare(
+          `UPDATE delivery_orders
+              SET status = 'DRAFT', updated_at = ?
+            WHERE id = ?`,
+        ).bind(new Date().toISOString(), d.id),
+      );
+    }
+    reverted++;
+  }
+  for (let i = 0; i < stmts.length; i += 50) {
+    await db.batch(stmts.slice(i, i + 50));
+  }
+  return c.json({
+    success: true,
+    loadedDOsFound: loadedDOs.length,
+    reverted,
+    datesBackfilled,
   });
 });
 

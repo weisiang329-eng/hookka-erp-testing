@@ -294,13 +294,17 @@ Identify each item's category by matching productCode against the catalog (BEDFR
 - sizeLabel: the size, normalized to short code: King→(K), Queen→(Q), Single→(S), SuperSingle→(SS), SuperKing→(SK), SuperPlus→(SP). Sometimes already in catalog form like "(K)", "(Q)".
 - "Fab3" / "Fab2" / "Fab1" tokens = fabric price tier (PRICE_3/2/1). NOT a fabric code. Do NOT put into fabricCode. Drop it from productCode matching.
 - fabricCode: the COLOR/COL/Col value (e.g. "PC151-02"). Match against FABRICS catalog. Common keys: "Col", "COL", "color", "COLOR", "col".
-- divanHeightInches: parse the FULL number BEFORE the "+" in spec. ALWAYS use the entire number, not just the leading digit.
+- divanHeightInches: parse the FULL number that follows the divan keyword. ALWAYS read the entire numeric token, not just the leading digit. The inch mark (") and any text after it are NOT part of the number.
     "Divan10+4" → divanHeightInches=10 (NOT 1)
-    "Divan:8inch+noleg" → divanHeightInches=8
-    "DRAWER:12"" → divanHeightInches=12 (NOT 1; the drawer height IS the divan height)
-    "DRAWER:14"" → 14 (NOT 1)
-    "8"DIVAN+2"LEG" → divanHeightInches=8
+    "Divan:8inch+noleg" → 8
+    "DRAWER:12"" → 12 (drawer height IS divan height when DRAWER variant)
+    "DRAWER:14"" → 14
+    "divan:12"divan NO leg" → divanHeightInches=12 (NOT 1; the trailing word "divan" + "NO leg" is just spec text, the number is 12)
     "divan:10inch+noleg" → 10
+    "8"DIVAN+2"LEG" → 8
+    "8inch DIVAN" → 8
+    "Divan above full cover/PC151-03/Divan8+2/gap12" → 8 (use the second "Divan8" — first is just text)
+  Whenever you see a digit followed by another digit before any non-digit character, the value is the multi-digit number (e.g. "12" → 12, "16" → 16). Single-digit values 1-9 are valid; never confuse a leading digit of a 2-digit number for a 1.
 - legHeightInches: parse the FULL number AFTER the "+" sign. NEVER strip digits.
     "Divan10+4" → legHeightInches=4
     "Divan10+1" → 1
@@ -308,12 +312,13 @@ Identify each item's category by matching productCode against the catalog (BEDFR
     null when followed by "no leg"/"NOLEG"/"no legs"/"+nolegs".
 - gapInches: parse the FULL number after "Gap"/"gap"/"GAP"/"M.Gap"/"M'GP"/"MATTRESSGAP"/"MATTRESS GAP" keyword. ALWAYS use entire number.
     "gap12" → gapInches=12 (NOT 1)
+    "gap:10"" → 10 (NOT 1)
     "MATTRESSGAP:14"" → 14 (NOT 1)
     "Gap:13"" → 13
     "M.Gap:12"" → 12
     "12"MATTRESS GAP" → 12
 
-CRITICAL: when spec says "10", "12", "14", "16" — these are TWO-digit inch measurements. Return the full number (10, 12, 14, 16). Never truncate to the first digit (1).
+CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch measurements. Return the full number (10, 12, 14, 16). Never truncate to the first digit (1). If you see "12"" with the trailing inch quote, the value is 12, NOT 1. The inch quote (") is a unit marker, not a digit separator.
 - noLeg: true if spec contains any case of "no leg", "noleg", "no legs". When true, legHeightInches MUST be null.
 - specialOrder: match against BEDFRAME Specials catalog. Examples:
     "HB straight"/"HB STR" → "HB Straight"
@@ -491,6 +496,22 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
   // wants a single canonical casing on screen.
   if (po.yourRefNo) po.yourRefNo = po.yourRefNo.toUpperCase();
   if (po.deliveryHub) po.deliveryHub = po.deliveryHub.toUpperCase();
+
+  // Hub matching is customer-scoped. Catalog hub shortNames are
+  // customer-prefixed ("Houzs PG", "Carress KL"…), but PDFs typically
+  // only write the location code ("PG", "KL"). Match by suffix WITHIN
+  // the matched customer's own hubs, then snap to the canonical
+  // shortName so the UI shows the full hub name.
+  if (po.deliveryHub && matchedCustomer) {
+    const ph = po.deliveryHub.toUpperCase();
+    const candidate = matchedCustomer.hubs.find((h) => {
+      const u = h.shortName.toUpperCase();
+      return u === ph || u.endsWith(` ${ph}`) || u.endsWith(`-${ph}`);
+    });
+    if (candidate) {
+      po.deliveryHub = candidate.shortName;
+    }
+  }
   for (const item of po.items) {
     // Fabric: snap to catalog canonical casing if matched, else just upper.
     if (item.fabricCode) {
@@ -527,12 +548,22 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     });
   }
 
-  if (po.deliveryHub && !hubShortNames.has(po.deliveryHub.toUpperCase())) {
-    warnings.push({
-      field: "deliveryHub",
-      value: po.deliveryHub,
-      message: "Delivery hub not in catalog.",
-    });
+  if (po.deliveryHub) {
+    // After the customer-scoped snap above, deliveryHub should equal one
+    // of the matched customer's hub shortNames; if it doesn't (or no
+    // customer was matched), fall back to the global set.
+    const ph = po.deliveryHub.toUpperCase();
+    const inCustomerHubs = matchedCustomer?.hubs.some(
+      (h) => h.shortName.toUpperCase() === ph,
+    );
+    const inGlobalHubs = hubShortNames.has(ph);
+    if (!inCustomerHubs && !inGlobalHubs) {
+      warnings.push({
+        field: "deliveryHub",
+        value: po.deliveryHub,
+        message: "Delivery hub not in catalog.",
+      });
+    }
   }
 
   for (let i = 0; i < po.items.length; i++) {

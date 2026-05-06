@@ -412,14 +412,28 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     • The piece that appears RIGHTMOST in the diagram → assign LHF.
     • Inner / sandwiched pieces stay NA (no side suffix).
 
-  Worked example using a real PO:
+  Worked example A — PO/2605-003 (TV at top of diagram):
     Diagram shows (left → right):  [ 28" 28" joined ] + [ 28" with L-flap ]
-    With "TV" drawn at the top of the page.
     The joined 28"+28" pair is on the diagram's LEFT, so it's on the TV-viewer's RIGHT → 2A(RHF).
-    The separated L-piece is on the diagram's RIGHT, so it's on the TV-viewer's LEFT → 1L(LHF).
+    The L-piece is on the diagram's RIGHT, so it's on the TV-viewer's LEFT → 1L(LHF).
     Output: 5531-1L(LHF) + 5531-2A(RHF).
 
-  When the diagram does NOT show a TV marker, fall back to the "leftmost = RHF, rightmost = LHF" rule by default — Hookka's house convention always uses the front-facing viewpoint.
+  Worked example B — PO/2605-010 (no TV marker, dimensions only):
+    Diagram shows (left → right):  [ tall narrow 200cm × 28" box ] + [ 28" 28" joined ]
+    The tall narrow box on the LEFT is the L-shape (chaise extension), so it's on the TV-viewer's RIGHT → 1L(RHF).
+    The joined 28"+28" pair on the RIGHT is the 2A, so it's on the TV-viewer's LEFT → 2A(LHF).
+    Output: 5531-1L(RHF) + 5531-2A(LHF).
+
+  Worked example C — PO/2605-013 (printed text says "3 Seater" but diagram splits into TWO clusters):
+    Description: "HK5531/24"(3 Seater)/KN390-1 PEARL"
+    Diagram: TV at top. Below: [ 24" 24" joined ] + [ 24" alone ]
+    Even though the printed text says "3 Seater", the DIAGRAM shows two separate clusters joined by "+" — this means it's a 2A + 1A chain, NOT a single 3S unit.
+    The joined 24"+24" pair on the diagram's LEFT is 2A → TV-viewer's RIGHT → 2A(RHF).
+    The standalone 24" on the diagram's RIGHT is 1A → TV-viewer's LEFT → 1A(LHF).
+    Output: 5531-1A(LHF) + 5531-2A(RHF).
+    Lesson: when printed text says "N Seater" but the diagram shows multiple "+"-separated clusters, the DIAGRAM WINS — split into the modules drawn.
+
+  Hookka rule: ALWAYS use the front-facing viewpoint (someone standing at the TV, looking AT the sofa). NEVER use the back-of-sofa viewpoint. The diagram's left/right is REVERSED from this convention. Apply this rule even when no TV marker is drawn — the convention is universal.
 
   ARM-INFERENCE RULE (master rule for resolving NA vs A):
   For any chain of modules joined by "+" signs:

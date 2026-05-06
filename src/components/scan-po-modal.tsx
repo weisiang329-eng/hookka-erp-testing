@@ -282,7 +282,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         // N rows the operator can merge). Re-anchor pageNumbers to the
         // original PDF's page index so renderPdfPagesToPng pulls the
         // correct source page when the SO is created.
+        // Skip samples with zero items — those come from continuation
+        // pages where the PDF header repeats but the line-item table is
+        // empty. Showing them as empty cards just clutters the modal.
         for (const s of v.samples) {
+          if (!s.extracted.items || s.extracted.items.length === 0) continue;
           const extracted = {
             ...s.extracted,
             pageNumbers: [v.job.pageNo],

@@ -837,9 +837,23 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
       item.fabricCode = fabricCanon.get(upper) ?? upper;
     }
     // Product: snap to catalog form so "hok-1007 (k)" → "HOK-1007 (K)".
+    // Also handle 1-prefix mismatch — Claude sometimes outputs
+    // "5531-1L(LHF)" but the catalog stores "5531-L(LHF)" (or vice
+    // versa for some models). Try toggling the "1" prefix before the
+    // module letter and snap to whichever form the catalog has.
     if (item.productCode) {
       const upper = item.productCode.toUpperCase();
-      const canon = productCanon.get(upper);
+      let canon = productCanon.get(upper);
+      if (!canon) {
+        // "5531-1L(LHF)" → "5531-L(LHF)"
+        const dropOne = upper.replace(/-1([A-Z])/, "-$1");
+        if (dropOne !== upper) canon = productCanon.get(dropOne);
+      }
+      if (!canon) {
+        // "5531-L(LHF)" → "5531-1L(LHF)"
+        const addOne = upper.replace(/-([A-Z])(\(|$)/, "-1$1$2");
+        if (addOne !== upper) canon = productCanon.get(addOne);
+      }
       if (canon) item.productCode = canon;
     }
     // Transferred-SO references.

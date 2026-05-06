@@ -39,12 +39,14 @@ type POLineItem = {
 
 function POFormDialog({
   onSave,
+  onSplitBySupplier,
   onClose,
   rawMaterials,
   supplierMaterialBindings,
   allSuppliers,
 }: {
   onSave: (data: Record<string, unknown>) => void;
+  onSplitBySupplier: (groups: Record<string, unknown>[]) => Promise<void>;
   onClose: () => void;
   rawMaterials: RawMaterial[];
   supplierMaterialBindings: SupplierMaterialBinding[];
@@ -179,6 +181,55 @@ function POFormDialog({
   // picked a supplier yet. Blocks Create PO submission.
   const hasUnboundLines = items.some((it) => !it.supplierId);
   const unboundCount = items.filter((it) => !it.supplierId).length;
+  // Distinct populated supplier ids — used for the Split-by-Supplier helper
+  // and the destructive mixed-supplier notice.
+  const distinctSupplierIds = useMemo(
+    () => Array.from(new Set(items.map((it) => it.supplierId).filter(Boolean))),
+    [items],
+  );
+  const distinctSupplierCount = distinctSupplierIds.length;
+  const [splitting, setSplitting] = useState(false);
+
+  /** Build one POST payload per supplier and hand the list to the parent
+   *  page's onSplitBySupplier handler, which loops sequentially with a
+   *  200ms gap so generatePoNo stays deterministic. */
+  const handleSplitClick = async () => {
+    if (splitting) return;
+    if (items.length === 0 || hasUnboundLines) return;
+    if (distinctSupplierCount < 2) return;
+
+    const bySupplier = new Map<string, POLineItem[]>();
+    for (const it of items) {
+      const list = bySupplier.get(it.supplierId) ?? [];
+      list.push(it);
+      bySupplier.set(it.supplierId, list);
+    }
+
+    const groups: Record<string, unknown>[] = [];
+    for (const [sid, lines] of bySupplier) {
+      groups.push({
+        supplierId: sid,
+        supplierName: lines[0].supplierName,
+        expectedDate,
+        notes,
+        items: lines.map((it) => ({
+          materialCategory: it.materialCategory,
+          materialName: `${it.rmCode} - ${it.rmDescription}`,
+          supplierSKU: it.supplierSku,
+          quantity: it.quantity,
+          unitPriceSen: it.unitPriceSen,
+          unit: it.unit,
+        })),
+      });
+    }
+
+    setSplitting(true);
+    try {
+      await onSplitBySupplier(groups);
+    } finally {
+      setSplitting(false);
+    }
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,7 +275,9 @@ function POFormDialog({
                     : headerSupplierName || "Pick supplier on line(s) below"}
               </div>
               {hasMixedSuppliers && (
-                <p className="text-xs text-[#9C6F1E] mt-1">Lines have different suppliers. The PO header will use the first line's supplier.</p>
+                <p className="text-xs text-[#9A3A2D] mt-1 font-medium">
+                  Lines belong to {distinctSupplierCount} suppliers — split before submitting
+                </p>
               )}
             </div>
             <div>
@@ -406,17 +459,34 @@ function POFormDialog({
               </p>
             )}
             <div className="flex justify-end gap-3">
-              <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+              <Button type="button" variant="outline" onClick={onClose} disabled={splitting}>Cancel</Button>
+              {hasMixedSuppliers && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={handleSplitClick}
+                  disabled={hasUnboundLines || splitting}
+                  title={
+                    hasUnboundLines
+                      ? "Pick supplier for unbound material(s)"
+                      : `Split into ${distinctSupplierCount} POs grouped by supplier`
+                  }
+                >
+                  {splitting ? "Splitting…" : `Split by Supplier (${distinctSupplierCount})`}
+                </Button>
+              )}
               <Button
                 type="submit"
                 variant="primary"
-                disabled={items.length === 0 || hasUnboundLines}
+                disabled={items.length === 0 || hasUnboundLines || hasMixedSuppliers || splitting}
                 title={
                   hasUnboundLines
                     ? "Pick supplier for unbound material(s)"
-                    : items.length === 0
-                      ? "Add at least one item"
-                      : undefined
+                    : hasMixedSuppliers
+                      ? "Lines belong to multiple suppliers — use Split by Supplier"
+                      : items.length === 0
+                        ? "Add at least one item"
+                        : undefined
                 }
               >
                 Create PO
@@ -516,6 +586,64 @@ export default function ProcurementPage() {
       console.error("Failed to create PO:", err);
       toast.error(err instanceof Error ? err.message : "Network error creating PO");
       return false;
+    }
+  };
+
+  /** Sequentially POST one PO per supplier group with a 200ms gap so
+   *  generatePoNo (YYMM scan + max+1) stays deterministic across the
+   *  batch. On all-success: close modal + single summary toast. On any
+   *  failure: toast per-supplier error, keep modal open with un-created
+   *  groups still visible (we only refresh the list, never close the
+   *  modal manually here — handleCreatePO already closed on success
+   *  per-call, but split mode bypasses that close until the whole
+   *  batch settles). */
+  const handleSplitBySupplier = async (groups: Record<string, unknown>[]) => {
+    if (!groups.length) return;
+    let okCount = 0;
+    const failures: { supplierName: string; error: string }[] = [];
+
+    for (let i = 0; i < groups.length; i++) {
+      const g = groups[i];
+      try {
+        const res = await fetch("/api/purchase-orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(g),
+        });
+        const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+        if (!res.ok || !body.success) {
+          failures.push({
+            supplierName: String(g.supplierName ?? "(unknown)"),
+            error: body.error || `HTTP ${res.status}`,
+          });
+        } else {
+          okCount++;
+        }
+      } catch (err) {
+        failures.push({
+          supplierName: String(g.supplierName ?? "(unknown)"),
+          error: err instanceof Error ? err.message : "Network error",
+        });
+      }
+      if (i < groups.length - 1) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+    }
+
+    invalidateCachePrefix("/api/purchase-orders");
+    invalidateCachePrefix("/api/grns");
+    refreshPOs();
+
+    if (failures.length === 0) {
+      toast.success(`Created ${okCount} POs across ${groups.length} suppliers`);
+      setShowPOForm(false);
+    } else {
+      for (const f of failures) {
+        toast.error(`${f.supplierName}: ${f.error}`);
+      }
+      if (okCount > 0) {
+        toast.warning(`${okCount}/${groups.length} POs created — fix the rest and retry`);
+      }
     }
   };
 
@@ -838,6 +966,7 @@ export default function ProcurementPage() {
       {showPOForm && (
         <POFormDialog
           onSave={handleCreatePO}
+          onSplitBySupplier={handleSplitBySupplier}
           onClose={() => setShowPOForm(false)}
           rawMaterials={rawMaterials}
           supplierMaterialBindings={supplierMaterialBindings}

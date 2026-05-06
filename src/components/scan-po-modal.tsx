@@ -1120,8 +1120,8 @@ function ClaudePOCard({
             )}
 
             {expanded && (
-              <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-hidden">
-                <table className="w-full text-xs">
+              <div className="mt-2 border border-[#E2DDD8] rounded-lg overflow-x-auto">
+                <table className="w-full min-w-[64rem] text-xs">
                   <thead>
                     <tr className="bg-[#F5F5F5] text-[#6B7280]">
                       <th className="px-1.5 py-1 text-left">#</th>

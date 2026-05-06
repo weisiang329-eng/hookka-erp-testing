@@ -86,6 +86,98 @@ function writeCache<T>(url: string, data: T): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-tab + same-tab live invalidation.
+//
+// Why: when the operator adds a new product / fabric / variants entry in the
+// Maintenance page (often in a separate tab), the SO Create + Edit pages
+// previously kept showing stale dropdowns until the user hard-refreshed.
+// Recurring complaint pattern (Wei Siang May 2026 — "added new fabric in
+// maintenance, not visible in SO create").
+//
+// Architecture:
+//   1. invalidateCache / invalidateCachePrefix drop the localStorage entry
+//      (existing behaviour) AND fire a notification so any mounted
+//      useCachedJson hook for that URL re-fetches immediately (same tab).
+//   2. They also broadcast to other tabs via BroadcastChannel — receiving
+//      tabs drop their localStorage copies AND notify their hooks too.
+//   3. useCachedJson subscribers register in a per-URL set; on receiving a
+//      bus tick they bump their `tick` state to re-run the fetch effect.
+//
+// Pure additive — existing callers don't change.
+// ---------------------------------------------------------------------------
+type InvalidationListener = () => void;
+const invalidationListeners = new Map<string, Set<InvalidationListener>>();
+
+function notifyInvalidation(url: string): void {
+  const exact = invalidationListeners.get(url);
+  if (exact) for (const cb of exact) try { cb(); } catch { /* ignore */ }
+}
+
+function notifyInvalidationPrefix(prefix: string): void {
+  for (const [url, listeners] of invalidationListeners) {
+    if (!url.startsWith(prefix)) continue;
+    for (const cb of listeners) try { cb(); } catch { /* ignore */ }
+  }
+}
+
+function subscribeInvalidation(url: string, listener: InvalidationListener): () => void {
+  let set = invalidationListeners.get(url);
+  if (!set) {
+    set = new Set();
+    invalidationListeners.set(url, set);
+  }
+  set.add(listener);
+  return () => {
+    const s = invalidationListeners.get(url);
+    if (!s) return;
+    s.delete(listener);
+    if (s.size === 0) invalidationListeners.delete(url);
+  };
+}
+
+// BroadcastChannel — cross-tab notification. Channel name is namespaced per
+// build so two builds running side-by-side (dev + prod) don't cross-talk.
+type InvalidateMessage =
+  | { kind: "url"; url: string }
+  | { kind: "prefix"; prefix: string };
+
+let bcast: BroadcastChannel | null = null;
+if (typeof window !== "undefined" && typeof BroadcastChannel !== "undefined") {
+  try {
+    bcast = new BroadcastChannel(`hookka-cache-bus:${__BUILD_ID__}`);
+    bcast.addEventListener("message", (ev) => {
+      const msg = ev.data as InvalidateMessage | null;
+      if (!msg || typeof msg !== "object") return;
+      // Drop the localStorage entry on this tab too — sender already did it
+      // on theirs. Then notify any mounted hooks on this tab to refetch.
+      if (msg.kind === "url") {
+        try { window.localStorage.removeItem(storageKey(msg.url)); } catch { /* ignore */ }
+        notifyInvalidation(msg.url);
+      } else if (msg.kind === "prefix") {
+        try {
+          const full = storageKey(msg.prefix);
+          const toRemove: string[] = [];
+          for (let i = 0; i < window.localStorage.length; i++) {
+            const k = window.localStorage.key(i);
+            if (k && k.startsWith(full)) toRemove.push(k);
+          }
+          for (const k of toRemove) window.localStorage.removeItem(k);
+        } catch { /* ignore */ }
+        notifyInvalidationPrefix(msg.prefix);
+      }
+    });
+  } catch {
+    // BroadcastChannel may be blocked (rare). Same-tab path still works.
+    bcast = null;
+  }
+}
+
+function broadcast(msg: InvalidateMessage): void {
+  if (!bcast) return;
+  try { bcast.postMessage(msg); } catch { /* ignore */ }
+}
+
 export function invalidateCache(url: string): void {
   if (typeof window === "undefined") return;
   try {
@@ -93,6 +185,8 @@ export function invalidateCache(url: string): void {
   } catch {
     // ignore
   }
+  notifyInvalidation(url);
+  broadcast({ kind: "url", url });
 }
 
 export function invalidateCachePrefix(prefix: string): void {
@@ -108,6 +202,8 @@ export function invalidateCachePrefix(prefix: string): void {
   } catch {
     // ignore
   }
+  notifyInvalidationPrefix(prefix);
+  broadcast({ kind: "prefix", prefix });
 }
 
 export function clearAllCache(): void {
@@ -213,6 +309,15 @@ type UseCachedJsonResult<T> = {
   refresh: () => void;
 };
 
+export type UseCachedJsonOptions = {
+  /**
+   * Re-fetch when the window regains focus (operator switches back to this
+   * tab). Use for catalog endpoints where stale data manifests as missing
+   * dropdown entries. Off by default — most pages don't need it.
+   */
+  revalidateOnFocus?: boolean;
+};
+
 /**
  * React hook for stale-while-revalidate JSON fetching.
  *
@@ -221,6 +326,12 @@ type UseCachedJsonResult<T> = {
  * - Skips the background fetch if the cached entry is younger than `ttlSec`.
  * - Pass `null` as the URL to intentionally skip the fetch (useful for
  *   routes where the id isn't known yet).
+ * - Auto-refetches when another tab calls invalidateCache(prefix) for this
+ *   URL via the BroadcastChannel bus. Same-tab invalidations are also
+ *   delivered (so Maintenance Save → SO dropdowns refresh without a
+ *   navigation).
+ * - With `revalidateOnFocus: true`, also refetches whenever the window
+ *   regains focus.
  *
  * `loading` is true only when there is NO cached data — so SWR hits feel
  * instant to the user without a spinner flash over stale-but-usable data.
@@ -229,6 +340,7 @@ type UseCachedJsonResult<T> = {
 export function useCachedJson<T = unknown>(
   url: string | null,
   ttlSec: number = 300,
+  options: UseCachedJsonOptions = {},
 ): UseCachedJsonResult<T> {
   const [data, setData] = useState<T | null>(() => {
     if (!url) return null;
@@ -321,6 +433,35 @@ export function useCachedJson<T = unknown>(
   const refresh = useCallback(() => {
     setTick((t) => t + 1);
   }, []);
+
+  // Subscribe to cache invalidations for this URL — fires when another
+  // tab (or this tab's Maintenance Save) calls invalidateCache /
+  // invalidateCachePrefix that matches this URL. Bumping the tick re-runs
+  // the fetch effect.
+  useEffect(() => {
+    if (!url) return;
+    return subscribeInvalidation(url, () => setTick((t) => t + 1));
+  }, [url]);
+
+  // Optional: revalidate when window regains focus. We gate on cache age
+  // (>2s) so quick alt-tab roundtrips don't fire redundant requests, but
+  // anything more than a momentary blur triggers a refetch.
+  const revalidateOnFocus = options.revalidateOnFocus === true;
+  useEffect(() => {
+    if (!url || !revalidateOnFocus) return;
+    if (typeof window === "undefined") return;
+    const onFocus = () => {
+      const cached = readCache<T>(url);
+      const age = cached ? Date.now() - cached.fetchedAt : Infinity;
+      if (age > 2000) setTick((t) => t + 1);
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [url, revalidateOnFocus]);
 
   return { data, loading, error, refresh };
 }

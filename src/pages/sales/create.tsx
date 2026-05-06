@@ -18,7 +18,7 @@ import {
   gapHeightOptions,
   SEAT_HEIGHT_OPTIONS,
 } from "@/lib/pricing-options";
-import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
+import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { useUnsavedChanges } from "@/lib/use-unsaved-changes";
 import { useFormDraft, clearFormDraft } from "@/lib/use-form-draft";
@@ -191,16 +191,23 @@ function CreateSalesOrderPage() {
   const { toast } = useToast();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
-  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
-  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
+  // Catalog endpoints — opt into focus revalidation so adding a new product /
+  // fabric / customer in Maintenance becomes visible without a hard refresh.
+  // Cross-tab BroadcastChannel + same-tab invalidate-listener (via cached-fetch)
+  // already cover the active mutation path; revalidateOnFocus is the safety
+  // net for edge cases (Maintenance edit done in another window, on another
+  // device, or before this tab subscribed).
+  const CAT_OPTS = { revalidateOnFocus: true };
+  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers", 300, CAT_OPTS);
+  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products", 300, CAT_OPTS);
+  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics", 300, CAT_OPTS);
   const { data: fabricTrackingsResp } = useCachedJson<{ data?: {
     id: string;
     fabricCode: string;
     priceTier: "PRICE_1" | "PRICE_2" | "PRICE_3";
     sofaPriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
     bedframePriceTier?: "PRICE_1" | "PRICE_2" | "PRICE_3" | null;
-  }[] }>("/api/fabric-tracking");
+  }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
@@ -222,6 +229,12 @@ function CreateSalesOrderPage() {
     soId: string | null;
   }>({ open: false, incompleteProducts: [], soId: null });
   const [maintenanceConfig, setMaintenanceConfig] = useState<Record<string, MaintenanceConfigValue[]> | null>(null);
+  // Bumped whenever a kv-config write is observed (cross-tab via
+  // BroadcastChannel, or same-tab via subscribeKvConfig). Forces the
+  // variants-fetch effect below to re-run so dropdowns reflect new
+  // specials / heights / sofa sizes added in Maintenance without a
+  // hard refresh.
+  const [variantsTick, setVariantsTick] = useState(0);
 
   const [customerId, setCustomerId] = useState("");
 
@@ -528,6 +541,19 @@ function CreateSalesOrderPage() {
       });
 
     return () => { cancelled = true; };
+  }, [customerId, variantsTick]);
+
+  // Live-refresh hook: subscribe to variants-config writes so dropdowns
+  // pick up new entries the moment Maintenance Save fires (in any tab).
+  useEffect(() => {
+    const unsubMaster = subscribeKvConfig(VARIANTS_CONFIG_KEY, () => setVariantsTick((t) => t + 1));
+    const unsubCustomer = customerId
+      ? subscribeKvConfig(`${VARIANTS_CONFIG_KEY}:${customerId}`, () => setVariantsTick((t) => t + 1))
+      : null;
+    return () => {
+      unsubMaster();
+      if (unsubCustomer) unsubCustomer();
+    };
   }, [customerId]);
 
   // Load clone data from localStorage if navigated from Clone button.

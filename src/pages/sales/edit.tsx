@@ -15,7 +15,7 @@ import {
   legHeightOptions,
   specialOrderOptions,
 } from "@/lib/pricing-options";
-import { fetchVariantsConfig, getVariantsConfigSync } from "@/lib/kv-config";
+import { fetchVariantsConfig, getVariantsConfigSync, subscribeKvConfig, VARIANTS_CONFIG_KEY } from "@/lib/kv-config";
 import { useCachedJson, invalidateCache, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { LockBanner } from "@/components/ui/lock-banner";
 import { usePresence } from "@/lib/use-presence";
@@ -156,9 +156,16 @@ export default function EditSalesOrderPage() {
     (location.state as { overrideToken?: string } | null)?.overrideToken ??
     null;
   const otherEditors = usePresence("sales_order", id, Boolean(id));
-  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers");
-  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products");
-  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics");
+  // Catalog endpoints — opt into focus revalidation so adding a new product /
+  // fabric / customer in Maintenance becomes visible without a hard refresh.
+  // Cross-tab BroadcastChannel + same-tab invalidate-listener (via cached-fetch)
+  // already cover the active mutation path; revalidateOnFocus is the safety
+  // net for edge cases (e.g. Maintenance edit happened in a window that's now
+  // closed / on another device pointing at the same backend).
+  const CAT_OPTS = { revalidateOnFocus: true };
+  const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers", 300, CAT_OPTS);
+  const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products", 300, CAT_OPTS);
+  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics", 300, CAT_OPTS);
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
   const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
@@ -224,6 +231,23 @@ export default function EditSalesOrderPage() {
   //   * Customer + seeded blob → `variants-config:<customerId>`.
   //   * Customer but not seeded → fall back to master so prices still
   //     resolve (UI stays usable until someone runs Copy from Master).
+  //
+  // [variantsTick] is bumped whenever a kv-config change is received
+  // (cross-tab via BroadcastChannel, or same-tab via subscribeKvConfig).
+  // Bumping forces this effect to re-run so the dropdowns reflect the
+  // new specials / heights / sizes the operator just added in Maintenance.
+  const [variantsTick, setVariantsTick] = useState(0);
+  useEffect(() => {
+    const unsubMaster = subscribeKvConfig(VARIANTS_CONFIG_KEY, () => setVariantsTick((t) => t + 1));
+    const unsubCustomer = customerId
+      ? subscribeKvConfig(`${VARIANTS_CONFIG_KEY}:${customerId}`, () => setVariantsTick((t) => t + 1))
+      : null;
+    return () => {
+      unsubMaster();
+      if (unsubCustomer) unsubCustomer();
+    };
+  }, [customerId]);
+
   useEffect(() => {
     let cancelled = false;
     if (!customerId) {
@@ -252,7 +276,7 @@ export default function EditSalesOrderPage() {
         }
       });
     return () => { cancelled = true; };
-  }, [customerId]);
+  }, [customerId, variantsTick]);
 
   // Surcharge lookup from maintenance config
   const getConfigSurcharge = (key: string, value: string, fallback: number): number => {

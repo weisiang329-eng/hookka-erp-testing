@@ -48,6 +48,53 @@ type CacheEntry = {
 
 const cache = new Map<string, CacheEntry>();
 const SAVE_DEBOUNCE_MS = 500;
+
+// ---------------------------------------------------------------------------
+// Cross-tab broadcast for kv-config writes.
+//
+// Why: SO Create + Edit pages read variants-config (specials, divan/leg/
+// sofa heights, sofa sizes, etc.) on mount. When the operator edits the
+// blob in Maintenance / Products / BOM in another tab, those open SO
+// pages previously kept the stale config until reload. We broadcast every
+// write here; receiving tabs invalidate their hydrated cache and notify
+// listeners so they can re-fetch.
+//
+// Same-tab listeners already see writes via subscribeKvConfig (notifyValueListeners).
+// This bus only handles the cross-tab path.
+// ---------------------------------------------------------------------------
+let kvBcast: BroadcastChannel | null = null;
+if (typeof window !== "undefined" && typeof BroadcastChannel !== "undefined") {
+  try {
+    kvBcast = new BroadcastChannel("hookka-kv-config-bus");
+    kvBcast.addEventListener("message", (ev) => {
+      const msg = ev.data as { kind?: string; key?: string } | null;
+      if (!msg || msg.kind !== "set" || typeof msg.key !== "string") return;
+      // Drop our hydrated copy and re-fetch from the server. Listeners on
+      // this tab learn about the new value via notifyValueListeners.
+      const entry = cache.get(msg.key);
+      if (!entry) {
+        // Nothing mounted is reading this key on our tab — nothing to do.
+        return;
+      }
+      // Force the next fetchKvConfig to re-hydrate from the server.
+      entry.hydrated = false;
+      entry.hydratePromise = null;
+      // If anything is subscribed, pull fresh data NOW so they see it.
+      if (entry.listeners.size > 0) {
+        void fetchKvConfig(msg.key).then((value) => {
+          notifyValueListeners(entry, value);
+        });
+      }
+    });
+  } catch {
+    kvBcast = null;
+  }
+}
+
+function broadcastKvSet(key: string): void {
+  if (!kvBcast) return;
+  try { kvBcast.postMessage({ kind: "set", key }); } catch { /* ignore */ }
+}
 // Backoff schedule for transient failures (network / 5xx / 408 / 429).
 // After RETRY_DELAYS_MS.length attempts the entry transitions to `error`,
 // but the localStorage backup stays on disk for replay on next page load.
@@ -384,6 +431,12 @@ export function setKvConfig(key: string, value: JsonValue): void {
   writePending(key, value);
 
   notifyValueListeners(entry, value);
+
+  // Cross-tab — let other tabs know this key changed. Receiving tabs
+  // refetch from the server (the value here is what we just queued, not
+  // necessarily what's on disk yet — receivers wait for the server to
+  // confirm before re-broadcasting downstream).
+  broadcastKvSet(key);
 
   // A new write supersedes any in-flight retry — reset the retry counter
   // so the new value gets a fresh 3-attempt budget.

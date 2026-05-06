@@ -1201,17 +1201,13 @@ function ClaudePOCard({
                             </datalist>
                           </td>
                           <td className="px-1.5 py-1">
-                            <input
-                              list={`spc-${row.sampleId}-${i}`}
-                              className="w-56 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded"
+                            <SpecialMultiSelect
                               value={item.specialOrder ?? ""}
-                              onChange={(e) => onUpdateItem(i, { specialOrder: e.target.value || null })}
-                              placeholder="comma-separated for multiple"
-                              title="For multiple specials, separate with commas: 'Back Fully Cover, Bottom Wrap Nylon'"
+                              options={specialList}
+                              onChange={(next) =>
+                                onUpdateItem(i, { specialOrder: next || null })
+                              }
                             />
-                            <datalist id={`spc-${row.sampleId}-${i}`}>
-                              {specialList.map((c) => <option key={c} value={c} />)}
-                            </datalist>
                           </td>
                           <td className="px-1.5 py-1 text-center">
                             <input
@@ -1460,6 +1456,81 @@ async function extractPdfText(file: File): Promise<string> {
   }
 
   return textParts.join("\n\n--- PAGE BREAK ---\n\n");
+}
+
+// Multi-select chip component for the Special Orders cell. Stores as
+// comma-separated string for backwards compatibility with the SO body
+// (single specialOrder field), splits on display into chips. Operator
+// adds via "+ Add" dropdown of remaining options, removes via × on each
+// chip. No free-typing — values must come from the catalog.
+function SpecialMultiSelect({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  onChange: (next: string) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  const selected = value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const remaining = options.filter((o) => !selected.includes(o));
+
+  const add = (opt: string) => {
+    const next = [...selected, opt].join(", ");
+    onChange(next);
+    setPicking(false);
+  };
+  const remove = (opt: string) => {
+    onChange(selected.filter((s) => s !== opt).join(", "));
+  };
+
+  return (
+    <div className="relative inline-flex flex-wrap items-center gap-1 min-w-[14rem]">
+      {selected.map((s) => (
+        <span
+          key={s}
+          className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8]"
+        >
+          {s}
+          <button
+            type="button"
+            onClick={() => remove(s)}
+            className="text-[#9CA3AF] hover:text-red-600"
+            title="Remove"
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        </span>
+      ))}
+      {remaining.length > 0 && (
+        <button
+          type="button"
+          onClick={() => setPicking((p) => !p)}
+          className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32]"
+        >
+          + Add
+        </button>
+      )}
+      {picking && remaining.length > 0 && (
+        <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-60 overflow-y-auto min-w-[14rem]">
+          {remaining.map((opt) => (
+            <button
+              key={opt}
+              type="button"
+              onClick={() => add(opt)}
+              className="block w-full text-left px-3 py-1.5 text-xs hover:bg-[#FAF9F7]"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Phase 4: split a multi-page PDF into one File per page, all single-page

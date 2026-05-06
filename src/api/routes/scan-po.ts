@@ -466,13 +466,29 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   MIRROR-PAIR LOGIC (CRITICAL):
     LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side.
 
-  ★ LHF / RHF VIEWPOINT CONVENTION (READ THIS CAREFULLY) ★
-  Hookka's LHF / RHF designation is from the perspective of someone STANDING IN FRONT OF the sofa, looking AT it (i.e. standing where the TV is, looking back). This is OPPOSITE of the diagram's left-right ordering, because the diagram is drawn as a floor-plan view from above with the TV typically at the top.
+  ★★★ LHF / RHF VIEWPOINT CONVENTION — READ TWICE, GET IT RIGHT ★★★
 
-  Conversion rule:
-    • The piece that appears LEFTMOST in the diagram → assign RHF.
-    • The piece that appears RIGHTMOST in the diagram → assign LHF.
+  ⚠ COMMON MISTAKE: most LLMs default to "leftmost piece = LHF" because that's
+  the natural reading of left-to-right text. THIS IS WRONG FOR HOOKKA. If your
+  first instinct says "the leftmost box is LHF", FLIP IT — Hookka's convention
+  is the OPPOSITE.
+
+  WHY: Hookka's LHF / RHF designation is from the perspective of someone
+  STANDING AT THE TV looking AT the sofa (i.e. someone in front of the sofa,
+  facing it). This perspective REVERSES the diagram's left-right ordering,
+  because the diagram is drawn as a floor-plan view from above with the TV
+  typically at the top.
+
+  THE RULE (memorise this — it is not optional):
+    • The piece that appears LEFTMOST in the diagram → ASSIGN (RHF).
+    • The piece that appears RIGHTMOST in the diagram → ASSIGN (LHF).
     • Inner / sandwiched pieces stay NA (no side suffix).
+
+  MNEMONIC: "DIAGRAM-LEFT = RHF, DIAGRAM-RIGHT = LHF" — letters are SWAPPED.
+
+  Self-check before you output: re-read the diagram. Did you assign LHF to
+  the LEFT piece? If yes, you have it BACKWARDS — flip both items. The
+  rightmost piece in the diagram MUST end up as LHF.
 
   Worked example A — PO/2605-003 (TV at top of diagram):
     Diagram shows (left → right):  [ 28" 28" joined ] + [ 28" with L-flap ]

@@ -8741,15 +8741,25 @@ app.post("/migrate-do-from-excel", async (c) => {
         );
         existingDoMap.set(plan.doNo, doId);
       } else {
-        // Append: increment totals on the existing DO header.
+        // Append: increment totals on the existing DO header AND back-fill the
+        // dispatchedAt/deliveryDate with the legacy DO date when the entry
+        // carries one. Earlier runs without per-entry dispatchDate stamped
+        // dispatchedAt = run-time, which the user wants overwritten with the
+        // real legacy DO date.
         stmts.push(
           db.prepare(
             `UPDATE delivery_orders
-                SET totalM3 = totalM3 + ?, totalItems = totalItems + ?, updated_at = ?
+                SET totalM3 = totalM3 + ?,
+                    totalItems = totalItems + ?,
+                    dispatchedAt = COALESCE(?, dispatchedAt),
+                    deliveryDate = COALESCE(?, deliveryDate),
+                    updated_at = ?
               WHERE id = ?`,
           ).bind(
             totalsRes?.totalM3 ?? 0,
             totalsRes?.totalItems ?? 0,
+            dispatchDateByEntry.has(planKey) ? planDispatchedAt : null,
+            dispatchDateByEntry.has(planKey) ? planDispatchDate : null,
             new Date().toISOString(),
             doId,
           ),

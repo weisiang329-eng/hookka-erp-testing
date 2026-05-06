@@ -8538,13 +8538,21 @@ app.post("/migrate-do-from-excel", async (c) => {
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
   const today = new Date().toISOString().slice(0, 10);
-  let body: { entries?: Array<{ custPO: string; doNo: string }>; deliveryDate?: string };
+  let body: { entries?: Array<{ custPO: string; doNo: string; dispatchDate?: string }>; deliveryDate?: string };
   try { body = await c.req.json(); } catch { return c.json({ success: false, error: "Invalid JSON" }, 400); }
   const entries = (body?.entries ?? []).filter(e => typeof e?.custPO === "string" && typeof e?.doNo === "string" && e.custPO && e.doNo);
   if (entries.length === 0) {
     return c.json({ success: false, error: "Provide entries: [{custPO, doNo}, ...]" }, 400);
   }
-  const deliveryDate = (body.deliveryDate ?? today).slice(0, 10);
+  const defaultDeliveryDate = (body.deliveryDate ?? today).slice(0, 10);
+  // Per-entry dispatchDate (from Aut/aiy DO Date column) is used for the DO's
+  // dispatchedAt timestamp + JC completedDate. Fallback to body.deliveryDate
+  // when not supplied.
+  const dispatchDateByEntry = new Map<string, string>();
+  for (const e of entries) {
+    const k = `${e.custPO}|${e.doNo}`;
+    if (e.dispatchDate) dispatchDateByEntry.set(k, String(e.dispatchDate).slice(0, 10));
+  }
 
   // 1. Get every existing DO's (doNo, id) so we can append line items to
   //    an existing DO when the legacy Excel has multiple custPOs sharing
@@ -8588,11 +8596,18 @@ app.post("/migrate-do-from-excel", async (c) => {
     customerId?: string; companySOId?: string;
     poIds: string[];
     packingJcsToStamp: Array<{ poId: string; jcId: string }>;
+    upstreamJcsToStamp: Array<{ poId: string; jcId: string; departmentCode: string }>;
     skipReason?: string;
   };
+  // When ?stampUpstream=true, also stamp non-PACKING JCs (FAB_CUT, FAB_SEW,
+  // WOOD_CUT, FOAM, FRAMING, WEBBING, BONDING, UPHOLSTERY) as COMPLETED. Used
+  // when the legacy system already shipped the goods but our digital twin's
+  // upstream JCs are still WIP.
+  const stampUpstream = c.req.query("stampUpstream") === "true";
+
   const plans: Plan[] = [];
   for (const e of entries) {
-    const plan: Plan = { custPO: e.custPO, doNo: e.doNo, poIds: [], packingJcsToStamp: [] };
+    const plan: Plan = { custPO: e.custPO, doNo: e.doNo, poIds: [], packingJcsToStamp: [], upstreamJcsToStamp: [] };
     const so = soByCustPo.get(e.custPO);
     if (!so) { plan.skipReason = "No matching SO"; plans.push(plan); continue; }
     plan.soId = so.id;
@@ -8620,16 +8635,19 @@ app.post("/migrate-do-from-excel", async (c) => {
       const placeholders = poIds.map(() => "?").join(",");
       const jcRes = await db
         .prepare(
-          `SELECT id, productionOrderId, status, completedDate
+          `SELECT id, productionOrderId, status, completedDate, departmentCode
              FROM job_cards
-            WHERE departmentCode = 'PACKING'
-              AND productionOrderId IN (${placeholders})`,
+            WHERE productionOrderId IN (${placeholders})`,
         )
         .bind(...poIds)
-        .all<{ id: string; productionOrderId: string; status: string; completedDate: string | null }>();
+        .all<{ id: string; productionOrderId: string; status: string; completedDate: string | null; departmentCode: string }>();
       for (const jc of (jcRes.results ?? [])) {
         if (["COMPLETED","TRANSFERRED","CANCELLED"].includes(jc.status)) continue;
-        plan.packingJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id });
+        if (jc.departmentCode === "PACKING") {
+          plan.packingJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id });
+        } else if (stampUpstream) {
+          plan.upstreamJcsToStamp.push({ poId: jc.productionOrderId, jcId: jc.id, departmentCode: jc.departmentCode });
+        }
       }
     }
     plans.push(plan);
@@ -8643,6 +8661,7 @@ app.post("/migrate-do-from-excel", async (c) => {
     alreadyMigrated: skipped.filter(p => p.skipReason === "Already migrated").length,
     usableCount: usable.length,
     totalPackingJcsToStamp: usable.reduce((s, p) => s + p.packingJcsToStamp.length, 0),
+    totalUpstreamJcsToStamp: usable.reduce((s, p) => s + p.upstreamJcsToStamp.length, 0),
     totalPOsToBundle: usable.reduce((s, p) => s + p.poIds.length, 0),
   };
 
@@ -8660,18 +8679,31 @@ app.post("/migrate-do-from-excel", async (c) => {
   // Multiple legacy custPOs commonly share one DO number (multi-SO-per-DO).
   // First entry with a given doNo creates the header; subsequent entries with
   // the same doNo append their items to the existing DO and update totals.
-  let dosCreated = 0, dosAppendedTo = 0, packingStamped = 0;
+  let dosCreated = 0, dosAppendedTo = 0, packingStamped = 0, upstreamStamped = 0;
   const errors: Array<{ custPO: string; error: string }> = [];
   for (const plan of usable) {
     try {
       const stmts: ReturnType<D1Database["prepare"]>[] = [];
+      const planKey = `${plan.custPO}|${plan.doNo}`;
+      const planDispatchDate = dispatchDateByEntry.get(planKey) ?? defaultDeliveryDate;
+      const planDispatchedAt = `${planDispatchDate}T00:00:00.000Z`;
+      // Stamp upstream JCs (when stampUpstream=true) — use dispatch date so the
+      // historical timeline is preserved (legacy DO date = when it was actually done).
+      for (const j of plan.upstreamJcsToStamp) {
+        stmts.push(
+          db.prepare(
+            `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
+              WHERE id = ?`,
+          ).bind(planDispatchDate, j.jcId),
+        );
+      }
       // Stamp PACKING JCs
       for (const j of plan.packingJcsToStamp) {
         stmts.push(
           db.prepare(
             `UPDATE job_cards SET status = 'COMPLETED', completedDate = ?, overdue = 'COMPLETED'
               WHERE id = ?`,
-          ).bind(today, j.jcId),
+          ).bind(planDispatchDate, j.jcId),
         );
       }
       const so = soByCustPo.get(plan.custPO)!;
@@ -8701,9 +8733,9 @@ app.post("/migrate-do-from-excel", async (c) => {
           ).bind(
             doId, plan.doNo, plan.soId ?? null, so.companySO, so.companySOId,
             so.customerId, plan.custPO, so.customerName, so.customerState ?? null,
-            so.hubId ?? null, deliveryDate, totalsRes?.totalM3 ?? 0,
+            so.hubId ?? null, planDispatchDate, totalsRes?.totalM3 ?? 0,
             totalsRes?.totalItems ?? 0,
-            new Date().toISOString(),
+            planDispatchedAt,
             new Date().toISOString(), new Date().toISOString(),
           ),
         );
@@ -8771,6 +8803,7 @@ app.post("/migrate-do-from-excel", async (c) => {
       }
       if (isAppend) dosAppendedTo++; else dosCreated++;
       packingStamped += plan.packingJcsToStamp.length;
+      upstreamStamped += plan.upstreamJcsToStamp.length;
     } catch (err) {
       errors.push({ custPO: plan.custPO, error: err instanceof Error ? err.message : String(err) });
     }
@@ -8778,7 +8811,7 @@ app.post("/migrate-do-from-excel", async (c) => {
 
   return c.json({
     success: true, dryRun: false, summary,
-    dosCreated, dosAppendedTo, packingStamped,
+    dosCreated, dosAppendedTo, packingStamped, upstreamStamped,
     errorCount: errors.length, errors: errors.slice(0, 10),
   });
 });

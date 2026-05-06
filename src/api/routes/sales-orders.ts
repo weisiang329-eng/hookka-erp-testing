@@ -1651,11 +1651,19 @@ app.post("/", async (c) => {
         // behavior).
         const incomingFabricId = String(item.fabricId ?? "");
         const incomingFabricCode = String(item.fabricCode ?? "");
+        // Resolve from the `fabrics` master catalog (same table the
+        // /sales/create + Edit dropdowns read from). NOT fabric_trackings
+        // — that's a per-roll tracker with `ft-` ids the dropdowns can't
+        // find. Also re-resolve when the incoming id has the legacy `ft-`
+        // prefix from older OCR runs so we heal stale references on edit.
         let resolvedFabricId = incomingFabricId;
-        if (!resolvedFabricId && incomingFabricCode) {
+        const needsResolve =
+          (!resolvedFabricId && incomingFabricCode) ||
+          (resolvedFabricId.startsWith("ft-") && incomingFabricCode);
+        if (needsResolve) {
           try {
             const fabRow = await c.var.DB.prepare(
-              "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
+              "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
             )
               .bind(incomingFabricCode)
               .first<{ id: string }>();
@@ -2707,11 +2715,16 @@ app.put("/:id", async (c) => {
         const isSofaItem = itemCategory === "SOFA";
         const incomingFabricId = String(item.fabricId ?? "");
         const incomingFabricCode = String(item.fabricCode ?? "");
+        // Resolve from `fabrics` master (same as POST path) and heal any
+        // stale `ft-` ids from older OCR runs on edit.
         let resolvedFabricId = incomingFabricId;
-        if (!resolvedFabricId && incomingFabricCode) {
+        const needsResolve =
+          (!resolvedFabricId && incomingFabricCode) ||
+          (resolvedFabricId.startsWith("ft-") && incomingFabricCode);
+        if (needsResolve) {
           try {
             const fabRow = await c.var.DB.prepare(
-              "SELECT id FROM fabric_trackings WHERE fabricCode = ? LIMIT 1",
+              "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
             )
               .bind(incomingFabricCode)
               .first<{ id: string }>();

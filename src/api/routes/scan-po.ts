@@ -354,6 +354,13 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
        • If the diagram clearly shows multiple arrows on one side, that's the answer.
     5. Only if NO diagram is present AND no L/R/F label: leave specialOrder=null + add specialNotes="drawer side missing — operator to confirm".
 - specialNotes: free-form remainder when no special matches (e.g. handwritten urgency dates).
+- rawSpec: copy the EXACT spec text line(s) under each Description verbatim, including punctuation, slashes, and inch marks. Examples to copy verbatim:
+    PC151-02/Divan10+4/gap12
+    Pc151-02/divan8+4/gap12
+    col:pc151-01/gap:10"/divan:12"divan NO leg
+    DRAWER:12"/COLOR:PC151-01/MATTRESSGAP:14"
+    M.Gap:12"/Color:PC151-01/Divan:8"+0
+  This field is the source of truth for the server-side regex post-processor; do NOT rephrase or simplify the spec line.
 
 [SOFA]
 - productCode: match against SOFA PRODUCTS (e.g. "5530-2A(LHF)"). Customer PDFs often abbreviate — normalize before matching:
@@ -410,7 +417,8 @@ Return STRICT JSON, no markdown fences, no prose:
         "specialOrder": string | null,
         "specialNotes": string | null,
         "unitPrice": number | null,
-        "transferredSO": string | null
+        "transferredSO": string | null,
+        "rawSpec": string | null
       }]
     }
   ]
@@ -434,6 +442,10 @@ type ExtractedItem = {
   specialNotes: string | null;
   unitPrice: number | null;
   transferredSO: string | null;
+  // Raw spec line text exactly as it appears on the PDF — used by the
+  // server-side regex to overrule Claude when number extraction looks
+  // off (LLMs occasionally truncate "10" to "1" even at temperature 0).
+  rawSpec: string | null;
 };
 
 type ExtractedPO = {
@@ -472,6 +484,61 @@ type Warning = {
 };
 
 // ===========================================================================
+// Server-side spec re-parser — overrules Claude on number extraction.
+// LLMs occasionally truncate "10" to "1" or "12" to "1" even at temp=0;
+// regex on the raw spec line is bulletproof for these patterns.
+// ===========================================================================
+function reparseSpec(item: ExtractedItem): void {
+  if (!item.rawSpec) return;
+  const spec = item.rawSpec;
+
+  // No-leg first — many specs read "8inch + No Legs" or "no leg" or "NOLEG".
+  // If matched, leg is null regardless of any number.
+  const noLegRe = /\b(no\s*leg(?:s)?|noleg(?:s)?)\b/i;
+  const noLegMatch = noLegRe.test(spec);
+
+  // Divan height: number that follows "divan" / "drawer" keyword.
+  // Examples: "Divan10+4" → 10. "Divan:8inch" → 8. "DRAWER:12"" → 12.
+  // "Divan 8\" + No Legs" → 8. "Divan8+0" → 8.
+  const divanRe = /(?:divan|drawer)[\s:.-]*(\d+(?:\.\d+)?)/i;
+  const divanMatch = spec.match(divanRe);
+
+  // Leg height: number that follows the "+" or "leg" keyword. Skip when
+  // noLeg is true. Patterns: "Divan10+4" → 4. "8\"DIVAN+2\"LEG" → 2.
+  // "+2 leg" → 2. "Divan10+1" → 1.
+  let legMatch: RegExpMatchArray | null = null;
+  if (!noLegMatch) {
+    legMatch =
+      spec.match(/\+\s*(\d+(?:\.\d+)?)\s*(?:"|inch|in|leg)/i) ??
+      spec.match(/(\d+(?:\.\d+)?)\s*"?\s*leg/i);
+  }
+
+  // Gap: number after gap-family keywords.
+  const gapRe =
+    /(?:m['.\s]*gap|m\s*gap|mattress\s*gap|mattressgap|gap)[\s:.-]*(\d+(?:\.\d+)?)/i;
+  const gapMatch = spec.match(gapRe);
+
+  if (divanMatch) {
+    const v = Number(divanMatch[1]);
+    if (Number.isFinite(v)) item.divanHeightInches = v;
+  }
+  if (noLegMatch) {
+    item.noLeg = true;
+    item.legHeightInches = null;
+  } else if (legMatch) {
+    const v = Number(legMatch[1]);
+    if (Number.isFinite(v)) {
+      item.legHeightInches = v;
+      item.noLeg = false;
+    }
+  }
+  if (gapMatch) {
+    const v = Number(gapMatch[1]);
+    if (Number.isFinite(v)) item.gapInches = v;
+  }
+}
+
+// ===========================================================================
 // Validation
 // ===========================================================================
 // Side-effect: enriches `po` with customerId when customerCode/customerName
@@ -508,6 +575,27 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     ),
   );
 
+  // Resolve customerId FIRST — hub normalisation below depends on knowing
+  // which customer's hubs to scope the match to.
+  let matchedCustomer: CatalogCustomer | undefined;
+  if (po.customerCode) {
+    matchedCustomer = customerByCode.get(po.customerCode.toUpperCase());
+  }
+  if (!matchedCustomer && po.customerName) {
+    matchedCustomer = customerByName.get(po.customerName.toUpperCase());
+  }
+  if (matchedCustomer) {
+    po.customerId = matchedCustomer.id;
+    if (!po.customerCode) po.customerCode = matchedCustomer.code;
+  } else {
+    po.customerId = null;
+    warnings.push({
+      field: "customerName",
+      value: po.customerName ?? "",
+      message: "Customer not in catalog — please match manually before creating SO.",
+    });
+  }
+
   // Normalise reference fields to upper case — these are short alphanumeric
   // identifiers (e.g. "hc8799", "TCF0431", "HC14096") and the operator
   // wants a single canonical casing on screen.
@@ -530,6 +618,12 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     }
   }
   for (const item of po.items) {
+    // Regex re-parse the spec line to overrule any Claude truncation
+    // mistakes (e.g. "10" reported as 1). Bedframe-specific; skipped for
+    // SOFA / ACCESSORY where the spec format is different.
+    if (item.category !== "SOFA" && item.category !== "ACCESSORY") {
+      reparseSpec(item);
+    }
     // Fabric: snap to catalog canonical casing if matched, else just upper.
     if (item.fabricCode) {
       const upper = item.fabricCode.toUpperCase();
@@ -543,26 +637,6 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     }
     // Transferred-SO references.
     if (item.transferredSO) item.transferredSO = item.transferredSO.toUpperCase();
-  }
-
-  // Resolve customerId — try code first, then name.
-  let matchedCustomer: CatalogCustomer | undefined;
-  if (po.customerCode) {
-    matchedCustomer = customerByCode.get(po.customerCode.toUpperCase());
-  }
-  if (!matchedCustomer && po.customerName) {
-    matchedCustomer = customerByName.get(po.customerName.toUpperCase());
-  }
-  if (matchedCustomer) {
-    po.customerId = matchedCustomer.id;
-    if (!po.customerCode) po.customerCode = matchedCustomer.code;
-  } else {
-    po.customerId = null;
-    warnings.push({
-      field: "customerName",
-      value: po.customerName ?? "",
-      message: "Customer not in catalog — please match manually before creating SO.",
-    });
   }
 
   if (po.deliveryHub) {

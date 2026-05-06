@@ -32,6 +32,7 @@ type ClaudeExtractedItem = {
   specialNotes: string | null;
   unitPrice: number | null;
   transferredSO: string | null;
+  rawSpec: string | null;
 };
 
 type ClaudeExtractedPO = {
@@ -777,6 +778,7 @@ function PreviewStep({
         specialNotes: null,
         unitPrice: null,
         transferredSO: null,
+        rawSpec: null,
       };
       return { ...r, extracted: { ...r.extracted, items: [...r.extracted.items, blank] } };
     }));

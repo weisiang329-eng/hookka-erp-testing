@@ -1146,7 +1146,10 @@ export default function EditSalesOrderPage() {
                           // Source from kv_config.sofaSizes so anything the user
                           // adds in Product Maintenance is picked up. Fall back
                           // to the hardcoded list only when the config hasn't
-                          // hydrated yet.
+                          // hydrated yet. Normalize bare numerics to quoted
+                          // form ("24" → '24"') so the dropdown value matches
+                          // the SO's sizeLabel/seatHeight format — kv_config
+                          // is inconsistent (some entries quoted, some not).
                           const cfg = maintenanceConfig?.sofaSizes;
                           const arr = Array.isArray(cfg) && cfg.length > 0
                             ? cfg.map((v) =>
@@ -1155,7 +1158,11 @@ export default function EditSalesOrderPage() {
                                   : String(v),
                               )
                             : (SEAT_HEIGHT_OPTIONS as unknown as string[]);
-                          return arr.map(h => ({ value: h, label: h }));
+                          const normalized = arr.map((h) => {
+                            const t = h.trim();
+                            return /^\d+(\.\d+)?$/.test(t) ? `${t}"` : t;
+                          });
+                          return normalized.map(h => ({ value: h, label: h }));
                         })()}
                         placeholder="Select size..."
                         className="w-full rounded border border-[#E2DDD8] px-2 py-1.5 text-sm h-8"

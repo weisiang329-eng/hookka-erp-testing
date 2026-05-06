@@ -33,17 +33,25 @@ function readErrorMessage(v: unknown): string | null {
 
 // ============================================================
 // GRN FORM DIALOG (Transfer from PO)
+//
+// Exported so detail.tsx (3.2 — Receive Goods button on the PO detail page)
+// can mount the same dialog inline, scoped to the current PO via the optional
+// `lockedPoId` prop. When lockedPoId is set, the PO dropdown is hidden +
+// pre-selected, removing the "pick the PO from the list" friction step.
 // ============================================================
-function GRNFormDialog({
+export function GRNFormDialog({
   purchaseOrders,
   onSave,
   onClose,
+  lockedPoId,
 }: {
   purchaseOrders: PurchaseOrder[];
   onSave: (data: Record<string, unknown>) => void;
   onClose: () => void;
+  /** When provided, the PO selector is hidden and this PO is pre-selected. */
+  lockedPoId?: string;
 }) {
-  const [selectedPO, setSelectedPO] = useState("");
+  const [selectedPO, setSelectedPO] = useState(lockedPoId ?? "");
   const [receivedBy, setReceivedBy] = useState("");
   const [notes, setNotes] = useState("");
   const [itemEntries, setItemEntries] = useState<
@@ -114,17 +122,23 @@ function GRNFormDialog({
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Purchase Order *</label>
-              <select
-                className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
-                value={selectedPO}
-                onChange={(e) => setSelectedPO(e.target.value)}
-                required
-              >
-                <option value="">Select PO...</option>
-                {eligiblePOs.map((p) => (
-                  <option key={p.id} value={p.id}>{p.poNo} - {p.supplierName}</option>
-                ))}
-              </select>
+              {lockedPoId ? (
+                <div className="flex h-10 w-full items-center rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-[#374151]">
+                  {po ? `${po.poNo} - ${po.supplierName}` : "Loading PO…"}
+                </div>
+              ) : (
+                <select
+                  className="flex h-10 w-full rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6B5C32]"
+                  value={selectedPO}
+                  onChange={(e) => setSelectedPO(e.target.value)}
+                  required
+                >
+                  <option value="">Select PO...</option>
+                  {eligiblePOs.map((p) => (
+                    <option key={p.id} value={p.id}>{p.poNo} - {p.supplierName}</option>
+                  ))}
+                </select>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Received By *</label>

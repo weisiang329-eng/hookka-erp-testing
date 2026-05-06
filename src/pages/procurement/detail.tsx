@@ -20,8 +20,9 @@ import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
   CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle, Mail,
 } from "lucide-react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
+import { GRNFormDialog } from "@/pages/procurement/grn";
 
 // Status timeline steps
 const STATUS_STEPS = [
@@ -82,7 +83,6 @@ function poItemToEditLine(it: POItem): EditLine {
 
 export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
-  const navigate = useNavigate();
   const { toast } = useToast();
   const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
@@ -141,6 +141,36 @@ export default function PurchaseOrderDetailPage() {
 
   // ------- Email-PO state (3.1) -------
   const [emailing, setEmailing] = useState(false);
+
+  // ------- Inline GRN dialog state (3.2) -------
+  // Embeds the existing GRNFormDialog from grn.tsx scoped to this PO so
+  // the operator doesn't have to navigate to the standalone GRN page +
+  // pick the PO from a list. The handler mirrors the canonical
+  // handleCreateGRN in grn.tsx — POST /api/grn, invalidate caches.
+  const [showGrnDialog, setShowGrnDialog] = useState(false);
+  const handleInlineGrnCreate = async (payload: Record<string, unknown>) => {
+    try {
+      const res = await fetch("/api/grn", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to create GRN (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/grn");
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/raw-materials");
+      fetchPO();
+      toast.success("GRN created");
+      setShowGrnDialog(false);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error creating GRN");
+    }
+  };
 
   const resolveSupplierName = useCallback(
     (sid: string): string => {
@@ -469,10 +499,17 @@ export default function PurchaseOrderDetailPage() {
   } else if (po.status === "RECEIVED") {
     statusActions.push({ label: "Close PO", status: "CLOSED", variant: "outline" });
   }
-  // CTA to start a GRN scoped to this PO. Routes to the existing GRN
-  // page with a poId hint so the dialog opens pre-filtered.
+  // CTA to start a GRN scoped to this PO. 3.2 — opens the GRN form dialog
+  // inline (no navigation, current PO pre-selected) instead of routing to
+  // the standalone /procurement/grn page + the operator picking the PO.
   const showCreateGrnCta =
     !hasPostedGrn && ["CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status);
+  // 3.2 — Receive Goods button: visible on CONFIRMED / PARTIAL_RECEIVED so
+  // partial receiving works inline without a navigate. Composes with the
+  // backend gate from 2.3 — Mark Received only enables once a POSTED GRN
+  // exists, but you can post N partial GRNs before then via this dialog.
+  const canReceiveInline =
+    ["CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status);
 
   const totalOrdered = po.items.reduce((s, i) => s + i.quantity, 0);
   const totalReceived = po.items.reduce((s, i) => s + i.receivedQty, 0);
@@ -941,7 +978,7 @@ export default function PurchaseOrderDetailPage() {
       )}
 
       {/* Action Buttons */}
-      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason || showCreateGrnCta) && (
+      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason || showCreateGrnCta || canReceiveInline) && (
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
@@ -950,9 +987,17 @@ export default function PurchaseOrderDetailPage() {
                 {showCreateGrnCta && (
                   <Button
                     variant="primary"
-                    onClick={() => navigate(`/procurement/grn?poId=${po.id}`)}
+                    onClick={() => setShowGrnDialog(true)}
                   >
                     <Package className="h-4 w-4" /> Create GRN
+                  </Button>
+                )}
+                {!showCreateGrnCta && canReceiveInline && (
+                  <Button
+                    variant="outline"
+                    onClick={() => setShowGrnDialog(true)}
+                  >
+                    <Package className="h-4 w-4" /> Receive Goods
                   </Button>
                 )}
                 {statusActions.map((action) => (
@@ -1057,6 +1102,19 @@ export default function PurchaseOrderDetailPage() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 3.2 — Inline GRN dialog scoped to this PO. The exported dialog
+          from grn.tsx renders the same form the standalone GRN page uses,
+          but lockedPoId hides the PO selector and pre-selects this PO,
+          so the operator skips the "pick the PO from a list" step. */}
+      {showGrnDialog && (
+        <GRNFormDialog
+          purchaseOrders={[po]}
+          lockedPoId={po.id}
+          onSave={handleInlineGrnCreate}
+          onClose={() => setShowGrnDialog(false)}
+        />
       )}
 
       {/* Audit trail for this PO */}

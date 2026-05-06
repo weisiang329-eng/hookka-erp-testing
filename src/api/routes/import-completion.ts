@@ -9485,4 +9485,105 @@ app.post("/backfill-ocr-so-fields", async (c) => {
   });
 });
 
+// One-shot migration (2026-05): SOFA items with non-standard sizeLabel
+// (e.g. "12", "44", '24" x 37"', "24 X 24") get the size moved into the
+// specialOrder field and sizeLabel cleared. Lets us drop those values
+// from kv_config.sofaSizes without orphaning the source SOs. Standard
+// seat heights (24"/26"/28"/30"/32"/35") are untouched.
+app.post("/migrate-nonstandard-sofa-sizes", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  const orgId = getOrgId(c);
+
+  const STANDARD_SIZES = new Set([
+    '24"', '26"', '28"', '30"', '32"', '35"',
+    "24", "26", "28", "30", "32", "35",
+  ]);
+
+  const targets = await db
+    .prepare(
+      `SELECT soi.id, soi.salesOrderId, soi.lineNo, soi.productCode,
+              soi.sizeLabel, soi.sizeCode, soi.specialOrder
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE so.orgId = ?
+          AND soi.itemCategory = 'SOFA'
+          AND soi.sizeLabel IS NOT NULL
+          AND soi.sizeLabel <> ''`,
+    )
+    .bind(orgId)
+    .all<{
+      id: string;
+      salesOrderId: string;
+      lineNo: number;
+      productCode: string | null;
+      sizeLabel: string | null;
+      sizeCode: string | null;
+      specialOrder: string | null;
+    }>();
+
+  const migrated: Array<{
+    soId: string;
+    line: number;
+    code: string | null;
+    oldSize: string;
+    newSpecialOrder: string;
+  }> = [];
+
+  for (const r of targets.results ?? []) {
+    const sl = (r.sizeLabel ?? "").trim();
+    if (!sl) continue;
+    if (STANDARD_SIZES.has(sl)) continue;
+
+    // Build the spec token. Prefer the more descriptive sizeLabel form
+    // ("24" x 37"") over the bare sizeCode.
+    const token = `Custom Size ${sl}`;
+    const existing = (r.specialOrder ?? "").trim();
+    const tokens = existing
+      ? existing.split(",").map((s) => s.trim()).filter(Boolean)
+      : [];
+    if (!tokens.some((t) => t.toLowerCase() === token.toLowerCase())) {
+      tokens.push(token);
+    }
+    const newSpecialOrder = tokens.join(", ");
+
+    await db
+      .prepare(
+        `UPDATE sales_order_items
+            SET sizeLabel = '', sizeCode = '', specialOrder = ?
+          WHERE id = ?`,
+      )
+      .bind(newSpecialOrder, r.id)
+      .run();
+
+    // Cascade to production_orders snapshot (delivery_order_items +
+    // invoice_items don't carry specialOrder so skip those).
+    await db
+      .prepare(
+        `UPDATE production_orders
+            SET sizeLabel = '', sizeCode = ''
+          WHERE salesOrderId = ? AND lineNo = ?`,
+      )
+      .bind(r.salesOrderId, r.lineNo)
+      .run()
+      .catch(() => null);
+
+    migrated.push({
+      soId: r.salesOrderId,
+      line: r.lineNo,
+      code: r.productCode,
+      oldSize: sl,
+      newSpecialOrder,
+    });
+  }
+
+  return c.json({
+    success: true,
+    scanned: targets.results?.length ?? 0,
+    migrated: migrated.length,
+    items: migrated,
+  });
+});
+
 export default app;

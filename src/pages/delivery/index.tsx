@@ -592,9 +592,14 @@ export default function DeliveryPage() {
           };
 
           // Planning: POs still in production (upholstery not yet complete)
+          // Excludes CO-sourced POs — those route to the Consignment Note
+          // flow (parallel branch), not Delivery. Mirror of the same guard
+          // on the Pending Delivery filter below; bug surfaced 2026-05-06
+          // (CO POs were leaking into Delivery's Planning tab).
           const planning = allPOs
             .filter((po) => {
               if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
+              if (po.consignmentOrderId) return false;
               // Must have upholstery cards
               const uphCards = (po.jobCards || []).filter((j) => j.departmentCode === "UPHOLSTERY");
               if (uphCards.length === 0) return false;

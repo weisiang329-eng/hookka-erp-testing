@@ -204,7 +204,18 @@ app.put("/", async (c) => {
     return c.json({ success: false, error: "Body must be an object" }, 400);
   }
 
-  const today = todayIso();
+  // Honor an optional `effectiveFrom` so the planning Save flow can queue a
+  // future-dated change without having to call /schedule per row. Falls back
+  // to today (existing behavior) when the field is missing or malformed.
+  const effectiveFromRaw = (body as Record<string, unknown>).effectiveFrom;
+  const effectiveFromCandidate =
+    typeof effectiveFromRaw === "string" ? effectiveFromRaw : "";
+  const effectiveFrom = /^\d{4}-\d{2}-\d{2}$/.test(effectiveFromCandidate)
+    ? effectiveFromCandidate
+    : todayIso();
+  const notesRaw = (body as Record<string, unknown>).notes;
+  const notes =
+    typeof notesRaw === "string" && notesRaw.trim() ? notesRaw.trim() : null;
   const statements: D1PreparedStatement[] = [];
 
   for (const cat of CATEGORIES) {
@@ -220,12 +231,13 @@ app.put("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO production_lead_times_history
              (id, category, dept_code, days, effective_from, notes)
-           VALUES (?, ?, ?, ?, ?, NULL)
+           VALUES (?, ?, ?, ?, ?, ?)
            ON CONFLICT (category, dept_code, effective_from)
            DO UPDATE SET days = EXCLUDED.days,
+                         notes = EXCLUDED.notes,
                          created_at = (to_char(NOW() AT TIME ZONE 'UTC',
                            'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
-        ).bind(genLeadTimeRowId(), cat as Category, deptCode, days, today),
+        ).bind(genLeadTimeRowId(), cat as Category, deptCode, days, effectiveFrom, notes),
       );
     }
   }
@@ -242,12 +254,13 @@ app.put("/", async (c) => {
         c.var.DB.prepare(
           `INSERT INTO hookka_dd_buffer_history
              (id, category, days, effective_from, notes)
-           VALUES (?, ?, ?, ?, NULL)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT (category, effective_from)
            DO UPDATE SET days = EXCLUDED.days,
+                         notes = EXCLUDED.notes,
                          created_at = (to_char(NOW() AT TIME ZONE 'UTC',
                            'YYYY-MM-DD"T"HH24:MI:SS"Z"'))`,
-        ).bind(genHookkaBufferRowId(), cat as Category, days, today),
+        ).bind(genHookkaBufferRowId(), cat as Category, days, effectiveFrom, notes),
       );
     }
   }

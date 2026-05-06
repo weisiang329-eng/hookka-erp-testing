@@ -14,8 +14,9 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Loader2, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, Trash2, X } from "lucide-react";
 import { formatCurrency } from "@/lib/utils";
+import { OLD_SO_SAFE_BANNER } from "./MaintenanceConfigHistoryDialog";
 
 type SeatHeightTier = {
   height: string;
@@ -273,6 +274,10 @@ export function MasterPriceHistoryDialog({
             <h3 className="text-sm font-medium text-[#1F1D1B] mb-3">
               New scheduled change
             </h3>
+            <div className="flex items-start gap-2 rounded border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32] mb-3">
+              <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>{OLD_SO_SAFE_BANNER}</span>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">

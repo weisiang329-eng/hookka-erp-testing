@@ -13,11 +13,23 @@
 //
 // Companion modal `MaintenanceConfigSaveModal` collects effectiveFrom + notes
 // before POSTing /api/maintenance-config/changes.
+//
+// Also exports `EffectiveDateConfirmModal`, a generic effective-date +
+// notes confirmation dialog used by every catalog Save flow that wants the
+// "applies to new SOs only, old ones keep their snapshot" banner. The plain
+// banner copy lives in OLD_SO_SAFE_BANNER below so every modal uses the
+// exact same wording.
 // ---------------------------------------------------------------------------
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Loader2, Trash2, X } from "lucide-react";
+import { AlertTriangle, Loader2, Trash2, X } from "lucide-react";
+
+// Single source of truth for the "old SOs are unaffected" copy. Every
+// catalog Save modal renders this so the operator hears the same promise
+// in every workflow.
+export const OLD_SO_SAFE_BANNER =
+  "This change applies to NEW sales orders going forward. Existing SOs already saved keep their original prices and config — they are snapshotted at creation time.";
 
 export type MaintenanceHistoryRow = {
   id: string;
@@ -131,6 +143,10 @@ export function MaintenanceConfigSaveModal({
           </button>
         </div>
         <div className="px-6 py-4 space-y-3">
+          <div className="flex items-start gap-2 rounded border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
+            <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+            <span>{OLD_SO_SAFE_BANNER}</span>
+          </div>
           <p className="text-xs text-[#6B7280]">
             Choose when this snapshot becomes the live config. Today is the
             usual choice; future-dating queues a pending change.
@@ -168,6 +184,168 @@ export function MaintenanceConfigSaveModal({
           <Button variant="primary" onClick={handleSubmit} disabled={saving}>
             {saving && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
             Save
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// EffectiveDateConfirmModal — generic confirm-and-collect modal for any
+// catalog Save flow that needs effectiveFrom + notes plus the standard
+// "old SOs are unaffected" banner. The host owns the actual save call:
+// onConfirm receives { effectiveFrom, notes } and resolves on success.
+// Errors thrown from onConfirm bubble back into errorMsg in the modal.
+//
+// `irreversible` swaps the banner for a red "this can't be effective-dated"
+// warning — used by flows where the backend mutates a shared field directly
+// but old SOs are protected by an in-line snapshot at SO creation (e.g.
+// fabric tier on fabric_tracking).
+// ---------------------------------------------------------------------------
+export function EffectiveDateConfirmModal({
+  open,
+  title,
+  summary,
+  ctaLabel = "Save",
+  defaultEffectiveFrom,
+  notesPlaceholder,
+  irreversible = false,
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  summary?: string;
+  ctaLabel?: string;
+  defaultEffectiveFrom?: string;
+  notesPlaceholder?: string;
+  irreversible?: boolean;
+  onClose: () => void;
+  onConfirm: (args: { effectiveFrom: string; notes: string }) => Promise<void> | void;
+}) {
+  const [effectiveFrom, setEffectiveFrom] = useState(
+    defaultEffectiveFrom ?? todayIso(),
+  );
+  const [notes, setNotes] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+
+  /* eslint-disable react-hooks/set-state-in-effect -- one-shot reset of modal form fields when it opens */
+  useEffect(() => {
+    if (!open) return;
+    setEffectiveFrom(defaultEffectiveFrom ?? todayIso());
+    setNotes("");
+    setErrorMsg("");
+  }, [open, defaultEffectiveFrom]);
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !saving) onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose, saving]);
+
+  if (!open) return null;
+
+  async function handleSubmit() {
+    if (!irreversible) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom)) {
+        setErrorMsg("Effective From date is required (YYYY-MM-DD).");
+        return;
+      }
+    }
+    setSaving(true);
+    setErrorMsg("");
+    try {
+      await onConfirm({ effectiveFrom, notes });
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : "Save failed");
+      setSaving(false);
+      return;
+    }
+    setSaving(false);
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+      onClick={() => !saving && onClose()}
+    >
+      <div
+        className="bg-white rounded-lg shadow-xl flex flex-col w-[90vw] max-w-md mx-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <h2 className="text-lg font-semibold text-[#1F1D1B]">{title}</h2>
+          <button
+            onClick={() => !saving && onClose()}
+            className="p-1 rounded hover:bg-[#E2DDD8]"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="px-6 py-4 space-y-3">
+          {irreversible ? (
+            <div className="flex items-start gap-2 rounded border border-[#E8B2A1] bg-[#FBE0DC] px-3 py-2 text-xs text-[#9A3A2D]">
+              <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>
+                This change is applied immediately and is not effective-dated.
+                Existing sales orders are unaffected because their values were
+                snapshotted at creation time, but the catalog itself flips to
+                the new value right away.
+              </span>
+            </div>
+          ) : (
+            <div className="flex items-start gap-2 rounded border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
+              <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>{OLD_SO_SAFE_BANNER}</span>
+            </div>
+          )}
+          {summary && (
+            <p className="text-xs text-[#6B7280]">{summary}</p>
+          )}
+          {!irreversible && (
+            <div>
+              <label className="block text-xs text-[#6B7280] mb-1">
+                Effective from *
+              </label>
+              <Input
+                type="date"
+                value={effectiveFrom}
+                onChange={(e) => setEffectiveFrom(e.target.value)}
+                className="h-8"
+              />
+              <p className="text-[10px] text-[#9CA3AF] mt-1">
+                Today applies the change immediately. A future date queues
+                it as Pending until that day.
+              </p>
+            </div>
+          )}
+          <div>
+            <label className="block text-xs text-[#6B7280] mb-1">
+              Notes (optional)
+            </label>
+            <Input
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder={notesPlaceholder ?? "e.g. Q3 contract update"}
+              className="h-8"
+            />
+          </div>
+          {errorMsg && <p className="text-xs text-[#9A3A2D]">{errorMsg}</p>}
+        </div>
+        <div className="flex justify-end gap-2 px-6 py-4 border-t border-[#E2DDD8]">
+          <Button variant="outline" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button variant="primary" onClick={handleSubmit} disabled={saving}>
+            {saving && <Loader2 className="h-4 w-4 mr-1 animate-spin" />}
+            {ctaLabel}
           </Button>
         </div>
       </div>

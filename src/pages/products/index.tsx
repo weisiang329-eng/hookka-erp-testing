@@ -9,6 +9,7 @@ import { mutationWithData } from "@/lib/schemas/common";
 import { ProductSchema } from "@/lib/schemas/product";
 import { MasterPriceHistoryDialog } from "./MasterPriceHistoryDialog";
 import {
+  EffectiveDateConfirmModal,
   MaintenanceConfigHistoryDialog,
   MaintenanceConfigSaveModal,
   type MaintenanceHistoryRow,
@@ -867,6 +868,17 @@ function MaintenanceView() {
   const [fabricsList, setFabricsList] = useState<FabricTrackingItem[]>([]);
   const [fabricsLoading, setFabricsLoading] = useState(false);
   const [fabricSearch, setFabricSearch] = useState("");
+  // Pending fabric-tier change captured before we PUT to /api/fabric-tracking.
+  // The confirm modal explains the catalog flips immediately but every existing
+  // sales-order line item carries a snapshot of basePriceSen, so old SOs are
+  // unaffected. Cleared after the confirm callback resolves.
+  const [pendingFabricTierChange, setPendingFabricTierChange] = useState<{
+    id: string;
+    code: string;
+    description: string;
+    fromTier: string;
+    toTier: "PRICE_1" | "PRICE_2";
+  } | null>(null);
 
   // Effective-dated history workflow. The legacy kv_config('variants-config')
   // write path is still triggered inside the save flow when the new snapshot
@@ -1140,6 +1152,44 @@ function MaintenanceView() {
         />
       )}
 
+      {/* Fabric tier change is a direct PUT to /api/fabric-tracking — there
+          is no effective-dated history table for it (every sales-order line
+          item already snapshots its own basePriceSen / fabricCode at SO
+          creation, so old SOs are protected without a history layer).
+          Operator confirms the irreversible flip in the modal first. */}
+      <EffectiveDateConfirmModal
+        open={pendingFabricTierChange !== null}
+        title="Change fabric price tier"
+        summary={
+          pendingFabricTierChange
+            ? `${pendingFabricTierChange.code} — ${pendingFabricTierChange.description}: ${pendingFabricTierChange.fromTier} -> ${pendingFabricTierChange.toTier}.`
+            : ""
+        }
+        ctaLabel="Confirm tier change"
+        notesPlaceholder="e.g. supplier reclassification"
+        irreversible
+        onClose={() => setPendingFabricTierChange(null)}
+        onConfirm={async () => {
+          if (!pendingFabricTierChange) return;
+          const { id, toTier } = pendingFabricTierChange;
+          const res = await fetch(`/api/fabric-tracking/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ priceTier: toTier }),
+          });
+          if (!res.ok) {
+            throw new Error(`Failed to update fabric tier (HTTP ${res.status})`);
+          }
+          invalidateCachePrefix("/api/fabric-tracking");
+          invalidateCachePrefix("/api/raw-materials");
+          setFabricsList((prev) =>
+            prev.map((fb) => (fb.id === id ? { ...fb, priceTier: toTier } : fb)),
+          );
+          setPendingFabricTierChange(null);
+          showToast("Fabric updated");
+        }}
+      />
+
       {/* Tabs + Content */}
       <div className="bg-white rounded-lg border border-[#E2DDD8] overflow-hidden">
         <div className="flex border-b border-[#E2DDD8] bg-[#FAF9F7] overflow-x-auto items-end">
@@ -1226,23 +1276,20 @@ function MaintenanceView() {
                           <td className="px-3 py-2 text-center">
                             <select
                               value={f.priceTier || "PRICE_2"}
-                              onChange={async (e) => {
+                              onChange={(e) => {
                                 const tier = e.target.value as "PRICE_1" | "PRICE_2";
-                                try {
-                                  const res = await fetch(`/api/fabric-tracking/${f.id}`, {
-                                    method: "PUT",
-                                    headers: { "Content-Type": "application/json" },
-                                    body: JSON.stringify({ priceTier: tier }),
-                                  });
-                                  if (res.ok) {
-                                    invalidateCachePrefix("/api/fabric-tracking");
-                                    invalidateCachePrefix("/api/raw-materials");
-                                    setFabricsList((prev) =>
-                                      prev.map((fb) => (fb.id === f.id ? { ...fb, priceTier: tier } : fb))
-                                    );
-                                    showToast("Fabric updated");
-                                  }
-                                } catch { /* ignore */ }
+                                if (tier === (f.priceTier || "PRICE_2")) return;
+                                // Stage the change behind the confirm modal —
+                                // the actual PUT runs once the operator OKs the
+                                // "old SOs already snapshotted, catalog flips
+                                // immediately" warning.
+                                setPendingFabricTierChange({
+                                  id: f.id,
+                                  code: f.fabricCode,
+                                  description: f.fabricDescription,
+                                  fromTier: f.priceTier || "PRICE_2",
+                                  toTier: tier,
+                                });
                               }}
                               className={`text-xs font-semibold px-2 py-1 rounded border cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/40 ${
                                 f.priceTier === "PRICE_1"

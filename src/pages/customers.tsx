@@ -32,12 +32,14 @@ import {
   ChevronDown,
   ChevronRight,
   History,
+  AlertTriangle,
   // Pencil already imported above for SKU edit. Used here as the Edit-mode
   // toggle icon on the customer Maintenance panel.
 } from "lucide-react";
 import {
   MaintenanceConfigHistoryDialog,
   MaintenanceConfigSaveModal,
+  OLD_SO_SAFE_BANNER,
   type MaintenanceHistoryRow,
 } from "./products/MaintenanceConfigHistoryDialog";
 import {
@@ -1098,6 +1100,10 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
               </p>
             </div>
             <div className="px-6 py-4 space-y-4">
+              <div className="flex items-start gap-2 rounded border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
+                <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+                <span>{OLD_SO_SAFE_BANNER}</span>
+              </div>
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">Effective from *</label>
                 <input

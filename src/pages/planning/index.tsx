@@ -22,6 +22,7 @@ import {
   Calendar,
 } from "lucide-react";
 import { LeadTimeHistoryDialog } from "./LeadTimeHistoryDialog";
+import { EffectiveDateConfirmModal } from "../products/MaintenanceConfigHistoryDialog";
 
 // ── Types matching mock-data ──
 
@@ -300,6 +301,7 @@ export default function PlanningPage() {
   });
   const [ltSaving, setLtSaving] = useState(false);
   const [ltSavedAt, setLtSavedAt] = useState<string | null>(null);
+  const [showLtSaveModal, setShowLtSaveModal] = useState(false);
   const [recalcRunning, setRecalcRunning] = useState(false);
   const [recalcResult, setRecalcResult] = useState<string | null>(null);
   // History dialog (scheduled future-dated changes). Mirrors the products
@@ -363,13 +365,18 @@ export default function PlanningPage() {
     }));
   };
 
-  const saveLeadTimes = async () => {
+  const persistLeadTimes = async (effectiveFrom: string, notes: string) => {
     setLtSaving(true);
     try {
       await fetch("/api/production/leadtimes", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...leadTimes, hookkaDDBuffer }),
+        body: JSON.stringify({
+          ...leadTimes,
+          hookkaDDBuffer,
+          effectiveFrom,
+          notes: notes || null,
+        }),
       });
       invalidateCachePrefix("/api/production/leadtimes");
       refreshLeadTimes();
@@ -1163,7 +1170,7 @@ export default function PlanningPage() {
                     )}
                   </Button>
                   <Button
-                    onClick={saveLeadTimes}
+                    onClick={() => setShowLtSaveModal(true)}
                     disabled={ltSaving || recalcRunning}
                     className="bg-[#6B5C32] text-white hover:bg-[#5a4d29]"
                   >
@@ -1289,6 +1296,25 @@ export default function PlanningPage() {
           // table picks up new effective values + the pending badge updates.
           invalidateCachePrefix("/api/production/leadtimes");
           refreshLeadTimes();
+        }}
+      />
+
+      {/* Effective-date confirmation for the inline Save Lead Times button.
+          The PUT /api/production/leadtimes endpoint accepts an optional
+          effectiveFrom (defaults to today) so the operator can either save
+          immediately or queue a future-dated change without leaving this
+          screen. The "Recalculate Existing POs" action remains separate
+          and explicitly opt-in for orders mid-production. */}
+      <EffectiveDateConfirmModal
+        open={showLtSaveModal}
+        title="Save lead times"
+        summary="New SO confirms after this date use the saved lead times. Existing POs keep their job-card dueDates unless you click Recalculate Existing POs."
+        ctaLabel="Save Lead Times"
+        notesPlaceholder="e.g. Q3 plant capacity update"
+        onClose={() => setShowLtSaveModal(false)}
+        onConfirm={async ({ effectiveFrom, notes }) => {
+          await persistLeadTimes(effectiveFrom, notes);
+          setShowLtSaveModal(false);
         }}
       />
     </div>

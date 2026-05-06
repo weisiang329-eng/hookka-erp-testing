@@ -22,12 +22,13 @@ import { Input } from "@/components/ui/input";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
 import { asArray } from "@/lib/safe-json";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import { Loader2, Plus, Trash2, X, Tag, Layers, History, Pencil } from "lucide-react";
+import { AlertTriangle, Loader2, Plus, Trash2, X, Tag, Layers, History, Pencil } from "lucide-react";
 import type { Product, Customer } from "@/types";
 import {
   SofaComboHistoryDialog,
   type SofaComboHistoryRule,
 } from "./SofaComboHistoryDialog";
+import { OLD_SO_SAFE_BANNER } from "../products/MaintenanceConfigHistoryDialog";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1258,6 +1259,10 @@ function CreateComboDialog({
             </div>
 
             {/* Effective from + notes */}
+            <div className="flex items-start gap-2 rounded border border-[#E8D597] bg-[#FAEFCB] px-3 py-2 text-xs text-[#6B5C32]">
+              <AlertTriangle className="h-4 w-4 mt-0.5 flex-shrink-0" />
+              <span>{OLD_SO_SAFE_BANNER}</span>
+            </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-medium text-[#374151] mb-1">

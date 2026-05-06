@@ -42,6 +42,7 @@ type ClaudeExtractedPO = {
   customerId: string | null;
   customerState: string | null;
   deliveryHub: string | null;
+  deliveryHubId: string | null;
   yourRefNo: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
@@ -82,7 +83,12 @@ type ClaudeScanRow = {
 // Slim catalog payload from GET /api/scan-po/catalog. Drives inline-edit
 // dropdowns so the operator picks from maintenance values, not free text.
 type ScanCatalog = {
-  customers: { id: string; code: string; name: string; hubs: string[] }[];
+  customers: {
+    id: string;
+    code: string;
+    name: string;
+    hubs: { id: string; shortName: string; state: string | null }[];
+  }[];
   bedframes: string[];
   sofas: string[];
   accessories: string[];
@@ -392,10 +398,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
         }
 
         // Hub resolution priority:
-        //   1. PDF-extracted "Purchase Location" (po.deliveryHub) — most accurate.
+        //   1. po.deliveryHubId — server-resolved match against the
+        //      customer's hubs (or operator's dropdown selection).
         //   2. Heuristic from customer name + state — legacy fallback.
         const hub = mapDeliveryHub(po.customerName, po.customerState ?? "");
-        const resolvedHubId = po.deliveryHub || hub.hubId;
+        const resolvedHubId = po.deliveryHubId || hub.hubId;
 
         const soItems = po.items.map((item, idx) => ({
           lineNo: idx + 1,
@@ -963,9 +970,44 @@ function ClaudePOCard({
               {po.isUrgent && (
                 <Badge className="bg-red-100 text-red-800 border-red-200">URGENT</Badge>
               )}
-              {po.deliveryHub && (
-                <Badge className="border border-[#D1D5DB]">{po.deliveryHub}</Badge>
-              )}
+              {/* Delivery Hub dropdown — bound to the matched customer's
+                  hubs from the catalog. Operator can override OCR's pick.
+                  Falls back to a free-text input only if catalog is null
+                  or customer didn't match (no hubs to choose from). */}
+              {(() => {
+                const matchedCust = catalog?.customers.find(
+                  (c) => c.id === po.customerId,
+                );
+                const hubs = matchedCust?.hubs ?? [];
+                if (hubs.length === 0) {
+                  return po.deliveryHub ? (
+                    <Badge className="border border-[#D1D5DB]">
+                      {po.deliveryHub}
+                    </Badge>
+                  ) : null;
+                }
+                return (
+                  <select
+                    className="text-xs px-2 py-0.5 rounded border border-[#D1D5DB] bg-white hover:border-[#9CA3AF]"
+                    value={po.deliveryHubId ?? ""}
+                    onChange={(e) => {
+                      const id = e.target.value || null;
+                      const matched = hubs.find((h) => h.id === id);
+                      onUpdate({
+                        deliveryHubId: id,
+                        deliveryHub: matched?.shortName ?? null,
+                      });
+                    }}
+                  >
+                    <option value="">— Hub —</option>
+                    {hubs.map((h) => (
+                      <option key={h.id} value={h.id}>
+                        {h.shortName}
+                      </option>
+                    ))}
+                  </select>
+                );
+              })()}
               {po.yourRefNo && (
                 <span className="text-[#9CA3AF]">Ref: {po.yourRefNo}</span>
               )}
@@ -1092,7 +1134,7 @@ function ClaudePOCard({
                               type="number"
                               step="0.5"
                               onFocus={(e) => e.currentTarget.select()}
-                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                               value={item.divanHeightInches ?? ""}
                               onChange={(e) => {
                                 const v = e.target.value === "" ? null : Number(e.target.value);
@@ -1105,39 +1147,30 @@ function ClaudePOCard({
                             </datalist>
                           </td>
                           <td className="px-1.5 py-1 text-center">
-                            <div className="flex items-center justify-center gap-1">
-                              <input
-                                list={`leg-${row.sampleId}-${i}`}
-                                type="number"
-                                step="0.5"
-                                onFocus={(e) => e.currentTarget.select()}
-                                className="w-10 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center disabled:opacity-50"
-                                value={item.noLeg ? "" : (item.legHeightInches ?? "")}
-                                onChange={(e) => {
-                                  const v = e.target.value === "" ? null : Number(e.target.value);
-                                  onUpdateItem(i, { legHeightInches: v, noLeg: false });
-                                }}
-                                disabled={item.noLeg || item.category === "ACCESSORY"}
-                              />
-                              <datalist id={`leg-${row.sampleId}-${i}`}>
-                                {legValues.map((v) => <option key={v} value={v} />)}
-                              </datalist>
-                              <label
-                                className="text-[10px] text-[#6B7280] cursor-pointer"
-                                title="No leg"
-                              >
-                                <input
-                                  type="checkbox"
-                                  className="mr-0.5 align-middle"
-                                  checked={item.noLeg}
-                                  onChange={(e) => onUpdateItem(i, {
-                                    noLeg: e.target.checked,
-                                    legHeightInches: e.target.checked ? null : item.legHeightInches,
-                                  })}
-                                />
-                                NL
-                              </label>
-                            </div>
+                            {/* Single dropdown matches the Maintenance leg-height
+                                pattern: "No Leg" + numeric options. The current
+                                value renders as either "No Leg" or e.g. '4"'. */}
+                            <select
+                              className="w-20 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent disabled:opacity-50"
+                              value={item.noLeg ? "__NOLEG__" : (item.legHeightInches != null ? String(item.legHeightInches) : "")}
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                if (v === "__NOLEG__") {
+                                  onUpdateItem(i, { noLeg: true, legHeightInches: null });
+                                } else if (v === "") {
+                                  onUpdateItem(i, { noLeg: false, legHeightInches: null });
+                                } else {
+                                  onUpdateItem(i, { noLeg: false, legHeightInches: Number(v) });
+                                }
+                              }}
+                              disabled={item.category === "ACCESSORY"}
+                            >
+                              <option value="">—</option>
+                              <option value="__NOLEG__">No Leg</option>
+                              {legValues.map((v) => (
+                                <option key={v} value={v}>{`${v}"`}</option>
+                              ))}
+                            </select>
                           </td>
                           <td className="px-1.5 py-1 text-center">
                             <input
@@ -1145,7 +1178,7 @@ function ClaudePOCard({
                               type="number"
                               step="0.5"
                               onFocus={(e) => e.currentTarget.select()}
-                              className="w-12 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center"
+                              className="w-16 px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded text-center [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                               value={item.gapInches ?? ""}
                               onChange={(e) => {
                                 const v = e.target.value === "" ? null : Number(e.target.value);

@@ -86,7 +86,7 @@ type CatalogCustomer = {
   id: string;
   code: string;
   name: string;
-  hubs: { shortName: string; state: string | null }[];
+  hubs: { id: string; shortName: string; state: string | null }[];
 };
 type CatalogProduct = { code: string; name: string; sizeLabel: string | null };
 type CatalogFabric = {
@@ -130,10 +130,10 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
       .all<{ id: string; code: string; name: string }>(),
     db
       .prepare(
-        "SELECT customerId, shortName, state FROM delivery_hubs WHERE orgId = ?",
+        "SELECT id, customerId, shortName, state FROM delivery_hubs WHERE orgId = ?",
       )
       .bind(orgId)
-      .all<{ customerId: string; shortName: string; state: string | null }>(),
+      .all<{ id: string; customerId: string; shortName: string; state: string | null }>(),
     db
       .prepare(
         "SELECT code, name, category, sizeLabel FROM products WHERE orgId = ? AND status = 'ACTIVE' ORDER BY category, code",
@@ -152,10 +152,10 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
       .first<{ value: string }>(),
   ]);
 
-  const hubsByCust = new Map<string, { shortName: string; state: string | null }[]>();
+  const hubsByCust = new Map<string, { id: string; shortName: string; state: string | null }[]>();
   for (const h of hubRes.results ?? []) {
     const list = hubsByCust.get(h.customerId) ?? [];
-    list.push({ shortName: h.shortName, state: h.state });
+    list.push({ id: h.id, shortName: h.shortName, state: h.state });
     hubsByCust.set(h.customerId, list);
   }
 
@@ -458,6 +458,10 @@ type ExtractedPO = {
   customerId: string | null;
   customerState: string | null;
   deliveryHub: string | null;
+  // Server-resolved hub ID — set by validateAndEnrichPO when deliveryHub
+  // matches one of the customer's hubs. Used as the actual foreign key
+  // in the SO create body. Frontend can also set this from the dropdown.
+  deliveryHubId: string | null;
   yourRefNo: string | null;
   deliveryDate: string | null;
   isUrgent: boolean;
@@ -615,7 +619,14 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
     });
     if (candidate) {
       po.deliveryHub = candidate.shortName;
+      po.deliveryHubId = candidate.id;
     }
+  }
+  // Fallback: if Claude didn't extract a hub but the customer has a single
+  // default hub, leave po.deliveryHub null but pass nothing — operator
+  // will pick from the dropdown explicitly.
+  if (!po.deliveryHubId && po.deliveryHub == null) {
+    po.deliveryHubId = null;
   }
   for (const item of po.items) {
     // Regex re-parse the spec line to overrule any Claude truncation
@@ -697,7 +708,10 @@ app.get("/catalog", async (c) => {
         id: c.id,
         code: c.code,
         name: c.name,
-        hubs: c.hubs.map((h) => h.shortName),
+        // Hubs as objects { id, shortName, state } so the modal can populate
+        // a real dropdown bound to the matched customer's hubs and pass
+        // the actual hub ID into the SO create body (not the shortName).
+        hubs: c.hubs.map((h) => ({ id: h.id, shortName: h.shortName, state: h.state })),
       })),
       bedframes: catalog.bedframes.map((p) => p.code),
       sofas: catalog.sofas.map((p) => p.code),

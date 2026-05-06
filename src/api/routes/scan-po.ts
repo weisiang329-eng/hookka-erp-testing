@@ -275,7 +275,7 @@ EXTRACTION RULES
 5. yourRefNo = "Your Ref No." field value.
 6. transferredSO = "Transferred SO" column on each line item (may be null).
 7. deliveryHub = "Purchase Location" or hub shortName (KL/PG/JB/...). Match against the customer's hubs in CUSTOMERS catalog.
-8. deliveryDate = "Delivery Date" field as YYYY-MM-DD. CRITICAL — hand-written corrections override printed dates: when the printed date has a strikethrough line through it AND a hand-written date appears nearby (often in red ink, sometimes also written in the Purchase Location field or beside the line items), USE THE HAND-WRITTEN DATE. Example: printed "2026/06/27" with red diagonal strike + hand-written "27.05.2026" beside it → deliveryDate = "2026-05-27". Hand-written DD.MM.YYYY format converts to YYYY-MM-DD.
+8. deliveryDate = "Delivery Date" field as YYYY-MM-DD. CRITICAL — strikethrough means INVALIDATED: when the printed date has a strikethrough/crossout line through it, that date is no longer valid. Look elsewhere on the same page for the replacement date — anywhere it appears (handwritten, in red, beside line items, in the Purchase Location field, near the signature, etc.). Whatever you find is the real deliveryDate. Same rule applies to per-line item dates in the "Transferred SO" column. DD.MM.YYYY / DD/MM/YYYY format converts to YYYY-MM-DD.
 9. isUrgent = true when PDF shows "URGENT", "SUPER URGENT", or similar emphasis (often red).
 10. pageNumbers = 1-indexed list of source PDF pages this PO occupies. Most POs span exactly one page (e.g. [3]); a multi-page PO lists every page (e.g. [4, 5]). Used to attach the original page image to the SO for customer disputes — accuracy here matters.
 

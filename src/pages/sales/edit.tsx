@@ -841,6 +841,7 @@ export default function EditSalesOrderPage() {
                           <option value="">Select...</option>
                           <option value="BEDFRAME">Bedframe</option>
                           <option value="SOFA">Sofa</option>
+                          <option value="ACCESSORY">Accessory</option>
                         </select>
                       </div>
 

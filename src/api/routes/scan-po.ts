@@ -466,29 +466,54 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   MIRROR-PAIR LOGIC (CRITICAL):
     LHF and RHF are MIRRORS of each other. In a sofa containing two armed pieces, ALWAYS output one LHF + one RHF — NEVER two of the same side.
 
-  ★★★ LHF / RHF VIEWPOINT CONVENTION — READ TWICE, GET IT RIGHT ★★★
+  ★★★ LHF / RHF VIEWPOINT CONVENTION — DEPENDS ON TV POSITION ★★★
 
-  ⚠ COMMON MISTAKE: most LLMs default to "leftmost piece = LHF" because that's
-  the natural reading of left-to-right text. THIS IS WRONG FOR HOOKKA. If your
-  first instinct says "the leftmost box is LHF", FLIP IT — Hookka's convention
-  is the OPPOSITE.
+  Hookka's LHF / RHF designation is from the perspective of someone STANDING
+  WHERE THE TV IS, FACING the sofa. The mapping from diagram-positions to
+  LHF / RHF therefore DEPENDS on where the TV is drawn in the diagram. There
+  is NO universal "flip everything" rule — you must locate the TV first.
 
-  WHY: Hookka's LHF / RHF designation is from the perspective of someone
-  STANDING AT THE TV looking AT the sofa (i.e. someone in front of the sofa,
-  facing it). This perspective REVERSES the diagram's left-right ordering,
-  because the diagram is drawn as a floor-plan view from above with the TV
-  typically at the top.
+  STEP 1: Locate the TV / facing reference in the diagram.
+    Look for a small box labelled "TV" or for written cues like
+    "TV here", "facing TV", or arrow markers showing "this side faces TV".
+    The TV is the FRONT of the room — the viewer stands here and looks AT
+    the sofa.
 
-  THE RULE (memorise this — it is not optional):
-    • The piece that appears LEFTMOST in the diagram → ASSIGN (RHF).
-    • The piece that appears RIGHTMOST in the diagram → ASSIGN (LHF).
-    • Inner / sandwiched pieces stay NA (no side suffix).
+  STEP 2: Determine the viewer's left/right based on TV position.
 
-  MNEMONIC: "DIAGRAM-LEFT = RHF, DIAGRAM-RIGHT = LHF" — letters are SWAPPED.
+    TV at the TOP of the diagram (most common): viewer faces DOWN.
+      → diagram-LEFT becomes viewer's RIGHT (RHF)
+      → diagram-RIGHT becomes viewer's LEFT (LHF)
+      Letters are swapped — diagram L/R reverses.
 
-  Self-check before you output: re-read the diagram. Did you assign LHF to
-  the LEFT piece? If yes, you have it BACKWARDS — flip both items. The
-  rightmost piece in the diagram MUST end up as LHF.
+    TV at the BOTTOM of the diagram: viewer faces UP.
+      → diagram-LEFT becomes viewer's LEFT (LHF)
+      → diagram-RIGHT becomes viewer's RIGHT (RHF)
+      No swap — natural reading.
+
+    TV on the LEFT side of the diagram: viewer faces RIGHT (rotate 90°).
+      → top of diagram → viewer's LEFT (LHF)
+      → bottom of diagram → viewer's RIGHT (RHF)
+
+    TV on the RIGHT side of the diagram: viewer faces LEFT.
+      → top of diagram → viewer's RIGHT (RHF)
+      → bottom of diagram → viewer's LEFT (LHF)
+
+  STEP 3: Verify using the L-shape's backrest direction.
+    The backrest of an L-piece is drawn as a short line along the FRONT of
+    the seat (the side nearest the TV). The L-extension (chaise leg)
+    sticks out to one side. If the L-extension is on the viewer's LEFT
+    when standing at the TV, it is L(LHF). If on the viewer's RIGHT, it
+    is L(RHF). This should agree with what STEP 2 told you — if it
+    doesn't, re-check the TV position.
+
+  STEP 4: When the diagram has NO TV marker AND no other facing cue:
+    Default to "TV at top" (the most common Hookka convention). Set
+    specialNotes to "TV position not marked — default front-facing assumed,
+    operator to verify L/R" so the operator knows to double-check.
+
+  CRITICAL: Inner / sandwiched pieces always stay NA (no LHF / RHF suffix)
+  regardless of viewpoint, because they have no arms.
 
   Worked example A — PO/2605-003 (TV at top of diagram):
     Diagram shows (left → right):  [ 28" 28" joined ] + [ 28" with L-flap ]

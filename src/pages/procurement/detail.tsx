@@ -18,7 +18,7 @@ import type {
 } from "@/types";
 import {
   ArrowLeft, Download, Printer, ChevronRight, Package, FileText,
-  CheckCircle, Send, Lock, Pencil, Save, X, Trash2,
+  CheckCircle, Send, Lock, Pencil, Save, X, Trash2, AlertTriangle,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { useParams } from "react-router-dom";
@@ -116,6 +116,11 @@ export default function PurchaseOrderDetailPage() {
   const [editLines, setEditLines] = useState<EditLine[]>([]);
   const [rmSearch, setRmSearch] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // ------- Cancel-PO modal state (2.2) -------
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelling, setCancelling] = useState(false);
 
   const resolveSupplierName = useCallback(
     (sid: string): string => {
@@ -298,6 +303,46 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
+  // 2.2 — Cancel PO with reason. Append "[CANCELLED YYYY-MM-DD: <reason>]"
+  // to existing notes so the cancellation reason is preserved alongside
+  // any free-form notes the operator already wrote. Backend's
+  // VALID_TRANSITIONS already allows CANCELLED from SUBMITTED / CONFIRMED /
+  // PARTIAL_RECEIVED (purchase-orders.ts:57) — no schema change needed.
+  const submitCancel = async () => {
+    if (!po) return;
+    const reason = cancelReason.trim();
+    if (reason.length < 10) {
+      toast.error("Reason must be at least 10 characters");
+      return;
+    }
+    setCancelling(true);
+    try {
+      const today = new Date().toISOString().split("T")[0];
+      const annotation = `[CANCELLED ${today}: ${reason}]`;
+      const newNotes = po.notes ? `${po.notes}\n${annotation}` : annotation;
+      const res = await fetch(`/api/purchase-orders/${po.id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: "CANCELLED", notes: newNotes }),
+      });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to cancel (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grns");
+      fetchPO();
+      toast.success("Purchase order cancelled");
+      setShowCancelModal(false);
+      setCancelReason("");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error cancelling PO");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -324,6 +369,10 @@ export default function PurchaseOrderDetailPage() {
   const currentStepIdx = getStepIndex(po.status);
   const isCancelled = po.status === "CANCELLED";
   const isDraft = po.status === "DRAFT";
+  // 2.2 — Cancel-with-reason gate: SUBMITTED / CONFIRMED / PARTIAL_RECEIVED.
+  // DRAFT keeps its existing one-click Cancel (no reason needed for a PO
+  // that never left the office). RECEIVED / CLOSED / CANCELLED are terminal.
+  const canCancelWithReason = ["SUBMITTED", "CONFIRMED", "PARTIAL_RECEIVED"].includes(po.status);
 
   // Determine available status advancement actions
   const statusActions: { label: string; status: string; variant: "primary" | "outline" }[] = [];
@@ -790,12 +839,12 @@ export default function PurchaseOrderDetailPage() {
       )}
 
       {/* Action Buttons */}
-      {!isCancelled && !editing && statusActions.length > 0 && (
+      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason) && (
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
               <p className="text-xs text-[#6B7280]">Advance this Purchase Order to the next status:</p>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
                 {statusActions.map((action) => (
                   <Button
                     key={action.status}
@@ -814,10 +863,90 @@ export default function PurchaseOrderDetailPage() {
                     Cancel PO
                   </Button>
                 )}
+                {canCancelWithReason && (
+                  <Button
+                    variant="outline"
+                    className="text-red-600 border-red-200 hover:bg-red-50"
+                    onClick={() => setShowCancelModal(true)}
+                  >
+                    Cancel PO
+                  </Button>
+                )}
               </div>
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Cancel-with-reason modal (2.2). Min 10 chars on the reason
+          textarea so we don't end up with single-character "x" justifications.
+          PARTIAL_RECEIVED gets a callout that posted GRNs stay committed. */}
+      {showCancelModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md">
+            <div className="flex items-center justify-between p-5 border-b border-[#E2DDD8]">
+              <div>
+                <h2 className="text-lg font-semibold text-[#1F1D1B]">Cancel Purchase Order</h2>
+                <p className="text-xs text-[#6B7280] mt-0.5">{po.poNo}</p>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setShowCancelModal(false)}
+                disabled={cancelling}
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            <div className="p-5 space-y-3">
+              <div>
+                <label className="block text-sm font-medium text-[#374151] mb-1">
+                  Reason for cancellation <span className="text-[#9A3A2D]">*</span>
+                </label>
+                <textarea
+                  className="w-full min-h-[90px] rounded-md border border-[#E2DDD8] bg-white px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#6B5C32]/20 focus:border-[#6B5C32]"
+                  value={cancelReason}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  placeholder="Minimum 10 characters — what's the reason?"
+                />
+                <p className="text-xs text-[#6B7280] mt-1">
+                  {cancelReason.trim().length}/10 minimum
+                </p>
+              </div>
+              {po.status === "PARTIAL_RECEIVED" && (
+                <div className="flex items-start gap-2 p-3 rounded border border-amber-200 bg-amber-50 text-xs text-amber-800">
+                  <AlertTriangle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+                  <span>
+                    Inventory already received from posted GRNs will NOT be reverted.
+                    Run reverse-GRN manually if needed.
+                  </span>
+                </div>
+              )}
+              <p className="text-xs text-[#6B7280]">
+                Reason will be appended to PO notes as a tagged
+                <code className="mx-1 px-1 py-0.5 rounded bg-[#FAF9F7] text-[#374151]">[CANCELLED YYYY-MM-DD: …]</code>
+                annotation.
+              </p>
+            </div>
+            <div className="flex justify-end gap-2 p-5 border-t border-[#E2DDD8]">
+              <Button
+                variant="outline"
+                onClick={() => setShowCancelModal(false)}
+                disabled={cancelling}
+              >
+                Keep PO
+              </Button>
+              <Button
+                variant="primary"
+                className="bg-[#9A3A2D] hover:bg-[#7A2E24]"
+                onClick={submitCancel}
+                disabled={cancelling || cancelReason.trim().length < 10}
+              >
+                {cancelling ? "Cancelling…" : "Cancel PO"}
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Audit trail for this PO */}

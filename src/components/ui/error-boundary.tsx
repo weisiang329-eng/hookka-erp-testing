@@ -92,11 +92,44 @@ export function ErrorFallback({ error, errorInfo, onReset, reset }: ErrorFallbac
   React.useEffect(() => {
     if (!isStaleChunkError(error)) return;
     const KEY = "hookka-stale-chunk-reloaded-at";
-    const COOLDOWN_MS = 60_000;
+    const ATTEMPT_KEY = "hookka-stale-chunk-attempts";
+    const COOLDOWN_MS = 30_000;
+    const MAX_ATTEMPTS = 2;
     const lastTs = Number(sessionStorage.getItem(KEY) || 0);
+    const attempts = Number(sessionStorage.getItem(ATTEMPT_KEY) || 0);
+
+    // Two-phase recovery:
+    //   1st hit  → plain reload (the SPA boot pulls the freshest HTML +
+    //              chunk hash map; usually enough)
+    //   2nd hit within cooldown → cache-busted reload via ?_v=<ts>
+    //              forces CDN edges + browser disk cache to drop the
+    //              stale entry that's still being served.
+    //   3rd+ hit → give up; user can use Try Again / Go Home buttons.
+    // Cooldown is a tight 30s so users genuinely hitting a stale deploy
+    // recover quickly on next page load, but tight reload loops still
+    // bottom out.
+    if (attempts >= MAX_ATTEMPTS) return;
+    if (lastTs && Date.now() - lastTs < COOLDOWN_MS && attempts > 0) {
+      // Second attempt — escalate to cache-buster.
+      sessionStorage.setItem(ATTEMPT_KEY, String(attempts + 1));
+      sessionStorage.setItem(KEY, String(Date.now()));
+      const url = new URL(window.location.href);
+      url.searchParams.set("_v", String(Date.now()));
+      window.location.replace(url.toString());
+      return;
+    }
     if (lastTs && Date.now() - lastTs < COOLDOWN_MS) return;
     sessionStorage.setItem(KEY, String(Date.now()));
+    sessionStorage.setItem(ATTEMPT_KEY, String(attempts + 1));
     window.location.reload();
+  }, [error]);
+
+  // Once a successful render happens (no stale-chunk crash), reset the
+  // attempt counter so the next future stale-chunk hit starts fresh.
+  React.useEffect(() => {
+    if (!error) {
+      sessionStorage.removeItem("hookka-stale-chunk-attempts");
+    }
   }, [error]);
 
   const handleReset = reset ?? onReset;

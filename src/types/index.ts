@@ -163,9 +163,11 @@ export type RawMaterial = {
   isActive: boolean;
   balanceQty: number;
   // Reorder thresholds — surfaced on /api/inventory in Phase 2.5 to
-  // power the procurement low-stock banner.
-  minStock: number;
-  maxStock: number;
+  // power the procurement low-stock banner. Optional because the
+  // legacy mock dataset (src/lib/mock-data.ts) doesn't seed them and
+  // the shipping wire format coerces null→0 anyway.
+  minStock?: number;
+  maxStock?: number;
 };
 
 // --- Workers ---

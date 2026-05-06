@@ -39,7 +39,6 @@ import {
 } from "./_shared/production-builder";
 import { checkSalesOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import {
-  consumeEditLockOverrideToken,
   createEditLockOverride,
   lookupActorDisplayName,
   MIN_OVERRIDE_REASON_LEN,
@@ -1164,36 +1163,24 @@ app.get("/:id/edit-eligibility", async (c) => {
     });
   }
 
-  // IN_PRODUCTION — pull earliest completed JC + earliest scheduled JC
-  // dueDate in one round trip.
-  const [completedRes, earliestDueRes] = await Promise.all([
-    c.var.DB
-      .prepare(
-        `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
-           FROM job_cards jc
-           JOIN production_orders po ON po.id = jc.productionOrderId
-          WHERE po.salesOrderId = ?
-            AND jc.completedDate IS NOT NULL
-            AND jc.completedDate <> ''
-          ORDER BY jc.completedDate ASC
-          LIMIT 1`,
-      )
-      .bind(id)
-      .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>(),
-    c.var.DB
-      .prepare(
-        `SELECT jc.dueDate
-           FROM job_cards jc
-           JOIN production_orders po ON po.id = jc.productionOrderId
-          WHERE po.salesOrderId = ?
-            AND jc.dueDate IS NOT NULL
-            AND jc.dueDate <> ''
-          ORDER BY jc.dueDate ASC
-          LIMIT 1`,
-      )
-      .bind(id)
-      .first<{ dueDate: string | null }>(),
-  ]);
+  // IN_PRODUCTION — only the dept-completed gate matters now. Operator
+  // policy (2026-05-06): the 2-day production_window soft lock is OFF;
+  // SOs stay editable / cancellable as long as no JC has been stamped
+  // COMPLETED. Rule 1 (status) + Rule 2 (dept completion) are the only
+  // hard locks remaining.
+  const completedRes = await c.var.DB
+    .prepare(
+      `SELECT jc.departmentName, jc.departmentCode, jc.completedDate
+         FROM job_cards jc
+         JOIN production_orders po ON po.id = jc.productionOrderId
+        WHERE po.salesOrderId = ?
+          AND jc.completedDate IS NOT NULL
+          AND jc.completedDate <> ''
+        ORDER BY jc.completedDate ASC
+        LIMIT 1`,
+    )
+    .bind(id)
+    .first<{ departmentName: string | null; departmentCode: string | null; completedDate: string | null }>();
 
   // Rule 2: any dept stamped a completion → fully locked.
   if (completedRes && completedRes.completedDate) {
@@ -1207,27 +1194,8 @@ app.get("/:id/edit-eligibility", async (c) => {
     });
   }
 
-  // Rule 3: earliest JC dueDate > today + 2 days. Treat missing dueDates
-  // as "not yet scheduled" → no lock (production hasn't been planned far
-  // enough to know the first step's deadline).
-  const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
-  if (earliestDue.length === 10) {
-    const cutoff = new Date();
-    cutoff.setUTCDate(cutoff.getUTCDate() + 2);
-    const cutoffStr = cutoff.toISOString().slice(0, 10);
-    if (earliestDue <= cutoffStr) {
-      return c.json({
-        success: true,
-        editable: false,
-        reason: "production_window",
-        status: so.status,
-        earliestJcDueDate: earliestDue,
-        cutoffDate: cutoffStr,
-      });
-    }
-  }
-
-  // IN_PRODUCTION, no JC done yet, earliest step still > 2 days away — editable.
+  // IN_PRODUCTION + no JC done yet → editable. (Old 2-day window guard
+  // removed.)
   return c.json({
     success: true,
     editable: true,
@@ -2391,42 +2359,30 @@ app.put("/:id", async (c) => {
       (existing.status === "IN_PRODUCTION" ||
         existing.status === "CONFIRMED")
     ) {
-      // Pull earliest completed JC + earliest scheduled JC dueDate in one
-      // round-trip — same query shape as the eligibility GET handler.
-      const [completedRes, earliestDueRes] = await Promise.all([
-        c.var.DB
-          .prepare(
-            `SELECT jc.completedDate, jc.departmentName, jc.departmentCode
-               FROM job_cards jc
-               JOIN production_orders po ON po.id = jc.productionOrderId
-              WHERE po.salesOrderId = ?
-                AND jc.completedDate IS NOT NULL
-                AND jc.completedDate <> ''
-              LIMIT 1`,
-          )
-          .bind(id)
-          .first<{
-            completedDate: string | null;
-            departmentName: string | null;
-            departmentCode: string | null;
-          }>(),
-        c.var.DB
-          .prepare(
-            `SELECT jc.dueDate
-               FROM job_cards jc
-               JOIN production_orders po ON po.id = jc.productionOrderId
-              WHERE po.salesOrderId = ?
-                AND jc.dueDate IS NOT NULL
-                AND jc.dueDate <> ''
-              ORDER BY jc.dueDate ASC
-              LIMIT 1`,
-          )
-          .bind(id)
-          .first<{ dueDate: string | null }>(),
-      ]);
+      // Only Rule 2 (dept_completed) remains. Rule 3 (production_window
+      // 2-day soft lock) was removed per operator policy 2026-05-06: SOs
+      // stay editable / cancellable as long as no JC has been stamped
+      // COMPLETED. The override-edit-lock endpoint is now a no-op but is
+      // left in place for FE compat.
+      const completedRes = await c.var.DB
+        .prepare(
+          `SELECT jc.completedDate, jc.departmentName, jc.departmentCode
+             FROM job_cards jc
+             JOIN production_orders po ON po.id = jc.productionOrderId
+            WHERE po.salesOrderId = ?
+              AND jc.completedDate IS NOT NULL
+              AND jc.completedDate <> ''
+            LIMIT 1`,
+        )
+        .bind(id)
+        .first<{
+          completedDate: string | null;
+          departmentName: string | null;
+          departmentCode: string | null;
+        }>();
 
-      // Rule 2 — dept_completed. NOT bypassable by overrideToken: real
-      // production output exists, editing items would orphan finished WIP.
+      // Rule 2 — dept_completed. NOT bypassable: real production output
+      // exists, editing items would orphan finished WIP.
       if (completedRes && completedRes.completedDate) {
         const dept =
           completedRes.departmentName ||
@@ -2440,59 +2396,6 @@ app.put("/:id", async (c) => {
           },
           403,
         );
-      }
-
-      // Rule 3 — production_window. Bypassable via a valid overrideToken.
-      const earliestDue = earliestDueRes?.dueDate?.slice(0, 10) ?? "";
-      if (earliestDue.length === 10) {
-        const cutoff = new Date();
-        cutoff.setUTCDate(cutoff.getUTCDate() + 2);
-        const cutoffStr = cutoff.toISOString().slice(0, 10);
-        if (earliestDue <= cutoffStr) {
-          const overrideToken =
-            typeof body.overrideToken === "string" ? body.overrideToken : "";
-          if (!overrideToken) {
-            return c.json(
-              {
-                success: false,
-                error: `Cannot edit — first production step is due ${earliestDue} (within the 2-day cutoff ${cutoffStr}). An ADMIN override is required.`,
-                reason: "production_window",
-                earliestJcDueDate: earliestDue,
-                cutoffDate: cutoffStr,
-              },
-              403,
-            );
-          }
-          // Verify + atomically consume the token. Rejects on wrong order
-          // / expired / already-used / not-found — each maps to a distinct
-          // 403 error message so the FE can show the operator what went
-          // wrong (token expired → "request a new override", etc.).
-          const consumed = await consumeEditLockOverrideToken(
-            c.var.DB,
-            overrideToken,
-            "SO",
-            id,
-          );
-          if (!consumed.ok) {
-            const detail =
-              consumed.reason === "expired"
-                ? "Override token has expired (60 min TTL). Request a new override."
-                : consumed.reason === "already_used"
-                  ? "Override token has already been used. Request a new override."
-                  : consumed.reason === "wrong_order"
-                    ? "Override token does not match this order."
-                    : "Override token not found.";
-            return c.json(
-              {
-                success: false,
-                error: detail,
-                reason: "override_invalid",
-              },
-              403,
-            );
-          }
-          // Token consumed — fall through to the normal PUT flow.
-        }
       }
     }
     const now = new Date().toISOString();

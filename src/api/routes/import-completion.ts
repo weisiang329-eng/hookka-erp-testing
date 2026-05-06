@@ -9252,6 +9252,10 @@ app.post("/backfill-ocr-so-fields", async (c) => {
   //   a) parent SO has a PO image (definitive OCR signal)
   //   b) productName looks like PDF junk (catches old rows from before
   //      the image column existed in migration 0108)
+  // Diagnostic: drop the p.orgId = so.orgId condition so we can see if the
+  // join was failing only because of that (single-tenant deploys still
+  // resolve correctly; cross-tenant collisions on identical productCode
+  // are vanishingly unlikely in this codebase).
   const targetsRes = await db
     .prepare(
       `SELECT soi.id,
@@ -9270,7 +9274,7 @@ app.post("/backfill-ocr-so-fields", async (c) => {
               p.category  AS canonCategory
          FROM sales_order_items soi
          JOIN sales_orders so ON so.id = soi.salesOrderId
-         LEFT JOIN products p ON p.code = soi.productCode AND p.orgId = so.orgId
+         LEFT JOIN products p ON p.code = soi.productCode
         WHERE so.orgId = ?
           AND (so.customerPOImageB64 IS NOT NULL
                OR soi.productName = soi.productCode
@@ -9302,6 +9306,9 @@ app.post("/backfill-ocr-so-fields", async (c) => {
   let sizeUpdated = 0;
   let fabricIdUpdated = 0;
   let specialOrderCleaned = 0;
+  let nullCanonName = 0;
+  let alreadyMatches = 0;
+  const notUpdatedSamples: { code: string; name: string; canonName: string | null }[] = [];
 
   // Cache fabricCode → fabricId lookups across rows.
   const fabricIdCache = new Map<string, string | null>();
@@ -9330,6 +9337,20 @@ app.post("/backfill-ocr-so-fields", async (c) => {
         .bind(r.canonName, r.id)
         .run();
       productNameUpdated++;
+    } else if (looksJunk) {
+      // Diagnostic: this row should have been updated but wasn't.
+      if (!r.canonName) {
+        nullCanonName++;
+        if (notUpdatedSamples.length < 5) {
+          notUpdatedSamples.push({
+            code: r.productCode ?? "",
+            name: r.productName ?? "",
+            canonName: r.canonName,
+          });
+        }
+      } else {
+        alreadyMatches++;
+      }
     }
 
     // -- size (sizeCode / sizeLabel) ------------------------------------
@@ -9413,6 +9434,9 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     sizeUpdated,
     fabricIdUpdated,
     specialOrderCleaned,
+    nullCanonName,
+    alreadyMatches,
+    notUpdatedSamples,
   });
 });
 

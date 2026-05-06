@@ -235,7 +235,16 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
       return { kind: "fail", job, error: "rate limit retry exhausted" };
     };
 
-    const CONCURRENCY = 2;
+    // Concurrency picked to fit the operator's Anthropic tier rate limit
+    // (each request consumes ~14K input tokens including the cached
+    // catalog block, which still counts toward the per-minute cap):
+    //   Tier 1 (30K/min)  → 2
+    //   Tier 2 (80K/min)  → 5  ← current
+    //   Tier 3 (200K/min) → 12
+    //   Tier 4+ (400K+)   → 20+
+    // Bump this constant after upgrading; long-term this should be a
+    // server-served config so it tunes without a redeploy.
+    const CONCURRENCY = 5;
     const claudeResults: PromiseSettledResult<JobRes>[] = [];
     for (let i = 0; i < allJobs.length; i += CONCURRENCY) {
       const batch = allJobs.slice(i, i + CONCURRENCY);

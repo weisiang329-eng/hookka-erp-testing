@@ -1654,14 +1654,15 @@ function SpecialMultiSelect({
   };
 
   return (
-    <div className="relative w-[14rem] max-w-[14rem] flex items-center gap-1">
-      {/* Chips row scrolls horizontally; +Add is pinned to the right edge */}
-      {/* so it's always reachable even when many chips overflow. */}
-      <div className="flex-1 min-w-0 flex flex-nowrap items-center gap-1 overflow-x-auto scrollbar-thin pb-0.5">
+    <div className="relative min-w-[18rem] max-w-[22rem]">
+      {/* Chips wrap to multiple lines so every label is readable in full. */}
+      {/* No horizontal scroll — operator can see the whole chip text at once, */}
+      {/* row just gets taller when there are many specials. */}
+      <div className="flex flex-wrap items-center gap-1">
         {selected.map((s) => (
           <span
             key={s}
-            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8] whitespace-nowrap shrink-0"
+            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded bg-[#F5F0EB] text-[#6B5C32] border border-[#E2DDD8] whitespace-nowrap"
           >
             {s}
             <button
@@ -1675,20 +1676,20 @@ function SpecialMultiSelect({
           </span>
         ))}
         {selected.length === 0 && (
-          <span className="text-[10px] text-[#9CA3AF] italic px-1">none</span>
+          <span className="text-[10px] text-[#9CA3AF] italic">none</span>
+        )}
+        {remaining.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setPicking((p) => !p)}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32] whitespace-nowrap"
+          >
+            + Add
+          </button>
         )}
       </div>
-      {remaining.length > 0 && (
-        <button
-          type="button"
-          onClick={() => setPicking((p) => !p)}
-          className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-dashed border-[#D1D5DB] text-[#6B7280] hover:border-[#6B5C32] hover:text-[#6B5C32] whitespace-nowrap"
-        >
-          + Add
-        </button>
-      )}
       {picking && remaining.length > 0 && (
-        <div className="absolute top-full right-0 mt-1 z-20 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-60 overflow-y-auto min-w-[14rem]">
+        <div className="absolute top-full left-0 mt-1 z-20 bg-white border border-[#E2DDD8] rounded-md shadow-lg max-h-60 overflow-y-auto min-w-[16rem]">
           {remaining.map((opt) => (
             <button
               key={opt}

@@ -175,6 +175,11 @@ export default function SalesPage() {
   const [selectedRows, setSelectedRows] = useState<SalesOrder[]>([]);
   const [bulkConverting, setBulkConverting] = useState(false);
   const [bulkPrinting, setBulkPrinting] = useState(false);
+  // Bulk-review modal — flat table of every line item across all DRAFT
+  // SOs in the current view. Lets the operator scan productCode / size /
+  // fabric / divan / leg / gap / special / qty for 50+ items in one
+  // scroll instead of clicking into each SO detail page.
+  const [showItemReview, setShowItemReview] = useState(false);
   // Tab + filter state lives in the URL so refresh, back/forward, and
   // shared links all land the user on exactly the view they had open.
   const [tab, setTab] = useUrlState<"DRAFT" | "CONFIRMED">("tab", "CONFIRMED");
@@ -710,29 +715,41 @@ export default function SalesPage() {
         <CardHeader className="pb-3">
           <div className="flex items-center justify-between">
             <CardTitle className="flex items-center gap-2"><ShoppingCart className="h-5 w-5 text-[#6B5C32]" /> Sales Orders</CardTitle>
-            <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
-              <button
-                onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "DRAFT"
-                    ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Draft ({draftCount})
-              </button>
-              <button
-                onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
-                className={cn(
-                  "px-4 py-1.5 text-sm rounded transition-colors",
-                  tab === "CONFIRMED"
-                    ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
-                    : "text-[#6B7280] hover:text-[#1F1D1B]"
-                )}
-              >
-                Confirmed ({confirmedCount})
-              </button>
+            <div className="flex items-center gap-2">
+              {tab === "DRAFT" && draftCount > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setShowItemReview(true)}
+                  title="Review every line item across all draft SOs in one flat table"
+                >
+                  <ClipboardList className="h-4 w-4" /> Review items
+                </Button>
+              )}
+              <div className="inline-flex rounded-md border border-[#E2DDD8] bg-[#FAF9F7] p-0.5">
+                <button
+                  onClick={() => { setTab("DRAFT"); setSelectedRows([]); }}
+                  className={cn(
+                    "px-4 py-1.5 text-sm rounded transition-colors",
+                    tab === "DRAFT"
+                      ? "bg-[#FAEFCB] text-[#9C6F1E] font-medium shadow-sm"
+                      : "text-[#6B7280] hover:text-[#1F1D1B]"
+                  )}
+                >
+                  Draft ({draftCount})
+                </button>
+                <button
+                  onClick={() => { setTab("CONFIRMED"); setSelectedRows([]); }}
+                  className={cn(
+                    "px-4 py-1.5 text-sm rounded transition-colors",
+                    tab === "CONFIRMED"
+                      ? "bg-[#E0EDF0] text-[#3E6570] font-medium shadow-sm"
+                      : "text-[#6B7280] hover:text-[#1F1D1B]"
+                  )}
+                >
+                  Confirmed ({confirmedCount})
+                </button>
+              </div>
             </div>
           </div>
         </CardHeader>
@@ -1182,6 +1199,145 @@ export default function SalesPage() {
           fetchAll();
         }}
       />
+      {/* Bulk Items Review Modal — flat table of every DRAFT line item.
+          Helps the operator scan productCode / fabric / config / qty
+          across 50+ items at once after a Scan PO upload. */}
+      {showItemReview && (
+        <DraftItemsReviewModal
+          orders={filteredOrders.filter((o) => o.status === "DRAFT")}
+          onClose={() => setShowItemReview(false)}
+          onOpenSO={(id) => {
+            setShowItemReview(false);
+            navigate(`/sales/${id}`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// =================================================================
+// Draft Items Review Modal — single flat table of all draft line items
+// =================================================================
+function DraftItemsReviewModal({
+  orders,
+  onClose,
+  onOpenSO,
+}: {
+  orders: SalesOrder[];
+  onClose: () => void;
+  onOpenSO: (id: string) => void;
+}) {
+  type Row = {
+    soId: string;
+    soNo: string;
+    customerName: string;
+    customerPO: string;
+    customerDD: string;
+    item: SalesOrder["items"][number];
+  };
+  const rows: Row[] = orders.flatMap((o) =>
+    o.items.map((it) => ({
+      soId: o.id,
+      soNo: o.companySOId,
+      customerName: o.customerName,
+      customerPO: o.customerPOId || "",
+      customerDD: o.customerDeliveryDate || "",
+      item: it,
+    })),
+  );
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-xl shadow-2xl w-full max-w-7xl max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-6 py-4 border-b border-[#E2DDD8]">
+          <div>
+            <h2 className="text-lg font-bold text-[#1F1D1B]">
+              Draft items review · {rows.length} item{rows.length === 1 ? "" : "s"} across{" "}
+              {orders.length} draft SO{orders.length === 1 ? "" : "s"}
+            </h2>
+            <p className="text-xs text-[#6B7280]">
+              Click any row to open that SO. Use Ctrl+F in the table to search.
+            </p>
+          </div>
+          <Button variant="ghost" size="sm" onClick={onClose}>
+            <X className="h-5 w-5" />
+          </Button>
+        </div>
+        <div className="flex-1 overflow-auto">
+          <table className="w-full text-xs">
+            <thead className="sticky top-0 bg-[#FAF9F7] border-b border-[#E2DDD8] z-10">
+              <tr className="text-[#6B7280]">
+                <th className="px-2 py-2 text-left">SO</th>
+                <th className="px-2 py-2 text-left">Customer</th>
+                <th className="px-2 py-2 text-left">PO</th>
+                <th className="px-2 py-2 text-left">CDD</th>
+                <th className="px-2 py-2 text-left">Cat</th>
+                <th className="px-2 py-2 text-left">Product</th>
+                <th className="px-2 py-2 text-left">Size</th>
+                <th className="px-2 py-2 text-left">Fabric</th>
+                <th className="px-2 py-2 text-center">Divan</th>
+                <th className="px-2 py-2 text-center">Leg</th>
+                <th className="px-2 py-2 text-center">Gap</th>
+                <th className="px-2 py-2 text-left">Special</th>
+                <th className="px-2 py-2 text-center">Qty</th>
+                <th className="px-2 py-2 text-right">Price</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => {
+                const it = r.item;
+                return (
+                  <tr
+                    key={`${r.soId}-${it.id ?? i}`}
+                    className="border-t border-[#E2DDD8] hover:bg-[#FAF9F7] cursor-pointer"
+                    onClick={() => onOpenSO(r.soId)}
+                  >
+                    <td className="px-2 py-1.5 font-medium doc-number">{r.soNo}</td>
+                    <td className="px-2 py-1.5">{r.customerName}</td>
+                    <td className="px-2 py-1.5 doc-number">{r.customerPO || "—"}</td>
+                    <td className="px-2 py-1.5">{r.customerDD ? formatDate(r.customerDD) : "—"}</td>
+                    <td className="px-2 py-1.5">
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#F3F4F6] text-[#374151]">
+                        {(it.itemCategory || "BEDFRAME").slice(0, 2)}
+                      </span>
+                    </td>
+                    <td className="px-2 py-1.5 font-medium">{it.productCode || "—"}</td>
+                    <td className="px-2 py-1.5">{it.sizeLabel || it.sizeCode || "—"}</td>
+                    <td className="px-2 py-1.5">{it.fabricCode || "—"}</td>
+                    <td className="px-2 py-1.5 text-center">
+                      {it.divanHeightInches ?? "—"}
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      {it.legHeightInches != null ? `${it.legHeightInches}"` : "No Leg"}
+                    </td>
+                    <td className="px-2 py-1.5 text-center">
+                      {it.gapInches ?? "—"}
+                    </td>
+                    <td className="px-2 py-1.5">{it.specialOrder || "—"}</td>
+                    <td className="px-2 py-1.5 text-center font-medium">{it.quantity}</td>
+                    <td className="px-2 py-1.5 text-right doc-number">
+                      {it.unitPriceSen
+                        ? `RM ${(it.unitPriceSen / 100).toFixed(2)}`
+                        : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-6 py-3 border-t border-[#E2DDD8] flex justify-end">
+          <Button variant="outline" size="sm" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

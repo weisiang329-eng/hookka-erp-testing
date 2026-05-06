@@ -44,6 +44,7 @@ function POFormDialog({
   rawMaterials,
   supplierMaterialBindings,
   allSuppliers,
+  prefillItems,
 }: {
   onSave: (data: Record<string, unknown>) => void;
   onSplitBySupplier: (groups: Record<string, unknown>[]) => Promise<void>;
@@ -51,10 +52,14 @@ function POFormDialog({
   rawMaterials: RawMaterial[];
   supplierMaterialBindings: SupplierMaterialBinding[];
   allSuppliers: Supplier[];
+  // 2.5 — when the modal is opened from the low-stock reorder banner,
+  // prefillItems is an array of POLineItem rows (already RM-bound, qty
+  // suggested per max-balance). Plain Create-PO opens with [].
+  prefillItems?: POLineItem[];
 }) {
   const [expectedDate, setExpectedDate] = useState("");
   const [notes, setNotes] = useState("");
-  const [items, setItems] = useState<POLineItem[]>([]);
+  const [items, setItems] = useState<POLineItem[]>(prefillItems ?? []);
   const [rmSearch, setRmSearch] = useState("");
 
   /** For a given RM code, return all supplier bindings. */
@@ -337,8 +342,22 @@ function POFormDialog({
               <div className="space-y-2">
                 {items.map((item, idx) => {
                   const bindings = getBindingsForRM(item.rmCode);
+                  // 2.5 — sub-header on category change. Rendered only
+                  // when the previous line had a different category, so
+                  // ungrouped flows (one-by-one add via search) just see
+                  // a single header at top. Drives the "all fabrics low"
+                  // visual when the modal is opened from the low-stock
+                  // reorder banner.
+                  const prevCategory = idx > 0 ? items[idx - 1].materialCategory : null;
+                  const showCategoryHeader = idx === 0 || prevCategory !== item.materialCategory;
                   return (
-                    <div key={idx} className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
+                    <div key={idx}>
+                      {showCategoryHeader && (
+                        <div className="text-xs font-semibold uppercase tracking-wide text-[#6B5C32] pl-1 pb-1">
+                          {item.materialCategory || "(uncategorised)"}
+                        </div>
+                      )}
+                    <div className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
                       {/* Row 1: RM code, description, supplier switcher */}
                       <div className="grid grid-cols-8 gap-2 items-end">
                         <div className="col-span-2">
@@ -443,6 +462,7 @@ function POFormDialog({
                         </div>
                       </div>
                     </div>
+                    </div>
                   );
                 })}
                 <div className="text-right text-sm font-semibold text-[#1F1D1B] pr-2">
@@ -521,6 +541,14 @@ export default function ProcurementPage() {
 
   // Dialog
   const [showPOForm, setShowPOForm] = useState(false);
+  // 2.5 — when the operator clicks the low-stock banner we open the
+  // same modal pre-populated with low-stock RMs. Cleared on close so
+  // a regular "+ New PO" click doesn't inherit the prefill.
+  const [poFormPrefill, setPoFormPrefill] = useState<POLineItem[] | null>(null);
+  const closePOForm = useCallback(() => {
+    setShowPOForm(false);
+    setPoFormPrefill(null);
+  }, []);
 
   // Filters
   const [filterStatus, setFilterStatus] = useState("");
@@ -579,7 +607,7 @@ export default function ProcurementPage() {
       invalidateCachePrefix("/api/purchase-orders");
       invalidateCachePrefix("/api/grns");
       refreshPOs();
-      setShowPOForm(false);
+      closePOForm();
       toast.success("Purchase order created");
       return true;
     } catch (err) {
@@ -636,7 +664,7 @@ export default function ProcurementPage() {
 
     if (failures.length === 0) {
       toast.success(`Created ${okCount} POs across ${groups.length} suppliers`);
-      setShowPOForm(false);
+      closePOForm();
     } else {
       for (const f of failures) {
         toast.error(`${f.supplierName}: ${f.error}`);
@@ -713,6 +741,72 @@ export default function ProcurementPage() {
   const totalOutstandingQty = purchaseOrders
     .filter((po) => !["RECEIVED", "CANCELLED"].includes(po.status))
     .reduce((sum, po) => sum + po.items.reduce((s, it) => s + Math.max(0, it.quantity - (it.receivedQty || 0)), 0), 0);
+
+  // ---- 2.5: Low-stock RMs grouped by category ----
+  // Active raw_materials below minStock — feeds both the banner count and
+  // the "Create from low stock" prefill payload. RMs with minStock=0 are
+  // excluded (no reorder threshold set yet).
+  const lowStockRMs = useMemo(() => {
+    return rawMaterials
+      .filter(
+        (rm) =>
+          rm.isActive &&
+          (rm.minStock ?? 0) > 0 &&
+          (rm.balanceQty ?? 0) <= (rm.minStock ?? 0),
+      )
+      .sort((a, b) => {
+        // Group by itemGroup first so the modal renders FABRIC, FOAM, ...
+        // contiguously; then alphabetical inside each group.
+        const ga = a.itemGroup || "";
+        const gb = b.itemGroup || "";
+        if (ga !== gb) return ga.localeCompare(gb);
+        return a.itemCode.localeCompare(b.itemCode);
+      });
+  }, [rawMaterials]);
+
+  // Resolve supplier display name for prefill — same shape as the modal's
+  // resolveSupplierName so the visual UX is identical.
+  const resolveSupplierNameLocal = useCallback(
+    (sid: string) => {
+      const sup = allSuppliers.find((s) => s.id === sid);
+      return sup ? `${sup.code} - ${sup.name}` : sid;
+    },
+    [allSuppliers],
+  );
+
+  // Build the prefill payload: one POLineItem per low-stock RM.
+  // Suggested qty = max(maxStock - balanceQty, MOQ). Falls back to MOQ
+  // when maxStock is unset or below balance.
+  const buildLowStockPrefill = useCallback((): POLineItem[] => {
+    return lowStockRMs.map((rm) => {
+      const bindings = supplierMaterialBindings.filter(
+        (b) => b.materialCode === rm.itemCode,
+      );
+      const main = bindings.find((b) => b.isMainSupplier) ?? bindings[0];
+      const moq = main?.moq ?? 1;
+      const refill = Math.max((rm.maxStock ?? 0) - (rm.balanceQty ?? 0), moq);
+      const sid = main?.supplierId ?? "";
+      return {
+        rmCode: rm.itemCode,
+        rmDescription: rm.description,
+        supplierId: sid,
+        supplierName: sid ? resolveSupplierNameLocal(sid) : "",
+        supplierSku: main?.supplierSku ?? "",
+        quantity: refill,
+        unitPriceSen: main?.unitPrice ?? 0,
+        unit: rm.baseUOM,
+        leadTimeDays: main?.leadTimeDays ?? 0,
+        moq,
+        materialCategory: rm.itemGroup,
+      };
+    });
+  }, [lowStockRMs, supplierMaterialBindings, resolveSupplierNameLocal]);
+
+  const openLowStockReorder = () => {
+    if (lowStockRMs.length === 0) return;
+    setPoFormPrefill(buildLowStockPrefill());
+    setShowPOForm(true);
+  };
 
   // ---- Unique suppliers for filter dropdown ----
   const uniqueSuppliers = useMemo(() => {
@@ -862,6 +956,31 @@ export default function ProcurementPage() {
         </Card>
       </div>
 
+      {/* 2.5 — Low-stock reorder banner. Click opens the Create PO modal
+          pre-populated with all low-stock RMs grouped by category. Hidden
+          when there are no low-stock items so the page stays calm in the
+          common case. */}
+      {lowStockRMs.length > 0 && (
+        <Card className="border-[#9C6F1E]/30 bg-[#FEF8EC]">
+          <CardContent className="p-3 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-[#9C6F1E] mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm font-semibold text-[#1F1D1B]">
+                  {lowStockRMs.length} raw material{lowStockRMs.length === 1 ? "" : "s"} below minStock
+                </p>
+                <p className="text-xs text-[#6B7280] mt-0.5">
+                  Click to open a draft PO pre-populated with these items, grouped by category.
+                </p>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={openLowStockReorder}>
+              Create PO from Low Stock
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Filters */}
       <Card>
         <CardContent className="p-4">
@@ -967,10 +1086,11 @@ export default function ProcurementPage() {
         <POFormDialog
           onSave={handleCreatePO}
           onSplitBySupplier={handleSplitBySupplier}
-          onClose={() => setShowPOForm(false)}
+          onClose={closePOForm}
           rawMaterials={rawMaterials}
           supplierMaterialBindings={supplierMaterialBindings}
           allSuppliers={allSuppliers}
+          prefillItems={poFormPrefill ?? undefined}
         />
       )}
 

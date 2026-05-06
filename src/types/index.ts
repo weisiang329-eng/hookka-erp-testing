@@ -162,6 +162,10 @@ export type RawMaterial = {
   itemGroup: string;
   isActive: boolean;
   balanceQty: number;
+  // Reorder thresholds — surfaced on /api/inventory in Phase 2.5 to
+  // power the procurement low-stock banner.
+  minStock: number;
+  maxStock: number;
 };
 
 // --- Workers ---

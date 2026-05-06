@@ -62,6 +62,11 @@ type RawMaterialRow = {
   itemGroup: string;
   isActive: number;
   balanceQty: number;
+  // Reorder thresholds — added 0008_raw_materials.sql; nullable for rows
+  // that haven't been touched since the migration. Used by the reorder
+  // banner on procurement/index (Phase 2.5).
+  minStock: number | null;
+  maxStock: number | null;
 };
 
 function parseJson<T>(raw: string | null, fallback: T): T {
@@ -125,6 +130,10 @@ function rowToRawMaterial(row: RawMaterialRow) {
     itemGroup: row.itemGroup,
     isActive: row.isActive === 1,
     balanceQty: row.balanceQty,
+    // Reorder thresholds — null in DB → 0 on the wire to keep the
+    // RawMaterial type's number contract.
+    minStock: row.minStock ?? 0,
+    maxStock: row.maxStock ?? 0,
   };
 }
 

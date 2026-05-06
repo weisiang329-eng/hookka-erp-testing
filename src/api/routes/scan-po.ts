@@ -377,18 +377,29 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
   • "CNR" — corner piece (joins two perpendicular sections).
   • "STOOL" — ottoman / footstool.
 
-  PDF-shorthand → catalog mapping:
-  • "1R" alone in a multi-box diagram → 1A; if it pairs with another "1R" / "1L" the pair is a mirror, output 1A(LHF) + 1A(RHF).
-  • "1R+1R" / "1A+1A" / "1L+1R" / two single-seater boxes drawn side-by-side → TWO line items: 1A(LHF) + 1A(RHF) (each qty=1).
-  • "1R+1NA+1R" / "1A+1NA+1A" / three boxes (left-arm + middle no-arm + right-arm) → THREE line items: 1A(LHF) + 1NA + 1A(RHF).
-  • "2+L Seater" / "2A+L" → 2A(LHF or as drawn) + L(LHF or as drawn).
-  • "2A(R)+2A(L)" → 2A(RHF) + 2A(LHF).
-  • "2+1+1" → 2A + 1A + 1A (default mirror for the two 1As).
-  • "L+L+CNR" → L(LHF) + L(RHF) + CNR.
-  • "3 Seater" with ONE single drawn box → 3S (not split).
-  • "3 Seater" with THREE drawn boxes → 1A(LHF) + 1NA + 1A(RHF) (it's drawn modular).
+  ARM-INFERENCE RULE (master rule for resolving NA vs A):
+  For any chain of modules joined by "+" signs:
+  • OUTERMOST positions (first and last in the chain) HAVE ARMS — they form the sides of the sofa.
+    → numeric outers become "1A" / "2A" with mirrored sides (left=LHF, right=RHF).
+    → "L" / "CNR" outers stay as L / CNR (already imply an arm/corner).
+  • INNER positions (anything sandwiched between two outers) HAVE NO ARM — their arms would collide with neighbours.
+    → numeric inners become "1NA" / "2NA" / "3NA" etc.
+  • Mirror-pair exception: when EXACTLY two outer modules and zero inners, both are arm modules ("1A(LHF) + 1A(RHF)" or "L(LHF) + L(RHF)").
 
-  GOLDEN RULE: every "+" in the configuration string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew one continuous box.
+  PDF-shorthand → catalog mapping:
+  • "1R" alone or with "1R" sibling → 1A. Pair "1R+1R" → 1A(LHF) + 1A(RHF) (mirror).
+  • "1+1" / "1A+1A" / two boxes side-by-side → 1A(LHF) + 1A(RHF).
+  • "1+2+1" / "1+1NA+1" / "1A+1NA+1A" → 1A(LHF) + 1NA + 1A(RHF). The middle "2" or "1NA" is no-arm because it's sandwiched.
+  • "1+2+L" → 1A(LHF) + 2NA + L(RHF). Left outer is 1A, middle is 2NA (sandwiched), right outer L is the corner extension.
+  • "L+2+L" → L(LHF) + 2NA + L(RHF).
+  • "1R+1NA+1R" / "1A+1NA+1A" → 1A(LHF) + 1NA + 1A(RHF) (NA already explicit).
+  • "2+L Seater" / "2A+L" → 2A(LHF or as drawn) + L(LHF or as drawn).
+  • "2+1+1" / "2A+1+1" → 2A(LHF) + 1NA + 1A(RHF) — middle 1 sandwiched is 1NA, but trailing 1 is outer so 1A(RHF).
+  • "L+L+CNR" → L(LHF) + L(RHF) + CNR (corner).
+  • "3 Seater" with ONE single continuous drawn box → 3S (do NOT split).
+  • "3 Seater" with THREE separate drawn boxes → 1A(LHF) + 1NA + 1A(RHF).
+
+  GOLDEN RULE: every "+" in the config string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Inner numeric pieces become NA; outer pieces become A / L / CNR. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew ONE continuous box.
 
   Naming conventions:
   • Strip "HK" prefix when matching ("HK5531" → "5531").
@@ -407,7 +418,8 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     • "headrest firm" / "head rest firm a little" → "Headrest Firm"
     • "back rest tak mahu pasang" / "don't install backrest" / "install at customer house" / "back rest tak mau pasang" → "Backrest Install at Customer Site"
     • "seat cushion fully cover" / "back fully cover" → "Seat Cushion Fully Cover"
-    • "Replace 5540 headrest" / "5540 headrest" / "8030 headrest" / "5540 = 5537" → "5537 Backrest"  (5540 and 8030 are model numbers that map to the 5537 Backrest spec)
+    • "Replace 5540 headrest" / "Backrest change 5540" / "5540 headrest" / "8030 headrest" / "5540 = 5537" / "change to 5540" / "headrest change 5540" → "5537 Backrest"  (5540 and 8030 are model numbers that map to the 5537 Backrest spec)
+    • "Bottom change to umbrella fabric" / "Bottom change to nylon" / "bottom umbrella" → "Nylon Fabric"
     • "Separate Backrest Packing" → "Separate Backrest Packing"
   Always inspect ALL handwritten margin notes (with #/* bullets) and red-pen annotations — they carry production-critical specials that aren't in the printed Description line.
 - divanHeightInches/gapInches/noLeg: bedframe-only — leave null.

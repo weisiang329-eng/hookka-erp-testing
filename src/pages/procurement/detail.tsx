@@ -181,6 +181,18 @@ export default function PurchaseOrderDetailPage() {
     [allSuppliers],
   );
 
+  // ACTIVE supplier id set + roster — drives every dropdown and binding
+  // pick on this edit screen. Mirror procurement/index.tsx so a deactivated
+  // vendor never silently sneaks back onto a PO via the edit path.
+  const activeSupplierIds = useMemo(
+    () => new Set(allSuppliers.filter((s) => s.status === "ACTIVE").map((s) => s.id)),
+    [allSuppliers],
+  );
+  const activeSuppliers = useMemo(
+    () => allSuppliers.filter((s) => s.status === "ACTIVE"),
+    [allSuppliers],
+  );
+
   // Snapshot the current PO into edit-mode state. Called from the Edit
   // button click handler (not via useEffect) — react-hooks/set-state-in-effect
   // explicitly forbids synchronous setState chains inside an effect, and
@@ -256,7 +268,12 @@ export default function PurchaseOrderDetailPage() {
   const addLineFromRM = (rmCode: string) => {
     const rm = rawMaterials.find((r) => r.itemCode === rmCode);
     if (!rm) return;
-    const bindings = supplierMaterialBindings.filter((b) => b.materialCode === rmCode);
+    // Filter bindings to ACTIVE suppliers — if the only binding is on a
+    // deactivated vendor we leave supplierId blank so the operator picks
+    // a live one rather than silently auto-filling a dead vendor.
+    const bindings = supplierMaterialBindings.filter(
+      (b) => b.materialCode === rmCode && activeSupplierIds.has(b.supplierId),
+    );
     const main = bindings.find((b) => b.isMainSupplier) ?? bindings[0];
     const sid = main?.supplierId ?? "";
     setEditLines((prev) => [
@@ -738,7 +755,11 @@ export default function PurchaseOrderDetailPage() {
             {editLines.length > 0 && (
               <div className="space-y-2">
                 {editLines.map((line, idx) => {
-                  const bindings = supplierMaterialBindings.filter((b) => b.materialCode === line.rmCode);
+                  // Active-only bindings — same gate as addLineFromRM so the
+                  // dropdown can never offer a deactivated vendor.
+                  const bindings = supplierMaterialBindings.filter(
+                    (b) => b.materialCode === line.rmCode && activeSupplierIds.has(b.supplierId),
+                  );
                   return (
                     <div key={idx} className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
                       <div className="grid grid-cols-8 gap-2 items-end">
@@ -785,7 +806,7 @@ export default function PurchaseOrderDetailPage() {
                               }
                             >
                               <option value="">Pick supplier…</option>
-                              {allSuppliers.map((s) => (
+                              {activeSuppliers.map((s) => (
                                 <option key={s.id} value={s.id}>
                                   {s.code} - {s.name}
                                 </option>

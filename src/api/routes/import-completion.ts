@@ -10076,6 +10076,372 @@ app.post("/backfill-supplier-material-bindings", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/import/backfill-supplier-bindings-multi
+//
+// Smarter v2 of /backfill-supplier-material-bindings. Where v1 picked the
+// single most-recent supplier for each RM, this endpoint scans the FULL PO
+// history and, per RM:
+//
+//   * Lists every supplier that ever ordered the material
+//   * Sums historical qty per supplier
+//   * Inserts a binding for every (materialCode, supplierId) pair NOT
+//     already in supplier_material_bindings (operator-set bindings win)
+//   * Marks the supplier with the highest historical qty as isMainSupplier=1
+//     — but only if no existing binding for that materialCode is already
+//     flagged main. If all suppliers from history were already bound and
+//     none is currently main, the highest-qty existing supplier is promoted
+//     in-place.
+//
+// MATCH STRATEGY — two passes, code-first then description-fallback:
+//
+//   1. Code match (strict): poi.materialName equals or starts with the RM's
+//      itemCode followed by space/dash. Avoids the AM275 ⊃ AM275-2 prefix bug.
+//   2. Description fallback: when the code pass yields zero, match by
+//      rm.description (which the historical-import path stored as the
+//      poi.materialName for AutoCount-imported PIs). Covers the very common
+//      fabric/filler case where the AutoCount export only carried generic
+//      descriptions like "FABRIC" or "BEIGE" with no RM code.
+//
+// The description-fallback intentionally produces broad bindings for generic
+// descriptions (every fabric RM gets bound to every fabric supplier). That's
+// the behavior the operator asked for: "bind these materials to the
+// suppliers I've historically ordered them from" — and for fabric, the
+// AutoCount records don't preserve which fabric model went to which PO.
+//
+// Tenant-scoped: every read and write is filtered by the request's orgId.
+//
+// Body: { dryRun?: boolean, ensureMainOnExisting?: boolean,
+//         disableDescriptionFallback?: boolean }
+//   ensureMainOnExisting=true: if NO binding for an RM is currently main
+//   AND we have history, promote the highest-qty supplier to main even if
+//   that binding already existed (covers the case where v1 left main=0).
+//   disableDescriptionFallback=true: only use code-based matching (the
+//   tighter v2 behavior, useful for re-running without re-binding fabrics).
+// ---------------------------------------------------------------------------
+type BackfillBindingsMultiBody = {
+  dryRun?: boolean;
+  ensureMainOnExisting?: boolean;
+  disableDescriptionFallback?: boolean;
+};
+
+app.post("/backfill-supplier-bindings-multi", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  const orgId = getOrgId(c);
+
+  let body: BackfillBindingsMultiBody = {};
+  try {
+    body = (await c.req.json().catch(() => ({}))) as BackfillBindingsMultiBody;
+  } catch {
+    body = {};
+  }
+  const dryRun = body.dryRun === true;
+  const ensureMainOnExisting = body.ensureMainOnExisting === true;
+  const useDescriptionFallback = body.disableDescriptionFallback !== true;
+
+  const db = c.var.DB;
+
+  // Every active RM in this org. Inactive RMs are skipped — operator deactivated
+  // them deliberately, and binding them would just clutter the picker.
+  const rmsRes = await db
+    .prepare(
+      `SELECT itemCode    AS "itemCode",
+              description AS "description"
+         FROM raw_materials
+        WHERE orgId = ? AND isActive = 1`,
+    )
+    .bind(orgId)
+    .all<{ itemCode: string; description: string }>();
+  const rms = rmsRes.results ?? [];
+
+  let bindingsInserted = 0;
+  let mainAssignedNew = 0;
+  let mainPromotedExisting = 0;
+  let rmsWithoutHistory = 0;
+  let rmsFullyCovered = 0;
+  const seededSamples: {
+    itemCode: string;
+    supplierId: string;
+    totalQty: number;
+    isMain: boolean;
+    matchSource: "code" | "description";
+  }[] = [];
+  const promotedSamples: { itemCode: string; supplierId: string }[] = [];
+  const skippedSamples: { itemCode: string; description: string }[] = [];
+  const errors: { itemCode: string; message: string }[] = [];
+
+  let rmsMatchedByCode = 0;
+  let rmsMatchedByDescription = 0;
+  for (const rm of rms) {
+    try {
+      // Pass 1 — code match: poi.materialName equals or starts with the
+      // RM's itemCode followed by space/dash. Strict prefix matching avoids
+      // the AM275 ⊃ AM275-2 over-match.
+      const codeExact = rm.itemCode;
+      const codeDash = `${rm.itemCode} - %`;
+      const codeSpace = `${rm.itemCode} %`;
+      const codeAggsRes = await db
+        .prepare(
+          `SELECT po.supplierId        AS "supplierId",
+                  SUM(poi.quantity)    AS "totalQty",
+                  COUNT(*)             AS "poCount",
+                  MAX(po.created_at)   AS "latestPoDate"
+             FROM purchase_order_items poi
+             JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+            WHERE po.orgId = ?
+              AND (poi.materialName = ? OR poi.materialName LIKE ? OR poi.materialName LIKE ?)
+            GROUP BY po.supplierId
+            ORDER BY SUM(poi.quantity) DESC, MAX(po.created_at) DESC`,
+        )
+        .bind(orgId, codeExact, codeDash, codeSpace)
+        .all<{
+          supplierId: string;
+          totalQty: number;
+          poCount: number;
+          latestPoDate: string;
+        }>();
+      let aggs = (codeAggsRes.results ?? []).filter((a) => a.supplierId);
+      let matchSource: "code" | "description" = "code";
+
+      // Pass 2 — description fallback: AutoCount-imported PIs stored only
+      // generic descriptions ("FABRIC", "BEIGE") in materialName with no RM
+      // code, so the code pass misses them. Match by rm.description (exact
+      // or as a prefix segment in poi.materialName) so the operator's
+      // historical fabric/filler buys propagate to the model-numbered RMs.
+      // Skip empties and absurdly short descriptions (< 2 chars) to avoid
+      // ridiculous wide matches.
+      if (
+        useDescriptionFallback &&
+        aggs.length === 0 &&
+        rm.description &&
+        rm.description.trim().length >= 2
+      ) {
+        const descExact = rm.description.trim();
+        const descSpace = `${descExact} %`;
+        const descSpaceMid = `% ${descExact} %`;
+        const descSpaceEnd = `% ${descExact}`;
+        const descAggsRes = await db
+          .prepare(
+            `SELECT po.supplierId        AS "supplierId",
+                    SUM(poi.quantity)    AS "totalQty",
+                    COUNT(*)             AS "poCount",
+                    MAX(po.created_at)   AS "latestPoDate"
+               FROM purchase_order_items poi
+               JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+              WHERE po.orgId = ?
+                AND (poi.materialName = ?
+                     OR poi.materialName LIKE ?
+                     OR poi.materialName LIKE ?
+                     OR poi.materialName LIKE ?)
+              GROUP BY po.supplierId
+              ORDER BY SUM(poi.quantity) DESC, MAX(po.created_at) DESC`,
+          )
+          .bind(orgId, descExact, descSpace, descSpaceMid, descSpaceEnd)
+          .all<{
+            supplierId: string;
+            totalQty: number;
+            poCount: number;
+            latestPoDate: string;
+          }>();
+        aggs = (descAggsRes.results ?? []).filter((a) => a.supplierId);
+        if (aggs.length > 0) matchSource = "description";
+      }
+
+      if (aggs.length === 0) {
+        rmsWithoutHistory++;
+        if (skippedSamples.length < 20) {
+          skippedSamples.push({
+            itemCode: rm.itemCode,
+            description: rm.description,
+          });
+        }
+        continue;
+      }
+      if (matchSource === "code") rmsMatchedByCode++;
+      else rmsMatchedByDescription++;
+
+      // Existing bindings for this RM — operator-set rows must not be touched.
+      const existingRes = await db
+        .prepare(
+          `SELECT supplierId        AS "supplierId",
+                  isMainSupplier    AS "isMainSupplier",
+                  id                AS "id"
+             FROM supplier_material_bindings
+            WHERE orgId = ? AND materialCode = ?`,
+        )
+        .bind(orgId, rm.itemCode)
+        .all<{ supplierId: string; isMainSupplier: number; id: string }>();
+      const existing = existingRes.results ?? [];
+      const existingSupplierIds = new Set(existing.map((r) => r.supplierId));
+      let hasMain = existing.some((r) => r.isMainSupplier === 1);
+
+      // Highest-qty supplier from history is the main candidate. If multiple
+      // suppliers are tied on qty, ORDER BY tiebreak (latestPoDate) decides.
+      const mainCandidate = aggs[0].supplierId;
+
+      let insertedForThisRm = 0;
+      for (const agg of aggs) {
+        if (existingSupplierIds.has(agg.supplierId)) continue;
+
+        // Pull the latest unitPrice + supplierSKU + unit for this (rm, supplier)
+        // pair. Mirror whichever match strategy actually produced the
+        // aggregate (code vs description) so the latest-row lookup hits
+        // the same set of POs the aggregate considered.
+        const latest = await (matchSource === "code"
+          ? db
+              .prepare(
+                `SELECT poi.unitPriceSen AS "unitPriceSen",
+                        poi.supplierSKU  AS "supplierSKU",
+                        poi.unit         AS "unit"
+                   FROM purchase_order_items poi
+                   JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+                  WHERE po.orgId = ?
+                    AND po.supplierId = ?
+                    AND (poi.materialName = ? OR poi.materialName LIKE ? OR poi.materialName LIKE ?)
+                  ORDER BY po.created_at DESC, po.id DESC
+                  LIMIT 1`,
+              )
+              .bind(orgId, agg.supplierId, codeExact, codeDash, codeSpace)
+          : db
+              .prepare(
+                `SELECT poi.unitPriceSen AS "unitPriceSen",
+                        poi.supplierSKU  AS "supplierSKU",
+                        poi.unit         AS "unit"
+                   FROM purchase_order_items poi
+                   JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+                  WHERE po.orgId = ?
+                    AND po.supplierId = ?
+                    AND (poi.materialName = ?
+                         OR poi.materialName LIKE ?
+                         OR poi.materialName LIKE ?
+                         OR poi.materialName LIKE ?)
+                  ORDER BY po.created_at DESC, po.id DESC
+                  LIMIT 1`,
+              )
+              .bind(
+                orgId,
+                agg.supplierId,
+                rm.description.trim(),
+                `${rm.description.trim()} %`,
+                `% ${rm.description.trim()} %`,
+                `% ${rm.description.trim()}`,
+              )
+        ).first<{
+          unitPriceSen: number;
+          supplierSKU: string | null;
+          unit: string | null;
+        }>();
+
+        const isMain = agg.supplierId === mainCandidate && !hasMain ? 1 : 0;
+
+        if (!dryRun) {
+          const id = `smb-${crypto.randomUUID().slice(0, 8)}`;
+          await db
+            .prepare(
+              `INSERT INTO supplier_material_bindings (id, orgId, supplierId, materialCode,
+                 materialName, supplierSku, unitPrice, currency, leadTimeDays,
+                 paymentTerms, moq, priceValidFrom, priceValidTo, isMainSupplier)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'MYR', 0, 'NET30', 1, ?, '2030-12-31', ?)`,
+            )
+            .bind(
+              id,
+              orgId,
+              agg.supplierId,
+              rm.itemCode,
+              rm.description,
+              latest?.supplierSKU || rm.itemCode,
+              latest?.unitPriceSen || 0,
+              new Date().toISOString().slice(0, 10),
+              isMain,
+            )
+            .run();
+        }
+
+        bindingsInserted++;
+        insertedForThisRm++;
+        if (isMain) {
+          mainAssignedNew++;
+          hasMain = true;
+        }
+        if (seededSamples.length < 30) {
+          seededSamples.push({
+            itemCode: rm.itemCode,
+            supplierId: agg.supplierId,
+            totalQty: Number(agg.totalQty) || 0,
+            isMain: isMain === 1,
+            matchSource,
+          });
+        }
+      }
+
+      if (insertedForThisRm === 0) {
+        rmsFullyCovered++;
+      }
+
+      // Promote a main supplier on existing bindings when nothing was inserted
+      // (or when the inserts didn't create a main because all candidates were
+      // already bound). Only fires when ensureMainOnExisting flag is set —
+      // operator opt-in, since this changes existing rows.
+      if (ensureMainOnExisting && !hasMain && existing.length > 0) {
+        // Pick the highest-qty supplier from history that ALSO has an existing
+        // binding row. If history's mainCandidate is already bound, promote it.
+        const promoteCandidate = aggs.find((a) =>
+          existingSupplierIds.has(a.supplierId),
+        );
+        if (promoteCandidate) {
+          const row = existing.find(
+            (r) => r.supplierId === promoteCandidate.supplierId,
+          );
+          if (row && !dryRun) {
+            await db
+              .prepare(
+                `UPDATE supplier_material_bindings SET isMainSupplier = 1 WHERE id = ?`,
+              )
+              .bind(row.id)
+              .run();
+          }
+          if (row) {
+            mainPromotedExisting++;
+            if (promotedSamples.length < 20) {
+              promotedSamples.push({
+                itemCode: rm.itemCode,
+                supplierId: promoteCandidate.supplierId,
+              });
+            }
+          }
+        }
+      }
+    } catch (err) {
+      errors.push({
+        itemCode: rm.itemCode,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    ensureMainOnExisting,
+    descriptionFallbackEnabled: useDescriptionFallback,
+    rmsScanned: rms.length,
+    rmsMatchedByCode,
+    rmsMatchedByDescription,
+    rmsWithoutHistory,
+    rmsFullyCovered,
+    bindingsInserted,
+    mainAssignedNew,
+    mainPromotedExisting,
+    errorCount: errors.length,
+    seededSamples,
+    promotedSamples,
+    skippedSamples,
+    errors,
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 2.4 — Phantom GRN backfill for historical RECEIVED POs.
 //
 // 556 historical POs imported from Google Sheets are at status='RECEIVED'

@@ -738,19 +738,46 @@ async function fetchFilteredPOs(
     : "job_cards";
   // Sprint 4: orgId is always the leading WHERE predicate. Status filter
   // becomes an AND clause when present.
-  // dueFrom / dueTo: optional targetEndDate window. NULL is preserved on
-  // both sides — undated POs survive the filter so the daily view still
-  // shows them. Mirrors the client-side guard at
-  // production/index.tsx:1188-1189.
+  // dueFrom / dueTo: date window applied differently depending on context:
+  //   overview (no deptFilter)  → PO.targetEndDate window (whole-order PACKING anchor)
+  //   dept page (deptFilter set) → that dept's JC.dueDate window (correct semantic
+  //                                for /production/<dept> filtering)
+  // NULL targetEndDate / dueDate is preserved on both sides — undated POs
+  // / JCs survive so the daily view still shows them.
   const dueClauses: string[] = [];
   const dueBindings: string[] = [];
-  if (dueFrom) {
-    dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
-    dueBindings.push(dueFrom);
-  }
-  if (dueTo) {
-    dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
-    dueBindings.push(dueTo);
+  if (dueFrom || dueTo) {
+    if (deptFilter) {
+      // Dept-page mode: filter rows where the matching dept's JC dueDate
+      // falls in the window. EXISTS sub-query keeps the PO row when at
+      // least one such JC exists (or its dueDate is NULL).
+      const sub: string[] = [
+        "EXISTS (SELECT 1 FROM job_cards jc",
+        " WHERE jc.productionOrderId = production_orders.id",
+        " AND jc.departmentCode = ?",
+      ];
+      const subBindings: string[] = [deptFilter];
+      if (dueFrom) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate >= ?)");
+        subBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate <= ?)");
+        subBindings.push(dueTo);
+      }
+      sub.push(")");
+      dueClauses.push(sub.join(""));
+      dueBindings.push(...subBindings);
+    } else {
+      if (dueFrom) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+        dueBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+        dueBindings.push(dueTo);
+      }
+    }
   }
   const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
   const poSql = hasFilter
@@ -1005,17 +1032,40 @@ async function fetchPaginatedPOs(
         SELECT * FROM job_cards_archive)`
     : "job_cards";
 
-  // dueFrom / dueTo: same NULL-preserving targetEndDate window as
-  // fetchFilteredPOs above.
+  // dueFrom / dueTo: dept-aware date window — same logic as
+  // fetchFilteredPOs. Overview filters PO.targetEndDate; dept page
+  // filters that dept's JC.dueDate via EXISTS subquery.
   const dueClauses: string[] = [];
   const dueBindings: string[] = [];
-  if (dueFrom) {
-    dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
-    dueBindings.push(dueFrom);
-  }
-  if (dueTo) {
-    dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
-    dueBindings.push(dueTo);
+  if (dueFrom || dueTo) {
+    if (deptFilter) {
+      const sub: string[] = [
+        "EXISTS (SELECT 1 FROM job_cards jc",
+        " WHERE jc.productionOrderId = production_orders.id",
+        " AND jc.departmentCode = ?",
+      ];
+      const subBindings: string[] = [deptFilter];
+      if (dueFrom) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate >= ?)");
+        subBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate <= ?)");
+        subBindings.push(dueTo);
+      }
+      sub.push(")");
+      dueClauses.push(sub.join(""));
+      dueBindings.push(...subBindings);
+    } else {
+      if (dueFrom) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+        dueBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+        dueBindings.push(dueTo);
+      }
+    }
   }
   const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
 

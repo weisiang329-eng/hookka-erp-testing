@@ -8,6 +8,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { computeFabricMetrics } from "../lib/fabric-usage";
 
 const app = new Hono<Env>();
 
@@ -82,6 +83,25 @@ export function effectiveTierForCategory(
 }
 
 // GET /api/fabric-tracking?category=B.M-FABR&shortageOnly=true
+//
+// Live-compute path (post 2026-05-07): fabric_trackings.{soh, poOutstanding,
+// lastMonthUsage, oneWeekUsage, twoWeeksUsage, oneMonthUsage, shortage}
+// columns are now derived per-request from the same FAB_CUT JC source the
+// Fab Cutting dept page uses. The static row columns stay as a cache /
+// fallback (legacy operators may still PUT manual values) but are
+// overwritten in the response when live data is available.
+//
+// Source aggregation (see src/api/lib/fabric-usage.ts):
+//   - SOH               ← raw_materials.balanceQty per itemCode
+//   - PO Outstanding    ← purchase_order_items where PO not received
+//   - Historical (30d)  ← cost_ledger RM_ISSUE rows
+//   - 1wk/2wk/1mo Usage ← active FAB_CUT JCs where dueDate within window,
+//                          fabricUsageMeters from BOM template
+//   - Shortage          ← SOH + Outstanding − 1mo (signed; negative = under)
+//
+// The shortageOnly query param now filters AFTER the live override so a
+// fabric whose static cache shows positive but live shortage is negative
+// still surfaces (and vice versa).
 app.get("/", async (c) => {
   const category = c.req.query("category");
   const shortageOnly = c.req.query("shortageOnly") === "true";
@@ -92,17 +112,35 @@ app.get("/", async (c) => {
     where.push("fabricCategory = ?");
     binds.push(category);
   }
-  if (shortageOnly) {
-    where.push("shortage < 0");
-  }
+  // NOTE: WHERE shortage < 0 dropped from SQL — applied post-merge below
+  // against the LIVE shortage value, not the stale cache column.
   const sql =
     where.length > 0
       ? `SELECT * FROM fabric_trackings WHERE ${where.join(" AND ")} ORDER BY fabricCode`
       : "SELECT * FROM fabric_trackings ORDER BY fabricCode";
-  const res = await c.var.DB.prepare(sql)
-    .bind(...binds)
-    .all<FabricTrackingRow>();
-  const data = (res.results ?? []).map(rowToTracking);
+
+  const [trackingsRes, liveMetrics] = await Promise.all([
+    c.var.DB.prepare(sql).bind(...binds).all<FabricTrackingRow>(),
+    computeFabricMetrics(c.var.DB),
+  ]);
+
+  let data = (trackingsRes.results ?? []).map(rowToTracking);
+  // Override stale cache columns with live numbers when available.
+  for (const r of data) {
+    const m = liveMetrics.get(r.fabricCode);
+    if (m) {
+      r.soh = m.soh;
+      r.poOutstanding = m.poOutstanding;
+      r.lastMonthUsage = m.lastMonthUsage;
+      r.oneWeekUsage = m.oneWeekUsage;
+      r.twoWeeksUsage = m.twoWeeksUsage;
+      r.oneMonthUsage = m.oneMonthUsage;
+      r.shortage = m.shortage;
+    }
+  }
+  if (shortageOnly) {
+    data = data.filter((r) => r.shortage < 0);
+  }
   return c.json({ success: true, data });
 });
 

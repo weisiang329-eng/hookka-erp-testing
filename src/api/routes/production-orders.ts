@@ -31,11 +31,9 @@ import {
   postJobCardLabor,
 } from "../lib/po-cost-cascade";
 import {
-  expandMaterialQty,
-  parseMaterialScaling,
-  parseSofaSeatHeightInches,
-  type ProductionDimensions,
-} from "../lib/material-scaling";
+  computeFcFabricUsageMeters,
+  fetchBomWipComponentsByCode,
+} from "../lib/fabric-usage";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
@@ -445,135 +443,6 @@ type MinimalPOOut = {
   jobCards: MinimalJobCardOut[];
 };
 
-// ---------------------------------------------------------------------------
-// Compute predicted fabric meters for a single JC by walking the parent
-// PO's bom_templates.wipComponents tree. Returns 0 for non-FAB_CUT JCs and
-// when the BOM has no FC nodes.
-//
-// Match strategy mirrors the consume path:
-//   - SPECIFIC: if any FC node has wipType === jc.wipType → only that node
-//     (used for STOOL / pillow JCs whose wipType is fine-grained)
-//   - FALLBACK: union of all FC nodes' materials (used for bedframe /
-//     mainstream sofa where one merged FC JC covers multiple BOM nodes)
-//
-// Math: per-piece scaled qty × parent FC node's quantity × po.quantity ×
-// (1 + waste%). Scaling is applied BEFORE multiplying by piece count so
-// the perUnit slope (per-inch) stays per-piece.
-//
-// Only counts materials that resolve to fabric. autoDetect='FABRIC' is the
-// authored signal (set on every BOM by the bulk update). Other materials
-// (legs, foam, etc.) on FC nodes are excluded — this column is fabric-only.
-// ---------------------------------------------------------------------------
-function computeFcFabricUsageMeters(
-  po: {
-    quantity: number;
-    itemCategory: string | null;
-    gapInches: number | null;
-    divanHeightInches: number | null;
-    legHeightInches: number | null;
-    sizeCode: string | null;
-    sizeLabel: string | null;
-  },
-  jc: {
-    departmentCode: string | null;
-    wipType: string | null;
-  },
-  wipComponentsRaw: unknown,
-): number {
-  if (jc.departmentCode !== "FAB_CUT") return 0;
-  if (!wipComponentsRaw) return 0;
-  const roots = Array.isArray(wipComponentsRaw)
-    ? wipComponentsRaw
-    : [wipComponentsRaw];
-
-  const dims: ProductionDimensions = {
-    gapInches: po.gapInches,
-    divanHeightInches: po.divanHeightInches,
-    legHeightInches: po.legHeightInches,
-    seatHeightInches:
-      po.itemCategory === "SOFA"
-        ? parseSofaSeatHeightInches(po.sizeCode, po.sizeLabel)
-        : null,
-  };
-
-  function isFcNode(node: unknown): boolean {
-    if (!node || typeof node !== "object") return false;
-    const procs = (node as Record<string, unknown>).processes;
-    if (!Array.isArray(procs)) return false;
-    return procs.some(
-      (p) =>
-        !!p &&
-        typeof p === "object" &&
-        (p as Record<string, unknown>).deptCode === "FAB_CUT",
-    );
-  }
-  function nodeQty(node: unknown): number {
-    if (!node || typeof node !== "object") return 1;
-    const q = (node as Record<string, unknown>).quantity;
-    const n = typeof q === "number" ? q : Number(q);
-    return Number.isFinite(n) && n > 0 ? n : 1;
-  }
-  function sumNodeFabric(node: unknown): number {
-    if (!node || typeof node !== "object") return 0;
-    const n = node as Record<string, unknown>;
-    const mats = Array.isArray(n.materials) ? n.materials : [];
-    let sum = 0;
-    for (const m of mats) {
-      if (!m || typeof m !== "object") continue;
-      const row = m as Record<string, unknown>;
-      // Only fabric lines count toward this column. Other RM types
-      // (foam, leg, etc.) are excluded; the user asked specifically
-      // for fabric usage.
-      if (row.autoDetect !== "FABRIC") continue;
-      const qty =
-        typeof row.qty === "number" ? row.qty : Number(row.qty) || 0;
-      const scaling = parseMaterialScaling(row.scaling);
-      const perPieceScaled = expandMaterialQty(qty, scaling, dims);
-      const waste =
-        typeof row.wastePct === "number"
-          ? row.wastePct
-          : Number(row.wastePct) || 0;
-      sum +=
-        perPieceScaled *
-        nodeQty(node) *
-        (po.quantity || 1) *
-        (1 + Math.max(0, waste) / 100);
-    }
-    return sum;
-  }
-
-  // Pass 1 — specific match by wipType.
-  function findSpecific(node: unknown): unknown | null {
-    if (!node || typeof node !== "object") return null;
-    const n = node as Record<string, unknown>;
-    if (isFcNode(node) && jc.wipType && n.wipType === jc.wipType) {
-      return node;
-    }
-    const kids = Array.isArray(n.children) ? n.children : [];
-    for (const c of kids) {
-      const found = findSpecific(c);
-      if (found) return found;
-    }
-    return null;
-  }
-  for (const root of roots) {
-    const specific = findSpecific(root);
-    if (specific) return sumNodeFabric(specific);
-  }
-
-  // Pass 2 — fallback: union of all FC nodes.
-  let total = 0;
-  function walkAll(node: unknown): void {
-    if (!node || typeof node !== "object") return;
-    const n = node as Record<string, unknown>;
-    if (isFcNode(node)) total += sumNodeFabric(node);
-    const kids = Array.isArray(n.children) ? n.children : [];
-    for (const c of kids) walkAll(c);
-  }
-  for (const root of roots) walkAll(root);
-  return total;
-}
-
 function rowToMinimalJobCard(
   r: JobCardRow,
   piecesDoneByJc: Map<string, number> = new Map(),
@@ -861,31 +730,6 @@ async function fetchPiecesDoneByJc(
   );
   for (const r of rows) {
     out.set(r.jobCardId, Number(r.piecesDone) || 0);
-  }
-  return out;
-}
-
-// Pre-load every ACTIVE bom_templates row's wipComponents JSON into a
-// productCode → parsed-tree map. Called once per list-endpoint request
-// so the per-PO fabric usage computation in rowToMinimalJobCard stays
-// O(1) lookup instead of O(N) DB roundtrips. Returns null when no
-// templates exist (caller treats as "no fabric usage column data").
-async function fetchBomWipComponentsByCode(
-  db: D1Database,
-): Promise<Map<string, unknown>> {
-  const out = new Map<string, unknown>();
-  const res = await db
-    .prepare(
-      "SELECT productCode, wipComponents FROM bom_templates WHERE versionStatus = 'ACTIVE'",
-    )
-    .all<{ productCode: string | null; wipComponents: string | null }>();
-  for (const row of res.results ?? []) {
-    if (!row.productCode || !row.wipComponents) continue;
-    try {
-      out.set(row.productCode, JSON.parse(row.wipComponents));
-    } catch {
-      // Skip malformed templates rather than failing the whole list endpoint.
-    }
   }
   return out;
 }

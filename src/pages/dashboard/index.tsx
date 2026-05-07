@@ -49,6 +49,12 @@ interface JobCard {
   departmentName: string;
   status: string;
   completedDate: string | null;
+  // Piece counts emitted by the minimal /api/production-orders payload.
+  // Legacy responses without them fall back to wipQty (or 1) — matches
+  // production/utils.ts:cellFor() so the dashboard counts pieces, not JCs.
+  wipQty: number | null;
+  piecesTotal?: number;
+  piecesDone?: number;
 }
 
 interface ProductionOrder {
@@ -306,17 +312,34 @@ export default function DashboardPage() {
   const lowStockItems = rawMaterials.filter((rm) => rm.balanceQty < 10).length;
   const activeRD = rdProjects.filter((p) => p.status === "ACTIVE").length;
 
-  // Department status from jobCards
+  // Department status from jobCards — piece-level counts so the
+  // dashboard agrees with the per-department production cells
+  // (production/utils.ts:cellFor). Sofa JCs commonly carry wipQty=N
+  // pieces; counting JCs would treat a 3-piece JC the same as a
+  // 1-piece JC and disagree with what the floor actually sees.
+  // Falls back to wipQty (or 1) when the minimal payload's
+  // piecesTotal / piecesDone aren't present.
   const deptStatus = DEPARTMENTS.map((dept) => {
     let active = 0;
     let queue = 0;
     let done = 0;
     for (const po of productionOrders) {
       for (const jc of po.jobCards ?? []) {
-        if (jc.departmentCode === dept.code) {
-          if (jc.status === "IN_PROGRESS") active++;
-          else if (jc.status === "WAITING") queue++;
-          else if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") done++;
+        if (jc.departmentCode !== dept.code) continue;
+        const total = Math.max(1, jc.piecesTotal ?? jc.wipQty ?? 1);
+        const isDone =
+          jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
+        const cardDone =
+          jc.piecesDone != null ? Math.min(total, jc.piecesDone) : isDone ? total : 0;
+        if (isDone) {
+          done += cardDone;
+        } else if (jc.status === "IN_PROGRESS" || jc.status === "PAUSED") {
+          // In-progress: pieces already done count toward "done" tally,
+          // and the remaining pieces are "active" work.
+          done += cardDone;
+          active += total - cardDone;
+        } else if (jc.status === "WAITING" || jc.status === "BLOCKED") {
+          queue += total;
         }
       }
     }

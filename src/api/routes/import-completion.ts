@@ -45,6 +45,7 @@ import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
 import {
   applyWipInventoryChange,
+  recomputePoStatusAndProgress,
   type JobCardRow,
   type ProductionOrderRow,
 } from "./production-orders";
@@ -10707,6 +10708,214 @@ app.post("/audit-procurement-integrity", async (c) => {
   }
 
   return c.json({ success: true, checks });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/recompute-po-status-progress
+//
+// One-shot backfill that runs the recomputePoStatusAndProgress helper over
+// every existing production_orders row. Required after the audit fix
+// (2026-05-07): historic POs were stranded at status="PENDING" and
+// progress=0 even when their JCs were all done. The helper itself is the
+// same one wired into every live JC mutation site, so re-running it here
+// gets every row to the canonical state.
+//
+// Skips ON_HOLD and CANCELLED (admin states). Returns counts +
+// representative samples so the operator can sanity-check the diff
+// before-and-after.
+//
+// Body: { dryRun?: boolean } — default false. Dry run computes the diff
+// but does not write.
+// ---------------------------------------------------------------------------
+app.post("/recompute-po-status-progress", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { dryRun?: boolean } = {};
+  try {
+    body = (await c.req.json().catch(() => ({}))) as { dryRun?: boolean };
+  } catch {
+    body = {};
+  }
+  const dryRun = body?.dryRun === true;
+
+  const db = c.var.DB;
+
+  // Load every PO id. A few thousand at most — fits in one round-trip.
+  const poRes = await db
+    .prepare(`SELECT id, poNo, status, progress, completedDate FROM production_orders`)
+    .all<{
+      id: string;
+      poNo: string;
+      status: string;
+      progress: number | null;
+      completedDate: string | null;
+    }>();
+  const allPos = poRes.results ?? [];
+
+  let scanned = 0;
+  let skippedAdminState = 0;
+  let statusChanged = 0;
+  let progressChanged = 0;
+  let completedDateChanged = 0;
+  const errors: Array<{ poId: string; poNo: string; message: string }> = [];
+  type Sample = {
+    poId: string;
+    poNo: string;
+    before: { status: string; progress: number; completedDate: string | null };
+    after: { status: string; progress: number; completedDate: string | null };
+  };
+  const statusSamples: Sample[] = [];
+  const progressSamples: Sample[] = [];
+
+  for (const po of allPos) {
+    scanned++;
+    if (po.status === "ON_HOLD" || po.status === "CANCELLED") {
+      skippedAdminState++;
+      continue;
+    }
+
+    if (dryRun) {
+      // Replicate the helper's read path to compute the diff without writing.
+      // Mirrors recomputePoStatusAndProgress exactly so the dry-run report
+      // matches what the live run would do.
+      const sibs = await db
+        .prepare(
+          `SELECT id, status, completedDate, wipQty, sequence
+             FROM job_cards
+            WHERE productionOrderId = ?`,
+        )
+        .bind(po.id)
+        .all<{
+          id: string;
+          status: string;
+          completedDate: string | null;
+          wipQty: number | null;
+          sequence: number;
+        }>();
+      const allJcs = sibs.results ?? [];
+      const isDone = (s: string) => s === "COMPLETED" || s === "TRANSFERRED";
+      const isInProgress = (s: string) =>
+        s === "IN_PROGRESS" || s === "PAUSED";
+      let derivedStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" = "PENDING";
+      if (allJcs.length > 0) {
+        if (allJcs.every((j) => isDone(j.status))) derivedStatus = "COMPLETED";
+        else if (allJcs.some((j) => isInProgress(j.status)))
+          derivedStatus = "IN_PROGRESS";
+      }
+      let pieces = 0;
+      let donePieces = 0;
+      for (const j of allJcs) {
+        const t = Math.max(1, j.wipQty ?? 1);
+        pieces += t;
+        if (isDone(j.status)) donePieces += t;
+      }
+      const newProgress =
+        pieces > 0 ? Math.round((donePieces / pieces) * 100) : 0;
+      let newCompletedDate: string | null = po.completedDate ?? null;
+      if (derivedStatus === "COMPLETED") {
+        const dates = allJcs
+          .map((j) => j.completedDate || "")
+          .filter(Boolean)
+          .sort();
+        newCompletedDate =
+          dates.length > 0
+            ? dates[dates.length - 1]
+            : (po.completedDate ??
+              new Date().toISOString().slice(0, 10));
+      }
+      const sChanged = po.status !== derivedStatus;
+      const pChanged = (po.progress ?? 0) !== newProgress;
+      const cChanged =
+        derivedStatus === "COMPLETED" &&
+        (po.completedDate ?? null) !== (newCompletedDate ?? null);
+      if (sChanged) statusChanged++;
+      if (pChanged) progressChanged++;
+      if (cChanged) completedDateChanged++;
+      if (sChanged && statusSamples.length < 10) {
+        statusSamples.push({
+          poId: po.id,
+          poNo: po.poNo,
+          before: {
+            status: po.status,
+            progress: po.progress ?? 0,
+            completedDate: po.completedDate ?? null,
+          },
+          after: {
+            status: derivedStatus,
+            progress: newProgress,
+            completedDate: newCompletedDate,
+          },
+        });
+      }
+      if (pChanged && progressSamples.length < 10) {
+        progressSamples.push({
+          poId: po.id,
+          poNo: po.poNo,
+          before: {
+            status: po.status,
+            progress: po.progress ?? 0,
+            completedDate: po.completedDate ?? null,
+          },
+          after: {
+            status: derivedStatus,
+            progress: newProgress,
+            completedDate: newCompletedDate,
+          },
+        });
+      }
+      continue;
+    }
+
+    try {
+      const result = await recomputePoStatusAndProgress(db, po.id);
+      if (!result.changed || !result.before || !result.after) continue;
+      if (result.statusChanged) {
+        statusChanged++;
+        if (statusSamples.length < 10) {
+          statusSamples.push({
+            poId: po.id,
+            poNo: po.poNo,
+            before: result.before,
+            after: result.after,
+          });
+        }
+      }
+      if (result.progressChanged) {
+        progressChanged++;
+        if (progressSamples.length < 10) {
+          progressSamples.push({
+            poId: po.id,
+            poNo: po.poNo,
+            before: result.before,
+            after: result.after,
+          });
+        }
+      }
+      if (result.completedDateChanged) completedDateChanged++;
+    } catch (err) {
+      errors.push({
+        poId: po.id,
+        poNo: po.poNo,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun,
+    scanned,
+    skippedAdminState,
+    statusChanged,
+    progressChanged,
+    completedDateChanged,
+    errors,
+    samples: {
+      status: statusSamples,
+      progress: progressSamples,
+    },
+  });
 });
 
 export default app;

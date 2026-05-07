@@ -50,7 +50,7 @@ import {
   type ProductionOrderRow,
 } from "./production-orders";
 import {
-  consumeRawMaterialsForJC,
+  consumeRawMaterialsForPO,
   postJobCardLabor,
 } from "../lib/po-cost-cascade";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
@@ -11290,26 +11290,27 @@ app.post("/recompute-po-status-progress", async (c) => {
 // ---------------------------------------------------------------------------
 // POST /api/import/backfill-fabcut-rm-issue?dryRun=true|false
 //
-// One-shot data migration: walk every job_cards row where
-//   departmentCode = 'FAB_CUT'
-//   AND status IN ('COMPLETED', 'TRANSFERRED')
-//   AND no cost_ledger RM_ISSUE row exists yet (refType='JOB_CARD',
-//       refId=jc.id, type='RM_ISSUE')
+// One-shot data migration: walk every production_orders row that has at
+// least one FAB_CUT JC in COMPLETED/TRANSFERRED status but no RM_ISSUE
+// cost_ledger row yet (refType='PRODUCTION_ORDER', refId=po.id).
 //
-// For each, run consumeRawMaterialsForJC(jc.id) which:
-//   - Resolves the FAB_CUT BOM node by jc.wipType
+// For each PO, run consumeRawMaterialsForPO(po.id) which:
+//   - Resolves materials from bom_templates.wipComponents (active)
+//     scoped by po.productCode
+//   - Multiplies per-piece qty × parent FC node's pieceCount × po.quantity
 //   - FIFO-consumes rm_batches
-//   - Writes one cost_ledger RM_ISSUE row per slice
+//   - Writes one cost_ledger RM_ISSUE row per slice (refType=PRODUCTION_ORDER)
 //   - Decrements raw_materials.balanceQty
 //
-// Idempotent on re-run (the JC-level idempotency check inside
-// consumeRawMaterialsForJC short-circuits already-consumed JCs).
+// Idempotent on re-run (consumeRawMaterialsForPO checks for existing
+// RM_ISSUE row keyed on refType='PRODUCTION_ORDER', refId=po.id).
 //
 // Why this exists: as of 2026-05-07 the F1 trigger moved from PO
 // completion to FAB_CUT JC completion. POs whose FAB_CUT JCs were
-// completed BEFORE that change consumed nothing (PO-completion path
-// short-circuited because we removed the wide consume). This walks
-// historical FC JCs and consumes them retroactively.
+// completed BEFORE that change still consume at PO completion if they
+// finish; this endpoint forces a retroactive consume for POs that have
+// FAB_CUT done but PO not yet COMPLETED (so haven't naturally triggered
+// the legacy F1 path either).
 //
 // dryRun=true → counts only, no DB writes (default)
 // dryRun=false → executes the consume batch
@@ -11322,49 +11323,46 @@ app.post("/backfill-fabcut-rm-issue", async (c) => {
   );
   const db = c.var.DB;
 
-  // Find FAB_CUT JCs that are done but have no JC-level RM_ISSUE yet.
-  // Bound at `limit` per call so a single Workers invocation finishes
-  // before hitting wall-clock budget. Caller loops with the returned
-  // `nextCursor` until null.
+  // Find DISTINCT POs that have at least one done FAB_CUT JC but no
+  // PO-level RM_ISSUE row. Bound at `limit` per call so a single Workers
+  // invocation finishes before hitting wall-clock budget.
   const cursor = c.req.query("cursor") || "";
   const candidates = await db
     .prepare(
-      `SELECT jc.id, jc.productionOrderId, jc.wipType, jc.wipQty, jc.status,
-              jc.completedDate, po.poNo, po.fabricCode
-         FROM job_cards jc
-         INNER JOIN production_orders po ON po.id = jc.productionOrderId
+      `SELECT DISTINCT po.id, po.poNo, po.productCode, po.fabricCode,
+              po.itemCategory, po.status
+         FROM production_orders po
+         INNER JOIN job_cards jc ON jc.productionOrderId = po.id
          WHERE jc.departmentCode = 'FAB_CUT'
            AND jc.status IN ('COMPLETED', 'TRANSFERRED')
-           AND jc.id > ?
+           AND po.id > ?
            AND NOT EXISTS (
              SELECT 1 FROM cost_ledger cl
-              WHERE cl.refType = 'JOB_CARD'
-                AND cl.refId = jc.id
+              WHERE cl.refType = 'PRODUCTION_ORDER'
+                AND cl.refId = po.id
                 AND cl.type = 'RM_ISSUE'
            )
-         ORDER BY jc.id ASC
+         ORDER BY po.id ASC
          LIMIT ?`,
     )
     .bind(cursor, limit)
     .all<{
       id: string;
-      productionOrderId: string;
-      wipType: string | null;
-      wipQty: number | null;
-      status: string;
-      completedDate: string | null;
       poNo: string | null;
+      productCode: string | null;
       fabricCode: string | null;
+      itemCategory: string | null;
+      status: string | null;
     }>();
 
   const candidateRows = candidates.results ?? [];
   const total = candidateRows.length;
 
   if (dryRun) {
-    const byWipType: Record<string, number> = {};
+    const byCategory: Record<string, number> = {};
     for (const r of candidateRows) {
-      const k = r.wipType || "(unknown)";
-      byWipType[k] = (byWipType[k] ?? 0) + 1;
+      const k = r.itemCategory || "(unknown)";
+      byCategory[k] = (byCategory[k] ?? 0) + 1;
     }
     const lastId =
       candidateRows.length > 0
@@ -11374,35 +11372,35 @@ app.post("/backfill-fabcut-rm-issue", async (c) => {
       success: true,
       dryRun: true,
       candidatesScanned: total,
-      candidatesByWipType: byWipType,
+      candidatesByCategory: byCategory,
       sample: candidateRows.slice(0, 10).map((r) => ({
-        jcId: r.id,
+        poId: r.id,
         poNo: r.poNo,
-        wipType: r.wipType,
-        wipQty: r.wipQty,
+        productCode: r.productCode,
         fabricCode: r.fabricCode,
-        completedDate: r.completedDate,
+        itemCategory: r.itemCategory,
+        status: r.status,
       })),
       nextCursor: candidateRows.length === limit ? lastId : null,
     });
   }
 
-  // Real run: invoke consumeRawMaterialsForJC per candidate. Each call is
-  // independently idempotent. We collect per-JC results into a summary.
+  // Real run: invoke consumeRawMaterialsForPO per candidate PO. Each
+  // call is idempotent. Collect per-PO results.
   let consumed = 0;
   let skipped = 0;
-  const errors: { jcId: string; error: string }[] = [];
+  const errors: { poId: string; error: string }[] = [];
   let totalMaterialCostSen = 0;
   let totalLinesConsumed = 0;
   const shortageSamples: {
-    jcId: string;
+    poId: string;
     materialName: string;
     shortageQty: number;
   }[] = [];
 
   for (const r of candidateRows) {
     try {
-      const result = await consumeRawMaterialsForJC(db, r.id);
+      const result = await consumeRawMaterialsForPO(db, r.id);
       if (result.skipped) {
         skipped++;
       } else {
@@ -11411,13 +11409,13 @@ app.post("/backfill-fabcut-rm-issue", async (c) => {
         totalLinesConsumed += result.linesConsumed;
         for (const s of result.shortages.slice(0, 3)) {
           if (shortageSamples.length < 20) {
-            shortageSamples.push({ jcId: r.id, ...s });
+            shortageSamples.push({ poId: r.id, ...s });
           }
         }
       }
     } catch (err) {
       errors.push({
-        jcId: r.id,
+        poId: r.id,
         error: err instanceof Error ? err.message : String(err),
       });
     }

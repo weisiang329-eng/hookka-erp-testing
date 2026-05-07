@@ -27,7 +27,7 @@ import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
 import {
-  consumeRawMaterialsForJC,
+  consumeRawMaterialsForPO,
   postJobCardLabor,
 } from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
@@ -3190,17 +3190,23 @@ async function applyPoUpdate(
         });
       }
 
-      // F1-JC — RM consumption at FAB_CUT JC completion (post 2026-05-07).
-      // Fabric (and any other raw material on the FC node) is deducted from
-      // raw_materials.balanceQty the moment the FAB_CUT JC flips done —
-      // matches physical reality (meters leave the roll when cutting). Only
-      // fires for FAB_CUT dept; other JC dept completions are pure WIP
-      // transformations (no RM consume). Idempotent per jc.id.
+      // F1 — RM consumption at FAB_CUT JC completion (moved here from PO
+      // completion on 2026-05-07). Fabric (and any other raw material the
+      // BOM authors on FC nodes) is deducted from raw_materials.balanceQty
+      // the moment ANY FAB_CUT JC of this PO flips done — matches physical
+      // reality (meters leave the roll when cutting happens, not weeks
+      // later). The consume is keyed on PO + BOM template (productCode):
+      // first FAB_CUT JC trips the consume for the whole PO, subsequent
+      // FAB_CUT JCs (e.g. STOOL with split Cushion / Base FCs) see the
+      // existing RM_ISSUE row and short-circuit via idempotency check
+      // inside consumeRawMaterialsForPO (refType='PRODUCTION_ORDER').
+      // Other JC dept completions (FAB_SEW, WOOD_CUT, etc.) are pure WIP
+      // transformations — no RM consume.
       if (updated.departmentCode === "FAB_CUT") {
         try {
-          await consumeRawMaterialsForJC(db, updated.id);
+          await consumeRawMaterialsForPO(db, existing.id);
         } catch (err) {
-          console.error("[consumeRawMaterialsForJC] cascade failed", {
+          console.error("[consumeRawMaterialsForPO@FAB_CUT] cascade failed", {
             poId: id,
             jobCardId: updated.id,
             dept: updated.departmentCode,

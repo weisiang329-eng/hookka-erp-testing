@@ -230,6 +230,12 @@ function POFormDialog({
     setItems(updated);
   };
 
+  const updateItemPrice = (idx: number, priceSen: number) => {
+    const updated = [...items];
+    updated[idx] = { ...updated[idx], unitPriceSen: priceSen };
+    setItems(updated);
+  };
+
   const removeItem = (idx: number) => {
     setItems(items.filter((_, i) => i !== idx));
   };
@@ -528,13 +534,31 @@ function POFormDialog({
                       <div className="grid grid-cols-8 gap-2 items-end mt-2">
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Qty</label>
-                          <Input className="h-8 text-xs" type="number" onFocus={(e) => e.currentTarget.select()} min={0} value={item.quantity} onChange={(e) => updateItemQty(idx, Number(e.target.value))} />
+                          {/* Empty-string fallback so a 0 default doesn't stick after a backspace.
+                              `Number("") === 0`, so internally a cleared field still maps to qty=0;
+                              UI shows blank instead of "0" so the operator can type freely. */}
+                          <Input
+                            className="h-8 text-xs"
+                            type="number"
+                            onFocus={(e) => e.currentTarget.select()}
+                            min={0}
+                            value={item.quantity === 0 ? "" : item.quantity}
+                            onChange={(e) => updateItemQty(idx, Number(e.target.value) || 0)}
+                          />
                         </div>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Price (sen)</label>
-                          <div className="h-8 flex items-center px-2 text-xs text-[#374151] bg-white rounded border border-[#E2DDD8]">
-                            {item.unitPriceSen}
-                          </div>
+                          {/* Editable — defaults to the supplier-material-binding price but
+                              operator can override per-line (negotiated discount, special quote).
+                              Same empty-string trick as Qty so a 0 default clears cleanly. */}
+                          <Input
+                            className="h-8 text-xs"
+                            type="number"
+                            onFocus={(e) => e.currentTarget.select()}
+                            min={0}
+                            value={item.unitPriceSen === 0 ? "" : item.unitPriceSen}
+                            onChange={(e) => updateItemPrice(idx, Number(e.target.value) || 0)}
+                          />
                         </div>
                         <div>
                           <label className="block text-xs text-[#6B7280] mb-1">Unit</label>

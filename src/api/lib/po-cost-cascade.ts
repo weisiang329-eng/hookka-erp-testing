@@ -179,11 +179,21 @@ function collectTreeMaterials(
   }
 }
 
-// Resolve the BOM material list for a PO. Prefers bom_versions.tree
-// (rich schema with inventoryCode + nested materials + optional scaling
-// rules), falls back to bom_components rows. Returns [] if nothing is
-// found. Dimensions snapshot is used by the JSON-tree path to expand
-// per-material scaling rules at extraction time.
+// Resolve the BOM material list for a PO. Walks three sources in order:
+//   1. bom_versions.tree            (legacy rich schema, only ~4 rows in prod)
+//   2. bom_templates.wipComponents  (current source of truth — BOM editor +
+//                                    MRP both write here; 244 rows in prod)
+//   3. bom_components               (flat fallback keyed by productId)
+//
+// Source #2 was added 2026-05-07: existing PO completions were silently
+// returning [] for almost every product because bom_versions had only 4
+// entries while operators authored BOMs through the /api/bom/templates UI.
+// fabric was never being deducted at PO completion. Walking
+// bom_templates.wipComponents with the same collectTreeMaterials helper
+// (compatible shape — same `materials`/`children` keys) closes that gap
+// without a data migration. Returns [] if nothing is found. Dimensions
+// snapshot is used by the JSON-tree paths to expand per-material scaling
+// rules at extraction time.
 async function resolveBomMaterials(
   db: D1Database,
   po: ProductionOrderRow,
@@ -227,7 +237,34 @@ async function resolveBomMaterials(
       collectTreeMaterials(parsed, acc, dims);
       if (acc.length > 0) return await substituteAutoDetectMaterials(db, acc, po);
     } catch {
-      // fall through to bom_components
+      // fall through to bom_templates
+    }
+  }
+
+  // Step 2: bom_templates.wipComponents — current source of truth. The
+  // wipComponents column is a JSON ARRAY of root nodes (one root per top-
+  // level WIP — divan, headboard, sofa base, etc.), not a single root.
+  // Walk each root with collectTreeMaterials; the helper accumulates into
+  // `acc` across siblings.
+  if (po.productCode) {
+    const tplRow = await db
+      .prepare(
+        "SELECT id, wipComponents FROM bom_templates WHERE productCode = ? AND versionStatus = 'ACTIVE' LIMIT 1",
+      )
+      .bind(po.productCode)
+      .first<{ id: string; wipComponents: string | null }>();
+    if (tplRow?.wipComponents) {
+      try {
+        const parsed = JSON.parse(tplRow.wipComponents);
+        const roots = Array.isArray(parsed) ? parsed : [parsed];
+        const acc: MaterialLine[] = [];
+        for (const root of roots) {
+          collectTreeMaterials(root, acc, dims);
+        }
+        if (acc.length > 0) return await substituteAutoDetectMaterials(db, acc, po);
+      } catch {
+        // fall through to bom_components
+      }
     }
   }
 

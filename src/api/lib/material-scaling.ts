@@ -9,29 +9,38 @@
 // future cost ledger), we expand the base qty by SUMMING every rule's
 // contribution:
 //
-//   effectiveQty = baseQty + Σ over rules:
-//                    max(0, SOLine[rule.dim] - rule.baseValue) * rule.perUnit
+//   effectiveQty = max(0, baseQty + Σ over rules:
+//                    (SOLine[rule.dim] - rule.baseValue) * rule.perUnit)
 //
-// FLOOR semantics: the BOM is recorded against the smallest spec build,
-// so orders SMALLER than the baseline still consume the full baseQty
-// (we never decrease — `max(0, …)` clamps the negative delta to zero
-// per-rule, so a small dim on one rule doesn't subtract from another
-// rule's contribution). Orders larger than baseline scale up linearly
-// per inch on each independent dimension.
+// SYMMETRIC semantics (since 2026-05-07): the BOM is recorded against a
+// canonical / typical spec, NOT the smallest spec. Orders LARGER than the
+// baseline scale UP linearly; orders SMALLER scale DOWN linearly with the
+// same perUnit slope. The final effectiveQty is floored at 0 so a wildly
+// out-of-range dimension can never create a negative consumption.
 //
 // User example (bedframe fabric, two rules stacked):
 //   - Base recipe:  1.5 m of fabric @ divan 8" + gap 0"
-//   - Rule A:       +0.2 m per inch divan over 8"
-//   - Rule B:       +0.1 m per inch gap over 0"
+//   - Rule A:       0.2 m per inch divan delta vs 8"
+//   - Rule B:       0.1 m per inch gap delta vs 0"
 //   - SO line:      divan 10", gap 2"
 //   - Effective:    1.5 + (10−8)*0.2 + (2−0)*0.1 = 2.1 m
+//   - SO line:      divan 6", gap 0"
+//   - Effective:    1.5 + (6−8)*0.2 + (0−0)*0.1 = 1.1 m   (scales DOWN)
 //
-// Single-rule legacy example (sofa fabric):
-//   - Base recipe: 5 metres of fabric @ seat height 24"
-//   - perUnit:     0.2 metres per inch over 24
-//   - SO line:     seat height 27"
-//   - Effective:   5 + max(0, 27 - 24) * 0.2 = 5.6 metres
-//   - SO line at 22": 5 + max(0, 22 - 24) * 0.2 = 5 metres (floored)
+// Sofa fabric example:
+//   - Base recipe: 5 metres of fabric @ seat height 30"
+//   - perUnit:     0.3 metres per inch delta vs 30"
+//   - SO line:     seat height 33"
+//   - Effective:   5 + (33 - 30) * 0.3 = 5.9 metres
+//   - SO line at 27": 5 + (27 - 30) * 0.3 = 4.1 metres   (scales DOWN)
+//
+// Migration note: pre-2026-05-07 callers relied on floor-only semantics
+// (max(0, dim - baseValue)). Existing scaling rules were authored against
+// the smallest possible build, so dim was always >= baseValue and the
+// floor never kicked in. Switching to symmetric is therefore a no-op for
+// those rules but enables authors to record canonical baselines plus
+// bidirectional perUnit slopes — closer to how production actually
+// estimates fabric consumption (more for bigger, less for smaller).
 //
 // Backwards compat: parseMaterialScaling accepts BOTH the legacy single-
 // object shape AND the new array shape, normalising to MaterialScaling[].
@@ -103,10 +112,14 @@ export function pickDimension(
 /**
  * Apply every scaling rule and return the effective qty to consume.
  *
- * Each rule contributes max(0, dim - rule.baseValue) * rule.perUnit
- * INDEPENDENTLY; the contributions are summed onto baseQty. A rule
- * whose dimension is missing on the PO contributes 0 (fallback to
- * baseQty for that rule, not the whole row).
+ * Each rule contributes (dim - rule.baseValue) * rule.perUnit
+ * INDEPENDENTLY (signed — a dim BELOW baseValue contributes a negative
+ * value, scaling consumption DOWN). Contributions are summed onto
+ * baseQty; the final result is floored at 0 so wildly small dimensions
+ * can't push consumption negative.
+ *
+ * A rule whose dimension is missing on the PO contributes 0 (fallback
+ * to baseQty for that rule, not the whole row).
  *
  * Defensive against malformed JSON: rules missing or with non-finite
  * baseValue / perUnit contribute 0. An empty / null / undefined rules
@@ -136,10 +149,17 @@ export function expandMaterialQty(
     }
     const dimValue = pickDimension(rule.dimension, dims);
     if (dimValue == null) continue;
-    const delta = Math.max(0, dimValue - rule.baseValue);
+    // Symmetric: signed delta. dim above baseValue scales UP, below
+    // scales DOWN by the same perUnit slope. Floor at 0 happens AFTER
+    // the sum so one rule's negative pull can be offset by another
+    // rule's positive push (mirrors the floor-at-end docstring above).
+    const delta = dimValue - rule.baseValue;
     qty += delta * rule.perUnit;
   }
-  return qty;
+  // Final floor: never let scaling drive consumption negative even if
+  // the operator entered an out-of-range dim or a perUnit slope is
+  // unrealistically steep.
+  return Math.max(0, qty);
 }
 
 /**

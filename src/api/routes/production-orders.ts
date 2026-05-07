@@ -26,7 +26,10 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "../worker";
 import { postProductionOrderCompletion } from "../lib/fg-completion";
-import { postJobCardLabor } from "../lib/po-cost-cascade";
+import {
+  consumeRawMaterialsForJC,
+  postJobCardLabor,
+} from "../lib/po-cost-cascade";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
 import { requirePermission } from "../lib/rbac";
@@ -3185,6 +3188,25 @@ async function applyPoUpdate(
           jobCardId: updated.id,
           err: err instanceof Error ? err.message : String(err),
         });
+      }
+
+      // F1-JC — RM consumption at FAB_CUT JC completion (post 2026-05-07).
+      // Fabric (and any other raw material on the FC node) is deducted from
+      // raw_materials.balanceQty the moment the FAB_CUT JC flips done —
+      // matches physical reality (meters leave the roll when cutting). Only
+      // fires for FAB_CUT dept; other JC dept completions are pure WIP
+      // transformations (no RM consume). Idempotent per jc.id.
+      if (updated.departmentCode === "FAB_CUT") {
+        try {
+          await consumeRawMaterialsForJC(db, updated.id);
+        } catch (err) {
+          console.error("[consumeRawMaterialsForJC] cascade failed", {
+            poId: id,
+            jobCardId: updated.id,
+            dept: updated.departmentCode,
+            err: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
 

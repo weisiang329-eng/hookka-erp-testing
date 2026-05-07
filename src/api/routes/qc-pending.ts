@@ -33,6 +33,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { recomputePoStatusAndProgress } from "./production-orders";
 
 const app = new Hono<Env>();
 
@@ -629,6 +630,7 @@ app.post("/:id/complete", async (c) => {
     }
 
     // 4. WIP-stage + JOB_CARD subject + FAIL → reset the Job Card.
+    let jcResetParentPoId: string | null = null;
     if (overallFail && existing.stage === "WIP" && subjectType === "JOB_CARD") {
       stmts.push(
         c.var.DB
@@ -643,9 +645,40 @@ app.post("/:id/complete", async (c) => {
           )
           .bind(subjectId),
       );
+      // Stash the parent PO id so we can recompute its status/progress
+      // after the batch commits — flipping a JC to BLOCKED can drop the
+      // parent PO from COMPLETED (extremely rare but possible) or simply
+      // refresh the progress %. Fetched outside the batch so the read
+      // happens before the UPDATE lands.
+      try {
+        const jcRow = await c.var.DB
+          .prepare(`SELECT productionOrderId FROM job_cards WHERE id = ?`)
+          .bind(subjectId)
+          .first<{ productionOrderId: string }>();
+        jcResetParentPoId = jcRow?.productionOrderId ?? null;
+      } catch (err) {
+        console.error("[qc-pending] parent PO lookup failed", {
+          jcId: subjectId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     await c.var.DB.batch(stmts);
+
+    // After the batch commits, recompute the parent PO's status/progress
+    // off the fresh JC view. Defensive — a recompute miss must not void
+    // the inspection submission that already committed.
+    if (jcResetParentPoId) {
+      try {
+        await recomputePoStatusAndProgress(c.var.DB, jcResetParentPoId);
+      } catch (err) {
+        console.error("[qc-pending] recomputePoStatusAndProgress failed", {
+          poId: jcResetParentPoId,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Reload + return
     const [updated, updatedItems] = await Promise.all([

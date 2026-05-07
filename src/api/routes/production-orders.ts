@@ -2703,6 +2703,160 @@ export async function cascadeCNReversalToCO(
 // through postProductionOrderCompletion() + postJobCardLabor() below.
 
 // ---------------------------------------------------------------------------
+// recomputePoStatusAndProgress — single source of truth for PO.status +
+// PO.progress + PO.completedDate roll-up off the JC view.
+//
+// FE-BE consistency audit (2026-05-07) found PO.status was set to "PENDING"
+// at PO creation (production-builder.ts:804) and never updated again —
+// dashboard "Active Jobs" and "In Queue" tiles were silently broken.
+// PO.progress was likewise a dead column the FE never read but the API
+// surfaced. This helper rolls both forward whenever a JC mutates so any
+// reader sees real values.
+//
+// Rules:
+//   • status — All JCs done (COMPLETED/TRANSFERRED) → "COMPLETED".
+//     Any JC IN_PROGRESS or PAUSED → "IN_PROGRESS".
+//     Otherwise → "PENDING".
+//     ON_HOLD / CANCELLED are admin states — left alone.
+//   • progress — piece-level (sum of wipQty for done JCs ÷ sum of wipQty
+//     for all JCs × 100). Mirrors the production page's cell math so the
+//     two views stop disagreeing.
+//   • completedDate — only set when transitioning to COMPLETED. Pulled
+//     from the latest JC.completedDate; falls back to today if none
+//     present (edge case for backfilled rows).
+//
+// Idempotent — only writes when something actually changed. Never
+// overwrites ON_HOLD / CANCELLED. Returns the diff for diagnostics
+// (used by the backfill endpoint).
+// ---------------------------------------------------------------------------
+export async function recomputePoStatusAndProgress(
+  db: D1Database,
+  poId: string,
+): Promise<{
+  changed: boolean;
+  statusChanged: boolean;
+  progressChanged: boolean;
+  completedDateChanged: boolean;
+  before: { status: string; progress: number; completedDate: string | null } | null;
+  after: { status: string; progress: number; completedDate: string | null } | null;
+}> {
+  const noop = {
+    changed: false,
+    statusChanged: false,
+    progressChanged: false,
+    completedDateChanged: false,
+    before: null,
+    after: null,
+  };
+  const poRow = await db
+    .prepare(
+      `SELECT status, progress, completedDate FROM production_orders WHERE id = ?`,
+    )
+    .bind(poId)
+    .first<{ status: string; progress: number; completedDate: string | null }>();
+  if (!poRow) return noop;
+
+  // Admin states are sticky — exit before touching anything.
+  if (poRow.status === "ON_HOLD" || poRow.status === "CANCELLED") return noop;
+
+  const sibs = await db
+    .prepare(
+      `SELECT id, status, completedDate, wipQty, sequence
+         FROM job_cards
+        WHERE productionOrderId = ?`,
+    )
+    .bind(poId)
+    .all<{
+      id: string;
+      status: string;
+      completedDate: string | null;
+      wipQty: number | null;
+      sequence: number;
+    }>();
+  const allJcs = sibs.results ?? [];
+
+  const isDone = (s: string) => s === "COMPLETED" || s === "TRANSFERRED";
+  const isInProgress = (s: string) => s === "IN_PROGRESS" || s === "PAUSED";
+
+  let derivedStatus: "PENDING" | "IN_PROGRESS" | "COMPLETED" = "PENDING";
+  if (allJcs.length > 0) {
+    if (allJcs.every((j) => isDone(j.status))) derivedStatus = "COMPLETED";
+    else if (allJcs.some((j) => isInProgress(j.status))) derivedStatus = "IN_PROGRESS";
+  }
+
+  // Piece-level progress so the dashboard / production page agree.
+  let pieces = 0;
+  let donePieces = 0;
+  for (const j of allJcs) {
+    const t = Math.max(1, j.wipQty ?? 1);
+    pieces += t;
+    if (isDone(j.status)) donePieces += t;
+  }
+  const newProgress = pieces > 0 ? Math.round((donePieces / pieces) * 100) : 0;
+
+  let newCompletedDate: string | null = poRow.completedDate ?? null;
+  if (derivedStatus === "COMPLETED") {
+    const dates = allJcs
+      .map((j) => j.completedDate || "")
+      .filter(Boolean)
+      .sort();
+    newCompletedDate =
+      dates.length > 0
+        ? dates[dates.length - 1]
+        : (poRow.completedDate ?? new Date().toISOString().slice(0, 10));
+  }
+
+  const statusChanged = poRow.status !== derivedStatus;
+  const progressChanged = (poRow.progress ?? 0) !== newProgress;
+  const completedDateChanged =
+    derivedStatus === "COMPLETED" &&
+    (poRow.completedDate ?? null) !== (newCompletedDate ?? null);
+
+  if (!statusChanged && !progressChanged && !completedDateChanged) {
+    return {
+      changed: false,
+      statusChanged: false,
+      progressChanged: false,
+      completedDateChanged: false,
+      before: { ...poRow },
+      after: { ...poRow },
+    };
+  }
+
+  const finalStatus = statusChanged ? derivedStatus : poRow.status;
+  const finalCompleted = completedDateChanged
+    ? newCompletedDate
+    : (poRow.completedDate ?? null);
+  await db
+    .prepare(
+      `UPDATE production_orders
+          SET status = ?, progress = ?, completedDate = ?, updated_at = ?
+        WHERE id = ?`,
+    )
+    .bind(
+      finalStatus,
+      newProgress,
+      finalCompleted,
+      new Date().toISOString(),
+      poId,
+    )
+    .run();
+
+  return {
+    changed: true,
+    statusChanged,
+    progressChanged,
+    completedDateChanged,
+    before: { ...poRow },
+    after: {
+      status: finalStatus,
+      progress: newProgress,
+      completedDate: finalCompleted,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Core PO-update logic shared between PUT and PATCH.
 // ---------------------------------------------------------------------------
 async function applyPoUpdate(
@@ -2745,10 +2899,12 @@ async function applyPoUpdate(
     .all<JobCardRow>();
   const allJcRows = jcRes.results ?? [];
 
-  let updatedPoStatus = existing.status;
-  let updatedProgress = existing.progress;
+  // currentDepartment is the only PO scalar derived inline — it doesn't
+  // belong in recomputePoStatusAndProgress (that helper is shared with
+  // the backfill endpoint where currentDepartment isn't on the rewrite
+  // surface). status / progress / completedDate are derived off the JC
+  // view by the helper.
   let updatedCurrentDept = existing.currentDepartment ?? "";
-  let updatedCompletedDate = existing.completedDate;
   // BUG-2026-04-27-020: track when this PATCH rolls a UPHOLSTERY JC out of
   // a DONE state so the SO-rollback companion to cascadeUpholsteryToSO
   // fires after the JC + PO UPDATEs commit. Set inside the body.jobCardId
@@ -3023,23 +3179,10 @@ async function applyPoUpdate(
       }
     }
 
-    // Recalculate progress / PO status.
+    // currentDepartment is the dept of the next JC the floor will work on.
+    // PO.status / progress / completedDate are recomputed by
+    // recomputePoStatusAndProgress() below — no longer derived here.
     const refreshedJcs = allJcRows.map((j) => (j.id === updated.id ? updated : j));
-    const completedCount = refreshedJcs.filter(
-      (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
-    ).length;
-    updatedProgress = Math.round((completedCount / refreshedJcs.length) * 100);
-
-    if (completedCount === refreshedJcs.length) {
-      updatedPoStatus = "COMPLETED";
-      updatedCompletedDate = today;
-      // postProductionOrderCompletion (FG + Track F cost cascade) runs
-      // after the production_orders UPDATE below.
-    } else {
-      updatedPoStatus = "IN_PROGRESS";
-      updatedCompletedDate = null;
-    }
-
     const activeDept = refreshedJcs.find(
       (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
     );
@@ -3060,18 +3203,20 @@ async function applyPoUpdate(
         : 0
       : existing.stockedIn;
 
+  // Write the operator-supplied scalar fields (currentDepartment, target
+  // dates, racking, stocked-in flag). status / progress / completedDate
+  // are NOT touched here — those are derived by
+  // recomputePoStatusAndProgress() below off the fresh JC view, which is
+  // the single source of truth for the roll-up.
   await db
     .prepare(
       `UPDATE production_orders SET
-         status = ?, progress = ?, currentDepartment = ?, completedDate = ?,
-         targetEndDate = ?, rackingNumber = ?, stockedIn = ?, updated_at = ?
+         currentDepartment = ?, targetEndDate = ?, rackingNumber = ?,
+         stockedIn = ?, updated_at = ?
        WHERE id = ?`,
     )
     .bind(
-      updatedPoStatus,
-      updatedProgress,
       updatedCurrentDept,
-      updatedCompletedDate,
       newTargetEnd,
       newRackingNumber,
       newStockedIn,
@@ -3080,10 +3225,24 @@ async function applyPoUpdate(
     )
     .run();
 
+  // Roll-up: derive PO.status + PO.progress + PO.completedDate off the
+  // post-UPDATE JC view. Skips ON_HOLD / CANCELLED. Only writes when
+  // something actually changed.
+  let recomputed: Awaited<ReturnType<typeof recomputePoStatusAndProgress>> | null = null;
+  try {
+    recomputed = await recomputePoStatusAndProgress(db, id);
+  } catch (err) {
+    console.error("[recomputePoStatusAndProgress] cascade failed", {
+      poId: id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const effectiveStatus = recomputed?.after?.status ?? existing.status;
+
   // SO cascades.  Wrapped in try/catch for the same reason as the WIP +
   // labor cascades above (Bug 3, 2026-04-26): a downstream cascade failure
   // must not void the JC + PO scalar UPDATEs that already committed.
-  if (body.jobCardId && updatedPoStatus === "COMPLETED") {
+  if (body.jobCardId && effectiveStatus === "COMPLETED") {
     // Auto-generate FG units + fg_batches row on PO completion. Idempotent:
     // postProductionOrderCompletion short-circuits if fg_units already exist
     // for this PO, and the fg_batches insert is guarded by productionOrderId.
@@ -4387,29 +4546,14 @@ app.post("/:id/scan-complete", async (c) => {
     await postJobCardLabor(db, mergedJc.id, target.po.id);
   }
 
-  // PO progress rollup.
+  // PO progress rollup. currentDepartment is derived inline; status,
+  // progress, completedDate flow through recomputePoStatusAndProgress
+  // below so the same rules apply on every JC mutation site.
   const poJcsRes = await db
     .prepare("SELECT * FROM job_cards WHERE productionOrderId = ?")
     .bind(target.po.id)
     .all<JobCardRow>();
   const poJcs = poJcsRes.results ?? [];
-  const completedCount = poJcs.filter(
-    (j) => j.status === "COMPLETED" || j.status === "TRANSFERRED",
-  ).length;
-  const newProgress = Math.round((completedCount / poJcs.length) * 100);
-  const allDone = completedCount === poJcs.length;
-
-  let newPoStatus = target.po.status;
-  let newCompleted: string | null = target.po.completedDate;
-  if (allDone) {
-    newPoStatus = "COMPLETED";
-    newCompleted = today;
-    // FG generation + fg_batches row is handled below, after the PO UPDATE
-    // writes the COMPLETED status (so generateFGUnitsForPO sees the flipped
-    // completedDate when stamping mfdDate on new units).
-  } else if (completedCount > 0) {
-    newPoStatus = "IN_PROGRESS";
-  }
   const activeDept = poJcs.find(
     (j) => j.status === "IN_PROGRESS" || j.status === "WAITING",
   );
@@ -4417,18 +4561,22 @@ app.post("/:id/scan-complete", async (c) => {
 
   await db
     .prepare(
-      `UPDATE production_orders SET status = ?, progress = ?,
-         completedDate = ?, currentDepartment = ?, updated_at = ? WHERE id = ?`,
+      `UPDATE production_orders SET currentDepartment = ?, updated_at = ?
+        WHERE id = ?`,
     )
-    .bind(
-      newPoStatus,
-      newProgress,
-      newCompleted,
-      newCurrentDept,
-      nowIso,
-      target.po.id,
-    )
+    .bind(newCurrentDept, nowIso, target.po.id)
     .run();
+
+  let scanRecomputed: Awaited<ReturnType<typeof recomputePoStatusAndProgress>> | null = null;
+  try {
+    scanRecomputed = await recomputePoStatusAndProgress(db, target.po.id);
+  } catch (err) {
+    console.error("[recomputePoStatusAndProgress] scan path failed", {
+      poId: target.po.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+  const allDone = scanRecomputed?.after?.status === "COMPLETED";
 
   if (allDone) {
     // Auto-generate FG units + fg_batches row on PO completion. Runs BEFORE

@@ -1158,6 +1158,10 @@ export default function ProductionPage({
     fltDueFrom, fltDueTo, fltDateAxis,
     fltCategory, fltItemType, fltModel,
     showCancelled,
+    // activeTab drives the dueDate axis branch added 2026-05-07 (overview
+    // → PO.targetEndDate, dept page → matching dept's JC.dueDate). Without
+    // it in the deps the memo retains stale results when the route changes.
+    activeTab,
   ]);
 
   const visibleOrders = useMemo(() => {

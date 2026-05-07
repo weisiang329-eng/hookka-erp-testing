@@ -18,6 +18,11 @@ export type JobCard = {
   // older client caches and the legacy non-minimal path don't carry them.
   piecesTotal?: number;
   piecesDone?: number;
+  // ISO timestamp the operator clicked the "Sent" tick on either the
+  // dept main grid (/production/<dept>) or the print-view production
+  // sheet (/production/department/<dept>). NULL until handed to floor.
+  // Optional for legacy cached payloads.
+  distributedAt?: string | null;
   // Server-derived expected dueDate under the *current* leadtime config:
   //   expectedDueDate = parentPO.targetEndDate - leadDaysFor(category, deptCode)
   // The Production overview cell flips to teal text when this differs

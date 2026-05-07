@@ -58,12 +58,19 @@ const app = new Hono<Env>();
 // Added 2026-05-07: distributedAt on job_cards — the dept sheet needs a
 // per-JC "Sent to floor" tick that survives sessions/devices so operators
 // stop double-printing the same sheet.
+//
+// Added 2026-05-07: dueDateOverriddenAt on job_cards — the production
+// Overview matrix paints the "Edited" cell colour when the operator has
+// manually rescheduled a JC's due date. Stamped from applyPoUpdate on
+// any dueDate change. Existing rows stay NULL so they render as Pending
+// until next time someone edits them, which matches the desired UX.
 let pendingMigrations: Promise<void> | null = null;
 function ensurePendingMigrations(db: D1Database): Promise<void> {
   if (pendingMigrations) return pendingMigrations;
   pendingMigrations = (async () => {
     const stmts = [
       "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS distributedAt TEXT",
+      "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS dueDateOverriddenAt TEXT",
     ];
     for (const sql of stmts) {
       try {
@@ -225,6 +232,11 @@ export type JobCardRow = {
   // Toggled via PATCH /api/production-orders/:id with `{ jobCardId,
   // distributedAt }`. Migration: see ensurePendingMigrations above.
   distributedAt: string | null;
+  // Per-JC "operator manually rescheduled" timestamp. NULL = original due
+  // date untouched; ISO string = when applyPoUpdate stamped it on a
+  // dueDate change. Drives the production Overview matrix' Edited cell
+  // colour. Migration: see ensurePendingMigrations above.
+  dueDateOverriddenAt: string | null;
 };
 
 type PiecePicRow = {
@@ -299,6 +311,7 @@ function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
     overdue: r.overdue ?? "",
     rackingNumber: r.rackingNumber ?? undefined,
     distributedAt: r.distributedAt ?? null,
+    dueDateOverriddenAt: r.dueDateOverriddenAt ?? null,
     piecePics: myPics.length > 0 ? myPics : undefined,
   };
 }
@@ -341,6 +354,10 @@ type MinimalJobCardOut = {
   // or null if it hasn't been sent yet. Drives the dept sheet's "Sent"
   // checkbox.
   distributedAt: string | null;
+  // ISO timestamp of the most recent operator-driven dueDate edit.
+  // NULL until the first manual reschedule; once set, the Overview
+  // matrix paints the cell with the "Edited" colour state.
+  dueDateOverriddenAt: string | null;
 };
 type MinimalPOOut = {
   id: string;
@@ -406,6 +423,7 @@ function rowToMinimalJobCard(
     piecesTotal,
     piecesDone,
     distributedAt: r.distributedAt ?? null,
+    dueDateOverriddenAt: r.dueDateOverriddenAt ?? null,
   };
 }
 
@@ -2696,7 +2714,18 @@ async function applyPoUpdate(
     if (body.actualMinutes !== undefined) {
       updated.actualMinutes = body.actualMinutes;
     }
-    if (body.dueDate !== undefined) updated.dueDate = body.dueDate;
+    if (body.dueDate !== undefined) {
+      const newDue = body.dueDate || null;
+      const oldDue = jcRow.dueDate || null;
+      updated.dueDate = newDue ?? "";
+      // Stamp the override timestamp ONLY when the value actually changes.
+      // No-op writes (FE re-sends the same date) shouldn't reset the flag,
+      // and clearing the date back to null doesn't count as an "edit" from
+      // the operator's perspective either — null → null stays null.
+      if (newDue !== oldDue) {
+        updated.dueDateOverriddenAt = nowIso;
+      }
+    }
     if (body.rackingNumber !== undefined) {
       updated.rackingNumber = body.rackingNumber;
     }
@@ -2713,7 +2742,8 @@ async function applyPoUpdate(
         `UPDATE job_cards SET
            status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
            pic2Id = ?, pic2Name = ?, actualMinutes = ?, dueDate = ?,
-           rackingNumber = ?, overdue = ?, distributedAt = ?
+           rackingNumber = ?, overdue = ?, distributedAt = ?,
+           dueDateOverriddenAt = ?
          WHERE id = ?`,
       )
       .bind(
@@ -2728,6 +2758,7 @@ async function applyPoUpdate(
         updated.rackingNumber,
         updated.overdue,
         updated.distributedAt,
+        updated.dueDateOverriddenAt,
         updated.id,
       )
       .run();

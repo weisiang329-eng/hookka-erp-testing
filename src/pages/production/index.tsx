@@ -229,16 +229,19 @@ function MultiSelectFilter({
   );
 }
 
+type DeptStatusValue = "pending" | "overdue" | "done" | "edited";
+
 function DeptStatusFilter({
   selected, onChange,
-}: { selected: ("pending" | "overdue" | "done")[]; onChange: (next: ("pending" | "overdue" | "done")[]) => void }) {
-  const opts: { value: "pending" | "overdue" | "done"; label: string; dot: string }[] = [
+}: { selected: DeptStatusValue[]; onChange: (next: DeptStatusValue[]) => void }) {
+  const opts: { value: DeptStatusValue; label: string; dot: string }[] = [
     { value: "pending", label: "Pending", dot: "bg-[#F4B860]" },
     { value: "overdue", label: "Overdue", dot: "bg-[#D9534F]" },
-    { value: "done", label: "Completed", dot: "bg-[#4F7C3A]" },
+    { value: "edited",  label: "Edited",  dot: "bg-[#3E6570]" },
+    { value: "done",    label: "Completed", dot: "bg-[#4F7C3A]" },
   ];
   const set = new Set(selected);
-  const toggle = (v: "pending" | "overdue" | "done") => {
+  const toggle = (v: DeptStatusValue) => {
     const next = new Set(set);
     if (next.has(v)) next.delete(v);
     else next.add(v);
@@ -511,7 +514,7 @@ export default function ProductionPage({
     qtyMax: string;
     dueFrom: string; // YYYY-MM-DD
     dueTo: string;
-    deptStatuses: Partial<Record<string, ("pending" | "overdue" | "done")[]>>;
+    deptStatuses: Partial<Record<string, DeptStatusValue[]>>;
   };
   const emptyOverviewFilters: OverviewFilters = {
     soId: "", product: "", customers: [], specialOrder: "",
@@ -1141,7 +1144,7 @@ export default function ProductionPage({
           if (wanted.length === 0) continue;
           const c = cellAt(o, deptCode);
           if (c.state === "empty") return false;
-          if (!wanted.includes(c.state as "pending" | "overdue" | "done")) return false;
+          if (!wanted.includes(c.state as DeptStatusValue)) return false;
         }
         return true;
       });
@@ -2663,6 +2666,7 @@ export default function ProductionPage({
     const cellClass = (state: CellState) =>
       state === "done" ? "done" :
       state === "overdue" ? "overdue" :
+      state === "edited" ? "edited" :
       state === "pending" ? "pending" : "empty";
 
     let body = "";
@@ -2900,6 +2904,7 @@ export default function ProductionPage({
     td.m.done    { background: #fff; color: #000; font-weight: 700; }
     td.m.pending { background: #fff; color: #000; font-style: italic; }
     td.m.overdue { background: #fff; color: #000; font-weight: 700; text-decoration: underline; }
+    td.m.edited  { background: #fff; color: #000; font-weight: 600; }
     td.m.empty   { background: #fff; }
     /* Dept-pill rendering inside the dept-tab print template. Print-friendly
        (B/W) — done = bold, overdue = bold + underlined, pending = italic.
@@ -3497,12 +3502,20 @@ export default function ProductionPage({
       </div>
       )}
 
-      {/* Legend — only for Overview matrix */}
+      {/* Legend — only for Overview matrix. 4-state palette per 2026-05-07
+          user spec: Completed (teal+✓) / Edited (teal, manually rescheduled
+          but on track) / Overdue (teal bg with red text) / Pending (olive,
+          default). Edited swatch matches CellBox to keep teal-bg cells
+          legible to operators scanning the row. */}
       {activeTab === "ALL" && (
         <div className="flex items-center gap-4 text-[10px] text-[#6B7280] px-1">
           <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-[#3E6570]" /> Completed</span>
           <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-[#9C6F1E]" /> Pending</span>
-          <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-[#9A3A2D]" /> Overdue</span>
+          <span className="flex items-center gap-1.5">
+            <span className="inline-flex h-3 w-3 rounded-sm bg-[#3E6570] items-center justify-center text-[8px] font-bold text-[#DC2626]">!</span>
+            Overdue
+          </span>
+          <span className="flex items-center gap-1.5"><span className="inline-block h-3 w-3 rounded-sm bg-[#3E6570] ring-1 ring-white/40" /> Edited</span>
         </div>
       )}
 

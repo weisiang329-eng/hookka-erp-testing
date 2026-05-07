@@ -61,6 +61,7 @@ function POFormDialog({
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<POLineItem[]>(prefillItems ?? []);
   const [rmSearch, setRmSearch] = useState("");
+  const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
 
   /** For a given RM code, return all supplier bindings. */
   const getBindingsForRM = useCallback(
@@ -93,16 +94,42 @@ function POFormDialog({
     [rawMaterials]
   );
 
-  // Filtered RM list based on search input
+  // Distinct categories with counts. Sorted alpha so the chip row is stable
+  // regardless of RM insertion order. "(uncategorised)" is the bucket for RMs
+  // with empty itemGroup so they don't silently disappear under the ALL chip
+  // when the user filters down.
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const rm of activeRMs) {
+      const cat = rm.itemGroup?.trim() || "(uncategorised)";
+      counts[cat] = (counts[cat] ?? 0) + 1;
+    }
+    return counts;
+  }, [activeRMs]);
+
+  const categories = useMemo(
+    () => Object.keys(categoryCounts).sort((a, b) => a.localeCompare(b)),
+    [categoryCounts]
+  );
+
+  // Filtered RM list — category chip + text search compose. Sorted by code so
+  // browsing without a query is predictable.
   const filteredRMs = useMemo(() => {
-    if (!rmSearch.trim()) return activeRMs;
-    const q = rmSearch.toLowerCase();
-    return activeRMs.filter(
-      (rm) =>
-        rm.itemCode.toLowerCase().includes(q) ||
-        rm.description.toLowerCase().includes(q)
-    );
-  }, [activeRMs, rmSearch]);
+    const q = rmSearch.trim().toLowerCase();
+    return activeRMs
+      .filter((rm) => {
+        if (selectedCategory !== "ALL") {
+          const cat = rm.itemGroup?.trim() || "(uncategorised)";
+          if (cat !== selectedCategory) return false;
+        }
+        if (!q) return true;
+        return (
+          rm.itemCode.toLowerCase().includes(q) ||
+          rm.description.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => a.itemCode.localeCompare(b.itemCode));
+  }, [activeRMs, rmSearch, selectedCategory]);
 
   const addItemFromRM = (rmItemCode: string) => {
     const rm = rawMaterials.find((r) => r.itemCode === rmItemCode);
@@ -312,41 +339,82 @@ function POFormDialog({
               <label className="text-sm font-medium text-[#374151]">Order Items</label>
             </div>
 
-            {/* RM search + dropdown */}
-            <div className="relative mb-3">
-              <label className="block text-xs text-[#6B7280] mb-1">Add material by RM code</label>
+            {/* RM picker — category chips + always-visible product list. The
+                operator can either click a category to narrow, type to search,
+                or both compose. List stays open so RMs can be browsed without
+                remembering codes. */}
+            <div className="mb-3 space-y-2">
+              <label className="block text-xs text-[#6B7280]">Add material — pick a category or search by code/description</label>
+
+              {/* Category chip row */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(["ALL", ...categories]).map((cat) => {
+                  const active = selectedCategory === cat;
+                  const count = cat === "ALL" ? activeRMs.length : (categoryCounts[cat] ?? 0);
+                  return (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => setSelectedCategory(cat)}
+                      className={
+                        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-colors " +
+                        (active
+                          ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+                          : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
+                      }
+                      aria-pressed={active}
+                    >
+                      {cat === "ALL" ? "All" : cat}
+                      <span
+                        className={`rounded-full px-1.5 py-0 text-[10px] ${
+                          active ? "bg-white/25 text-white" : "bg-[#F0ECE9] text-gray-500"
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Search box */}
               <Input
                 className="h-9 text-sm"
                 value={rmSearch}
                 onChange={(e) => setRmSearch(e.target.value)}
                 placeholder="Search by RM code or description..."
               />
-              {rmSearch.trim() && filteredRMs.length > 0 && (
-                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md shadow-lg">
-                  {filteredRMs.slice(0, 20).map((rm) => (
-                    <button
-                      key={rm.id}
-                      type="button"
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0"
-                      onClick={() => addItemFromRM(rm.itemCode)}
-                    >
-                      <span className="font-medium text-[#1F1D1B]">{rm.itemCode}</span>
-                      <span className="text-[#6B7280] ml-2">{rm.description}</span>
-                      <span className="text-[#9CA3AF] ml-2">({rm.baseUOM})</span>
-                    </button>
-                  ))}
-                  {filteredRMs.length > 20 && (
-                    <div className="px-3 py-2 text-xs text-[#9CA3AF]">
-                      Showing 20 of {filteredRMs.length} results. Refine your search.
-                    </div>
-                  )}
-                </div>
-              )}
-              {rmSearch.trim() && filteredRMs.length === 0 && (
-                <div className="absolute z-10 mt-1 w-full bg-white border border-[#E2DDD8] rounded-md shadow-lg px-3 py-2 text-sm text-[#9CA3AF]">
-                  No materials found
-                </div>
-              )}
+
+              {/* Always-visible product list — bounded scroll. Cap at 30 rows
+                  so the modal doesn't grow unbounded; chip + search narrow. */}
+              <div className="max-h-64 overflow-y-auto bg-white border border-[#E2DDD8] rounded-md">
+                {filteredRMs.length === 0 ? (
+                  <div className="px-3 py-4 text-sm text-[#9CA3AF] text-center">
+                    No materials match this filter
+                  </div>
+                ) : (
+                  <>
+                    {filteredRMs.slice(0, 30).map((rm) => (
+                      <button
+                        key={rm.id}
+                        type="button"
+                        className="w-full text-left px-3 py-2 text-sm hover:bg-[#FAF9F7] border-b border-[#E2DDD8] last:border-b-0 flex items-center gap-2"
+                        onClick={() => addItemFromRM(rm.itemCode)}
+                      >
+                        <Plus className="h-3 w-3 text-[#6B5C32] flex-shrink-0" />
+                        <span className="font-medium text-[#1F1D1B] flex-shrink-0">{rm.itemCode}</span>
+                        <span className="text-[#6B7280] truncate">{rm.description}</span>
+                        <span className="text-[#9CA3AF] ml-auto flex-shrink-0">({rm.baseUOM})</span>
+                      </button>
+                    ))}
+                    {filteredRMs.length > 30 && (
+                      <div className="px-3 py-2 text-xs text-[#9CA3AF] bg-[#FAF9F7]">
+                        Showing 30 of {filteredRMs.length}. Pick a category or refine search to narrow.
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
             </div>
 
             {items.length > 0 && (

@@ -1173,10 +1173,17 @@ export default function ProductionPage({
           if (key === "specialOrder") return cmpStr(a.specialOrder || "", b.specialOrder || "");
           if (key === "qty") return cmpNum(Number(a.quantity || 0), Number(b.quantity || 0));
           if (key === "due") return cmpStr(a.targetEndDate || "", b.targetEndDate || "");
-          // Department column — sort by earliest dept due date.
+          // Department column — sort by the SAME date the cell visually
+          // displays (done cells show latestCompleted; others show
+          // earliestDue). Tiebreaker on SO ID so rows with equal dates
+          // still have a stable, visible order.
           const ca = cellAt(a, key);
           const cb = cellAt(b, key);
-          return cmpStr(ca.earliestDue || "", cb.earliestDue || "");
+          const da = ca.state === "done" ? (ca.latestCompleted || ca.earliestDue) : ca.earliestDue;
+          const db = cb.state === "done" ? (cb.latestCompleted || cb.earliestDue) : cb.earliestDue;
+          const dateCmp = cmpStr(da || "", db || "");
+          if (dateCmp !== 0) return dateCmp;
+          return cmpStr(a.poNo || "", b.poNo || "");
         });
       }
     }

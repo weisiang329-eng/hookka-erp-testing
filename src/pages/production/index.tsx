@@ -460,8 +460,10 @@ export default function ProductionPage({
   //     (HB→HEADBOARD, DIVAN, BASE→SOFA_BASE, CUSHION→SOFA_CUSHION, etc.).
   //   • Model — exact productCode match, drawn from already-loaded orders.
   const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
-  const [fltDateAxis, setFltDateAxis] =
-    useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
+  // Date axis dropdown removed 2026-05-07 — operators only ever filtered
+  // on Due date. The from/to range now reads o.targetEndDate directly.
+  // Old ?axis= URL params parse harmlessly via the leftover useUrlState
+  // (none anymore — both setters dropped along with the state).
   const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
   const [fltModel, setFltModel] = useUrlState<string>("model", "");
   // Hide CANCELLED POs by default (2026-05-06 user request — they were
@@ -1073,19 +1075,14 @@ export default function ProductionPage({
         const jcs = o.jobCards ?? [];
         if (flags && jcs.length > 0 && !flags.has(fltItemType)) return false;
       }
-      // Date range against the user-chosen axis. Falls back to targetEndDate
-      // when customerDeliveryDate isn't on the payload (TODO near the state
-      // declaration). Empty axis values DO NOT filter the row out — that
-      // prevents POs with missing dates from disappearing the moment a
-      // from-date is set. Previous bug: `"" < fltDueFrom` was always true
-      // so undated POs got dropped silently as soon as any from-date was
-      // entered.
-      const axisVal: string =
-        (fltDateAxis === "dueDate"
-          ? o.targetEndDate
-          : fltDateAxis === "customerDeliveryDate"
-            ? (o.customerDeliveryDate || "")
-            : (o.createdAt || "")) || "";
+      // Date range — always against targetEndDate (Due date). The previous
+      // multi-axis dropdown (Customer delivery / Created at) was removed
+      // 2026-05-07; operators only ever used Due date. Empty axis values
+      // DO NOT filter the row out — that prevents POs with missing dates
+      // from disappearing the moment a from-date is set. Previous bug:
+      // `"" < fltDueFrom` was always true so undated POs got dropped
+      // silently as soon as any from-date was entered.
+      const axisVal: string = o.targetEndDate || "";
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
       // Hide CANCELLED POs unless explicitly opted in via ?showCancelled=1.
@@ -1099,7 +1096,7 @@ export default function ProductionPage({
   }, [
     orders, haystackByPo, itemTypesByPo,
     fltSearch, fltState, fltCustomer,
-    fltDueFrom, fltDueTo, fltDateAxis,
+    fltDueFrom, fltDueTo,
     fltCategory, fltItemType, fltModel,
     showCancelled,
   ]);
@@ -3393,26 +3390,16 @@ export default function ProductionPage({
             click ▼ on the Status column header to narrow by JC status
             (WAITING / DONE / OVERDUE) and the colored row background
             still flags ON_HOLD / CANCELLED / COMPLETED PO rows.) */}
-        {/* Date axis toggle — picks WHICH date column the from/to range
-            applies to. dueDate (default) is the production target end date.
-            customerDeliveryDate is what the customer was promised (TODO:
-            currently the production_orders payload doesn't expose it; the
-            filter no-ops on rows where the field is missing). created_at =
-            when the PO was raised. */}
-        <select
-          value={fltDateAxis}
-          onChange={(e) =>
-            setFltDateAxis(
-              e.target.value as "dueDate" | "customerDeliveryDate" | "created_at",
-            )
-          }
-          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
-          title="Which date axis the from/to range filters on"
+        {/* Date filter — always Due date (production target end date).
+            The previous Customer-delivery / Created-at options were
+            removed 2026-05-07; operators only ever used Due date. Static
+            label kept so the From/To range stays self-explanatory. */}
+        <span
+          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-[#FAF8F4] text-[#6B5C32] font-medium"
+          title="Date range filters on Due date (production target end date)"
         >
-          <option value="dueDate">Due date</option>
-          <option value="customerDeliveryDate">Customer delivery</option>
-          <option value="created_at">Created at</option>
-        </select>
+          Due date
+        </span>
         <label className="text-[10px] text-[#6B7280]">From</label>
         <input
           type="date"

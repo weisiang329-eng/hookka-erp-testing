@@ -455,15 +455,13 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     • 2NA      — double NO arm (sandwiched)
 
   STANDALONE PIECES (S-suffix = single continuous body, BOTH arms):
-    • 1S       — standalone single-seater armchair (BOTH arms, not chained). Different from 1A.
-    • 2S       — standalone 2-seater (BOTH arms, single body, not part of a multi-module chain).
-    • 3S       — standalone 3-seater (BOTH arms, single body — one armrest on each end with no centre split).
-    Use the S-variant when:
-      - The diagram shows ONE continuous box (not joined with "+" to other modules).
-      - The PDF text doesn't break into "+"-joined parts.
-    Use the A / NA variants when:
-      - Diagram shows multiple boxes chained with "+" or drawn side-by-side.
-      - PDF text uses "1+1+1", "1+2+L", "2+L", etc.
+    • 1S       — standalone single-seater armchair (BOTH arms, not chained).
+    • 2S       — standalone 2-seater (BOTH arms, single continuous body).
+    • 3S       — standalone 3-seater (BOTH arms, single continuous body).
+    S-variant rule: ONE single rectangle in the diagram with multiple seat
+    labels INSIDE it (no internal divider line) → use S. Two or more
+    separate rectangles → use A / NA per the GOLDEN RULE below, regardless
+    of whether they're drawn touching or with gaps.
 
   3NA — three-piece no arm (rare; only when sandwiched and 3 seats wide).
 
@@ -481,105 +479,20 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
 
   ★★★ LHF / RHF — DO NOT COMPUTE; THE SERVER DOES THIS ★★★
 
-  Stop. Read this section carefully.
+  Don't try to work out which armed piece is LHF vs RHF. The server
+  computes that deterministically from two facts you report:
 
-  You used to be asked to compute LHF/RHF based on where the TV is drawn. We
-  found you get the swap math wrong consistently. The SERVER now does this
-  deterministically using two facts you must report instead:
+    • tvPosition (PO-level): "top" | "bottom" | "left" | "right" | "none"
+      — where the TV / front-marker is drawn. "none" if no marker.
+    • diagramOrder (per item): 0-indexed position from the LEFT edge of
+      the diagram (leftmost drawn box = 0, next = 1, …).
 
-    • tvPosition (PO-level field): where the TV / front marker is drawn —
-      "top" | "bottom" | "left" | "right" | "none".
-    • diagramOrder (per item): the item's 0-indexed position from the LEFT
-      of the diagram (leftmost drawn box = 0).
+  Output your best guess at (LHF)/(RHF) on armed productCodes — the
+  server overrides if it disagrees. Spend your effort on accurate
+  spatial layout (count boxes left-to-right, identify TV marker), not
+  on the swap math.
 
-  The server applies a lookup table on those two facts and OVERWRITES your
-  productCode's (LHF)/(RHF) suffix. So:
-
-    • Spend your effort identifying the SPATIAL LAYOUT correctly — count the
-      boxes left-to-right, give each its diagramOrder, and report tvPosition
-      based on what you actually see drawn.
-    • You MAY still output your best-guess (LHF) or (RHF) in productCode for
-      armed pieces — the server will override if it disagrees with the
-      tvPosition lookup. Don't agonise over this.
-    • If you can't find any TV/front marker in the diagram, set
-      tvPosition="none" and the server will warn the operator that the
-      automatic flip didn't run.
-
-  For background only — DO NOT apply this logic yourself; just report what
-  you see:
-
-  STEP 1: Locate the TV / facing reference in the diagram.
-    Look for a small box labelled "TV" or for written cues like
-    "TV here", "facing TV", or arrow markers showing "this side faces TV".
-    The TV is the FRONT of the room — the viewer stands here and looks AT
-    the sofa.
-
-  STEP 2: Determine the viewer's left/right based on TV position.
-
-    TV at the TOP of the diagram (most common): viewer faces DOWN.
-      → diagram-LEFT becomes viewer's RIGHT (RHF)
-      → diagram-RIGHT becomes viewer's LEFT (LHF)
-      Letters are swapped — diagram L/R reverses.
-
-    TV at the BOTTOM of the diagram: viewer faces UP.
-      → diagram-LEFT becomes viewer's LEFT (LHF)
-      → diagram-RIGHT becomes viewer's RIGHT (RHF)
-      No swap — natural reading.
-
-    TV on the LEFT side of the diagram: viewer faces RIGHT (rotate 90°).
-      → top of diagram → viewer's LEFT (LHF)
-      → bottom of diagram → viewer's RIGHT (RHF)
-
-    TV on the RIGHT side of the diagram: viewer faces LEFT.
-      → top of diagram → viewer's RIGHT (RHF)
-      → bottom of diagram → viewer's LEFT (LHF)
-
-  STEP 3: Verify using the L-shape's backrest direction.
-    The backrest of an L-piece is drawn as a short line along the FRONT of
-    the seat (the side nearest the TV). The L-extension (chaise leg)
-    sticks out to one side. If the L-extension is on the viewer's LEFT
-    when standing at the TV, it is L(LHF). If on the viewer's RIGHT, it
-    is L(RHF). This should agree with what STEP 2 told you — if it
-    doesn't, re-check the TV position.
-
-  STEP 4: When the diagram has NO TV marker — find the FRONT another way.
-    The viewer stands at the FRONT of the sofa (opposite the backrest).
-    Identify the front using these cues IN ORDER:
-
-    (a) BACKREST DIRECTION (most reliable — Hookka's primary cue):
-        The backrest is drawn as a longer/thicker line, sometimes with a
-        small flap or "back" annotation, along ONE edge of the seat
-        boxes. The OPPOSITE edge of the seat boxes is the FRONT — that's
-        where the viewer / TV stands.
-          • Backrest at the TOP of the diagram → viewer at the bottom →
-            sofa faces DOWN. LHF = diagram-LEFT, RHF = diagram-RIGHT.
-          • Backrest at the BOTTOM of the diagram → viewer at the top →
-            sofa faces UP. LHF = diagram-RIGHT, RHF = diagram-LEFT.
-          • Backrest on the LEFT edge → viewer on the right (90° rotation).
-          • Backrest on the RIGHT edge → viewer on the left.
-
-    (b) L-PIECE EXTENSION DIRECTION (when present):
-        The L-extension's chaise opening faces the FRONT (you lie on
-        the chaise with your feet toward the TV). If the L-extension
-        sticks OUT in a direction PERPENDICULAR to the main sofa row,
-        that's still in the seating plane — the seat-front is along the
-        long axis of the chaise, not the short edge. Cross-check this
-        with the backrest cue (they should agree).
-
-    (c) DIMENSION ARROWS (fallback):
-        If a longer dimension is labelled along one axis (e.g. "298cm"
-        spanning the whole sofa) and another along the perpendicular
-        (e.g. "120cm"), the LONG axis is the seat row and the SHORT
-        axis is the front-back depth. The FRONT is on whichever short
-        edge has the dimension arrow / label closer to it. Weak cue —
-        only use when (a) and (b) both fail.
-
-    (d) NO CUE AT ALL:
-        Output the items but set the LHF/RHF suffix to whichever side
-        you guess + add specialNotes "no front-facing cue in diagram —
-        operator to verify L/R orientation". Don't silently pick one.
-
-  CRITICAL: Inner / sandwiched pieces always stay NA (no LHF / RHF suffix)
+  Inner / sandwiched pieces always stay NA (no LHF / RHF suffix)
   regardless of viewpoint, because they have no arms.
 
   Worked example A — PO/2605-003 (TV at top of diagram):
@@ -603,54 +516,34 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     Output: 5531-1A(LHF) + 5531-2A(RHF).
     Lesson: when printed text says "N Seater" but the diagram shows multiple "+"-separated clusters, the DIAGRAM WINS — split into the modules drawn.
 
-  Hookka rule: ALWAYS use the front-facing viewpoint (someone standing at the TV, looking AT the sofa). NEVER use the back-of-sofa viewpoint. The diagram's left/right is REVERSED from this convention. Apply this rule even when no TV marker is drawn — the convention is universal.
+  GOLDEN RULE — box counting (most important):
+  Each separately-drawn rectangle in the diagram is ONE line item. Count
+  boxes left-to-right; that's your item count. Never collapse multiple
+  boxes into one N-seater module (e.g. two adjacent [24][24] rectangles
+  are 1A + 1NA, NOT a 2A — even when drawn touching). Use S-variants
+  (1S/2S/3S) ONLY when the customer drew ONE single big rectangle with
+  multiple seat-height labels INSIDE it. When printed text ("3 Seater",
+  "2R+L") conflicts with the box count, the DIAGRAM WINS.
 
-  ARM-INFERENCE RULE (master rule for resolving NA vs A):
-  For any chain of modules joined by "+" signs:
-  • OUTERMOST positions (first and last in the chain) HAVE ARMS — they form the sides of the sofa.
-    → numeric outers become "1A" / "2A" with mirrored sides (left=LHF, right=RHF).
-    → "L" / "CNR" outers stay as L / CNR (already imply an arm/corner).
-  • INNER positions (anything sandwiched between two outers) HAVE NO ARM — their arms would collide with neighbours.
-    → numeric inners become "1NA" / "2NA" / "3NA" etc.
-  • Mirror-pair exception: when EXACTLY two outer modules and zero inners, both are arm modules ("1A(LHF) + 1A(RHF)" or "L(LHF) + L(RHF)").
+  ARM-INFERENCE RULE (resolves A vs NA):
+  • OUTERMOST positions (first + last box) → ARMED. Numeric outers become
+    "1A" / "2A"; "L" / "CNR" outers stay as L / CNR.
+  • INNER positions (sandwiched) → NO ARM. Numeric inners become "1NA" /
+    "2NA" / "3NA". Their arms would collide with neighbours.
 
   PDF-shorthand → catalog mapping:
-  • "1R" alone or with "1R" sibling → 1A. Pair "1R+1R" → 1A(LHF) + 1A(RHF) (mirror).
-  • "1+1" / "1A+1A" / two boxes side-by-side → 1A(LHF) + 1A(RHF).
-  • "1+2+1" / "1+1NA+1" / "1A+1NA+1A" → 1A(LHF) + 1NA + 1A(RHF). The middle "2" or "1NA" is no-arm because it's sandwiched.
-  • "1+2+L" → 1A(LHF) + 2NA + L(RHF). Left outer is 1A, middle is 2NA (sandwiched), right outer L is the corner extension.
-  • "L+2+L" → L(LHF) + 2NA + L(RHF).
-  • "1R+1NA+1R" / "1A+1NA+1A" → 1A(LHF) + 1NA + 1A(RHF) (NA already explicit).
-  • "2+L Seater" / "2A+L" → 2A(LHF or as drawn) + L(LHF or as drawn).
-  • "2+1+1" / "2A+1+1" → 2A(LHF) + 1NA + 1A(RHF) — middle 1 sandwiched is 1NA, but trailing 1 is outer so 1A(RHF).
-  • "L+L+CNR" → L(LHF) + L(RHF) + CNR (corner).
-  • "3 Seater" with ONE single continuous drawn box → 3S (do NOT split).
-  • "3 Seater" with THREE separate drawn boxes → 1A(LHF) + 1NA + 1A(RHF).
-
-  GOLDEN RULE: every "+" in the config string OR every separate hand-drawn box in the diagram is ITS OWN LINE ITEM. Inner numeric pieces become NA; outer pieces become A / L / CNR. Never collapse multiple boxes into a single N-seater unless the customer explicitly drew ONE continuous box.
-
-  ITEM ORDER + diagramOrder (REQUIRED for sofas):
-  Output sofa items in DIAGRAM ORDER — left-to-right as drawn in the PDF.
-  For each sofa item, set diagramOrder to its 0-indexed position from the
-  LEFT edge of the diagram: leftmost drawn box = 0, the next = 1, etc.
-  Standalone S-pieces (1S/2S/3S) and CNR/STOOL get a diagramOrder too based
-  on where they sit in the row. ACCESSORY items always get diagramOrder=null.
-  The server uses diagramOrder + tvPosition to apply LHF/RHF deterministically.
-
-  ★ ALWAYS INSPECT THE HAND-DRAWN DIAGRAM ★
-  The printed text spec ("(1+2+L)", "1R+1R", "3 Seater") is OFTEN AMBIGUOUS by itself — you cannot reliably tell A vs S vs NA from text alone. The diagram is the source of truth:
-    - Count the BOXES — that's the line-item count.
-    - Look at the gaps/joiners — boxes joined with "+" are separate modules; boxes drawn merged (no "+", no gap) are one body (use S-variant).
-    - Read box positions left → right — leftmost arm-piece is LHF, rightmost is RHF, sandwiched are NA.
-    - Look at any small flap/L-shape on the side — that indicates an arm OR an L-extension on that side.
-  When the printed text and the diagram conflict, the DIAGRAM WINS.
+  • "1R+1R" / "1+1" / "1A+1A" → 1A(LHF) + 1A(RHF)
+  • "1+2+1" / "1+1NA+1" → 1A(LHF) + 1NA + 1A(RHF)
+  • "1+2+L" → 1A(LHF) + 2NA + L(RHF)
+  • "L+2+L" → L(LHF) + 2NA + L(RHF)
+  • "2+L" / "2A+L" → 2A + L (sides per diagramOrder)
+  • "2+1+1" → 2A(LHF) + 1NA + 1A(RHF)
+  • "L+L+CNR" → L(LHF) + L(RHF) + CNR
+  • "3 Seater" + ONE drawn box → 3S; "3 Seater" + THREE drawn boxes → 1A(LHF) + 1NA + 1A(RHF)
 
   Naming conventions:
-  • Strip "HK" prefix when matching ("HK5531" → "5531").
-  • Strip family-name aliases on bedframe; sofa codes are pure numeric models like 5530, 5531, 5536, 9068, 9028.
-  • Old model numbers (8030, 9068, 9028, 5540) may map to current codes — operator will correct, output original if unsure.
-  • Default to (LHF) when only ONE armed module appears and the diagram doesn't disambiguate; operator flips in preview.
-  • In a mirrored pair ALWAYS output one (LHF) + one (RHF) — never two of the same side.
+  • Strip "HK" prefix ("HK5531" → "5531"). Sofa codes are pure numeric models (5530, 5531, 9028…).
+  • Old model numbers (8030, 9068, 9028, 5540) may map to current codes — output as-is, operator will correct.
 
 - sizeLabel: seat height in inches (24/26/28/30/32/35). Catalog: SOFA Sizes.
 - fabricCode: from "COL:XXX" / "COLOUR:XXX" / "/KN390-2 SAND" / "/PC151-01" — match against FABRICS catalog. Sometimes a fabric appears as "BO315-2 Feather" — capture the code "BO315-2" only (drop the trailing variant word).

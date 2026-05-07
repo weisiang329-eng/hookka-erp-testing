@@ -494,23 +494,40 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             )
             .join(", ");
 
+          // For sofa: seat height lives on the LINE (variant), not in the
+          // product master. SO create page sends BOTH sizeLabel + seatHeight
+          // when a sofa seat is picked (see src/pages/sales/create.tsx
+          // line 1087: setting seatHeight + sizeLabel to the same value).
+          // Mirror that here so:
+          //   - sales_order_items.sizeLabel stores the seat height (e.g. '28"')
+          //     and renders correctly in the Draft items review modal +
+          //     SO list Size column.
+          //   - body.seatHeight feeds the price resolver in sales-orders.ts
+          //     line 1690 (cpSeatHeightPrices / resolvedProduct.seatHeightPrices).
+          // For BEDFRAME: leave sizeLabel/sizeCode empty so the backend
+          // resolves them from the product master (e.g. "5FT" from
+          // 1003-(K)).
+          const sofaSeat =
+            item.category === "SOFA" && item.sizeLabel
+              ? item.sizeLabel.replace(/[^\d.]/g, "")
+              : "";
           return {
             lineNo: idx + 1,
             lineSuffix: `-${String(idx + 1).padStart(2, "0")}`,
             productCode: item.productCode,
             productName: "", // backend → resolvedProduct.name
             itemCategory: item.category,
-            sizeLabel: "", // backend → resolvedProduct.sizeLabel ("5FT" etc)
+            // SOFA: send seat height so it lands in DB sizeLabel and renders
+            // in every reader (list, detail, draft review). Backend
+            // normalises "28" → '28"' (sales-orders.ts:1788).
+            // BEDFRAME / ACCESSORY: empty → backend resolves from product
+            // master.
+            sizeLabel: item.category === "SOFA" ? sofaSeat : "",
             sizeCode: "", // backend → resolvedProduct.sizeCode
             fabricCode: item.fabricCode ?? "",
-            // For sofa: seat height is the variant. Send as seatHeight so
-            // the price resolver can find it in product.seatHeightPrices.
-            // Strip parens / quotes that Claude may include — keep just the
-            // number. "28" → "28", '(28")' → "28".
-            seatHeight:
-              item.category === "SOFA" && item.sizeLabel
-                ? item.sizeLabel.replace(/[^\d.]/g, "")
-                : "",
+            // Seat height also goes on a separate field so the price
+            // resolver can match against product.seatHeightPrices.
+            seatHeight: sofaSeat,
             quantity: item.quantity || 1,
             gapInches: item.gapInches ?? 0,
             divanHeightInches: item.divanHeightInches ?? 0,

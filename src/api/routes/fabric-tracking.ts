@@ -84,12 +84,14 @@ export function effectiveTierForCategory(
 
 // GET /api/fabric-tracking?category=B.M-FABR&shortageOnly=true
 //
-// Live-compute path (post 2026-05-07): fabric_trackings.{soh, poOutstanding,
-// lastMonthUsage, oneWeekUsage, twoWeeksUsage, oneMonthUsage, shortage}
-// columns are now derived per-request from the same FAB_CUT JC source the
-// Fab Cutting dept page uses. The static row columns stay as a cache /
-// fallback (legacy operators may still PUT manual values) but are
-// overwritten in the response when live data is available.
+// Live-compute path (post 2026-05-07): every fabric SKU in raw_materials
+// (itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')) gets
+// a row in the response. fabric_trackings is treated as an optional
+// metadata cache (description, priceTier, supplier, leadTimeDays) merged
+// in by fabricCode when present. The metric columns (soh, poOutstanding,
+// lastMonthUsage, oneWeekUsage, twoWeeksUsage, oneMonthUsage, shortage)
+// are ALWAYS live-computed from the same FAB_CUT JC source the Fab
+// Cutting dept page uses.
 //
 // Source aggregation (see src/api/lib/fabric-usage.ts):
 //   - SOH               ← raw_materials.balanceQty per itemCode
@@ -98,45 +100,88 @@ export function effectiveTierForCategory(
 //   - 1wk/2wk/1mo Usage ← active FAB_CUT JCs where dueDate within window,
 //                          fabricUsageMeters from BOM template
 //   - Shortage          ← SOH + Outstanding − 1mo (signed; negative = under)
-//
-// The shortageOnly query param now filters AFTER the live override so a
-// fabric whose static cache shows positive but live shortage is negative
-// still surfaces (and vice versa).
+type RawMaterialFabricRow = {
+  id: string;
+  itemCode: string;
+  description: string | null;
+  itemGroup: string | null;
+  unitPriceSen: number | null;
+};
+
+const FABRIC_GROUPS = new Set(["B.M-FABR", "S-FABR", "S.M-FABR", "LINING", "WEBBING"]);
+
 app.get("/", async (c) => {
   const category = c.req.query("category");
   const shortageOnly = c.req.query("shortageOnly") === "true";
 
-  const where: string[] = [];
-  const binds: unknown[] = [];
-  if (category) {
-    where.push("fabricCategory = ?");
-    binds.push(category);
-  }
-  // NOTE: WHERE shortage < 0 dropped from SQL — applied post-merge below
-  // against the LIVE shortage value, not the stale cache column.
-  const sql =
-    where.length > 0
-      ? `SELECT * FROM fabric_trackings WHERE ${where.join(" AND ")} ORDER BY fabricCode`
-      : "SELECT * FROM fabric_trackings ORDER BY fabricCode";
-
-  const [trackingsRes, liveMetrics] = await Promise.all([
-    c.var.DB.prepare(sql).bind(...binds).all<FabricTrackingRow>(),
+  // Pull every fabric raw material + the static fabric_trackings rows
+  // (used as metadata cache) + live metrics in parallel.
+  const [rmRes, trackingsRes, liveMetrics] = await Promise.all([
+    c.var.DB.prepare(
+      `SELECT id, itemCode, description, itemGroup, unitPriceSen
+         FROM raw_materials
+        WHERE itemCode IS NOT NULL
+          AND itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
+        ORDER BY itemCode`,
+    ).all<RawMaterialFabricRow>(),
+    c.var.DB.prepare("SELECT * FROM fabric_trackings").all<FabricTrackingRow>(),
     computeFabricMetrics(c.var.DB),
   ]);
 
-  let data = (trackingsRes.results ?? []).map(rowToTracking);
-  // Override stale cache columns with live numbers when available.
-  for (const r of data) {
-    const m = liveMetrics.get(r.fabricCode);
-    if (m) {
-      r.soh = m.soh;
-      r.poOutstanding = m.poOutstanding;
-      r.lastMonthUsage = m.lastMonthUsage;
-      r.oneWeekUsage = m.oneWeekUsage;
-      r.twoWeeksUsage = m.twoWeeksUsage;
-      r.oneMonthUsage = m.oneMonthUsage;
-      r.shortage = m.shortage;
-    }
+  // Build a fabricCode → tracking-cache map for metadata merging.
+  const trackingByCode = new Map<string, FabricTrackingRow>();
+  for (const t of trackingsRes.results ?? []) {
+    if (t.fabricCode) trackingByCode.set(t.fabricCode, t);
+  }
+
+  // One response row per fabric raw material. Metadata defaults from the
+  // RM row (itemGroup → fabricCategory, description → fabricDescription,
+  // unitPriceSen → price); the fabric_trackings cache adds priceTier /
+  // supplier / leadTimeDays / reorderPoint when present.
+  let data = (rmRes.results ?? [])
+    .filter((rm) => rm.itemGroup && FABRIC_GROUPS.has(rm.itemGroup))
+    .map((rm) => {
+      const cached = trackingByCode.get(rm.itemCode);
+      const m = liveMetrics.get(rm.itemCode);
+      // Convert sen → display price units. The legacy fabric_trackings.price
+      // column stores already-converted display units, so fall back to that
+      // when the RM row's unitPriceSen is missing.
+      const priceDisplay =
+        rm.unitPriceSen != null
+          ? rm.unitPriceSen / 100
+          : cached?.price ?? 0;
+      return {
+        // Identity. Prefer the cached tracking id so existing PUT writes
+        // hit the same row; fall back to the RM id for fabrics that have
+        // no tracking row yet.
+        id: cached?.id ?? rm.id,
+        fabricCode: rm.itemCode,
+        fabricDescription: cached?.fabricDescription ?? rm.description ?? "",
+        fabricCategory:
+          (cached?.fabricCategory as FabricTrackingRow["fabricCategory"]) ??
+          (rm.itemGroup as FabricTrackingRow["fabricCategory"]) ??
+          "B.M-FABR",
+        priceTier: cached?.priceTier ?? "PRICE_1",
+        sofaPriceTier: cached?.sofaPriceTier ?? null,
+        bedframePriceTier: cached?.bedframePriceTier ?? null,
+        price: priceDisplay,
+        // ----- LIVE metric columns -----
+        soh: m?.soh ?? 0,
+        poOutstanding: m?.poOutstanding ?? 0,
+        lastMonthUsage: m?.lastMonthUsage ?? 0,
+        oneWeekUsage: m?.oneWeekUsage ?? 0,
+        twoWeeksUsage: m?.twoWeeksUsage ?? 0,
+        oneMonthUsage: m?.oneMonthUsage ?? 0,
+        shortage: m?.shortage ?? 0,
+        // ----- Metadata pass-through -----
+        reorderPoint: cached?.reorderPoint ?? 0,
+        supplier: cached?.supplier ?? "",
+        leadTimeDays: cached?.leadTimeDays ?? 0,
+      };
+    });
+
+  if (category) {
+    data = data.filter((r) => r.fabricCategory === category);
   }
   if (shortageOnly) {
     data = data.filter((r) => r.shortage < 0);

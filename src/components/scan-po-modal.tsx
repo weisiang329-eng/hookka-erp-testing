@@ -37,6 +37,11 @@ type ClaudeExtractedItem = {
   // + ExtractedPO.tvPosition to deterministically apply LHF/RHF. Internal
   // diagnostic — no UI; operator overrides via the productCode dropdown.
   diagramOrder: number | null;
+  // Free-text per-line specials with their own surcharge — operator-added
+  // in the preview when a custom spec ("Custom Foam Density 35D") doesn't
+  // match the master Specials catalog. AI never populates this — defaults
+  // to []. Mirrors src/pages/sales/create.tsx customSpecials.
+  customSpecials: { description: string; surchargeSen: number }[];
 };
 
 type ClaudeExtractedPO = {
@@ -325,6 +330,14 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
           const extracted = {
             ...s.extracted,
             pageNumbers: [v.job.pageNo],
+            // Backfill optional fields older API responses (or cached
+            // few-shot replays) may omit. customSpecials is operator-only
+            // — Claude never populates it — but the type requires it on
+            // every item so the row UI can edit safely.
+            items: s.extracted.items.map((it) => ({
+              ...it,
+              customSpecials: Array.isArray(it.customSpecials) ? it.customSpecials : [],
+            })),
           };
           claudeSuccesses.push({
             sampleId: s.sampleId,
@@ -503,6 +516,11 @@ export function ScanPOModal({ open, onClose, onCreated }: Props) {
             divanHeightInches: item.divanHeightInches ?? 0,
             legHeightInches: item.noLeg ? null : item.legHeightInches,
             specialOrder: cleanedSpecialOrder,
+            // Operator-added free-text specials with their own surcharge.
+            // Server appends each to specialOrder text as "OTHER: <desc>"
+            // and stores the structured form in sales_order_items.custom_specials.
+            customSpecials: (item.customSpecials ?? [])
+              .filter((cs) => cs.description.trim().length > 0),
             // Unit price is in RM (decimal) on the PDF; backend stores sen
             // (integer). Multiply + round to avoid float drift.
             basePriceSen:
@@ -893,6 +911,7 @@ function PreviewStep({
         transferredSO: null,
         rawSpec: null,
         diagramOrder: null,
+        customSpecials: [],
       };
       return { ...r, extracted: { ...r.extracted, items: [...r.extracted.items, blank] } };
     }));
@@ -907,6 +926,20 @@ function PreviewStep({
           items: r.extracted.items.filter((_, j) => j !== itemIdx),
         },
       };
+    }));
+  };
+  // Move a row up or down in the items array. Used by the ↑↓ buttons in
+  // the # cell. Operator request 2026-05-07 — sometimes the OCR extracts
+  // sofa modules out of physical order, and the AI's diagramOrder fix
+  // only works when a TV marker is drawn. Manual reorder is the fallback.
+  const moveClaudeItem = (rowIdx: number, itemIdx: number, dir: -1 | 1) => {
+    setClaudeRows(prev => prev.map((r, i) => {
+      if (i !== rowIdx) return r;
+      const items = [...r.extracted.items];
+      const j = itemIdx + dir;
+      if (j < 0 || j >= items.length) return r;
+      [items[itemIdx], items[j]] = [items[j], items[itemIdx]];
+      return { ...r, extracted: { ...r.extracted, items } };
     }));
   };
   const toggleGold = (rowIdx: number) => {
@@ -958,6 +991,7 @@ function PreviewStep({
             onUpdateItem={(itemIdx, patch) => updateClaudeItem(idx, itemIdx, patch)}
             onAddItem={() => addClaudeItem(idx)}
             onRemoveItem={(itemIdx) => removeClaudeItem(idx, itemIdx)}
+            onMoveItem={(itemIdx, dir) => moveClaudeItem(idx, itemIdx, dir)}
             onToggleGold={() => toggleGold(idx)}
           />
         ))}
@@ -994,7 +1028,7 @@ function PreviewStep({
 }
 
 function ClaudePOCard({
-  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onToggleGold,
+  row, catalog, selected, expanded, onToggle, onExpand, onUpdate, onUpdateItem, onAddItem, onRemoveItem, onMoveItem, onToggleGold,
 }: {
   row: ClaudeScanRow;
   catalog: ScanCatalog | null;
@@ -1006,6 +1040,7 @@ function ClaudePOCard({
   onUpdateItem: (itemIdx: number, patch: Partial<ClaudeExtractedItem>) => void;
   onAddItem: () => void;
   onRemoveItem: (itemIdx: number) => void;
+  onMoveItem: (itemIdx: number, dir: -1 | 1) => void;
   onToggleGold: () => void;
 }) {
   const po = row.extracted;
@@ -1212,9 +1247,31 @@ function ClaudePOCard({
                         item.fabricCode &&
                         fabricList.length > 0 &&
                         !fabricList.some((c) => c.toUpperCase() === item.fabricCode!.toUpperCase());
+                      const isFirst = i === 0;
+                      const isLast = i === po.items.length - 1;
                       return (
                         <tr key={`${row.sampleId}-${i}`} className="border-t border-[#E2DDD8] align-top">
-                          <td className="px-1.5 py-1 text-[#9CA3AF]">{i + 1}</td>
+                          <td className="px-1.5 py-1 text-[#9CA3AF]">
+                            <div className="flex items-center gap-0.5">
+                              <span className="text-xs">{i + 1}</span>
+                              <div className="flex flex-col">
+                                <button
+                                  type="button"
+                                  onClick={() => onMoveItem(i, -1)}
+                                  disabled={isFirst}
+                                  className="text-[10px] leading-none px-0.5 text-[#9CA3AF] hover:text-[#1F1D1B] disabled:opacity-30 disabled:hover:text-[#9CA3AF]"
+                                  title="Move up"
+                                >▲</button>
+                                <button
+                                  type="button"
+                                  onClick={() => onMoveItem(i, 1)}
+                                  disabled={isLast}
+                                  className="text-[10px] leading-none px-0.5 text-[#9CA3AF] hover:text-[#1F1D1B] disabled:opacity-30 disabled:hover:text-[#9CA3AF]"
+                                  title="Move down"
+                                >▼</button>
+                              </div>
+                            </div>
+                          </td>
                           <td className="px-1.5 py-1">
                             <select
                               className="w-full px-1 py-0.5 text-xs border border-transparent hover:border-[#E2DDD8] rounded bg-transparent"
@@ -1345,6 +1402,69 @@ function ClaudePOCard({
                                 onUpdateItem(i, { specialOrder: next || null })
                               }
                             />
+                            {/* Other (custom) — free-text specials with own
+                                surcharge, mirrors src/pages/sales/create.tsx
+                                customSpecials. AI never populates this; only
+                                operator adds. */}
+                            <div className="mt-1">
+                              <button
+                                type="button"
+                                onClick={() => onUpdateItem(i, {
+                                  customSpecials: [
+                                    ...(item.customSpecials ?? []),
+                                    { description: "", surchargeSen: 0 },
+                                  ],
+                                })}
+                                className="text-[10px] text-[#6B5C32] hover:text-[#4A3F22] flex items-center gap-0.5"
+                              >
+                                <Plus className="h-2.5 w-2.5" />
+                                Custom
+                                {item.customSpecials?.length > 0 && (
+                                  <span className="text-[#9CA3AF]">({item.customSpecials.length})</span>
+                                )}
+                              </button>
+                              {(item.customSpecials ?? []).map((cs, csIdx) => (
+                                <div key={csIdx} className="mt-1 flex items-center gap-1">
+                                  <input
+                                    type="text"
+                                    value={cs.description}
+                                    onChange={(e) => {
+                                      const next = [...(item.customSpecials ?? [])];
+                                      next[csIdx] = { ...next[csIdx], description: e.target.value };
+                                      onUpdateItem(i, { customSpecials: next });
+                                    }}
+                                    placeholder="e.g. Custom Foam 35D"
+                                    className="flex-1 px-1 py-0.5 text-[10px] border border-[#E2DDD8] rounded"
+                                  />
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    value={cs.surchargeSen / 100}
+                                    onChange={(e) => {
+                                      const next = [...(item.customSpecials ?? [])];
+                                      next[csIdx] = {
+                                        ...next[csIdx],
+                                        surchargeSen: Math.round(parseFloat(e.target.value || "0") * 100),
+                                      };
+                                      onUpdateItem(i, { customSpecials: next });
+                                    }}
+                                    className="w-12 px-1 py-0.5 text-[10px] border border-[#E2DDD8] rounded text-right"
+                                    title="RM"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => onUpdateItem(i, {
+                                      customSpecials: (item.customSpecials ?? []).filter((_, k) => k !== csIdx),
+                                    })}
+                                    className="text-[#9CA3AF] hover:text-red-600"
+                                    title="Remove custom"
+                                  >
+                                    <X className="h-2.5 w-2.5" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
                           </td>
                           <td className="px-1.5 py-1 text-right">
                             <input

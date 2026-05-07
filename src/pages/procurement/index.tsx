@@ -63,14 +63,28 @@ function POFormDialog({
   const [rmSearch, setRmSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState<string>("ALL");
 
-  /** For a given RM code, return all supplier bindings. */
-  const getBindingsForRM = useCallback(
-    (materialCode: string): SupplierMaterialBinding[] =>
-      supplierMaterialBindings.filter((b) => b.materialCode === materialCode),
-    [supplierMaterialBindings],
+  // Active supplier id set — drives all dropdowns. INACTIVE / BLACKLISTED
+  // suppliers are filtered out everywhere so the operator can never auto-pick
+  // or manually pick a deactivated vendor (which would silently fail later
+  // when the email-PO step runs against a dead address). Status check
+  // matches procurement/maintenance.tsx's SupplierStatus union.
+  const activeSupplierIds = useMemo(
+    () => new Set(allSuppliers.filter((s) => s.status === "ACTIVE").map((s) => s.id)),
+    [allSuppliers],
   );
 
-  /** For a given RM code, return the main-supplier binding (or first available). */
+  /** For a given RM code, return supplier bindings whose supplier is ACTIVE. */
+  const getBindingsForRM = useCallback(
+    (materialCode: string): SupplierMaterialBinding[] =>
+      supplierMaterialBindings.filter(
+        (b) => b.materialCode === materialCode && activeSupplierIds.has(b.supplierId),
+      ),
+    [supplierMaterialBindings, activeSupplierIds],
+  );
+
+  /** For a given RM code, return the main-supplier binding (or first available).
+   *  Both candidates are already filtered to ACTIVE suppliers via
+   *  getBindingsForRM, so we never auto-pick a deactivated vendor. */
   const getMainBinding = useCallback(
     (materialCode: string): SupplierMaterialBinding | undefined => {
       const bindings = getBindingsForRM(materialCode);
@@ -85,6 +99,12 @@ function POFormDialog({
       const sup = allSuppliers.find((s) => s.id === supplierId);
       return sup ? `${sup.code} - ${sup.name}` : supplierId;
     },
+    [allSuppliers],
+  );
+
+  /** Suppliers list shown in the unbound-RM dropdown — ACTIVE only. */
+  const activeSuppliers = useMemo(
+    () => allSuppliers.filter((s) => s.status === "ACTIVE"),
     [allSuppliers],
   );
 
@@ -484,7 +504,7 @@ function POFormDialog({
                               onChange={(e) => pickSupplierForUnbound(idx, e.target.value)}
                             >
                               <option value="">Pick supplier…</option>
-                              {allSuppliers.map((s) => (
+                              {activeSuppliers.map((s) => (
                                 <option key={s.id} value={s.id}>
                                   {s.code} - {s.name}
                                 </option>

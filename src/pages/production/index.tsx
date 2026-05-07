@@ -1361,6 +1361,13 @@ export default function ProductionPage({
     // NULL until the operator hands the printed sheet to the production
     // worker. Drives the leftmost Sent column on the dept grid.
     distributedAt: string | null;
+    // Predicted fabric meters for this WIP, computed server-side by
+    // walking the parent PO's BOM template (bom_templates.wipComponents)
+    // and summing FAB_CUT-node fabric materials × node.quantity ×
+    // po.quantity × scaling. Populated only for FAB_CUT JCs; 0 for
+    // every other dept. Drives the FAB_CUT dept page's Fabric Usage
+    // column.
+    fabricUsage: number;
     pic1: string;
     pic2: string;
     status: string;        // job_card status
@@ -1781,6 +1788,13 @@ export default function ProductionPage({
           // ISO timestamp the operator clicked the "Sent" tick. NULL =
           // not yet handed out; truthy = printed + given to the floor.
           distributedAt: jc.distributedAt ?? null,
+          // Predicted fabric meters for FAB_CUT JCs, computed server-side
+          // from bom_templates (see rowToMinimalJobCard in
+          // production-orders.ts). 0 / undefined for non-FC depts —
+          // surfaces as "—" in the dept sheet's Fabric Usage column.
+          fabricUsage:
+            (jc as JobCard & { fabricUsageMeters?: number })
+              .fabricUsageMeters ?? 0,
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
@@ -2272,6 +2286,31 @@ export default function ProductionPage({
     { key: "totalHeight",   label: "Total H",        type: "text",   width: "75px",  sortable: true, align: "right" },
     { key: "specialOrder",  label: "Special Order",  type: "text",   width: "130px", sortable: true },
     { key: "qty",           label: "Qty",            type: "number", width: "60px",  sortable: true, align: "right" },
+    // Fabric Usage column — predicted meters of fabric this WIP will consume.
+    // Server computes by walking the PO's bom_templates.wipComponents tree
+    // (see rowToMinimalJobCard in production-orders.ts), summing FC-node
+    // fabric × node.quantity × po.quantity × symmetric scaling. Visible only
+    // on the Fab Cut tab since other depts don't consume fabric raw material.
+    {
+      key: "fabricUsage",
+      label: "Fabric Usage (m)",
+      type: "number",
+      width: "120px",
+      sortable: true,
+      align: "right",
+      hidden: activeTab !== "FAB_CUT",
+      render: (_v, row) => {
+        if (!row.fabricUsage || row.fabricUsage <= 0) {
+          return <span className="text-[#9C9690]">—</span>;
+        }
+        // 2-decimal display matches the BOM editor's MTR field convention.
+        return (
+          <span className="tabular-nums font-medium">
+            {row.fabricUsage.toFixed(2)}
+          </span>
+        );
+      },
+    },
     // Per-row production minutes — supervisors use this as a capacity /
     // time-budget read. On FAB_CUT the merged row sums across all
     // components (Base + Cushion + Arm cut together) so the number

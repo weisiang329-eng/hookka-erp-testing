@@ -31,6 +31,13 @@ export type JobCard = {
   // server (no anchor / no category) → FE treats as "on plan, no signal".
   // Optional: legacy cached payloads predate this field.
   expectedDueDate?: string;
+  // Predicted fabric meters this JC will consume, computed server-side
+  // by walking the parent PO's bom_templates.wipComponents tree and
+  // summing FAB_CUT-node fabric materials × node.quantity × po.quantity
+  // × symmetric scaling. Populated only for FAB_CUT JCs; undefined for
+  // every other dept. Drives the FAB_CUT dept page's Fabric Usage column.
+  // Optional: legacy cached payloads predate this field.
+  fabricUsageMeters?: number;
 };
 
 export type ProductionOrder = {

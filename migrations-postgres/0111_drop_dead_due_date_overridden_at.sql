@@ -1,0 +1,31 @@
+-- ---------------------------------------------------------------------------
+-- 0111_drop_dead_due_date_overridden_at.sql
+--
+-- Drops job_cards.due_date_overridden_at — a dead column with no callers.
+--
+-- History:
+--   * Added 2026-05-07 by commit 03ef4e5 ("Edited cell state on overview
+--     matrix") to stamp a timestamp every time a JC's dueDate was manually
+--     rescheduled, so the production matrix could paint an "Edited" colour
+--     on those cells.
+--   * Replaced 2026-05-07 by commit 83deae7 ("teal cell text when dueDate is
+--     off the current leadtime plan"). The new approach computes the
+--     "Edited" signal by comparing dueDate vs. the leadtime-derived expected
+--     date — no stored stamp needed. All references to dueDateOverriddenAt
+--     were removed in that commit, but the column itself stayed.
+--   * Renamed 2026-05-07 by 0110_rename_smashed_columns.sql from the
+--     postgres-lowercased `duedateoverriddenat` to the project-standard
+--     `due_date_overridden_at`. Prepared this drop.
+--
+-- At drop time prod had 11,408 job_cards rows; only 8 carried a stamp from
+-- the brief window when 03ef4e5 was live. Those 8 stamps are unused by any
+-- current code path — the new computed approach reads dueDate + leadtimes,
+-- not this column.
+--
+-- Companion change in this commit: the dueDateOverriddenAt entry is removed
+-- from src/api/lib/column-rename-map.json so future translateSql() runs
+-- don't silently route a typo / accidental re-introduction to a non-existent
+-- column.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE job_cards DROP COLUMN IF EXISTS due_date_overridden_at;

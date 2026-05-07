@@ -174,7 +174,6 @@
   "driverPhone": "driver_phone",
   "dropPoints": "drop_points",
   "dueDate": "due_date",
-  "dueDateOverriddenAt": "due_date_overridden_at",
   "effectiveFrom": "effective_from",
   "effectiveTo": "effective_to",
   "efficiencyPct": "efficiency_pct",

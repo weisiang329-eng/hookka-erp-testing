@@ -84,16 +84,35 @@ export function cellFor(
       isOffLeadtime: false,
     };
   }
-  const done = cards.filter(
-    (c) => c.status === "COMPLETED" || c.status === "TRANSFERRED",
-  ).length;
+  // Piece-level counts (NOT JC-level) — sofa JCs commonly carry
+  // wipQty=N pieces, so a 2-of-3-pieces-done JC needs to show 2/3 in
+  // the cell, not 0/1. piecesDone/piecesTotal are emitted by the
+  // minimal /api/production-orders payload; legacy responses without
+  // them fall back to (status === COMPLETED ? wipQty : 0) / wipQty.
+  let done = 0;
+  let totalPieces = 0;
+  let allFullyDone = true;
+  for (const c of cards) {
+    const isJcDone =
+      c.status === "COMPLETED" || c.status === "TRANSFERRED";
+    const total = Math.max(1, c.piecesTotal ?? c.wipQty ?? 1);
+    const cardDone =
+      c.piecesDone != null
+        ? Math.min(total, c.piecesDone)
+        : isJcDone
+          ? total
+          : 0;
+    done += cardDone;
+    totalPieces += total;
+    if (cardDone < total) allFullyDone = false;
+  }
   const earliestDue =
     cards.map((c) => c.dueDate).filter(Boolean).sort()[0] || "";
   const latestCompleted =
     cards.map((c) => c.completedDate || "").filter(Boolean).sort().slice(-1)[0] || "";
 
   let state: CellState;
-  if (done === cards.length) state = "done";
+  if (allFullyDone) state = "done";
   else {
     const today = new Date().toISOString().slice(0, 10);
     state = earliestDue && earliestDue < today ? "overdue" : "pending";
@@ -112,7 +131,11 @@ export function cellFor(
     );
   return {
     state,
-    totalCards: cards.length,
+    // totalCards now means TOTAL PIECES (sum of wipQty across JCs in the
+    // cell). doneCards = pieces actually completed. CellBox renders
+    // doneCards/totalCards verbatim, so this gives operators piece-level
+    // progress like "2/3" instead of the old JC-level "0/1".
+    totalCards: totalPieces,
     doneCards: done,
     earliestDue,
     latestCompleted,

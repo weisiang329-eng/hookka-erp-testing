@@ -221,14 +221,18 @@ function InventoryTab({
   const columns: Column<FabricTracking>[] = useMemo(
     () => [
       {
+        // Sticky column needs to be wide enough for the longest fabric
+        // code in the catalog ("FABRIC HR805-10", "GARFIELD-2 CHERVRON",
+        // 19+ chars). 140px was clipping into the Description column;
+        // 200px + truncate keeps the layout clean.
         key: "fabricCode",
         label: "Fabric Code",
         type: "text",
-        width: "140px",
+        width: "200px",
         sortable: true,
         sticky: true,
         render: (_v, f) => (
-          <span className="font-mono font-medium text-gray-900">
+          <span className="font-mono font-medium text-gray-900 block truncate" title={f.fabricCode}>
             {f.fabricCode}
           </span>
         ),
@@ -237,8 +241,13 @@ function InventoryTab({
         key: "fabricDescription",
         label: "Description",
         type: "text",
-        width: "180px",
+        width: "200px",
         sortable: true,
+        render: (_v, f) => (
+          <span className="block truncate" title={f.fabricDescription}>
+            {f.fabricDescription}
+          </span>
+        ),
       },
       {
         key: "fabricCategory",

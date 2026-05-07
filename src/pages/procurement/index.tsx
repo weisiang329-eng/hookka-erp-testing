@@ -1,5 +1,5 @@
-import { useState, useCallback, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useState, useCallback, useEffect, useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { useToast } from "@/components/ui/toast";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -104,11 +104,20 @@ function POFormDialog({
     );
   }, [activeRMs, rmSearch]);
 
-  const addItemFromRM = (rmItemCode: string) => {
+  const addItemFromRM = (rmItemCode: string, qtyOverride?: number) => {
     const rm = rawMaterials.find((r) => r.itemCode === rmItemCode);
     if (!rm) return;
 
     const mainBinding = getMainBinding(rmItemCode);
+
+    // qtyOverride lets external triggers (e.g. shortage chip on Fabric
+    // Module) seed the line with a specific quantity instead of the
+    // binding's MOQ default. Falls back to MOQ when no override.
+    const defaultQty = mainBinding?.moq ?? 1;
+    const seedQty =
+      qtyOverride != null && Number.isFinite(qtyOverride) && qtyOverride > 0
+        ? Math.max(qtyOverride, mainBinding?.moq ?? 1)
+        : defaultQty;
 
     // No binding for this RM → leave supplierId empty. The line will render
     // an inline supplier dropdown (allSuppliers) and the Create button stays
@@ -119,7 +128,7 @@ function POFormDialog({
       supplierId: mainBinding?.supplierId ?? "",
       supplierName: mainBinding ? resolveSupplierName(mainBinding.supplierId) : "",
       supplierSku: mainBinding?.supplierSku ?? "",
-      quantity: mainBinding?.moq ?? 1,
+      quantity: seedQty,
       unitPriceSen: mainBinding?.unitPrice ?? 0,
       unit: rm.baseUOM,
       leadTimeDays: mainBinding?.leadTimeDays ?? 0,
@@ -652,6 +661,74 @@ export default function ProcurementPage() {
   const [shortagePanelOpen, setShortagePanelOpen] = useState(false);
 
   const loading = supLoading || poLoading || invLoading || bindingsLoading;
+
+  // ---------------------------------------------------------------------------
+  // Deep-link prefill from /procurement?prefillRm=<itemCode>&qty=<n>
+  //
+  // Used by the Fabric Module's negative-shortage chip — operator clicks
+  // "−57.8" on PC151-10 → lands here with prefillRm=PC151-10&qty=58 (rounded
+  // up). The effect waits for rawMaterials + bindings to load, builds one
+  // POLineItem with the shortage qty seeded, opens the modal, and clears
+  // the URL params so a refresh doesn't re-fire the prefill.
+  // ---------------------------------------------------------------------------
+  const [searchParams, setSearchParams] = useSearchParams();
+  useEffect(() => {
+    const prefillRm = searchParams.get("prefillRm");
+    const qtyStr = searchParams.get("qty");
+    if (!prefillRm) return;
+    if (rawMaterials.length === 0) return; // wait for inventory load
+    const rm = rawMaterials.find((r) => r.itemCode === prefillRm);
+    if (!rm) {
+      // RM not found — clear params so we don't loop, surface a toast.
+      setSearchParams({}, { replace: true });
+      toast.error(`Raw material ${prefillRm} not found`);
+      return;
+    }
+    const bindings = supplierMaterialBindings.filter(
+      (b) => b.materialCode === prefillRm,
+    );
+    const mainBinding =
+      bindings.find((b) => b.isMainSupplier) ?? bindings[0];
+    const qty = qtyStr ? Math.max(1, Math.ceil(Number(qtyStr) || 0)) : 1;
+    const seedQty = mainBinding?.moq
+      ? Math.max(qty, mainBinding.moq)
+      : qty;
+    const supplierName = mainBinding
+      ? (() => {
+          const sup = allSuppliers.find((s) => s.id === mainBinding.supplierId);
+          return sup ? `${sup.code} - ${sup.name}` : mainBinding.supplierId;
+        })()
+      : "";
+    const prefillItem: POLineItem = {
+      rmCode: rm.itemCode,
+      rmDescription: rm.description,
+      supplierId: mainBinding?.supplierId ?? "",
+      supplierName,
+      supplierSku: mainBinding?.supplierSku ?? "",
+      quantity: seedQty,
+      unitPriceSen: mainBinding?.unitPrice ?? 0,
+      unit: rm.baseUOM,
+      leadTimeDays: mainBinding?.leadTimeDays ?? 0,
+      moq: mainBinding?.moq ?? 0,
+      materialCategory: rm.itemGroup,
+    };
+    // One-shot prefill from URL params — the alternative (subscribe to
+    // an external store) would be heavier than the cascade penalty from
+    // these three setState calls, which only run once on mount when the
+    // user arrives via the Fabric Module shortage chip.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPoFormPrefill([prefillItem]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setShowPOForm(true);
+    setSearchParams({}, { replace: true });
+  }, [
+    searchParams,
+    rawMaterials,
+    supplierMaterialBindings,
+    allSuppliers,
+    setSearchParams,
+    toast,
+  ]);
 
   const fetchData = useCallback(() => {
     refreshSuppliers();

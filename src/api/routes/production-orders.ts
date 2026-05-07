@@ -47,6 +47,17 @@ import {
 // Google Sheets sync (fire-and-forget). Helper silently no-ops when
 // GOOGLE_SHEETS_SA_KEY is missing — see docs/SHEETS-SYNC.md.
 import { syncJobCardToSheet } from "../lib/sheets-sync";
+// Per-request leadtime map → expectedDueDate computation. The Production
+// overview cell flips its text colour to teal when a JC's persisted
+// dueDate doesn't match what the *current* leadtime config says it
+// should be (operator manually moved it, OR config changed underneath
+// it). Computed at read time, never persisted — purely derived.
+import {
+  loadLeadTimes,
+  leadDaysFor,
+  addDays,
+  type LeadTimeMap,
+} from "../lib/lead-times";
 
 const app = new Hono<Env>();
 
@@ -267,7 +278,31 @@ function rowToPiecePic(r: PiecePicRow): PiecePicOut {
   };
 }
 
-function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
+// Compute the dueDate this JC *should* have under the currently loaded
+// leadtime config, given the parent PO's anchor (targetEndDate) and
+// itemCategory. Returns "" when the inputs aren't enough to compute
+// (no anchor / no category / no dept) — FE treats "" as "no signal,
+// don't flag". Mirrors the formula in _shared/production-builder.ts:
+//   dueDate = packingAnchor - leadDaysFor(category, deptCode)
+// where packingAnchor is the PO's targetEndDate.
+function computeExpectedDueDate(
+  targetEndDate: string | null | undefined,
+  itemCategory: string | null | undefined,
+  deptCode: string | null | undefined,
+  leadTimeMap: LeadTimeMap | null,
+): string {
+  if (!targetEndDate || !itemCategory || !deptCode || !leadTimeMap) return "";
+  const days = leadDaysFor(leadTimeMap, itemCategory, deptCode);
+  return addDays(targetEndDate, -days);
+}
+
+function rowToJobCard(
+  r: JobCardRow,
+  pics: PiecePicRow[] = [],
+  parentTargetEndDate: string | null = null,
+  parentItemCategory: string | null = null,
+  leadTimeMap: LeadTimeMap | null = null,
+) {
   const myPics = pics
     .filter((p) => p.jobCardId === r.id)
     .sort((a, b) => a.pieceNo - b.pieceNo)
@@ -280,6 +315,14 @@ function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
     sequence: r.sequence,
     status: r.status,
     dueDate: r.dueDate ?? "",
+    // Derived per request from current leadtime config. Empty string when
+    // we lack the anchor/category/dept to compute. See computeExpectedDueDate.
+    expectedDueDate: computeExpectedDueDate(
+      parentTargetEndDate,
+      parentItemCategory,
+      r.departmentCode,
+      leadTimeMap,
+    ),
     wipKey: r.wipKey ?? undefined,
     wipCode: r.wipCode ?? undefined,
     wipType: r.wipType ?? undefined,
@@ -319,6 +362,10 @@ type MinimalJobCardOut = {
   sequence: number;
   status: string;
   dueDate: string;
+  // Derived per request from current production_lead_times_history (see
+  // computeExpectedDueDate). "" when not computable. FE compares
+  // dueDate vs expectedDueDate to surface "off-leadtime" cells in teal.
+  expectedDueDate: string;
   completedDate: string | null;
   pic1Id: string | null;
   pic1Name: string;
@@ -376,6 +423,9 @@ type MinimalPOOut = {
 function rowToMinimalJobCard(
   r: JobCardRow,
   piecesDoneByJc: Map<string, number> = new Map(),
+  parentTargetEndDate: string | null = null,
+  parentItemCategory: string | null = null,
+  leadTimeMap: LeadTimeMap | null = null,
 ): MinimalJobCardOut {
   // wipQty defaults to 1 for legacy single-piece JCs; piecesTotal must
   // therefore floor at 1 so the FE never divides by 0 / renders "0/0".
@@ -387,6 +437,13 @@ function rowToMinimalJobCard(
     sequence: r.sequence,
     status: r.status,
     dueDate: r.dueDate ?? "",
+    // Derived per request — see computeExpectedDueDate.
+    expectedDueDate: computeExpectedDueDate(
+      parentTargetEndDate,
+      parentItemCategory,
+      r.departmentCode,
+      leadTimeMap,
+    ),
     wipKey: r.wipKey ?? undefined,
     wipCode: r.wipCode ?? undefined,
     wipType: r.wipType ?? undefined,
@@ -413,11 +470,22 @@ function rowToMinimalPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
   piecesDoneByJc: Map<string, number> = new Map(),
+  leadTimeMap: LeadTimeMap | null = null,
 ): MinimalPOOut {
+  const parentTargetEndDate = row.targetEndDate ?? null;
+  const parentItemCategory = row.itemCategory ?? null;
   const myJCs = jobCards
     .filter((j) => j.productionOrderId === row.id)
     .sort((a, b) => a.sequence - b.sequence)
-    .map((j) => rowToMinimalJobCard(j, piecesDoneByJc));
+    .map((j) =>
+      rowToMinimalJobCard(
+        j,
+        piecesDoneByJc,
+        parentTargetEndDate,
+        parentItemCategory,
+        leadTimeMap,
+      ),
+    );
   return {
     id: row.id,
     poNo: row.poNo,
@@ -454,11 +522,16 @@ function rowToPO(
   row: ProductionOrderRow,
   jobCards: JobCardRow[] = [],
   pics: PiecePicRow[] = [],
+  leadTimeMap: LeadTimeMap | null = null,
 ) {
+  const parentTargetEndDate = row.targetEndDate ?? null;
+  const parentItemCategory = row.itemCategory ?? null;
   const myJCs = jobCards
     .filter((j) => j.productionOrderId === row.id)
     .sort((a, b) => a.sequence - b.sequence)
-    .map((j) => rowToJobCard(j, pics));
+    .map((j) =>
+      rowToJobCard(j, pics, parentTargetEndDate, parentItemCategory, leadTimeMap),
+    );
   return {
     id: row.id,
     poNo: row.poNo,
@@ -639,6 +712,13 @@ async function fetchFilteredPOs(
   dueFrom: string | null = null,
   dueTo: string | null = null,
 ): Promise<ProductionOrderOut[] | MinimalPOOut[]> {
+  // Load the (category, deptCode) → days map once per request. Drives the
+  // derived `expectedDueDate` field on each JC — the FE compares it
+  // against the persisted `dueDate` to flip the Production overview cell
+  // text to teal when an operator has manually moved a JC off the
+  // current leadtime plan. Single round-trip; safe to fail-soft (a null
+  // map yields expectedDueDate = "" which the FE treats as "on plan").
+  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
   const hasFilter = Array.isArray(statuses) && statuses.length > 0;
   const placeholders = hasFilter
     ? statuses.map(() => "?").join(",")
@@ -743,9 +823,11 @@ async function fetchFilteredPOs(
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
     if (minimal) {
-      return (pos.results ?? []).map((p) => rowToMinimalPO(p, []));
+      return (pos.results ?? []).map((p) =>
+        rowToMinimalPO(p, [], new Map(), leadTimeMap),
+      );
     }
-    return (pos.results ?? []).map((p) => rowToPO(p, [], []));
+    return (pos.results ?? []).map((p) => rowToPO(p, [], [], leadTimeMap));
   }
 
   // Minimal path: skip piece_pics entirely (the Production page never reads
@@ -776,7 +858,7 @@ async function fetchFilteredPOs(
         jcRows.map((j) => j.id),
       );
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcRows, piecesDoneByJc),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap),
       );
     }
     if (hasFilter) {
@@ -801,7 +883,9 @@ async function fetchFilteredPOs(
         orgId,
         jcs.map((j) => j.id),
       );
-      return poRows.map((p) => rowToMinimalPO(p, jcs, piecesDoneByJc));
+      return poRows.map((p) =>
+        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap),
+      );
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
     const jcStmt = db
@@ -818,7 +902,7 @@ async function fetchFilteredPOs(
       jcRows.map((j) => j.id),
     );
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcRows, piecesDoneByJc),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap),
     );
   }
 
@@ -836,7 +920,7 @@ async function fetchFilteredPOs(
         .all<PiecePicRow>(),
     ]);
     return (pos.results ?? []).map((p) =>
-      rowToPO(p, jcs.results ?? [], pics.results ?? []),
+      rowToPO(p, jcs.results ?? [], pics.results ?? [], leadTimeMap),
     );
   }
   if (hasFilter) {
@@ -868,7 +952,7 @@ async function fetchFilteredPOs(
         poIds,
       ),
     ]);
-    return poRows.map((p) => rowToPO(p, jcs, pics));
+    return poRows.map((p) => rowToPO(p, jcs, pics, leadTimeMap));
   }
   // No status filter, no dept filter: legacy full-fetch backward-compat path.
   const jcStmt = db
@@ -883,7 +967,7 @@ async function fetchFilteredPOs(
       .all<PiecePicRow>(),
   ]);
   return (pos.results ?? []).map((p) =>
-    rowToPO(p, jcs.results ?? [], pics.results ?? []),
+    rowToPO(p, jcs.results ?? [], pics.results ?? [], leadTimeMap),
   );
 }
 
@@ -956,11 +1040,25 @@ async function fetchPaginatedPOs(
   const total = countRes?.n ?? 0;
   const posRows = pageRes.results ?? [];
 
+  // Per-request leadtime map. See the matching call at the top of
+  // fetchFilteredPOs for full rationale: drives the `expectedDueDate`
+  // derived field that the FE compares against `dueDate` to highlight
+  // off-leadtime cells.
+  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
+
   if (!includeJobCards || posRows.length === 0) {
     if (minimal) {
-      return { data: posRows.map((p) => rowToMinimalPO(p, [])), total };
+      return {
+        data: posRows.map((p) =>
+          rowToMinimalPO(p, [], new Map(), leadTimeMap),
+        ),
+        total,
+      };
     }
-    return { data: posRows.map((p) => rowToPO(p, [], [])), total };
+    return {
+      data: posRows.map((p) => rowToPO(p, [], [], leadTimeMap)),
+      total,
+    };
   }
 
   // Scope JC + piece_pics queries to only this page's PO IDs. Bind lists
@@ -1037,7 +1135,12 @@ async function fetchPaginatedPOs(
 
   // Minimal path: skip piece_pics entirely.
   if (minimal) {
-    return { data: posRows.map((p) => rowToMinimalPO(p, jcs)), total };
+    return {
+      data: posRows.map((p) =>
+        rowToMinimalPO(p, jcs, new Map(), leadTimeMap),
+      ),
+      total,
+    };
   }
 
   // piece_pics: bind chunks of 100 PO ids and use a sub-select on job_cards
@@ -1057,7 +1160,10 @@ async function fetchPaginatedPOs(
     );
   }
 
-  return { data: posRows.map((p) => rowToPO(p, jcs, pics)), total };
+  return {
+    data: posRows.map((p) => rowToPO(p, jcs, pics, leadTimeMap)),
+    total,
+  };
 }
 
 async function fetchPO(
@@ -1083,7 +1189,10 @@ async function fetchPO(
       .all<PiecePicRow>();
     pics = picsRes.results ?? [];
   }
-  return rowToPO(po, jcs.results ?? [], pics);
+  // Same per-request leadtime map as the list endpoints — keeps
+  // expectedDueDate consistent on single-PO fetches.
+  const leadTimeMap = await loadLeadTimes(db).catch(() => null);
+  return rowToPO(po, jcs.results ?? [], pics, leadTimeMap);
 }
 
 // Ensure piece_pics rows exist for a job card. Creates wipQty (or 1) slots on

@@ -18,6 +18,14 @@ export type JobCard = {
   // older client caches and the legacy non-minimal path don't carry them.
   piecesTotal?: number;
   piecesDone?: number;
+  // Server-derived expected dueDate under the *current* leadtime config:
+  //   expectedDueDate = parentPO.targetEndDate - leadDaysFor(category, deptCode)
+  // The Production overview cell flips to teal text when this differs
+  // from the persisted `dueDate` (operator manually moved the JC, or the
+  // leadtime config changed underneath it). "" = not computable on the
+  // server (no anchor / no category) → FE treats as "on plan, no signal".
+  // Optional: legacy cached payloads predate this field.
+  expectedDueDate?: string;
 };
 
 export type ProductionOrder = {
@@ -59,6 +67,12 @@ export type Cell = {
   doneCards: number;
   earliestDue: string; // YYYY-MM-DD
   latestCompleted: string; // latest completedDate across this dept's cards
+  // True when at least one of this cell's JCs has a persisted dueDate
+  // that differs from the server-computed expectedDueDate (operator
+  // manually moved it off the leadtime plan, OR the leadtime config
+  // changed underneath it). Suppressed when the cell is fully done —
+  // ✓ stays white. CellBox uses this to render teal text.
+  isOffLeadtime: boolean;
 };
 
 export type Worker = { id: string; name: string; departmentCode?: string; empNo?: string };

@@ -75,7 +75,14 @@ export function cellFor(
     }
   }
   if (cards.length === 0) {
-    return { state: "empty", totalCards: 0, doneCards: 0, earliestDue: "", latestCompleted: "" };
+    return {
+      state: "empty",
+      totalCards: 0,
+      doneCards: 0,
+      earliestDue: "",
+      latestCompleted: "",
+      isOffLeadtime: false,
+    };
   }
   const done = cards.filter(
     (c) => c.status === "COMPLETED" || c.status === "TRANSFERRED",
@@ -91,5 +98,24 @@ export function cellFor(
     const today = new Date().toISOString().slice(0, 10);
     state = earliestDue && earliestDue < today ? "overdue" : "pending";
   }
-  return { state, totalCards: cards.length, doneCards: done, earliestDue, latestCompleted };
+  // Off-leadtime signal: any JC whose persisted dueDate doesn't match
+  // the server-computed expectedDueDate (current leadtime plan).
+  // Empty expectedDueDate = "no signal" (treat as on-plan). Done
+  // suppresses the override — ✓ stays white per spec.
+  const isOffLeadtime =
+    state !== "done" &&
+    cards.some(
+      (c) =>
+        !!c.expectedDueDate &&
+        !!c.dueDate &&
+        c.expectedDueDate !== c.dueDate,
+    );
+  return {
+    state,
+    totalCards: cards.length,
+    doneCards: done,
+    earliestDue,
+    latestCompleted,
+    isOffLeadtime,
+  };
 }

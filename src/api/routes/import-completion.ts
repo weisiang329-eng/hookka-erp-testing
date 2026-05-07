@@ -244,7 +244,7 @@ async function findSalesOrderIdsByLookup(
   //   2. reference    — most common (HC#, CR#, AKHC#, ZNT# etc). Supports
   //                     combined values like "CR0450+CR1056" by splitting
   //                     on + or , and OR-ing the lookups.
-  //   3. soNo         — fallback to our internal SO number (SO-2509-238).
+  //   3. companySOId  — fallback to our internal SO number (SO-2509-238).
   const customerPOTokens = splitMultiRef(lookup.custPONo);
   if (customerPOTokens.length > 0) {
     const all = new Set<string>();
@@ -277,13 +277,17 @@ async function findSalesOrderIdsByLookup(
   if (soTokens.length > 0) {
     const all = new Set<string>();
     for (const tok of soTokens) {
+      // sales_orders has no so_no column — the customer-facing SO number
+      // lives in companySOId ("SO-2509-238"). Earlier code searched
+      // soNo and silently failed at the Postgres layer because that
+      // column doesn't exist on this table.
       const res = await db
-        .prepare("SELECT id FROM sales_orders WHERE soNo = ?")
+        .prepare("SELECT id FROM sales_orders WHERE companySOId = ?")
         .bind(tok)
         .all<SalesOrderIdRow>();
       for (const r of res.results ?? []) all.add(r.id);
     }
-    if (all.size > 0) return { ids: Array.from(all), matchedVia: "soNo" };
+    if (all.size > 0) return { ids: Array.from(all), matchedVia: "companySOId" };
   }
 
   return { ids: [], matchedVia: null };

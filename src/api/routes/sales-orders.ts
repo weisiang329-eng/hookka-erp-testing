@@ -1128,24 +1128,76 @@ app.get("/status-changes", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/sales-orders/stats — whole-dataset status bucket counts.
+// GET /api/sales-orders/stats — whole-dataset status bucket counts + revenue.
 //
-// Returns { byStatus: Record<string, number>, total }. Used by the list page
-// tab badges / KPI cards so "Confirmed (N)" reflects the full table rather
-// than only the current paginated page. Single aggregate SELECT — cheap.
+// Returns:
+//   {
+//     byStatus: Record<status, count>,
+//     revenueByStatus: Record<status, totalSen>,
+//     total: count,
+//     totalRevenueSen: raw sum across every status,
+//     csRevenueSen: "Confirmed Sales" — sum across the post-DRAFT, non-paused,
+//                    non-cancelled status set (CONFIRMED → CLOSED). This is
+//                    the headline revenue number the operator reads off the
+//                    SO list page.
+//   }
+//
+// Used by the list page tile cards so "Revenue" reflects the whole table
+// rather than just the current paginated page (the previous client-side
+// `orders.reduce(...)` was bounded by PAGE_SIZE=200 when no filter was
+// active, so a 444-row dataset under-reported revenue by ~half).
+//
+// Single aggregate SELECT — cheap. Tenant-scoped via withOrgScope.
 // Registered BEFORE /:id (Hono route ordering: static before wildcards).
 // ---------------------------------------------------------------------------
+const CS_STATUSES = new Set([
+  "CONFIRMED",
+  "IN_PRODUCTION",
+  "READY_TO_SHIP",
+  "SHIPPED",
+  "DELIVERED",
+  "INVOICED",
+  "CLOSED",
+]);
+
 app.get("/stats", async (c) => {
+  const { whereSql: orgWhere, params: orgParams } = withOrgScope(
+    c,
+    "sales_orders",
+  );
   const res = await c.var.DB
-    .prepare("SELECT status, COUNT(*) AS n FROM sales_orders GROUP BY status")
-    .all<{ status: string; n: number }>();
+    .prepare(
+      `SELECT status                        AS "status",
+              COUNT(*)                      AS "n",
+              COALESCE(SUM(totalSen), 0)    AS "revenueSen"
+         FROM sales_orders
+         ${orgWhere}
+         GROUP BY status`,
+    )
+    .bind(...orgParams)
+    .all<{ status: string; n: number; revenueSen: number }>();
   const byStatus: Record<string, number> = {};
+  const revenueByStatus: Record<string, number> = {};
   let total = 0;
+  let totalRevenueSen = 0;
+  let csRevenueSen = 0;
   for (const row of res.results ?? []) {
     byStatus[row.status] = row.n;
+    revenueByStatus[row.status] = Number(row.revenueSen) || 0;
     total += row.n;
+    totalRevenueSen += Number(row.revenueSen) || 0;
+    if (CS_STATUSES.has(row.status)) {
+      csRevenueSen += Number(row.revenueSen) || 0;
+    }
   }
-  return c.json({ success: true, byStatus, total });
+  return c.json({
+    success: true,
+    byStatus,
+    revenueByStatus,
+    total,
+    totalRevenueSen,
+    csRevenueSen,
+  });
 });
 
 // ---------------------------------------------------------------------------

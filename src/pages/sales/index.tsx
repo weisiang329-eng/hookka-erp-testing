@@ -60,10 +60,27 @@ const OUTSTANDING_STATUSES = new Set([
   "SHIPPED",
   "INVOICED",
 ]);
+// `CONFIRMED` is also a synthetic group — Wei Siang's "CS" (Confirmed
+// Sales) reads as "every order I've actually sold", which in practice means
+// post-DRAFT + non-paused + non-cancelled. The literal CONFIRMED status is
+// just a brief checkpoint between Draft and IN_PRODUCTION; treating the
+// dropdown option as that single status meant a 444-order book with one
+// SO at literal CONFIRMED reported RM 287 of revenue while all the real
+// money sat under IN_PRODUCTION / READY_TO_SHIP. Mirrors the server-side
+// `CS_STATUSES` set in routes/sales-orders.ts.
+const CONFIRMED_STATUSES = new Set([
+  "CONFIRMED",
+  "IN_PRODUCTION",
+  "READY_TO_SHIP",
+  "SHIPPED",
+  "DELIVERED",
+  "INVOICED",
+  "CLOSED",
+]);
 const ALL_STATUSES = [
   { value: "", label: "All Statuses" },
   { value: "DRAFT", label: "Draft" },
-  { value: "CONFIRMED", label: "Confirmed" },
+  { value: "CONFIRMED", label: "Confirmed (all)" },
   { value: "OUTSTANDING", label: "Outstanding" },
   { value: "DELIVERED", label: "Delivered" },
   { value: "CLOSED", label: "Closed" },
@@ -119,7 +136,10 @@ export default function SalesPage() {
   const { data: statsResp, refresh: refreshStats } = useCachedJson<{
     success?: boolean;
     byStatus?: Record<string, number>;
+    revenueByStatus?: Record<string, number>;
     total?: number;
+    totalRevenueSen?: number;
+    csRevenueSen?: number;
   }>("/api/sales-orders/stats");
   const { data: customersResp, refresh: refreshCustomers } = useCachedJson<{ success?: boolean; data?: Customer[] }>("/api/customers");
   const { data: productionOrdersResp, refresh: refreshProductionOrders } = useCachedJson<{ success?: boolean; data?: { salesOrderId: string; poNo: string; status: string }[] }>("/api/production-orders");
@@ -279,6 +299,10 @@ export default function SalesPage() {
       if (filterStatus) {
         if (filterStatus === "OUTSTANDING") {
           if (!OUTSTANDING_STATUSES.has(o.status)) return false;
+        } else if (filterStatus === "CONFIRMED") {
+          // Synthetic group — see CONFIRMED_STATUSES comment. Match the
+          // dropdown's "Confirmed (all)" semantics.
+          if (!CONFIRMED_STATUSES.has(o.status)) return false;
         } else if (o.status !== filterStatus) {
           return false;
         }
@@ -504,19 +528,24 @@ export default function SalesPage() {
     },
   ];
 
-  // Revenue card excludes DRAFT and CANCELLED — those orders aren't real
-  // revenue (drafts haven't been confirmed by the customer; cancelled
-  // orders were voided). Including them inflates the headline number.
-  const totalRevenue = orders
-    .filter((o) => o.status !== "DRAFT" && o.status !== "CANCELLED")
-    .reduce((sum, o) => sum + o.totalSen, 0);
-  // When any filter is active, show the sum of the currently-visible rows
-  // so users can ask "sofa this month — how much?" and read it off the
-  // same Revenue card. Falls back to the page-level totalRevenue when no
-  // filter is active.
+  // Revenue card — server-side "CS revenue" (Confirmed Sales) excludes
+  // DRAFT, ON_HOLD, and CANCELLED. Pulled from /stats so the headline
+  // figure reflects the WHOLE table, not just the current paginated 200-row
+  // page. Pre-server-stats this was `orders.reduce(...)` which silently
+  // capped at PAGE_SIZE when no filter was active, missing ~half the
+  // revenue on a 444-order dataset.
+  const totalRevenue = statsResp?.csRevenueSen ?? 0;
+  // Filter case still iterates the (unpaginated) loaded array — when any
+  // filter is active the fetch path drops `?page&limit` and pulls all
+  // orders, so this sum is whole-dataset accurate. CS exclusion is
+  // applied here too so a user filtering "All Statuses" still reads the
+  // CS number, not raw-including-cancelled.
   const filteredRevenue = useMemo(
-    () => filteredOrders.reduce((sum, o) => sum + o.totalSen, 0),
-    [filteredOrders]
+    () =>
+      filteredOrders
+        .filter((o) => CONFIRMED_STATUSES.has(o.status))
+        .reduce((sum, o) => sum + o.totalSen, 0),
+    [filteredOrders],
   );
 
   // Quick date presets — see useUrlBatch jsdoc for why we can't just call

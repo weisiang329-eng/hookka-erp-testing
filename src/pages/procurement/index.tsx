@@ -129,6 +129,17 @@ function POFormDialog({
 
     setItems((prev) => [...prev, newItem]);
     setRmSearch("");
+    // Scroll the newly-added line into view so the operator sees the row land
+    // (esp. important when the RM has no main binding — the inline supplier
+    // dropdown sits on the new row and would otherwise be hidden below the
+    // modal scroll fold). Defer to the next paint so the row is in the DOM.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const lines = document.querySelectorAll('[data-po-line-row="true"]');
+        const last = lines[lines.length - 1] as HTMLElement | undefined;
+        if (last) last.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    });
   };
 
   /** Set supplier on a line that has no binding yet — picked from allSuppliers
@@ -357,7 +368,7 @@ function POFormDialog({
                           {item.materialCategory || "(uncategorised)"}
                         </div>
                       )}
-                    <div className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
+                    <div data-po-line-row="true" className="p-3 bg-[#FAF9F7] rounded border border-[#E2DDD8]">
                       {/* Row 1: RM code, description, supplier switcher */}
                       <div className="grid grid-cols-8 gap-2 items-end">
                         <div className="col-span-2">

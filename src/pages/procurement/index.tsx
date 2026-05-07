@@ -348,7 +348,7 @@ function POFormDialog({
               )}
             </div>
             <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Expected Date</label>
+              <label className="block text-sm font-medium text-[#374151] mb-1">Delivery Date</label>
               <Input type="date" value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
             </div>
             <div className="col-span-2">
@@ -828,6 +828,11 @@ export default function ProcurementPage() {
       }
       invalidateCachePrefix("/api/purchase-orders");
       invalidateCachePrefix("/api/grn");
+      // Fabric Module reads PO Outstanding live off purchase_order_items
+      // (see src/api/lib/fabric-usage.ts computeFabricMetrics). Without
+      // this invalidation, the page keeps showing the pre-PO outstanding
+      // count from the SPA cache until the next manual refresh.
+      invalidateCachePrefix("/api/fabric-tracking");
       refreshPOs();
       closePOForm();
       toast.success("Purchase order created");

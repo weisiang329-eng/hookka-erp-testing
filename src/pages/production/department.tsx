@@ -28,6 +28,11 @@ type JobCard = {
   category: string; productionTimeMinutes: number; overdue: string;
   // WIP grouping (optional for legacy seed data — falls back to "FG")
   wipKey?: string; wipCode?: string; wipType?: string; wipLabel?: string;
+  // ISO timestamp the operator clicked the "Sent" tick. NULL = not yet
+  // distributed to floor staff. Optional because legacy clients (and the
+  // initial isolate where the column hasn't been created yet) may not
+  // carry it. See src/api/routes/production-orders.ts ensurePendingMigrations.
+  distributedAt?: string | null;
 };
 
 type ProductionOrder = {
@@ -346,6 +351,42 @@ export default function DepartmentProductionPage() {
     pic1Id?: string; pic2Id?: string; completedDate?: string; dueDate?: string;
   }>>({});
 
+  // Per-JC "sent to floor" toggle. Only un-sent rows get printed when the
+  // operator runs Print Stickers next, and the filter below hides already-
+  // sent rows so duplicates don't slip out of the workshop.
+  const [showOnlyUnsent, setShowOnlyUnsent] = useState(false);
+
+  // Optimistic toggle: flip distributedAt locally, fire PATCH, on failure
+  // revert + toast. PO-level cache busted so other operators viewing the
+  // same dept tab see the tick within a few seconds (cached-fetch's
+  // background refresh interval drives the propagation rate).
+  const toggleDistributed = async (order: ProductionOrder, jc: JobCard) => {
+    const prevValue = jc.distributedAt ?? null;
+    const nextValue = prevValue ? null : new Date().toISOString();
+    // Optimistic local update.
+    setOrders((prev) => prev.map((o) => o.id !== order.id ? o : {
+      ...o,
+      jobCards: o.jobCards.map((j) => j.id !== jc.id ? j : { ...j, distributedAt: nextValue }),
+    }));
+    try {
+      const data = await fetchJson(`/api/production-orders/${order.id}`, POMutationSchema, {
+        method: "PATCH",
+        body: { jobCardId: jc.id, distributedAt: nextValue },
+      });
+      if (!data.success) throw new Error(data.error || "save failed");
+      // Refresh cached PO list so peers see the tick on their next refetch.
+      invalidateCachePrefix("/api/production-orders");
+    } catch (err) {
+      // Revert local change + alert.
+      setOrders((prev) => prev.map((o) => o.id !== order.id ? o : {
+        ...o,
+        jobCards: o.jobCards.map((j) => j.id !== jc.id ? j : { ...j, distributedAt: prevValue }),
+      }));
+      const detail = err instanceof Error ? err.message : "network error";
+      toast.error(`Could not save Sent state (${detail}).`);
+    }
+  };
+
   const dept = DEPT_INFO[deptCode] || { name: deptCode, color: "#6B7280" };
   const prevDeptHeaders = PREV_DEPT[deptCode] || [];
   const prevDeptCodes = PREV_DEPT_CODES[deptCode] || [];
@@ -546,6 +587,7 @@ export default function DepartmentProductionPage() {
 
   // Compute total column count for empty state
   const colCount = 14 // includes new WIP column
+    + 1 // leftmost "Sent" tick column (added 2026-05-07)
     + (showQty ? 1 : 0)
     + (showRawMaterial ? 1 : 0)
     + (showRack ? 1 : 0)
@@ -836,16 +878,45 @@ export default function DepartmentProductionPage() {
       {/* Department Production Table - matches Google Sheet layout */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="flex items-center gap-2">
-            <div className="h-3 w-3 rounded-full" style={{ backgroundColor: dept.color }} />
-            {dept.name} - Production Sheet ({deptOrders.length} items)
-          </CardTitle>
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <CardTitle className="flex items-center gap-2">
+              <div className="h-3 w-3 rounded-full" style={{ backgroundColor: dept.color }} />
+              {dept.name} - Production Sheet ({deptOrders.length} items)
+              {/* Sent counter — surfaces "X out of Y job cards have already
+                  been printed + handed to floor staff" so the operator
+                  knows progress at a glance instead of scanning the column. */}
+              {(() => {
+                const total = deptOrders.length;
+                const sent = deptOrders.filter((r) => r.jc.distributedAt != null).length;
+                if (total === 0) return null;
+                return (
+                  <span className="ml-2 inline-flex items-center rounded-full bg-[#EEF3E4] text-[#4F7C3A] px-2 py-0.5 text-xs font-medium">
+                    Sent: {sent} / {total}
+                  </span>
+                );
+              })()}
+            </CardTitle>
+            {/* Show-only-un-sent filter — duplicates Google Sheets' "filter
+                view" pattern. When checked, the table only shows JCs the
+                operator hasn't sent to the floor yet so the next print
+                run lines up exactly with what's left. */}
+            <label className="flex items-center gap-2 text-xs text-[#4B5563] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showOnlyUnsent}
+                onChange={(e) => setShowOnlyUnsent(e.target.checked)}
+                className="h-3.5 w-3.5"
+              />
+              <span>Show only un-sent</span>
+            </label>
+          </div>
         </CardHeader>
         <CardContent>
           <div className="rounded-md border border-[#E2DDD8] overflow-x-auto">
             <table className="w-full text-sm whitespace-nowrap">
               <thead>
                 <tr className="border-b border-[#E2DDD8]" style={{ backgroundColor: dept.color + "15" }}>
+                  <th className="h-10 px-3 text-center font-medium text-[#374151]" title="Tick when this job card has been printed and handed to the floor">Sent</th>
                   <th className="h-10 px-3 text-left font-medium text-[#374151] sticky left-0 bg-inherit">#</th>
                   <th className="h-10 px-3 text-left font-medium text-[#374151]">Customer PO ID</th>
                   <th className="h-10 px-3 text-left font-medium text-[#374151]">Customer Ref</th>
@@ -887,16 +958,36 @@ export default function DepartmentProductionPage() {
                 </tr>
               </thead>
               <tbody>
-                {deptOrders.length === 0 ? (
-                  <tr><td colSpan={colCount} className="py-8 text-center text-[#9CA3AF]">No production orders for this department</td></tr>
-                ) : (
-                  deptOrders.map((row, idx) => {
+                {(() => {
+                  // "Show only un-sent" filter — drops rows whose JC has
+                  // a distributedAt timestamp. Keeps idx numbering tight
+                  // by indexing the rendered subset, not the raw deptOrders.
+                  const visibleRows = showOnlyUnsent
+                    ? deptOrders.filter((r) => !r.jc.distributedAt)
+                    : deptOrders;
+                  if (visibleRows.length === 0) {
+                    return (
+                      <tr>
+                        <td colSpan={colCount} className="py-8 text-center text-[#9CA3AF]">
+                          {showOnlyUnsent
+                            ? `All ${dept.name} job cards have been sent to the floor — uncheck "Show only un-sent" to see them.`
+                            : "No production orders for this department"}
+                        </td>
+                      </tr>
+                    );
+                  }
+                  return visibleRows.map((row, idx) => {
                     const jc = row.jc;
                     const edit = edits[jc.id] || {};
                     const isCompleted = jc.status === "COMPLETED" || jc.status === "TRANSFERRED";
                     const hasEdits = !!edits[jc.id];
                     const overdueInfo = computeOverdueText(jc);
                     const isOverdue = overdueInfo.color === "#DC2626";
+                    // Distributed = job card has been printed and handed
+                    // to floor staff. Mutes the row text + adds a tint so
+                    // the operator sees "this one already went out" at a
+                    // glance.
+                    const isDistributed = !!jc.distributedAt;
 
                     // Check raw material readiness: all prerequisite departments completed OR first dept
                     const rawMaterialReady = jc.prerequisiteMet;
@@ -915,14 +1006,45 @@ export default function DepartmentProductionPage() {
                     // dept dashboards show `8" Divan 5FT` instead of the synthetic
                     // default. Falls back to legacy wipLabel/wipCode/productCode.
                     const wipDisplay = buildWipDisplay(jc, row);
+                    // Distributed-row class wins when present so the muted
+                    // grey is visible regardless of completion / overdue
+                    // colouring (we still want operators to recognise a
+                    // sent overdue card — the tick is the dominant signal).
+                    const rowBgCls = isDistributed
+                      ? "bg-[#F0F0EB] text-[#9CA3AF] hover:bg-[#E8E8E2]"
+                      : isCompleted
+                        ? "bg-[#EEF3E4]/50"
+                        : isOverdue
+                          ? "bg-[#F9E1DA]/50"
+                          : "hover:bg-[#FAF9F7]";
                     return (
                       <tr
                         key={row.rowKey}
-                        className={`border-b border-[#E2DDD8] cursor-pointer ${
-                          isCompleted ? "bg-[#EEF3E4]/50" : isOverdue ? "bg-[#F9E1DA]/50" : "hover:bg-[#FAF9F7]"
-                        }`}
+                        className={`border-b border-[#E2DDD8] cursor-pointer ${rowBgCls}`}
                         onDoubleClick={() => setJobCardDialog({ order: row, jc })}
                       >
+                        {/* Sent tick — column 0. Click toggles distributedAt
+                            optimistically + PATCHes the server. stopPropagation
+                            so it doesn't double as a row-open double-click
+                            target when the operator double-clicks rapidly. */}
+                        <td
+                          className="px-3 py-2 text-center"
+                          onClick={(e) => e.stopPropagation()}
+                          onDoubleClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={isDistributed}
+                            onChange={() => toggleDistributed(row, jc)}
+                            disabled={saving === jc.id}
+                            className="h-3.5 w-3.5 cursor-pointer"
+                            title={
+                              isDistributed
+                                ? `Sent at ${new Date(jc.distributedAt as string).toLocaleString()}`
+                                : "Tick when this job card has been printed and handed to the floor"
+                            }
+                          />
+                        </td>
                         <td className="px-3 py-2 text-[#9CA3AF]">{idx + 1}</td>
                         <td className="px-3 py-2 doc-number font-medium">{row.customerPOId || row.poNo}</td>
                         <td className="px-3 py-2 text-[#4B5563]">{row.customerReference || "-"}</td>
@@ -1216,8 +1338,8 @@ export default function DepartmentProductionPage() {
                         </td>
                       </tr>
                     );
-                  })
-                )}
+                  });
+                })()}
               </tbody>
             </table>
           </div>

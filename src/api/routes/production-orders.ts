@@ -50,6 +50,44 @@ import { syncJobCardToSheet } from "../lib/sheets-sync";
 
 const app = new Hono<Env>();
 
+// Self-applying migrations for the production-orders / job-cards space.
+// Mirrors the pattern in src/api/routes/sales-orders.ts:1492 — each ALTER
+// runs IF NOT EXISTS so it's idempotent + cheap, and the module-level
+// promise gates one round of ALTERs per isolate boot, not per request.
+//
+// Added 2026-05-07: distributedAt on job_cards — the dept sheet needs a
+// per-JC "Sent to floor" tick that survives sessions/devices so operators
+// stop double-printing the same sheet.
+//
+// Added 2026-05-07: dueDateOverriddenAt on job_cards — the production
+// Overview matrix paints the "Edited" cell colour when the operator has
+// manually rescheduled a JC's due date. Stamped from applyPoUpdate on
+// any dueDate change. Existing rows stay NULL so they render as Pending
+// until next time someone edits them, which matches the desired UX.
+let pendingMigrations: Promise<void> | null = null;
+function ensurePendingMigrations(db: D1Database): Promise<void> {
+  if (pendingMigrations) return pendingMigrations;
+  pendingMigrations = (async () => {
+    const stmts = [
+      "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS distributedAt TEXT",
+      "ALTER TABLE job_cards ADD COLUMN IF NOT EXISTS dueDateOverriddenAt TEXT",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        // Best-effort. Log so silent schema drift surfaces in wrangler tail
+        // (per the security-fix tightening landed earlier this branch).
+        console.warn("[production-orders.migrations] ALTER skipped", {
+          sql,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return pendingMigrations;
+}
+
 // Local helper — push one JC row to the matching dept tab on the live
 // spreadsheet via fire-and-forget. Joins production_orders + sales_orders
 // for the customerRef / customer columns the sheet expects. Wrapped in
@@ -189,6 +227,16 @@ export type JobCardRow = {
   productionTimeMinutes: number;
   overdue: string | null;
   rackingNumber: string | null;
+  // Per-JC "sent to floor" timestamp. NULL = not yet distributed; ISO
+  // string = the moment the operator ticked the sheet as printed/sent.
+  // Toggled via PATCH /api/production-orders/:id with `{ jobCardId,
+  // distributedAt }`. Migration: see ensurePendingMigrations above.
+  distributedAt: string | null;
+  // Per-JC "operator manually rescheduled" timestamp. NULL = original due
+  // date untouched; ISO string = when applyPoUpdate stamped it on a
+  // dueDate change. Drives the production Overview matrix' Edited cell
+  // colour. Migration: see ensurePendingMigrations above.
+  dueDateOverriddenAt: string | null;
 };
 
 type PiecePicRow = {
@@ -262,6 +310,8 @@ function rowToJobCard(r: JobCardRow, pics: PiecePicRow[] = []) {
     productionTimeMinutes: r.productionTimeMinutes,
     overdue: r.overdue ?? "",
     rackingNumber: r.rackingNumber ?? undefined,
+    distributedAt: r.distributedAt ?? null,
+    dueDateOverriddenAt: r.dueDateOverriddenAt ?? null,
     piecePics: myPics.length > 0 ? myPics : undefined,
   };
 }
@@ -300,6 +350,14 @@ type MinimalJobCardOut = {
   // piecesDone counts piece_pics rows where pic1Id IS NOT NULL.
   piecesTotal: number;
   piecesDone: number;
+  // ISO timestamp when this JC was marked distributed (sent to floor),
+  // or null if it hasn't been sent yet. Drives the dept sheet's "Sent"
+  // checkbox.
+  distributedAt: string | null;
+  // ISO timestamp of the most recent operator-driven dueDate edit.
+  // NULL until the first manual reschedule; once set, the Overview
+  // matrix paints the cell with the "Edited" colour state.
+  dueDateOverriddenAt: string | null;
 };
 type MinimalPOOut = {
   id: string;
@@ -364,6 +422,8 @@ function rowToMinimalJobCard(
     rackingNumber: r.rackingNumber ?? undefined,
     piecesTotal,
     piecesDone,
+    distributedAt: r.distributedAt ?? null,
+    dueDateOverriddenAt: r.dueDateOverriddenAt ?? null,
   };
 }
 
@@ -2654,9 +2714,27 @@ async function applyPoUpdate(
     if (body.actualMinutes !== undefined) {
       updated.actualMinutes = body.actualMinutes;
     }
-    if (body.dueDate !== undefined) updated.dueDate = body.dueDate;
+    if (body.dueDate !== undefined) {
+      const newDue = body.dueDate || null;
+      const oldDue = jcRow.dueDate || null;
+      updated.dueDate = newDue ?? "";
+      // Stamp the override timestamp ONLY when the value actually changes.
+      // No-op writes (FE re-sends the same date) shouldn't reset the flag,
+      // and clearing the date back to null doesn't count as an "edit" from
+      // the operator's perspective either — null → null stays null.
+      if (newDue !== oldDue) {
+        updated.dueDateOverriddenAt = nowIso;
+      }
+    }
     if (body.rackingNumber !== undefined) {
       updated.rackingNumber = body.rackingNumber;
+    }
+    // distributedAt — ISO string ("now") to mark the JC as sent to floor;
+    // null to untick. The dept-sheet operator clicks the "Sent" checkbox
+    // and the FE sends the resolved value. Schema column added by
+    // ensurePendingMigrations on first PATCH per isolate.
+    if (body.distributedAt !== undefined) {
+      updated.distributedAt = body.distributedAt;
     }
 
     await db
@@ -2664,7 +2742,8 @@ async function applyPoUpdate(
         `UPDATE job_cards SET
            status = ?, completedDate = ?, pic1Id = ?, pic1Name = ?,
            pic2Id = ?, pic2Name = ?, actualMinutes = ?, dueDate = ?,
-           rackingNumber = ?, overdue = ?
+           rackingNumber = ?, overdue = ?, distributedAt = ?,
+           dueDateOverriddenAt = ?
          WHERE id = ?`,
       )
       .bind(
@@ -2678,6 +2757,8 @@ async function applyPoUpdate(
         updated.dueDate,
         updated.rackingNumber,
         updated.overdue,
+        updated.distributedAt,
+        updated.dueDateOverriddenAt,
         updated.id,
       )
       .run();
@@ -4268,6 +4349,7 @@ app.get("/:id", async (c) => {
 app.put("/:id", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
   return applyPoUpdate(c, c.req.param("id"));
 });
 
@@ -4277,6 +4359,7 @@ app.put("/:id", async (c) => {
 app.patch("/:id", async (c) => {
   const denied = await requirePermission(c, "production-orders", "update");
   if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
   return applyPoUpdate(c, c.req.param("id"));
 });
 

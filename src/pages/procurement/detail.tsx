@@ -702,7 +702,7 @@ export default function PurchaseOrderDetailPage() {
                 )}
               </div>
               <div>
-                <label className="block text-xs text-[#6B7280] mb-1">Expected Date</label>
+                <label className="block text-xs text-[#6B7280] mb-1">Delivery Date</label>
                 <Input
                   type="date"
                   value={editExpectedDate}
@@ -902,7 +902,7 @@ export default function PurchaseOrderDetailPage() {
                 <span className="text-[#6B7280]">Order Date</span>
                 <span className="text-[#4B5563]">{formatDate(po.orderDate)}</span>
 
-                <span className="text-[#6B7280]">Expected Date</span>
+                <span className="text-[#6B7280]">Delivery Date</span>
                 <span className="text-[#4B5563]">{po.expectedDate ? formatDate(po.expectedDate) : "-"}</span>
 
                 <span className="text-[#6B7280]">Received Date</span>

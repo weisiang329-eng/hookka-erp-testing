@@ -319,21 +319,24 @@ export async function computeFabricMetrics(
 
   // ---- Supply: PO Outstanding from purchase_order_items ----
   // Open POs = status NOT IN (RECEIVED, CANCELLED, CLOSED). Per-line
-  // outstanding = quantity − COALESCE(receivedQty, 0). The schema has
-  // no materialCode column on purchase_order_items; the SKU is stored
-  // in `materialName` (e.g. 'PC151-01'). Match raw_materials.itemCode
-  // on that. Defensive try/catch — if the column shape drifts again
-  // the metric collapses to 0 instead of 500-ing the whole endpoint.
+  // outstanding = quantity − COALESCE(receivedQty, 0).
+  //
+  // SKU extraction: purchase_order_items.materialName is authored by
+  // the Create PO modal as "<itemCode> - <description>" (e.g.
+  // "PC151-10 - FABRIC"). To match against raw_materials.itemCode we
+  // split on " - " and take the first segment. SPLIT_PART(s, sep, 1)
+  // returns the full string if the separator is absent — so legacy
+  // rows that were stored as plain itemCode also match.
   try {
     const outRes = await db
       .prepare(
-        `SELECT poi.materialName AS code,
+        `SELECT TRIM(SPLIT_PART(poi.materialName, ' - ', 1)) AS code,
                 SUM(poi.quantity - COALESCE(poi.receivedQty, 0)) AS qty
            FROM purchase_order_items poi
            INNER JOIN purchase_orders po ON po.id = poi.purchaseOrderId
           WHERE po.status NOT IN ('RECEIVED', 'CANCELLED', 'CLOSED')
             AND poi.materialName IS NOT NULL
-          GROUP BY poi.materialName`,
+          GROUP BY TRIM(SPLIT_PART(poi.materialName, ' - ', 1))`,
       )
       .all<{ code: string; qty: number }>();
     for (const r of outRes.results ?? []) {

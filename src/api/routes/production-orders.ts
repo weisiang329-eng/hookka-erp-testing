@@ -415,6 +415,13 @@ type MinimalPOOut = {
   specialOrder: string;
   status: string;
   currentDepartment: string;
+  // Piece-level completion % (computed by recomputePoStatusAndProgress).
+  // Dashboard "progress" pills + reports read this — keep on the minimal
+  // payload so consumers don't have to fetch the full PO row.
+  progress: number;
+  // ISO date stamped by the auto-cascade when status flips to COMPLETED.
+  // Dashboard "Completed Today" tile depends on this.
+  completedDate: string | null;
   lineNo: number;
   targetEndDate: string;
   jobCards: MinimalJobCardOut[];
@@ -512,6 +519,8 @@ function rowToMinimalPO(
     specialOrder: row.specialOrder ?? "",
     status: row.status,
     currentDepartment: row.currentDepartment ?? "",
+    progress: row.progress ?? 0,
+    completedDate: row.completedDate ?? null,
     lineNo: row.lineNo,
     targetEndDate: row.targetEndDate ?? "",
     jobCards: myJCs,

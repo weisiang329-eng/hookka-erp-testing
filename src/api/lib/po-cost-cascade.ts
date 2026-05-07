@@ -378,44 +378,97 @@ function genLedgerId(prefix: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Walk the bom_templates wipComponents tree and find the FAB_CUT node that
-// matches a JC's wipType. Bedframe BOMs have TWO FAB_CUT nodes (Divan FC +
-// HB FC); each matches a different JC by wipType. Sofa BOMs have one Base
-// FC node (Cushion / Arm FC nodes are intentionally empty per spec). The
-// match key is (deptCode='FAB_CUT' AND wipType === jc.wipType).
+// Walk the bom_templates wipComponents tree and return materials from every
+// FAB_CUT node a JC should consume, paired with the parent FC node's
+// `quantity` field so consumption math can multiply correctly. Two-step
+// match strategy:
 //
-// Returns the array of `materials` on that node (post-token shape — code,
-// name, qty, scaling, autoDetect, wastePct), or [] if no match.
+//   1. SPECIFIC: if any FC node's wipType === jc.wipType, return ONLY
+//      that node's materials. Used for STOOL / CSL / pillow JCs whose
+//      wipType is fine-grained (SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST)
+//      and matches the BOM node 1:1.
+//
+//   2. FALLBACK: if no specific match, return the union of ALL FC nodes'
+//      materials. Used for bedframe (jc.wipType='BEDFRAME', BOM has
+//      Divan FC[wipType='DIVAN', quantity=2] + HB FC[wipType='HEADBOARD',
+//      quantity=1]) and sofa (jc.wipType='SOFA', BOM has Base + Cushion +
+//      Arm FC nodes — but Cushion / Arm have empty materials[] per spec).
+//
+// Why pair with nodeQuantity: the BOM authors `material.qty` as PER-PIECE
+// (e.g. divan FC qty=3.25 means 3.25m fabric per divan piece). The FC
+// node's `quantity` field is the piece count (2 for K/Q divans, 1 for
+// HB). Total per FG = material.qty × scaling × nodeQuantity. The merged
+// FAB_CUT JC for a bedframe needs different multipliers per material
+// (×2 for Divan, ×1 for HB), which jc.wipQty alone can't capture.
 // ---------------------------------------------------------------------------
-function findFcNodeMaterialsByWipType(
+type FcMaterialWithMultiplier = {
+  material: unknown;
+  nodeQuantity: number;
+};
+
+function collectFcNodeMaterials(
   roots: unknown[],
-  wipType: string,
-): unknown[] {
-  function walk(node: unknown): unknown[] | null {
-    if (!node || typeof node !== "object") return null;
+  jcWipType: string,
+): FcMaterialWithMultiplier[] {
+  function isFcNode(node: unknown): boolean {
+    if (!node || typeof node !== "object") return false;
     const n = node as Record<string, unknown>;
     const procs = Array.isArray(n.processes) ? n.processes : [];
-    const isFc = procs.some(
+    return procs.some(
       (p) =>
         !!p &&
         typeof p === "object" &&
         (p as Record<string, unknown>).deptCode === "FAB_CUT",
     );
-    if (isFc && n.wipType === wipType) {
-      return Array.isArray(n.materials) ? n.materials : [];
+  }
+  function nodeQty(node: unknown): number {
+    if (!node || typeof node !== "object") return 1;
+    const q = (node as Record<string, unknown>).quantity;
+    const n = typeof q === "number" ? q : Number(q);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }
+  function emitMaterials(
+    node: unknown,
+    out: FcMaterialWithMultiplier[],
+  ): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as Record<string, unknown>;
+    const mats = Array.isArray(n.materials) ? n.materials : [];
+    const q = nodeQty(node);
+    for (const m of mats) out.push({ material: m, nodeQuantity: q });
+  }
+
+  // Pass 1: specific match by wipType.
+  function walkSpecific(node: unknown): FcMaterialWithMultiplier[] | null {
+    if (!node || typeof node !== "object") return null;
+    const n = node as Record<string, unknown>;
+    if (isFcNode(node) && n.wipType === jcWipType) {
+      const out: FcMaterialWithMultiplier[] = [];
+      emitMaterials(node, out);
+      return out;
     }
     const kids = Array.isArray(n.children) ? n.children : [];
     for (const c of kids) {
-      const found = walk(c);
+      const found = walkSpecific(c);
       if (found) return found;
     }
     return null;
   }
   for (const root of roots) {
-    const found = walk(root);
+    const found = walkSpecific(root);
     if (found) return found;
   }
-  return [];
+  // Pass 2: fallback — union of all FC nodes' materials.
+  const acc: FcMaterialWithMultiplier[] = [];
+  function walkAll(node: unknown): void {
+    if (!node || typeof node !== "object") return;
+    const n = node as Record<string, unknown>;
+    if (isFcNode(node)) emitMaterials(node, acc);
+    const kids = Array.isArray(n.children) ? n.children : [];
+    for (const c of kids) walkAll(c);
+  }
+  for (const root of roots) walkAll(root);
+  return acc;
 }
 
 // ---------------------------------------------------------------------------
@@ -463,21 +516,24 @@ async function resolveBomMaterialsForJC(
     return [];
   }
   const roots = Array.isArray(parsed) ? parsed : [parsed];
-  const materialsRaw = findFcNodeMaterialsByWipType(roots, jc.wipType);
-  if (materialsRaw.length === 0) return [];
+  const tagged = collectFcNodeMaterials(roots, jc.wipType);
+  if (tagged.length === 0) return [];
 
-  // Build MaterialLine[] using the same shape as collectTreeMaterials does
-  // for the PO-wide path. Scaling is applied here so downstream FIFO sees
-  // the per-PO-spec qty.
+  // Build MaterialLine[] — scale per-piece qty against PO dims, then
+  // multiply by parent FC node's quantity to get per-FG qty. Scaling
+  // rules are authored per-piece (base 8" divan / base 20" totalHeight
+  // / base 30" seatHeight), so we expand BEFORE multiplying by
+  // pieceCount; multiplying first would scale the perUnit slope wrong.
   const acc: MaterialLine[] = [];
-  for (const m of materialsRaw) {
-    if (!m || typeof m !== "object") continue;
-    const row = m as Record<string, unknown>;
+  for (const { material, nodeQuantity } of tagged) {
+    if (!material || typeof material !== "object") continue;
+    const row = material as Record<string, unknown>;
     const code = typeof row.code === "string" ? row.code : "";
     const name = typeof row.name === "string" ? row.name : code;
     const qty = typeof row.qty === "number" ? row.qty : Number(row.qty) || 0;
     const scaling = parseMaterialScaling(row.scaling);
-    const scaledQty = expandMaterialQty(qty, scaling, dims);
+    const perPieceScaled = expandMaterialQty(qty, scaling, dims);
+    const perFgQty = perPieceScaled * nodeQuantity;
     const waste =
       typeof row.wastePct === "number"
         ? row.wastePct
@@ -488,7 +544,7 @@ async function resolveBomMaterialsForJC(
       row.autoDetect === "FABRIC" || row.autoDetect === "LEG"
         ? row.autoDetect
         : undefined;
-    if (scaledQty > 0 && (code || name || autoDetect)) {
+    if (perFgQty > 0 && (code || name || autoDetect)) {
       acc.push({
         code: code || name,
         name:
@@ -498,7 +554,7 @@ async function resolveBomMaterialsForJC(
             : autoDetect === "LEG"
               ? "Leg (from order)"
               : ""),
-        qtyPerUnit: scaledQty,
+        qtyPerUnit: perFgQty,
         wastePct: waste,
         inventoryCode,
         autoDetect,
@@ -593,11 +649,12 @@ export async function consumeRawMaterialsForJC(
     ? new Date(`${jc.completedDate}T12:00:00`).toISOString()
     : new Date().toISOString();
 
-  // JC-level required qty = per-piece BOM qty × wipQty (pieces produced
-  // by this JC) × (1 + waste%). For sofas where wipQty=1 (single base),
-  // this collapses to per-unit. For 2-piece divan JCs (wipQty=2), this
-  // doubles the per-piece qty.
-  const wipQty = Math.max(1, jc.wipQty ?? 1);
+  // JC-level required qty = qtyPerUnit (per-FG, already includes
+  // node-quantity multiplication from resolveBomMaterialsForJC) ×
+  // po.quantity × (1 + waste%). Most POs run quantity=1 so this
+  // collapses to qtyPerUnit × (1 + waste%); for batch POs (quantity > 1)
+  // the consume scales linearly with FG count, which matches BOM
+  // semantics where qty is "per finished good."
   let materialCostSen = 0;
   let linesConsumed = 0;
   const shortages: { materialName: string; shortageQty: number }[] = [];
@@ -605,7 +662,9 @@ export async function consumeRawMaterialsForJC(
 
   for (const line of bomLines) {
     const required =
-      line.qtyPerUnit * wipQty * (1 + Math.max(0, line.wastePct || 0) / 100);
+      line.qtyPerUnit *
+      po.quantity *
+      (1 + Math.max(0, line.wastePct || 0) / 100);
     if (required <= 0) continue;
 
     const rm = await resolveRmFromBom(db, line);

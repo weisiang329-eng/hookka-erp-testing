@@ -11,6 +11,13 @@
 //
 // Plus, for RM with a positive delta we ALSO insert an rm_batches row so
 // the FIFO cost layer has the correct on-hand cost basis going forward.
+// For RM with a negative delta we WALK rm_batches in receivedDate ASC and
+// decrement each layer's remainingQty until the requested qty is fully
+// consumed — keeping balanceQty in lockstep with sum(remainingQty) and
+// generating per-batch cost_ledger rows that carry each layer's true
+// unitCostSen. Residual qty (when balanceQty has drifted above
+// sum(remainingQty) on legacy data) falls back to the operator-provided
+// unitCostSen and emits a "no batch" residual cost_ledger row.
 //
 // Per user 2026-04-28:
 //   • No approver — adjustments take effect immediately. Audit trail
@@ -20,9 +27,11 @@
 //   • Cost impact recorded — for write-offs the operator sees how much
 //     stock value left the books.
 //
-// v1 simplification: operator provides unitCostSen on the request. The
-// frontend prefills from the item's current weighted-average cost. v2
-// can compute server-side from rm_batches FIFO / fg_batches.
+// Cost basis: for RM IN the operator's submitted unitCostSen sets the new
+// FIFO layer (frontend pre-fills from current weighted-avg). For RM OUT
+// the operator's unitCostSen is ignored at the cost-ledger level — FIFO
+// from rm_batches is authoritative. WIP/FG honor the operator value as
+// before.
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
@@ -266,13 +275,80 @@ app.post("/", async (c) => {
     const id = genId();
     const adjNo = await nextAdjNo(c.var.DB);
     const direction: "IN" | "OUT" = qtyDelta > 0 ? "IN" : "OUT";
-    const totalCostSen = Math.round(Math.abs(qtyDelta) * unitCostSen);
     const nowIso = new Date().toISOString();
     const today = nowIso.split("T")[0];
 
+    // FIFO consumption plan for RM OUT — walk rm_batches in receivedDate
+    // ASC, id ASC and decide how much to take from each layer. We do this
+    // BEFORE composing statements so the cost_ledger / stock_adjustments
+    // rows can use the FIFO-derived true cost instead of the operator's
+    // claimed unitCostSen (which was a v1 simplification — pre-fill from
+    // weighted-avg, accept whatever the user typed).
+    type FifoConsumption = {
+      batchId: string;
+      qty: number;
+      unitCostSen: number;
+      totalCostSen: number;
+    };
+    const fifoPlan: FifoConsumption[] = [];
+    if (type === "RM" && direction === "OUT") {
+      const remaining = Math.abs(qtyDelta);
+      const batchesRes = await c.var.DB
+        .prepare(
+          `SELECT id, remainingQty, unitCostSen
+             FROM rm_batches
+            WHERE rmId = ? AND remainingQty > 0
+            ORDER BY receivedDate ASC, id ASC`,
+        )
+        .bind(itemId)
+        .all<{ id: string; remainingQty: number; unitCostSen: number }>();
+      const batches = batchesRes.results ?? [];
+      let stillToConsume = remaining;
+      for (const b of batches) {
+        if (stillToConsume <= 0) break;
+        const take = Math.min(b.remainingQty, stillToConsume);
+        if (take <= 0) continue;
+        const layerCost = Math.round(take * b.unitCostSen);
+        fifoPlan.push({
+          batchId: b.id,
+          qty: take,
+          unitCostSen: b.unitCostSen,
+          totalCostSen: layerCost,
+        });
+        stillToConsume -= take;
+      }
+      // If we couldn't satisfy from FIFO (e.g. balanceQty drifted from
+      // sum(remainingQty) on legacy adjustments), fall back to the
+      // operator's claimed cost for the residual. That keeps the
+      // adjustment runnable while making the FIFO drift visible in the
+      // ledger as a residual-cost entry.
+      if (stillToConsume > 0) {
+        const residualCost = Math.round(stillToConsume * unitCostSen);
+        fifoPlan.push({
+          batchId: "",
+          qty: stillToConsume,
+          unitCostSen,
+          totalCostSen: residualCost,
+        });
+      }
+    }
+    // Effective unitCost + total cost for the stock_adjustments row.
+    // For RM OUT the FIFO plan is authoritative; everything else uses the
+    // operator-supplied unitCostSen as before.
+    const totalCostSen =
+      type === "RM" && direction === "OUT"
+        ? fifoPlan.reduce((s, l) => s + l.totalCostSen, 0)
+        : Math.round(Math.abs(qtyDelta) * unitCostSen);
+    const effectiveUnitCostSen =
+      type === "RM" && direction === "OUT" && Math.abs(qtyDelta) > 0
+        ? Math.round(totalCostSen / Math.abs(qtyDelta))
+        : unitCostSen;
+
     const stmts: D1PreparedStatement[] = [];
 
-    // 1. stock_adjustments — the canonical record
+    // 1. stock_adjustments — the canonical record. unitCostSen reflects the
+    // FIFO-derived effective cost for RM OUT (vs the operator's claimed
+    // pre-fill); totalCostSen is the true cost out of stock.
     stmts.push(
       c.var.DB.prepare(
         `INSERT INTO stock_adjustments (id, adjNo, type, itemId, itemCode, itemName,
@@ -287,7 +363,7 @@ app.post("/", async (c) => {
         itemCode,
         itemName,
         qtyDelta,
-        unitCostSen,
+        effectiveUnitCostSen,
         totalCostSen,
         direction,
         reason,
@@ -318,26 +394,54 @@ app.post("/", async (c) => {
       ),
     );
 
-    // 3. cost_ledger — financial impact
-    stmts.push(
-      c.var.DB.prepare(
-        `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
-           qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
-         VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
-      ).bind(
-        `cl-${id}`,
-        today,
-        type,
-        itemId,
-        null,
-        Math.abs(qtyDelta),
-        direction,
-        unitCostSen,
-        totalCostSen,
-        id,
-        `${reason}${body.notes ? ": " + body.notes : ""}`,
-      ),
-    );
+    // 3. cost_ledger — financial impact. For RM OUT we emit one row per
+    // FIFO layer consumed so each entry carries the batchId + that layer's
+    // true unitCostSen — auditors can reconstruct the consumption trail.
+    // Other paths (RM IN, WIP, FG) keep the single-row behaviour.
+    if (type === "RM" && direction === "OUT" && fifoPlan.length > 0) {
+      for (let i = 0; i < fifoPlan.length; i++) {
+        const layer = fifoPlan[i];
+        stmts.push(
+          c.var.DB.prepare(
+            `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+               qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+             VALUES (?, ?, 'ADJUSTMENT', 'RM', ?, ?, ?, 'OUT', ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+          ).bind(
+            `cl-${id}-${i}`,
+            today,
+            itemId,
+            layer.batchId || null,
+            layer.qty,
+            layer.unitCostSen,
+            layer.totalCostSen,
+            id,
+            `${reason} (FIFO layer ${i + 1}/${fifoPlan.length}${
+              layer.batchId ? "" : " — residual, no batch"
+            })${body.notes ? ": " + body.notes : ""}`,
+          ),
+        );
+      }
+    } else {
+      stmts.push(
+        c.var.DB.prepare(
+          `INSERT INTO cost_ledger (id, date, type, itemType, itemId, batchId,
+             qty, direction, unitCostSen, totalCostSen, refType, refId, notes)
+           VALUES (?, ?, 'ADJUSTMENT', ?, ?, ?, ?, ?, ?, ?, 'STOCK_ADJUSTMENT', ?, ?)`,
+        ).bind(
+          `cl-${id}`,
+          today,
+          type,
+          itemId,
+          null,
+          Math.abs(qtyDelta),
+          direction,
+          unitCostSen,
+          totalCostSen,
+          id,
+          `${reason}${body.notes ? ": " + body.notes : ""}`,
+        ),
+      );
+    }
 
     // 4. UPDATE the parent item's qty + (for RM IN) create FIFO batch
     if (type === "RM") {
@@ -366,9 +470,22 @@ app.post("/", async (c) => {
           ),
         );
       }
-      // NOTE: For RM with negative delta we update balanceQty above but do
-      // NOT consume specific rm_batches FIFO layers here — that's a
-      // simplification for v1. v2 can walk the batches in receivedDate order.
+      // RM with negative delta — consume the FIFO layers we computed up
+      // front. Each plan entry knows exactly how much to take from a
+      // specific batch; we DECREMENT remainingQty so sum(rm_batches.
+      // remainingQty) stays in lockstep with raw_materials.balanceQty.
+      // Residual entries (batchId="") leave a cost_ledger trail but no
+      // rm_batches mutation — those are the "balanceQty drift" cases.
+      if (direction === "OUT") {
+        for (const layer of fifoPlan) {
+          if (!layer.batchId) continue;
+          stmts.push(
+            c.var.DB.prepare(
+              `UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ?`,
+            ).bind(layer.qty, layer.batchId),
+          );
+        }
+      }
     } else if (type === "WIP") {
       stmts.push(
         c.var.DB.prepare(

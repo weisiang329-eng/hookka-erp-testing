@@ -105,7 +105,6 @@ type RawMaterialFabricRow = {
   itemCode: string;
   description: string | null;
   itemGroup: string | null;
-  unitPriceSen: number | null;
 };
 
 const FABRIC_GROUPS = new Set(["B.M-FABR", "S-FABR", "S.M-FABR", "LINING", "WEBBING"]);
@@ -118,7 +117,7 @@ app.get("/", async (c) => {
   // (used as metadata cache) + live metrics in parallel.
   const [rmRes, trackingsRes, liveMetrics] = await Promise.all([
     c.var.DB.prepare(
-      `SELECT id, itemCode, description, itemGroup, unitPriceSen
+      `SELECT id, itemCode, description, itemGroup
          FROM raw_materials
         WHERE itemCode IS NOT NULL
           AND itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
@@ -143,13 +142,10 @@ app.get("/", async (c) => {
     .map((rm) => {
       const cached = trackingByCode.get(rm.itemCode);
       const m = liveMetrics.get(rm.itemCode);
-      // Convert sen → display price units. The legacy fabric_trackings.price
-      // column stores already-converted display units, so fall back to that
-      // when the RM row's unitPriceSen is missing.
-      const priceDisplay =
-        rm.unitPriceSen != null
-          ? rm.unitPriceSen / 100
-          : cached?.price ?? 0;
+      // Price comes from the legacy fabric_trackings cache when present
+      // (manually maintained); raw_materials has no per-fabric price
+      // column today, so 0 is the default for fabrics with no cache row.
+      const priceDisplay = cached?.price ?? 0;
       return {
         // Identity. Prefer the cached tracking id so existing PUT writes
         // hit the same row; fall back to the RM id for fabrics that have

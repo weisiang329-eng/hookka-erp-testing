@@ -245,6 +245,42 @@ function POFormDialog({
     setItems(updated);
   };
 
+  /** Swap the RM on an existing line — operator types a different rmCode in
+   *  the inline picker. Re-resolves binding (supplier / supplierSku /
+   *  unitPriceSen / leadTimeDays / moq / category) from the new RM. Preserves
+   *  the operator's already-typed quantity (so changing PC151-01 → PC151-02
+   *  doesn't reset the qty they painstakingly entered). No-op when the new
+   *  rmCode doesn't match an active RM. */
+  const swapItemRM = (idx: number, newRmCode: string) => {
+    const trimmed = newRmCode.trim();
+    if (!trimmed) return;
+    const rm = rawMaterials.find((r) => r.itemCode === trimmed);
+    if (!rm) return;
+    const current = items[idx];
+    if (current.rmCode === trimmed) return; // no-op
+    const mainBinding = getMainBinding(trimmed);
+    const updated = [...items];
+    updated[idx] = {
+      rmCode: rm.itemCode,
+      rmDescription: rm.description,
+      supplierId: mainBinding?.supplierId ?? "",
+      supplierName: mainBinding
+        ? resolveSupplierName(mainBinding.supplierId)
+        : "",
+      supplierSku: mainBinding?.supplierSku ?? "",
+      // Keep the operator-entered quantity. If qty was 0 (default), seed
+      // from the new binding's MOQ so the line is still actionable.
+      quantity:
+        current.quantity > 0 ? current.quantity : mainBinding?.moq ?? 1,
+      unitPriceSen: mainBinding?.unitPrice ?? 0,
+      unit: rm.baseUOM,
+      leadTimeDays: mainBinding?.leadTimeDays ?? 0,
+      moq: mainBinding?.moq ?? 0,
+      materialCategory: rm.itemGroup,
+    };
+    setItems(updated);
+  };
+
   const removeItem = (idx: number) => {
     setItems(items.filter((_, i) => i !== idx));
   };
@@ -476,9 +512,46 @@ function POFormDialog({
                       <div className="grid grid-cols-8 gap-2 items-end">
                         <div className="col-span-2">
                           <label className="block text-xs text-[#6B7280] mb-1">RM Code</label>
-                          <div className="h-8 flex items-center px-2 text-xs font-medium text-[#1F1D1B] bg-white rounded border border-[#E2DDD8]">
-                            {item.rmCode}
-                          </div>
+                          {/* Editable RM picker — type or pick from datalist
+                              autocomplete. swapItemRM commits on blur if the
+                              new code resolves to an active RM; otherwise
+                              the field reverts (uncontrolled input via key
+                              forces re-render to current value). Keeps the
+                              operator's qty so they don't lose their typing. */}
+                          <input
+                            key={`rm-${idx}-${item.rmCode}`}
+                            type="text"
+                            list={`rm-options-${idx}`}
+                            defaultValue={item.rmCode}
+                            onFocus={(e) => e.currentTarget.select()}
+                            onBlur={(e) => {
+                              const v = e.currentTarget.value.trim();
+                              if (v && v !== item.rmCode) {
+                                const found = rawMaterials.find(
+                                  (r) => r.itemCode === v,
+                                );
+                                if (found) {
+                                  swapItemRM(idx, v);
+                                } else {
+                                  // Unknown RM — restore previous value.
+                                  e.currentTarget.value = item.rmCode;
+                                }
+                              }
+                            }}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.currentTarget.blur();
+                              }
+                            }}
+                            className="h-8 w-full px-2 text-xs font-medium text-[#1F1D1B] bg-white rounded border border-[#E2DDD8] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]"
+                          />
+                          <datalist id={`rm-options-${idx}`}>
+                            {activeRMs.map((rm) => (
+                              <option key={rm.itemCode} value={rm.itemCode}>
+                                {rm.description}
+                              </option>
+                            ))}
+                          </datalist>
                         </div>
                         <div className="col-span-2">
                           <label className="block text-xs text-[#6B7280] mb-1">Description</label>

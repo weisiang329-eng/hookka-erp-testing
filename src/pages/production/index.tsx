@@ -2144,6 +2144,15 @@ export default function ProductionPage({
   // which cascaded through sortedData → render → onFilteredDataChange →
   // parent setState → back here. Dept code is the only thing that changes
   // the column set meaningfully (activeTab).
+  //
+  // Render functions inside columns capture closures at memo-creation time.
+  // We pin patchJobCard through a ref so the closure's click handlers
+  // always invoke the latest version even though the column array itself
+  // doesn't depend on it (and shouldn't — that'd defeat the memo).
+  const patchJobCardRef = useRef(patchJobCard);
+  useEffect(() => {
+    patchJobCardRef.current = patchJobCard;
+  }, [patchJobCard]);
   const deptColumns: Column<DeptRow>[] = useMemo(() => [
     // Sent — leftmost tick column (added 2026-05-07). Operator clicks to mark
     // the JC as printed + handed to the floor; persists via the same
@@ -2170,7 +2179,7 @@ export default function ProductionPage({
             }
             onChange={() => {
               const next = isSent ? null : new Date().toISOString();
-              patchJobCard(row.poId, row.jobCardId, { distributedAt: next });
+              patchJobCardRef.current(row.poId, row.jobCardId, { distributedAt: next });
             }}
             className="h-4 w-4 cursor-pointer"
           />

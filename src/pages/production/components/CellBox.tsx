@@ -2,21 +2,12 @@ import { Check } from "lucide-react";
 import type { Cell } from "../types";
 import { fmtShortDate } from "../utils";
 
-// Original 3-state palette + isEdited text-colour modifier:
-//   done    — teal  #3E6570 bg + white text + ✓ check
-//   overdue — red   #9A3A2D bg + white text
-//   pending — olive #9C6F1E bg + white text
-//
-// When `cell.isEdited` is true on a non-done cell, the text colour
-// flips to cyan #22D3EE so the operator can see "I rescheduled this"
-// at a glance — without losing the overdue red bg or pending olive bg
-// underneath. Done suppresses the modifier (completion supersedes edit).
+// Each cell shows state colour + the relevant date. Text is white so it
+// stays legible against the teal/olive/red state backgrounds — previously
+// text-color matched bg-color and both the ✓ and date were invisible.
 export function CellBox({ cell }: { cell: Cell }) {
   const base =
     "h-full w-full flex flex-col items-center justify-center text-[10px] leading-tight relative";
-  // Cyan text override for edited non-done cells; otherwise white.
-  const textCls =
-    cell.state !== "done" && cell.isEdited ? "text-[#22D3EE]" : "text-white";
 
   if (cell.state === "empty") {
     return <div className={`${base} bg-transparent`} />;
@@ -33,7 +24,7 @@ export function CellBox({ cell }: { cell: Cell }) {
   }
   if (cell.state === "overdue") {
     return (
-      <div className={`${base} ${textCls} bg-[#9A3A2D] cursor-pointer hover:bg-[#B04536]`}>
+      <div className={`${base} bg-[#9A3A2D] text-white cursor-pointer hover:bg-[#B04536]`}>
         <span className="font-bold">{cell.doneCards}/{cell.totalCards}</span>
         <span className="text-[9px] font-semibold">{fmtShortDate(cell.earliestDue)}</span>
       </div>
@@ -41,7 +32,7 @@ export function CellBox({ cell }: { cell: Cell }) {
   }
   // pending
   return (
-    <div className={`${base} ${textCls} bg-[#9C6F1E] cursor-pointer hover:bg-[#B38023]`}>
+    <div className={`${base} bg-[#9C6F1E] text-white cursor-pointer hover:bg-[#B38023]`}>
       <span className="font-bold">{cell.doneCards}/{cell.totalCards}</span>
       <span className="text-[9px] font-semibold">{fmtShortDate(cell.earliestDue)}</span>
     </div>

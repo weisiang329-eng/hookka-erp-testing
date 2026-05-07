@@ -86,23 +86,10 @@ export function cellFor(
     cards.map((c) => c.completedDate || "").filter(Boolean).sort().slice(-1)[0] || "";
 
   let state: CellState;
-  if (done === cards.length) {
-    state = "done";
-  } else {
+  if (done === cards.length) state = "done";
+  else {
     const today = new Date().toISOString().slice(0, 10);
     state = earliestDue && earliestDue < today ? "overdue" : "pending";
   }
-  // Edited is a text-colour modifier on non-done states; it tracks whether
-  // any underlying JC has a non-null dueDateOverriddenAt. Done cells
-  // suppress the indicator (completion already supersedes the edit).
-  const isEdited =
-    state !== "done" && cards.some((c) => !!c.dueDateOverriddenAt);
-  return {
-    state,
-    isEdited,
-    totalCards: cards.length,
-    doneCards: done,
-    earliestDue,
-    latestCompleted,
-  };
+  return { state, totalCards: cards.length, doneCards: done, earliestDue, latestCompleted };
 }

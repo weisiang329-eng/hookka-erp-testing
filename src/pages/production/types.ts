@@ -18,11 +18,6 @@ export type JobCard = {
   // older client caches and the legacy non-minimal path don't carry them.
   piecesTotal?: number;
   piecesDone?: number;
-  // ISO timestamp of the most recent operator-driven dueDate edit.
-  // NULL until the JC is manually rescheduled. Drives the production
-  // Overview matrix' "Edited" cell colour state. Optional so older
-  // cached payloads don't break the type at the call site.
-  dueDateOverriddenAt?: string | null;
 };
 
 export type ProductionOrder = {
@@ -54,20 +49,12 @@ export type ProductionOrder = {
   customerDeliveryDate?: string;
 };
 
-// 3-state palette (original) + isEdited text-colour modifier (2026-05-07 v2):
-//   done    = teal #3E6570 bg + ✓ + white text
-//   overdue = red #9A3A2D bg + white text
-//   pending = olive #9C6F1E bg + white text
-//
-// `isEdited` is a separate flag (not a 4th state) — when true on a non-done
-// cell, the text colour overrides to teal/cyan so the operator can spot
-// manually-rescheduled cells at a glance without losing the underlying
-// overdue/pending background warning. Done cells suppress isEdited (the
-// completion supersedes the edit indicator).
+// Simplified 3-state palette per user spec:
+//   completed = cyan, pending = amber, overdue = rose.
+// "active/blocked/ready" all collapse into "pending" since work is unfinished.
 export type CellState = "done" | "pending" | "overdue" | "empty";
 export type Cell = {
   state: CellState;
-  isEdited: boolean;
   totalCards: number;
   doneCards: number;
   earliestDue: string; // YYYY-MM-DD

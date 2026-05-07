@@ -416,12 +416,7 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     1. Explicit text wins: "Left Drawer" / "L Drawer" / "L'DRAWER" / "LEFT DRAWER" → "Left Drawer".
     2. "Right Drawer" / "R Drawer" / "R'DRAWER" / "RIGHT DRAWER" → "Right Drawer".
     3. "Front Drawer" / "F Drawer" / "FRONT DRAWER" → "Front Drawer".
-    4. Only "DRAWER" / "DRAWERS" written with NO L/R/F label → LOOK AT THE HAND-DRAWN DIAGRAM on the same page. The diagram is usually a rectangle (the bed) with arrow marks (←, →, ↑, ↓) showing which side the drawer slides out from:
-       • Arrows on the LEFT edge of the rectangle pointing left (←) → "Left Drawer".
-       • Arrows on the RIGHT edge pointing right (→) → "Right Drawer".
-       • Arrows on the BOTTOM/FOOT edge pointing down or out of the foot → "Front Drawer".
-       • If the diagram clearly shows multiple arrows on one side, that's the answer.
-    5. Only if NO diagram is present AND no L/R/F label: leave specialOrder=null + add specialNotes="drawer side missing — operator to confirm".
+    4. Otherwise (just "DRAWER" / "DRAWERS" / "2drawer" / "1drawer" with NO L/R/F label, regardless of whether a hand-drawn diagram is present): DO NOT guess from the diagram. Leave specialOrder=null and add specialNotes="drawer side ambiguous — operator to confirm". Diagram interpretation is unreliable enough that picking the wrong side ("Front Drawer" when the customer meant "Left Drawer") slips past the operator's review and ends up on the production sheet uncorrected. Empty + flag forces the operator to read the diagram themselves and pick — which is what they want anyway.
 - specialNotes: free-form remainder when no special matches (e.g. handwritten urgency dates).
 - rawSpec: copy the EXACT spec text line(s) under each Description verbatim, including punctuation, slashes, and inch marks. Examples to copy verbatim:
     PC151-02/Divan10+4/gap12

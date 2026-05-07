@@ -122,13 +122,22 @@ type MaterialLine = {
 };
 
 // Walk a BOM tree JSON node and gather every `materials[]` entry across all
-// nested levels. The tree is the JSON stored in bom_versions.tree.
+// nested levels. The tree is the JSON stored in bom_versions.tree (legacy)
+// or bom_templates.wipComponents (current source of truth, post-2026-05-07).
 //
-// Material scaling is applied HERE (not later in consumeRawMaterialsForPO)
-// so the resulting `qtyPerUnit` is already the SCALED per-FG-unit qty.
-// Downstream multiplication by `po.quantity` and `(1 + wastePct/100)`
-// stays unchanged. If a row has no scaling rule, expandMaterialQty
-// returns the raw qty — same behaviour as before this change.
+// Material qty semantics (BOM author convention):
+//   - `material.qty` is PER PIECE OF THIS WIP (e.g. divan FC qty=3.25 means
+//     3.25m fabric per individual divan piece).
+//   - The parent WIP node's `quantity` field is the piece count produced
+//     per finished good (2 for K/Q divans, 1 for headboards).
+//   - Total per FG = (scaled material.qty) × (parent node quantity).
+//
+// Order: scale FIRST (perUnit slope is per-piece), then multiply by
+// piece count. Scaling rules are authored per piece (base 8" divan,
+// +0.4 m/inch); multiplying first would double the slope.
+//
+// Output `qtyPerUnit` is the per-FG-unit qty. Downstream multiplication
+// by `po.quantity` (FG count) and `(1 + wastePct/100)` stays unchanged.
 function collectTreeMaterials(
   node: unknown,
   out: MaterialLine[],
@@ -136,6 +145,13 @@ function collectTreeMaterials(
 ): void {
   if (!node || typeof node !== "object") return;
   const n = node as Record<string, unknown>;
+  // Parent node's piece count. Defaults to 1 when missing / non-positive
+  // — matches the prior behavior where the multiplier was implicitly 1.
+  const rawNodeQty = n.quantity;
+  const parsedNodeQty =
+    typeof rawNodeQty === "number" ? rawNodeQty : Number(rawNodeQty);
+  const nodeQuantity =
+    Number.isFinite(parsedNodeQty) && parsedNodeQty > 0 ? parsedNodeQty : 1;
   const mats = n.materials;
   if (Array.isArray(mats)) {
     for (const m of mats) {
@@ -145,7 +161,8 @@ function collectTreeMaterials(
       const name = typeof row.name === "string" ? row.name : code;
       const qty = typeof row.qty === "number" ? row.qty : Number(row.qty) || 0;
       const scaling = parseMaterialScaling(row.scaling);
-      const scaledQty = expandMaterialQty(qty, scaling, dims);
+      const perPieceScaled = expandMaterialQty(qty, scaling, dims);
+      const perFgQty = perPieceScaled * nodeQuantity;
       const waste =
         typeof row.wastePct === "number"
           ? row.wastePct
@@ -159,11 +176,11 @@ function collectTreeMaterials(
       // autoDetect lines may have empty code/name at authoring time — keep
       // them so the substitution step downstream can resolve them. The
       // (code || name) guard would otherwise drop them silently.
-      if (scaledQty > 0 && (code || name || autoDetect)) {
+      if (perFgQty > 0 && (code || name || autoDetect)) {
         out.push({
           code: code || name,
           name: name || (autoDetect === "FABRIC" ? "Fabric (from order)" : autoDetect === "LEG" ? "Leg (from order)" : ""),
-          qtyPerUnit: scaledQty,
+          qtyPerUnit: perFgQty,
           wastePct: waste,
           inventoryCode,
           autoDetect,
@@ -378,385 +395,17 @@ function genLedgerId(prefix: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Walk the bom_templates wipComponents tree and return materials from every
-// FAB_CUT node a JC should consume, paired with the parent FC node's
-// `quantity` field so consumption math can multiply correctly. Two-step
-// match strategy:
+// F1 — RM consumption (FIFO).
 //
-//   1. SPECIFIC: if any FC node's wipType === jc.wipType, return ONLY
-//      that node's materials. Used for STOOL / CSL / pillow JCs whose
-//      wipType is fine-grained (SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST)
-//      and matches the BOM node 1:1.
-//
-//   2. FALLBACK: if no specific match, return the union of ALL FC nodes'
-//      materials. Used for bedframe (jc.wipType='BEDFRAME', BOM has
-//      Divan FC[wipType='DIVAN', quantity=2] + HB FC[wipType='HEADBOARD',
-//      quantity=1]) and sofa (jc.wipType='SOFA', BOM has Base + Cushion +
-//      Arm FC nodes — but Cushion / Arm have empty materials[] per spec).
-//
-// Why pair with nodeQuantity: the BOM authors `material.qty` as PER-PIECE
-// (e.g. divan FC qty=3.25 means 3.25m fabric per divan piece). The FC
-// node's `quantity` field is the piece count (2 for K/Q divans, 1 for
-// HB). Total per FG = material.qty × scaling × nodeQuantity. The merged
-// FAB_CUT JC for a bedframe needs different multipliers per material
-// (×2 for Divan, ×1 for HB), which jc.wipQty alone can't capture.
-// ---------------------------------------------------------------------------
-type FcMaterialWithMultiplier = {
-  material: unknown;
-  nodeQuantity: number;
-};
-
-function collectFcNodeMaterials(
-  roots: unknown[],
-  jcWipType: string,
-): FcMaterialWithMultiplier[] {
-  function isFcNode(node: unknown): boolean {
-    if (!node || typeof node !== "object") return false;
-    const n = node as Record<string, unknown>;
-    const procs = Array.isArray(n.processes) ? n.processes : [];
-    return procs.some(
-      (p) =>
-        !!p &&
-        typeof p === "object" &&
-        (p as Record<string, unknown>).deptCode === "FAB_CUT",
-    );
-  }
-  function nodeQty(node: unknown): number {
-    if (!node || typeof node !== "object") return 1;
-    const q = (node as Record<string, unknown>).quantity;
-    const n = typeof q === "number" ? q : Number(q);
-    return Number.isFinite(n) && n > 0 ? n : 1;
-  }
-  function emitMaterials(
-    node: unknown,
-    out: FcMaterialWithMultiplier[],
-  ): void {
-    if (!node || typeof node !== "object") return;
-    const n = node as Record<string, unknown>;
-    const mats = Array.isArray(n.materials) ? n.materials : [];
-    const q = nodeQty(node);
-    for (const m of mats) out.push({ material: m, nodeQuantity: q });
-  }
-
-  // Pass 1: specific match by wipType.
-  function walkSpecific(node: unknown): FcMaterialWithMultiplier[] | null {
-    if (!node || typeof node !== "object") return null;
-    const n = node as Record<string, unknown>;
-    if (isFcNode(node) && n.wipType === jcWipType) {
-      const out: FcMaterialWithMultiplier[] = [];
-      emitMaterials(node, out);
-      return out;
-    }
-    const kids = Array.isArray(n.children) ? n.children : [];
-    for (const c of kids) {
-      const found = walkSpecific(c);
-      if (found) return found;
-    }
-    return null;
-  }
-  for (const root of roots) {
-    const found = walkSpecific(root);
-    if (found) return found;
-  }
-  // Pass 2: fallback — union of all FC nodes' materials.
-  const acc: FcMaterialWithMultiplier[] = [];
-  function walkAll(node: unknown): void {
-    if (!node || typeof node !== "object") return;
-    const n = node as Record<string, unknown>;
-    if (isFcNode(node)) emitMaterials(node, acc);
-    const kids = Array.isArray(n.children) ? n.children : [];
-    for (const c of kids) walkAll(c);
-  }
-  for (const root of roots) walkAll(root);
-  return acc;
-}
-
-// ---------------------------------------------------------------------------
-// Resolve BOM materials scoped to ONE specific FAB_CUT JC. Reads
-// bom_templates.wipComponents (current source of truth — same table
-// resolveBomMaterials walks for the PO-wide path), but extracts only the
-// node matching this JC's wipType + FAB_CUT process.
-//
-// Materials get scaled with the same expandMaterialQty + scaling rules
-// the PO-wide path uses, then autoDetect=FABRIC is substituted to
-// po.fabricCode (sofa/bedframe spec — fabric SKU lives on the SO line, not
-// the BOM template).
-// ---------------------------------------------------------------------------
-async function resolveBomMaterialsForJC(
-  db: D1Database,
-  po: ProductionOrderRow,
-  jc: { id: string; departmentCode: string | null; wipType: string | null },
-): Promise<MaterialLine[]> {
-  if (!po.productCode) return [];
-  if (jc.departmentCode !== "FAB_CUT") return [];
-  if (!jc.wipType) return [];
-
-  const dims: ProductionDimensions = {
-    gapInches: po.gapInches,
-    divanHeightInches: po.divanHeightInches,
-    legHeightInches: po.legHeightInches,
-    seatHeightInches:
-      po.itemCategory === "SOFA"
-        ? parseSofaSeatHeightInches(po.sizeCode, po.sizeLabel)
-        : null,
-  };
-
-  const tplRow = await db
-    .prepare(
-      "SELECT id, wipComponents FROM bom_templates WHERE productCode = ? AND versionStatus = 'ACTIVE' LIMIT 1",
-    )
-    .bind(po.productCode)
-    .first<{ id: string; wipComponents: string | null }>();
-  if (!tplRow?.wipComponents) return [];
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(tplRow.wipComponents);
-  } catch {
-    return [];
-  }
-  const roots = Array.isArray(parsed) ? parsed : [parsed];
-  const tagged = collectFcNodeMaterials(roots, jc.wipType);
-  if (tagged.length === 0) return [];
-
-  // Build MaterialLine[] — scale per-piece qty against PO dims, then
-  // multiply by parent FC node's quantity to get per-FG qty. Scaling
-  // rules are authored per-piece (base 8" divan / base 20" totalHeight
-  // / base 30" seatHeight), so we expand BEFORE multiplying by
-  // pieceCount; multiplying first would scale the perUnit slope wrong.
-  const acc: MaterialLine[] = [];
-  for (const { material, nodeQuantity } of tagged) {
-    if (!material || typeof material !== "object") continue;
-    const row = material as Record<string, unknown>;
-    const code = typeof row.code === "string" ? row.code : "";
-    const name = typeof row.name === "string" ? row.name : code;
-    const qty = typeof row.qty === "number" ? row.qty : Number(row.qty) || 0;
-    const scaling = parseMaterialScaling(row.scaling);
-    const perPieceScaled = expandMaterialQty(qty, scaling, dims);
-    const perFgQty = perPieceScaled * nodeQuantity;
-    const waste =
-      typeof row.wastePct === "number"
-        ? row.wastePct
-        : Number(row.wastePct) || 0;
-    const inventoryCode =
-      typeof row.inventoryCode === "string" ? row.inventoryCode : undefined;
-    const autoDetect =
-      row.autoDetect === "FABRIC" || row.autoDetect === "LEG"
-        ? row.autoDetect
-        : undefined;
-    if (perFgQty > 0 && (code || name || autoDetect)) {
-      acc.push({
-        code: code || name,
-        name:
-          name ||
-          (autoDetect === "FABRIC"
-            ? "Fabric (from order)"
-            : autoDetect === "LEG"
-              ? "Leg (from order)"
-              : ""),
-        qtyPerUnit: perFgQty,
-        wastePct: waste,
-        inventoryCode,
-        autoDetect,
-      });
-    }
-  }
-  if (acc.length === 0) return [];
-  return await substituteAutoDetectMaterials(db, acc, po);
-}
-
-// ---------------------------------------------------------------------------
-// F1-JC — RM consumption (FIFO) on FAB_CUT JC completion.
-//
-// Per 2026-05-07 architecture decision: fabric (and any other raw materials
-// authored on the FC node) is deducted from raw_materials.balanceQty the
-// moment the FAB_CUT JC flips to COMPLETED/TRANSFERRED — matches physical
-// reality (meters leave the roll when cutting happens, not weeks later when
-// the whole PO finishes).
-//
-// Idempotency: cost_ledger refType='JOB_CARD', refId=jc.id, type='RM_ISSUE'.
-// Re-flipping a JC's status (rollback + re-complete) does not re-consume.
-//
-// Cross-PO sibling caveat (SOFA group with anchor FAB_CUT JC): only the
-// anchor PO has a FAB_CUT JC; sibling POs have no FAB_CUT JC of their own.
-// The anchor's BOM is authored to cover the whole group's fabric demand
-// (i.e. wipQty already aggregates), so consuming on the anchor JC is
-// correct without explicit sibling traversal.
-// ---------------------------------------------------------------------------
-export async function consumeRawMaterialsForJC(
-  db: D1Database,
-  jcId: string,
-): Promise<{
-  skipped: boolean;
-  materialCostSen: number;
-  linesConsumed: number;
-  shortages: { materialName: string; shortageQty: number }[];
-}> {
-  // Idempotency — already consumed on this JC?
-  const existing = await db
-    .prepare(
-      "SELECT COUNT(*) AS n FROM cost_ledger WHERE refType = 'JOB_CARD' AND refId = ? AND type = 'RM_ISSUE'",
-    )
-    .bind(jcId)
-    .first<{ n: number }>();
-  if ((existing?.n ?? 0) > 0) {
-    return { skipped: true, materialCostSen: 0, linesConsumed: 0, shortages: [] };
-  }
-
-  const jc = await db
-    .prepare(
-      "SELECT id, productionOrderId, departmentCode, wipType, wipQty, status, completedDate FROM job_cards WHERE id = ?",
-    )
-    .bind(jcId)
-    .first<{
-      id: string;
-      productionOrderId: string;
-      departmentCode: string | null;
-      wipType: string | null;
-      wipQty: number | null;
-      status: string;
-      completedDate: string | null;
-    }>();
-  if (!jc) {
-    return { skipped: true, materialCostSen: 0, linesConsumed: 0, shortages: [] };
-  }
-  // Only FAB_CUT JCs consume raw materials in this architecture. Other
-  // dept JCs (FAB_SEW, WOOD_CUT, etc.) are pure WIP-transformation steps —
-  // their cost is captured as labor + WIP cascade, not RM consume.
-  if (jc.departmentCode !== "FAB_CUT") {
-    return { skipped: true, materialCostSen: 0, linesConsumed: 0, shortages: [] };
-  }
-
-  const po = await db
-    .prepare(
-      `SELECT id, poNo, productId, productCode, quantity, completedDate,
-              itemCategory, gapInches, divanHeightInches, legHeightInches,
-              sizeCode, sizeLabel, fabricCode
-         FROM production_orders WHERE id = ?`,
-    )
-    .bind(jc.productionOrderId)
-    .first<ProductionOrderRow>();
-  if (!po || !po.quantity || po.quantity <= 0) {
-    return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
-  }
-
-  const bomLines = await resolveBomMaterialsForJC(db, po, jc);
-  if (bomLines.length === 0) {
-    return { skipped: false, materialCostSen: 0, linesConsumed: 0, shortages: [] };
-  }
-
-  const dateIso = jc.completedDate
-    ? new Date(`${jc.completedDate}T12:00:00`).toISOString()
-    : new Date().toISOString();
-
-  // JC-level required qty = qtyPerUnit (per-FG, already includes
-  // node-quantity multiplication from resolveBomMaterialsForJC) ×
-  // po.quantity × (1 + waste%). Most POs run quantity=1 so this
-  // collapses to qtyPerUnit × (1 + waste%); for batch POs (quantity > 1)
-  // the consume scales linearly with FG count, which matches BOM
-  // semantics where qty is "per finished good."
-  let materialCostSen = 0;
-  let linesConsumed = 0;
-  const shortages: { materialName: string; shortageQty: number }[] = [];
-  const statements: D1PreparedStatement[] = [];
-
-  for (const line of bomLines) {
-    const required =
-      line.qtyPerUnit *
-      po.quantity *
-      (1 + Math.max(0, line.wastePct || 0) / 100);
-    if (required <= 0) continue;
-
-    const rm = await resolveRmFromBom(db, line);
-    if (!rm) {
-      shortages.push({ materialName: line.name, shortageQty: required });
-      continue;
-    }
-
-    const batchesRes = await db
-      .prepare(
-        "SELECT id, rmId, source, sourceRefId, receivedDate, originalQty, remainingQty, unitCostSen, created_at, notes FROM rm_batches WHERE rmId = ? AND remainingQty > 0 ORDER BY receivedDate ASC, id ASC",
-      )
-      .bind(rm.id)
-      .all<RMBatchRow>();
-    const rows = batchesRes.results ?? [];
-
-    const batches: RMBatch[] = rows.map((b) => ({
-      id: b.id,
-      rmId: b.rmId,
-      source: b.source as RMBatch["source"],
-      sourceRefId: b.sourceRefId ?? undefined,
-      receivedDate: b.receivedDate,
-      originalQty: b.originalQty,
-      remainingQty: b.remainingQty,
-      unitCostSen: b.unitCostSen,
-      createdAt: b.created_at ?? "",
-      notes: b.notes ?? undefined,
-    }));
-
-    const result = fifoConsume(batches, required);
-
-    for (const slice of result.slices) {
-      statements.push(
-        db
-          .prepare(
-            "UPDATE rm_batches SET remainingQty = remainingQty - ? WHERE id = ?",
-          )
-          .bind(slice.qty, slice.batchId),
-        db
-          .prepare(
-            `INSERT INTO cost_ledger
-               (id, date, type, itemType, itemId, batchId, qty, direction,
-                unitCostSen, totalCostSen, refType, refId, notes)
-             VALUES (?, ?, 'RM_ISSUE', 'RM', ?, ?, ?, 'OUT', ?, ?, 'JOB_CARD', ?, ?)`,
-          )
-          .bind(
-            genLedgerId("rmi"),
-            dateIso,
-            rm.id,
-            slice.batchId,
-            slice.qty,
-            slice.unitCostSen,
-            slice.totalCostSen,
-            jcId,
-            `Issued for ${po.poNo} ${jc.departmentCode}/${jc.wipType ?? "?"} (${line.name})`,
-          ),
-      );
-      materialCostSen += slice.totalCostSen;
-    }
-
-    if (result.consumedQty > 0) {
-      statements.push(
-        db
-          .prepare(
-            "UPDATE raw_materials SET balanceQty = MAX(0, balanceQty - ?) WHERE id = ?",
-          )
-          .bind(result.consumedQty, rm.id),
-      );
-      linesConsumed++;
-    }
-
-    if (result.shortageQty > 0) {
-      shortages.push({ materialName: line.name, shortageQty: result.shortageQty });
-    }
-  }
-
-  if (statements.length > 0) {
-    await db.batch(statements);
-  }
-
-  return { skipped: false, materialCostSen, linesConsumed, shortages };
-}
-
-// ---------------------------------------------------------------------------
-// F1 — RM consumption (FIFO) on PO completion.
-//
-// LEGACY: as of 2026-05-07, RM consumption moved to the FAB_CUT JC
-// completion event (consumeRawMaterialsForJC). This PO-wide path stays
-// only for backwards compat — products without a FAB_CUT JC in their BOM
-// (legacy / accessory) still need a fallback. Idempotency is preserved
-// at refType='PRODUCTION_ORDER'; new code paths should call
-// consumeRawMaterialsForJC instead.
+// Architecture (2026-05-07): keyed on PRODUCT CODE → BOM template →
+// material list. The trigger event moved from PO completion to FAB_CUT
+// JC completion (matches physical reality — meters leave the roll when
+// cutting happens, not weeks later when the whole PO finishes), but the
+// underlying logic stays product-code-centric. We don't try to subdivide
+// by JC structure (merged vs split FAB_CUT JCs); the BOM is the source
+// of truth for what gets consumed per FG, and idempotency on
+// refType='PRODUCTION_ORDER' ensures a PO only consumes once even when
+// multiple FAB_CUT JCs in the same PO sequentially complete.
 // ---------------------------------------------------------------------------
 export async function consumeRawMaterialsForPO(
   db: D1Database,
@@ -1099,21 +748,11 @@ export async function backfillFGBatchCost(
     };
   }
 
-  // Sum RM_ISSUE rows across BOTH refType paths:
-  //   - refType='PRODUCTION_ORDER' → legacy F1 path (PO-wide consume)
-  //   - refType='JOB_CARD'         → new F1-JC path (consume at FAB_CUT
-  //                                  JC completion, post 2026-05-07)
-  // A single PO will have rows from one path or the other, not both, but
-  // the union query handles legacy + new uniformly.
   const matSum = await db
     .prepare(
-      `SELECT COALESCE(SUM(totalCostSen),0) AS s FROM cost_ledger
-         WHERE type = 'RM_ISSUE'
-           AND ((refType = 'PRODUCTION_ORDER' AND refId = ?)
-                OR (refType = 'JOB_CARD'
-                    AND refId IN (SELECT id FROM job_cards WHERE productionOrderId = ?)))`,
+      "SELECT COALESCE(SUM(totalCostSen),0) AS s FROM cost_ledger WHERE type = 'RM_ISSUE' AND refType = 'PRODUCTION_ORDER' AND refId = ?",
     )
-    .bind(poId, poId)
+    .bind(poId)
     .first<{ s: number }>();
   const materialCostSen = matSum?.s ?? 0;
 

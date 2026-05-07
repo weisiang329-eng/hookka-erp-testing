@@ -116,29 +116,15 @@ export async function postProductionOrderCompletion(
   // cascade can still fill in missing ledger entries. Each helper is
   // independently idempotent via its own guard on cost_ledger rows.
   //
-  // F1 path split as of 2026-05-07:
-  //   - Forward path: consumeRawMaterialsForJC fires at FAB_CUT JC
-  //     completion (see production-orders.ts applyPoUpdate). The PO-wide
-  //     consume here becomes a no-op when any JC-level RM_ISSUE row
-  //     already exists for this PO's JCs.
-  //   - Legacy fallback: consumeRawMaterialsForPO runs only for POs whose
-  //     BOM has no FAB_CUT JC (accessory / non-standard products); its
-  //     own idempotency check on refType='PRODUCTION_ORDER' is preserved.
-  // The PO-level call is kept (instead of removed) so backfillFGBatchCost
-  // still finds RM_ISSUE rows under the legacy refType for accessory POs.
-  const jcConsumed = await db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM cost_ledger
-         WHERE type = 'RM_ISSUE'
-           AND refType = 'JOB_CARD'
-           AND refId IN (SELECT id FROM job_cards WHERE productionOrderId = ?)`,
-    )
-    .bind(poId)
-    .first<{ n: number }>();
-  const rmResult =
-    (jcConsumed?.n ?? 0) > 0
-      ? { skipped: true, materialCostSen: 0, linesConsumed: 0, shortages: [] }
-      : await consumeRawMaterialsForPO(db, poId);
+  // F1 trigger moved 2026-05-07: consumeRawMaterialsForPO now also fires
+  // at FAB_CUT JC completion (see production-orders.ts applyPoUpdate).
+  // Calling it again here at PO completion is a no-op when an RM_ISSUE
+  // row already exists (idempotent on refType='PRODUCTION_ORDER'). The
+  // PO-completion call is kept as a safety net: if a PO somehow reaches
+  // COMPLETED without any FAB_CUT JC having completed first (legacy /
+  // accessory products without an FC step in their BOM, or imported
+  // historical POs), the PO-level call still consumes correctly.
+  const rmResult = await consumeRawMaterialsForPO(db, poId);
   const fgCostResult = await backfillFGBatchCost(db, poId);
   // Light WIP marker — full tracking is TODO(wip-phase-2).
   await postWIPCompletionMarker(db, poId, quantity);

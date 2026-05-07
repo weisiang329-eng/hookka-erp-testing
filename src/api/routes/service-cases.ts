@@ -322,9 +322,12 @@ app.post("/", async (c) => {
       type SrcRow = { customerId: string | null; customerName: string | null; customerState: string | null; companyOrderId: string | null };
       const tableId = sourceType === "SO" ? "sales_orders" : "consignment_orders";
       const noCol = sourceType === "SO" ? "companySOId" : "companyCOId";
+      // Quote the camelCase alias — unquoted identifiers fold to lowercase
+      // on Postgres, which made row.companyOrderId resolve to undefined and
+      // triggered UNDEFINED_VALUE on the INSERT bind below.
       const row = await c.var.DB
         .prepare(
-          `SELECT customerId, customerName, customerState, ${noCol} AS companyOrderId FROM ${tableId} WHERE id = ?`,
+          `SELECT customerId, customerName, customerState, ${noCol} AS "companyOrderId" FROM ${tableId} WHERE id = ?`,
         )
         .bind(sourceId)
         .first<SrcRow>();
@@ -337,7 +340,9 @@ app.post("/", async (c) => {
       customerId = row.customerId ?? customerId;
       customerName = row.customerName ?? customerName;
       customerState = row.customerState ?? null;
-      sourceNo = row.companyOrderId;
+      // Defensive ?? null so any future case where the column-rename layer
+      // returns undefined doesn't re-trip the same UNDEFINED_VALUE bug.
+      sourceNo = row.companyOrderId ?? null;
     }
 
     if (!customerName) {

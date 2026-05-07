@@ -700,19 +700,28 @@ export default function ProductionPage({
         const jcs = o.jobCards ?? [];
         if (flags && jcs.length > 0 && !flags.has(fltItemType)) return false;
       }
-      // Date range against the user-chosen axis. Falls back to targetEndDate
-      // when customerDeliveryDate isn't on the payload (TODO near the state
-      // declaration). Empty axis values DO NOT filter the row out — that
-      // prevents POs with missing dates from disappearing the moment a
-      // from-date is set. Previous bug: `"" < fltDueFrom` was always true
-      // so undated POs got dropped silently as soon as any from-date was
-      // entered.
-      const axisVal: string =
-        (fltDateAxis === "dueDate"
-          ? o.targetEndDate
-          : fltDateAxis === "customerDeliveryDate"
-            ? (o.customerDeliveryDate || "")
-            : (o.createdAt || "")) || "";
+      // Date range filter — axis depends on which page the operator is on:
+      //   overview ("ALL") → PO.targetEndDate  (whole-order packing anchor)
+      //   dept page        → that dept's JC.dueDate (the dept's own deadline)
+      // The dept-level switch matches user mental model: on /production/fab-cut
+      // they expect a "due ≤ 7/5" filter to mean "FAB_CUT due ≤ 7/5", not
+      // "the whole PO's PACKING date ≤ 7/5" (which would silently let
+      // FAB_CUT-overdue rows through if PACKING is also past 7/5 by even more).
+      let axisVal = "";
+      if (activeTab === "ALL") {
+        axisVal =
+          (fltDateAxis === "dueDate"
+            ? o.targetEndDate
+            : fltDateAxis === "customerDeliveryDate"
+              ? (o.customerDeliveryDate || "")
+              : (o.createdAt || "")) || "";
+      } else {
+        // Dept page — find the matching JC's dueDate. Skip filter when the
+        // PO has no JC for this dept (don't silently hide it; the cell will
+        // render empty and the operator can choose to widen the filter).
+        const jc = (o.jobCards ?? []).find((j) => j.departmentCode === activeTab);
+        axisVal = jc?.dueDate || "";
+      }
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
       // Hide CANCELLED POs unless explicitly opted in via ?showCancelled=1.

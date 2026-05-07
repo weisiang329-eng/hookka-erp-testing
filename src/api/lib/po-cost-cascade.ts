@@ -525,7 +525,13 @@ export async function consumeRawMaterialsForPO(
       statements.push(
         db
           .prepare(
-            "UPDATE raw_materials SET balanceQty = MAX(0, balanceQty - ?) WHERE id = ?",
+            // GREATEST not MAX — Postgres MAX is an aggregate (over rows);
+            // GREATEST returns the largest of N argument values and works
+            // across numeric types (integer 0 vs balanceQty's numeric/float).
+            // SQLite accepted MAX(a, b) as 2-arg max but Postgres errors
+            // with "function max(integer, double precision) does not exist"
+            // (caught 2026-05-07 when running first live RM consume).
+            "UPDATE raw_materials SET balanceQty = GREATEST(0, balanceQty - ?) WHERE id = ?",
           )
           .bind(result.consumedQty, rm.id),
       );

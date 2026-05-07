@@ -89,6 +89,14 @@ export function cellFor(
   // the cell, not 0/1. piecesDone/piecesTotal are emitted by the
   // minimal /api/production-orders payload; legacy responses without
   // them fall back to (status === COMPLETED ? wipQty : 0) / wipQty.
+  //
+  // Priority: JC.status wins over piecesDone count. The API emits
+  // `piecesDone ?? 0`, so the value is ALWAYS a number (never null) —
+  // a COMPLETED JC that was finished without per-piece scanning shows
+  // piecesDone=0. If we trusted piecesDone first, those cells would
+  // render "0/1 overdue red" forever even though work is done. Status
+  // first → piecesDone fallback fixes this and matches user expectation
+  // ("if it's COMPLETED, show ✓").
   let done = 0;
   let totalPieces = 0;
   let allFullyDone = true;
@@ -96,12 +104,9 @@ export function cellFor(
     const isJcDone =
       c.status === "COMPLETED" || c.status === "TRANSFERRED";
     const total = Math.max(1, c.piecesTotal ?? c.wipQty ?? 1);
-    const cardDone =
-      c.piecesDone != null
-        ? Math.min(total, c.piecesDone)
-        : isJcDone
-          ? total
-          : 0;
+    const cardDone = isJcDone
+      ? total
+      : Math.min(total, c.piecesDone ?? 0);
     done += cardDone;
     totalPieces += total;
     if (cardDone < total) allFullyDone = false;

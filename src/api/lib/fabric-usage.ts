@@ -319,38 +319,56 @@ export async function computeFabricMetrics(
 
   // ---- Supply: PO Outstanding from purchase_order_items ----
   // Open POs = status NOT IN (RECEIVED, CANCELLED, CLOSED). Per-line
-  // outstanding = quantity − COALESCE(receivedQty, 0). Sum per material.
-  const outRes = await db
-    .prepare(
-      `SELECT poi.materialCode AS code,
-              SUM(poi.quantity - COALESCE(poi.receivedQty, 0)) AS qty
-         FROM purchase_order_items poi
-         INNER JOIN purchase_orders po ON po.id = poi.purchaseOrderId
-        WHERE po.status NOT IN ('RECEIVED', 'CANCELLED', 'CLOSED')
-          AND poi.materialCode IS NOT NULL
-        GROUP BY poi.materialCode`,
-    )
-    .all<{ code: string; qty: number }>();
-  for (const r of outRes.results ?? []) {
-    if (out.has(r.code)) ensure(r.code).poOutstanding = Number(r.qty) || 0;
+  // outstanding = quantity − COALESCE(receivedQty, 0). The schema has
+  // no materialCode column on purchase_order_items; the SKU is stored
+  // in `materialName` (e.g. 'PC151-01'). Match raw_materials.itemCode
+  // on that. Defensive try/catch — if the column shape drifts again
+  // the metric collapses to 0 instead of 500-ing the whole endpoint.
+  try {
+    const outRes = await db
+      .prepare(
+        `SELECT poi.materialName AS code,
+                SUM(poi.quantity - COALESCE(poi.receivedQty, 0)) AS qty
+           FROM purchase_order_items poi
+           INNER JOIN purchase_orders po ON po.id = poi.purchaseOrderId
+          WHERE po.status NOT IN ('RECEIVED', 'CANCELLED', 'CLOSED')
+            AND poi.materialName IS NOT NULL
+          GROUP BY poi.materialName`,
+      )
+      .all<{ code: string; qty: number }>();
+    for (const r of outRes.results ?? []) {
+      if (out.has(r.code)) ensure(r.code).poOutstanding = Number(r.qty) || 0;
+    }
+  } catch (err) {
+    console.error("[computeFabricMetrics] PO Outstanding query failed", {
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // ---- Historical usage: cost_ledger RM_ISSUE rows last 30 days ----
-  // JOIN raw_materials so we can group by itemCode (fabric SKU).
-  const histRes = await db
-    .prepare(
-      `SELECT rm.itemCode AS code, SUM(cl.qty) AS qty
-         FROM cost_ledger cl
-         INNER JOIN raw_materials rm ON rm.id = cl.itemId
-        WHERE cl.type = 'RM_ISSUE'
-          AND cl.date >= ?
-          AND rm.itemCode IS NOT NULL
-        GROUP BY rm.itemCode`,
-    )
-    .bind(`${last30Start}T00:00:00.000Z`)
-    .all<{ code: string; qty: number }>();
-  for (const r of histRes.results ?? []) {
-    if (out.has(r.code)) ensure(r.code).lastMonthUsage = Number(r.qty) || 0;
+  // JOIN raw_materials so we can group by itemCode (fabric SKU). Defensive
+  // try/catch like the PO Outstanding path — schema drift on cost_ledger
+  // shouldn't 500 the whole endpoint.
+  try {
+    const histRes = await db
+      .prepare(
+        `SELECT rm.itemCode AS code, SUM(cl.qty) AS qty
+           FROM cost_ledger cl
+           INNER JOIN raw_materials rm ON rm.id = cl.itemId
+          WHERE cl.type = 'RM_ISSUE'
+            AND cl.date >= ?
+            AND rm.itemCode IS NOT NULL
+          GROUP BY rm.itemCode`,
+      )
+      .bind(`${last30Start}T00:00:00.000Z`)
+      .all<{ code: string; qty: number }>();
+    for (const r of histRes.results ?? []) {
+      if (out.has(r.code)) ensure(r.code).lastMonthUsage = Number(r.qty) || 0;
+    }
+  } catch (err) {
+    console.error("[computeFabricMetrics] Historical query failed", {
+      err: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // ---- Shortage: SOH + Outstanding − 1mo predicted ----

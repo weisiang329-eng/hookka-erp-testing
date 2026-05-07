@@ -1175,10 +1175,30 @@ function ClaudePOCard({
                   </thead>
                   <tbody>
                     {po.items.map((item, i) => {
-                      const productList =
-                        item.category === "SOFA" ? (catalog?.sofas ?? [])
-                          : item.category === "ACCESSORY" ? (catalog?.accessories ?? [])
-                          : (catalog?.bedframes ?? []);
+                      // Unified product list across all 3 categories — matches
+                      // the Sales Order create flow where the user picks a
+                      // product from the full catalog and itemCategory binds
+                      // automatically. Without this the operator had to click
+                      // Cat (BF/SF/AC) FIRST before the product list refreshed,
+                      // adding a step every time the AI mis-categorised an item.
+                      const allProducts = [
+                        ...(catalog?.bedframes ?? []),
+                        ...(catalog?.sofas ?? []),
+                        ...(catalog?.accessories ?? []),
+                      ];
+                      const productCategoryFor = (code: string): ClaudeExtractedItem["category"] | null => {
+                        if ((catalog?.bedframes ?? []).includes(code)) return "BEDFRAME";
+                        if ((catalog?.sofas ?? []).includes(code)) return "SOFA";
+                        if ((catalog?.accessories ?? []).includes(code)) return "ACCESSORY";
+                        return null;
+                      };
+                      const productLabel = (code: string): string => {
+                        const cat = productCategoryFor(code);
+                        const tag = cat === "SOFA" ? "SF" : cat === "ACCESSORY" ? "AC" : cat === "BEDFRAME" ? "BF" : "?";
+                        return `${code} · ${tag}`;
+                      };
+                      // Variant fields (specials, divan, etc.) still depend on
+                      // the line's current category — keep that branching.
                       const fabricList = catalog?.fabrics ?? [];
                       const specialList =
                         item.category === "SOFA"
@@ -1186,8 +1206,8 @@ function ClaudePOCard({
                           : (catalog?.bedframeSpecials ?? []);
                       const isUnknownProduct =
                         item.productCode &&
-                        productList.length > 0 &&
-                        !productList.some((c) => c.toUpperCase() === item.productCode.toUpperCase());
+                        allProducts.length > 0 &&
+                        !allProducts.some((c) => c.toUpperCase() === item.productCode.toUpperCase());
                       const isUnknownFabric =
                         item.fabricCode &&
                         fabricList.length > 0 &&
@@ -1209,11 +1229,24 @@ function ClaudePOCard({
                           <td className="px-1.5 py-1">
                             <SearchableSelect
                               value={item.productCode}
-                              options={productList}
-                              onChange={(v) => onUpdateItem(i, { productCode: v })}
+                              options={allProducts}
+                              onChange={(v) => {
+                                const cat = productCategoryFor(v);
+                                onUpdateItem(i, {
+                                  productCode: v,
+                                  // Auto-rebind itemCategory from the picked
+                                  // product. Mirrors src/pages/sales/create.tsx
+                                  // selectProduct() — the line's category
+                                  // follows the product, not the other way
+                                  // around. Cat dropdown stays for manual
+                                  // override but rarely needs to be touched.
+                                  ...(cat && cat !== item.category ? { category: cat } : {}),
+                                });
+                              }}
                               placeholder="Search SKU…"
                               widthClass="w-40"
                               warning={!!isUnknownProduct}
+                              getLabel={productLabel}
                             />
                           </td>
                           <td className="px-1.5 py-1 text-center">
@@ -1567,6 +1600,7 @@ function SearchableSelect({
   placeholder,
   widthClass,
   warning,
+  getLabel,
 }: {
   value: string;
   options: string[];
@@ -1574,6 +1608,12 @@ function SearchableSelect({
   placeholder?: string;
   widthClass?: string;
   warning?: boolean;
+  // Optional decorator — when provided, renders this string in the dropdown
+  // list AND uses it for substring search, so callers can stick a category
+  // suffix ("5530-1A · SF") onto each option without changing what value
+  // gets stored. The closed-state button still shows the bare value (so the
+  // table cell stays clean once a pick is made).
+  getLabel?: (v: string) => string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -1592,7 +1632,10 @@ function SearchableSelect({
 
   const q = query.trim().toLowerCase();
   const filtered = q
-    ? options.filter((o) => o.toLowerCase().includes(q))
+    ? options.filter((o) => {
+        const hay = getLabel ? getLabel(o).toLowerCase() : o.toLowerCase();
+        return hay.includes(q);
+      })
     : options;
 
   return (
@@ -1646,7 +1689,7 @@ function SearchableSelect({
                     opt === value ? "bg-[#F5F0EB] font-medium" : ""
                   }`}
                 >
-                  {opt}
+                  {getLabel ? getLabel(opt) : opt}
                 </button>
               ))
             )}

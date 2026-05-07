@@ -412,6 +412,17 @@ CRITICAL: when spec contains "10", "12", "14", "16" — these are TWO-digit inch
     "Divan full cover" → "Divan Full Cover"
     "HB fully cover" → "HB Fully Cover"
 
+  IMPORTANT — do NOT duplicate the product's intrinsic shape as a special.
+  If the BEDFRAME product name itself already carries a headboard shape
+  descriptor like "(HB STRAIGHT)" / "(HB CURVED)" / "(HB FULLY COVER)" — see
+  the bedframe product list below for full catalog — the shape is part of
+  the product code's identity, not a modifier on top of it. DO NOT extract
+  that shape word as specialOrder; it duplicates information already encoded
+  in productCode and clutters the operator's import preview with chips that
+  always need to be removed by hand. Only extract specials that *modify*
+  the default product behavior (e.g. additional drawers, divan variants,
+  custom fabric placements).
+
   DRAWER position rule (priority order, stop at first match):
     1. Explicit text wins: "Left Drawer" / "L Drawer" / "L'DRAWER" / "LEFT DRAWER" → "Left Drawer".
     2. "Right Drawer" / "R Drawer" / "R'DRAWER" / "RIGHT DRAWER" → "Right Drawer".
@@ -1139,6 +1150,45 @@ function validateAndEnrichPO(po: ExtractedPO, catalog: Catalog): Warning[] {
         canon = productCanonByNorm.get(normalizeForMatch(item.productCode));
       }
       item.productCode = canon ?? "";
+    }
+    // Strip specials that are already implied by the product's name.
+    //
+    // Catalog products like "TRION (HB STRAIGHT) BEDFRAME (5FT)" embed the
+    // headboard shape directly in the product name. When a PDF for product
+    // 2008 also writes "HB Straight" in the spec line, Claude correctly
+    // matches it against the Specials catalog and emits "HB Straight" as
+    // specialOrder — but the chip is redundant: the shape is part of the
+    // product's identity, not a modifier. Operators have to manually X it
+    // out on every import (Wei Siang report 2026-05-07).
+    //
+    // This post-processor backstops the AI prompt rule (no-duplicate-shape
+    // is documented in the prompt above): regardless of what Claude returns,
+    // we look up the resolved product's name and drop any specialOrder
+    // tokens that appear inside it. Match is case-insensitive +
+    // punctuation-tolerant; comma-separated specials (sofa convention) are
+    // split, filtered, and rejoined.
+    if (item.productCode && item.specialOrder) {
+      const productInfo = [
+        ...catalog.bedframes,
+        ...catalog.sofas,
+        ...catalog.accessories,
+      ].find((p) => p.code === item.productCode);
+      if (productInfo) {
+        const normName = productInfo.name
+          .toLowerCase()
+          .replace(/[()]/g, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+        const tokens = item.specialOrder
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const kept = tokens.filter((t) => {
+          const norm = t.toLowerCase().replace(/\s+/g, " ").trim();
+          return !normName.includes(norm);
+        });
+        item.specialOrder = kept.length > 0 ? kept.join(", ") : null;
+      }
     }
     // Transferred-SO references.
     if (item.transferredSO) item.transferredSO = item.transferredSO.toUpperCase();

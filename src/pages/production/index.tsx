@@ -3,7 +3,7 @@ import { useUrlState, useUrlBatch } from "@/lib/use-url-state";
 import { useSessionState } from "@/lib/use-session-state";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import { Plus, Lock, ExternalLink } from "lucide-react";
+import { Plus, Lock, ExternalLink, Filter } from "lucide-react";
 import { DataGrid } from "@/components/ui/data-grid";
 import type { Column, ContextMenuItem } from "@/components/ui/data-grid";
 import { getQRCodeDataURL, generateStickerData } from "@/lib/qr-utils";
@@ -19,6 +19,289 @@ import { DEPARTMENTS, cellFor, fmtShortDate, todayISO } from "./utils";
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
+
+// ----- Overview sort / filter shared types (used by header sub-components) -----
+type OverviewSortKey =
+  | "soId" | "product" | "customer" | "specialOrder"
+  | "qty" | "due"
+  | "FAB_CUT" | "FAB_SEW" | "FOAM" | "WOOD_CUT"
+  | "FRAMING" | "WEBBING" | "UPHOLSTERY" | "PACKING";
+type OverviewSort = { key: OverviewSortKey; dir: "asc" | "desc" } | null;
+
+// ----- Overview header cell — sort indicator + filter popover trigger -----
+//
+// Memoized internally via the shallow comparison of the props the cell
+// reads (sort + open + active flags). Filter popover bodies are rendered
+// lazily (only when openFilterCol === filterCol) so we don't pay the
+// render cost for 14 hidden popovers on every keystroke.
+function OverviewHeader({
+  label,
+  align,
+  border,
+  sortKey,
+  sort,
+  cycle,
+  filterCol,
+  filterActive,
+  openFilterCol,
+  setOpenFilterCol,
+  renderFilter,
+}: {
+  label: string;
+  align?: "left" | "center";
+  border?: boolean;
+  sortKey: OverviewSortKey;
+  sort: OverviewSort;
+  cycle: (k: OverviewSortKey) => void;
+  filterCol: string;
+  filterActive: boolean;
+  openFilterCol: string | null;
+  setOpenFilterCol: (v: string | null) => void;
+  renderFilter: () => React.ReactNode;
+}) {
+  const isSorted = sort?.key === sortKey;
+  const dir = isSorted ? sort?.dir : null;
+  const open = openFilterCol === filterCol;
+  return (
+    <div
+      className={`relative px-1.5 py-2.5 ${align === "center" ? "text-center" : "text-left"} ${border ? "border-l border-[#E6E0D9]" : ""}`}
+    >
+      <div className={`flex items-center gap-1 ${align === "center" ? "justify-center" : ""}`}>
+        <button
+          type="button"
+          className="flex items-center gap-0.5 hover:text-[#1F1D1B] cursor-pointer truncate text-[10px] font-semibold uppercase tracking-wider text-[#6B7280]"
+          onClick={() => cycle(sortKey)}
+          title={`Sort by ${label} — click to cycle asc / desc / off`}
+        >
+          <span className="truncate">{label}</span>
+          <span className="text-[8px] leading-none flex flex-col flex-shrink-0">
+            <span className={dir === "asc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▲</span>
+            <span className={dir === "desc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▼</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className="relative h-4 w-4 flex items-center justify-center rounded hover:bg-[#E6E0D9] cursor-pointer flex-shrink-0"
+          onClick={(e) => {
+            e.stopPropagation();
+            setOpenFilterCol(open ? null : filterCol);
+          }}
+          title="Filter this column"
+        >
+          <Filter
+            className={`h-2.5 w-2.5 ${filterActive ? "text-[#6B5C32]" : "text-[#9CA3AF]"}`}
+          />
+          {filterActive && (
+            <span className="absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-[#9C6F1E]" />
+          )}
+        </button>
+      </div>
+      {open && (
+        <>
+          {/* Outside-click + esc capture overlay so the popover dismisses
+              cleanly without trapping clicks anywhere else. */}
+          <div
+            className="fixed inset-0 z-30"
+            onClick={() => setOpenFilterCol(null)}
+          />
+          <div
+            className="absolute top-full left-0 mt-1 z-40 bg-white border border-[#E6E0D9] rounded-md shadow-lg p-3 min-w-[180px] normal-case tracking-normal text-[12px] font-normal text-[#1F1D1B]"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {renderFilter()}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function TextContainsFilter({
+  value, onChange, placeholder,
+}: { value: string; onChange: (v: string) => void; placeholder?: string }) {
+  return (
+    <input
+      type="text"
+      value={value}
+      placeholder={placeholder}
+      onChange={(e) => onChange(e.target.value)}
+      className="w-full h-7 px-2 border border-[#E6E0D9] rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
+      autoFocus
+    />
+  );
+}
+
+function NumericRangeFilter({
+  min, max, onChange,
+}: { min: string; max: string; onChange: (min: string, max: string) => void }) {
+  return (
+    <div className="flex items-center gap-1.5">
+      <input
+        type="number"
+        value={min}
+        placeholder="Min"
+        onChange={(e) => onChange(e.target.value, max)}
+        className="w-16 h-7 px-2 border border-[#E6E0D9] rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
+      />
+      <span className="text-[#9CA3AF]">–</span>
+      <input
+        type="number"
+        value={max}
+        placeholder="Max"
+        onChange={(e) => onChange(min, e.target.value)}
+        className="w-16 h-7 px-2 border border-[#E6E0D9] rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
+      />
+    </div>
+  );
+}
+
+function DateRangeFilter({
+  from, to, onChange,
+}: { from: string; to: string; onChange: (from: string, to: string) => void }) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <label className="flex items-center gap-1.5 text-[11px] text-[#6B7280]">
+        <span className="w-8">From</span>
+        <input
+          type="date"
+          value={from}
+          onChange={(e) => onChange(e.target.value, to)}
+          className="flex-1 h-7 px-2 border border-[#E6E0D9] rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
+        />
+      </label>
+      <label className="flex items-center gap-1.5 text-[11px] text-[#6B7280]">
+        <span className="w-8">To</span>
+        <input
+          type="date"
+          value={to}
+          onChange={(e) => onChange(from, e.target.value)}
+          className="flex-1 h-7 px-2 border border-[#E6E0D9] rounded text-[12px] focus:outline-none focus:ring-1 focus:ring-[#6B5C32]/40"
+        />
+      </label>
+      {(from || to) && (
+        <button
+          type="button"
+          className="text-[11px] text-[#6B5C32] hover:underline self-end"
+          onClick={() => onChange("", "")}
+        >
+          Clear
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MultiSelectFilter({
+  options, selected, onChange,
+}: { options: string[]; selected: string[]; onChange: (next: string[]) => void }) {
+  const set = new Set(selected);
+  const toggle = (v: string) => {
+    const next = new Set(set);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    onChange(Array.from(next));
+  };
+  return (
+    <div className="flex flex-col gap-1 max-h-56 overflow-y-auto pr-1 min-w-[200px]">
+      {selected.length > 0 && (
+        <button
+          type="button"
+          className="text-[11px] text-[#6B5C32] hover:underline self-end"
+          onClick={() => onChange([])}
+        >
+          Clear ({selected.length})
+        </button>
+      )}
+      {options.length === 0 ? (
+        <span className="text-[11px] text-[#9CA3AF]">No options</span>
+      ) : options.map((opt) => (
+        <label key={opt} className="flex items-center gap-1.5 cursor-pointer hover:bg-[#FAF8F4] rounded px-1 py-0.5">
+          <input
+            type="checkbox"
+            checked={set.has(opt)}
+            onChange={() => toggle(opt)}
+            className="h-3 w-3"
+          />
+          <span className="text-[12px] truncate" title={opt}>{opt}</span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function DeptStatusFilter({
+  selected, onChange,
+  dateRange, onDateRangeChange,
+}: {
+  selected: ("pending" | "overdue" | "done")[];
+  onChange: (next: ("pending" | "overdue" | "done")[]) => void;
+  dateRange?: { from: string; to: string };
+  onDateRangeChange?: (next: { from: string; to: string }) => void;
+}) {
+  const opts: { value: "pending" | "overdue" | "done"; label: string; dot: string }[] = [
+    { value: "pending", label: "Pending", dot: "bg-[#F4B860]" },
+    { value: "overdue", label: "Overdue", dot: "bg-[#D9534F]" },
+    { value: "done", label: "Completed", dot: "bg-[#4F7C3A]" },
+  ];
+  const set = new Set(selected);
+  const toggle = (v: "pending" | "overdue" | "done") => {
+    const next = new Set(set);
+    if (next.has(v)) next.delete(v);
+    else next.add(v);
+    onChange(Array.from(next));
+  };
+  const range = dateRange ?? { from: "", to: "" };
+  const hasAny = selected.length > 0 || !!range.from || !!range.to;
+  const clearAll = () => {
+    onChange([]);
+    onDateRangeChange?.({ from: "", to: "" });
+  };
+  return (
+    <div className="flex flex-col gap-1 min-w-[180px]">
+      {opts.map((o) => (
+        <label key={o.value} className="flex items-center gap-1.5 cursor-pointer hover:bg-[#FAF8F4] rounded px-1 py-0.5">
+          <input
+            type="checkbox"
+            checked={set.has(o.value)}
+            onChange={() => toggle(o.value)}
+            className="h-3 w-3"
+          />
+          <span className={`h-2 w-2 rounded-full ${o.dot}`} />
+          <span className="text-[12px]">{o.label}</span>
+        </label>
+      ))}
+      {onDateRangeChange && (
+        <>
+          <div className="border-t border-[#E6E0D9] my-1" />
+          <div className="text-[10px] text-[#6B7280] px-1">Date range</div>
+          <input
+            type="date"
+            value={range.from}
+            onChange={(e) => onDateRangeChange({ ...range, from: e.target.value })}
+            className="text-[11px] px-1.5 py-0.5 border border-[#E6E0D9] rounded"
+            title="From (cell date)"
+          />
+          <input
+            type="date"
+            value={range.to}
+            onChange={(e) => onDateRangeChange({ ...range, to: e.target.value })}
+            className="text-[11px] px-1.5 py-0.5 border border-[#E6E0D9] rounded"
+            title="To (cell date)"
+          />
+        </>
+      )}
+      {hasAny && (
+        <button
+          type="button"
+          className="text-[11px] text-[#6B5C32] hover:underline self-end mt-1"
+          onClick={clearAll}
+        >
+          Clear
+        </button>
+      )}
+    </div>
+  );
+}
 
 // ----- main page -----
 
@@ -239,10 +522,131 @@ export default function ProductionPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Overview-matrix-only sort. The dept-tab Production Sheet has DataGrid's
-  // built-in sort; this state drives the Overview "Due" header click-to-sort.
-  // null = original order; "asc"/"desc" = sorted by targetEndDate.
-  const [overviewDueSort, setOverviewDueSort] = useState<"asc" | "desc" | null>(null);
+  // Overview-matrix-only sort + filter state. Persisted to localStorage so
+  // the operator's column preferences (e.g. "sort by Customer asc, hide
+  // completed Packing rows") survive a page reload. The dept-tab DataGrid
+  // has its own filter UI; this state only drives the Overview matrix.
+  //
+  // Sort: ONE column at a time (key + direction). null = unsorted.
+  // Filter: per-column text/multi/range/multi-status — see OverviewFilters.
+  // Cell flash: short-lived map of `${jcId}|${dept}` → "ok"|"err". On a
+  // successful PATCH the cell paints bg-green-100 for 800ms; on failure
+  // it paints bg-red-100. Auto-cleared by setTimeout. SO ID column flash
+  // for the PO-level dueDate edit uses key `${poId}|DUE`.
+  // (OverviewSortKey + OverviewSort declared at module top so the header
+  // sub-components above can share the type.)
+  type OverviewFilters = {
+    soId: string;
+    product: string;
+    customers: string[]; // multi-select; empty = all
+    specialOrder: string;
+    qtyMin: string; // string so empty box stays empty
+    qtyMax: string;
+    dueFrom: string; // YYYY-MM-DD
+    dueTo: string;
+    deptStatuses: Partial<Record<string, ("pending" | "overdue" | "done")[]>>;
+    // Per-dept date-range filter (the displayed cell date — done cells use
+    // latestCompleted; others use earliestDue). Independent of deptStatuses
+    // so operators can combine both: "FAB CUT pending AND due before 12 May".
+    deptDates: Partial<Record<string, { from: string; to: string }>>;
+  };
+  const emptyOverviewFilters: OverviewFilters = {
+    soId: "", product: "", customers: [], specialOrder: "",
+    qtyMin: "", qtyMax: "", dueFrom: "", dueTo: "",
+    deptStatuses: {},
+    deptDates: {},
+  };
+  const OVERVIEW_TABLE_LS_KEY = "hookka-production-overview-table-state";
+  type OverviewTableState = { sort: OverviewSort; filters: OverviewFilters };
+  const loadOverviewTableState = (): OverviewTableState => {
+    try {
+      const raw = localStorage.getItem(OVERVIEW_TABLE_LS_KEY);
+      if (!raw) return { sort: null, filters: emptyOverviewFilters };
+      const parsed = JSON.parse(raw) as Partial<OverviewTableState>;
+      return {
+        sort: parsed.sort ?? null,
+        filters: { ...emptyOverviewFilters, ...(parsed.filters || {}) },
+      };
+    } catch {
+      return { sort: null, filters: emptyOverviewFilters };
+    }
+  };
+  const initialOverviewState = loadOverviewTableState();
+  const [overviewSort, setOverviewSort] = useState<OverviewSort>(initialOverviewState.sort);
+  const [overviewFilters, setOverviewFilters] = useState<OverviewFilters>(initialOverviewState.filters);
+  const [openFilterCol, setOpenFilterCol] = useState<string | null>(null);
+  // Cell flash map — `${jcId}|${dept}` → "ok"|"err"; "${poId}|DUE" for the
+  // PO-level due-date column. Tracked separately from optimistic UI so the
+  // tint can fade independently of the data update.
+  const [cellFlash, setCellFlash] = useState<Record<string, "ok" | "err">>({});
+  const flashCell = useCallback((key: string, kind: "ok" | "err") => {
+    setCellFlash((prev) => ({ ...prev, [key]: kind }));
+    // eslint-disable-next-line no-restricted-syntax -- one-shot fade fired from event handler, not render
+    setTimeout(() => {
+      setCellFlash((prev) => {
+        if (prev[key] !== kind) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, 800);
+  }, []);
+  // Persist sort + filter to localStorage on change.
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        OVERVIEW_TABLE_LS_KEY,
+        JSON.stringify({ sort: overviewSort, filters: overviewFilters }),
+      );
+    } catch {
+      // ignore quota / private-mode failures
+    }
+  }, [overviewSort, overviewFilters]);
+  // Cycle a column's sort: unset → asc → desc → unset.
+  const cycleOverviewSort = useCallback((key: OverviewSortKey) => {
+    setOverviewSort((prev) => {
+      if (!prev || prev.key !== key) return { key, dir: "asc" };
+      if (prev.dir === "asc") return { key, dir: "desc" };
+      return null;
+    });
+  }, []);
+  // Active-filter helpers — drives the coloured-dot indicator on each header.
+  const isFilterActive = useCallback((col: string): boolean => {
+    const f = overviewFilters;
+    switch (col) {
+      case "soId": return !!f.soId;
+      case "product": return !!f.product;
+      case "customer": return f.customers.length > 0;
+      case "specialOrder": return !!f.specialOrder;
+      case "qty": return !!f.qtyMin || !!f.qtyMax;
+      case "due": return !!f.dueFrom || !!f.dueTo;
+      default: {
+        const arr = f.deptStatuses[col];
+        const hasStatus = !!(arr && arr.length > 0);
+        const range = f.deptDates[col];
+        const hasDate = !!(range && (range.from || range.to));
+        return hasStatus || hasDate;
+      }
+    }
+  }, [overviewFilters]);
+  const anyOverviewFilterActive = useMemo(() => {
+    const f = overviewFilters;
+    if (f.soId || f.product || f.specialOrder || f.qtyMin || f.qtyMax || f.dueFrom || f.dueTo) return true;
+    if (f.customers.length > 0) return true;
+    for (const k of Object.keys(f.deptStatuses)) {
+      if ((f.deptStatuses[k] || []).length > 0) return true;
+    }
+    for (const k of Object.keys(f.deptDates)) {
+      const r = f.deptDates[k];
+      if (r && (r.from || r.to)) return true;
+    }
+    return false;
+  }, [overviewFilters]);
+  const clearAllOverviewFilters = useCallback(() => {
+    setOverviewFilters(emptyOverviewFilters);
+    setOverviewSort(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Lazy-load trigger: any filter being non-default flips shouldFetch=true,
   // which arms ordersUrl in the useCachedJson call above. Once fetched the
@@ -548,7 +952,13 @@ export default function ProductionPage({
     async (
       poId: string,
       jobCardId: string,
-      patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">>,
+      patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">> & { distributedAt?: string | null },
+      // Optional cell-flash key (e.g. `${jobCardId}|FAB_CUT`). When present
+      // a successful PATCH paints the cell green for 800ms and fires a
+      // success toast; failure paints red + error toast. Caller can also
+      // pass `silent: true` if it wants neither (e.g. bulk fan-out where
+      // only the wrapper should report).
+      feedback?: { flashKey?: string; silent?: boolean; successMsg?: string },
     ) => {
       setOrders((prev) =>
         prev.map((o) =>
@@ -577,15 +987,25 @@ export default function ProductionPage({
           } catch { /* non-json body — keep status code */ }
           throw new Error(msg);
         }
+        if (!feedback?.silent) {
+          if (feedback?.flashKey) flashCell(feedback.flashKey, "ok");
+          if (feedback?.successMsg) toast.success(feedback.successMsg);
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "network error";
         console.error("[patchJobCard]", detail);
-        toast.error(`Save failed (${detail}). Refresh and retry.`);
+        if (feedback?.flashKey) flashCell(feedback.flashKey, "err");
+        if (!feedback?.silent) {
+          toast.error(`Save failed (${detail}). Refresh and retry.`);
+        } else {
+          // Silent caller still wants to know — surface as a thrown error.
+          throw err instanceof Error ? err : new Error(detail);
+        }
       } finally {
         pendingJcPatchesRef.current.delete(jobCardId);
       }
     },
-    [toast],
+    [toast, flashCell],
   );
 
   // Optimistic PATCH for the Packing Rack dropdown. Writes rackingNumber to
@@ -700,19 +1120,28 @@ export default function ProductionPage({
         const jcs = o.jobCards ?? [];
         if (flags && jcs.length > 0 && !flags.has(fltItemType)) return false;
       }
-      // Date range against the user-chosen axis. Falls back to targetEndDate
-      // when customerDeliveryDate isn't on the payload (TODO near the state
-      // declaration). Empty axis values DO NOT filter the row out — that
-      // prevents POs with missing dates from disappearing the moment a
-      // from-date is set. Previous bug: `"" < fltDueFrom` was always true
-      // so undated POs got dropped silently as soon as any from-date was
-      // entered.
-      const axisVal: string =
-        (fltDateAxis === "dueDate"
-          ? o.targetEndDate
-          : fltDateAxis === "customerDeliveryDate"
-            ? (o.customerDeliveryDate || "")
-            : (o.createdAt || "")) || "";
+      // Date range filter — axis depends on which page the operator is on:
+      //   overview ("ALL") → PO.targetEndDate  (whole-order packing anchor)
+      //   dept page        → that dept's JC.dueDate (the dept's own deadline)
+      // The dept-level switch matches user mental model: on /production/fab-cut
+      // they expect a "due ≤ 7/5" filter to mean "FAB_CUT due ≤ 7/5", not
+      // "the whole PO's PACKING date ≤ 7/5" (which would silently let
+      // FAB_CUT-overdue rows through if PACKING is also past 7/5 by even more).
+      let axisVal = "";
+      if (activeTab === "ALL") {
+        axisVal =
+          (fltDateAxis === "dueDate"
+            ? o.targetEndDate
+            : fltDateAxis === "customerDeliveryDate"
+              ? (o.customerDeliveryDate || "")
+              : (o.createdAt || "")) || "";
+      } else {
+        // Dept page — find the matching JC's dueDate. Skip filter when the
+        // PO has no JC for this dept (don't silently hide it; the cell will
+        // render empty and the operator can choose to widen the filter).
+        const jc = (o.jobCards ?? []).find((j) => j.departmentCode === activeTab);
+        axisVal = jc?.dueDate || "";
+      }
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
       // Hide CANCELLED POs unless explicitly opted in via ?showCancelled=1.
@@ -738,21 +1167,88 @@ export default function ProductionPage({
         (o) => cellFor(o, activeTab, filteredOrders).state !== "empty",
       );
     }
-    // Overview-only Due sort. Empty due dates park at the end regardless
-    // of direction so undated rows don't dominate ascending order.
-    if (activeTab === "ALL" && overviewDueSort) {
-      const dir = overviewDueSort === "asc" ? 1 : -1;
-      rows = [...rows].sort((a, b) => {
-        const av = a.targetEndDate || "";
-        const bv = b.targetEndDate || "";
-        if (!av && !bv) return 0;
-        if (!av) return 1;
-        if (!bv) return -1;
-        return av < bv ? -1 * dir : av > bv ? 1 * dir : 0;
+    // Overview-only column-level filters + sort. Applied AFTER the
+    // page-level filter pass above so the operator can layer column
+    // filters on top of the global Customer / Date filters.
+    if (activeTab === "ALL") {
+      const f = overviewFilters;
+      // Cell-state cache so dept-status filter + dept-sort don't recompute
+      // cellFor() N×M times.
+      const cellCache = new Map<string, ReturnType<typeof cellFor>>();
+      const cellAt = (o: ProductionOrder, dept: string) => {
+        const k = `${o.id}|${dept}`;
+        let v = cellCache.get(k);
+        if (!v) {
+          v = cellFor(o, dept, filteredOrders);
+          cellCache.set(k, v);
+        }
+        return v;
+      };
+      rows = rows.filter((o) => {
+        if (f.soId && !o.poNo.toLowerCase().includes(f.soId.toLowerCase())) return false;
+        if (f.product && !(o.productCode || "").toLowerCase().includes(f.product.toLowerCase())) return false;
+        if (f.customers.length > 0 && !f.customers.includes(o.customerName)) return false;
+        if (f.specialOrder && !((o.specialOrder || "").toLowerCase().includes(f.specialOrder.toLowerCase()))) return false;
+        if (f.qtyMin && Number(o.quantity) < Number(f.qtyMin)) return false;
+        if (f.qtyMax && Number(o.quantity) > Number(f.qtyMax)) return false;
+        const dueVal = o.targetEndDate || "";
+        if (f.dueFrom && dueVal && dueVal < f.dueFrom) return false;
+        if (f.dueTo && dueVal && dueVal > f.dueTo) return false;
+        // Dept status filters — only check depts the user actually picked.
+        for (const deptCode of Object.keys(f.deptStatuses)) {
+          const wanted = f.deptStatuses[deptCode] || [];
+          if (wanted.length === 0) continue;
+          const c = cellAt(o, deptCode);
+          if (c.state === "empty") return false;
+          if (!wanted.includes(c.state as "pending" | "overdue" | "done")) return false;
+        }
+        // Dept date-range filters — applied to the displayed cell date
+        // (done → latestCompleted; else → earliestDue). Empty cells fall
+        // out of any non-empty filter.
+        for (const deptCode of Object.keys(f.deptDates)) {
+          const range = f.deptDates[deptCode];
+          if (!range || (!range.from && !range.to)) continue;
+          const c = cellAt(o, deptCode);
+          if (c.state === "empty") return false;
+          const cellDate =
+            c.state === "done"
+              ? (c.latestCompleted || c.earliestDue)
+              : c.earliestDue;
+          if (!cellDate) return false;
+          if (range.from && cellDate < range.from) return false;
+          if (range.to && cellDate > range.to) return false;
+        }
+        return true;
       });
+      // Sort — single key, asc/desc. Empty values park at the end so they
+      // don't dominate ascending order.
+      if (overviewSort) {
+        const { key, dir } = overviewSort;
+        const sign = dir === "asc" ? 1 : -1;
+        const cmpStr = (av: string, bv: string) => {
+          if (!av && !bv) return 0;
+          if (!av) return 1; // empties always last
+          if (!bv) return -1;
+          return av < bv ? -1 * sign : av > bv ? 1 * sign : 0;
+        };
+        const cmpNum = (a: number, b: number) =>
+          a === b ? 0 : a < b ? -1 * sign : 1 * sign;
+        rows = [...rows].sort((a, b) => {
+          if (key === "soId") return cmpStr(a.poNo || "", b.poNo || "");
+          if (key === "product") return cmpStr(a.productCode || "", b.productCode || "");
+          if (key === "customer") return cmpStr(a.customerName || "", b.customerName || "");
+          if (key === "specialOrder") return cmpStr(a.specialOrder || "", b.specialOrder || "");
+          if (key === "qty") return cmpNum(Number(a.quantity || 0), Number(b.quantity || 0));
+          if (key === "due") return cmpStr(a.targetEndDate || "", b.targetEndDate || "");
+          // Department column — sort by earliest dept due date.
+          const ca = cellAt(a, key);
+          const cb = cellAt(b, key);
+          return cmpStr(ca.earliestDue || "", cb.earliestDue || "");
+        });
+      }
     }
     return rows;
-  }, [filteredOrders, activeTab, overviewDueSort]);
+  }, [filteredOrders, activeTab, overviewSort, overviewFilters]);
 
   // Unique customer + state + model options for the filter dropdowns,
   // derived live from the order set so they auto-update when data changes.
@@ -857,6 +1353,10 @@ export default function ProductionPage({
     // has been QR-scanned. Renders "X/Y" when 0 < piecesDone < piecesTotal.
     piecesTotal: number;
     piecesDone: number;
+    // ISO timestamp of the "Sent to floor" tick (job_cards.distributedAt).
+    // NULL until the operator hands the printed sheet to the production
+    // worker. Drives the leftmost Sent column on the dept grid.
+    distributedAt: string | null;
     pic1: string;
     pic2: string;
     status: string;        // job_card status
@@ -1274,6 +1774,9 @@ export default function ProductionPage({
           // without the new fields don't trip the partial-render branch.
           piecesTotal: Math.max(1, jc.piecesTotal ?? jc.wipQty ?? 1),
           piecesDone: jc.piecesDone ?? 0,
+          // ISO timestamp the operator clicked the "Sent" tick. NULL =
+          // not yet handed out; truthy = printed + given to the floor.
+          distributedAt: jc.distributedAt ?? null,
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
@@ -1638,6 +2141,38 @@ export default function ProductionPage({
   // parent setState → back here. Dept code is the only thing that changes
   // the column set meaningfully (activeTab).
   const deptColumns: Column<DeptRow>[] = useMemo(() => [
+    // Sent — leftmost tick column (added 2026-05-07). Operator clicks to mark
+    // the JC as printed + handed to the floor; persists via the same
+    // distributedAt PATCH the print-view uses. Sticky so it stays visible
+    // when the grid is scrolled horizontally.
+    {
+      key: "sent",
+      label: "Sent",
+      type: "text",
+      width: "60px",
+      align: "center",
+      sticky: true,
+      sortable: true,
+      render: (_v, row) => {
+        const isSent = !!row.distributedAt;
+        return (
+          <input
+            type="checkbox"
+            checked={isSent}
+            title={
+              isSent && row.distributedAt
+                ? `Sent at ${new Date(row.distributedAt).toLocaleString()}`
+                : "Tick when handed to the floor"
+            }
+            onChange={() => {
+              const next = isSent ? null : new Date().toISOString();
+              patchJobCard(row.poId, row.jobCardId, { distributedAt: next });
+            }}
+            className="h-4 w-4 cursor-pointer"
+          />
+        );
+      },
+    },
     // rowNo + soId are frozen to the left so operators always know which
     // row they're scanning when the grid is scrolled horizontally — this
     // sheet has 30+ columns and the SO ID falls off-screen quickly.
@@ -2972,19 +3507,22 @@ export default function ProductionPage({
         {/* Date-axis dropdown removed 2026-05-07 per operator preference —
             from/to range always filters on dueDate (production target end
             date). The customerDeliveryDate + created_at axes were unused. */}
-        <label className="text-[10px] text-[#6B7280]">Due date — from</label>
+        {/* Filters always apply to dueDate. Labels removed 2026-05-07 — */}
+        {/* the from/to inputs sit in the standard left-to-right reading */}
+        {/* order so the relationship is self-evident. */}
         <input
           type="date"
           value={fltDueFrom}
           onChange={(e) => setFltDueFrom(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
+          title="From (due date)"
         />
-        <label className="text-[10px] text-[#6B7280]">to</label>
         <input
           type="date"
           value={fltDueTo}
           onChange={(e) => setFltDueTo(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
+          title="To (due date)"
         />
         {!shouldFetch && (
           <button
@@ -3277,40 +3815,165 @@ export default function ProductionPage({
 
       {/* Overview matrix grid (only shown when Overview tab is active) */}
       {activeTab === "ALL" && (
-      <div className="rounded-lg border border-[#E6E0D9] bg-white overflow-hidden">
+      <div className="rounded-lg border border-[#E6E0D9] bg-white overflow-visible">
+        {/* Clear-all-filters bar — shown only when at least one column
+            filter or sort is active so the operator has a one-click
+            reset without scrubbing each column individually. */}
+        {(anyOverviewFilterActive || overviewSort) && (
+          <div className="px-4 py-2 bg-[#FFFBEC] border-b border-[#F0E6BC] text-[11px] text-[#6B5C32] flex items-center justify-between">
+            <span className="flex items-center gap-1.5">
+              <Filter className="h-3 w-3" />
+              Column filters / sort active
+            </span>
+            <button
+              type="button"
+              className="text-[11px] font-semibold text-[#6B5C32] hover:underline"
+              onClick={clearAllOverviewFilters}
+            >
+              Clear all filters
+            </button>
+          </div>
+        )}
         {/* Header row */}
         <div
-          className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9]"
+          className="grid text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] bg-[#FAF8F4] border-b border-[#E6E0D9] relative z-20"
           style={{ gridTemplateColumns: "120px minmax(220px,1.4fr) 110px 130px 50px 70px repeat(8,minmax(0,1fr))" }}
         >
-          <div className="px-3 py-2.5">SO ID</div>
-          <div className="px-3 py-2.5">Product</div>
-          <div className="px-3 py-2.5">Customer</div>
-          <div className="px-3 py-2.5">Special Order</div>
-          <div className="px-2 py-2.5 text-center">Qty</div>
-          <button
-            type="button"
-            className="px-2 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider text-[#6B7280] flex items-center gap-1 hover:text-[#1F1D1B] cursor-pointer"
-            onClick={() =>
-              setOverviewDueSort((p) =>
-                p === null ? "asc" : p === "asc" ? "desc" : null,
-              )
-            }
-            title="Sort by due date — click to cycle asc / desc / off"
-          >
-            Due
-            <span className="text-[8px] leading-none flex flex-col">
-              <span className={overviewDueSort === "asc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▲</span>
-              <span className={overviewDueSort === "desc" ? "text-[#6B5C32]" : "text-[#D1CCC4]"}>▼</span>
-            </span>
-          </button>
+          <OverviewHeader
+            label="SO ID"
+            sortKey="soId"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="soId"
+            filterActive={isFilterActive("soId")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <TextContainsFilter
+                value={overviewFilters.soId}
+                onChange={(v) => setOverviewFilters((p) => ({ ...p, soId: v }))}
+                placeholder="Contains…"
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Product"
+            sortKey="product"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="product"
+            filterActive={isFilterActive("product")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <TextContainsFilter
+                value={overviewFilters.product}
+                onChange={(v) => setOverviewFilters((p) => ({ ...p, product: v }))}
+                placeholder="Contains…"
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Customer"
+            sortKey="customer"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="customer"
+            filterActive={isFilterActive("customer")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <MultiSelectFilter
+                options={Array.from(new Set(visibleOrders.concat(orders).map((o) => o.customerName).filter(Boolean))).sort()}
+                selected={overviewFilters.customers}
+                onChange={(next) => setOverviewFilters((p) => ({ ...p, customers: next }))}
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Special Order"
+            sortKey="specialOrder"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="specialOrder"
+            filterActive={isFilterActive("specialOrder")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <TextContainsFilter
+                value={overviewFilters.specialOrder}
+                onChange={(v) => setOverviewFilters((p) => ({ ...p, specialOrder: v }))}
+                placeholder="Contains…"
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Qty"
+            align="center"
+            sortKey="qty"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="qty"
+            filterActive={isFilterActive("qty")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <NumericRangeFilter
+                min={overviewFilters.qtyMin}
+                max={overviewFilters.qtyMax}
+                onChange={(min, max) => setOverviewFilters((p) => ({ ...p, qtyMin: min, qtyMax: max }))}
+              />
+            )}
+          />
+          <OverviewHeader
+            label="Due"
+            sortKey="due"
+            sort={overviewSort}
+            cycle={cycleOverviewSort}
+            filterCol="due"
+            filterActive={isFilterActive("due")}
+            openFilterCol={openFilterCol}
+            setOpenFilterCol={setOpenFilterCol}
+            renderFilter={() => (
+              <DateRangeFilter
+                from={overviewFilters.dueFrom}
+                to={overviewFilters.dueTo}
+                onChange={(from, to) => setOverviewFilters((p) => ({ ...p, dueFrom: from, dueTo: to }))}
+              />
+            )}
+          />
           {DEPARTMENTS.map((d) => (
-            <div
+            <OverviewHeader
               key={d.code}
-              className={`px-1 py-2.5 text-center border-l border-[#E6E0D9] truncate`}
-            >
-              {d.name}
-            </div>
+              label={d.name}
+              align="center"
+              border
+              sortKey={d.code as OverviewSortKey}
+              sort={overviewSort}
+              cycle={cycleOverviewSort}
+              filterCol={d.code}
+              filterActive={isFilterActive(d.code)}
+              openFilterCol={openFilterCol}
+              setOpenFilterCol={setOpenFilterCol}
+              renderFilter={() => (
+                <DeptStatusFilter
+                  selected={overviewFilters.deptStatuses[d.code] || []}
+                  onChange={(next) =>
+                    setOverviewFilters((p) => ({
+                      ...p,
+                      deptStatuses: { ...p.deptStatuses, [d.code]: next },
+                    }))
+                  }
+                  dateRange={overviewFilters.deptDates[d.code] || { from: "", to: "" }}
+                  onDateRangeChange={(next) =>
+                    setOverviewFilters((p) => ({
+                      ...p,
+                      deptDates: { ...p.deptDates, [d.code]: next },
+                    }))
+                  }
+                />
+              )}
+            />
           ))}
         </div>
 
@@ -3375,7 +4038,13 @@ export default function ProductionPage({
               </div>
               <div className="px-2 py-1.5 text-xs text-center text-[#6B7280] flex items-center justify-center">{order.quantity}</div>
               <div
-                className="px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center cursor-pointer hover:text-[#6B5C32] hover:underline"
+                className={`px-2 py-1.5 text-[11px] text-[#6B7280] flex items-center cursor-pointer hover:text-[#6B5C32] hover:underline transition-colors ${
+                  cellFlash[`${order.id}|DUE`] === "ok"
+                    ? "bg-green-100"
+                    : cellFlash[`${order.id}|DUE`] === "err"
+                      ? "bg-red-100"
+                      : ""
+                }`}
                 onClick={(e) => {
                   e.stopPropagation();
                   openDatePicker(
@@ -3385,14 +4054,22 @@ export default function ProductionPage({
                       setOrders((prev) =>
                         prev.map((o) => o.id === order.id ? { ...o, targetEndDate: v } : o)
                       );
+                      const flashKey = `${order.id}|DUE`;
                       fetch(`/api/production-orders/${order.id}`, {
                         method: "PATCH",
                         headers: { "Content-Type": "application/json" },
                         body: JSON.stringify({ targetEndDate: v }),
-                      }).then(() => {
+                      }).then((res) => {
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
                         invalidateCachePrefix("/api/production-orders");
                         invalidateCachePrefix("/api/sales-orders");
-                      }).catch(() => {});
+                        flashCell(flashKey, "ok");
+                        toast.success("Date updated");
+                      }).catch((err) => {
+                        flashCell(flashKey, "err");
+                        const detail = err instanceof Error ? err.message : "network error";
+                        toast.error(`Save failed (${detail})`);
+                      });
                     },
                     e.currentTarget,
                   );
@@ -3402,6 +4079,17 @@ export default function ProductionPage({
               {DEPARTMENTS.map((d) => {
                 const c = cellFor(order, d.code, visibleOrders);
                 const isActiveCol = false; // inside ALL view, no column highlighted
+                // Flash state for this dept cell. The cell may contain
+                // multiple JCs (a sofa with multiple WIPs in one dept) — we
+                // key per-JC for green-tint accuracy, but for the cell tint
+                // we OR them: any "err" wins, then any "ok".
+                const deptCards = order.jobCards.filter((j) => j.departmentCode === d.code);
+                let cellTint: "ok" | "err" | "" = "";
+                for (const jc of deptCards) {
+                  const k = cellFlash[`${jc.id}|${d.code}`];
+                  if (k === "err") { cellTint = "err"; break; }
+                  if (k === "ok") cellTint = "ok";
+                }
                 const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
                   if (c.state === "empty") return;
                   e.stopPropagation();
@@ -3414,12 +4102,26 @@ export default function ProductionPage({
                     seed,
                     (v) => {
                       if (!v) return;
-                      const deptCards = order.jobCards.filter(
-                        (j) => j.departmentCode === d.code,
+                      // Fan out PATCH per dept JC. Each one carries its own
+                      // flash key so the green tint paints exactly the cell
+                      // that landed. Suppress per-JC toasts (silent) and
+                      // emit a single "Date updated" once we know all of
+                      // them landed (or surface the first failure).
+                      let okCount = 0;
+                      let errMsg: string | null = null;
+                      const promises = deptCards.map((jc) =>
+                        patchJobCard(order.id, jc.id, { dueDate: v }, {
+                          flashKey: `${jc.id}|${d.code}`,
+                          silent: true,
+                        }).then(() => { okCount++; })
+                          .catch((err) => {
+                            errMsg = err instanceof Error ? err.message : "network error";
+                          }),
                       );
-                      for (const jc of deptCards) {
-                        patchJobCard(order.id, jc.id, { dueDate: v });
-                      }
+                      Promise.allSettled(promises).then(() => {
+                        if (errMsg) toast.error(`Save failed (${errMsg})`);
+                        else if (okCount > 0) toast.success("Date updated");
+                      });
                     },
                     anchor,
                   );
@@ -3427,7 +4129,9 @@ export default function ProductionPage({
                 return (
                   <div
                     key={d.code}
-                    className={`relative border-l border-[#F0EBE3] min-h-[34px] ${isActiveCol ? "bg-[#FAF8F4]" : ""} ${c.state !== "empty" ? "cursor-pointer" : ""}`}
+                    className={`relative border-l border-[#F0EBE3] min-h-[34px] transition-colors ${isActiveCol ? "bg-[#FAF8F4]" : ""} ${c.state !== "empty" ? "cursor-pointer" : ""} ${
+                      cellTint === "ok" ? "bg-green-100" : cellTint === "err" ? "bg-red-100" : ""
+                    }`}
                     onClick={handleClick}
                     onDoubleClick={(e) => e.stopPropagation()}
                     title={c.state !== "empty" ? "Click to reschedule" : undefined}

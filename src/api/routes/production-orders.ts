@@ -2717,17 +2717,26 @@ async function applyPoUpdate(
          WHERE id = ?`,
       )
       .bind(
+        // Coerce every nullable column to `null` because the Postgres
+        // driver rejects `undefined` with UNDEFINED_VALUE. Undefined
+        // creeps in for two reasons: (a) a JC row fetched via SELECT *
+        // before a self-applying ALTER TABLE landed has the new
+        // column key absent from the row object, so spread copies
+        // leave it undefined; (b) optional body fields are only
+        // assigned in `if (body.X !== undefined)` branches, and an
+        // unrelated PATCH path may not initialize them on `updated`
+        // at all.
         updated.status,
-        updated.completedDate,
-        updated.pic1Id,
-        updated.pic1Name,
-        updated.pic2Id,
-        updated.pic2Name,
-        updated.actualMinutes,
-        updated.dueDate,
-        updated.rackingNumber,
-        updated.overdue,
-        updated.distributedAt,
+        updated.completedDate ?? null,
+        updated.pic1Id ?? null,
+        updated.pic1Name ?? null,
+        updated.pic2Id ?? null,
+        updated.pic2Name ?? null,
+        updated.actualMinutes ?? null,
+        updated.dueDate ?? null,
+        updated.rackingNumber ?? null,
+        updated.overdue ?? null,
+        updated.distributedAt ?? null,
         updated.id,
       )
       .run();

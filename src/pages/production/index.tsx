@@ -2972,19 +2972,22 @@ export default function ProductionPage({
         {/* Date-axis dropdown removed 2026-05-07 per operator preference —
             from/to range always filters on dueDate (production target end
             date). The customerDeliveryDate + created_at axes were unused. */}
-        <label className="text-[10px] text-[#6B7280]">Due date — from</label>
+        {/* Filters always apply to dueDate. Labels removed 2026-05-07 — */}
+        {/* the from/to inputs sit in the standard left-to-right reading */}
+        {/* order so the relationship is self-evident. */}
         <input
           type="date"
           value={fltDueFrom}
           onChange={(e) => setFltDueFrom(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
+          title="From (due date)"
         />
-        <label className="text-[10px] text-[#6B7280]">to</label>
         <input
           type="date"
           value={fltDueTo}
           onChange={(e) => setFltDueTo(e.target.value)}
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
+          title="To (due date)"
         />
         {!shouldFetch && (
           <button

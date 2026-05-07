@@ -209,7 +209,10 @@ export default function ProductionPage({
   //     (HB→HEADBOARD, DIVAN, BASE→SOFA_BASE, CUSHION→SOFA_CUSHION, etc.).
   //   • Model — exact productCode match, drawn from already-loaded orders.
   const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
-  const [fltDateAxis, setFltDateAxis] =
+  // Date-axis dropdown removed 2026-05-07 — fltDateAxis is now a constant
+  // 'dueDate'. The state hook stays so the filter logic conditional below
+  // still resolves correctly without a deeper refactor.
+  const [fltDateAxis] =
     useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
   const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
   const [fltModel, setFltModel] = useUrlState<string>("model", "");
@@ -2966,27 +2969,10 @@ export default function ProductionPage({
             click ▼ on the Status column header to narrow by JC status
             (WAITING / DONE / OVERDUE) and the colored row background
             still flags ON_HOLD / CANCELLED / COMPLETED PO rows.) */}
-        {/* Date axis toggle — picks WHICH date column the from/to range
-            applies to. dueDate (default) is the production target end date.
-            customerDeliveryDate is what the customer was promised (TODO:
-            currently the production_orders payload doesn't expose it; the
-            filter no-ops on rows where the field is missing). created_at =
-            when the PO was raised. */}
-        <select
-          value={fltDateAxis}
-          onChange={(e) =>
-            setFltDateAxis(
-              e.target.value as "dueDate" | "customerDeliveryDate" | "created_at",
-            )
-          }
-          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
-          title="Which date axis the from/to range filters on"
-        >
-          <option value="dueDate">Due date</option>
-          <option value="customerDeliveryDate">Customer delivery</option>
-          <option value="created_at">Created at</option>
-        </select>
-        <label className="text-[10px] text-[#6B7280]">From</label>
+        {/* Date-axis dropdown removed 2026-05-07 per operator preference —
+            from/to range always filters on dueDate (production target end
+            date). The customerDeliveryDate + created_at axes were unused. */}
+        <label className="text-[10px] text-[#6B7280]">Due date — from</label>
         <input
           type="date"
           value={fltDueFrom}

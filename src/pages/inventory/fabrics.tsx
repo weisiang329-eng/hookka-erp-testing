@@ -1,4 +1,5 @@
 import { useState, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { formatCurrency } from "@/lib/utils";
 import type { FabricTracking } from "@/types";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
@@ -59,6 +60,7 @@ const CATEGORY_COLORS: Record<string, { bg: string; text: string }> = {
 type Tab = "inventory";
 
 export default function FabricsPage() {
+  const navigate = useNavigate();
   const { data: fabricsResp, loading, refresh: refreshFabrics } = useCachedJson<{ success?: boolean; data?: FabricTracking[] }>("/api/fabric-tracking");
   const fabrics: FabricTracking[] = useMemo(
     () => (fabricsResp?.data ?? (Array.isArray(fabricsResp) ? (fabricsResp as FabricTracking[]) : [])),
@@ -165,6 +167,15 @@ export default function FabricsPage() {
               // ignore
             }
           }}
+          onCreatePO={(fabricCode, qty) => {
+            // Deep-link into Procurement with the fabric prefilled. The
+            // procurement page reads ?prefillRm + ?qty on mount, builds a
+            // single POLineItem from the supplier-material-binding (auto-
+            // picks main supplier + price), and opens the Create PO modal.
+            navigate(
+              `/procurement?prefillRm=${encodeURIComponent(fabricCode)}&qty=${qty}`,
+            );
+          }}
         />
       )}
     </div>
@@ -202,6 +213,7 @@ function InventoryTab({
   categoryFilter,
   setCategoryFilter,
   onPriceTierChange,
+  onCreatePO,
 }: {
   fabrics: FabricTracking[];
   search: string;
@@ -213,6 +225,7 @@ function InventoryTab({
     field: "sofaPriceTier" | "bedframePriceTier",
     tier: "PRICE_1" | "PRICE_2" | "PRICE_3",
   ) => void;
+  onCreatePO: (fabricCode: string, qty: number) => void;
 }) {
   // DataGrid columns. Sticky fabricCode + sortable on every numeric metric +
   // built-in column toggle (visibility) + value filter (the "(All)" dropdown
@@ -405,15 +418,29 @@ function InventoryTab({
         sortable: true,
         render: (_v, f) => (
           <div className="text-right">
-            <span
-              className={`font-bold tabular-nums ${
-                f.shortage < 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"
-              }`}
-            >
-              {f.shortage < 0
-                ? f.shortage.toLocaleString()
-                : `+${f.shortage.toLocaleString()}`}
-            </span>
+            {f.shortage < 0 ? (
+              // Negative shortage = under-provisioned. Click to deep-link
+              // into Procurement with this fabric prefilled + the absolute
+              // shortage seeded as the order qty (rounded up). Procurement
+              // page reads ?prefillRm + ?qty params (see procurement/index.tsx
+              // useEffect on searchParams).
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const qty = Math.ceil(Math.abs(f.shortage));
+                  onCreatePO(f.fabricCode, qty);
+                }}
+                className="font-bold tabular-nums text-[#9A3A2D] hover:underline cursor-pointer"
+                title={`Click to create PO for ${f.fabricCode} — order ${Math.ceil(Math.abs(f.shortage))} ${f.fabricCode.startsWith("PC") || f.fabricCategory.includes("FABR") ? "m" : ""}`}
+              >
+                {f.shortage.toLocaleString()}
+              </button>
+            ) : (
+              <span className="font-bold tabular-nums text-[#4F7C3A]">
+                +{f.shortage.toLocaleString()}
+              </span>
+            )}
             {f.shortage < 0 &&
               (() => {
                 const subs = getSubstitutesForFabric(f.fabricCode);
@@ -429,7 +456,7 @@ function InventoryTab({
         ),
       },
     ],
-    [onPriceTierChange],
+    [onPriceTierChange, onCreatePO],
   );
 
   return (

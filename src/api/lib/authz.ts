@@ -118,7 +118,7 @@ async function resolveUserRole(
   if (cached) return cached;
 
   const row = await c.var.DB.prepare(
-    `SELECT u.roleId AS roleId, r.name AS roleName
+    `SELECT u.roleId AS roleId, r.name AS "roleName"
        FROM users u
        LEFT JOIN roles r ON r.id = u.roleId
       WHERE u.id = ?

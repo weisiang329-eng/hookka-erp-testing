@@ -246,7 +246,7 @@ export async function backfillAllJobCards(
               -- do. Without this, CO rows pushed to Sheets had blank
               -- customerPOId and soReference columns.
               COALESCE(so.customerPOId, co.customerPOId) AS customerPOId,
-              COALESCE(so.reference, co.reference)       AS soReference
+              COALESCE(so.reference, co.reference)       AS "soReference"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
     LEFT JOIN sales_orders so ON so.id = po.salesOrderId

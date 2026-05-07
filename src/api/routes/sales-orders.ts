@@ -2348,7 +2348,7 @@ async function pushNewlyCreatedJobCardsToSheet(
               po.customerName AS customerName,
               po.productCode AS productCode,
               so.customerPOId AS customerPOId,
-              so.reference   AS soReference
+              so.reference   AS "soReference"
          FROM job_cards jc
          JOIN production_orders po ON po.id = jc.productionOrderId
     LEFT JOIN sales_orders so ON so.id = po.salesOrderId

@@ -476,12 +476,12 @@ app.get("/fg-source/:productCode", async (c) => {
               po.companySOId  AS soNo,
               po.customerName AS customerName,
               po.quantity     AS qty,
-              SUM(CASE WHEN jc.departmentCode = 'UPHOLSTERY' THEN 1 ELSE 0 END) AS uphTotal,
+              SUM(CASE WHEN jc.departmentCode = 'UPHOLSTERY' THEN 1 ELSE 0 END) AS "uphTotal",
               SUM(CASE WHEN jc.departmentCode = 'UPHOLSTERY'
-                        AND jc.status IN ('COMPLETED','TRANSFERRED') THEN 1 ELSE 0 END) AS uphDone,
+                        AND jc.status IN ('COMPLETED','TRANSFERRED') THEN 1 ELSE 0 END) AS "uphDone",
               MAX(CASE WHEN jc.departmentCode = 'UPHOLSTERY'
                         AND jc.status IN ('COMPLETED','TRANSFERRED')
-                       THEN jc.completedDate END) AS uphCompletedDate
+                       THEN jc.completedDate END) AS "uphCompletedDate"
          FROM production_orders po
          JOIN job_cards jc ON jc.productionOrderId = po.id
         WHERE po.productCode = ?

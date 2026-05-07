@@ -70,13 +70,20 @@ export function GRNFormDialog({
   useEffect(() => {
     if (po) {
       setItemEntries(
-        po.items.map((item, idx) => ({
-          poItemIndex: idx,
-          receivedQty: item.quantity,
-          acceptedQty: item.quantity,
-          rejectedQty: 0,
-          rejectionReason: "",
-        }))
+        po.items.map((item, idx) => {
+          // Seed with REMAINING qty (ordered − already-received), not the full
+          // ordered qty. PARTIAL_RECEIVED POs come back through this dialog for
+          // the second/third receipt; pre-filling the original quantity forced
+          // the operator to subtract by hand on every line.
+          const remaining = Math.max(0, item.quantity - (item.receivedQty || 0));
+          return {
+            poItemIndex: idx,
+            receivedQty: remaining,
+            acceptedQty: remaining,
+            rejectedQty: 0,
+            rejectionReason: "",
+          };
+        }),
       );
     } else {
       setItemEntries([]);
@@ -165,14 +172,27 @@ export function GRNFormDialog({
                     {po.items.map((poItem, idx) => {
                       const entry = itemEntries[idx];
                       if (!entry) return null;
-                      const overReceipt = entry.receivedQty > poItem.quantity * 1.1;
+                      // Cumulative receipt comparison — the over-receipt flag
+                      // should look at (already-received + this-batch), not
+                      // just this batch, otherwise PARTIAL_RECEIVED top-ups
+                      // never trip the 110% guard.
+                      const alreadyReceived = poItem.receivedQty || 0;
+                      const cumulative = alreadyReceived + entry.receivedQty;
+                      const overReceipt = cumulative > poItem.quantity * 1.1;
                       return (
                         <tr key={idx} className="border-t border-[#E2DDD8]">
                           <td className="px-3 py-2">
                             <div className="font-medium">{poItem.materialName}</div>
                             <div className="text-xs text-gray-500">{poItem.supplierSKU}</div>
                           </td>
-                          <td className="px-3 py-2 text-right">{poItem.quantity} {poItem.unit}</td>
+                          <td className="px-3 py-2 text-right">
+                            <div>{poItem.quantity} {poItem.unit}</div>
+                            {alreadyReceived > 0 && (
+                              <div className="text-[10px] text-[#6B5C32]">
+                                {alreadyReceived} already received
+                              </div>
+                            )}
+                          </td>
                           <td className="px-3 py-2 text-right">
                             <Input type="number" onFocus={(e) => e.currentTarget.select()} min={0} className={`w-20 text-right ml-auto ${overReceipt ? "border-[#9A3A2D]" : ""}`}
                               value={entry.receivedQty} onChange={(e) => updateItem(idx, "receivedQty", Number(e.target.value))} />

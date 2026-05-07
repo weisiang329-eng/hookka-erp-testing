@@ -952,7 +952,7 @@ export default function ProductionPage({
     async (
       poId: string,
       jobCardId: string,
-      patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">>,
+      patch: Partial<Pick<JobCard, "dueDate" | "completedDate" | "status" | "pic1Id" | "pic1Name" | "pic2Id" | "pic2Name">> & { distributedAt?: string | null },
       // Optional cell-flash key (e.g. `${jobCardId}|FAB_CUT`). When present
       // a successful PATCH paints the cell green for 800ms and fires a
       // success toast; failure paints red + error toast. Caller can also
@@ -1353,6 +1353,10 @@ export default function ProductionPage({
     // has been QR-scanned. Renders "X/Y" when 0 < piecesDone < piecesTotal.
     piecesTotal: number;
     piecesDone: number;
+    // ISO timestamp of the "Sent to floor" tick (job_cards.distributedAt).
+    // NULL until the operator hands the printed sheet to the production
+    // worker. Drives the leftmost Sent column on the dept grid.
+    distributedAt: string | null;
     pic1: string;
     pic2: string;
     status: string;        // job_card status
@@ -1770,6 +1774,9 @@ export default function ProductionPage({
           // without the new fields don't trip the partial-render branch.
           piecesTotal: Math.max(1, jc.piecesTotal ?? jc.wipQty ?? 1),
           piecesDone: jc.piecesDone ?? 0,
+          // ISO timestamp the operator clicked the "Sent" tick. NULL =
+          // not yet handed out; truthy = printed + given to the floor.
+          distributedAt: jc.distributedAt ?? null,
           pic1: jc.pic1Name || "",
           pic2: jc.pic2Name || "",
           status: jc.status || "",
@@ -2134,6 +2141,38 @@ export default function ProductionPage({
   // parent setState → back here. Dept code is the only thing that changes
   // the column set meaningfully (activeTab).
   const deptColumns: Column<DeptRow>[] = useMemo(() => [
+    // Sent — leftmost tick column (added 2026-05-07). Operator clicks to mark
+    // the JC as printed + handed to the floor; persists via the same
+    // distributedAt PATCH the print-view uses. Sticky so it stays visible
+    // when the grid is scrolled horizontally.
+    {
+      key: "sent",
+      label: "Sent",
+      type: "text",
+      width: "60px",
+      align: "center",
+      sticky: true,
+      sortable: true,
+      render: (_v, row) => {
+        const isSent = !!row.distributedAt;
+        return (
+          <input
+            type="checkbox"
+            checked={isSent}
+            title={
+              isSent && row.distributedAt
+                ? `Sent at ${new Date(row.distributedAt).toLocaleString()}`
+                : "Tick when handed to the floor"
+            }
+            onChange={() => {
+              const next = isSent ? null : new Date().toISOString();
+              patchJobCard(row.poId, row.jobCardId, { distributedAt: next });
+            }}
+            className="h-4 w-4 cursor-pointer"
+          />
+        );
+      },
+    },
     // rowNo + soId are frozen to the left so operators always know which
     // row they're scanning when the grid is scrolled horizontally — this
     // sheet has 30+ columns and the SO ID falls off-screen quickly.

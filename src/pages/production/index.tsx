@@ -1144,7 +1144,12 @@ export default function ProductionPage({
           if (wanted.length === 0) continue;
           const c = cellAt(o, deptCode);
           if (c.state === "empty") return false;
-          if (!wanted.includes(c.state as DeptStatusValue)) return false;
+          // "edited" is a pseudo-filter that matches isEdited=true regardless
+          // of underlying state. Other tokens match the literal state.
+          const matches =
+            wanted.includes(c.state as DeptStatusValue) ||
+            (wanted.includes("edited") && c.isEdited);
+          if (!matches) return false;
         }
         return true;
       });
@@ -2663,11 +2668,15 @@ export default function ProductionPage({
     const title =
       activeTab === "ALL" ? "Production Schedule — Overview" : `Production Schedule — ${activeDept?.name}`;
 
-    const cellClass = (state: CellState) =>
-      state === "done" ? "done" :
-      state === "overdue" ? "overdue" :
-      state === "edited" ? "edited" :
-      state === "pending" ? "pending" : "empty";
+    const cellClass = (state: CellState, isEdited: boolean) => {
+      const base =
+        state === "done" ? "done" :
+        state === "overdue" ? "overdue" :
+        state === "pending" ? "pending" : "empty";
+      // is-edited is an additive modifier (white text → cyan, etc.) — applied
+      // alongside the state class.
+      return isEdited && state !== "done" ? `${base} is-edited` : base;
+    };
 
     let body = "";
     let columnCount = 0;
@@ -2680,7 +2689,7 @@ export default function ProductionPage({
           if (c.state === "done") {
             return `<td class="m done">✓<br/><small>${fmt(c.latestCompleted || c.earliestDue)}</small></td>`;
           }
-          return `<td class="m ${cellClass(c.state)}"><b>${c.doneCards}/${c.totalCards}</b><br/><small>${fmt(c.earliestDue)}</small></td>`;
+          return `<td class="m ${cellClass(c.state, c.isEdited)}"><b>${c.doneCards}/${c.totalCards}</b><br/><small>${fmt(c.earliestDue)}</small></td>`;
         }).join("");
         const details: string[] = [];
         if (o.fabricCode) details.push(o.fabricCode);
@@ -2904,7 +2913,10 @@ export default function ProductionPage({
     td.m.done    { background: #fff; color: #000; font-weight: 700; }
     td.m.pending { background: #fff; color: #000; font-style: italic; }
     td.m.overdue { background: #fff; color: #000; font-weight: 700; text-decoration: underline; }
-    td.m.edited  { background: #fff; color: #000; font-weight: 600; }
+    /* is-edited is an additive modifier paired with .pending or .overdue.
+       On B/W print we dotted-underline so the rescheduled marker still
+       shows alongside the state. */
+    td.m.is-edited { text-decoration-style: dotted; text-decoration-line: underline; }
     td.m.empty   { background: #fff; }
     /* Dept-pill rendering inside the dept-tab print template. Print-friendly
        (B/W) — done = bold, overdue = bold + underlined, pending = italic.

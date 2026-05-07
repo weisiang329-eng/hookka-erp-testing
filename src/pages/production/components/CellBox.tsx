@@ -2,17 +2,21 @@ import { Check } from "lucide-react";
 import type { Cell } from "../types";
 import { fmtShortDate } from "../utils";
 
-// Each cell shows state colour + the relevant date.
-// 4-state palette (2026-05-07 user spec — see types.ts CellState comment):
-//   done    — teal #3E6570 bg, white text + ✓ check (operator marked done)
-//   overdue — teal #3E6570 bg, red #DC2626 text (passed dueDate, not done)
-//   edited  — teal #3E6570 bg, white text (operator rescheduled, on track)
-//   pending — olive #9C6F1E bg, white text (default — never touched)
-// Priority done > overdue > edited > pending is enforced upstream in
-// cellFor(); this component just paints the resolved state.
+// Original 3-state palette + isEdited text-colour modifier:
+//   done    — teal  #3E6570 bg + white text + ✓ check
+//   overdue — red   #9A3A2D bg + white text
+//   pending — olive #9C6F1E bg + white text
+//
+// When `cell.isEdited` is true on a non-done cell, the text colour
+// flips to cyan #22D3EE so the operator can see "I rescheduled this"
+// at a glance — without losing the overdue red bg or pending olive bg
+// underneath. Done suppresses the modifier (completion supersedes edit).
 export function CellBox({ cell }: { cell: Cell }) {
   const base =
     "h-full w-full flex flex-col items-center justify-center text-[10px] leading-tight relative";
+  // Cyan text override for edited non-done cells; otherwise white.
+  const textCls =
+    cell.state !== "done" && cell.isEdited ? "text-[#22D3EE]" : "text-white";
 
   if (cell.state === "empty") {
     return <div className={`${base} bg-transparent`} />;
@@ -28,20 +32,8 @@ export function CellBox({ cell }: { cell: Cell }) {
     );
   }
   if (cell.state === "overdue") {
-    // Teal bg + red text — operator already rescheduled (or hasn't), but
-    // the current dueDate has already passed. Red numbers so the warning
-    // still pops against the calmer teal background.
     return (
-      <div className={`${base} bg-[#3E6570] text-[#DC2626] cursor-pointer hover:bg-[#4A7686]`}>
-        <span className="font-bold">{cell.doneCards}/{cell.totalCards}</span>
-        <span className="text-[9px] font-semibold">{fmtShortDate(cell.earliestDue)}</span>
-      </div>
-    );
-  }
-  if (cell.state === "edited") {
-    // Teal bg + white text — operator manually rescheduled; on schedule.
-    return (
-      <div className={`${base} bg-[#3E6570] text-white cursor-pointer hover:bg-[#4A7686]`}>
+      <div className={`${base} ${textCls} bg-[#9A3A2D] cursor-pointer hover:bg-[#B04536]`}>
         <span className="font-bold">{cell.doneCards}/{cell.totalCards}</span>
         <span className="text-[9px] font-semibold">{fmtShortDate(cell.earliestDue)}</span>
       </div>
@@ -49,7 +41,7 @@ export function CellBox({ cell }: { cell: Cell }) {
   }
   // pending
   return (
-    <div className={`${base} bg-[#9C6F1E] text-white cursor-pointer hover:bg-[#B38023]`}>
+    <div className={`${base} ${textCls} bg-[#9C6F1E] cursor-pointer hover:bg-[#B38023]`}>
       <span className="font-bold">{cell.doneCards}/{cell.totalCards}</span>
       <span className="text-[9px] font-semibold">{fmtShortDate(cell.earliestDue)}</span>
     </div>

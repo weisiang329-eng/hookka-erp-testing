@@ -90,15 +90,19 @@ export function cellFor(
     state = "done";
   } else {
     const today = new Date().toISOString().slice(0, 10);
-    const isOverdue = !!(earliestDue && earliestDue < today);
-    // Cell is "edited" when ANY of its underlying JCs has a non-null
-    // dueDateOverriddenAt. Priority: done > overdue > edited > pending,
-    // so we only consult the override flag once we know the cell is
-    // neither done nor overdue.
-    const anyEdited = cards.some((c) => !!c.dueDateOverriddenAt);
-    if (isOverdue) state = "overdue";
-    else if (anyEdited) state = "edited";
-    else state = "pending";
+    state = earliestDue && earliestDue < today ? "overdue" : "pending";
   }
-  return { state, totalCards: cards.length, doneCards: done, earliestDue, latestCompleted };
+  // Edited is a text-colour modifier on non-done states; it tracks whether
+  // any underlying JC has a non-null dueDateOverriddenAt. Done cells
+  // suppress the indicator (completion already supersedes the edit).
+  const isEdited =
+    state !== "done" && cards.some((c) => !!c.dueDateOverriddenAt);
+  return {
+    state,
+    isEdited,
+    totalCards: cards.length,
+    doneCards: done,
+    earliestDue,
+    latestCompleted,
+  };
 }

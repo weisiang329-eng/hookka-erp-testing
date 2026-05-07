@@ -236,22 +236,28 @@ async function findSalesOrderIdsByLookup(
   },
 ): Promise<{ ids: string[]; matchedVia: string | null }> {
   // Strategy: try each field in order. First non-empty hit wins.
-  //   1. customerPO  — if user populates `customers PO` column on the SO
-  //   2. reference   — most common (HC#, CR#, AKHC#, ZNT# etc). Supports
-  //                    combined values like "CR0450+CR1056" by splitting on
-  //                    + or , and OR-ing the lookups.
-  //   3. soNo        — fallback to our internal SO number (SO-2509-238).
+  //   1. customerPOId — primary. Real customer PO numbers live here
+  //                     (e.g. "PO-008657"). The shorter `customerPO`
+  //                     column exists in the schema but is empty in prod —
+  //                     OR'd in below as a defensive fallback in case any
+  //                     legacy row ended up populating it instead.
+  //   2. reference    — most common (HC#, CR#, AKHC#, ZNT# etc). Supports
+  //                     combined values like "CR0450+CR1056" by splitting
+  //                     on + or , and OR-ing the lookups.
+  //   3. soNo         — fallback to our internal SO number (SO-2509-238).
   const customerPOTokens = splitMultiRef(lookup.custPONo);
   if (customerPOTokens.length > 0) {
     const all = new Set<string>();
     for (const tok of customerPOTokens) {
       const res = await db
-        .prepare("SELECT id FROM sales_orders WHERE customerPO = ?")
-        .bind(tok)
+        .prepare(
+          "SELECT id FROM sales_orders WHERE customerPOId = ? OR customerPO = ?",
+        )
+        .bind(tok, tok)
         .all<SalesOrderIdRow>();
       for (const r of res.results ?? []) all.add(r.id);
     }
-    if (all.size > 0) return { ids: Array.from(all), matchedVia: "customerPO" };
+    if (all.size > 0) return { ids: Array.from(all), matchedVia: "customerPOId" };
   }
 
   const refTokens = splitMultiRef(lookup.customerRef);

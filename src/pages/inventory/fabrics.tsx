@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { formatCurrency } from "@/lib/utils";
 import type { FabricTracking } from "@/types";
 import { useCachedJson, invalidateCachePrefix } from "@/lib/cached-fetch";
+import { DataGrid, type Column } from "@/components/ui/data-grid";
 import {
   Search,
   Package,
@@ -213,9 +214,221 @@ function InventoryTab({
     tier: "PRICE_1" | "PRICE_2" | "PRICE_3",
   ) => void;
 }) {
+  // DataGrid columns. Sticky fabricCode + sortable on every numeric metric +
+  // built-in column toggle (visibility) + value filter (the "(All)" dropdown
+  // per column header). Replaces the old static <table> + page-level search
+  // input — the grid's own controls give per-column sort + filter.
+  const columns: Column<FabricTracking>[] = useMemo(
+    () => [
+      {
+        key: "fabricCode",
+        label: "Fabric Code",
+        type: "text",
+        width: "140px",
+        sortable: true,
+        sticky: true,
+        render: (_v, f) => (
+          <span className="font-mono font-medium text-gray-900">
+            {f.fabricCode}
+          </span>
+        ),
+      },
+      {
+        key: "fabricDescription",
+        label: "Description",
+        type: "text",
+        width: "180px",
+        sortable: true,
+      },
+      {
+        key: "fabricCategory",
+        label: "Category",
+        type: "text",
+        width: "110px",
+        sortable: true,
+        render: (_v, f) => {
+          const catColor = CATEGORY_COLORS[f.fabricCategory] ?? {
+            bg: "bg-gray-100",
+            text: "text-gray-600",
+          };
+          return (
+            <span
+              className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${catColor.bg} ${catColor.text}`}
+            >
+              {f.fabricCategory}
+            </span>
+          );
+        },
+      },
+      {
+        key: "sofaPriceTier",
+        label: "Sofa Tier",
+        type: "text",
+        width: "100px",
+        align: "center",
+        sortable: true,
+        // Sort keys via filterAccessor so "Price 1/2/3" order naturally.
+        filterAccessor: (f) =>
+          (f.sofaPriceTier ?? f.priceTier ?? "PRICE_2").replace("PRICE_", ""),
+        render: (_v, f) => (
+          <PriceTierSelect
+            value={f.sofaPriceTier ?? f.priceTier ?? "PRICE_2"}
+            onChange={(t) => onPriceTierChange(f.id, "sofaPriceTier", t)}
+          />
+        ),
+      },
+      {
+        key: "bedframePriceTier",
+        label: "Bedframe Tier",
+        type: "text",
+        width: "120px",
+        align: "center",
+        sortable: true,
+        filterAccessor: (f) =>
+          (f.bedframePriceTier ?? f.priceTier ?? "PRICE_2").replace("PRICE_", ""),
+        render: (_v, f) => (
+          <PriceTierSelect
+            value={f.bedframePriceTier ?? f.priceTier ?? "PRICE_2"}
+            onChange={(t) => onPriceTierChange(f.id, "bedframePriceTier", t)}
+          />
+        ),
+      },
+      {
+        key: "price",
+        label: "Price",
+        type: "currency",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="text-gray-700">{formatCurrency(f.price)}</span>
+        ),
+      },
+      {
+        key: "soh",
+        label: "SOH",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="font-medium text-gray-900 tabular-nums">
+            {f.soh.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "poOutstanding",
+        label: "PO Outstanding",
+        type: "number",
+        width: "130px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) =>
+          f.poOutstanding > 0 ? (
+            <span className="text-[#9C6F1E] font-medium tabular-nums">
+              {f.poOutstanding.toLocaleString()}
+            </span>
+          ) : (
+            <span className="text-gray-400">
+              <Minus className="inline h-3 w-3" />
+            </span>
+          ),
+      },
+      {
+        key: "lastMonthUsage",
+        label: "Last 30d Used",
+        type: "number",
+        width: "120px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="text-gray-600 tabular-nums">
+            {f.lastMonthUsage.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "oneWeekUsage",
+        label: "1-Week",
+        type: "number",
+        width: "90px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="text-gray-600 tabular-nums">
+            {f.oneWeekUsage.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "twoWeeksUsage",
+        label: "2-Week",
+        type: "number",
+        width: "90px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="text-gray-600 tabular-nums">
+            {f.twoWeeksUsage.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "oneMonthUsage",
+        label: "1-Month",
+        type: "number",
+        width: "100px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <span className="text-gray-600 tabular-nums">
+            {f.oneMonthUsage.toLocaleString()}
+          </span>
+        ),
+      },
+      {
+        key: "shortage",
+        label: "Shortage",
+        type: "number",
+        width: "140px",
+        align: "right",
+        sortable: true,
+        render: (_v, f) => (
+          <div className="text-right">
+            <span
+              className={`font-bold tabular-nums ${
+                f.shortage < 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"
+              }`}
+            >
+              {f.shortage < 0
+                ? f.shortage.toLocaleString()
+                : `+${f.shortage.toLocaleString()}`}
+            </span>
+            {f.shortage < 0 &&
+              (() => {
+                const subs = getSubstitutesForFabric(f.fabricCode);
+                if (!subs) return null;
+                return (
+                  <div className="text-[10px] text-[#9C6F1E] font-normal mt-0.5 text-left">
+                    ⚠️ Subs:{" "}
+                    {subs.map((s) => `${s.name} (${s.costDiff})`).join(", ")}
+                  </div>
+                );
+              })()}
+          </div>
+        ),
+      },
+    ],
+    [onPriceTierChange],
+  );
+
   return (
     <div className="space-y-4">
-      {/* Filters */}
+      {/* Page-level filters — search + category. DataGrid has its own
+          per-column filter / sort, but the global search and category
+          dropdown are kept for quick scoping (single-keystroke "show only
+          PC151" filter is faster than opening the per-column filter UI). */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
@@ -243,127 +456,18 @@ function InventoryTab({
         </div>
       </div>
 
-      {/* Table */}
-      <div className="overflow-x-auto border border-gray-200 rounded-lg">
-        <table className="min-w-full divide-y divide-gray-200 text-sm">
-          <thead className="bg-gray-50">
-            <tr>
-              <th className="px-3 py-3 text-left font-semibold text-gray-600">Fabric Code</th>
-              <th className="px-3 py-3 text-left font-semibold text-gray-600">Description</th>
-              <th className="px-3 py-3 text-left font-semibold text-gray-600">Category</th>
-              <th className="px-3 py-3 text-center font-semibold text-gray-600">
-                Sofa Price Tier
-                <div className="text-[10px] font-normal text-gray-400 mt-0.5">Sofa &amp; Accessory</div>
-              </th>
-              <th className="px-3 py-3 text-center font-semibold text-gray-600">
-                Bedframe Price Tier
-              </th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">Price</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">SOH</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">PO Outstanding</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">Last Month Usage</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">1-Week</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">2-Week</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">1-Month</th>
-              <th className="px-3 py-3 text-right font-semibold text-gray-600">Shortage</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-gray-100">
-            {fabrics.length === 0 ? (
-              <tr>
-                <td colSpan={13} className="px-3 py-8 text-center text-gray-400">
-                  No fabrics found
-                </td>
-              </tr>
-            ) : (
-              fabrics.map((f) => {
-                const catColor = CATEGORY_COLORS[f.fabricCategory] ?? {
-                  bg: "bg-gray-100",
-                  text: "text-gray-600",
-                };
-                return (
-                  <tr key={f.id} className="hover:bg-gray-50">
-                    <td className="px-3 py-2 font-mono font-medium text-gray-900">
-                      {f.fabricCode}
-                    </td>
-                    <td className="px-3 py-2 text-gray-700">{f.fabricDescription}</td>
-                    <td className="px-3 py-2">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${catColor.bg} ${catColor.text}`}
-                      >
-                        {f.fabricCategory}
-                      </span>
-                    </td>
-                    <td className="px-3 py-2 text-center">
-                      <PriceTierSelect
-                        value={f.sofaPriceTier ?? f.priceTier ?? "PRICE_2"}
-                        onChange={(t) =>
-                          onPriceTierChange(f.id, "sofaPriceTier", t)
-                        }
-                      />
-                    </td>
-                    <td className="px-3 py-2 text-center">
-                      <PriceTierSelect
-                        value={f.bedframePriceTier ?? f.priceTier ?? "PRICE_2"}
-                        onChange={(t) =>
-                          onPriceTierChange(f.id, "bedframePriceTier", t)
-                        }
-                      />
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-700">
-                      {formatCurrency(f.price)}
-                    </td>
-                    <td className="px-3 py-2 text-right font-medium text-gray-900">
-                      {f.soh.toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2 text-right">
-                      {f.poOutstanding > 0 ? (
-                        <span className="text-[#9C6F1E] font-medium">
-                          {f.poOutstanding.toLocaleString()}
-                        </span>
-                      ) : (
-                        <span className="text-gray-400">
-                          <Minus className="inline h-3 w-3" />
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-600">
-                      {f.lastMonthUsage.toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-600">
-                      {f.oneWeekUsage.toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-600">
-                      {f.twoWeeksUsage.toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2 text-right text-gray-600">
-                      {f.oneMonthUsage.toLocaleString()}
-                    </td>
-                    <td className="px-3 py-2 text-right font-bold">
-                      <span
-                        className={
-                          f.shortage < 0 ? "text-[#9A3A2D]" : "text-[#4F7C3A]"
-                        }
-                      >
-                        {f.shortage < 0 ? f.shortage.toLocaleString() : `+${f.shortage.toLocaleString()}`}
-                      </span>
-                      {f.shortage < 0 && (() => {
-                        const subs = getSubstitutesForFabric(f.fabricCode);
-                        if (!subs) return null;
-                        return (
-                          <div className="text-[10px] text-[#9C6F1E] font-normal mt-0.5 text-left">
-                            &#x26A0;&#xFE0F; Substitutes: {subs.map((s) => `${s.name} (${s.costDiff})`).join(", ")}
-                          </div>
-                        );
-                      })()}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      {/* Grid — sort, per-column filter, column visibility toggle, sticky
+          fabricCode all built in. gridId persists user's column layout +
+          filter state per logged-in user across sessions. */}
+      <DataGrid
+        columns={columns}
+        data={fabrics}
+        keyField="id"
+        gridId="fabric-inventory"
+        emptyMessage="No fabrics found"
+        stickyHeader
+        virtualize={fabrics.length > 100}
+      />
     </div>
   );
 }

@@ -231,7 +231,13 @@ function MultiSelectFilter({
 
 function DeptStatusFilter({
   selected, onChange,
-}: { selected: ("pending" | "overdue" | "done")[]; onChange: (next: ("pending" | "overdue" | "done")[]) => void }) {
+  dateRange, onDateRangeChange,
+}: {
+  selected: ("pending" | "overdue" | "done")[];
+  onChange: (next: ("pending" | "overdue" | "done")[]) => void;
+  dateRange?: { from: string; to: string };
+  onDateRangeChange?: (next: { from: string; to: string }) => void;
+}) {
   const opts: { value: "pending" | "overdue" | "done"; label: string; dot: string }[] = [
     { value: "pending", label: "Pending", dot: "bg-[#F4B860]" },
     { value: "overdue", label: "Overdue", dot: "bg-[#D9534F]" },
@@ -244,8 +250,14 @@ function DeptStatusFilter({
     else next.add(v);
     onChange(Array.from(next));
   };
+  const range = dateRange ?? { from: "", to: "" };
+  const hasAny = selected.length > 0 || !!range.from || !!range.to;
+  const clearAll = () => {
+    onChange([]);
+    onDateRangeChange?.({ from: "", to: "" });
+  };
   return (
-    <div className="flex flex-col gap-1 min-w-[140px]">
+    <div className="flex flex-col gap-1 min-w-[180px]">
       {opts.map((o) => (
         <label key={o.value} className="flex items-center gap-1.5 cursor-pointer hover:bg-[#FAF8F4] rounded px-1 py-0.5">
           <input
@@ -258,11 +270,31 @@ function DeptStatusFilter({
           <span className="text-[12px]">{o.label}</span>
         </label>
       ))}
-      {selected.length > 0 && (
+      {onDateRangeChange && (
+        <>
+          <div className="border-t border-[#E6E0D9] my-1" />
+          <div className="text-[10px] text-[#6B7280] px-1">Date range</div>
+          <input
+            type="date"
+            value={range.from}
+            onChange={(e) => onDateRangeChange({ ...range, from: e.target.value })}
+            className="text-[11px] px-1.5 py-0.5 border border-[#E6E0D9] rounded"
+            title="From (cell date)"
+          />
+          <input
+            type="date"
+            value={range.to}
+            onChange={(e) => onDateRangeChange({ ...range, to: e.target.value })}
+            className="text-[11px] px-1.5 py-0.5 border border-[#E6E0D9] rounded"
+            title="To (cell date)"
+          />
+        </>
+      )}
+      {hasAny && (
         <button
           type="button"
           className="text-[11px] text-[#6B5C32] hover:underline self-end mt-1"
-          onClick={() => onChange([])}
+          onClick={clearAll}
         >
           Clear
         </button>
@@ -513,11 +545,16 @@ export default function ProductionPage({
     dueFrom: string; // YYYY-MM-DD
     dueTo: string;
     deptStatuses: Partial<Record<string, ("pending" | "overdue" | "done")[]>>;
+    // Per-dept date-range filter (the displayed cell date — done cells use
+    // latestCompleted; others use earliestDue). Independent of deptStatuses
+    // so operators can combine both: "FAB CUT pending AND due before 12 May".
+    deptDates: Partial<Record<string, { from: string; to: string }>>;
   };
   const emptyOverviewFilters: OverviewFilters = {
     soId: "", product: "", customers: [], specialOrder: "",
     qtyMin: "", qtyMax: "", dueFrom: "", dueTo: "",
     deptStatuses: {},
+    deptDates: {},
   };
   const OVERVIEW_TABLE_LS_KEY = "hookka-production-overview-table-state";
   type OverviewTableState = { sort: OverviewSort; filters: OverviewFilters };
@@ -585,7 +622,10 @@ export default function ProductionPage({
       case "due": return !!f.dueFrom || !!f.dueTo;
       default: {
         const arr = f.deptStatuses[col];
-        return !!(arr && arr.length > 0);
+        const hasStatus = !!(arr && arr.length > 0);
+        const range = f.deptDates[col];
+        const hasDate = !!(range && (range.from || range.to));
+        return hasStatus || hasDate;
       }
     }
   }, [overviewFilters]);
@@ -595,6 +635,10 @@ export default function ProductionPage({
     if (f.customers.length > 0) return true;
     for (const k of Object.keys(f.deptStatuses)) {
       if ((f.deptStatuses[k] || []).length > 0) return true;
+    }
+    for (const k of Object.keys(f.deptDates)) {
+      const r = f.deptDates[k];
+      if (r && (r.from || r.to)) return true;
     }
     return false;
   }, [overviewFilters]);
@@ -1157,6 +1201,22 @@ export default function ProductionPage({
           const c = cellAt(o, deptCode);
           if (c.state === "empty") return false;
           if (!wanted.includes(c.state as "pending" | "overdue" | "done")) return false;
+        }
+        // Dept date-range filters — applied to the displayed cell date
+        // (done → latestCompleted; else → earliestDue). Empty cells fall
+        // out of any non-empty filter.
+        for (const deptCode of Object.keys(f.deptDates)) {
+          const range = f.deptDates[deptCode];
+          if (!range || (!range.from && !range.to)) continue;
+          const c = cellAt(o, deptCode);
+          if (c.state === "empty") return false;
+          const cellDate =
+            c.state === "done"
+              ? (c.latestCompleted || c.earliestDue)
+              : c.earliestDue;
+          if (!cellDate) return false;
+          if (range.from && cellDate < range.from) return false;
+          if (range.to && cellDate > range.to) return false;
         }
         return true;
       });
@@ -3863,6 +3923,13 @@ export default function ProductionPage({
                     setOverviewFilters((p) => ({
                       ...p,
                       deptStatuses: { ...p.deptStatuses, [d.code]: next },
+                    }))
+                  }
+                  dateRange={overviewFilters.deptDates[d.code] || { from: "", to: "" }}
+                  onDateRangeChange={(next) =>
+                    setOverviewFilters((p) => ({
+                      ...p,
+                      deptDates: { ...p.deptDates, [d.code]: next },
                     }))
                   }
                 />

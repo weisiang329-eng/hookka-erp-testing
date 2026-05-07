@@ -56,7 +56,7 @@ app.get("/", async (c) => {
   // gets oldest-first. The unique (orgId, month) index makes this a tight
   // index-only scan.
   const res = await c.var.DB.prepare(
-    `SELECT month, revenue_sen AS revenueSen, order_count AS orderCount
+    `SELECT month, revenue_sen AS "revenueSen", order_count AS "orderCount"
        FROM mv_revenue_by_month_by_org
       WHERE orgId = ?
       ORDER BY month DESC

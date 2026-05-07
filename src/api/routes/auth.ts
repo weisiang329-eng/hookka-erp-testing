@@ -338,7 +338,7 @@ app.get("/me/permissions", async (c) => {
     // Look up the user's role (id + name). Empty roleId -> READ_ONLY fallback,
     // mirroring authz.ts's resolveUserRole().
     const roleRow = await c.var.DB.prepare(
-      `SELECT u.roleId AS roleId, r.name AS roleName
+      `SELECT u.roleId AS roleId, r.name AS "roleName"
          FROM users u
          LEFT JOIN roles r ON r.id = u.roleId
         WHERE u.id = ?

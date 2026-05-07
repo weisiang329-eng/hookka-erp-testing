@@ -1024,7 +1024,7 @@ app.post("/cascade-upstream-completion", async (c) => {
               j.sequence AS anchor_seq,
               j.completedDate AS anchor_date,
               j.departmentCode AS anchor_dept,
-              j.wipType AS anchorWt
+              j.wipType AS "anchorWt"
          FROM job_cards j
          JOIN (
            SELECT productionOrderId,
@@ -1580,7 +1580,7 @@ app.post("/uph-pofold-backfill", async (c) => {
     .prepare(
       `SELECT productionOrderId,
               COALESCE(wipKey,'') AS wk,
-              completedDate AS uphDate
+              completedDate AS "uphDate"
          FROM job_cards
         WHERE departmentCode = 'UPHOLSTERY'
           AND status IN ('COMPLETED','TRANSFERRED')
@@ -2084,13 +2084,13 @@ app.post("/derive-historical-price-baselines", async (c) => {
   // before that date is a gap we may be able to fill from SO snapshots.
   const cpRowsRes = await db
     .prepare(
-      `SELECT cp.id           AS cpId,
+      `SELECT cp.id           AS "cpId",
               cp.productId    AS productId,
               cp.customerId   AS customerId,
-              cp.basePriceSen AS cpLegacyBase,
+              cp.basePriceSen AS "cpLegacyBase",
               p.code          AS productCode,
               p.category      AS category,
-              MIN(cph.effectiveFrom) AS earliestHistory
+              MIN(cph.effectiveFrom) AS "earliestHistory"
          FROM customer_products cp
          JOIN products p ON p.id = cp.productId
          LEFT JOIN customer_product_prices cph
@@ -2127,9 +2127,9 @@ app.post("/derive-historical-price-baselines", async (c) => {
     // Find OLDEST SO line for this (productCode, customerId) below cutoff.
     const oldestLine = await db
       .prepare(
-        `SELECT soi.id           AS lineId,
+        `SELECT soi.id           AS "lineId",
                 soi.basePriceSen AS basePriceSen,
-                so.companySODate AS soDate
+                so.companySODate AS "soDate"
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.salesOrderId
           WHERE soi.productCode = ?
@@ -2195,8 +2195,8 @@ app.post("/derive-historical-price-baselines", async (c) => {
       `SELECT p.id          AS productId,
               p.code        AS productCode,
               p.category    AS category,
-              p.basePriceSen AS legacyBase,
-              MIN(pp.effectiveFrom) AS earliestHistory
+              p.basePriceSen AS "legacyBase",
+              MIN(pp.effectiveFrom) AS "earliestHistory"
          FROM products p
          LEFT JOIN product_prices pp ON pp.productId = p.id
         WHERE p.category IN ('BEDFRAME','ACCESSORY')
@@ -2215,9 +2215,9 @@ app.post("/derive-historical-price-baselines", async (c) => {
     const cutoff = p.earliestHistory ?? "9999-12-31";
     const oldestLine = await db
       .prepare(
-        `SELECT soi.id           AS lineId,
+        `SELECT soi.id           AS "lineId",
                 soi.basePriceSen AS basePriceSen,
-                so.companySODate AS soDate
+                so.companySODate AS "soDate"
            FROM sales_order_items soi
            JOIN sales_orders so ON so.id = soi.salesOrderId
           WHERE soi.productCode = ?
@@ -2786,7 +2786,7 @@ app.post("/fix-misparsed-jan-dates", async (c) => {
       .prepare(
         `SELECT productionOrderId,
                 COUNT(*) AS cnt,
-                MAX(completedDate) AS maxDate
+                MAX(completedDate) AS "maxDate"
            FROM job_cards
           WHERE productionOrderId IN (${placeholders})
             AND completedDate IS NOT NULL
@@ -4200,9 +4200,9 @@ app.post("/normalize-fullwidth-parens", async (c) => {
   };
   const pairsRes = await db
     .prepare(
-      `SELECT b.id AS fwId, b.code AS fwCode, b.stockQty AS fwQty,
-              b.relatedProduct AS fwRelated,
-              a.id AS hwId, a.code AS hwCode, a.stockQty AS hwQty
+      `SELECT b.id AS "fwId", b.code AS "fwCode", b.stockQty AS "fwQty",
+              b.relatedProduct AS "fwRelated",
+              a.id AS "hwId", a.code AS "hwCode", a.stockQty AS "hwQty"
          FROM wip_items b
          JOIN wip_items a
            ON a.code = REPLACE(REPLACE(b.code, '（', '('), '）', ')')
@@ -4265,10 +4265,10 @@ app.post("/normalize-fullwidth-parens", async (c) => {
   // surfacing them here lets us decide manually if any need merging.
   const renameCollisionRes = await db
     .prepare(
-      `SELECT b.id AS fwId, b.code AS fwCode, b.relatedProduct AS fwRelated,
-              b.stockQty AS fwQty,
-              a.id AS hwId, a.code AS hwCode, a.relatedProduct AS hwRelated,
-              a.stockQty AS hwQty
+      `SELECT b.id AS "fwId", b.code AS "fwCode", b.relatedProduct AS "fwRelated",
+              b.stockQty AS "fwQty",
+              a.id AS "hwId", a.code AS "hwCode", a.relatedProduct AS "hwRelated",
+              a.stockQty AS "hwQty"
          FROM wip_items b
          JOIN wip_items a
            ON a.code = REPLACE(REPLACE(b.code, '（', '('), '）', ')')
@@ -4473,7 +4473,7 @@ app.post("/dedupe-wip-items", async (c) => {
   // columns we need to pick a canonical and report the sample.
   const dupCodesRes = await db
     .prepare(
-      `SELECT code, COUNT(*) AS n, SUM(stockQty) AS netQty
+      `SELECT code, COUNT(*) AS n, SUM(stockQty) AS "netQty"
          FROM wip_items
         GROUP BY code
        HAVING COUNT(*) > 1`,
@@ -6370,8 +6370,8 @@ app.post("/cancel-leaked-co-pos", async (c) => {
   // POs whose parent CO is CANCELLED but they themselves aren't.
   const leakRes = await db
     .prepare(
-      `SELECT po.id AS poId, po.poNo, po.status AS poStatus,
-              co.id AS coId, co.companyCOId, co.status AS coStatus
+      `SELECT po.id AS poId, po.poNo, po.status AS "poStatus",
+              co.id AS "coId", co.companyCOId, co.status AS "coStatus"
          FROM production_orders po
          JOIN consignment_orders co ON co.id = po.consignmentOrderId
         WHERE co.status = 'CANCELLED'
@@ -8939,7 +8939,7 @@ app.post("/backfill-so-expected-dd", async (c) => {
     .prepare(
       `SELECT so.id, so.customerDeliveryDate,
               (SELECT itemCategory FROM sales_order_items
-                WHERE salesOrderId = so.id ORDER BY lineNo LIMIT 1) AS firstCat
+                WHERE salesOrderId = so.id ORDER BY lineNo LIMIT 1) AS "firstCat"
          FROM sales_orders so
         WHERE so.orgId = ?
           AND (so.hookkaExpectedDD IS NULL OR so.hookkaExpectedDD = '')

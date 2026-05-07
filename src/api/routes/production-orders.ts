@@ -850,7 +850,7 @@ async function fetchPiecesDoneByJc(
   const rows = await fetchInChunks<{ jobCardId: string; piecesDone: number }>(
     db,
     (placeholders) =>
-      `SELECT jobCardId, COUNT(*) AS piecesDone
+      `SELECT jobCardId, COUNT(*) AS "piecesDone"
          FROM piece_pics
          WHERE orgId = ?
            AND pic1Id IS NOT NULL

@@ -278,8 +278,11 @@ function SupplierFormDialog({
   const [email, setEmail] = useState(editData?.email || "");
   const [address, setAddress] = useState(editData?.address || "");
   const [paymentTerms, setPaymentTerms] = useState<PaymentTerms>(editData?.paymentTerms || "NET30");
-  const [rating, setRating] = useState(editData?.rating || 3);
   const [status, setStatus] = useState<SupplierStatus>(editData?.status || "ACTIVE");
+  // Rating is no longer collected on the form. Preserve the existing value on
+  // edit; default new suppliers to a neutral 3-star rating. Operators can
+  // adjust ratings later via a dedicated path when that workflow exists.
+  const rating = editData?.rating ?? 3;
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -326,7 +329,7 @@ function SupplierFormDialog({
             <label className="block text-sm font-medium text-[#374151] mb-1">Address</label>
             <Input value={address} onChange={(e) => setAddress(e.target.value)} placeholder="Full address" />
           </div>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-[#374151] mb-1">Payment Terms</label>
               <select
@@ -339,18 +342,6 @@ function SupplierFormDialog({
                 <option value="NET30">Net 30</option>
                 <option value="NET45">Net 45</option>
                 <option value="NET60">Net 60</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-[#374151] mb-1">Rating</label>
-              <select
-                className="w-full border border-[#D1D5DB] rounded-md px-3 py-2 text-sm bg-white"
-                value={rating}
-                onChange={(e) => setRating(Number(e.target.value))}
-              >
-                {[1, 2, 3, 4, 5].map((r) => (
-                  <option key={r} value={r}>{r} Star{r > 1 ? "s" : ""}</option>
-                ))}
               </select>
             </div>
             <div>

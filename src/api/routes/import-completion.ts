@@ -12422,6 +12422,24 @@ app.post("/refresh-jcs-by-id", async (c) => {
       };
       const wips = breakBomIntoWips(bom.wipComponents, productCode, variants);
       let wip = wips.find((w) => w.wipKey === r.wipKey);
+      // Fallback 1: match on wipKey segments 0-2 (productCode::idx::wipType).
+      // The 4th segment is the rawTopCode template — if the BOM template was
+      // edited, the old JC's wipKey diverges from the new walker's output but
+      // the first 3 segments are stable. Common case: BOM editor changed
+      // {DIVAN_HEIGHT} Divan- {SIZE} → {PRODUCT_CODE} Divan- {SIZE} (or
+      // similar), JCs created under the old template need to match the new
+      // walker output by wipType + position.
+      if (!wip && r.wipKey) {
+        const oldSegs = r.wipKey.split("::");
+        if (oldSegs.length >= 3) {
+          const oldPrefix = oldSegs.slice(0, 3).join("::");
+          wip = wips.find((w) => {
+            const newSegs = w.wipKey.split("::");
+            return newSegs.slice(0, 3).join("::") === oldPrefix;
+          });
+        }
+      }
+      // Fallback 2: pick the only WIP that has a process for this dept.
       if (!wip && r.departmentCode) {
         const candidates = wips.filter((w) =>
           w.processes.some((p) => p.deptCode === r.departmentCode),
@@ -12435,7 +12453,7 @@ app.post("/refresh-jcs-by-id", async (c) => {
           productCode,
           deptCode: r.departmentCode ?? undefined,
           error:
-            "No matching WIP in BOM (wipKey + dept fallback both failed)",
+            "No matching WIP in BOM (wipKey + segment-prefix + dept fallback all failed)",
         });
         continue;
       }

@@ -5663,15 +5663,31 @@ app.post("/backfill-fab-cut-merge", async (c) => {
       (sum, r) => sum + (r.productionTimeMinutes ?? r.estMinutes ?? 0),
       0,
     );
-    // wipQty by category — mirrors aggregateFcSlots in production-builder.ts:
-    //   - SOFA cross-PO merge → SUM (the cutter physically cuts every
-    //     sibling: 1A(LHF)×2 + 1NA + 1A(RHF)×2 + 1S = 6 pieces).
-    //   - BF/ACC same-PO merge → MIN (HB qty=1 + DV qty=2 → min=1 set).
+    // SOFA cross-PO merge needs to count each PO ONCE, not once per WIP node.
+    // backfillJobCardsForPo creates one FAB_CUT JC per WIP component
+    // (SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST), so a 6-PO sofa group can
+    // surface as 18 rows here — collapse to 1 row per productionOrderId
+    // before computing wipQty / label so:
+    //   - wipQty = sum of unique PO line qtys (= 6, not 18)
+    //   - label  = joinModelLabel of unique PO productCodes (= 6 entries
+    //              repeated by line qty, not 18 = 3 WIPs × 6 POs).
+    // BF/ACC same-PO merge keeps the per-row min logic — set count semantics
+    // (HB qty=1 + DV qty=2 → min=1 set) was correct for per-WIP rows.
     const isSofaForQty = (anchor.poItemCategory ?? "") === "SOFA";
+    const perPoRows = isSofaForQty
+      ? Array.from(
+          sorted
+            .reduce((m, r) => {
+              if (!m.has(r.productionOrderId)) m.set(r.productionOrderId, r);
+              return m;
+            }, new Map<string, FcRow>())
+            .values(),
+        )
+      : sorted;
     const newWipQty = isSofaForQty
-      ? sorted.reduce((sum, r) => sum + (r.wipQty || 1), 0)
+      ? perPoRows.reduce((sum, r) => sum + (r.wipQty || 1), 0)
       : Math.min(...sorted.map((r) => r.wipQty || 1));
-    const productCodes = sorted.map((r) => r.poProductCode ?? "");
+    const productCodes = perPoRows.map((r) => r.poProductCode ?? "");
     const modelLabel = joinModelLabel(productCodes);
     const totalH =
       (anchor.poGapInches ?? 0) +

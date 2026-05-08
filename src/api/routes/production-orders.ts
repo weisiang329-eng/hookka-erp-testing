@@ -762,19 +762,30 @@ async function fetchPiecesDoneByJc(
 ): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   if (jcIds.length === 0) return out;
-  const rows = await fetchInChunks<{ jobCardId: string; piecesDone: number }>(
-    db,
-    (placeholders) =>
+  // Phase B+ (2026-05-08): the chunked IN(...) variant fanned 12 k JC IDs
+  // into 122 parallel `IN (?,?,?,...)` queries via Hyperdrive — Hyperdrive's
+  // pool serialises beyond a small concurrency, so the 100/chunk batches
+  // cumulatively cost ~3 s on prod (the 90% slice of /api/production-orders
+  // server time per the inline ?debug=timing probe). One unfiltered
+  // `GROUP BY jobCardId` returns the same map in <100 ms — the wider scope
+  // is harmless because the caller already loads every JC the user is
+  // entitled to in the same request, and Postgres collapses the count
+  // server-side. We still scope by orgId so cross-tenant counts can't leak.
+  // Result rows that aren't in jcIds get dropped during the Map fill below.
+  void jcIds;
+  const wanted = new Set(jcIds);
+  const stmt = db
+    .prepare(
       `SELECT jobCardId, COUNT(*) AS "piecesDone"
          FROM piece_pics
-         WHERE orgId = ?
-           AND pic1Id IS NOT NULL
-           AND jobCardId IN (${placeholders})
-         GROUP BY jobCardId`,
-    jcIds,
-    [orgId],
-  );
-  for (const r of rows) {
+        WHERE orgId = ?
+          AND pic1Id IS NOT NULL
+        GROUP BY jobCardId`,
+    )
+    .bind(orgId);
+  const res = await stmt.all<{ jobCardId: string; piecesDone: number }>();
+  for (const r of res.results ?? []) {
+    if (!wanted.has(r.jobCardId)) continue;
     out.set(r.jobCardId, Number(r.piecesDone) || 0);
   }
   return out;

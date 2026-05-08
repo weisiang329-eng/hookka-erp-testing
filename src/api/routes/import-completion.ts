@@ -12343,8 +12343,25 @@ app.post("/refresh-jcs-by-id", async (c) => {
       results.push({ jcId: r.id, error: "PO missing productCode" });
       continue;
     }
+    // FC-merge detection: jcId convention OR wipKey shape. The id-prefix
+    // form was added later (jc-fc-so- / jc-fc-po-); legacy FC-merge JCs
+    // created before that convention have jcId `jc-pord-so-...` but their
+    // wipKey still follows the merge format
+    // `{idShape}::{baseModel}::{fabricCode}::FAB_CUT` where segment 0 is
+    // a poId / SO- / CO- id (NOT a productCode). Detect both forms so the
+    // walker uses buildFcWipLabel-style logic instead of trying to match
+    // a non-existent BOM tree node.
+    const wkSegs = (r.wipKey || "").split("::");
+    const isFcMergeByKey =
+      wkSegs.length === 4 &&
+      wkSegs[3] === "FAB_CUT" &&
+      (wkSegs[0].startsWith("pord-") ||
+        wkSegs[0].startsWith("SO-") ||
+        wkSegs[0].startsWith("CO-"));
     const isFcMerge =
-      r.id.startsWith("jc-fc-so-") || r.id.startsWith("jc-fc-po-");
+      r.id.startsWith("jc-fc-so-") ||
+      r.id.startsWith("jc-fc-po-") ||
+      isFcMergeByKey;
     const oldWipCode = r.wipCode ?? "";
     const oldWipLabel = r.wipLabel ?? "";
     let newWipCode = oldWipCode;

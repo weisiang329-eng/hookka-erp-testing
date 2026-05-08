@@ -685,22 +685,11 @@ export default function PurchaseOrderDetailPage() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Supplier is picked per line item below — no top-level
+                supplier display (operator found it redundant and misleading
+                mid-edit). Save still blocks on mixed suppliers via the
+                button's disabled state. */}
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-[#6B7280] mb-1">Supplier (from line items)</label>
-                <div className="flex h-10 w-full items-center rounded-md border border-[#E2DDD8] bg-[#FAF9F7] px-3 py-2 text-sm text-[#374151]">
-                  {editLines.length === 0
-                    ? "Add items to determine supplier"
-                    : editHasMixed
-                      ? "Mixed suppliers (multiple)"
-                      : (editLines[0].supplierName || "Pick supplier on line(s) below")}
-                </div>
-                {editHasMixed && (
-                  <p className="text-xs text-[#9A3A2D] mt-1 font-medium">
-                    Lines must share a single supplier
-                  </p>
-                )}
-              </div>
               <div>
                 <label className="block text-xs text-[#6B7280] mb-1">Delivery Date</label>
                 <Input

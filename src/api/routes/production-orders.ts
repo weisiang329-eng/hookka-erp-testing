@@ -3705,7 +3705,7 @@ app.get("/overdue-counts", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/production-orders/_debug-timing[?dept=WOOD_CUT&dueFrom=...&dueTo=...]
+// GET /api/production-orders/debug-timing[?dept=WOOD_CUT&dueFrom=...&dueTo=...]
 //
 // TEMPORARY (Phase B+, 2026-05-08): mirrors the dept-mode minimal hot path
 // step-by-step with millisecond timings around each query / compute block.
@@ -3715,7 +3715,7 @@ app.get("/overdue-counts", async (c) => {
 // between Hyperdrive and rowToMinimalPO). Delete once the bottleneck is
 // fixed and Phase B+ ships.
 // ---------------------------------------------------------------------------
-app.get("/_debug-timing", async (c) => {
+app.get("/debug-timing", async (c) => {
   const orgId = getOrgId(c);
   const deptParamRaw = c.req.query("dept");
   const deptFilter =

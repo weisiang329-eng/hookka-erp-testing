@@ -12456,7 +12456,25 @@ app.post("/refresh-jcs-by-id", async (c) => {
           });
         }
       }
-      // Fallback 2: pick the only WIP that has a process for this dept.
+      // Fallback 2: match on wipKey segments 1-2 only (idx::wipType), ignoring
+      // segment 0 (productCode). Used when PO's productCode was corrected
+      // (e.g. SOFA variant swap LHF↔RHF via /backfill-po-from-so-lines): the
+      // JC's old wipKey has the stale productCode but idx + wipType are
+      // stable within the BOM tree so segments 1-2 still identify the WIP.
+      if (!wip && r.wipKey) {
+        const oldSegs = r.wipKey.split("::");
+        if (oldSegs.length >= 3) {
+          const oldIdxType = `${oldSegs[1]}::${oldSegs[2]}`;
+          wip = wips.find((w) => {
+            const newSegs = w.wipKey.split("::");
+            return (
+              newSegs.length >= 3 &&
+              `${newSegs[1]}::${newSegs[2]}` === oldIdxType
+            );
+          });
+        }
+      }
+      // Fallback 3: pick the only WIP that has a process for this dept.
       if (!wip && r.departmentCode) {
         const candidates = wips.filter((w) =>
           w.processes.some((p) => p.deptCode === r.departmentCode),
@@ -12470,7 +12488,7 @@ app.post("/refresh-jcs-by-id", async (c) => {
           productCode,
           deptCode: r.departmentCode ?? undefined,
           error:
-            "No matching WIP in BOM (wipKey + segment-prefix + dept fallback all failed)",
+            "No matching WIP in BOM (wipKey + segment-prefix + idx-type + dept fallback all failed)",
         });
         continue;
       }

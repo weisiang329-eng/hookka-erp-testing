@@ -132,6 +132,23 @@ function POFormDialog({
     [categoryCounts]
   );
 
+  // Group categories by family prefix so the chip strip reads as 3 short
+  // rows (Bedframe / Sofa / Common) instead of one cluttered wrap. Within
+  // each group, sort by count desc so the operator's eye and finger land
+  // on the heavy-traffic categories first. Anything starting with B.* or
+  // B-* is bedframe; S.* / S-* is sofa; everything else is common.
+  const groupedCategories = useMemo(() => {
+    const isBedframe = (c: string) => /^B[.-]/i.test(c);
+    const isSofa = (c: string) => /^S[.-]/i.test(c);
+    const byCountDesc = (a: string, b: string) =>
+      (categoryCounts[b] ?? 0) - (categoryCounts[a] ?? 0) || a.localeCompare(b);
+    return {
+      bedframe: categories.filter(isBedframe).sort(byCountDesc),
+      sofa: categories.filter(isSofa).sort(byCountDesc),
+      common: categories.filter((c) => !isBedframe(c) && !isSofa(c)).sort(byCountDesc),
+    };
+  }, [categories, categoryCounts]);
+
   // Filtered RM list — category chip + text search compose. Sorted by code so
   // browsing without a query is predictable.
   const filteredRMs = useMemo(() => {
@@ -417,36 +434,70 @@ function POFormDialog({
             <div className="mb-3 space-y-2">
               <label className="block text-xs text-[#6B7280]">Add material — pick a category or search by code/description</label>
 
-              {/* Category chip row */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {(["ALL", ...categories]).map((cat) => {
+              {/* Category chips — grouped Bedframe / Sofa / Common, sorted by
+                  count desc within each row. Tiny grey label on the left
+                  anchors the family. Low-count chips (<5) fade so the heavy
+                  categories pop without hiding the long-tail entirely. */}
+              {(() => {
+                const renderChip = (cat: string) => {
                   const active = selectedCategory === cat;
                   const count = cat === "ALL" ? activeRMs.length : (categoryCounts[cat] ?? 0);
+                  const lowVolume = !active && cat !== "ALL" && count < 5;
                   return (
                     <button
                       key={cat}
                       type="button"
                       onClick={() => setSelectedCategory(cat)}
                       className={
-                        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium border transition-colors " +
+                        "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium border transition-colors " +
                         (active
                           ? "bg-[#6B5C32] text-white border-[#6B5C32]"
-                          : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
+                          : lowVolume
+                            ? "bg-white text-[#9CA3AF] border-[#EDE8E3] hover:bg-[#F0ECE9] hover:text-[#1F1D1B]"
+                            : "bg-white text-[#1F1D1B] border-[#E2DDD8] hover:bg-[#F0ECE9]")
                       }
                       aria-pressed={active}
                     >
-                      {cat === "ALL" ? "All" : cat}
+                      <span>{cat === "ALL" ? "All" : cat}</span>
                       <span
-                        className={`rounded-full px-1.5 py-0 text-[10px] ${
-                          active ? "bg-white/25 text-white" : "bg-[#F0ECE9] text-gray-500"
+                        className={`text-[10px] tabular-nums ${
+                          active ? "text-white/75" : "text-[#9CA3AF]"
                         }`}
                       >
                         {count}
                       </span>
                     </button>
                   );
-                })}
-              </div>
+                };
+                const labelCls = "shrink-0 text-[10px] font-medium uppercase tracking-wide text-[#9CA3AF] w-12";
+                const rowCls = "flex flex-wrap items-center gap-1.5";
+                return (
+                  <div className="space-y-1.5">
+                    <div className={rowCls}>
+                      <span className={labelCls}>All</span>
+                      {renderChip("ALL")}
+                    </div>
+                    {groupedCategories.bedframe.length > 0 && (
+                      <div className={rowCls}>
+                        <span className={labelCls}>Bedframe</span>
+                        {groupedCategories.bedframe.map(renderChip)}
+                      </div>
+                    )}
+                    {groupedCategories.sofa.length > 0 && (
+                      <div className={rowCls}>
+                        <span className={labelCls}>Sofa</span>
+                        {groupedCategories.sofa.map(renderChip)}
+                      </div>
+                    )}
+                    {groupedCategories.common.length > 0 && (
+                      <div className={rowCls}>
+                        <span className={labelCls}>Common</span>
+                        {groupedCategories.common.map(renderChip)}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
 
               {/* Search box */}
               <Input

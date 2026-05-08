@@ -488,17 +488,16 @@ export default function ProductionPage({
   //     customerDeliveryDate isn't on the production_orders payload today
   //     (lives on the SO). Until that's wired, the dropdown still shows
   //     the option but matches against the field if/when present.
-  //   • Item type — substring match on each PO's job-card wipType
-  //     (HB→HEADBOARD, DIVAN, BASE→SOFA_BASE, CUSHION→SOFA_CUSHION, etc.).
-  //   • Model — exact productCode match, drawn from already-loaded orders.
+  // (Item type + Model filters removed 2026-05-08 per operator request —
+  //  they didn't narrow the view in practice; the data now shows all
+  //  item types + models by default. State hooks, URL params, and
+  //  itemTypesByPo memo are gone with them.)
   const [fltCategory, setFltCategory] = useUrlState<string>("cat", "");
   // Date-axis dropdown removed 2026-05-07 — fltDateAxis is now a constant
   // 'dueDate'. The state hook stays so the filter logic conditional below
   // still resolves correctly without a deeper refactor.
   const [fltDateAxis] =
     useUrlState<"dueDate" | "customerDeliveryDate" | "created_at">("axis", "dueDate");
-  const [fltItemType, setFltItemType] = useUrlState<string>("itype", "");
-  const [fltModel, setFltModel] = useUrlState<string>("model", "");
   // Hide CANCELLED POs by default (2026-05-06 user request — they were
   // showing as strikethrough rows that cluttered the daily view). Toggle
   // via ?showCancelled=1 in the URL when needed.
@@ -660,9 +659,7 @@ export default function ProductionPage({
     !!fltCustomer ||
     !!fltDueFrom ||
     !!fltDueTo ||
-    !!fltCategory ||
-    !!fltItemType ||
-    !!fltModel;
+    !!fltCategory;
   /* eslint-disable react-hooks/set-state-in-effect -- gate fetch on first filter activation */
   useEffect(() => {
     if (anyFilterActive && !shouldFetch) setShouldFetch(true);
@@ -1075,26 +1072,8 @@ export default function ProductionPage({
     return m;
   }, [orders]);
 
-  // Sprint 5 F3: pre-compute the set of WIP item-type flags present on
-  // each PO's job cards. Filter checks become Set.has() instead of
-  // jcs.some(j => predicate(j.wipType.toUpperCase())) per row per render.
-  const itemTypesByPo = useMemo(() => {
-    const m = new Map<string, Set<string>>();
-    for (const o of orders) {
-      const flags = new Set<string>();
-      for (const j of o.jobCards ?? []) {
-        const t = String(j.wipType || "").toUpperCase();
-        if (t === "HEADBOARD" || t === "HB") flags.add("HB");
-        if (t === "DIVAN") flags.add("DIVAN");
-        if (t.endsWith("BASE")) flags.add("BASE");
-        if (t.endsWith("CUSHION")) flags.add("CUSHION");
-        if (t.endsWith("ARMREST")) flags.add("ARMREST");
-        if (t.endsWith("HEADREST")) flags.add("HEADREST");
-      }
-      m.set(o.id, flags);
-    }
-    return m;
-  }, [orders]);
+  // (itemTypesByPo memo removed 2026-05-08 — was only consumed by the
+  // now-deleted Item type filter dropdown.)
 
   // Apply the page-level filter panel to `orders` first, then scope further
   // by active tab (Overview = everything; dept tab = only orders that have
@@ -1110,16 +1089,9 @@ export default function ProductionPage({
       if (fltCustomer && o.customerName !== fltCustomer) return false;
       // Category — itemCategory column on the PO.
       if (fltCategory && o.itemCategory !== fltCategory) return false;
-      // Model — exact productCode match.
-      if (fltModel && o.productCode !== fltModel) return false;
-      // Item Type — at least one JC on the PO must match. POs with no JCs
-      // (legacy / partially-built) bypass this filter rather than getting
-      // hidden, since we can't tell what they are.
-      if (fltItemType) {
-        const flags = itemTypesByPo.get(o.id);
-        const jcs = o.jobCards ?? [];
-        if (flags && jcs.length > 0 && !flags.has(fltItemType)) return false;
-      }
+      // (Item type + Model filters removed 2026-05-08 — data shows all
+      //  item types + models by default; operators narrow via search /
+      //  category / state / date instead.)
       // Date range filter — axis depends on which page the operator is on:
       //   overview ("ALL") → PO.targetEndDate  (whole-order packing anchor)
       //   dept page        → that dept's JC.dueDate (the dept's own deadline)
@@ -1153,10 +1125,10 @@ export default function ProductionPage({
       return true;
     });
   }, [
-    orders, haystackByPo, itemTypesByPo,
+    orders, haystackByPo,
     fltSearch, fltState, fltCustomer,
     fltDueFrom, fltDueTo, fltDateAxis,
-    fltCategory, fltItemType, fltModel,
+    fltCategory,
     showCancelled,
     // activeTab drives the dueDate axis branch added 2026-05-07 (overview
     // → PO.targetEndDate, dept page → matching dept's JC.dueDate). Without
@@ -1254,8 +1226,9 @@ export default function ProductionPage({
     return rows;
   }, [filteredOrders, activeTab, overviewSort, overviewFilters]);
 
-  // Unique customer + state + model options for the filter dropdowns,
-  // derived live from the order set so they auto-update when data changes.
+  // Unique customer + state options for the filter dropdowns, derived
+  // live from the order set so they auto-update when data changes.
+  // (modelOptions removed 2026-05-08 with the Model filter.)
   const customerOptions = useMemo(
     () =>
       Array.from(new Set(orders.map((o) => o.customerName).filter(Boolean))).sort(),
@@ -1264,11 +1237,6 @@ export default function ProductionPage({
   const stateOptions = useMemo(
     () =>
       Array.from(new Set(orders.map((o) => o.customerState).filter(Boolean))).sort(),
-    [orders],
-  );
-  const modelOptions = useMemo(
-    () =>
-      Array.from(new Set(orders.map((o) => o.productCode).filter(Boolean))).sort(),
     [orders],
   );
 
@@ -3524,33 +3492,10 @@ export default function ProductionPage({
           <option value="SOFA">Sofa</option>
           <option value="ACCESSORY">Accessories</option>
         </select>
-        {/* Item type (wipType, substring-matched against each PO's job
-            cards). Helpful when a supervisor wants to see only e.g. every
-            PO with a Headboard component currently in production. */}
-        <select
-          value={fltItemType}
-          onChange={(e) => setFltItemType(e.target.value)}
-          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
-          title="WIP item type (matches against job-card wipType)"
-        >
-          <option value="">All item types</option>
-          <option value="HB">HB</option>
-          <option value="DIVAN">Divan</option>
-          <option value="BASE">Base</option>
-          <option value="CUSHION">Cushion</option>
-          <option value="ARMREST">Armrest</option>
-          <option value="HEADREST">Headrest</option>
-        </select>
-        {/* Model dropdown — distinct productCodes from already-loaded orders. */}
-        <select
-          value={fltModel}
-          onChange={(e) => setFltModel(e.target.value)}
-          className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded bg-white"
-          title="Product code (model)"
-        >
-          <option value="">All models</option>
-          {modelOptions.map((m) => (<option key={m} value={m}>{m}</option>))}
-        </select>
+        {/* Item-type + Model dropdowns removed 2026-05-08 per operator
+            request — they didn't help narrow the view in practice and just
+            added clutter beside the more useful state/category filters.
+            Data now shows all item types + models by default. */}
         {/* (Lifecycle status dropdown removed 2026-04-27 — replaced by
             the per-column Status filter on the dept grid. Operators
             click ▼ on the Status column header to narrow by JC status

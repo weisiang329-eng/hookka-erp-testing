@@ -660,11 +660,16 @@ export default function SupplierMaintenancePage() {
       supplierId: String(b.supplierId ?? ""),
       supplierName: b.supplierName ? String(b.supplierName) : undefined,
       supplierSku: String(b.supplierSku ?? ""),
+      // The /api/supplier-materials route returns `unitPrice` already in sen
+      // (the supplier_material_bindings.unitPrice column is INTEGER sen — see
+      // migrations/0001_init.sql + scripts/import-historical-purchases.py
+      // which inserts `unit_price * 100`). Treat it as sen directly; do NOT
+      // multiply by 100 again or the column renders 100× too high.
       unitPriceSen:
         typeof b.unitPriceSen === "number"
           ? b.unitPriceSen
           : typeof b.unitPrice === "number"
-            ? Math.round(b.unitPrice * 100)
+            ? Math.round(b.unitPrice)
             : 0,
       currency: String(b.currency ?? "MYR"),
       leadTimeDays: Number(b.leadTimeDays ?? 7),

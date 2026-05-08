@@ -173,10 +173,28 @@ export default function EditSalesOrderPage() {
   const CAT_OPTS = { revalidateOnFocus: true };
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers", 300, CAT_OPTS);
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products", 300, CAT_OPTS);
-  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics", 300, CAT_OPTS);
+  // Fabric picker now reads from /api/fabric-tracking (sourced from
+  // raw_materials, the inventory source of truth) — the legacy /api/fabrics
+  // table has stale leading-zero duplicates (M2402-04 vs M2402-4) which let
+  // operators pick fabrics that don't actually exist in inventory, leaving
+  // POs with orphan fabricCodes. We map the tracking shape back to the
+  // legacy FabricItem at the boundary so downstream picker logic is
+  // unchanged.
+  const { data: fabricsTrackingForPickerResp } = useCachedJson<{ data?: { id: string; fabricCode: string; fabricDescription?: string; fabricCategory?: string }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
-  const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
+  const fabrics: FabricItem[] = useMemo(
+    () => (fabricsTrackingForPickerResp?.data || []).map(t => ({
+      id: t.id,
+      code: t.fabricCode,
+      name: t.fabricDescription || "",
+      category: t.fabricCategory || "",
+      priceSen: 0,
+      sohMeters: 0,
+      reorderLevel: 0,
+    })),
+    [fabricsTrackingForPickerResp],
+  );
   const [saving, setSaving] = useState(false);
   const [loading, setLoading] = useState(true);
   const [order, setOrder] = useState<SalesOrder | null>(null);
@@ -228,7 +246,7 @@ export default function EditSalesOrderPage() {
   // Track whether the deferred fabricId backfill (declared in the load-
   // effect block below) has had a chance to run. The dirty-state
   // baseline must wait for it — otherwise OCR-created SOs would flag
-  // themselves dirty the moment /api/fabrics arrives, for a backfill
+  // themselves dirty the moment /api/fabric-tracking arrives, for a backfill
   // the user never triggered.
   const [fabricBackfillDone, setFabricBackfillDone] = useState(false);
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- one-shot baseline snapshot when the loaded order arrives; deliberately excludes formSig so later edits don't reset the baseline */

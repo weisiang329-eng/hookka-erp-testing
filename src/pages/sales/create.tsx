@@ -209,7 +209,14 @@ function CreateSalesOrderPage() {
   const CAT_OPTS = { revalidateOnFocus: true };
   const { data: customersResp } = useCachedJson<{ data?: Customer[] }>("/api/customers", 300, CAT_OPTS);
   const { data: productsResp } = useCachedJson<{ data?: Product[] }>("/api/products", 300, CAT_OPTS);
-  const { data: fabricsResp } = useCachedJson<{ data?: FabricItem[] }>("/api/fabrics", 300, CAT_OPTS);
+  // Fabric picker now reads from /api/fabric-tracking (sourced from
+  // raw_materials, the inventory source of truth) — the legacy /api/fabrics
+  // table has stale leading-zero duplicates (M2402-04 vs M2402-4) which let
+  // operators pick fabrics that don't actually exist in inventory, leaving
+  // POs with orphan fabricCodes. We map the tracking shape back to the
+  // legacy FabricItem at the boundary so downstream picker logic is
+  // unchanged.
+  const { data: fabricsTrackingForPickerResp } = useCachedJson<{ data?: { id: string; fabricCode: string; fabricDescription?: string; fabricCategory?: string }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
   const { data: fabricTrackingsResp } = useCachedJson<{ data?: {
     id: string;
     fabricCode: string;
@@ -219,7 +226,18 @@ function CreateSalesOrderPage() {
   }[] }>("/api/fabric-tracking", 300, CAT_OPTS);
   const customers: Customer[] = useMemo(() => customersResp?.data || [], [customersResp]);
   const products: Product[] = useMemo(() => productsResp?.data || [], [productsResp]);
-  const fabrics: FabricItem[] = useMemo(() => fabricsResp?.data || [], [fabricsResp]);
+  const fabrics: FabricItem[] = useMemo(
+    () => (fabricsTrackingForPickerResp?.data || []).map(t => ({
+      id: t.id,
+      code: t.fabricCode,
+      name: t.fabricDescription || "",
+      category: t.fabricCategory || "",
+      priceSen: 0,
+      sohMeters: 0,
+      reorderLevel: 0,
+    })),
+    [fabricsTrackingForPickerResp],
+  );
   const fabricTrackings: {
     id: string;
     fabricCode: string;

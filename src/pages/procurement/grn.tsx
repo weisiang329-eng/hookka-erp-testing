@@ -23,6 +23,7 @@ import {
   Filter,
   Download,
   DollarSign,
+  FileText,
 } from "lucide-react";
 
 function readErrorMessage(v: unknown): string | null {
@@ -435,6 +436,63 @@ export default function GRNPage() {
           }
         },
         disabled: row.status === "CONFIRMED" || row.status === "POSTED",
+      },
+      {
+        // POSTED-only: a non-POSTED GRN hasn't yet committed inventory and
+        // shouldn't be billed. Mirrors the manual flow on the PI list which
+        // pulls amount from the GRN's totalAmount and reuses the GRN items
+        // (acceptedQty × unitPrice) so the PI pre-matches the GRN exactly.
+        // Status defaults to DRAFT — operator reviews + finalizes from the
+        // PI page; we don't auto-approve.
+        label: "Convert to Invoice",
+        icon: <FileText className="h-3.5 w-3.5" />,
+        action: async () => {
+          const grnTotalRM = (row.totalAmount / 100).toFixed(2);
+          const ok = window.confirm(
+            `Create Purchase Invoice from GRN ${row.grnNumber}? Total: RM ${grnTotalRM}`,
+          );
+          if (!ok) return;
+          try {
+            const today = new Date().toISOString().split("T")[0];
+            const items = row.items
+              .filter((it) => it.acceptedQty > 0)
+              .map((it) => ({
+                materialCode: it.materialCode,
+                materialName: it.materialName,
+                qty: it.acceptedQty,
+                unitPriceSen: it.unitPrice,
+                lineType: "STOCKED" as const,
+              }));
+            const res = await fetch("/api/purchase-invoices", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                purchaseOrderId: row.poId,
+                supplierId: row.supplierId,
+                supplierName: row.supplierName,
+                invoiceDate: today,
+                amountSen: row.totalAmount,
+                remarks: `Auto-created from GRN ${row.grnNumber}`,
+                items,
+              }),
+            });
+            const j = (await res.json().catch(() => null)) as
+              | { success?: boolean; error?: string; data?: { id: string; piNo: string } }
+              | null;
+            if (!res.ok || !j?.success || !j.data) {
+              toast.error(j?.error || "Failed to create invoice");
+              return;
+            }
+            invalidateCachePrefix("/api/grn");
+            invalidateCachePrefix("/api/purchase-invoices");
+            fetchData();
+            toast.success(`Invoice ${j.data.piNo} created from GRN ${row.grnNumber}`);
+            navigate(`/procurement/pi/${j.data.id}`);
+          } catch {
+            toast.error("Failed to create invoice");
+          }
+        },
+        disabled: row.status !== "POSTED",
       },
       { label: "", separator: true, action: () => {} },
       {

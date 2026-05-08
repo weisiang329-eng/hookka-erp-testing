@@ -12742,7 +12742,7 @@ app.post("/backfill-po-from-so-lines", async (c) => {
         `SELECT id, poNo, productCode, productName, productId, itemCategory,
                 sizeCode, sizeLabel, fabricCode,
                 divanHeightInches, legHeightInches, gapInches,
-                specialOrder, salesOrderItemId, quantity, status
+                specialOrder, quantity, status
            FROM production_orders WHERE salesOrderId = ? AND status <> 'CANCELLED'
            ORDER BY id ASC`,
       )
@@ -12761,7 +12761,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
         legHeightInches: number | null;
         gapInches: number | null;
         specialOrder: string | null;
-        salesOrderItemId: string | null;
         quantity: number;
         status: string;
       }>();
@@ -12800,7 +12799,6 @@ app.post("/backfill-po-from-so-lines", async (c) => {
         ["legHeightInches", po.legHeightInches, exp.legHeightInches],
         ["gapInches", po.gapInches, exp.gapInches],
         ["specialOrder", po.specialOrder, exp.specialOrder],
-        ["salesOrderItemId", po.salesOrderItemId, exp.lineId],
         ["quantity", po.quantity, exp.unitQty],
       ];
       for (const [field, from, to] of checks) {

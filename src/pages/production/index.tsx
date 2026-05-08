@@ -548,11 +548,15 @@ export default function ProductionPage({
       // ignore quota / private-mode failures
     }
   }, [incompleteOnly]);
-  // "Total Overdue SO" drill-down panel toggle. Click the red chip in the
-  // filter bar to expand a list of every SO with at least one overdue PO,
-  // sorted earliest-overdue first. Date-filter-independent — the chip and
-  // the panel both scan `allOrders`, not `filteredOrders`.
-  const [showOverduePanel, setShowOverduePanel] = useState<boolean>(false);
+  // Overdue drill-down panel mode. Two cards in the filter bar
+  // ("Bedframe Overdue: N" + "Sofa Overdue: N") each toggle the panel
+  // scoped to that itemCategory. null = panel closed. Click the active
+  // card again to close, or click the other card to switch categories.
+  // Date-filter-independent — the cards and the panel both scan
+  // `allOrders`, not `filteredOrders`.
+  const [overduePanelMode, setOverduePanelMode] = useState<
+    "BEDFRAME" | "SOFA" | null
+  >(null);
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
@@ -1218,6 +1222,7 @@ export default function ProductionPage({
     earliest: string;      // earliest overdue JC dueDate across all POs in this SO
     poStatus: string;      // representative PO status (READY_TO_SHIP / IN_PRODUCTION / PENDING)
     salesOrderId: string;  // canonical id for navigation (may be empty for CO-only orders)
+    overdueCategories: Set<string>; // itemCategory set across this SO's *overdue* POs only
   };
   const overdueBreakdown: OverdueSORow[] = useMemo(() => {
     const byso = new Map<string, OverdueSORow>();
@@ -1242,6 +1247,7 @@ export default function ProductionPage({
           earliest: "",
           poStatus: po.status,
           salesOrderId: po.salesOrderId || "",
+          overdueCategories: new Set<string>(),
         };
         byso.set(groupId, entry);
       }
@@ -1251,6 +1257,7 @@ export default function ProductionPage({
       if (!entry.salesOrderId && po.salesOrderId) entry.salesOrderId = po.salesOrderId;
       if (isOverduePO(po)) {
         entry.overduePos += 1;
+        if (po.itemCategory) entry.overdueCategories.add(po.itemCategory);
         const e = earliestOverdueDateOnPO(po);
         if (e && (!entry.earliest || e < entry.earliest)) entry.earliest = e;
       }
@@ -1266,7 +1273,18 @@ export default function ProductionPage({
         return a.earliest.localeCompare(b.earliest);
       });
   }, [allOrders]);
-  const overdueSoCount = overdueBreakdown.length;
+  // Per-category counts. An SO with both BEDFRAME + SOFA overdue POs counts
+  // in BOTH cards — we want to surface both signals, not dedup at SO level.
+  // Operator request 2026-05-08: replace the single "Overdue SOs" chip
+  // with two side-by-side cards split by itemCategory.
+  const bedframeOverdueCount = useMemo(
+    () => overdueBreakdown.filter((r) => r.overdueCategories.has("BEDFRAME")).length,
+    [overdueBreakdown],
+  );
+  const sofaOverdueCount = useMemo(
+    () => overdueBreakdown.filter((r) => r.overdueCategories.has("SOFA")).length,
+    [overdueBreakdown],
+  );
 
   const visibleOrders = useMemo(() => {
     let rows = filteredOrders;
@@ -3653,30 +3671,54 @@ export default function ProductionPage({
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
           title="To (due date)"
         />
-        {/* Total Overdue SO chip — date-filter-INDEPENDENT count of every
-            SO with at least one overdue PO. Scans the full `allOrders`
-            payload, not the date-windowed `filteredOrders`. Click to expand
-            the per-SO drill-down panel below the filter bar. The chip is
-            rendered even when count is 0 so the operator gets the "all
-            clear" signal explicitly (greyed out in that case). */}
+        {/* Per-category overdue chips — date-filter-INDEPENDENT counts of
+            SOs with at least one overdue PO of that itemCategory. Scans the
+            full `allOrders` payload, not the date-windowed `filteredOrders`.
+            Click either to drill the panel below into that category; click
+            again to close. An SO with both BEDFRAME + SOFA overdue POs is
+            counted in BOTH cards (no dedup — both signals matter to the
+            operator). Greyed out at zero so "all clear" reads explicit. */}
         <button
           type="button"
-          onClick={() => setShowOverduePanel((v) => !v)}
+          onClick={() =>
+            setOverduePanelMode((m) => (m === "BEDFRAME" ? null : "BEDFRAME"))
+          }
           className={`text-xs px-2 py-1.5 rounded border transition font-semibold ${
-            overdueSoCount > 0
-              ? showOverduePanel
+            bedframeOverdueCount > 0
+              ? overduePanelMode === "BEDFRAME"
                 ? "bg-[#D9534F] text-white border-[#D9534F]"
                 : "bg-[#FDECEA] text-[#A12C28] border-[#F1B5B0] hover:bg-[#F8D7D4]"
               : "bg-white text-[#9CA3AF] border-[#E6E0D9] cursor-default"
           }`}
-          disabled={overdueSoCount === 0}
+          disabled={bedframeOverdueCount === 0}
           title={
-            overdueSoCount > 0
-              ? `Click to view ${overdueSoCount} SO${overdueSoCount === 1 ? "" : "s"} with overdue POs (independent of date filter)`
-              : "No overdue SOs system-wide"
+            bedframeOverdueCount > 0
+              ? `Click to view ${bedframeOverdueCount} SO${bedframeOverdueCount === 1 ? "" : "s"} with overdue BEDFRAME POs (independent of date filter)`
+              : "No overdue Bedframe SOs system-wide"
           }
         >
-          Overdue SOs: {overdueSoCount}
+          Bedframe Overdue: {bedframeOverdueCount}
+        </button>
+        <button
+          type="button"
+          onClick={() =>
+            setOverduePanelMode((m) => (m === "SOFA" ? null : "SOFA"))
+          }
+          className={`text-xs px-2 py-1.5 rounded border transition font-semibold ${
+            sofaOverdueCount > 0
+              ? overduePanelMode === "SOFA"
+                ? "bg-[#D9534F] text-white border-[#D9534F]"
+                : "bg-[#FDECEA] text-[#A12C28] border-[#F1B5B0] hover:bg-[#F8D7D4]"
+              : "bg-white text-[#9CA3AF] border-[#E6E0D9] cursor-default"
+          }`}
+          disabled={sofaOverdueCount === 0}
+          title={
+            sofaOverdueCount > 0
+              ? `Click to view ${sofaOverdueCount} SO${sofaOverdueCount === 1 ? "" : "s"} with overdue SOFA POs (independent of date filter)`
+              : "No overdue Sofa SOs system-wide"
+          }
+        >
+          Sofa Overdue: {sofaOverdueCount}
         </button>
         {/* "Filter Incomplete" toggle — narrows to POs whose UPHOLSTERY
             JC isn't COMPLETED/TRANSFERRED. Sits on top of the date range
@@ -3728,17 +3770,26 @@ export default function ProductionPage({
         </span>
       </div>
 
-      {/* Overdue SO drill-down panel — toggled by the red chip above.
+      {/* Overdue SO drill-down panel — toggled by the chips above. Filter
+          mode comes from `overduePanelMode` (BEDFRAME / SOFA): only rows
+          whose overdue PO set contains that itemCategory render. An SO
+          with both BF + sofa overdue POs appears in either panel.
           Date-filter-independent: rows come from the full `allOrders`
           payload via `overdueBreakdown`. Click an SO row → navigate to
           /sales/<id> when we have a salesOrderId, otherwise the row stays
           read-only (CO-only orders don't have an SO detail page). */}
-      {showOverduePanel && overdueSoCount > 0 && (
+      {overduePanelMode && (() => {
+        const filteredRows = overdueBreakdown.filter((r) =>
+          r.overdueCategories.has(overduePanelMode),
+        );
+        if (filteredRows.length === 0) return null;
+        const label = overduePanelMode === "BEDFRAME" ? "Bedframe" : "Sofa";
+        return (
         <div className="rounded-lg border border-[#F1B5B0] bg-[#FFF7F6] overflow-hidden">
           <div className="flex items-center justify-between px-3 py-2 border-b border-[#F1B5B0] bg-[#FDECEA]">
             <div className="flex items-baseline gap-2">
               <span className="text-sm font-semibold text-[#A12C28]">
-                Overdue SOs ({overdueSoCount})
+                {label} Overdue ({filteredRows.length})
               </span>
               <span className="text-[10px] text-[#A12C28]/70">
                 System-wide — independent of the date filter above
@@ -3746,7 +3797,7 @@ export default function ProductionPage({
             </div>
             <button
               type="button"
-              onClick={() => setShowOverduePanel(false)}
+              onClick={() => setOverduePanelMode(null)}
               className="text-[11px] text-[#A12C28] hover:underline"
             >
               Close
@@ -3764,7 +3815,7 @@ export default function ProductionPage({
                 </tr>
               </thead>
               <tbody>
-                {overdueBreakdown.map((row) => {
+                {filteredRows.map((row) => {
                   const clickable = !!row.salesOrderId;
                   return (
                     <tr
@@ -3809,7 +3860,8 @@ export default function ProductionPage({
             </table>
           </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Lazy-load placeholder: before any filter is set we don't fetch
           the payload at all — the user sees the filter bar above plus this

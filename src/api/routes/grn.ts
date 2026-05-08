@@ -437,6 +437,16 @@ async function cascadePOStatusAfterGRNPost(
       )
       .bind(nowIso.split("T")[0], nowIso, poId)
       .run();
+    // PO is now fully received — clear the goods_in_transit row keyed to
+    // this PO so the In Transit sidebar count reconciles. Stays a no-op
+    // if there is no in-transit row (e.g. local supplier that skipped the
+    // shipping leg). Mirrors the cleanup the operator would otherwise do
+    // by hand, and keeps the bulk Convert-to-GRN action in line with the
+    // workflow Wei Siang described.
+    await db
+      .prepare("DELETE FROM goods_in_transit WHERE poId = ?")
+      .bind(poId)
+      .run();
   } else if (anyPartial) {
     await db
       .prepare(

@@ -13,7 +13,21 @@ import {
   Plus, ShoppingBag, Truck, Trash2, X, Package,
   FileText, Download, Filter, AlertTriangle,
   Eye, Pencil, Printer, RefreshCw, TrendingDown, ChevronDown, ChevronUp,
+  ClipboardCheck,
 } from "lucide-react";
+
+// PO statuses that the bulk Convert-to-GRN action accepts. Mirrors the
+// `eligiblePOs` filter in the manual GRNFormDialog (procurement/grn.tsx) plus
+// IN_TRANSIT, which is the post-shipped / pre-arrival state where the typical
+// "all goods arrived" full-receipt happens. DRAFT / CANCELLED / RECEIVED /
+// CLOSED are intentionally excluded — DRAFT hasn't been sent, CANCELLED is
+// dead, RECEIVED / CLOSED are already done.
+const BULK_GRN_ELIGIBLE_STATUSES = new Set([
+  "SUBMITTED",
+  "CONFIRMED",
+  "IN_TRANSIT",
+  "PARTIAL_RECEIVED",
+]);
 // generatePurchaseOrderPdf is dynamic-imported at the click handler so the
 // 1MB jspdf vendor chunk only ships when the user actually prints a PO.
 
@@ -869,6 +883,14 @@ export default function ProcurementPage() {
   const forecastHorizon = forecastResp?.horizonDate ?? "";
   const [shortagePanelOpen, setShortagePanelOpen] = useState(false);
 
+  // Multi-select PO rows for the bulk Convert-to-GRN action. Mirrored back
+  // from the DataGrid via `onSelectionChange` so the toolbar button can
+  // gate on count + per-row eligibility (status check). Cleared after a
+  // successful bulk run so the operator doesn't accidentally re-trigger
+  // on the same set.
+  const [selectedPOs, setSelectedPOs] = useState<PurchaseOrder[]>([]);
+  const [bulkGrnRunning, setBulkGrnRunning] = useState(false);
+
   const loading = supLoading || poLoading || invLoading || bindingsLoading;
 
   // ---------------------------------------------------------------------------
@@ -1038,6 +1060,140 @@ export default function ProcurementPage() {
     }
   };
 
+
+  // ---- Bulk Convert-to-GRN ----
+  // Per-PO eligibility: status must be one of the BULK_GRN_ELIGIBLE_STATUSES
+  // AND there must be at least one line still outstanding (otherwise we'd
+  // POST an empty GRN, which the backend rejects). Returns null when OK,
+  // or a short reason string the toolbar tooltip surfaces.
+  const reasonPOIneligible = useCallback(
+    (po: PurchaseOrder): string | null => {
+      if (!BULK_GRN_ELIGIBLE_STATUSES.has(po.status)) {
+        return `Cannot convert: PO ${po.poNo} is ${po.status}`;
+      }
+      const outstanding = po.items.reduce(
+        (s, it) => s + Math.max(0, it.quantity - (it.receivedQty || 0)),
+        0,
+      );
+      if (outstanding <= 0) {
+        return `Cannot convert: PO ${po.poNo} has no outstanding qty`;
+      }
+      return null;
+    },
+    [],
+  );
+
+  const ineligibleReason = useMemo(() => {
+    for (const po of selectedPOs) {
+      const r = reasonPOIneligible(po);
+      if (r) return r;
+    }
+    return null;
+  }, [selectedPOs, reasonPOIneligible]);
+
+  // Sequentially: POST a full-receipt GRN per PO (using outstanding qty so
+  // PARTIAL_RECEIVED top-ups also work), then PUT it to POSTED so the
+  // backend cascade fires (post to stock, bump PO line receivedQty,
+  // transition PO to RECEIVED, delete goods_in_transit row). Stops on
+  // first failure with a toast naming the offending PO; already-POSTED
+  // GRNs stay (operator finishes the rest manually). Final toast reports
+  // count of GRNs and items received.
+  const handleBulkConvertToGRN = useCallback(async () => {
+    if (selectedPOs.length === 0 || bulkGrnRunning) return;
+    if (ineligibleReason) {
+      toast.error(ineligibleReason);
+      return;
+    }
+    if (!window.confirm(`Create GRN for ${selectedPOs.length} PO${selectedPOs.length === 1 ? "" : "s"} and clear In Transit?`)) {
+      return;
+    }
+    setBulkGrnRunning(true);
+    let grnsCreated = 0;
+    let itemsReceived = 0;
+    try {
+      for (const po of selectedPOs) {
+        // Build full-receipt items from outstanding qty per line. Skip
+        // already-fully-received lines so we don't violate the 110%
+        // over-receipt guard on PARTIAL_RECEIVED top-ups.
+        const items = po.items
+          .map((it, idx) => {
+            const outstanding = Math.max(
+              0,
+              it.quantity - (it.receivedQty || 0),
+            );
+            return outstanding > 0
+              ? {
+                  poItemIndex: idx,
+                  receivedQty: outstanding,
+                  acceptedQty: outstanding,
+                  rejectedQty: 0,
+                  rejectionReason: null,
+                }
+              : null;
+          })
+          .filter((x): x is NonNullable<typeof x> => x !== null);
+        if (items.length === 0) continue;
+
+        const createRes = await fetch("/api/grn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            poId: po.id,
+            items,
+            receivedBy: "Bulk Convert",
+            notes: `Auto-created from bulk Convert to GRN (${po.poNo})`,
+            qcStatus: "PENDING",
+          }),
+        });
+        const createBody = (await createRes.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+          data?: { id?: string };
+        };
+        if (!createRes.ok || !createBody.success || !createBody.data?.id) {
+          toast.error(`PO ${po.poNo}: ${createBody.error || `Failed to create GRN (HTTP ${createRes.status})`}`);
+          break;
+        }
+
+        // Flip to POSTED so the cascade runs. cascadePOStatusAfterGRNPost
+        // bumps purchase_order_items.receivedQty, transitions the PO, and
+        // deletes the goods_in_transit row.
+        const postRes = await fetch(`/api/grn/${createBody.data.id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "POSTED" }),
+        });
+        const postBody = (await postRes.json().catch(() => ({}))) as {
+          success?: boolean;
+          error?: string;
+        };
+        if (!postRes.ok || !postBody.success) {
+          toast.error(`PO ${po.poNo}: ${postBody.error || `Failed to post GRN (HTTP ${postRes.status})`}`);
+          break;
+        }
+
+        grnsCreated += 1;
+        itemsReceived += items.length;
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error during bulk Convert to GRN");
+    } finally {
+      setBulkGrnRunning(false);
+      // Always invalidate / refresh — even on a partial run, the GRNs we
+      // did create need to land in the cache so the operator's next view
+      // reflects reality.
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grn");
+      invalidateCachePrefix("/api/inventory");
+      invalidateCachePrefix("/api/raw-materials");
+      invalidateCachePrefix("/api/goods-in-transit");
+      refreshPOs();
+      if (grnsCreated > 0) {
+        toast.success(`${grnsCreated} GRN${grnsCreated === 1 ? "" : "s"} created, ${itemsReceived} item${itemsReceived === 1 ? "" : "s"} received`);
+        setSelectedPOs([]);
+      }
+    }
+  }, [selectedPOs, bulkGrnRunning, ineligibleReason, toast, refreshPOs]);
 
   // ---- Filters ----
   const hasActiveFilters = filterStatus || filterSupplier || filterDateFrom || filterDateTo || filterOverdueOnly;
@@ -1543,9 +1699,34 @@ export default function ProcurementPage() {
                 </span>
               )}
             </div>
-            <Button variant="outline" size="sm" onClick={exportCSV}>
-              <Download className="h-4 w-4" /> Export CSV
-            </Button>
+            <div className="flex items-center gap-2">
+              {/* Bulk Convert to GRN — appears as soon as any PO row is
+                  selected, so the operator's first checkbox click reveals
+                  the action. Disabled (with tooltip) when any selected PO
+                  isn't in an eligible status, instead of silently filtering
+                  the bad rows — surfaces the constraint up front. */}
+              {selectedPOs.length > 0 && (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onClick={handleBulkConvertToGRN}
+                  disabled={!!ineligibleReason || bulkGrnRunning}
+                  title={
+                    ineligibleReason
+                      ? ineligibleReason
+                      : `Create full-receipt GRN for ${selectedPOs.length} PO${selectedPOs.length === 1 ? "" : "s"} and clear In Transit`
+                  }
+                >
+                  <ClipboardCheck className="h-4 w-4" />
+                  {bulkGrnRunning
+                    ? "Converting…"
+                    : `Convert ${selectedPOs.length} to GRN`}
+                </Button>
+              )}
+              <Button variant="outline" size="sm" onClick={exportCSV}>
+                <Download className="h-4 w-4" /> Export CSV
+              </Button>
+            </div>
           </div>
 
           {showFilters && (
@@ -1611,6 +1792,8 @@ export default function ProcurementPage() {
             keyField="id"
             loading={loading}
             stickyHeader={true}
+            selectable={true}
+            onSelectionChange={setSelectedPOs}
             onDoubleClick={(row) => navigate(`/procurement/${row.id}`)}
             contextMenuItems={poGridContextMenu}
             maxHeight="calc(100vh - 300px)"

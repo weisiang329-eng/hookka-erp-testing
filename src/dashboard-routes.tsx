@@ -49,6 +49,7 @@ const EInvoice = lazy(() => import('./pages/invoices/e-invoice'))
 
 // Procurement
 const Procurement = lazy(() => import('./pages/procurement'))
+const ProcurementCreate = lazy(() => import('./pages/procurement/create'))
 const ProcurementDetail = lazy(() => import('./pages/procurement/detail'))
 const GRN = lazy(() => import('./pages/procurement/grn'))
 const InTransit = lazy(() => import('./pages/procurement/in-transit'))
@@ -254,6 +255,9 @@ export const DASHBOARD_ROUTES: RouteObject[] = [
 
   // Procurement
   { path: '/procurement', element: <S><Procurement /></S> },
+  // /procurement/create must come before the :id wildcard so React Router
+  // matches the literal path first (otherwise "create" is captured as :id).
+  { path: '/procurement/create', element: <S><ProcurementCreate /></S> },
   { path: '/procurement/:id', element: <S><ProcurementDetail /></S> },
   { path: '/procurement/grn', element: <S><GRN /></S> },
   { path: '/procurement/in-transit', element: <S><InTransit /></S> },

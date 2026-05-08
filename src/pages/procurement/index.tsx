@@ -1503,7 +1503,14 @@ export default function ProcurementPage() {
           <h1 className="text-xl font-bold text-[#1F1D1B]">Purchase Orders</h1>
           <p className="text-xs text-[#6B7280]">Create and manage purchase orders using internal material codes</p>
         </div>
-        <Button variant="primary" onClick={() => setShowPOForm(true)}>
+        {/* Toolbar entry routes to the full-page form. The modal-based
+            POFormDialog below is retained for the deep-link prefill case
+            (Fabric Module shortage chip → /procurement?prefillRm=…) and
+            the Low-Stock reorder banner ("Create PO from Low Stock"),
+            both of which open with seeded line items where the compact
+            modal still feels right. Plain "New PO" gets the breathing
+            room of the full page. */}
+        <Button variant="primary" onClick={() => navigate("/procurement/create")}>
           <Plus className="h-4 w-4" /> New Purchase Order
         </Button>
       </div>

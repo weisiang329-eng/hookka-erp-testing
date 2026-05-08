@@ -186,8 +186,17 @@ export type SiblingPo = {
 };
 
 // ---------------------------------------------------------------------------
-// Group key for sofa cross-PO siblings. Same SO (or CO when SO is NULL)
-// + same fabricCode = one merged FAB_CUT cut.
+// Group key for sofa cross-PO siblings — must mirror the JC builder's
+// merged FAB_CUT wipKey shape: `{companySOId|companyCOId}::{baseModel}::{fabricCode}`.
+//
+// Including baseModel is critical: a single SO may carry two different
+// sofa lines that happen to share the same fabricCode (e.g. SO-2605-106
+// has both 5530-1A series and 5535-1A series cut from M2402-4). Without
+// baseModel they'd collapse into one group and the 5535 piece would be
+// reported with the 5530 set's full fabric demand.
+//
+// Falls back to productCode when baseModel isn't known — slightly less
+// precise but still per-product, never cross-product.
 // ---------------------------------------------------------------------------
 export function sofaSiblingGroupKey(
   po: {
@@ -195,36 +204,53 @@ export function sofaSiblingGroupKey(
     companySOId: string | null;
     companyCOId: string | null;
     fabricCode: string | null;
+    productCode?: string | null;
   },
+  baseModel?: string | null,
 ): string | null {
   if (po.itemCategory !== "SOFA") return null;
   const parent = po.companySOId || po.companyCOId;
   if (!parent || !po.fabricCode) return null;
-  return `${parent}::${po.fabricCode}`;
+  const model = baseModel || po.productCode || "";
+  if (!model) return null;
+  return `${parent}::${model}::${po.fabricCode}`;
 }
 
 // ---------------------------------------------------------------------------
 // Pre-load every sofa PO that participates in a cross-PO group, then bucket
-// by sofaSiblingGroupKey. The merged FAB_CUT JC's anchor PO does NOT carry
-// the full demand on its own — sibling POs (qty=3 mid, qty=1 LHF/RHF, etc.)
-// share the same cut. Caller builds this map ONCE per request and passes
-// it into computeFcFabricUsageMeters / computeFabricMetrics so we sum every
-// piece in the group instead of just the anchor.
+// by sofaSiblingGroupKey. Returns:
+//   - byGroupKey         → Map<groupKey, SiblingPo[]> for sum-across-siblings
+//   - baseModelByProductCode → Map<productCode, baseModel> so callers can
+//                              recompute groupKey for any PO (callers usually
+//                              have productCode but not baseModel).
+//
+// SQL JOINs bom_templates so baseModel rides along with the same query —
+// avoids a second roundtrip. For products with no ACTIVE BOM template, the
+// row still goes into the bucket (baseModel falls back to productCode).
 // ---------------------------------------------------------------------------
+export type SofaSiblingsIndex = {
+  byGroupKey: Map<string, SiblingPo[]>;
+  baseModelByProductCode: Map<string, string>;
+};
+
 export async function fetchSofaSiblingsByGroupKey(
   db: D1Database,
   orgId?: string | null,
-): Promise<Map<string, SiblingPo[]>> {
-  const out = new Map<string, SiblingPo[]>();
+): Promise<SofaSiblingsIndex> {
+  const byGroupKey = new Map<string, SiblingPo[]>();
+  const baseModelByProductCode = new Map<string, string>();
   const sql =
-    `SELECT productCode, quantity, itemCategory, gapInches,
-            divanHeightInches, legHeightInches, sizeCode, sizeLabel,
-            companySOId, companyCOId, fabricCode
-       FROM production_orders
-      WHERE itemCategory = 'SOFA'
-        AND fabricCode IS NOT NULL AND fabricCode <> ''
-        AND (companySOId IS NOT NULL OR companyCOId IS NOT NULL)` +
-    (orgId ? " AND orgId = ?" : "");
+    `SELECT po.productCode, po.quantity, po.itemCategory, po.gapInches,
+            po.divanHeightInches, po.legHeightInches, po.sizeCode, po.sizeLabel,
+            po.companySOId, po.companyCOId, po.fabricCode,
+            bt.baseModel
+       FROM production_orders po
+       LEFT JOIN bom_templates bt
+         ON bt.productCode = po.productCode AND bt.versionStatus = 'ACTIVE'
+      WHERE po.itemCategory = 'SOFA'
+        AND po.fabricCode IS NOT NULL AND po.fabricCode <> ''
+        AND (po.companySOId IS NOT NULL OR po.companyCOId IS NOT NULL)` +
+    (orgId ? " AND po.orgId = ?" : "");
   const stmt = orgId ? db.prepare(sql).bind(orgId) : db.prepare(sql);
   const res = await stmt.all<{
     productCode: string | null;
@@ -238,19 +264,27 @@ export async function fetchSofaSiblingsByGroupKey(
     companySOId: string | null;
     companyCOId: string | null;
     fabricCode: string | null;
+    baseModel: string | null;
   }>();
   for (const r of res.results ?? []) {
-    const key = sofaSiblingGroupKey({
-      itemCategory: r.itemCategory,
-      companySOId: r.companySOId,
-      companyCOId: r.companyCOId,
-      fabricCode: r.fabricCode,
-    });
+    if (r.productCode && r.baseModel) {
+      baseModelByProductCode.set(r.productCode, r.baseModel);
+    }
+    const key = sofaSiblingGroupKey(
+      {
+        itemCategory: r.itemCategory,
+        companySOId: r.companySOId,
+        companyCOId: r.companyCOId,
+        fabricCode: r.fabricCode,
+        productCode: r.productCode,
+      },
+      r.baseModel,
+    );
     if (!key) continue;
-    let bucket = out.get(key);
+    let bucket = byGroupKey.get(key);
     if (!bucket) {
       bucket = [];
-      out.set(key, bucket);
+      byGroupKey.set(key, bucket);
     }
     bucket.push({
       productCode: r.productCode,
@@ -263,7 +297,7 @@ export async function fetchSofaSiblingsByGroupKey(
       sizeLabel: r.sizeLabel,
     });
   }
-  return out;
+  return { byGroupKey, baseModelByProductCode };
 }
 
 // ---------------------------------------------------------------------------
@@ -422,10 +456,12 @@ export async function computeFabricMetrics(
   // considered "in-flight" in production tracking. PO status excludes
   // CANCELLED/COMPLETED/ON_HOLD (held POs may resume but their fabric
   // demand isn't pressing).
-  const [bomMap, siblingsByGroup] = await Promise.all([
+  const [bomMap, siblingsIdx] = await Promise.all([
     fetchBomWipComponentsByCode(db),
     fetchSofaSiblingsByGroupKey(db),
   ]);
+  const siblingsByGroup = siblingsIdx.byGroupKey;
+  const baseModelByProductCode = siblingsIdx.baseModelByProductCode;
   const jcsRes = await db
     .prepare(
       `SELECT jc.id AS jcId, jc.dueDate, jc.wipType, jc.departmentCode,
@@ -447,12 +483,19 @@ export async function computeFabricMetrics(
     const wipComponents = jc.productCode ? bomMap.get(jc.productCode) : null;
     // For sofa cross-PO groups, fall through to the siblings path even when
     // the anchor's own BOM is missing (siblings supply their own BOM).
-    const groupKey = sofaSiblingGroupKey({
-      itemCategory: jc.itemCategory,
-      companySOId: jc.companySOId,
-      companyCOId: jc.companyCOId,
-      fabricCode: jc.fabricCode,
-    });
+    const baseModel = jc.productCode
+      ? baseModelByProductCode.get(jc.productCode)
+      : null;
+    const groupKey = sofaSiblingGroupKey(
+      {
+        itemCategory: jc.itemCategory,
+        companySOId: jc.companySOId,
+        companyCOId: jc.companyCOId,
+        fabricCode: jc.fabricCode,
+        productCode: jc.productCode,
+      },
+      baseModel,
+    );
     const siblings = groupKey ? siblingsByGroup.get(groupKey) : undefined;
     if (!wipComponents && (!siblings || siblings.length === 0)) continue;
     const meters = computeFcFabricUsageMeters(

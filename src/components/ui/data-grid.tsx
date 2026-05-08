@@ -65,6 +65,13 @@ export type Column<T> = {
   //      show row.sources.length).
   // Sort still uses `key` so sortable: true keeps its original ordering.
   filterAccessor?: (row: T) => string | number | null;
+  // Optional sort-value accessor — when defined the sort comparator reads
+  // from this fn instead of `getNestedValue(row, key)`. Use this for
+  // columns whose displayed value is computed in `render` from a lookup
+  // outside the row (e.g. a Map keyed by row.id) so sort reflects the
+  // visible value rather than always returning undefined and leaving rows
+  // in input order. Only the value matters — direction stays user-controlled.
+  sortAccessor?: (row: T) => string | number | null | undefined;
 };
 
 export type ContextMenuItem = {
@@ -1259,7 +1266,13 @@ export function DataGrid<T extends Record<string, any>>({
       });
     }
 
-    // Primary sort by groupBy column (if grouping enabled), then by user sort
+    // Primary sort by groupBy column (if grouping enabled), then by user sort.
+    // Look up column.sortAccessor from sortKey so columns whose displayed
+    // value is computed (e.g. via an external Map lookup) sort by that
+    // computed value instead of always returning undefined from
+    // getNestedValue.
+    const sortCol = sortKey ? columns.find((c) => c.key === sortKey) : null;
+    const sortRead = sortCol?.sortAccessor;
     if ((groupBy && groupEnabled) || sortKey) {
       result.sort((a, b) => {
         if (groupBy && groupEnabled) {
@@ -1269,8 +1282,8 @@ export function DataGrid<T extends Record<string, any>>({
           if (gc !== 0) return gc;
         }
         if (sortKey) {
-          const va = getNestedValue(a, sortKey);
-          const vb = getNestedValue(b, sortKey);
+          const va = sortRead ? sortRead(a) : getNestedValue(a, sortKey);
+          const vb = sortRead ? sortRead(b) : getNestedValue(b, sortKey);
           const vc = compareValues(va, vb);
           return sortDir === "desc" ? -vc : vc;
         }
@@ -1278,7 +1291,7 @@ export function DataGrid<T extends Record<string, any>>({
       });
     }
     return result;
-  }, [filteredData, sortKey, sortDir, groupBy, groupEnabled, groupFilter]);
+  }, [filteredData, sortKey, sortDir, groupBy, groupEnabled, groupFilter, columns]);
 
   // ── Virtualization ──
   // Only enable when explicitly opted-in AND no group headers are interleaved

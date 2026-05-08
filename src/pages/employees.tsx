@@ -2212,6 +2212,7 @@ function EfficiencyOverviewTab({
         label: "Production Time",
         align: "right",
         sortable: true,
+        sortAccessor: (row) => prodMinsByWorker.get(row.workerId) ?? 0,
         render: (_value, row) => {
           const mins = prodMinsByWorker.get(row.workerId) ?? 0;
           if (mins <= 0) {
@@ -2233,6 +2234,20 @@ function EfficiencyOverviewTab({
         label: "Efficiency %",
         align: "right",
         sortable: true,
+        sortAccessor: (row) => {
+          // Mirror the render: production-dept hours only / 60 = denominator,
+          // numerator = JC production minutes for this worker. When the
+          // denominator is 0 (no production-dept hours OR no entries at all),
+          // sort treats the row as -1 so they pile at the bottom in asc /
+          // top in desc — distinct from real 0% efficiency rows.
+          const prodHours = Object.entries(row.byDept).reduce(
+            (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
+            0,
+          );
+          if (prodHours <= 0 || row.daysWithEntries === 0) return -1;
+          const prodMins = prodMinsByWorker.get(row.workerId) ?? 0;
+          return (prodMins / (prodHours * 60)) * 100;
+        },
         // Numerator vs denominator coverage is the killer caveat here:
         //   - prodMins  = sum of job_cards.completedDate within [from,to]
         //                 with the worker as PIC1/PIC2
@@ -2297,6 +2312,7 @@ function EfficiencyOverviewTab({
         label: d.shortName || d.name,
         align: "right",
         sortable: true,
+        sortAccessor: (row) => row.byDept[d.code] ?? 0,
         render: (_value, row) => {
           const h = row.byDept[d.code] ?? 0;
           if (h <= 0) {

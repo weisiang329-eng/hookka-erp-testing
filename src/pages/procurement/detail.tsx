@@ -951,7 +951,8 @@ export default function PurchaseOrderDetailPage() {
                   <thead>
                     <tr className="border-b border-[#E2DDD8] bg-[#F0ECE9]">
                       <th className="h-10 px-4 text-left font-medium text-[#374151]">#</th>
-                      <th className="h-10 px-4 text-left font-medium text-[#374151]">Item Code</th>
+                      <th className="h-10 px-3 text-left font-medium text-[#374151]">Internal Code</th>
+                      <th className="h-10 px-3 text-left font-medium text-[#374151]">Supplier SKU</th>
                       <th className="h-10 px-4 text-left font-medium text-[#374151]">Description</th>
                       <th className="h-10 px-4 text-center font-medium text-[#374151]">Unit</th>
                       <th className="h-10 px-4 text-right font-medium text-[#374151]">Qty</th>
@@ -964,11 +965,36 @@ export default function PurchaseOrderDetailPage() {
                     {po.items.map((item, idx) => {
                       const isComplete = item.receivedQty >= item.quantity;
                       const hasPartial = item.receivedQty > 0 && item.receivedQty < item.quantity;
+                      // materialName stores "<rmCode> - <description>" (same
+                      // shape POFormDialog writes on create + poItemToEditLine
+                      // splits on edit). Pull the prefix as the internal RM
+                      // code; the rest is the human-readable description.
+                      // Falls back to the raw string if no " - " separator
+                      // (legacy rows or supplier-only items).
+                      const dashIdx = (item.materialName ?? "").indexOf(" - ");
+                      const internalCode = dashIdx > 0
+                        ? item.materialName.slice(0, dashIdx).trim()
+                        : (item.materialName ?? "").trim();
+                      const description = dashIdx > 0
+                        ? item.materialName.slice(dashIdx + 3).trim()
+                        : "";
+                      const supplierSku = (item.supplierSKU ?? "").trim();
                       return (
                         <tr key={item.id} className={`border-b border-[#E2DDD8] ${idx % 2 === 1 ? "bg-[#FAF9F7]" : ""}`}>
                           <td className="h-12 px-4 text-[#6B7280]">{idx + 1}</td>
-                          <td className="h-12 px-4 font-medium text-[#6B5C32]">{item.supplierSKU}</td>
-                          <td className="h-12 px-4 text-[#1F1D1B]">{item.materialName}</td>
+                          <td
+                            className="h-12 px-3 font-mono text-xs font-medium text-[#6B5C32] whitespace-nowrap"
+                            title={internalCode || undefined}
+                          >
+                            {internalCode || <span className="text-[#9CA3AF]">—</span>}
+                          </td>
+                          <td
+                            className="h-12 px-3 font-mono text-xs text-[#6B7280] whitespace-nowrap"
+                            title={supplierSku || undefined}
+                          >
+                            {supplierSku || <span className="text-[#9CA3AF]">—</span>}
+                          </td>
+                          <td className="h-12 px-4 text-[#1F1D1B]">{description || <span className="text-[#9CA3AF]">—</span>}</td>
                           <td className="h-12 px-4 text-center text-[#6B7280]">{item.unit}</td>
                           <td className="h-12 px-4 text-right text-[#4B5563]">{item.quantity}</td>
                           <td className={`h-12 px-4 text-right font-medium ${isComplete ? "text-green-600" : hasPartial ? "text-amber-600" : "text-[#6B7280]"}`}>
@@ -982,7 +1008,7 @@ export default function PurchaseOrderDetailPage() {
                   </tbody>
                   <tfoot>
                     <tr className="bg-[#F0ECE9]">
-                      <td colSpan={4} className="h-10 px-4 font-semibold text-[#374151]">Total</td>
+                      <td colSpan={5} className="h-10 px-4 font-semibold text-[#374151]">Total</td>
                       <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalOrdered}</td>
                       <td className="h-10 px-4 text-right font-semibold text-[#374151]">{totalReceived}</td>
                       <td className="h-10 px-4"></td>

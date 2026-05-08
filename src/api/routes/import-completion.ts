@@ -63,6 +63,7 @@ import {
 } from "../lib/lead-times";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import { getOrgId } from "../lib/tenant";
+import { validateFabricCodes } from "../lib/fabric-validation";
 
 const app = new Hono<Env>();
 
@@ -11436,6 +11437,350 @@ app.post("/backfill-fabcut-rm-issue", async (c) => {
     totalLinesConsumed,
     shortageSamples,
     nextCursor: candidateRows.length === limit ? lastId : null,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/audit-orphan-fabric-codes
+//
+// Read-only diagnostic. Scans production_orders, sales_order_items, and
+// consignment_order_items for any non-empty `fabricCode` that does NOT
+// resolve to a row in `raw_materials` with a fabric `itemGroup`. For each
+// orphan, suggests a canonical match by stripping leading zeros from the
+// LAST hyphen-separated segment (the historical typo pattern: M2402-04
+// instead of M2402-4).
+//
+// Response:
+//   {
+//     totalOrphanRecords: <sum of affectedTables across all codes>,
+//     byCode: [
+//       {
+//         wrongCode, suggestedCode (or null), isSafeTypo,
+//         affectedTables: { production_orders, sales_order_items,
+//                           consignment_order_items }
+//       }
+//     ]
+//   }
+//
+// `isSafeTypo` is true ONLY when the leading-zero-stripped form is
+// already a valid raw_material — caller can then auto-apply via the
+// `/apply-fabric-code-fixes` endpoint without manual review. Anything
+// else (pattern doesn't match, or the stripped form still doesn't exist)
+// returns isSafeTypo=false and requires a human-supplied mapping.
+// ---------------------------------------------------------------------------
+app.post("/audit-orphan-fabric-codes", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+
+  // 1. Pull every distinct non-empty fabricCode used across the three tables,
+  //    along with per-table row counts. UNION ALL preserves duplicates so we
+  //    can sum them per-code in one pass.
+  const usageRes = await db
+    .prepare(
+      `SELECT fabricCode, source, n FROM (
+         SELECT fabricCode AS fabricCode, 'production_orders' AS source,
+                COUNT(*) AS n
+           FROM production_orders
+          WHERE fabricCode IS NOT NULL AND fabricCode <> ''
+          GROUP BY fabricCode
+         UNION ALL
+         SELECT fabricCode AS fabricCode, 'sales_order_items' AS source,
+                COUNT(*) AS n
+           FROM sales_order_items
+          WHERE fabricCode IS NOT NULL AND fabricCode <> ''
+          GROUP BY fabricCode
+         UNION ALL
+         SELECT fabricCode AS fabricCode, 'consignment_order_items' AS source,
+                COUNT(*) AS n
+           FROM consignment_order_items
+          WHERE fabricCode IS NOT NULL AND fabricCode <> ''
+          GROUP BY fabricCode
+       ) t`,
+    )
+    .all<{ fabricCode: string; source: string; n: number }>();
+  const usageRows = usageRes.results ?? [];
+
+  // 2. Pull the canonical fabric set from raw_materials so we can both
+  //    (a) classify orphans and (b) verify safe-typo suggestions.
+  const rmRes = await db
+    .prepare(
+      `SELECT itemCode FROM raw_materials
+        WHERE itemCode IS NOT NULL
+          AND itemGroup IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')`,
+    )
+    .all<{ itemCode: string | null }>();
+  const knownCodes = new Set<string>();
+  for (const r of rmRes.results ?? []) {
+    if (r.itemCode) knownCodes.add(r.itemCode);
+  }
+
+  // 3. Aggregate per-code counts, filtering to orphans (codes not in
+  //    raw_materials).
+  type Counts = {
+    production_orders: number;
+    sales_order_items: number;
+    consignment_order_items: number;
+  };
+  const byCode = new Map<string, Counts>();
+  for (const u of usageRows) {
+    if (!u.fabricCode || knownCodes.has(u.fabricCode)) continue;
+    let agg = byCode.get(u.fabricCode);
+    if (!agg) {
+      agg = {
+        production_orders: 0,
+        sales_order_items: 0,
+        consignment_order_items: 0,
+      };
+      byCode.set(u.fabricCode, agg);
+    }
+    if (u.source === "production_orders") agg.production_orders += Number(u.n) || 0;
+    else if (u.source === "sales_order_items") agg.sales_order_items += Number(u.n) || 0;
+    else if (u.source === "consignment_order_items")
+      agg.consignment_order_items += Number(u.n) || 0;
+  }
+
+  // 4. Suggestion rule — strip leading zeros from the LAST hyphen-separated
+  //    segment. If the stripped form already exists in raw_materials,
+  //    flag isSafeTypo=true. Anything else returns suggestedCode=null.
+  const suggestFor = (wrong: string): string | null => {
+    const idx = wrong.lastIndexOf("-");
+    if (idx < 0 || idx === wrong.length - 1) return null;
+    const head = wrong.slice(0, idx);
+    const tail = wrong.slice(idx + 1);
+    // Only strip when the tail is purely digits with at least one leading zero.
+    if (!/^0+\d+$/.test(tail)) return null;
+    const stripped = String(parseInt(tail, 10));
+    return `${head}-${stripped}`;
+  };
+
+  const result: Array<{
+    wrongCode: string;
+    suggestedCode: string | null;
+    isSafeTypo: boolean;
+    affectedTables: Counts;
+  }> = [];
+  let totalOrphanRecords = 0;
+  // Stable ordering for human review — alpha by wrongCode.
+  const orphanCodes = Array.from(byCode.keys()).sort();
+  for (const wrongCode of orphanCodes) {
+    const counts = byCode.get(wrongCode)!;
+    const sum =
+      counts.production_orders +
+      counts.sales_order_items +
+      counts.consignment_order_items;
+    totalOrphanRecords += sum;
+    const candidate = suggestFor(wrongCode);
+    const isSafeTypo = candidate !== null && knownCodes.has(candidate);
+    result.push({
+      wrongCode,
+      suggestedCode: isSafeTypo ? candidate : null,
+      isSafeTypo,
+      affectedTables: counts,
+    });
+  }
+
+  return c.json({
+    totalOrphanRecords,
+    byCode: result,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/apply-fabric-code-fixes
+//
+// Body: { mapping: { "M2402-04": "M2402-4", ... }, dryRun?: boolean }
+//
+// For each wrongCode → correctCode pair:
+//   1. Re-validate that correctCode exists in raw_materials with a fabric
+//      itemGroup (don't trust the caller — a hand-rolled mapping could
+//      otherwise sneak an orphan code into the orphan-fix path).
+//   2. Run UPDATEs against production_orders, sales_order_items,
+//      consignment_order_items in a single db.batch() — the three writes
+//      either all land or none do, so a partial cascade can't desync the
+//      tables.
+//   3. Collect affected production_orders.id values so the caller can
+//      regen job-cards / fabric-cut JCs downstream (the regen itself is
+//      out of scope for this endpoint — it's a separate cascade).
+//
+// Returns:
+//   {
+//     applied: [
+//       { from, to, rowsUpdated: { ... }, affectedPoIds: [...] }
+//     ],
+//     rejected: [
+//       { from, to, reason }
+//     ]
+//   }
+// ---------------------------------------------------------------------------
+app.post("/apply-fabric-code-fixes", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  type Body = {
+    mapping?: Record<string, string>;
+    dryRun?: boolean;
+  };
+  let body: Body = {};
+  try {
+    body = (await c.req.json().catch(() => ({}))) as Body;
+  } catch {
+    body = {};
+  }
+  const dryRun = body?.dryRun === true;
+  const mapping = body?.mapping && typeof body.mapping === "object"
+    ? body.mapping
+    : {};
+  const pairs = Object.entries(mapping)
+    .filter(
+      ([from, to]) =>
+        typeof from === "string" &&
+        typeof to === "string" &&
+        from.trim() !== "" &&
+        to.trim() !== "",
+    )
+    .map(([from, to]) => ({ from: from.trim(), to: to.trim() }));
+
+  if (pairs.length === 0) {
+    return c.json({
+      success: false,
+      error: "mapping is required and must contain at least one non-empty pair",
+    }, 400);
+  }
+
+  const db = c.var.DB;
+
+  // Pre-validate every target in one round-trip — cheap and lets us reject
+  // bad pairs before attempting any UPDATEs. Note we ONLY check the target
+  // (`to`) side: the source (`from`) is by definition an orphan, that's
+  // why we're fixing it.
+  const targetCheck = await validateFabricCodes(
+    db,
+    pairs.map((p) => p.to),
+  );
+  const unknownTargets = new Set(targetCheck.unknown);
+
+  const applied: Array<{
+    from: string;
+    to: string;
+    rowsUpdated: {
+      production_orders: number;
+      sales_order_items: number;
+      consignment_order_items: number;
+    };
+    affectedPoIds: string[];
+  }> = [];
+  const rejected: Array<{ from: string; to: string; reason: string }> = [];
+
+  for (const pair of pairs) {
+    if (pair.from === pair.to) {
+      rejected.push({
+        from: pair.from,
+        to: pair.to,
+        reason: "from and to are identical — nothing to do",
+      });
+      continue;
+    }
+    if (unknownTargets.has(pair.to)) {
+      rejected.push({
+        from: pair.from,
+        to: pair.to,
+        reason: "target not in raw_materials",
+      });
+      continue;
+    }
+
+    // Snapshot affected PO ids BEFORE the UPDATE — caller needs them for
+    // downstream JC regen. Doing this read in dryRun mode too returns the
+    // same ids the live mode would touch.
+    const affectedRes = await db
+      .prepare(
+        `SELECT id FROM production_orders WHERE fabricCode = ?`,
+      )
+      .bind(pair.from)
+      .all<{ id: string }>();
+    const affectedPoIds = (affectedRes.results ?? []).map((r) => r.id);
+
+    // Count rows that would change in each table. For the dryRun path we
+    // return these counts without writing; for the live path we use them
+    // as the expected-rowcount report (db.batch results don't always
+    // surface row counts on the postgres compat shim, so we count here).
+    const [poCountRes, soiCountRes, coiCountRes] = await Promise.all([
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM production_orders WHERE fabricCode = ?",
+        )
+        .bind(pair.from)
+        .first<{ n: number }>(),
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM sales_order_items WHERE fabricCode = ?",
+        )
+        .bind(pair.from)
+        .first<{ n: number }>(),
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM consignment_order_items WHERE fabricCode = ?",
+        )
+        .bind(pair.from)
+        .first<{ n: number }>(),
+    ]);
+    const rowsUpdated = {
+      production_orders: Number(poCountRes?.n) || 0,
+      sales_order_items: Number(soiCountRes?.n) || 0,
+      consignment_order_items: Number(coiCountRes?.n) || 0,
+    };
+
+    if (!dryRun) {
+      // Atomic three-statement batch — production_orders, sales_order_items,
+      // consignment_order_items must all flip together. db.batch() is the
+      // closest primitive the pg compat shim exposes to a transaction; if
+      // any statement throws, the whole batch fails and we surface the
+      // pair as rejected.
+      try {
+        await db.batch([
+          db
+            .prepare(
+              "UPDATE production_orders SET fabricCode = ? WHERE fabricCode = ?",
+            )
+            .bind(pair.to, pair.from),
+          db
+            .prepare(
+              "UPDATE sales_order_items SET fabricCode = ? WHERE fabricCode = ?",
+            )
+            .bind(pair.to, pair.from),
+          db
+            .prepare(
+              "UPDATE consignment_order_items SET fabricCode = ? WHERE fabricCode = ?",
+            )
+            .bind(pair.to, pair.from),
+        ]);
+      } catch (err) {
+        rejected.push({
+          from: pair.from,
+          to: pair.to,
+          reason:
+            err instanceof Error
+              ? `update batch failed: ${err.message}`
+              : "update batch failed",
+        });
+        continue;
+      }
+    }
+
+    applied.push({
+      from: pair.from,
+      to: pair.to,
+      rowsUpdated,
+      affectedPoIds,
+    });
+  }
+
+  return c.json({
+    dryRun,
+    applied,
+    rejected,
   });
 });
 

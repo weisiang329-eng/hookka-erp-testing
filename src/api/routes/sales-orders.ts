@@ -44,6 +44,10 @@ import {
   MIN_OVERRIDE_REASON_LEN,
 } from "../lib/edit-lock-override";
 import { readIdempotencyKey, withIdempotency } from "../lib/idempotency";
+import {
+  validateFabricCodes,
+  unknownFabricCodeError,
+} from "../lib/fabric-validation";
 
 const app = new Hono<Env>();
 
@@ -1675,6 +1679,21 @@ app.post("/", async (c) => {
       return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
     }
 
+    // Fabric integrity gate — every non-empty incoming fabricCode must
+    // resolve to a row in raw_materials with a fabric itemGroup. Closes
+    // the door on operators saving stale/typo codes (e.g. M2402-04 when
+    // only M2402-4 exists). Empty fabricCode is legal — line items
+    // without fabric simply skip the check.
+    {
+      const fabCheck = await validateFabricCodes(
+        c.var.DB,
+        rawItems.map((it) => (it.fabricCode as string | null | undefined)),
+      );
+      if (!fabCheck.valid) {
+        return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+      }
+    }
+
     // Price-resolution date: use companySODate (may be future-dated) when given,
     // fall back to today so price history resolves correctly on confirm.
     const priceAsOf =
@@ -2774,6 +2793,19 @@ app.put("/:id", async (c) => {
         )
       ) {
         return c.json({ success: false, error: SO_MIXED_CATEGORY_ERROR }, 400);
+      }
+
+      // Fabric integrity gate — see the POST handler for the rationale.
+      // Reject before any items are deleted/inserted so a bad payload
+      // can't half-write a new row set.
+      {
+        const fabCheck = await validateFabricCodes(
+          c.var.DB,
+          rawItems.map((it) => (it.fabricCode as string | null | undefined)),
+        );
+        if (!fabCheck.valid) {
+          return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+        }
       }
 
       const oldItemsRes = await c.var.DB.prepare(

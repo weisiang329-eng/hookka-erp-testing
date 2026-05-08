@@ -30,6 +30,10 @@ import {
   lookupActorDisplayName,
   MIN_OVERRIDE_REASON_LEN,
 } from "../lib/edit-lock-override";
+import {
+  validateFabricCodes,
+  unknownFabricCodeError,
+} from "../lib/fabric-validation";
 
 const app = new Hono<Env>();
 
@@ -344,6 +348,23 @@ app.post("/", async (c) => {
     const id = genCoId();
 
     const rawItems = Array.isArray(body.items) ? body.items : [];
+
+    // Fabric integrity gate — every non-empty incoming fabricCode must
+    // resolve to a row in raw_materials with a fabric itemGroup. Mirrors
+    // the SO POST guard so CO can't sneak orphan codes into production.
+    {
+      const fabCheck = await validateFabricCodes(
+        c.var.DB,
+        rawItems.map(
+          (it: Record<string, unknown>) =>
+            (it.fabricCode as string | null | undefined),
+        ),
+      );
+      if (!fabCheck.valid) {
+        return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+      }
+    }
+
     const itemRows: ConsignmentOrderItemRow[] = rawItems.map(
       (it: Record<string, unknown>, idx: number) => {
         const qty = Number(it.quantity) || 1;
@@ -1173,6 +1194,21 @@ app.put("/:id", async (c) => {
     let subtotalSen = existing.subtotalSen;
     let totalSen = existing.totalSen;
     if (Array.isArray(body.items)) {
+      // Fabric integrity gate — see the POST handler. Validate before
+      // queuing the DELETE so a bad payload can't wipe the existing
+      // items and leave the CO with no lines.
+      {
+        const fabCheck = await validateFabricCodes(
+          c.var.DB,
+          (body.items as Array<Record<string, unknown>>).map(
+            (it) => (it.fabricCode as string | null | undefined),
+          ),
+        );
+        if (!fabCheck.valid) {
+          return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+        }
+      }
+
       stmts.push(
         c.var.DB.prepare(
           "DELETE FROM consignment_order_items WHERE consignmentOrderId = ?",

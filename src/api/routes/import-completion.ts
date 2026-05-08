@@ -12556,4 +12556,332 @@ app.post("/refresh-jcs-by-id", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-po-from-so-lines
+//
+// One-shot backfill: re-syncs production_orders attributes to match their
+// source sales_order_items. For each input soId:
+//
+//   1. Loads SO line items (sorted by lineNo).
+//   2. Expands lines into per-PO list using the generator's own expansion
+//      logic (SOFA non-project: 1 PO per line carrying line.quantity;
+//      BEDFRAME/ACCESSORY: pieceCount = line.quantity, each PO carries 1).
+//   3. Loads production_orders for the SO sorted by suffix.
+//   4. PO count check: if expected != actual → reject (caller must
+//      decide whether to create/delete POs; out of scope for this
+//      backfill which only updates existing rows).
+//   5. For each PO at index i, UPDATEs PO attributes to match expected
+//      unit's: productCode, sizeLabel, sizeCode, fabricCode,
+//      divanHeightInches, legHeightInches, gapInches, salesOrderItemId.
+//      DOES NOT touch status, currentDepartment, dueDate, completedDate,
+//      progress, customerPOId, etc. — those are operational state, not
+//      source attributes.
+//
+// Body: { soIds: string[], dryRun: boolean }
+// Returns: { success, dryRun, processed: [{soId, status, changes?, error?}] }
+//
+// Supports both internal soId and companySOId in input (resolved per-SO).
+//
+// Per memory feedback_isolated_branch_for_schema_changes: cascade integrity
+// work; called from main but operator must dry-run + confirm before live.
+// ---------------------------------------------------------------------------
+type BackfillExpectedUnit = {
+  lineId: string;
+  lineSuffix: string | null;
+  lineNo: number | null;
+  productCode: string | null;
+  productName: string | null;
+  productId: string | null;
+  itemCategory: string | null;
+  sizeLabel: string | null;
+  sizeCode: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
+  specialOrder: string | null;
+  unitQty: number;
+};
+
+app.post("/backfill-po-from-so-lines", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "update");
+  if (denied) return denied;
+
+  let body: { soIds?: unknown; dryRun?: unknown };
+  try {
+    body = (await c.req.json()) as { soIds?: unknown; dryRun?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+
+  const soIdsRaw = Array.isArray(body.soIds)
+    ? body.soIds.filter((x): x is string => typeof x === "string" && x.length > 0)
+    : null;
+  if (!soIdsRaw || soIdsRaw.length === 0) {
+    return c.json(
+      {
+        success: false,
+        error: "body.soIds must be a non-empty array of strings",
+      },
+      400,
+    );
+  }
+  const dryRun = body.dryRun === true;
+  const db = c.var.DB;
+
+  type ProcessResult = {
+    soId: string;
+    companySOId?: string | null;
+    status: "ok" | "skipped" | "error";
+    expectedPoCount?: number;
+    actualPoCount?: number;
+    changes?: Array<{
+      poId: string;
+      poNo: string;
+      diffs: Record<
+        string,
+        { from: unknown; to: unknown }
+      >;
+    }>;
+    error?: string;
+    isProjectOrder?: boolean;
+  };
+  const processed: ProcessResult[] = [];
+  const allUpdateStatements: D1PreparedStatement[] = [];
+
+  for (const soIdRaw of soIdsRaw) {
+    // Resolve to internal id
+    let soRow = await db
+      .prepare(
+        "SELECT id, companySOId, isProjectOrder FROM sales_orders WHERE id = ? LIMIT 1",
+      )
+      .bind(soIdRaw)
+      .first<{ id: string; companySOId: string | null; isProjectOrder: number | null }>();
+    if (!soRow) {
+      soRow = await db
+        .prepare(
+          "SELECT id, companySOId, isProjectOrder FROM sales_orders WHERE companySOId = ? LIMIT 1",
+        )
+        .bind(soIdRaw)
+        .first<{ id: string; companySOId: string | null; isProjectOrder: number | null }>();
+    }
+    if (!soRow) {
+      processed.push({
+        soId: soIdRaw,
+        status: "error",
+        error: "SO not found by id or companySOId",
+      });
+      continue;
+    }
+    const soId = soRow.id;
+    const isProject = !!soRow.isProjectOrder;
+
+    // Load SO line items
+    const linesRes = await db
+      .prepare(
+        `SELECT id, lineNo, lineSuffix, productId, productCode, productName,
+                itemCategory, sizeCode, sizeLabel, fabricCode,
+                divanHeightInches, legHeightInches, gapInches,
+                specialOrder, quantity
+           FROM sales_order_items WHERE salesOrderId = ?
+           ORDER BY lineNo ASC`,
+      )
+      .bind(soId)
+      .all<{
+        id: string;
+        lineNo: number | null;
+        lineSuffix: string | null;
+        productId: string | null;
+        productCode: string | null;
+        productName: string | null;
+        itemCategory: string | null;
+        sizeCode: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        gapInches: number | null;
+        specialOrder: string | null;
+        quantity: number;
+      }>();
+    const lines = linesRes.results ?? [];
+
+    // Expand into per-PO unit list — mirrors createProductionOrdersForOrder:
+    //   SOFA non-project: 1 entry per line (line.quantity carried on the PO)
+    //   BEDFRAME/ACC + project SOFA: line.quantity entries per line
+    const expected: BackfillExpectedUnit[] = [];
+    for (const line of lines) {
+      const isSofa = (line.itemCategory ?? "BEDFRAME") === "SOFA";
+      const isSetItem = isSofa && !isProject;
+      const pieceCount = isSetItem ? 1 : Math.max(1, line.quantity || 1);
+      const perPoQty = isSetItem ? line.quantity || 1 : 1;
+      for (let p = 0; p < pieceCount; p++) {
+        expected.push({
+          lineId: line.id,
+          lineSuffix: line.lineSuffix,
+          lineNo: line.lineNo,
+          productCode: line.productCode,
+          productName: line.productName,
+          productId: line.productId,
+          itemCategory: line.itemCategory,
+          sizeLabel: line.sizeLabel,
+          sizeCode: line.sizeCode,
+          fabricCode: line.fabricCode,
+          divanHeightInches: line.divanHeightInches,
+          legHeightInches: line.legHeightInches,
+          gapInches: line.gapInches,
+          specialOrder: line.specialOrder,
+          unitQty: perPoQty,
+        });
+      }
+    }
+
+    // Load existing POs sorted by id (which encodes suffix)
+    const posRes = await db
+      .prepare(
+        `SELECT id, poNo, productCode, productName, productId, itemCategory,
+                sizeCode, sizeLabel, fabricCode,
+                divanHeightInches, legHeightInches, gapInches,
+                specialOrder, salesOrderItemId, quantity, status
+           FROM production_orders WHERE salesOrderId = ? AND status <> 'CANCELLED'
+           ORDER BY id ASC`,
+      )
+      .bind(soId)
+      .all<{
+        id: string;
+        poNo: string;
+        productCode: string | null;
+        productName: string | null;
+        productId: string | null;
+        itemCategory: string | null;
+        sizeCode: string | null;
+        sizeLabel: string | null;
+        fabricCode: string | null;
+        divanHeightInches: number | null;
+        legHeightInches: number | null;
+        gapInches: number | null;
+        specialOrder: string | null;
+        salesOrderItemId: string | null;
+        quantity: number;
+        status: string;
+      }>();
+    const pos = posRes.results ?? [];
+
+    // PO count check
+    if (pos.length !== expected.length) {
+      processed.push({
+        soId,
+        companySOId: soRow.companySOId,
+        status: "skipped",
+        expectedPoCount: expected.length,
+        actualPoCount: pos.length,
+        isProjectOrder: isProject,
+        error: `PO count mismatch (expected ${expected.length}, got ${pos.length}) — needs CREATE/DELETE which is out of scope for this backfill. Operator must investigate manually.`,
+      });
+      continue;
+    }
+
+    // Pair PO[i] with expected[i] and compute diffs
+    const changes: NonNullable<ProcessResult["changes"]> = [];
+    for (let i = 0; i < pos.length; i++) {
+      const po = pos[i];
+      const exp = expected[i];
+      const diffs: Record<string, { from: unknown; to: unknown }> = {};
+
+      const checks: Array<[string, unknown, unknown]> = [
+        ["productCode", po.productCode, exp.productCode],
+        ["productName", po.productName, exp.productName],
+        ["productId", po.productId, exp.productId],
+        ["itemCategory", po.itemCategory, exp.itemCategory],
+        ["sizeCode", po.sizeCode, exp.sizeCode],
+        ["sizeLabel", po.sizeLabel, exp.sizeLabel],
+        ["fabricCode", po.fabricCode, exp.fabricCode],
+        ["divanHeightInches", po.divanHeightInches, exp.divanHeightInches],
+        ["legHeightInches", po.legHeightInches, exp.legHeightInches],
+        ["gapInches", po.gapInches, exp.gapInches],
+        ["specialOrder", po.specialOrder, exp.specialOrder],
+        ["salesOrderItemId", po.salesOrderItemId, exp.lineId],
+        ["quantity", po.quantity, exp.unitQty],
+      ];
+      for (const [field, from, to] of checks) {
+        const normFrom =
+          from === null || from === undefined || from === "" ? null : from;
+        const normTo =
+          to === null || to === undefined || to === "" ? null : to;
+        if (normFrom !== normTo) {
+          diffs[field] = { from, to };
+        }
+      }
+
+      if (Object.keys(diffs).length > 0) {
+        changes.push({ poId: po.id, poNo: po.poNo, diffs });
+        // Build UPDATE statement (only changed fields)
+        const setClauses: string[] = [];
+        const binds: unknown[] = [];
+        for (const field of Object.keys(diffs)) {
+          setClauses.push(`${field} = ?`);
+          const val = (diffs[field].to ?? null) as unknown;
+          binds.push(val);
+        }
+        if (setClauses.length > 0) {
+          setClauses.push("updated_at = ?");
+          binds.push(new Date().toISOString());
+          binds.push(po.id);
+          allUpdateStatements.push(
+            db
+              .prepare(
+                `UPDATE production_orders SET ${setClauses.join(", ")} WHERE id = ?`,
+              )
+              .bind(...binds),
+          );
+        }
+      }
+    }
+
+    processed.push({
+      soId,
+      companySOId: soRow.companySOId,
+      status: "ok",
+      expectedPoCount: expected.length,
+      actualPoCount: pos.length,
+      isProjectOrder: isProject,
+      changes,
+    });
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      processed,
+      totalUpdates: allUpdateStatements.length,
+    });
+  }
+
+  // Live: execute UPDATEs in chunks of 50
+  const CHUNK = 50;
+  let updated = 0;
+  const errors: Array<{ chunk: number; message: string }> = [];
+  for (let i = 0; i < allUpdateStatements.length; i += CHUNK) {
+    const slice = allUpdateStatements.slice(i, i + CHUNK);
+    if (slice.length === 0) continue;
+    try {
+      await db.batch(slice);
+      updated += slice.length;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ chunk: i, message });
+    }
+  }
+
+  return c.json({
+    success: errors.length === 0,
+    dryRun: false,
+    processed,
+    updated,
+    totalUpdates: allUpdateStatements.length,
+    errors,
+  });
+});
+
 export default app;

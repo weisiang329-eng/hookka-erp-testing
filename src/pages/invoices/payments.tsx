@@ -329,13 +329,22 @@ export default function PaymentsPage() {
               <div className="grid grid-cols-3 gap-4">
                 {/* Amount */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount (sen)</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Amount (RM)</label>
+                  {/* Operator types RM (e.g. "1000.00"); we convert to sen on every
+                      keystroke (× 100, rounded). API + storage stay in sen. */}
                   <input
                     type="number" onFocus={(e) => e.currentTarget.select()}
+                    step="0.01"
+                    inputMode="decimal"
+                    min="0"
                     className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm"
-                    value={amount || ""}
-                    onChange={(e) => setAmount(parseInt(e.target.value) || 0)}
-                    placeholder="e.g. 100000 = RM1,000"
+                    value={amount ? (amount / 100).toFixed(2) : ""}
+                    onChange={(e) => {
+                      const rm = parseFloat(e.target.value);
+                      const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                      setAmount(sen);
+                    }}
+                    placeholder="e.g. 1000.00"
                   />
                   {amount > 0 && (
                     <p className="text-xs text-gray-500 mt-1">= {formatCurrency(amount)}</p>
@@ -412,11 +421,16 @@ export default function PaymentsPage() {
                                   {alloc ? (
                                     <input
                                       type="number" onFocus={(e) => e.currentTarget.select()}
+                                      step="0.01"
+                                      inputMode="decimal"
+                                      min="0"
                                       className="w-28 border border-gray-300 rounded px-2 py-1 text-sm text-right"
-                                      value={alloc.amount}
-                                      onChange={(e) =>
-                                        updateAllocationAmount(inv.id, parseInt(e.target.value) || 0)
-                                      }
+                                      value={alloc.amount ? (alloc.amount / 100).toFixed(2) : ""}
+                                      onChange={(e) => {
+                                        const rm = parseFloat(e.target.value);
+                                        const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                                        updateAllocationAmount(inv.id, sen);
+                                      }}
                                     />
                                   ) : (
                                     <span className="text-gray-400">-</span>

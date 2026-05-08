@@ -339,9 +339,15 @@ export default function CreditNotesPage() {
                         className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm"
                         type="number" onFocus={(e) => e.currentTarget.select()}
                         min="0"
-                        placeholder="Unit Price (sen)"
-                        value={item.unitPrice || ""}
-                        onChange={(e) => updateItem(idx, "unitPrice", parseInt(e.target.value) || 0)}
+                        step="0.01"
+                        inputMode="decimal"
+                        placeholder="Unit Price (RM)"
+                        value={item.unitPrice ? (item.unitPrice / 100).toFixed(2) : ""}
+                        onChange={(e) => {
+                          const rm = parseFloat(e.target.value);
+                          const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                          updateItem(idx, "unitPrice", sen);
+                        }}
                       />
                       <span className="text-sm text-gray-500 py-2 w-28 text-right">
                         {formatCurrency(item.quantity * item.unitPrice)}

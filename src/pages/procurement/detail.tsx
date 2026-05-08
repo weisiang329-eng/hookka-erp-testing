@@ -836,14 +836,22 @@ export default function PurchaseOrderDetailPage() {
                           />
                         </div>
                         <div>
-                          <label className="block text-xs text-[#6B7280] mb-1">Price (sen)</label>
+                          <label className="block text-xs text-[#6B7280] mb-1">Price (RM)</label>
+                          {/* Operator types RM (e.g. "25.50"); we convert to sen on every
+                              keystroke (× 100, rounded). Storage + API stay in sen. */}
                           <Input
                             className="h-8 text-xs"
                             type="number"
+                            step="0.01"
+                            inputMode="decimal"
                             min={0}
                             onFocus={(e) => e.currentTarget.select()}
-                            value={line.unitPriceSen}
-                            onChange={(e) => updateLine(idx, { unitPriceSen: Number(e.target.value) })}
+                            value={line.unitPriceSen === 0 ? "" : (line.unitPriceSen / 100).toFixed(2)}
+                            onChange={(e) => {
+                              const rm = parseFloat(e.target.value);
+                              const sen = Number.isFinite(rm) && rm >= 0 ? Math.round(rm * 100) : 0;
+                              updateLine(idx, { unitPriceSen: sen });
+                            }}
                           />
                         </div>
                         <div>

@@ -12182,4 +12182,343 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/refresh-jcs-by-id
+//
+// Narrow JC wipCode/wipLabel refresh. Takes EXPLICIT jcIds list (no sweep,
+// no heuristic filter). For each JC:
+//   - FAB_CUT cross-PO merge JC (id starts with jc-fc-so- / jc-fc-po-):
+//     wipLabel rebuilt via cross-PO-merge format with current SO context
+//     (mirrors buildFcWipLabel in production-builder.ts); wipCode via BOM
+//     walker (anchor piece's FAB_CUT process).
+//   - Standard BOM-tree JC: re-walks current ACTIVE BOM template against
+//     current SO context, matches by wipKey or dept fallback, returns the
+//     resolved process's wipCode/wipLabel.
+//
+// Surgical: ONLY wipCode + wipLabel change. status, pic1Id, pic2Id,
+// completedDate, productionTimeMinutes, wipKey, branchKey, wipQty are all
+// preserved. Operator's work credit is unaffected.
+//
+// Body: { jcIds: string[], dryRun: boolean }
+// Returns: { success, dryRun, requested, found, notFound, changed,
+//            unchanged, updated?, results, errors? }
+//
+// This is the surgical replacement for /backfill-jc-wip-labels-from-bom
+// (reverted in commit 25d00c0). That version swept system-wide with a
+// heuristic skip filter that wrongly excluded jc-fc-po- prefixed JCs (the
+// 22 ((K))/((Q)) rows on FAB_CUT). This endpoint processes ONLY the
+// explicit jcIds passed in body — no auto-discovery, no skip heuristic,
+// no scope creep.
+// ---------------------------------------------------------------------------
+type RefreshJcRow = {
+  id: string;
+  productionOrderId: string;
+  status: string;
+  wipKey: string | null;
+  departmentCode: string | null;
+  wipCode: string | null;
+  wipLabel: string | null;
+  poNo: string | null;
+  productCode: string | null;
+  itemCategory: string | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
+};
+
+app.post("/refresh-jcs-by-id", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { jcIds?: unknown; dryRun?: unknown };
+  try {
+    body = (await c.req.json()) as { jcIds?: unknown; dryRun?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+
+  const jcIds = Array.isArray(body.jcIds)
+    ? body.jcIds.filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      )
+    : null;
+  if (!jcIds || jcIds.length === 0) {
+    return c.json(
+      {
+        success: false,
+        error: "body.jcIds must be a non-empty array of strings",
+      },
+      400,
+    );
+  }
+  const dryRun = body.dryRun === true;
+  const db = c.var.DB;
+
+  // Load JCs by exact id list — no sweep, no filter, just SELECT WHERE IN.
+  const placeholders = jcIds.map(() => "?").join(",");
+  const sel = await db
+    .prepare(
+      `SELECT
+         jc.id                AS id,
+         jc.productionOrderId AS productionOrderId,
+         jc.status            AS status,
+         jc.wipKey            AS wipKey,
+         jc.departmentCode    AS departmentCode,
+         jc.wipCode           AS wipCode,
+         jc.wipLabel          AS wipLabel,
+         po.poNo              AS poNo,
+         po.productCode       AS productCode,
+         po.itemCategory      AS itemCategory,
+         po.sizeCode          AS sizeCode,
+         po.sizeLabel         AS sizeLabel,
+         po.fabricCode        AS fabricCode,
+         po.divanHeightInches AS divanHeightInches,
+         po.legHeightInches   AS legHeightInches,
+         po.gapInches         AS gapInches
+       FROM job_cards jc
+       LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+       WHERE jc.id IN (${placeholders})`,
+    )
+    .bind(...jcIds)
+    .all<RefreshJcRow>();
+  const rows = sel.results ?? [];
+  const foundIds = new Set(rows.map((r) => r.id));
+  const notFound = jcIds.filter((id) => !foundIds.has(id));
+
+  // BOM cache (one ACTIVE template per productCode; falls back to most
+  // recent draft if no ACTIVE row).
+  const bomCache = new Map<
+    string,
+    { wipComponents: string | null; baseModel: string | null } | null
+  >();
+  async function loadBom(productCode: string) {
+    if (bomCache.has(productCode)) return bomCache.get(productCode);
+    const active = await db
+      .prepare(
+        `SELECT wipComponents, baseModel FROM bom_templates
+           WHERE productCode = ? AND versionStatus = 'ACTIVE'
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ wipComponents: string | null; baseModel: string | null }>();
+    if (active) {
+      bomCache.set(productCode, active);
+      return active;
+    }
+    const latest = await db
+      .prepare(
+        `SELECT wipComponents, baseModel FROM bom_templates
+           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{ wipComponents: string | null; baseModel: string | null }>();
+    bomCache.set(productCode, latest ?? null);
+    return latest;
+  }
+
+  type Result = {
+    jcId: string;
+    poNo?: string;
+    productCode?: string;
+    deptCode?: string;
+    isFcMerge?: boolean;
+    before?: { wipCode: string; wipLabel: string };
+    after?: { wipCode: string; wipLabel: string };
+    changed?: boolean;
+    error?: string;
+  };
+  const results: Result[] = [];
+  const updates: Array<{
+    id: string;
+    newWipCode: string;
+    newWipLabel: string;
+  }> = [];
+
+  for (const r of rows) {
+    const productCode = r.productCode || "";
+    if (!productCode) {
+      results.push({ jcId: r.id, error: "PO missing productCode" });
+      continue;
+    }
+    const isFcMerge =
+      r.id.startsWith("jc-fc-so-") || r.id.startsWith("jc-fc-po-");
+    const oldWipCode = r.wipCode ?? "";
+    const oldWipLabel = r.wipLabel ?? "";
+    let newWipCode = oldWipCode;
+    let newWipLabel = oldWipLabel;
+
+    if (isFcMerge) {
+      // FAB_CUT cross-PO merge JC: wipLabel format is buildFcWipLabel-style
+      // (productCode | (size) | (totalH") | (DV divanH") | fabric | (FC));
+      // wipCode is the BOM walker's FAB_CUT process output for the anchor
+      // piece (DIVAN/HEADBOARD).
+      const totalH =
+        (r.gapInches ?? 0) +
+        (r.divanHeightInches ?? 0) +
+        (r.legHeightInches ?? 0);
+      const isBF = r.itemCategory === "BEDFRAME";
+      newWipLabel = [
+        productCode,
+        r.sizeLabel ? `(${r.sizeLabel})` : "",
+        isBF && totalH > 0 ? `(${totalH}")` : "",
+        isBF && r.divanHeightInches ? `(DV ${r.divanHeightInches}")` : "",
+        r.fabricCode || "",
+        "(FC)",
+      ]
+        .filter(Boolean)
+        .join(" | ");
+
+      const bom = await loadBom(productCode);
+      if (bom?.wipComponents) {
+        const variants: BomVariantContext = {
+          productCode,
+          model: bom.baseModel ?? productCode,
+          sizeLabel: r.sizeLabel ?? "",
+          sizeCode: r.sizeCode ?? "",
+          fabricCode: r.fabricCode ?? "",
+          divanHeightInches: r.divanHeightInches ?? null,
+          legHeightInches: r.legHeightInches ?? null,
+          gapInches: r.gapInches ?? null,
+        };
+        const wips = breakBomIntoWips(
+          bom.wipComponents,
+          productCode,
+          variants,
+        );
+        const anchor = wips.find((w) =>
+          w.processes.some((p) => p.deptCode === "FAB_CUT"),
+        );
+        if (anchor) {
+          const proc = anchor.processes.find((p) => p.deptCode === "FAB_CUT");
+          newWipCode = proc?.wipCode || anchor.wipCode || oldWipCode;
+        }
+      }
+    } else {
+      // Standard BOM-tree JC: re-walk current ACTIVE BOM, match by wipKey
+      // or single-dept fallback, use process's wipCode/wipLabel.
+      const bom = await loadBom(productCode);
+      if (!bom?.wipComponents) {
+        results.push({
+          jcId: r.id,
+          poNo: r.poNo ?? undefined,
+          productCode,
+          deptCode: r.departmentCode ?? undefined,
+          error: "No active BOM template",
+        });
+        continue;
+      }
+      const variants: BomVariantContext = {
+        productCode,
+        model: bom.baseModel ?? productCode,
+        sizeLabel: r.sizeLabel ?? "",
+        sizeCode: r.sizeCode ?? "",
+        fabricCode: r.fabricCode ?? "",
+        divanHeightInches: r.divanHeightInches ?? null,
+        legHeightInches: r.legHeightInches ?? null,
+        gapInches: r.gapInches ?? null,
+      };
+      const wips = breakBomIntoWips(bom.wipComponents, productCode, variants);
+      let wip = wips.find((w) => w.wipKey === r.wipKey);
+      if (!wip && r.departmentCode) {
+        const candidates = wips.filter((w) =>
+          w.processes.some((p) => p.deptCode === r.departmentCode),
+        );
+        if (candidates.length === 1) wip = candidates[0];
+      }
+      if (!wip) {
+        results.push({
+          jcId: r.id,
+          poNo: r.poNo ?? undefined,
+          productCode,
+          deptCode: r.departmentCode ?? undefined,
+          error:
+            "No matching WIP in BOM (wipKey + dept fallback both failed)",
+        });
+        continue;
+      }
+      const proc = wip.processes.find((p) => p.deptCode === r.departmentCode);
+      if (!proc) {
+        results.push({
+          jcId: r.id,
+          poNo: r.poNo ?? undefined,
+          productCode,
+          deptCode: r.departmentCode ?? undefined,
+          error: "Matched WIP but no process for this dept",
+        });
+        continue;
+      }
+      newWipCode = proc.wipCode || wip.wipCode || oldWipCode;
+      newWipLabel = proc.wipLabel || wip.wipLabel || oldWipLabel;
+    }
+
+    const changed = newWipCode !== oldWipCode || newWipLabel !== oldWipLabel;
+    results.push({
+      jcId: r.id,
+      poNo: r.poNo ?? undefined,
+      productCode,
+      deptCode: r.departmentCode ?? undefined,
+      isFcMerge,
+      before: { wipCode: oldWipCode, wipLabel: oldWipLabel },
+      after: { wipCode: newWipCode, wipLabel: newWipLabel },
+      changed,
+    });
+    if (changed) {
+      updates.push({ id: r.id, newWipCode, newWipLabel });
+    }
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      requested: jcIds.length,
+      found: rows.length,
+      notFound,
+      changed: updates.length,
+      unchanged: rows.length - updates.length,
+      results,
+    });
+  }
+
+  // Live UPDATE in chunks of 50 (D1 batch limit-friendly). On chunk error,
+  // record + continue so partial progress lands; caller can re-run.
+  const CHUNK = 50;
+  let updated = 0;
+  const errors: Array<{ chunk: number; message: string }> = [];
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    const slice = updates.slice(i, i + CHUNK);
+    const stmts = slice.map((u) =>
+      db
+        .prepare(
+          `UPDATE job_cards SET wipCode = ?, wipLabel = ? WHERE id = ?`,
+        )
+        .bind(u.newWipCode, u.newWipLabel, u.id),
+    );
+    if (stmts.length === 0) continue;
+    try {
+      await db.batch(stmts);
+      updated += stmts.length;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ chunk: i, message });
+    }
+  }
+
+  return c.json({
+    success: errors.length === 0,
+    dryRun: false,
+    requested: jcIds.length,
+    found: rows.length,
+    notFound,
+    updated,
+    changed: updates.length,
+    unchanged: rows.length - updates.length,
+    results,
+    errors,
+  });
+});
+
 export default app;

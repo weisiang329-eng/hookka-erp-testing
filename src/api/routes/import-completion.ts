@@ -11826,18 +11826,33 @@ app.post("/apply-fabric-code-fixes", async (c) => {
 // matching (wipKey, deptCode) entry, and overwrites productionTimeMinutes
 // + estMinutes when drifted.
 //
-// Scope:
-//   - Active job_cards (status WAITING/IN_PROGRESS/PAUSED/BLOCKED): UPDATE
-//     when drifted.
-//   - COMPLETED/TRANSFERRED job_cards: surfaced in `completedDrifts` array
-//     for operator review — NOT auto-rewritten because they represent
-//     historical credited work.
+// Scope (operator directive 2026-05-08 "全部都要 fix 掉的"):
+//   - Default ?includeCompleted=true → ALL statuses get rewritten,
+//     including COMPLETED + TRANSFERRED. Operator consciously accepts
+//     that historical Employee Efficiency / Total JC Time numbers will
+//     retroactively reflect current BOM truth instead of stale snapshots.
+//   - ?includeCompleted=false → COMPLETED/TRANSFERRED drift surfaced in
+//     `completedDrifts` for review but NOT applied. (Original conservative
+//     behavior pre-2026-05-08.)
 //   - JCs whose wipKey is "FG" (FG-level l1Processes) are SKIPPED — those
 //     belong to the kv_config-master path and are out of scope here.
 //
+// 5536-CSL / 5540-CSL guard: when the BOM walker emits 0 for a JC that
+// previously stored a non-zero productionTimeMinutes, DO NOT zero it out.
+// The 0 reflects a missing UPH stanza on the top-level BOM node (the
+// chaise might genuinely have no upholstery, OR the BOM is missing UPH
+// data — operator hasn't disambiguated). Preserving the stored value
+// keeps already-credited work intact, and we surface the JC under
+// `bomZeroPreservedSamples[]` so the operator can audit the BOM gap.
+//
+// Surgical: only productionTimeMinutes + estMinutes change. pic1Id /
+// pic2Id / status / completedDate / actualMinutes / wipKey / wipCode /
+// wipLabel / wipQty are preserved.
+//
 // Query string:
-//   ?dryRun=true   -> SELECT-only summary, sample 30 worst drifts.
-//   ?dryRun=false  -> apply UPDATEs in db.batch chunks of 50.
+//   ?dryRun=true                 → SELECT-only summary, sample 30 worst.
+//   ?dryRun=false                → apply UPDATEs in db.batch chunks of 50.
+//   ?includeCompleted=false      → exclude COMPLETED/TRANSFERRED writes.
 //
 // Response shape: { success, dryRun, scanned, drifted, updated,
 //   completedDrifts: [{jcId, poNo, productCode, wipKey, deptCode,
@@ -11884,6 +11899,9 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
 
   const db = c.var.DB;
   const dryRun = c.req.query("dryRun") === "true";
+  // Default ON per operator directive — only set false to opt back into
+  // active-only scope.
+  const includeCompleted = c.req.query("includeCompleted") !== "false";
 
   // 1. Load every JC across the statuses we care about, joined to PO so we
   // have the variant context the BOM walker needs without a second pass.
@@ -11964,6 +11982,18 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
   const activeDrifts: DriftSample[] = [];
   const completedDrifts: DriftSample[] = [];
   const updates: Array<{ id: string; newMinutes: number }> = [];
+  // 5536-CSL / 5540-CSL guard: BOM walker emitted 0 minutes but stored
+  // value is non-zero — preserve and surface for operator audit.
+  const bomZeroPreservedSamples: Array<{
+    jcId: string;
+    poNo: string;
+    productCode: string;
+    wipKey: string;
+    deptCode: string;
+    storedMinutes: number;
+    status: string;
+  }> = [];
+  let bomZeroPreservedCount = 0;
   let scanned = 0;
   let unchanged = 0;
   let skippedNoBom = 0;
@@ -12016,6 +12046,27 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
 
     const oldMinutes = r.productionTimeMinutes ?? 0;
     const newMinutes = proc.minutes;
+
+    // 5536-CSL / 5540-CSL guard: BOM walker says 0 but JC has non-zero
+    // stored minutes. Likely a missing UPH stanza on the top-level BOM
+    // node — DO NOT zero out (would erase already-credited work). Surface
+    // for operator review and skip the write.
+    if (newMinutes === 0 && oldMinutes > 0) {
+      bomZeroPreservedCount++;
+      if (bomZeroPreservedSamples.length < 50) {
+        bomZeroPreservedSamples.push({
+          jcId: r.id,
+          poNo: r.poNo ?? "",
+          productCode,
+          wipKey,
+          deptCode,
+          storedMinutes: oldMinutes,
+          status: r.status,
+        });
+      }
+      continue;
+    }
+
     if (oldMinutes === newMinutes && (r.estMinutes ?? 0) === newMinutes) {
       unchanged++;
       continue;
@@ -12034,6 +12085,13 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
     };
     if (COMPLETED_JC_STATUSES.includes(r.status)) {
       completedDrifts.push(sample);
+      // Operator directive 2026-05-08: when includeCompleted=true (default)
+      // also queue the COMPLETED/TRANSFERRED rows for UPDATE. Surgical —
+      // only productionTimeMinutes + estMinutes change, not status / pics /
+      // completedDate / actualMinutes.
+      if (includeCompleted) {
+        updates.push({ id: r.id, newMinutes });
+      }
     } else {
       activeDrifts.push(sample);
       updates.push({ id: r.id, newMinutes });
@@ -12050,10 +12108,16 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
     return c.json({
       success: true,
       dryRun: true,
+      includeCompleted,
       scanned,
       activeDrifted: activeDrifts.length,
       completedDrifted: completedDrifts.length,
+      // wouldUpdate reflects the actual write queue for the configured
+      // includeCompleted scope — easier for operator to compare against
+      // the live-run `updated` count.
+      wouldUpdate: updates.length,
       unchanged,
+      bomZeroPreserved: bomZeroPreservedCount,
       skipped: {
         fgWipKey: skippedFg,
         noBom: skippedNoBom,
@@ -12061,6 +12125,7 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
       },
       topActiveDrifts: activeDrifts.slice(0, 30),
       topCompletedDrifts: completedDrifts.slice(0, 30),
+      bomZeroPreservedSamples,
     });
   }
 
@@ -12099,11 +12164,13 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
   return c.json({
     success: true,
     dryRun: false,
+    includeCompleted,
     scanned,
     activeDrifted: activeDrifts.length,
     completedDrifted: completedDrifts.length,
     updated,
     unchanged,
+    bomZeroPreserved: bomZeroPreservedCount,
     skipped: {
       fgWipKey: skippedFg,
       noBom: skippedNoBom,
@@ -12111,6 +12178,7 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
     },
     topActiveDrifts: activeDrifts.slice(0, 30),
     topCompletedDrifts: completedDrifts.slice(0, 30),
+    bomZeroPreservedSamples,
   });
 });
 

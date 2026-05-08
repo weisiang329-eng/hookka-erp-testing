@@ -507,9 +507,19 @@ export default function ProductionPage({
   // anyway, so in practice this fetches once per session alongside the
   // main orders fetch. Cached by useCachedJson, so it's effectively a
   // local-storage hit on subsequent renders.
-  const allOrdersUrl: string | null = shouldFetch
-    ? "/api/production-orders?fields=minimal"
-    : null;
+  // 2026-05-08: also gate on `ordersResp` being non-null so this bare
+  // (~800 PO, all depts) fetch fires AFTER the dept-filtered one returns,
+  // not concurrently. The two used to race on Hyperdrive — the bare one
+  // takes 5-17s and stacks behind the dept-filtered one, so when the user
+  // clicked away mid-load the response payloads landed together and the
+  // main thread froze long enough for the renderer to be flagged
+  // unresponsive. Sequencing means: navigate-away within the first ~5s
+  // lets the bare fetch never start, since the dept response never
+  // landed.
+  const allOrdersUrl: string | null =
+    shouldFetch && datesSeeded && ordersResp != null
+      ? "/api/production-orders?fields=minimal"
+      : null;
   const { data: allOrdersResp } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(allOrdersUrl);
   const allOrders: ProductionOrder[] = useMemo(() => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

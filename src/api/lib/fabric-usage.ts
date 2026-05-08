@@ -128,26 +128,33 @@ function computeFabricFromBomForOnePo(
     return sum;
   }
 
-  // Pass 1 — specific match by wipType.
-  function findSpecific(node: unknown): unknown | null {
-    if (!node || typeof node !== "object") return null;
-    const n = node as Record<string, unknown>;
-    if (isFcNode(node) && jcWipType && n.wipType === jcWipType) {
-      return node;
+  // SOFA: always sum every FC node in the BOM tree (LHF + 1NA + RHF +
+  // backrest + cushion etc. all get cut on the same merged FC JC). The
+  // wipType-specific match is wrong here because it would early-return on
+  // the first matching module and miss the rest.
+  // Bedframe / accessory: keep the wipType-specific match — those JCs
+  // really do cut just one piece per JC.
+  if (po.itemCategory !== "SOFA") {
+    function findSpecific(node: unknown): unknown | null {
+      if (!node || typeof node !== "object") return null;
+      const n = node as Record<string, unknown>;
+      if (isFcNode(node) && jcWipType && n.wipType === jcWipType) {
+        return node;
+      }
+      const kids = Array.isArray(n.children) ? n.children : [];
+      for (const c of kids) {
+        const found = findSpecific(c);
+        if (found) return found;
+      }
+      return null;
     }
-    const kids = Array.isArray(n.children) ? n.children : [];
-    for (const c of kids) {
-      const found = findSpecific(c);
-      if (found) return found;
+    for (const root of roots) {
+      const specific = findSpecific(root);
+      if (specific) return sumNodeFabric(specific);
     }
-    return null;
-  }
-  for (const root of roots) {
-    const specific = findSpecific(root);
-    if (specific) return sumNodeFabric(specific);
   }
 
-  // Pass 2 — fallback: union of all FC nodes.
+  // Fallback (and sofa default): union of all FC nodes in the tree.
   let total = 0;
   function walkAll(node: unknown): void {
     if (!node || typeof node !== "object") return;

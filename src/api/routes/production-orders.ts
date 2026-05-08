@@ -3704,6 +3704,137 @@ app.get("/overdue-counts", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/_debug-timing[?dept=WOOD_CUT&dueFrom=...&dueTo=...]
+//
+// TEMPORARY (Phase B+, 2026-05-08): mirrors the dept-mode minimal hot path
+// step-by-step with millisecond timings around each query / compute block.
+// Doesn't ship data — just returns the timing breakdown so we can see where
+// the 3-4 s server time on /api/production-orders?fields=minimal&dept=X
+// actually goes (Postgres EXPLAIN says 5-25 ms; the rest is somewhere
+// between Hyperdrive and rowToMinimalPO). Delete once the bottleneck is
+// fixed and Phase B+ ships.
+// ---------------------------------------------------------------------------
+app.get("/_debug-timing", async (c) => {
+  const orgId = getOrgId(c);
+  const deptParamRaw = c.req.query("dept");
+  const deptFilter =
+    deptParamRaw && deptParamRaw.trim().length > 0
+      ? deptParamRaw.trim().toUpperCase()
+      : null;
+  const dueFrom = c.req.query("dueFrom") || null;
+  const dueTo = c.req.query("dueTo") || null;
+  const db = c.var.DB;
+
+  const t: Record<string, number> = {};
+  const tstart = Date.now();
+  const mark = (k: string) => {
+    t[k] = Date.now() - tstart;
+  };
+
+  // Step 1: leadTimeMap
+  const tA = Date.now();
+  await loadLeadTimes(db).catch(() => null);
+  mark("leadTimes");
+  void tA;
+
+  // Step 2: BOM + sibling pre-loads (Promise.all in real code; serial here
+  // so we can attribute time per call).
+  const tB = Date.now();
+  await fetchBomWipComponentsByCode(db);
+  t["bomTemplates"] = Date.now() - tB;
+  const tC = Date.now();
+  await fetchSofaSiblingsByGroupKey(db, orgId);
+  t["sofaSiblings"] = Date.now() - tC;
+
+  // Step 3: PO list (with optional date window)
+  const tD = Date.now();
+  const dueClauses: string[] = [];
+  const dueBindings: string[] = [];
+  if (dueFrom || dueTo) {
+    if (deptFilter) {
+      const sub: string[] = [
+        "EXISTS (SELECT 1 FROM job_cards jc",
+        " WHERE jc.productionOrderId = production_orders.id",
+        " AND jc.departmentCode = ?",
+      ];
+      const subBindings: string[] = [deptFilter];
+      if (dueFrom) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate >= ?)");
+        subBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        sub.push(" AND (jc.dueDate IS NULL OR jc.dueDate <= ?)");
+        subBindings.push(dueTo);
+      }
+      sub.push(")");
+      dueClauses.push(sub.join(""));
+      dueBindings.push(...subBindings);
+    } else {
+      if (dueFrom) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate >= ?)");
+        dueBindings.push(dueFrom);
+      }
+      if (dueTo) {
+        dueClauses.push("(targetEndDate IS NULL OR targetEndDate <= ?)");
+        dueBindings.push(dueTo);
+      }
+    }
+  }
+  const dueWhere = dueClauses.length > 0 ? ` AND ${dueClauses.join(" AND ")}` : "";
+  const poRes = await db
+    .prepare(
+      `SELECT * FROM production_orders WHERE orgId = ?${dueWhere} ORDER BY created_at DESC, id DESC`,
+    )
+    .bind(orgId, ...dueBindings)
+    .all<ProductionOrderRow>();
+  t["poQuery"] = Date.now() - tD;
+  const poRows = poRes.results ?? [];
+
+  // Step 4: JC list with the 3-way OR sibling fan-out (dept mode only).
+  const tE = Date.now();
+  let jcCount = 0;
+  if (deptFilter) {
+    const jcSql =
+      `SELECT * FROM job_cards WHERE orgId = ? AND productionOrderId IN (
+          SELECT po.id FROM production_orders po
+          WHERE po.orgId = ?
+            AND (po.id IN (SELECT productionOrderId FROM job_cards WHERE orgId = ? AND departmentCode = ?)
+                 OR (po.companySOId IS NOT NULL AND po.companySOId IN (
+                      SELECT po2.companySOId FROM production_orders po2
+                      JOIN job_cards jc2 ON jc2.productionOrderId = po2.id
+                      WHERE jc2.orgId = ? AND jc2.departmentCode = ? AND po2.companySOId IS NOT NULL))
+                 OR (po.companyCOId IS NOT NULL AND po.companyCOId IN (
+                      SELECT po3.companyCOId FROM production_orders po3
+                      JOIN job_cards jc3 ON jc3.productionOrderId = po3.id
+                      WHERE jc3.orgId = ? AND jc3.departmentCode = ? AND po3.companyCOId IS NOT NULL)))
+        )`;
+    const jcRes = await db
+      .prepare(jcSql)
+      .bind(orgId, orgId, orgId, deptFilter, orgId, deptFilter, orgId, deptFilter)
+      .all<JobCardRow>();
+    jcCount = (jcRes.results ?? []).length;
+    t["jcQuery"] = Date.now() - tE;
+
+    // Step 5: piecesDoneByJc
+    const tF = Date.now();
+    await fetchPiecesDoneByJc(
+      db,
+      orgId,
+      (jcRes.results ?? []).map((j) => j.id),
+    );
+    t["piecesDone"] = Date.now() - tF;
+  }
+
+  return c.json({
+    success: true,
+    poCount: poRows.length,
+    jcCount,
+    timingsMs: t,
+    totalMs: Date.now() - tstart,
+  });
+});
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam

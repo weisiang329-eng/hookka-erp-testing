@@ -12182,4 +12182,369 @@ app.post("/backfill-jc-production-time-from-bom", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-jc-wip-labels-from-bom?dryRun=true|false
+//
+// Re-renders job_cards.wipCode + wipLabel against the CURRENT BOM template +
+// CURRENT production_orders variant context. One-shot cleanup for the OCR
+// back-door bug fixed in cd6a417 (2026-05-06): the old scan-po-modal sent
+// `sizeLabel="(K)"` / `(Q)` / `(S)` letters straight into SO save; the SO
+// normalizer accepted them; JCs were created with `(K)` / `(Q)` baked into
+// the resolved wipCode/wipLabel. cd6a417 fixed the back-door + ran
+// /backfill-ocr-so-fields to snap sales_order_items.sizeLabel back to
+// `5FT` / `6FT`, but JCs already created kept the old letter form.
+//
+// Today: sales_orders + production_orders carry the corrected feet form
+// (5FT / 6FT / SS); job_cards.wipCode / wipLabel still carry the legacy
+// (K) / (Q) form for ~< 20 POs created on the morning of 2026-05-06.
+//
+// What this endpoint does:
+//   1. Loads every JC joined to its current PO (single query).
+//   2. For each JC, walks the PO's current BOM template via
+//      breakBomIntoWips() with a BomVariantContext built from the CURRENT
+//      production_orders row.
+//   3. Matches the JC to a walked WIP node by wipKey first, falling back
+//      to (productCode, departmentCode) when wipKey doesn't match. From
+//      the matched WIP picks the per-process entry whose deptCode matches
+//      the JC's departmentCode — that entry's wipCode / wipLabel are the
+//      authoritative current-BOM values.
+//   4. If the walked (wipCode, wipLabel) differs from the stored values,
+//      surgically UPDATEs ONLY those two columns. pic1Id, pic2Id, status,
+//      completedDate, productionTimeMinutes, wipKey, branchKey, wipQty
+//      are all preserved — operator already credited work; we are only
+//      refreshing the cosmetic label.
+//
+// Skipped:
+//   - wipKey === "FG" → FG-level cards are owned by l1Processes, not the
+//     WIP tree. Their label comes from a different source.
+//   - Cross-PO synthetic merged FAB_CUT JCs (wipKey shape
+//     `{companySOId|poId}::{baseModel}::{fabricCode}::FAB_CUT`, JC id
+//     prefix `jc-fc-so-` / `jc-fc-po-`). Their wipKey + wipLabel are
+//     built by aggregateFcSlots() across multiple POs — re-walking a
+//     single PO's BOM would lose the cross-PO model+fabric grouping.
+//
+// Surgical: only wipCode + wipLabel change. The label change does not
+// affect work credit or production timing, so we update ALL statuses
+// including COMPLETED + TRANSFERRED by default (matches operator's
+// "全部都要 fix" directive on the productionTimeMinutes backfill).
+//
+// Response shape:
+//   dryRun  → { scanned, drifted, byDept, sample }
+//   live    → { updated, errors, ...same diagnostic fields }
+// ---------------------------------------------------------------------------
+type JcLabelBackfillRow = {
+  id: string;
+  productionOrderId: string;
+  status: string;
+  wipKey: string | null;
+  departmentCode: string | null;
+  wipCode: string | null;
+  wipLabel: string | null;
+  poNo: string | null;
+  productCode: string | null;
+  itemCategory: string | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
+};
+
+type LabelDriftSample = {
+  jcId: string;
+  poNo: string;
+  productCode: string;
+  wipKey: string;
+  deptCode: string;
+  status: string;
+  oldWipCode: string;
+  newWipCode: string;
+  oldWipLabel: string;
+  newWipLabel: string;
+};
+
+// Synthetic merged FAB_CUT wipKey detector. Real per-piece BOM-walk wipKeys
+// have shape `{productCode}::{idx}::{wipType}::{rawTopCode}` where wipType
+// is the BOM node's wipType (DIVAN / HEADBOARD / SOFA_BASE / ...) — never
+// FAB_CUT. The merged FC JCs synthesized by aggregateFcSlots() use shape
+// `{companySOId|poId}::{baseModel}::{fabricCode}::FAB_CUT` — recognisable
+// because the wipKey ends with `::FAB_CUT` AND the JC id is prefixed
+// `jc-fc-so-` or `jc-fc-po-`.
+function isSyntheticMergedFcJc(jcId: string, wipKey: string): boolean {
+  if (jcId.startsWith("jc-fc-so-") || jcId.startsWith("jc-fc-po-")) return true;
+  // Belt-and-suspenders: legacy synthetic FC JCs created before the id
+  // convention landed could still be detected by wipKey shape.
+  if (wipKey.endsWith("::FAB_CUT")) {
+    const segs = wipKey.split("::");
+    // Per-piece walker emits 4 segments where seg[2] is wipType (e.g. DIVAN)
+    // and seg[3] is the raw top wipCode (anything but the literal "FAB_CUT"
+    // unless a BOM template rawTopCode is literally "FAB_CUT"). Synthetic
+    // FC always has seg[3] === "FAB_CUT" AND seg[2] === fabricCode (a value
+    // that's never a known wipType).
+    const KNOWN_WIP_TYPES = new Set([
+      "DIVAN",
+      "HEADBOARD",
+      "SOFA_BASE",
+      "SOFA_CUSHION",
+      "SOFA_ARMREST",
+      "SOFA_HEADREST",
+      "FG_MAIN",
+    ]);
+    if (segs.length === 4 && segs[3] === "FAB_CUT" && !KNOWN_WIP_TYPES.has(segs[2])) {
+      return true;
+    }
+  }
+  return false;
+}
+
+app.post("/backfill-jc-wip-labels-from-bom", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Load every JC across all statuses, joined to PO for variant context.
+  const allStatuses = [...ACTIVE_JC_STATUSES, ...COMPLETED_JC_STATUSES];
+  const placeholders = allStatuses.map(() => "?").join(",");
+  const sel = await db
+    .prepare(
+      `SELECT
+         jc.id                AS id,
+         jc.productionOrderId AS productionOrderId,
+         jc.status            AS status,
+         jc.wipKey            AS wipKey,
+         jc.departmentCode    AS departmentCode,
+         jc.wipCode           AS wipCode,
+         jc.wipLabel          AS wipLabel,
+         po.poNo              AS poNo,
+         po.productCode       AS productCode,
+         po.itemCategory      AS itemCategory,
+         po.sizeCode          AS sizeCode,
+         po.sizeLabel         AS sizeLabel,
+         po.fabricCode        AS fabricCode,
+         po.divanHeightInches AS divanHeightInches,
+         po.legHeightInches   AS legHeightInches,
+         po.gapInches         AS gapInches
+       FROM job_cards jc
+       LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+       WHERE jc.status IN (${placeholders})
+       ORDER BY jc.id ASC`,
+    )
+    .bind(...allStatuses)
+    .all<JcLabelBackfillRow>();
+  const rows = sel.results ?? [];
+
+  // 2. Cache BOM template lookups per-productCode.
+  type BomCacheEntry = {
+    wipComponents: string | null;
+    l1Processes: string | null;
+    baseModel: string | null;
+  } | null;
+  const bomCache = new Map<string, BomCacheEntry>();
+  async function loadBom(productCode: string): Promise<BomCacheEntry> {
+    if (bomCache.has(productCode)) return bomCache.get(productCode)!;
+    const active = await db
+      .prepare(
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
+           WHERE productCode = ? AND versionStatus = 'ACTIVE'
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{
+        wipComponents: string | null;
+        l1Processes: string | null;
+        baseModel: string | null;
+      }>();
+    if (active) {
+      bomCache.set(productCode, active);
+      return active;
+    }
+    const latest = await db
+      .prepare(
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
+           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{
+        wipComponents: string | null;
+        l1Processes: string | null;
+        baseModel: string | null;
+      }>();
+    bomCache.set(productCode, latest ?? null);
+    return latest ?? null;
+  }
+
+  // 3. Walk each JC, classify drift.
+  const drifts: LabelDriftSample[] = [];
+  const updates: Array<{
+    id: string;
+    newWipCode: string;
+    newWipLabel: string;
+  }> = [];
+  let scanned = 0;
+  let unchanged = 0;
+  let skippedNoBom = 0;
+  let skippedFg = 0;
+  let skippedSyntheticFc = 0;
+  let skippedNoMatch = 0;
+
+  for (const r of rows) {
+    scanned++;
+    const productCode = r.productCode ?? "";
+    const wipKey = r.wipKey ?? "";
+    const deptCode = r.departmentCode ?? "";
+    if (!productCode || !wipKey || !deptCode) {
+      skippedNoMatch++;
+      continue;
+    }
+    if (wipKey === "FG") {
+      skippedFg++;
+      continue;
+    }
+    if (isSyntheticMergedFcJc(r.id, wipKey)) {
+      skippedSyntheticFc++;
+      continue;
+    }
+
+    const bom = await loadBom(productCode);
+    if (!bom || !bom.wipComponents) {
+      skippedNoBom++;
+      continue;
+    }
+
+    const variants: BomVariantContext = {
+      productCode,
+      model: bom.baseModel ?? productCode,
+      sizeLabel: r.sizeLabel ?? "",
+      sizeCode: r.sizeCode ?? "",
+      fabricCode: r.fabricCode ?? "",
+      divanHeightInches: r.divanHeightInches ?? null,
+      legHeightInches: r.legHeightInches ?? null,
+      gapInches: r.gapInches ?? null,
+    };
+    const wips = breakBomIntoWips(bom.wipComponents, productCode, variants);
+
+    // Match by wipKey first; fall back to (productCode + same dept produces
+    // a process). The walker's wipKey embeds the BOM tree's TOP rawTopCode,
+    // so legacy JCs whose stored wipKey already drifted (rare — only
+    // possible if the BOM template's rawTopCode itself changed) still
+    // resolve via the dept-fallback.
+    let wip = wips.find((w) => w.wipKey === wipKey);
+    if (!wip) {
+      // Dept-fallback: pick the (only) WIP that has a process for this dept.
+      const candidates = wips.filter((w) =>
+        w.processes.some((p) => p.deptCode === deptCode),
+      );
+      if (candidates.length === 1) {
+        wip = candidates[0];
+      }
+    }
+    if (!wip) {
+      skippedNoMatch++;
+      continue;
+    }
+    const proc = wip.processes.find((p) => p.deptCode === deptCode);
+    if (!proc) {
+      skippedNoMatch++;
+      continue;
+    }
+
+    const oldWipCode = r.wipCode ?? "";
+    const oldWipLabel = r.wipLabel ?? "";
+    const newWipCode = proc.wipCode || wip.wipCode;
+    const newWipLabel = proc.wipLabel || wip.wipLabel;
+
+    if (oldWipCode === newWipCode && oldWipLabel === newWipLabel) {
+      unchanged++;
+      continue;
+    }
+
+    drifts.push({
+      jcId: r.id,
+      poNo: r.poNo ?? "",
+      productCode,
+      wipKey,
+      deptCode,
+      status: r.status,
+      oldWipCode,
+      newWipCode,
+      oldWipLabel,
+      newWipLabel,
+    });
+    updates.push({ id: r.id, newWipCode, newWipLabel });
+  }
+
+  // byDept summary — operator wants to see how the drift distributes across
+  // departments (e.g. mostly FRAMING + WEBBING vs WOOD_CUT).
+  const byDept: Record<string, number> = {};
+  for (const d of drifts) {
+    byDept[d.deptCode] = (byDept[d.deptCode] ?? 0) + 1;
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      scanned,
+      drifted: drifts.length,
+      unchanged,
+      byDept,
+      skipped: {
+        fgWipKey: skippedFg,
+        syntheticMergedFc: skippedSyntheticFc,
+        noBom: skippedNoBom,
+        noWipOrDeptMatch: skippedNoMatch,
+      },
+      sample: drifts.slice(0, 30),
+    });
+  }
+
+  // 4. Live run — apply UPDATEs in chunks of 50.
+  const CHUNK = 50;
+  let updated = 0;
+  const errors: Array<{ chunk: number; message: string }> = [];
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    const slice = updates.slice(i, i + CHUNK);
+    const stmts = slice.map((u) =>
+      db
+        .prepare(
+          `UPDATE job_cards
+             SET wipCode = ?, wipLabel = ?
+             WHERE id = ?`,
+        )
+        .bind(u.newWipCode, u.newWipLabel, u.id),
+    );
+    if (stmts.length === 0) continue;
+    try {
+      await db.batch(stmts);
+      updated += stmts.length;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ chunk: i, message });
+      // Don't 500 on the first chunk — return what landed plus the error
+      // list so the operator can re-run. Mirrors /uph-pofold-backfill style.
+    }
+  }
+
+  return c.json({
+    success: errors.length === 0,
+    dryRun: false,
+    scanned,
+    drifted: drifts.length,
+    updated,
+    unchanged,
+    byDept,
+    skipped: {
+      fgWipKey: skippedFg,
+      syntheticMergedFc: skippedSyntheticFc,
+      noBom: skippedNoBom,
+      noWipOrDeptMatch: skippedNoMatch,
+    },
+    sample: drifts.slice(0, 30),
+    errors,
+  });
+});
+
 export default app;

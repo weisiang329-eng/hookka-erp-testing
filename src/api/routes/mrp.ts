@@ -27,6 +27,11 @@ import {
   parseSofaSeatHeightInches,
   type ProductionDimensions,
 } from "../lib/material-scaling";
+import {
+  computeFcFabricUsageMeters,
+  fetchSofaSiblingsByGroupKey,
+  sofaSiblingGroupKey,
+} from "../lib/fabric-usage";
 
 const app = new Hono<Env>();
 
@@ -119,12 +124,22 @@ type ProductionOrderRow = {
   legHeightInches: number | null;
   sizeCode: string | null;
   sizeLabel: string | null;
+  // Cross-PO sofa sibling lookup: groupKey =
+  // `${companySOId||companyCOId}::${fabricCode}`. The merged FAB_CUT JC
+  // sits on the anchor PO; siblings have no FC JC of their own.
+  companySOId: string | null;
+  companyCOId: string | null;
 };
 
 type JobCardRow = {
   productionOrderId: string;
   status: string;
   dueDate: string | null;
+  // FAB_CUT JCs feed the fabric-demand calc (see fabricDemand block below)
+  // — we walk active FC JCs and call computeFcFabricUsageMeters with the
+  // anchor PO + sibling group. Non-FC JCs ignore these fields.
+  departmentCode: string | null;
+  wipType: string | null;
 };
 
 type RawMaterialRow = {
@@ -268,16 +283,18 @@ app.post("/", async (c) => {
   const now = new Date();
   const horizonParam = c.req.query("horizon") || "all";
 
-  const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes] = await Promise.all([
+  const [poRes, jcRes, bomRes, rmRes, bindRes, supRes, fabRes, siblingsByGroup] = await Promise.all([
     c.var.DB.prepare(
       `SELECT id, poNo, productCode, itemCategory, fabricCode, quantity,
               targetEndDate, status, gapInches, divanHeightInches,
-              legHeightInches, sizeCode, sizeLabel
+              legHeightInches, sizeCode, sizeLabel,
+              companySOId, companyCOId
          FROM production_orders
         WHERE status IN ('PENDING','IN_PROGRESS')`,
     ).all<ProductionOrderRow>(),
     c.var.DB.prepare(
-      "SELECT productionOrderId, status, dueDate FROM job_cards",
+      `SELECT productionOrderId, status, dueDate, departmentCode, wipType
+         FROM job_cards`,
     ).all<JobCardRow>(),
     c.var.DB.prepare(
       "SELECT id, productCode, wipComponents, versionStatus FROM bom_templates",
@@ -293,6 +310,10 @@ app.post("/", async (c) => {
     c.var.DB.prepare(
       "SELECT id, code, name, category, sohMeters FROM fabrics",
     ).all<FabricRow>(),
+    // Sofa cross-PO sibling map keyed by `${companySOId||companyCOId}::${fabricCode}`
+    // — required so the fabric-demand block sums the merged FC's full
+    // fabric demand instead of just the anchor PO's qty * BOM.
+    fetchSofaSiblingsByGroupKey(c.var.DB),
   ]);
 
   const activeOrders = poRes.results ?? [];
@@ -479,36 +500,76 @@ app.post("/", async (c) => {
   };
 
   // --- Fabric planning ----------------------------------------------------
+  // BOM-driven fabric demand. Iterates ACTIVE FAB_CUT JCs (not all POs) so
+  // sofa cross-PO sibling groups are counted exactly once: only the anchor
+  // PO carries the merged FC JC, siblings have none. computeFcFabricUsageMeters
+  // sums fabric across the entire BOM tree (LHF + 1NA + RHF + cushion etc.)
+  // for sofa, and across every sibling PO when the merged group spans
+  // multiple POs. Bedframe / accessory keep the wipType-specific match.
+  //
+  // Replaces the legacy `usage = sofa ? 5m : 3m * qty` heuristic which was
+  // both unit-incorrect (sofa cuts vary 5-15m depending on size) and
+  // single-piece-only (a 5-piece sofa set was reported as 5m × 1 = 5m).
+  const bomByProductCode = new Map<string, unknown>();
+  for (const t of templates) {
+    if (!t.productCode || !t.wipComponents || t.versionStatus !== "ACTIVE") continue;
+    try {
+      bomByProductCode.set(t.productCode, JSON.parse(t.wipComponents));
+    } catch {
+      // Malformed template → skip rather than fail the whole MRP run.
+    }
+  }
   const fabricDemand = new Map<
     string,
     { total: number; byBucket: Record<TimeBucket, number> }
   >();
-  for (const order of activeOrders) {
-    if (!order.fabricCode) continue;
-    const jcs = jcByPO.get(order.id) ?? [];
-    const pendingJcs = jcs.filter(
-      (jc) => jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED",
+  const poById = new Map<string, ProductionOrderRow>();
+  for (const o of activeOrders) poById.set(o.id, o);
+  for (const jc of allJobCards) {
+    if (jc.departmentCode !== "FAB_CUT") continue;
+    if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
+    const order = poById.get(jc.productionOrderId);
+    if (!order || !order.fabricCode) continue;
+    const wipComponents = order.productCode
+      ? bomByProductCode.get(order.productCode)
+      : null;
+    const groupKey = sofaSiblingGroupKey({
+      itemCategory: order.itemCategory,
+      companySOId: order.companySOId,
+      companyCOId: order.companyCOId,
+      fabricCode: order.fabricCode,
+    });
+    const siblings = groupKey ? siblingsByGroup.get(groupKey) : undefined;
+    if (!wipComponents && (!siblings || siblings.length === 0)) continue;
+    const meters = computeFcFabricUsageMeters(
+      {
+        quantity: order.quantity,
+        itemCategory: order.itemCategory,
+        gapInches: order.gapInches,
+        divanHeightInches: order.divanHeightInches,
+        legHeightInches: order.legHeightInches,
+        sizeCode: order.sizeCode,
+        sizeLabel: order.sizeLabel,
+      },
+      { departmentCode: jc.departmentCode, wipType: jc.wipType },
+      wipComponents,
+      bomByProductCode,
+      siblings,
     );
-    const earliestDue =
-      pendingJcs.length > 0
-        ? pendingJcs.reduce<string>((min, jc) => {
-            if (!jc.dueDate) return min;
-            if (!min || jc.dueDate < min) return jc.dueDate;
-            return min;
-          }, "")
-        : order.targetEndDate || "";
-    const bucket = dateToBucket(earliestDue, now);
+    if (meters <= 0) continue;
+    // Bucket by the FC JC's own dueDate — that's when the cut actually
+    // happens, which drives fabric procurement timing more directly than
+    // the parent PO's PACKING targetEndDate.
+    const bucket = dateToBucket(jc.dueDate || order.targetEndDate, now);
     if (!fabricDemand.has(order.fabricCode)) {
       fabricDemand.set(order.fabricCode, {
         total: 0,
         byBucket: { THIS_WEEK: 0, NEXT_WEEK: 0, WEEK_3_4: 0, BEYOND: 0 },
       });
     }
-    const usage = order.itemCategory === "SOFA" ? 5 : 3;
-    const qty = usage * order.quantity;
     const fd = fabricDemand.get(order.fabricCode)!;
-    fd.total += qty;
-    fd.byBucket[bucket] += qty;
+    fd.total += meters;
+    fd.byBucket[bucket] += meters;
   }
 
   const fabricDetail = fabrics.map((fab) => {

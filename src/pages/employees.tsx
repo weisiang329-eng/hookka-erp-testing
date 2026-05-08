@@ -3002,17 +3002,25 @@ function EmployeeDetailTab({
       label: "Product / Item",
       sortable: true,
       render: (_v, row) => {
-        // For sofa cross-PO merged FAB_CUT JCs, productCode is just the
-        // anchor PO's productCode (e.g. "5535-1A(LHF)") which hides the
-        // fact that the JC physically cuts a merged set
-        // ("5535-1A(LHF)+1NA+1A(RHF)+1A(LHF)+1A(RHF)+1S"). Prefer the
-        // wipLabel as the primary product label when it carries more
-        // information (= contains a "+" indicating multiple pieces) so
-        // the operator sees the full set on one line.
-        const isMerged = row.wipLabel && row.wipLabel.includes("+");
-        const primary = isMerged ? row.wipLabel : row.productCode;
+        // wipLabel is always the most specific identifier the JC carries —
+        // it tells the operator which physical piece this JC covers
+        // (e.g. "5530 -Right Arm BO315-25" for a FAB_SEW armrest cover,
+        // "1013-(Q) | (5FT) | (20") | (DV 8") | PC151-01 | (FC)" for a
+        // bedframe FC, or the merged set
+        // "5535-1A(LHF)+1NA+1A(RHF)+1A(LHF)+1A(RHF)+1S" for a sofa
+        // cross-PO FAB_CUT). The productCode alone (e.g. "5530-1A(RHF)")
+        // is just the parent PO's product code, which hides what specific
+        // work the JC covered. Prefer wipLabel as the primary label
+        // whenever the JC carries one (every dept does); fall back to
+        // productCode only when wipLabel is empty (legacy rows). Show
+        // productCode as a small secondary line when both exist and differ
+        // so the parent product is still discoverable.
+        const primary = row.wipLabel || row.productCode;
         const secondary =
-          isMerged && row.productCode && row.productCode !== "—" && primary !== row.productCode
+          row.wipLabel &&
+          row.productCode &&
+          row.productCode !== "—" &&
+          primary !== row.productCode
             ? row.productCode
             : "";
         return (

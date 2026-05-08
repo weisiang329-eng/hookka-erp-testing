@@ -356,6 +356,20 @@ export default function ProductionPage({
   // depend on it. baseUrl / dueQueryFrag are deferred to AFTER
   // fltDueFrom/fltDueTo are declared (~line 791) to dodge a TDZ error.
   const [shouldFetch, setShouldFetch] = useState<boolean>(mode === "dept");
+  // Suppress the first-mount fetch until the date-seed effect (~L517) has
+  // populated fltDueFrom/fltDueTo. Otherwise mount fires fetch #1 against
+  // the bare URL (`?fields=minimal&dept=X` — full table, ~10s on prod) and
+  // a second fetch lands seconds later with the seeded dates. Both queries
+  // race on Hyperdrive; on a slow Postgres day they stack and freeze the
+  // page for 15-20s when the user navigates away mid-render.
+  // Initialise from URL synchronously so deep links / refreshes (which
+  // already carry from/to params) don't pay the one-render delay.
+  const [datesSeeded, setDatesSeeded] = useState<boolean>(() => {
+    if (mode !== "dept") return true;
+    if (typeof window === "undefined") return true;
+    const params = new URLSearchParams(window.location.search);
+    return params.has("from") || params.has("to");
+  });
   const { data: workersResp } = useCachedJson<{ success?: boolean; data?: Worker[] }>("/api/workers");
   const { data: warehouseResp } = useCachedJson<{ success?: boolean; data?: Array<{ rack: string; status: string; productCode?: string; customerName?: string }> }>("/api/warehouse");
   const [orders, setOrders] = useState<ProductionOrder[]>([]);
@@ -482,7 +496,7 @@ export default function ProductionPage({
     mode === "dept" && deptCode
       ? `/api/production-orders?fields=minimal&dept=${encodeURIComponent(deptCode)}${dueQueryFrag}`
       : `/api/production-orders?fields=minimal${dueQueryFrag}`;
-  const ordersUrl: string | null = shouldFetch ? baseUrl : null;
+  const ordersUrl: string | null = shouldFetch && datesSeeded ? baseUrl : null;
   const { data: ordersResp, loading, refresh: refreshOrders } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(ordersUrl);
   // Date-filter-INDEPENDENT fetch used solely by the "Total Overdue SO"
   // header chip + drill-down panel. Pulls ALL POs (no dueFrom/dueTo, no
@@ -575,6 +589,16 @@ export default function ProductionPage({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Once the seed lands in the URL state, flip datesSeeded so ordersUrl
+  // builds with the date filter on its first non-null render. Prevents
+  // the duplicate first-mount fetch (bare URL → seeded URL).
+  useEffect(() => {
+    if (!datesSeeded && (fltDueFrom || fltDueTo)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- one-shot seed-completion gate; flips a one-way boolean derived from external (URL) state landing
+      setDatesSeeded(true);
+    }
+  }, [datesSeeded, fltDueFrom, fltDueTo]);
 
   // Overview-matrix-only sort + filter state. Persisted to localStorage so
   // the operator's column preferences (e.g. "sort by Customer asc, hide
@@ -896,16 +920,21 @@ export default function ProductionPage({
   // reconciled). visibilitychange only fires on tab switch / window
   // minimize / programmatic hide, so date pickers stay interactive.
   //
-  // Throttle: only fire if it's been >30s since the last fetch AND no
+  // Throttle: only fire if it's been >5min since the last fetch AND no
   // optimistic PATCH is in-flight. The latter prevents the classic race
   // where the user edits a PIC, glances at another tab, comes back, and
   // the visibility refetch lands BEFORE the PATCH commits — wiping the
   // edit they just made.
+  // 2026-05-08: bumped from 30s to 5min. /api/production-orders runs
+  // 5-17s on prod; the old 30s throttle let normal alt-tab patterns
+  // re-fire the fetch while a previous one was still in flight, which
+  // stacked queries on Hyperdrive and froze the renderer for 15-20s
+  // when the response payloads finally arrived together.
   useEffect(() => {
     const onVisibility = () => {
       if (document.visibilityState !== "visible") return;
       if (pendingJcPatchesRef.current.size > 0) return;
-      if (Date.now() - lastFetchAtRef.current < 30_000) return;
+      if (Date.now() - lastFetchAtRef.current < 300_000) return;
       lastFetchAtRef.current = Date.now();
       fetchOrders();
     };

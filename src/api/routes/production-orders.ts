@@ -33,6 +33,9 @@ import {
 import {
   computeFcFabricUsageMeters,
   fetchBomWipComponentsByCode,
+  fetchSofaSiblingsByGroupKey,
+  sofaSiblingGroupKey,
+  type SiblingPo,
 } from "../lib/fabric-usage";
 import { resolveWorkerToken } from "./worker-auth";
 import { checkProductionOrderLocked, lockedResponse } from "../lib/lock-helpers";
@@ -459,20 +462,34 @@ function rowToMinimalJobCard(
     sizeLabel: string | null;
   } | null = null,
   bomWipComponentsRaw: unknown = null,
+  bomByProductCode: Map<string, unknown> | null = null,
+  siblings: SiblingPo[] | null = null,
 ): MinimalJobCardOut {
   // wipQty defaults to 1 for legacy single-piece JCs; piecesTotal must
   // therefore floor at 1 so the FE never divides by 0 / renders "0/0".
   const piecesTotal = Math.max(1, r.wipQty ?? 1);
   const piecesDone = piecesDoneByJc.get(r.id) ?? 0;
-  // Compute fabric usage only for FAB_CUT JCs when the parent PO context
-  // and BOM tree are available. Skipped on non-FC (returns 0 anyway) and
-  // when the BOM lookup didn't find a template.
+  // Compute fabric usage only for FAB_CUT JCs. For mainstream bedframe /
+  // accessory cases the anchor PO's BOM fully describes the cut. For sofa
+  // cross-PO groups (merged FAB_CUT JC sits on ONE anchor PO but cuts for
+  // every sibling sharing the same SO+fabric), pass siblings + bomMap so
+  // computeFcFabricUsageMeters sums every piece in the group.
+  const hasSiblingPath =
+    !!parentPoForFabric &&
+    parentPoForFabric.itemCategory === "SOFA" &&
+    !!siblings &&
+    siblings.length > 0 &&
+    !!bomByProductCode;
   const fabricUsageMeters =
-    r.departmentCode === "FAB_CUT" && parentPoForFabric && bomWipComponentsRaw
+    r.departmentCode === "FAB_CUT" &&
+    parentPoForFabric &&
+    (bomWipComponentsRaw || hasSiblingPath)
       ? computeFcFabricUsageMeters(
           parentPoForFabric,
           { departmentCode: r.departmentCode, wipType: r.wipType ?? null },
           bomWipComponentsRaw,
+          bomByProductCode ?? undefined,
+          siblings ?? undefined,
         )
       : undefined;
   return {
@@ -517,6 +534,7 @@ function rowToMinimalPO(
   piecesDoneByJc: Map<string, number> = new Map(),
   leadTimeMap: LeadTimeMap | null = null,
   bomByProductCode: Map<string, unknown> | null = null,
+  siblingsByGroupKey: Map<string, SiblingPo[]> | null = null,
 ): MinimalPOOut {
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
@@ -536,6 +554,19 @@ function rowToMinimalPO(
     sizeCode: row.sizeCode,
     sizeLabel: row.sizeLabel,
   };
+  // For sofa cross-PO merged FAB_CUT JCs, look up the sibling group so
+  // fabricUsageMeters sums every piece (the anchor PO's BOM only tells us
+  // the anchor's cut; siblings share the same merged JC). Bedframe /
+  // accessory / non-merged sofa → groupKey is null or sibling list is
+  // single-element, falls back to anchor-only math.
+  const groupKey = sofaSiblingGroupKey({
+    itemCategory: row.itemCategory,
+    companySOId: row.companySOId,
+    companyCOId: row.companyCOId,
+    fabricCode: row.fabricCode,
+  });
+  const siblings =
+    groupKey && siblingsByGroupKey ? (siblingsByGroupKey.get(groupKey) ?? null) : null;
   const myJCs = jobCards
     .filter((j) => j.productionOrderId === row.id)
     .sort((a, b) => a.sequence - b.sequence)
@@ -548,6 +579,8 @@ function rowToMinimalPO(
         leadTimeMap,
         parentPoForFabric,
         bomWipComponents,
+        bomByProductCode,
+        siblings,
       ),
     );
   return {
@@ -918,13 +951,22 @@ async function fetchFilteredPOs(
   // stays O(1) lookup. Loaded only on the minimal path because the
   // Fabric Cutting dept page is the only consumer; the full-payload
   // path skips it to keep the legacy contract unchanged.
-  const bomByProductCode = minimal ? await fetchBomWipComponentsByCode(db) : null;
+  // Sibling map: sofa cross-PO merged FAB_CUT JCs share fabric across
+  // multiple POs in the same SO group. Pre-fetched here so each row's
+  // converter can sum the entire group's BOM-based fabric demand instead
+  // of just the anchor PO. Bedframe / accessory paths get a no-op map.
+  const [bomByProductCode, siblingsByGroupKey] = minimal
+    ? await Promise.all([
+        fetchBomWipComponentsByCode(db),
+        fetchSofaSiblingsByGroupKey(db, orgId),
+      ])
+    : [null, null];
 
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
     if (minimal) {
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode),
+        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
       );
     }
     return (pos.results ?? []).map((p) => rowToPO(p, [], [], leadTimeMap));
@@ -958,7 +1000,7 @@ async function fetchFilteredPOs(
         jcRows.map((j) => j.id),
       );
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
       );
     }
     if (hasFilter) {
@@ -984,7 +1026,7 @@ async function fetchFilteredPOs(
         jcs.map((j) => j.id),
       );
       return poRows.map((p) =>
-        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode),
+        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
       );
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
@@ -1002,7 +1044,7 @@ async function fetchFilteredPOs(
       jcRows.map((j) => j.id),
     );
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
     );
   }
 
@@ -1169,16 +1211,23 @@ async function fetchPaginatedPOs(
   // off-leadtime cells.
   const leadTimeMap = await loadLeadTimes(db).catch(() => null);
 
-  // BOM templates pre-load — same rationale as fetchFilteredPOs above:
-  // load once per request so per-FAB_CUT-JC fabric usage compute is
-  // O(1) lookup. Only on the minimal path; full payload skips it.
-  const bomByProductCode = minimal ? await fetchBomWipComponentsByCode(db) : null;
+  // BOM templates + sofa sibling group map pre-load — same rationale as
+  // fetchFilteredPOs above: load once per request so per-FAB_CUT-JC fabric
+  // usage compute is O(1) lookup. Only on the minimal path; full payload
+  // skips them. Sibling map covers cross-PO sofa merged cuts (anchor PO's
+  // FC JC must sum every sibling sharing the same SO+fabric).
+  const [bomByProductCode, siblingsByGroupKey] = minimal
+    ? await Promise.all([
+        fetchBomWipComponentsByCode(db),
+        fetchSofaSiblingsByGroupKey(db, orgId),
+      ])
+    : [null, null];
 
   if (!includeJobCards || posRows.length === 0) {
     if (minimal) {
       return {
         data: posRows.map((p) =>
-          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode),
+          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
         ),
         total,
       };
@@ -1265,7 +1314,7 @@ async function fetchPaginatedPOs(
   if (minimal) {
     return {
       data: posRows.map((p) =>
-        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode),
+        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
       ),
       total,
     };

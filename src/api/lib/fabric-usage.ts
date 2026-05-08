@@ -52,26 +52,12 @@ export async function fetchBomWipComponentsByCode(
 }
 
 // ---------------------------------------------------------------------------
-// Compute predicted fabric meters for one FAB_CUT JC by walking the parent
-// PO's bom_templates.wipComponents tree.
-//
-// Match strategy (mirrors the consume path in po-cost-cascade.ts):
-//   1. SPECIFIC: any FC node whose wipType === jc.wipType → only that node
-//      (used for STOOL / pillow JCs whose wipType is fine-grained, e.g.
-//      SOFA_BASE / SOFA_CUSHION / SOFA_ARMREST and matches the BOM 1:1).
-//   2. FALLBACK: union of all FC nodes (used for the merged bedframe FC JC
-//      whose wipType is the parent category like "BEDFRAME", and for the
-//      mainstream sofa FC JC where Cushion/Arm FC nodes intentionally have
-//      empty materials so only Base contributes).
-//
-// Math: per-piece scaled qty × parent FC node's quantity × po.quantity ×
-// (1 + waste%). Scaling is applied BEFORE multiplying by piece count so
-// the perUnit slope (per-inch) stays per-piece.
-//
-// Only counts materials with autoDetect="FABRIC" — leg / foam / hardware
-// lines are excluded from this metric.
+// Internal — compute per-FG fabric meters for ONE PO using its BOM tree.
+// Used twice in computeFcFabricUsageMeters: once for the anchor PO, then
+// once per sibling PO when the FAB_CUT JC is the anchor of a sofa cross-PO
+// group. Same SPECIFIC-then-FALLBACK match strategy as the consume path.
 // ---------------------------------------------------------------------------
-export function computeFcFabricUsageMeters(
+function computeFabricFromBomForOnePo(
   po: {
     quantity: number;
     itemCategory: string | null;
@@ -81,13 +67,9 @@ export function computeFcFabricUsageMeters(
     sizeCode: string | null;
     sizeLabel: string | null;
   },
-  jc: {
-    departmentCode: string | null;
-    wipType: string | null;
-  },
+  jcWipType: string | null,
   wipComponentsRaw: unknown,
 ): number {
-  if (jc.departmentCode !== "FAB_CUT") return 0;
   if (!wipComponentsRaw) return 0;
   const roots = Array.isArray(wipComponentsRaw)
     ? wipComponentsRaw
@@ -150,7 +132,7 @@ export function computeFcFabricUsageMeters(
   function findSpecific(node: unknown): unknown | null {
     if (!node || typeof node !== "object") return null;
     const n = node as Record<string, unknown>;
-    if (isFcNode(node) && jc.wipType && n.wipType === jc.wipType) {
+    if (isFcNode(node) && jcWipType && n.wipType === jcWipType) {
       return node;
     }
     const kids = Array.isArray(n.children) ? n.children : [];
@@ -176,6 +158,175 @@ export function computeFcFabricUsageMeters(
   }
   for (const root of roots) walkAll(root);
   return total;
+}
+
+// ---------------------------------------------------------------------------
+// Sibling PO shape used to expand cross-PO sofa cuts. The merged FAB_CUT
+// JC sits on ONE anchor PO but physically cuts fabric for every sibling
+// in the same SO group sharing the same fabric. Each sibling carries
+// its own productCode (so its BOM may have a different fabricUsage) and
+// its own quantity (qty=3 means 3 of that variant in one cut).
+// ---------------------------------------------------------------------------
+export type SiblingPo = {
+  productCode: string | null;
+  quantity: number;
+  itemCategory: string | null;
+  gapInches: number | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
+};
+
+// ---------------------------------------------------------------------------
+// Group key for sofa cross-PO siblings. Same SO (or CO when SO is NULL)
+// + same fabricCode = one merged FAB_CUT cut.
+// ---------------------------------------------------------------------------
+export function sofaSiblingGroupKey(
+  po: {
+    itemCategory: string | null;
+    companySOId: string | null;
+    companyCOId: string | null;
+    fabricCode: string | null;
+  },
+): string | null {
+  if (po.itemCategory !== "SOFA") return null;
+  const parent = po.companySOId || po.companyCOId;
+  if (!parent || !po.fabricCode) return null;
+  return `${parent}::${po.fabricCode}`;
+}
+
+// ---------------------------------------------------------------------------
+// Pre-load every sofa PO that participates in a cross-PO group, then bucket
+// by sofaSiblingGroupKey. The merged FAB_CUT JC's anchor PO does NOT carry
+// the full demand on its own — sibling POs (qty=3 mid, qty=1 LHF/RHF, etc.)
+// share the same cut. Caller builds this map ONCE per request and passes
+// it into computeFcFabricUsageMeters / computeFabricMetrics so we sum every
+// piece in the group instead of just the anchor.
+// ---------------------------------------------------------------------------
+export async function fetchSofaSiblingsByGroupKey(
+  db: D1Database,
+  orgId?: string | null,
+): Promise<Map<string, SiblingPo[]>> {
+  const out = new Map<string, SiblingPo[]>();
+  const sql =
+    `SELECT productCode, quantity, itemCategory, gapInches,
+            divanHeightInches, legHeightInches, sizeCode, sizeLabel,
+            companySOId, companyCOId, fabricCode
+       FROM production_orders
+      WHERE itemCategory = 'SOFA'
+        AND fabricCode IS NOT NULL AND fabricCode <> ''
+        AND (companySOId IS NOT NULL OR companyCOId IS NOT NULL)` +
+    (orgId ? " AND orgId = ?" : "");
+  const stmt = orgId ? db.prepare(sql).bind(orgId) : db.prepare(sql);
+  const res = await stmt.all<{
+    productCode: string | null;
+    quantity: number;
+    itemCategory: string | null;
+    gapInches: number | null;
+    divanHeightInches: number | null;
+    legHeightInches: number | null;
+    sizeCode: string | null;
+    sizeLabel: string | null;
+    companySOId: string | null;
+    companyCOId: string | null;
+    fabricCode: string | null;
+  }>();
+  for (const r of res.results ?? []) {
+    const key = sofaSiblingGroupKey({
+      itemCategory: r.itemCategory,
+      companySOId: r.companySOId,
+      companyCOId: r.companyCOId,
+      fabricCode: r.fabricCode,
+    });
+    if (!key) continue;
+    let bucket = out.get(key);
+    if (!bucket) {
+      bucket = [];
+      out.set(key, bucket);
+    }
+    bucket.push({
+      productCode: r.productCode,
+      quantity: Number(r.quantity) || 0,
+      itemCategory: r.itemCategory,
+      gapInches: r.gapInches,
+      divanHeightInches: r.divanHeightInches,
+      legHeightInches: r.legHeightInches,
+      sizeCode: r.sizeCode,
+      sizeLabel: r.sizeLabel,
+    });
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Compute predicted fabric meters for one FAB_CUT JC.
+//
+// For mainstream bedframe / accessory cases the JC fully describes the cut
+// → walk the anchor PO's BOM only.
+//
+// For sofa cross-PO groups the merged FAB_CUT JC physically cuts fabric for
+// MULTIPLE sibling POs (same companySOId + fabricCode). Only the anchor PO
+// has the JC; the siblings have NO FC JC of their own. To capture the full
+// cut we sum across all siblings. The caller passes `siblings` — when
+// omitted (or just the anchor itself), single-PO math is preserved.
+//
+// Only counts materials with autoDetect="FABRIC" — leg / foam / hardware
+// lines are excluded.
+// ---------------------------------------------------------------------------
+export function computeFcFabricUsageMeters(
+  po: {
+    quantity: number;
+    itemCategory: string | null;
+    gapInches: number | null;
+    divanHeightInches: number | null;
+    legHeightInches: number | null;
+    sizeCode: string | null;
+    sizeLabel: string | null;
+  },
+  jc: {
+    departmentCode: string | null;
+    wipType: string | null;
+  },
+  wipComponentsRaw: unknown,
+  bomByProductCode?: Map<string, unknown>,
+  siblings?: SiblingPo[],
+): number {
+  if (jc.departmentCode !== "FAB_CUT") return 0;
+
+  // Cross-PO sofa group: walk every sibling, sum each sibling's BOM-based
+  // fabric demand. Bedframe / accessory siblings array is empty (or just
+  // the anchor) → falls through to anchor-only math.
+  if (
+    po.itemCategory === "SOFA" &&
+    Array.isArray(siblings) &&
+    siblings.length > 0 &&
+    bomByProductCode
+  ) {
+    let total = 0;
+    for (const sib of siblings) {
+      if (!sib.productCode) continue;
+      const sibBom = bomByProductCode.get(sib.productCode);
+      if (!sibBom) continue;
+      total += computeFabricFromBomForOnePo(
+        {
+          quantity: sib.quantity,
+          itemCategory: sib.itemCategory,
+          gapInches: sib.gapInches,
+          divanHeightInches: sib.divanHeightInches,
+          legHeightInches: sib.legHeightInches,
+          sizeCode: sib.sizeCode,
+          sizeLabel: sib.sizeLabel,
+        },
+        jc.wipType,
+        sibBom,
+      );
+    }
+    return total;
+  }
+
+  // Single-PO path (bedframe / accessory / non-merged sofa).
+  return computeFabricFromBomForOnePo(po, jc.wipType, wipComponentsRaw);
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +366,8 @@ type ActiveFcJcRow = {
   legHeightInches: number | null;
   sizeCode: string | null;
   sizeLabel: string | null;
+  companySOId: string | null;
+  companyCOId: string | null;
 };
 
 export async function computeFabricMetrics(
@@ -262,13 +415,17 @@ export async function computeFabricMetrics(
   // considered "in-flight" in production tracking. PO status excludes
   // CANCELLED/COMPLETED/ON_HOLD (held POs may resume but their fabric
   // demand isn't pressing).
-  const bomMap = await fetchBomWipComponentsByCode(db);
+  const [bomMap, siblingsByGroup] = await Promise.all([
+    fetchBomWipComponentsByCode(db),
+    fetchSofaSiblingsByGroupKey(db),
+  ]);
   const jcsRes = await db
     .prepare(
       `SELECT jc.id AS jcId, jc.dueDate, jc.wipType, jc.departmentCode,
               po.id AS poId, po.fabricCode, po.quantity, po.productCode,
               po.itemCategory, po.gapInches, po.divanHeightInches,
-              po.legHeightInches, po.sizeCode, po.sizeLabel
+              po.legHeightInches, po.sizeCode, po.sizeLabel,
+              po.companySOId, po.companyCOId
          FROM job_cards jc
          INNER JOIN production_orders po ON po.id = jc.productionOrderId
         WHERE jc.departmentCode = 'FAB_CUT'
@@ -281,7 +438,16 @@ export async function computeFabricMetrics(
   for (const jc of jcsRes.results ?? []) {
     if (!jc.fabricCode) continue;
     const wipComponents = jc.productCode ? bomMap.get(jc.productCode) : null;
-    if (!wipComponents) continue;
+    // For sofa cross-PO groups, fall through to the siblings path even when
+    // the anchor's own BOM is missing (siblings supply their own BOM).
+    const groupKey = sofaSiblingGroupKey({
+      itemCategory: jc.itemCategory,
+      companySOId: jc.companySOId,
+      companyCOId: jc.companyCOId,
+      fabricCode: jc.fabricCode,
+    });
+    const siblings = groupKey ? siblingsByGroup.get(groupKey) : undefined;
+    if (!wipComponents && (!siblings || siblings.length === 0)) continue;
     const meters = computeFcFabricUsageMeters(
       {
         quantity: jc.quantity,
@@ -294,6 +460,8 @@ export async function computeFabricMetrics(
       },
       { departmentCode: jc.departmentCode, wipType: jc.wipType },
       wipComponents,
+      bomMap,
+      siblings,
     );
     if (meters <= 0) continue;
     const m = ensure(jc.fabricCode);

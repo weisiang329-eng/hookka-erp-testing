@@ -140,6 +140,37 @@ function todayStr(): string {
   return new Date().toISOString().split("T")[0];
 }
 
+// Each tab on this page has its own from/to date filter. Persisting the
+// operator's last selection in localStorage — keyed per tab — means they can
+// flip between tabs without re-picking the same range, AND when they reopen
+// the page the date <input/> calendar pops open on the month they actually
+// care about (instead of jumping 30 days back into the previous month).
+// Returns null/undefined fields when nothing is stored or the JSON is
+// malformed so the caller can fall back to today.
+function readPersistedDateRange(key: string): { from?: string; to?: string } {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { from?: unknown; to?: unknown };
+    return {
+      from: typeof parsed.from === "string" ? parsed.from : undefined,
+      to: typeof parsed.to === "string" ? parsed.to : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writePersistedDateRange(key: string, from: string, to: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ from, to }));
+  } catch {
+    /* localStorage full / blocked — non-fatal, just lose persistence */
+  }
+}
+
 // Quote a CSV cell when it contains a comma, double-quote or newline. Empty /
 // safe cells render as-is. Internal quotes are escaped by doubling per RFC
 // 4180.
@@ -291,9 +322,19 @@ function WorkingHoursTab({
   // mode (same view as before the range refactor). When dateFrom < dateTo
   // the table fetches every entry in the range, the table grows a Date
   // column, and new rows default their date to dateFrom (operator can
-  // change per row). When dateFrom > dateTo we silently swap.
-  const [dateFrom, setDateFrom] = useState(todayStr());
-  const [dateTo, setDateTo] = useState(todayStr());
+  // change per row). When dateFrom > dateTo we silently swap. Last
+  // selection persists in localStorage so the operator returns to the
+  // window they were last working on instead of being snapped back to
+  // today every visit.
+  const [dateFrom, setDateFrom] = useState<string>(() =>
+    readPersistedDateRange("employees:working-hours:dateRange").from ?? todayStr()
+  );
+  const [dateTo, setDateTo] = useState<string>(() =>
+    readPersistedDateRange("employees:working-hours:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:working-hours:dateRange", dateFrom, dateTo);
+  }, [dateFrom, dateTo]);
   const isMultiDay = dateFrom !== dateTo;
   const [rows, setRows] = useState<EntryDraft[]>([]);
   const [loading, setLoading] = useState(false);
@@ -2064,12 +2105,19 @@ function EfficiencyOverviewTab({
   departments: DepartmentLite[];
 }) {
   const { toast } = useToast();
-  const [dateFrom, setDateFrom] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 30);
-    return d.toISOString().split("T")[0];
-  });
-  const [dateTo, setDateTo] = useState(todayStr());
+  // Date range — defaults to single-day (today) so the date picker pops open
+  // on the current month instead of jumping back 30 days. Last selection is
+  // persisted in localStorage so revisiting the tab keeps the operator's
+  // chosen window. Per-tab key avoids cross-tab interference.
+  const [dateFrom, setDateFrom] = useState<string>(() =>
+    readPersistedDateRange("employees:efficiency-overview:dateRange").from ?? todayStr()
+  );
+  const [dateTo, setDateTo] = useState<string>(() =>
+    readPersistedDateRange("employees:efficiency-overview:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:efficiency-overview:dateRange", dateFrom, dateTo);
+  }, [dateFrom, dateTo]);
 
   // Per-worker × per-dept hours pivot — mirrors the Google Sheet HOURS
   // DASHBOARD layout. Aggregation lives server-side (one SQL GROUP BY) so
@@ -2441,15 +2489,48 @@ function DepartmentLaborTab({
   // Same period model as Labor Cost: a Month dropdown is the quick-jump
   // preset; the From/To inputs allow custom ranges. Dropdown -> sets
   // dateFrom/dateTo to that month's bounds; touching the date inputs
-  // drops period back to "" (Custom range).
+  // drops period back to "" (Custom range). Last selection (period +
+  // explicit from/to) is persisted in localStorage so the operator
+  // resumes the same window when they revisit the tab — no more
+  // calendar popups jumping back to a month they don't care about.
   const periodOptions = useMemo(() => buildPeriodOptions(), []);
-  const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
+  const persistedDeptLabor = useMemo(
+    () => readPersistedDateRange("employees:department-labor:dateRange"),
+    [],
+  );
+  const persistedDeptLaborPeriod = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem("employees:department-labor:period");
+      return typeof raw === "string" ? raw : null;
+    } catch {
+      return null;
+    }
+  }, []);
+  const [period, setPeriod] = useState<string>(
+    () => persistedDeptLaborPeriod ?? (periodOptions[0]?.value ?? ""),
+  );
   const initialRange = useMemo(
     () => periodToDateRange(periodOptions[0]?.value ?? ""),
     [periodOptions],
   );
-  const [dateFrom, setDateFrom] = useState(initialRange.from);
-  const [dateTo, setDateTo] = useState(initialRange.to);
+  const [dateFrom, setDateFrom] = useState<string>(
+    () => persistedDeptLabor.from ?? initialRange.from,
+  );
+  const [dateTo, setDateTo] = useState<string>(
+    () => persistedDeptLabor.to ?? initialRange.to,
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:department-labor:dateRange", dateFrom, dateTo);
+  }, [dateFrom, dateTo]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("employees:department-labor:period", period);
+    } catch {
+      /* non-fatal */
+    }
+  }, [period]);
   // Category filter mirrors Labor Cost: when set, only entries tagged with
   // that product category count toward dept totals. Non-production buckets
   // (Warehousing / Repair / Maintenance / Production Shortfall) carry an
@@ -2820,12 +2901,18 @@ function EmployeeDetailTab({
   const [selectedEmployeeId, setSelectedEmployeeId] = useState(
     workers[0]?.id || ""
   );
-  const [dateFrom, setDateFrom] = useState(() => {
-    const d = new Date();
-    d.setDate(d.getDate() - 30);
-    return d.toISOString().split("T")[0];
-  });
-  const [dateTo, setDateTo] = useState(todayStr());
+  // Date range — defaults to single-day (today) so the picker lands on the
+  // current month. Persisted per-tab in localStorage so reopening the tab
+  // restores the operator's last window without forcing them to re-pick.
+  const [dateFrom, setDateFrom] = useState<string>(() =>
+    readPersistedDateRange("employees:employee-detail:dateRange").from ?? todayStr()
+  );
+  const [dateTo, setDateTo] = useState<string>(() =>
+    readPersistedDateRange("employees:employee-detail:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:employee-detail:dateRange", dateFrom, dateTo);
+  }, [dateFrom, dateTo]);
 
   const selectedWorker = workers.find((w) => w.id === selectedEmployeeId);
 
@@ -4147,14 +4234,46 @@ function LaborCostTab({
   // `period` keeps the existing month dropdown working as a quick-jump preset.
   // When the user picks a month, we re-derive from/to. When they tweak the
   // date inputs directly, `period` stays in sync only if their range matches
-  // an exact calendar month — otherwise it drops to "" (Custom).
-  const [period, setPeriod] = useState<string>(() => periodOptions[0]?.value ?? "");
+  // an exact calendar month — otherwise it drops to "" (Custom). Last
+  // selection (period + explicit from/to) is persisted in localStorage so
+  // tab-switching keeps the operator's chosen window.
+  const persistedLaborCost = useMemo(
+    () => readPersistedDateRange("employees:labor-cost:dateRange"),
+    [],
+  );
+  const persistedLaborCostPeriod = useMemo(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem("employees:labor-cost:period");
+      return typeof raw === "string" ? raw : null;
+    } catch {
+      return null;
+    }
+  }, []);
+  const [period, setPeriod] = useState<string>(
+    () => persistedLaborCostPeriod ?? (periodOptions[0]?.value ?? ""),
+  );
   const initialRange = useMemo(
     () => periodToDateRange(periodOptions[0]?.value ?? ""),
     [periodOptions],
   );
-  const [fromDate, setFromDate] = useState<string>(initialRange.from);
-  const [toDate, setToDate] = useState<string>(initialRange.to);
+  const [fromDate, setFromDate] = useState<string>(
+    () => persistedLaborCost.from ?? initialRange.from,
+  );
+  const [toDate, setToDate] = useState<string>(
+    () => persistedLaborCost.to ?? initialRange.to,
+  );
+  useEffect(() => {
+    writePersistedDateRange("employees:labor-cost:dateRange", fromDate, toDate);
+  }, [fromDate, toDate]);
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem("employees:labor-cost:period", period);
+    } catch {
+      /* non-fatal */
+    }
+  }, [period]);
   const from = fromDate;
   const to = toDate;
   // Optional category slice ("" = All). When non-empty, EVERY metric on this

@@ -5513,18 +5513,21 @@ type FcRow = {
   bomBaseModel: string | null;
 };
 
+// Mirror of _shared/production-builder.ts joinModelLabel — keeps duplicates
+// in source order so cutter sees every piece in the group, not just unique
+// productCodes. See the canonical version for full rationale.
 function joinModelLabel(productCodes: string[]): string {
-  const unique = [...new Set(productCodes.filter(Boolean))];
-  if (unique.length === 0) return "";
-  if (unique.length === 1) return unique[0];
-  const firstDash = unique[0].indexOf("-");
+  const all = productCodes.filter(Boolean);
+  if (all.length === 0) return "";
+  if (all.length === 1) return all[0];
+  const firstDash = all[0].indexOf("-");
   if (firstDash > 0) {
-    const prefix = unique[0].slice(0, firstDash + 1);
-    if (unique.every((m) => m.startsWith(prefix))) {
-      return prefix + unique.map((m) => m.slice(prefix.length)).join("+");
+    const prefix = all[0].slice(0, firstDash + 1);
+    if (all.every((m) => m.startsWith(prefix))) {
+      return prefix + all.map((m) => m.slice(prefix.length)).join("+");
     }
   }
-  return unique.join("+");
+  return all.join("+");
 }
 
 function buildFcWipLabel(
@@ -5660,13 +5663,14 @@ app.post("/backfill-fab-cut-merge", async (c) => {
       (sum, r) => sum + (r.productionTimeMinutes ?? r.estMinutes ?? 0),
       0,
     );
-    // Sets-count = min(slot.wipQty) across the group. The anchor's
-    // wipQty randomly picks one piece's qty which may be inflated by a
-    // BOM multiplier (BF Divan qty = 2 × set-count). Using min always
-    // gives the true set-count regardless of which piece sorts first.
-    const newWipQty = Math.min(
-      ...sorted.map((r) => r.wipQty || 1),
-    );
+    // wipQty by category — mirrors aggregateFcSlots in production-builder.ts:
+    //   - SOFA cross-PO merge → SUM (the cutter physically cuts every
+    //     sibling: 1A(LHF)×2 + 1NA + 1A(RHF)×2 + 1S = 6 pieces).
+    //   - BF/ACC same-PO merge → MIN (HB qty=1 + DV qty=2 → min=1 set).
+    const isSofaForQty = (anchor.poItemCategory ?? "") === "SOFA";
+    const newWipQty = isSofaForQty
+      ? sorted.reduce((sum, r) => sum + (r.wipQty || 1), 0)
+      : Math.min(...sorted.map((r) => r.wipQty || 1));
     const productCodes = sorted.map((r) => r.poProductCode ?? "");
     const modelLabel = joinModelLabel(productCodes);
     const totalH =

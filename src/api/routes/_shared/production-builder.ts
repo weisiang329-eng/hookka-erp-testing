@@ -173,22 +173,26 @@ function buildFcWipLabel(
 }
 
 // Join multiple productCodes into a single composite label with shared-prefix
-// stripping. Mirrors the pre-77ba23c frontend merge code:
+// stripping. Preserves source order AND duplicates — when a sofa SO has two
+// LHF + one NA + two RHF + one 1S, the cutter needs to see all 6 pieces
+// listed, not just the 4 unique productCodes:
+//   ["5535-1A(LHF)", "5535-1NA", "5535-1A(RHF)", "5535-1A(LHF)", "5535-1A(RHF)", "5535-1S"]
+//     → "5535-1A(LHF)+1NA+1A(RHF)+1A(LHF)+1A(RHF)+1S"
 //   ["5535-2A(LHF)", "5535-L(RHF)"]  →  "5535-2A(LHF)+L(RHF)"
 //   ["5531"]                         →  "5531"
-//   ["5531", "5535"]                 →  "5531+5535"  (no shared prefix)
+//   ["5531", "5535"]                 →  "5531+5535"   (no shared prefix)
 function joinModelLabel(productCodes: string[]): string {
-  const unique = [...new Set(productCodes.filter(Boolean))];
-  if (unique.length === 0) return "";
-  if (unique.length === 1) return unique[0];
-  const firstDash = unique[0].indexOf("-");
+  const all = productCodes.filter(Boolean);
+  if (all.length === 0) return "";
+  if (all.length === 1) return all[0];
+  const firstDash = all[0].indexOf("-");
   if (firstDash > 0) {
-    const prefix = unique[0].slice(0, firstDash + 1);
-    if (unique.every((m) => m.startsWith(prefix))) {
-      return prefix + unique.map((m) => m.slice(prefix.length)).join("+");
+    const prefix = all[0].slice(0, firstDash + 1);
+    if (all.every((m) => m.startsWith(prefix))) {
+      return prefix + all.map((m) => m.slice(prefix.length)).join("+");
     }
   }
-  return unique.join("+");
+  return all.join("+");
 }
 
 // Aggregator — category-aware grouping per the pre-77ba23c frontend rule:
@@ -265,15 +269,18 @@ function aggregateFcSlots(
       // cascade → wip_items.type → Inventory Type column shows
       // "Bedframe" / "Sofa" / "Accessory").
       wipType: anchor.itemCategory || anchor.wipType,
-      // wipQty = SET count for the merge group, NOT a per-piece quantity.
-      // BF pieces have varying multipliers (HB qty=1, DV qty=2 per BOM
-      // divanMultiplier) so anchor.wipQty randomly picks one of those
-      // depending on sort order. Use min(slot.wipQty) which always
-      // equals the set-count regardless of which piece sorts first:
-      //   BF line qty=1: HB=1 + DV=2 → min=1 (1 set) ✓
-      //   BF line qty=N: HB=N + DV=2N → min=N (N sets) ✓
-      //   SOFA line qty=N: each piece multiplier=1 → all = N → min=N ✓
-      wipQty: Math.min(...group.map((s) => s.wipQty)),
+      // wipQty:
+      //   - BF/ACC same-PO merge → set count via min (HB=1 + DV=2 → min=1
+      //     means 1 set, mirrors original logic — multipliers across pieces
+      //     of the same set must NOT be summed).
+      //   - SOFA cross-PO merge → sum across source POs (the cutter cuts
+      //     every piece in the group: 5530-1A(LHF) ×2 + 1NA ×1 + 1A(RHF)
+      //     ×2 + 1S ×1 → wipQty=6, not 1). Each sibling PO contributes its
+      //     own line qty.
+      wipQty:
+        anchor.itemCategory === "SOFA" && !anchor.isProjectOrder
+          ? group.reduce((sum, s) => sum + s.wipQty, 0)
+          : Math.min(...group.map((s) => s.wipQty)),
       category: anchor.processCategory,
       minutes: totalMinutes,
       branchKey: "",

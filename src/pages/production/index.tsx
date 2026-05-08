@@ -1171,15 +1171,21 @@ export default function ProductionPage({
       }
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
-      // "Filter Incomplete" toggle — keep only POs with at least one
-      // UPHOLSTERY JC that ISN'T COMPLETED / TRANSFERRED. POs with no UPH
-      // JCs at all (legacy or non-upholstered items) stay visible — we
-      // can't tell those are "done", and silently hiding them would lie
-      // about what's still in scope.
+      // "Filter Incomplete" toggle — dept-aware:
+      //   Overview ("ALL")  → keep POs whose UPHOLSTERY JC isn't done.
+      //                       UPH gates ship-readiness, so this answers
+      //                       "what's still in scope but hasn't shipped?"
+      //   Per-dept tab      → keep POs whose JC for that dept isn't done.
+      //                       Same question, scoped to "what's still on
+      //                       this dept's plate?".
+      // POs with no JC for the gating dept stay visible — we can't tell
+      // those are "done" and silently hiding them would lie about what's
+      // still in scope.
       if (incompleteOnly) {
-        const uphJcs = (o.jobCards ?? []).filter((j) => j.departmentCode === "UPHOLSTERY");
-        if (uphJcs.length > 0) {
-          const stillOpen = uphJcs.some(
+        const gateDept = activeTab === "ALL" ? "UPHOLSTERY" : activeTab;
+        const gateJcs = (o.jobCards ?? []).filter((j) => j.departmentCode === gateDept);
+        if (gateJcs.length > 0) {
+          const stillOpen = gateJcs.some(
             (j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED",
           );
           if (!stillOpen) return false;
@@ -1224,7 +1230,13 @@ export default function ProductionPage({
     salesOrderId: string;  // canonical id for navigation (may be empty for CO-only orders)
     overdueCategories: Set<string>; // itemCategory set across this SO's *overdue* POs only
   };
+  // Dept context for the overdue rule. Overview (activeTab = "ALL") uses
+  // the customer-promise rule (PO.targetEndDate passed AND UPH not done);
+  // a dept tab uses that dept's JC dueDate. Same shape feeds the cards
+  // AND the Filter Incomplete toggle so the two stay in lockstep.
+  const overdueDept: string | null = activeTab === "ALL" ? null : activeTab;
   const overdueBreakdown: OverdueSORow[] = useMemo(() => {
+    const today = todayISO();
     const byso = new Map<string, OverdueSORow>();
     for (const po of allOrders) {
       // Skip CANCELLED — they should never count as overdue.
@@ -1255,10 +1267,10 @@ export default function ProductionPage({
       // Prefer a non-empty salesOrderId on any PO in the group (CO siblings
       // can land first with empty salesOrderId).
       if (!entry.salesOrderId && po.salesOrderId) entry.salesOrderId = po.salesOrderId;
-      if (isOverduePO(po)) {
+      if (isOverduePO(po, today, overdueDept)) {
         entry.overduePos += 1;
         if (po.itemCategory) entry.overdueCategories.add(po.itemCategory);
-        const e = earliestOverdueDateOnPO(po);
+        const e = earliestOverdueDateOnPO(po, today, overdueDept);
         if (e && (!entry.earliest || e < entry.earliest)) entry.earliest = e;
       }
     }
@@ -1272,7 +1284,7 @@ export default function ProductionPage({
         if (!b.earliest) return -1;
         return a.earliest.localeCompare(b.earliest);
       });
-  }, [allOrders]);
+  }, [allOrders, overdueDept]);
   // Per-category counts. An SO with both BEDFRAME + SOFA overdue POs counts
   // in BOTH cards — we want to surface both signals, not dedup at SO level.
   // Operator request 2026-05-08: replace the single "Overdue SOs" chip
@@ -3720,10 +3732,13 @@ export default function ProductionPage({
         >
           Sofa Overdue: {sofaOverdueCount}
         </button>
-        {/* "Filter Incomplete" toggle — narrows to POs whose UPHOLSTERY
-            JC isn't COMPLETED/TRANSFERRED. Sits on top of the date range
-            so the operator can ask "what's still in scope but hasn't
-            shipped yet?". Persisted via localStorage so reload survives. */}
+        {/* "Filter Incomplete" toggle — narrows to POs whose gating-JC
+            isn't COMPLETED/TRANSFERRED. Overview gates on UPHOLSTERY (ship
+            readiness); a dept tab gates on that dept's own JC. Sits on top
+            of the date range so the operator can ask "what's still in
+            scope but hasn't shipped yet?". Persisted via localStorage so
+            reload survives — single shared key applied through the
+            dept-aware predicate at filter time. */}
         <button
           type="button"
           onClick={() => setIncompleteOnly((v) => !v)}
@@ -3732,7 +3747,11 @@ export default function ProductionPage({
               ? "bg-[#6B5C32] text-white border-[#6B5C32]"
               : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
           }`}
-          title="Show only POs whose UPHOLSTERY isn't COMPLETED yet"
+          title={
+            activeTab === "ALL"
+              ? "Show only POs whose UPHOLSTERY isn't COMPLETED yet"
+              : `Show only POs whose ${activeDept?.name ?? activeTab} isn't COMPLETED yet`
+          }
         >
           {incompleteOnly
             ? `Filter Incomplete (${filteredOrders.length})`

@@ -1055,6 +1055,17 @@ const rmColumns: Column<RawMaterial>[] = [
     ),
   },
   {
+    key: "itemGroup",
+    label: "Category",
+    sortable: true,
+    sortAccessor: (row) => row.itemGroup ?? "",
+    render: (_v, row) => (
+      <span className="inline-flex items-center rounded-full bg-[#F0ECE9] px-2 py-0.5 text-xs font-medium text-[#6B5C32]">
+        {row.itemGroup || "—"}
+      </span>
+    ),
+  },
+  {
     key: "balanceQty",
     label: "Stock Qty",
     align: "right",

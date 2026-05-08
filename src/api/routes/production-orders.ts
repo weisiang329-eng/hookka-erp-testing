@@ -3544,6 +3544,10 @@ async function applyPoUpdate(
 // consignmentOrderId) group with overdue POs in it, plus the per-category
 // totals the FE renders as "Bedframe Overdue: N" / "Sofa Overdue: N".
 // ---------------------------------------------------------------------------
+// NOTE: SQL aliases must use snake_case so postgres.js's snake→camel
+// transform turns them back into camelCase here. An unquoted `AS poStatus`
+// would land as Postgres-lowercased `postatus`, which the transform leaves
+// alone (no underscore = no rename), and `row.poStatus` reads undefined.
 type OverduePoRow = {
   id: string;
   companySOId: string | null;
@@ -3552,8 +3556,8 @@ type OverduePoRow = {
   consignmentOrderId: string | null;
   customerName: string | null;
   itemCategory: string | null;
-  poStatus: string;
-  earliestOverdue: string | null;
+  poStatus: string;        // SQL: po.status AS po_status
+  earliestOverdue: string | null;  // SQL: ... AS earliest_overdue
 };
 
 type OverdueBreakdownRow = {
@@ -3592,7 +3596,7 @@ app.get("/overdue-counts", async (c) => {
               po.consignmentOrderId,
               po.customerName,
               po.itemCategory,
-              po.status AS poStatus,
+              po.status AS po_status,
               CASE
                 WHEN po.status NOT IN ('COMPLETED','CANCELLED')
                   AND po.targetEndDate IS NOT NULL
@@ -3605,7 +3609,7 @@ app.get("/overdue-counts", async (c) => {
                   )
                 THEN po.targetEndDate
                 ELSE NULL
-              END AS earliestOverdue
+              END AS earliest_overdue
          FROM production_orders po
         WHERE po.orgId = ?`,
     ).bind(today, orgId);
@@ -3620,14 +3624,14 @@ app.get("/overdue-counts", async (c) => {
               po.consignmentOrderId,
               po.customerName,
               po.itemCategory,
-              po.status AS poStatus,
+              po.status AS po_status,
               (SELECT MIN(jc.dueDate)
                  FROM job_cards jc
                 WHERE jc.productionOrderId = po.id
                   AND jc.departmentCode = ?
                   AND jc.dueDate IS NOT NULL
                   AND jc.dueDate < ?
-                  AND jc.status NOT IN ('COMPLETED','TRANSFERRED')) AS earliestOverdue
+                  AND jc.status NOT IN ('COMPLETED','TRANSFERRED')) AS earliest_overdue
          FROM production_orders po
         WHERE po.orgId = ?
           AND po.status NOT IN ('COMPLETED','CANCELLED')`,

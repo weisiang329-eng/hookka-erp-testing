@@ -109,6 +109,42 @@ type PurchaseOrder = {
   expectedDate: string;
 };
 
+// ── Date helpers ─────────────────────────────────────────────────────
+
+// All date pickers on this page default to today so the calendar popup
+// opens at the current month instead of jumping back to whichever past
+// month a hard-coded constant was last set to. The operator's last
+// selection persists in localStorage — keyed per report tab — so flipping
+// between tabs and revisiting the page lands on the range they last cared
+// about. Mirrors the pattern in employees.tsx (introduced 2026-05-08).
+function todayStr(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+function readPersistedDateRange(key: string): { from?: string; to?: string } {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { from?: unknown; to?: unknown };
+    return {
+      from: typeof parsed.from === "string" ? parsed.from : undefined,
+      to: typeof parsed.to === "string" ? parsed.to : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writePersistedDateRange(key: string, from: string, to: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ from, to }));
+  } catch {
+    /* localStorage full / blocked — non-fatal, just lose persistence */
+  }
+}
+
 // ── CSV helper ───────────────────────────────────────────────────────
 
 function downloadCSV(
@@ -282,8 +318,15 @@ type TabId = (typeof TABS)[number]["id"];
 // =====================================================================
 
 function SalesReportTab() {
-  const [from, setFrom] = useState("2026-04-01");
-  const [to, setTo] = useState("2026-04-30");
+  const [from, setFrom] = useState<string>(
+    () => readPersistedDateRange("reports:sales:dateRange").from ?? todayStr()
+  );
+  const [to, setTo] = useState<string>(
+    () => readPersistedDateRange("reports:sales:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("reports:sales:dateRange", from, to);
+  }, [from, to]);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<{
     orders: SalesOrder[];
@@ -502,8 +545,15 @@ function SalesReportTab() {
 // =====================================================================
 
 function ProductionReportTab() {
-  const [from, setFrom] = useState("2026-04-01");
-  const [to, setTo] = useState("2026-04-30");
+  const [from, setFrom] = useState<string>(
+    () => readPersistedDateRange("reports:production:dateRange").from ?? todayStr()
+  );
+  const [to, setTo] = useState<string>(
+    () => readPersistedDateRange("reports:production:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("reports:production:dateRange", from, to);
+  }, [from, to]);
   const [loading, setLoading] = useState(false);
   const [data, setData] = useState<ProductionOrder[] | null>(null);
 
@@ -1072,8 +1122,15 @@ function FinancialReportTab() {
 // =====================================================================
 
 function EmployeeReportTab() {
-  const [from, setFrom] = useState("2026-04-01");
-  const [to, setTo] = useState("2026-04-30");
+  const [from, setFrom] = useState<string>(
+    () => readPersistedDateRange("reports:employee:dateRange").from ?? todayStr()
+  );
+  const [to, setTo] = useState<string>(
+    () => readPersistedDateRange("reports:employee:dateRange").to ?? todayStr()
+  );
+  useEffect(() => {
+    writePersistedDateRange("reports:employee:dateRange", from, to);
+  }, [from, to]);
   const [loading, setLoading] = useState(false);
   const [workers, setWorkers] = useState<Worker[] | null>(null);
 

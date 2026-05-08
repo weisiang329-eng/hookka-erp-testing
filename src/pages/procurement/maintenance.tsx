@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -289,14 +289,25 @@ function SupplierFormDialog({
     onSave({ code, name, contactPerson, phone, email, address, paymentTerms, rating, status });
   };
 
+  // Close on Escape key — operators expect dialog dismissal even when
+  // focus is trapped inside an Input.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-6 border-b border-[#E2DDD8]">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">
             {editData ? "Edit Supplier" : "Add Supplier"}
           </h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button type="button" variant="ghost" size="icon" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -387,6 +398,22 @@ function SKUFormDialog({
   const [materialName, setMaterialName] = useState(editData?.materialName || "");
   const [rmSearch, setRmSearch] = useState("");
   const [showRmDropdown, setShowRmDropdown] = useState(false);
+  const rmDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Close the inventory dropdown on outside click. Without this it stayed
+  // open indefinitely once focused, overlaying the Cancel + Add Mapping
+  // buttons further down the form (it's `absolute top-full` from the
+  // Internal Code field) and silently swallowing those clicks.
+  useEffect(() => {
+    if (!showRmDropdown) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (rmDropdownRef.current && !rmDropdownRef.current.contains(e.target as Node)) {
+        setShowRmDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [showRmDropdown]);
 
   const filteredInventory = useMemo(() => {
     if (!rmSearch) return inventoryItems.slice(0, 50);
@@ -429,20 +456,31 @@ function SKUFormDialog({
     });
   };
 
+  // Close on Escape key — operators expect dialog dismissal even when
+  // focus is trapped inside an Input.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
       <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
         <div className="flex items-center justify-between p-6 border-b border-[#E2DDD8]">
           <h2 className="text-lg font-semibold text-[#1F1D1B]">
             {editData ? "Edit SKU Mapping" : "Add SKU Mapping"}
           </h2>
-          <Button variant="ghost" size="icon" onClick={onClose}>
+          <Button type="button" variant="ghost" size="icon" onClick={onClose}>
             <X className="h-4 w-4" />
           </Button>
         </div>
         <form onSubmit={handleSubmit} className="p-6 space-y-4">
           <div className="grid grid-cols-2 gap-4">
-            <div className="relative">
+            <div className="relative" ref={rmDropdownRef}>
               <label className="block text-sm font-medium text-[#374151] mb-1">Internal Code *</label>
               <Input
                 value={showRmDropdown ? rmSearch : internalRMCode}

@@ -502,6 +502,26 @@ export default function ProductionPage({
   // showing as strikethrough rows that cluttered the daily view). Toggle
   // via ?showCancelled=1 in the URL when needed.
   const [showCancelled] = useUrlState<string>("showCancelled", "");
+  // "Filter Incomplete" toggle (2026-05-08 operator request) — narrows
+  // visible POs to those whose UPHOLSTERY JC is NOT yet COMPLETED /
+  // TRANSFERRED. Sits ON TOP of the date-range filter so the operator can
+  // ask "what's still in scope but hasn't shipped yet?". Persisted to
+  // localStorage so the toggle survives reloads.
+  const INCOMPLETE_FILTER_LS_KEY = "production:overview:incompleteFilter";
+  const [incompleteOnly, setIncompleteOnly] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(INCOMPLETE_FILTER_LS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(INCOMPLETE_FILTER_LS_KEY, incompleteOnly ? "1" : "0");
+    } catch {
+      // ignore quota / private-mode failures
+    }
+  }, [incompleteOnly]);
   // Atomic multi-key URL writer for "Clear all". Sequential useUrlState
   // setters race under React 18 batching — see useUrlBatch jsdoc.
   const setUrlBatch = useUrlBatch();
@@ -1116,6 +1136,20 @@ export default function ProductionPage({
       }
       if (fltDueFrom && axisVal && axisVal < fltDueFrom) return false;
       if (fltDueTo && axisVal && axisVal > fltDueTo) return false;
+      // "Filter Incomplete" toggle — keep only POs with at least one
+      // UPHOLSTERY JC that ISN'T COMPLETED / TRANSFERRED. POs with no UPH
+      // JCs at all (legacy or non-upholstered items) stay visible — we
+      // can't tell those are "done", and silently hiding them would lie
+      // about what's still in scope.
+      if (incompleteOnly) {
+        const uphJcs = (o.jobCards ?? []).filter((j) => j.departmentCode === "UPHOLSTERY");
+        if (uphJcs.length > 0) {
+          const stillOpen = uphJcs.some(
+            (j) => j.status !== "COMPLETED" && j.status !== "TRANSFERRED",
+          );
+          if (!stillOpen) return false;
+        }
+      }
       // Hide CANCELLED POs unless explicitly opted in via ?showCancelled=1.
       if (!showCancelled && o.status === "CANCELLED") return false;
       // (Lifecycle filter removed 2026-04-27 — moved to per-column Status
@@ -1130,6 +1164,7 @@ export default function ProductionPage({
     fltDueFrom, fltDueTo, fltDateAxis,
     fltCategory,
     showCancelled,
+    incompleteOnly,
     // activeTab drives the dueDate axis branch added 2026-05-07 (overview
     // → PO.targetEndDate, dept page → matching dept's JC.dueDate). Without
     // it in the deps the memo retains stale results when the route changes.
@@ -3521,6 +3556,24 @@ export default function ProductionPage({
           className="text-xs px-2 py-1.5 border border-[#E6E0D9] rounded"
           title="To (due date)"
         />
+        {/* "Filter Incomplete" toggle — narrows to POs whose UPHOLSTERY
+            JC isn't COMPLETED/TRANSFERRED. Sits on top of the date range
+            so the operator can ask "what's still in scope but hasn't
+            shipped yet?". Persisted via localStorage so reload survives. */}
+        <button
+          type="button"
+          onClick={() => setIncompleteOnly((v) => !v)}
+          className={`text-xs px-2 py-1.5 rounded border transition ${
+            incompleteOnly
+              ? "bg-[#6B5C32] text-white border-[#6B5C32]"
+              : "bg-white text-[#6B5C32] border-[#E6E0D9] hover:bg-[#FAF8F4]"
+          }`}
+          title="Show only POs whose UPHOLSTERY isn't COMPLETED yet"
+        >
+          {incompleteOnly
+            ? `Filter Incomplete (${filteredOrders.length})`
+            : "Filter Incomplete"}
+        </button>
         {!shouldFetch && (
           <button
             onClick={() => setShouldFetch(true)}

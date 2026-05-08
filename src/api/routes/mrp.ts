@@ -21,6 +21,7 @@
 import { Hono } from "hono";
 import type { Env } from "../worker";
 import { requirePermission } from "../lib/rbac";
+import { getOrgId } from "../lib/tenant";
 import {
   expandMaterialQty,
   parseMaterialScaling,
@@ -47,6 +48,11 @@ const BUCKET_LABELS: Record<TimeBucket, string> = {
 
 type MaterialRequirement = {
   id: string;
+  // SKU code (raw_materials.itemCode). Different from materialName which is
+  // the human-readable label. Persisted so /api/purchase-orders/from-mrp
+  // (Phase A1.2) can look up supplier_material_bindings and prefill a draft
+  // PO without re-running the MRP solver.
+  materialCode: string;
   materialName: string;
   materialCategory: string;
   unit: string;
@@ -253,19 +259,275 @@ function genId(prefix: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Self-applying schema migrations.
+//
+// migrations-postgres/0112_mrp_persistence.sql is the canonical source — but
+// the prod deploy pipeline runs SQL migrations out-of-band. Self-apply on
+// first request per isolate so the route never 500s against an old schema
+// during a partial deploy. ALTER ... IF NOT EXISTS is idempotent so re-runs
+// are cheap. Mirrors src/api/routes/production-orders.ts:83.
+// ---------------------------------------------------------------------------
+let pendingMigrations: Promise<void> | null = null;
+function ensurePendingMigrations(db: D1Database): Promise<void> {
+  if (pendingMigrations) return pendingMigrations;
+  pendingMigrations = (async () => {
+    const stmts = [
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS org_id TEXT",
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS created_by TEXT",
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS fabric_detail TEXT",
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS matched_pos INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_runs ADD COLUMN IF NOT EXISTS unmatched_pos INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS material_code TEXT",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS bucket_this_week DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS bucket_next_week DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS bucket_week34 DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS bucket_beyond DOUBLE PRECISION NOT NULL DEFAULT 0",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS lead_time_days INTEGER",
+      "ALTER TABLE mrp_requirements ADD COLUMN IF NOT EXISTS suggested_order_date TEXT",
+      "CREATE INDEX IF NOT EXISTS idx_mrp_runs_org_run_date ON mrp_runs(org_id, run_date DESC)",
+      "CREATE INDEX IF NOT EXISTS idx_mrp_requirements_run ON mrp_requirements(mrp_run_id)",
+    ];
+    for (const sql of stmts) {
+      try {
+        await db.prepare(sql).run();
+      } catch (err) {
+        console.warn("[mrp.migrations] ALTER skipped", {
+          sql,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  })();
+  return pendingMigrations;
+}
+
+// ---------------------------------------------------------------------------
+// DB row shapes for persistence
+// ---------------------------------------------------------------------------
+type MrpRunRow = {
+  id: string;
+  runDate: string;
+  planningHorizon: string | null;
+  productionOrderCount: number;
+  totalMaterials: number;
+  shortageCount: number;
+  status: string;
+  fabricDetail: string | null;
+  matchedPos: number;
+  unmatchedPos: number;
+};
+
+type MrpRequirementRow = {
+  id: string;
+  mrpRunId: string;
+  materialCode: string | null;
+  materialName: string | null;
+  materialCategory: string | null;
+  unit: string | null;
+  grossRequired: number;
+  onHand: number;
+  onOrder: number;
+  netRequired: number;
+  status: string;
+  suggestedPoQty: number;
+  preferredSupplierId: string | null;
+  preferredSupplierName: string | null;
+  bucketThisWeek: number;
+  bucketNextWeek: number;
+  bucketWeek34: number;
+  bucketBeyond: number;
+  leadTimeDays: number | null;
+  suggestedOrderDate: string | null;
+};
+
+// Reconstruct the MRPRun shape the FE expects from the persisted rows.
+function rowsToMRPRun(
+  runRow: MrpRunRow,
+  reqRows: MrpRequirementRow[],
+): MRPRun {
+  const requirements: MaterialRequirement[] = reqRows.map((r) => ({
+    id: r.id,
+    materialCode: r.materialCode || "",
+    materialName: r.materialName || "",
+    materialCategory: r.materialCategory || "",
+    unit: r.unit || "",
+    grossRequired: Number(r.grossRequired) || 0,
+    onHand: Number(r.onHand) || 0,
+    onOrder: Number(r.onOrder) || 0,
+    netRequired: Number(r.netRequired) || 0,
+    status: (r.status as MaterialRequirement["status"]) || "SUFFICIENT",
+    suggestedPOQty: Number(r.suggestedPoQty) || 0,
+    preferredSupplierId: r.preferredSupplierId ?? undefined,
+    preferredSupplierName: r.preferredSupplierName ?? undefined,
+    byBucket: {
+      THIS_WEEK: Number(r.bucketThisWeek) || 0,
+      NEXT_WEEK: Number(r.bucketNextWeek) || 0,
+      WEEK_3_4: Number(r.bucketWeek34) || 0,
+      BEYOND: Number(r.bucketBeyond) || 0,
+    },
+    leadTimeDays: r.leadTimeDays ?? undefined,
+    suggestedOrderDate: r.suggestedOrderDate ?? undefined,
+  }));
+  return {
+    id: runRow.id,
+    runDate: runRow.runDate,
+    planningHorizon: runRow.planningHorizon || "All",
+    productionOrderCount: Number(runRow.productionOrderCount) || 0,
+    totalMaterials: Number(runRow.totalMaterials) || 0,
+    shortageCount: Number(runRow.shortageCount) || 0,
+    status: (runRow.status as MRPRun["status"]) || "COMPLETED",
+    requirements,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
 
-// GET /api/mrp — legacy endpoint returns "latest run" state. No persistence
-// now, so we always return data=null, allRuns=0 (UI handles the empty state).
-app.get("/", (c) => {
-  return c.json({ success: true, data: null, allRuns: 0 });
+// GET /api/mrp — return the most recent persisted run for this org so the FE
+// lands on something useful instead of an empty dashboard. Phase A1.1
+// (2026-05-09) replaces the prior data=null stub.
+app.get("/", async (c) => {
+  await ensurePendingMigrations(c.var.DB);
+  const orgId = getOrgId(c);
+  const latestRun = await c.var.DB
+    .prepare(
+      `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
+              shortageCount, status, fabricDetail, matchedPos, unmatchedPos
+         FROM mrp_runs
+        WHERE orgId = ?
+        ORDER BY runDate DESC
+        LIMIT 1`,
+    )
+    .bind(orgId)
+    .first<MrpRunRow>();
+  const totalRuns = await c.var.DB
+    .prepare(`SELECT COUNT(*) AS n FROM mrp_runs WHERE orgId = ?`)
+    .bind(orgId)
+    .first<{ n: number }>();
+  if (!latestRun) {
+    return c.json({ success: true, data: null, allRuns: 0 });
+  }
+  const reqRes = await c.var.DB
+    .prepare(
+      `SELECT id, mrpRunId, materialCode, materialName, materialCategory, unit,
+              grossRequired, onHand, onOrder, netRequired, status,
+              suggested_po_qty AS suggested_po_qty,
+              preferredSupplierId, preferredSupplierName,
+              bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
+              leadTimeDays, suggested_order_date
+         FROM mrp_requirements
+        WHERE mrpRunId = ?`,
+    )
+    .bind(latestRun.id)
+    .all<MrpRequirementRow>();
+  const data = rowsToMRPRun(latestRun, reqRes.results ?? []);
+  let fabricDetail: unknown = null;
+  if (latestRun.fabricDetail) {
+    try {
+      fabricDetail = JSON.parse(latestRun.fabricDetail);
+    } catch {
+      fabricDetail = null;
+    }
+  }
+  return c.json({
+    success: true,
+    data,
+    fabricDetail,
+    bucketLabels: BUCKET_LABELS,
+    meta: {
+      matchedPOs: Number(latestRun.matchedPos) || 0,
+      unmatchedPOs: Number(latestRun.unmatchedPos) || 0,
+    },
+    allRuns: Number(totalRuns?.n) || 0,
+  });
 });
 
-// POST /api/mrp — compute a fresh MRP run from live D1 data.
+// GET /api/mrp/runs?limit=30 — paginated history for this org. Defaults to
+// 30 most recent (matches the "30 runs / 90 days" retention guidance — actual
+// pruning lives in a separate cron, not yet wired). Returns header metadata
+// only; full requirement detail loads via /api/mrp/runs/:id.
+app.get("/runs", async (c) => {
+  await ensurePendingMigrations(c.var.DB);
+  const orgId = getOrgId(c);
+  const rawLimit = parseInt(c.req.query("limit") ?? "30", 10) || 30;
+  const limit = Math.min(100, Math.max(1, rawLimit));
+  const res = await c.var.DB
+    .prepare(
+      `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
+              shortageCount, status, matchedPos, unmatchedPos, createdBy
+         FROM mrp_runs
+        WHERE orgId = ?
+        ORDER BY runDate DESC
+        LIMIT ?`,
+    )
+    .bind(orgId, limit)
+    .all<MrpRunRow & { createdBy: string | null }>();
+  return c.json({ success: true, data: res.results ?? [] });
+});
+
+// GET /api/mrp/runs/:id — reload a stored snapshot in full MRPRun shape.
+app.get("/runs/:id", async (c) => {
+  await ensurePendingMigrations(c.var.DB);
+  const orgId = getOrgId(c);
+  const id = c.req.param("id");
+  const runRow = await c.var.DB
+    .prepare(
+      `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
+              shortageCount, status, fabricDetail, matchedPos, unmatchedPos
+         FROM mrp_runs
+        WHERE id = ? AND orgId = ?`,
+    )
+    .bind(id, orgId)
+    .first<MrpRunRow>();
+  if (!runRow) {
+    return c.json({ success: false, error: "MRP run not found" }, 404);
+  }
+  const reqRes = await c.var.DB
+    .prepare(
+      `SELECT id, mrpRunId, materialCode, materialName, materialCategory, unit,
+              grossRequired, onHand, onOrder, netRequired, status,
+              suggested_po_qty AS suggested_po_qty,
+              preferredSupplierId, preferredSupplierName,
+              bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
+              leadTimeDays, suggested_order_date
+         FROM mrp_requirements
+        WHERE mrpRunId = ?`,
+    )
+    .bind(runRow.id)
+    .all<MrpRequirementRow>();
+  const data = rowsToMRPRun(runRow, reqRes.results ?? []);
+  let fabricDetail: unknown = null;
+  if (runRow.fabricDetail) {
+    try {
+      fabricDetail = JSON.parse(runRow.fabricDetail);
+    } catch {
+      fabricDetail = null;
+    }
+  }
+  return c.json({
+    success: true,
+    data,
+    fabricDetail,
+    bucketLabels: BUCKET_LABELS,
+    meta: {
+      matchedPOs: Number(runRow.matchedPos) || 0,
+      unmatchedPOs: Number(runRow.unmatchedPos) || 0,
+    },
+  });
+});
+
+// POST /api/mrp — compute a fresh MRP run from live data and persist it.
+//
+// Phase A1.1 (2026-05-09): now writes the computed MRPRun + fabric panel
+// state into mrp_runs / mrp_requirements (best-effort — a write failure
+// logs a warning but doesn't fail the response, since the FE still gets
+// the in-memory result and the operator can re-run if needed).
 app.post("/", async (c) => {
   const denied = await requirePermission(c, "mrp", "create");
   if (denied) return denied;
+  await ensurePendingMigrations(c.var.DB);
+  const orgId = getOrgId(c);
   const now = new Date();
   const horizonParam = c.req.query("horizon") || "all";
 
@@ -435,6 +697,7 @@ app.post("/", async (c) => {
 
     requirements.push({
       id: genId("mr"),
+      materialCode: code,
       materialName: demand.name,
       materialCategory: rm?.itemGroup || code,
       unit: demand.unit,
@@ -524,6 +787,82 @@ app.post("/", async (c) => {
       byBucket,
     };
   });
+
+  // Persist the run. Best-effort — a DB write failure logs and falls through
+  // to the response so the FE still gets the in-memory result. Mrp_runs +
+  // mrp_requirements have an ON DELETE CASCADE FK so a partial failure of
+  // requirement inserts followed by a rollback would just leave the run
+  // header — re-running picks up a fresh ID. Sequential INSERTs because the
+  // D1 shim (src/api/lib/supabase-compat.ts) doesn't expose a transaction
+  // helper; concurrency on a single isolated write isn't worth the complexity.
+  try {
+    const userId = (c.get as unknown as (k: string) => unknown)("userId") as
+      | string
+      | undefined;
+    await c.var.DB
+      .prepare(
+        `INSERT INTO mrp_runs
+           (id, orgId, runDate, planningHorizon, productionOrderCount,
+            totalMaterials, shortageCount, status, fabricDetail,
+            matchedPos, unmatchedPos, createdBy)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        newRun.id,
+        orgId,
+        newRun.runDate,
+        newRun.planningHorizon,
+        newRun.productionOrderCount,
+        newRun.totalMaterials,
+        newRun.shortageCount,
+        newRun.status,
+        JSON.stringify(fabricDetail),
+        matchedPOs,
+        unmatchedPOs,
+        userId ?? null,
+      )
+      .run();
+    for (const req of newRun.requirements) {
+      await c.var.DB
+        .prepare(
+          `INSERT INTO mrp_requirements
+             (id, mrpRunId, materialCode, materialName, materialCategory, unit,
+              grossRequired, onHand, onOrder, netRequired, status,
+              suggested_po_qty, preferredSupplierId, preferredSupplierName,
+              bucket_this_week, bucket_next_week, bucket_week34, bucket_beyond,
+              leadTimeDays, suggested_order_date)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          req.id,
+          newRun.id,
+          req.materialCode,
+          req.materialName,
+          req.materialCategory,
+          req.unit,
+          req.grossRequired,
+          req.onHand,
+          req.onOrder,
+          req.netRequired,
+          req.status,
+          req.suggestedPOQty,
+          req.preferredSupplierId ?? null,
+          req.preferredSupplierName ?? null,
+          req.byBucket.THIS_WEEK,
+          req.byBucket.NEXT_WEEK,
+          req.byBucket.WEEK_3_4,
+          req.byBucket.BEYOND,
+          req.leadTimeDays ?? null,
+          req.suggestedOrderDate ?? null,
+        )
+        .run();
+    }
+  } catch (err) {
+    console.warn("[mrp] persist failed — returning in-memory result", {
+      runId: newRun.id,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   return c.json({
     success: true,

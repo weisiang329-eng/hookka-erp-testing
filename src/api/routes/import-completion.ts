@@ -64,6 +64,10 @@ import {
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
 import { getOrgId } from "../lib/tenant";
 import { validateFabricCodes } from "../lib/fabric-validation";
+import {
+  breakBomIntoWips,
+  type BomVariantContext,
+} from "../lib/bom-wip-breakdown";
 
 const app = new Hono<Env>();
 
@@ -11801,6 +11805,312 @@ app.post("/apply-fabric-code-fixes", async (c) => {
     dryRun,
     applied,
     rejected,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-jc-production-time-from-bom?dryRun=true|false
+//
+// Per-WIP-tree refresh of job_cards.productionTimeMinutes from the CURRENT
+// active BOM template's wipComponents JSON. Distinct from
+// /api/bom/resync-job-card-times (which overwrites from kv_config master
+// productionTimes keyed by deptCode+category): this endpoint walks the BOM
+// JSON tree per top-level WIP and stamps the dept-specific minutes that
+// the BOM walker emits — matching what the SO->JC cascade does on PO create.
+//
+// Why this exists: bom_templates.wipComponents is the canonical store of
+// per-WIP per-process minutes. When the operator edits a single WIP node
+// (e.g. 5536-CSL bumped 40 -> 60 in UPHOLSTERY), existing JCs created BEFORE
+// that edit keep stamping the old 40. Daily Breakdown then shows stale
+// numbers. This backfill walks every active JC's PO -> BOM tree, finds the
+// matching (wipKey, deptCode) entry, and overwrites productionTimeMinutes
+// + estMinutes when drifted.
+//
+// Scope:
+//   - Active job_cards (status WAITING/IN_PROGRESS/PAUSED/BLOCKED): UPDATE
+//     when drifted.
+//   - COMPLETED/TRANSFERRED job_cards: surfaced in `completedDrifts` array
+//     for operator review — NOT auto-rewritten because they represent
+//     historical credited work.
+//   - JCs whose wipKey is "FG" (FG-level l1Processes) are SKIPPED — those
+//     belong to the kv_config-master path and are out of scope here.
+//
+// Query string:
+//   ?dryRun=true   -> SELECT-only summary, sample 30 worst drifts.
+//   ?dryRun=false  -> apply UPDATEs in db.batch chunks of 50.
+//
+// Response shape: { success, dryRun, scanned, drifted, updated,
+//   completedDrifts: [{jcId, poNo, productCode, wipKey, deptCode,
+//                      oldMinutes, newMinutes}], topDrifts: [...] }
+// ---------------------------------------------------------------------------
+type JcBackfillRow = {
+  id: string;
+  productionOrderId: string;
+  status: string;
+  wipKey: string | null;
+  departmentCode: string | null;
+  productionTimeMinutes: number | null;
+  estMinutes: number | null;
+  poNo: string | null;
+  productCode: string | null;
+  quantity: number | null;
+  itemCategory: string | null;
+  sizeCode: string | null;
+  sizeLabel: string | null;
+  fabricCode: string | null;
+  divanHeightInches: number | null;
+  legHeightInches: number | null;
+  gapInches: number | null;
+};
+
+type DriftSample = {
+  jcId: string;
+  poNo: string;
+  productCode: string;
+  wipKey: string;
+  deptCode: string;
+  status: string;
+  oldMinutes: number;
+  newMinutes: number;
+  delta: number;
+};
+
+const ACTIVE_JC_STATUSES = ["WAITING", "IN_PROGRESS", "PAUSED", "BLOCKED"];
+const COMPLETED_JC_STATUSES = ["COMPLETED", "TRANSFERRED"];
+
+app.post("/backfill-jc-production-time-from-bom", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  const db = c.var.DB;
+  const dryRun = c.req.query("dryRun") === "true";
+
+  // 1. Load every JC across the statuses we care about, joined to PO so we
+  // have the variant context the BOM walker needs without a second pass.
+  const allStatuses = [...ACTIVE_JC_STATUSES, ...COMPLETED_JC_STATUSES];
+  const placeholders = allStatuses.map(() => "?").join(",");
+  const sel = await db
+    .prepare(
+      `SELECT
+         jc.id                    AS id,
+         jc.productionOrderId     AS productionOrderId,
+         jc.status                AS status,
+         jc.wipKey                AS wipKey,
+         jc.departmentCode        AS departmentCode,
+         jc.productionTimeMinutes AS productionTimeMinutes,
+         jc.estMinutes            AS estMinutes,
+         po.poNo                  AS poNo,
+         po.productCode           AS productCode,
+         po.quantity              AS quantity,
+         po.itemCategory          AS itemCategory,
+         po.sizeCode              AS sizeCode,
+         po.sizeLabel             AS sizeLabel,
+         po.fabricCode            AS fabricCode,
+         po.divanHeightInches     AS divanHeightInches,
+         po.legHeightInches       AS legHeightInches,
+         po.gapInches             AS gapInches
+       FROM job_cards jc
+       LEFT JOIN production_orders po ON po.id = jc.productionOrderId
+       WHERE jc.status IN (${placeholders})
+       ORDER BY jc.id ASC`,
+    )
+    .bind(...allStatuses)
+    .all<JcBackfillRow>();
+  const rows = sel.results ?? [];
+
+  // 2. Cache BOM template lookups per-productCode. Many JCs share the same
+  // product, so a Map saves O(n) DB calls.
+  type BomCacheEntry = {
+    wipComponents: string | null;
+    l1Processes: string | null;
+    baseModel: string | null;
+  } | null;
+  const bomCache = new Map<string, BomCacheEntry>();
+  async function loadBom(productCode: string): Promise<BomCacheEntry> {
+    if (bomCache.has(productCode)) return bomCache.get(productCode)!;
+    const active = await db
+      .prepare(
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
+           WHERE productCode = ? AND versionStatus = 'ACTIVE'
+           ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{
+        wipComponents: string | null;
+        l1Processes: string | null;
+        baseModel: string | null;
+      }>();
+    if (active) {
+      bomCache.set(productCode, active);
+      return active;
+    }
+    const latest = await db
+      .prepare(
+        `SELECT wipComponents, l1Processes, baseModel FROM bom_templates
+           WHERE productCode = ? ORDER BY effectiveFrom DESC LIMIT 1`,
+      )
+      .bind(productCode)
+      .first<{
+        wipComponents: string | null;
+        l1Processes: string | null;
+        baseModel: string | null;
+      }>();
+    bomCache.set(productCode, latest ?? null);
+    return latest ?? null;
+  }
+
+  // 3. Walk each JC, look up its expected per-WIP per-dept minutes from the
+  // current BOM tree, classify drift.
+  const activeDrifts: DriftSample[] = [];
+  const completedDrifts: DriftSample[] = [];
+  const updates: Array<{ id: string; newMinutes: number }> = [];
+  let scanned = 0;
+  let unchanged = 0;
+  let skippedNoBom = 0;
+  let skippedFg = 0;
+  let skippedNoMatch = 0;
+
+  for (const r of rows) {
+    scanned++;
+    const productCode = r.productCode ?? "";
+    const wipKey = r.wipKey ?? "";
+    const deptCode = r.departmentCode ?? "";
+    if (!productCode || !wipKey || !deptCode) {
+      skippedNoMatch++;
+      continue;
+    }
+    // FG-level (wipKey="FG") JCs are driven by l1Processes, which is the
+    // master Production Times path — out of scope for the BOM-tree backfill.
+    if (wipKey === "FG") {
+      skippedFg++;
+      continue;
+    }
+
+    const bom = await loadBom(productCode);
+    if (!bom || !bom.wipComponents) {
+      skippedNoBom++;
+      continue;
+    }
+
+    const variants: BomVariantContext = {
+      productCode,
+      model: bom.baseModel ?? productCode,
+      sizeLabel: r.sizeLabel ?? "",
+      sizeCode: r.sizeCode ?? "",
+      fabricCode: r.fabricCode ?? "",
+      divanHeightInches: r.divanHeightInches ?? null,
+      legHeightInches: r.legHeightInches ?? null,
+      gapInches: r.gapInches ?? null,
+    };
+    const wips = breakBomIntoWips(bom.wipComponents, productCode, variants);
+    const wip = wips.find((w) => w.wipKey === wipKey);
+    if (!wip) {
+      skippedNoMatch++;
+      continue;
+    }
+    const proc = wip.processes.find((p) => p.deptCode === deptCode);
+    if (!proc) {
+      skippedNoMatch++;
+      continue;
+    }
+
+    const oldMinutes = r.productionTimeMinutes ?? 0;
+    const newMinutes = proc.minutes;
+    if (oldMinutes === newMinutes && (r.estMinutes ?? 0) === newMinutes) {
+      unchanged++;
+      continue;
+    }
+
+    const sample: DriftSample = {
+      jcId: r.id,
+      poNo: r.poNo ?? "",
+      productCode,
+      wipKey,
+      deptCode,
+      status: r.status,
+      oldMinutes,
+      newMinutes,
+      delta: newMinutes - oldMinutes,
+    };
+    if (COMPLETED_JC_STATUSES.includes(r.status)) {
+      completedDrifts.push(sample);
+    } else {
+      activeDrifts.push(sample);
+      updates.push({ id: r.id, newMinutes });
+    }
+  }
+
+  // Sort top-N by absolute delta so the operator sees the worst drifts first.
+  const sortByAbsDelta = (a: DriftSample, b: DriftSample) =>
+    Math.abs(b.delta) - Math.abs(a.delta);
+  activeDrifts.sort(sortByAbsDelta);
+  completedDrifts.sort(sortByAbsDelta);
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      scanned,
+      activeDrifted: activeDrifts.length,
+      completedDrifted: completedDrifts.length,
+      unchanged,
+      skipped: {
+        fgWipKey: skippedFg,
+        noBom: skippedNoBom,
+        noWipOrDeptMatch: skippedNoMatch,
+      },
+      topActiveDrifts: activeDrifts.slice(0, 30),
+      topCompletedDrifts: completedDrifts.slice(0, 30),
+    });
+  }
+
+  // 4. Real run — apply UPDATEs in chunks of 50.
+  const CHUNK = 50;
+  let updated = 0;
+  for (let i = 0; i < updates.length; i += CHUNK) {
+    const slice = updates.slice(i, i + CHUNK);
+    const stmts = slice.map((u) =>
+      db
+        .prepare(
+          `UPDATE job_cards
+             SET productionTimeMinutes = ?, estMinutes = ?
+             WHERE id = ?`,
+        )
+        .bind(u.newMinutes, u.newMinutes, u.id),
+    );
+    if (stmts.length > 0) {
+      try {
+        await db.batch(stmts);
+        updated += stmts.length;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return c.json(
+          {
+            success: false,
+            error: `Batch UPDATE failed at chunk ${i}: ${message}`,
+            updatedBeforeFailure: updated,
+          },
+          500,
+        );
+      }
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    scanned,
+    activeDrifted: activeDrifts.length,
+    completedDrifted: completedDrifts.length,
+    updated,
+    unchanged,
+    skipped: {
+      fgWipKey: skippedFg,
+      noBom: skippedNoBom,
+      noWipOrDeptMatch: skippedNoMatch,
+    },
+    topActiveDrifts: activeDrifts.slice(0, 30),
+    topCompletedDrifts: completedDrifts.slice(0, 30),
   });
 });
 

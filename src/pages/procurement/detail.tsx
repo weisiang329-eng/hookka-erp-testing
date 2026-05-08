@@ -22,7 +22,7 @@ import {
   GitCompare, ChevronDown, ChevronUp,
 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { useParams } from "react-router-dom";
+import { useParams, useNavigate } from "react-router-dom";
 import { GRNFormDialog } from "@/pages/procurement/grn";
 
 // Status timeline steps
@@ -84,6 +84,7 @@ function poItemToEditLine(it: POItem): EditLine {
 
 export default function PurchaseOrderDetailPage() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const { toast } = useToast();
   const { data: resp, loading, error: fetchError, refresh: fetchPO } = useCachedJson<{ success?: boolean; data?: PurchaseOrder; error?: string }>(id ? `/api/purchase-orders/${id}` : null);
   const po: PurchaseOrder | null = useMemo(
@@ -139,6 +140,9 @@ export default function PurchaseOrderDetailPage() {
   const [showCancelModal, setShowCancelModal] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
   const [cancelling, setCancelling] = useState(false);
+
+  // ------- Delete-PO state (DRAFT-only physical delete) -------
+  const [deleting, setDeleting] = useState(false);
 
   // ------- Email-PO state (3.1) -------
   const [emailing, setEmailing] = useState(false);
@@ -431,6 +435,37 @@ export default function PurchaseOrderDetailPage() {
     }
   };
 
+  // Delete PO — physical row removal. DRAFT-only on the FE; the backend
+  // DELETE /api/purchase-orders/:id endpoint cascades to PO items via FK.
+  // Cancel PO (above) keeps the row but flips status; Delete is for DRAFTs
+  // the operator never sent and just wants gone.
+  const handleDelete = async () => {
+    if (!po) return;
+    const ok = window.confirm(
+      `Permanently delete PO ${po.poNo}? This cannot be undone.`,
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/purchase-orders/${po.id}`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => ({})) as { success?: boolean; error?: string };
+      if (!res.ok || !body.success) {
+        toast.error(body.error || `Failed to delete (HTTP ${res.status})`);
+        return;
+      }
+      invalidateCachePrefix("/api/purchase-orders");
+      invalidateCachePrefix("/api/grn");
+      toast.success(`PO ${po.poNo} deleted`);
+      navigate("/procurement");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Network error deleting PO");
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   // 3.1 — Manual "Email to Supplier" send. Hits the new
   // POST /api/purchase-orders/:id/email endpoint, which enqueues to
   // outbox_emails and stamps lastEmailedAt. The cron drain
@@ -501,9 +536,10 @@ export default function PurchaseOrderDetailPage() {
   // operator sees a "Create GRN" CTA (rendered separately below) that
   // routes them to the GRN flow scoped to this PO.
   const statusActions: { label: string; status: string; variant: "primary" | "outline" }[] = [];
-  if (po.status === "DRAFT") {
-    statusActions.push({ label: "Send to Supplier", status: "SUBMITTED", variant: "primary" });
-  } else if (po.status === "SUBMITTED") {
+  // DRAFT no longer has a "Send to Supplier" advance action — operator goes
+  // straight to other workflow without the SUBMITTED intermediate. DRAFT POs
+  // get a Delete button (physical row removal) below instead.
+  if (po.status === "SUBMITTED") {
     statusActions.push({ label: "Mark Confirmed", status: "CONFIRMED", variant: "primary" });
   } else if (po.status === "CONFIRMED") {
     statusActions.push({ label: "Mark Partially Received", status: "PARTIAL_RECEIVED", variant: "outline" });
@@ -1022,12 +1058,17 @@ export default function PurchaseOrderDetailPage() {
         </div>
       )}
 
-      {/* Action Buttons */}
-      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason || showCreateGrnCta || canReceiveInline) && (
+      {/* Action Buttons. DRAFT POs only get Delete (physical row removal,
+          no SUBMITTED intermediate state — operator's flow skips it).
+          Non-DRAFT POs get the relevant status-advance buttons + Cancel PO
+          (status=CANCELLED, row preserved). */}
+      {!isCancelled && !editing && (statusActions.length > 0 || canCancelWithReason || showCreateGrnCta || canReceiveInline || isDraft) && (
         <Card>
           <CardContent className="p-4">
             <div className="flex items-center justify-between flex-wrap gap-3">
-              <p className="text-xs text-[#6B7280]">Advance this Purchase Order to the next status:</p>
+              <p className="text-xs text-[#6B7280]">
+                {isDraft ? "Available actions:" : "Advance this Purchase Order to the next status:"}
+              </p>
               <div className="flex items-center gap-2 flex-wrap">
                 {showCreateGrnCta && (
                   <Button
@@ -1054,13 +1095,14 @@ export default function PurchaseOrderDetailPage() {
                     <ChevronRight className="h-4 w-4" /> {action.label}
                   </Button>
                 ))}
-                {po.status === "DRAFT" && (
+                {isDraft && (
                   <Button
                     variant="outline"
-                    className="text-red-600 border-red-200 hover:bg-red-50"
-                    onClick={() => handleAdvanceStatus("CANCELLED")}
+                    className="text-red-700 border-red-300 hover:bg-red-50"
+                    onClick={handleDelete}
+                    disabled={deleting}
                   >
-                    Cancel PO
+                    <Trash2 className="h-4 w-4" /> {deleting ? "Deleting…" : "Delete PO"}
                   </Button>
                 )}
                 {canCancelWithReason && (

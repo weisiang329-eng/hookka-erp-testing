@@ -3705,17 +3705,17 @@ app.get("/overdue-counts", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /api/production-orders/diag/timing[?dept=WOOD_CUT&dueFrom=...&dueTo=...]
+// Internal — timing probe for /api/production-orders?fields=minimal&dept=X.
 //
-// TEMPORARY (Phase B+, 2026-05-08): mirrors the dept-mode minimal hot path
-// step-by-step with millisecond timings around each query / compute block.
-// Doesn't ship data — just returns the timing breakdown so we can see where
-// the 3-4 s server time on /api/production-orders?fields=minimal&dept=X
-// actually goes (Postgres EXPLAIN says 5-25 ms; the rest is somewhere
-// between Hyperdrive and rowToMinimalPO). Delete once the bottleneck is
-// fixed and Phase B+ ships.
+// TEMPORARY (Phase B+, 2026-05-08): triggered by ?debug=timing on the main
+// list endpoint below. Mirrors the dept-mode minimal hot path step-by-step
+// with millisecond timings around each query / compute block. Returns the
+// breakdown JSON instead of the data payload so we can see where the 3-4 s
+// server time goes (Postgres EXPLAIN says SQL is 5-25 ms; the rest must be
+// in Hyperdrive RTT, pre-load helpers, or rowToMinimalPO). Delete once
+// the bottleneck is fixed.
 // ---------------------------------------------------------------------------
-app.get("/diag/timing", async (c) => {
+async function runTimingProbe(c: Context<Env>) {
   const orgId = getOrgId(c);
   const deptParamRaw = c.req.query("dept");
   const deptFilter =
@@ -3833,9 +3833,16 @@ app.get("/diag/timing", async (c) => {
     timingsMs: t,
     totalMs: Date.now() - tstart,
   });
-});
+}
 
 app.get("/", async (c) => {
+  // Phase B+ (2026-05-08): inline timing probe — short-circuits before any
+  // of the normal handler logic. Inline rather than a separate route because
+  // /:id at the bottom of this file shadows static single-segment paths in
+  // some Hono router configs, and the multi-segment workaround stayed 404.
+  if (c.req.query("debug") === "timing") {
+    return runTimingProbe(c);
+  }
   const statusParam = c.req.query("status");
   const statuses = statusParam
     ? statusParam

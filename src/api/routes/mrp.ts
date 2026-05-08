@@ -329,7 +329,7 @@ type MrpRequirementRow = {
   onOrder: number;
   netRequired: number;
   status: string;
-  suggestedPoQty: number;
+  suggestedPOQty: number;
   preferredSupplierId: string | null;
   preferredSupplierName: string | null;
   bucketThisWeek: number;
@@ -356,7 +356,7 @@ function rowsToMRPRun(
     onOrder: Number(r.onOrder) || 0,
     netRequired: Number(r.netRequired) || 0,
     status: (r.status as MaterialRequirement["status"]) || "SUFFICIENT",
-    suggestedPOQty: Number(r.suggestedPoQty) || 0,
+    suggestedPOQty: Number(r.suggestedPOQty) || 0,
     preferredSupplierId: r.preferredSupplierId ?? undefined,
     preferredSupplierName: r.preferredSupplierName ?? undefined,
     byBucket: {
@@ -393,7 +393,8 @@ app.get("/", async (c) => {
   const latestRun = await c.var.DB
     .prepare(
       `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
-              shortageCount, status, fabricDetail, matchedPos, unmatchedPos
+              shortageCount, status,
+              fabric_detail, matched_pos, unmatched_pos
          FROM mrp_runs
         WHERE orgId = ?
         ORDER BY runDate DESC
@@ -455,7 +456,8 @@ app.get("/runs", async (c) => {
   const res = await c.var.DB
     .prepare(
       `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
-              shortageCount, status, matchedPos, unmatchedPos, createdBy
+              shortageCount, status,
+              matched_pos, unmatched_pos, created_by
          FROM mrp_runs
         WHERE orgId = ?
         ORDER BY runDate DESC
@@ -474,7 +476,8 @@ app.get("/runs/:id", async (c) => {
   const runRow = await c.var.DB
     .prepare(
       `SELECT id, runDate, planningHorizon, productionOrderCount, totalMaterials,
-              shortageCount, status, fabricDetail, matchedPos, unmatchedPos
+              shortageCount, status,
+              fabric_detail, matched_pos, unmatched_pos
          FROM mrp_runs
         WHERE id = ? AND orgId = ?`,
     )
@@ -803,8 +806,8 @@ app.post("/", async (c) => {
       .prepare(
         `INSERT INTO mrp_runs
            (id, orgId, runDate, planningHorizon, productionOrderCount,
-            totalMaterials, shortageCount, status, fabricDetail,
-            matchedPos, unmatchedPos, createdBy)
+            totalMaterials, shortageCount, status,
+            fabric_detail, matched_pos, unmatched_pos, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(

@@ -535,6 +535,7 @@ function rowToMinimalPO(
   leadTimeMap: LeadTimeMap | null = null,
   bomByProductCode: Map<string, unknown> | null = null,
   siblingsByGroupKey: Map<string, SiblingPo[]> | null = null,
+  baseModelByProductCode: Map<string, string> | null = null,
 ): MinimalPOOut {
   const parentTargetEndDate = row.targetEndDate ?? null;
   const parentItemCategory = row.itemCategory ?? null;
@@ -559,12 +560,24 @@ function rowToMinimalPO(
   // the anchor's cut; siblings share the same merged JC). Bedframe /
   // accessory / non-merged sofa → groupKey is null or sibling list is
   // single-element, falls back to anchor-only math.
-  const groupKey = sofaSiblingGroupKey({
-    itemCategory: row.itemCategory,
-    companySOId: row.companySOId,
-    companyCOId: row.companyCOId,
-    fabricCode: row.fabricCode,
-  });
+  // Group key includes baseModel — must NOT collapse two different sofa
+  // models into one group just because they share a fabricCode in the
+  // same SO (e.g. SO-2605-106 has both 5530 and 5535 series cut from
+  // M2402-4; they should NOT sum each other).
+  const baseModel =
+    baseModelByProductCode && row.productCode
+      ? (baseModelByProductCode.get(row.productCode) ?? null)
+      : null;
+  const groupKey = sofaSiblingGroupKey(
+    {
+      itemCategory: row.itemCategory,
+      companySOId: row.companySOId,
+      companyCOId: row.companyCOId,
+      fabricCode: row.fabricCode,
+      productCode: row.productCode,
+    },
+    baseModel,
+  );
   const siblings =
     groupKey && siblingsByGroupKey ? (siblingsByGroupKey.get(groupKey) ?? null) : null;
   const myJCs = jobCards
@@ -955,18 +968,22 @@ async function fetchFilteredPOs(
   // multiple POs in the same SO group. Pre-fetched here so each row's
   // converter can sum the entire group's BOM-based fabric demand instead
   // of just the anchor PO. Bedframe / accessory paths get a no-op map.
-  const [bomByProductCode, siblingsByGroupKey] = minimal
+  // Index also carries productCode → baseModel so callers can compute the
+  // group key (which is `${SO|CO}::${baseModel}::${fabricCode}`).
+  const [bomByProductCode, siblingsIdx] = minimal
     ? await Promise.all([
         fetchBomWipComponentsByCode(db),
         fetchSofaSiblingsByGroupKey(db, orgId),
       ])
     : [null, null];
+  const siblingsByGroupKey = siblingsIdx?.byGroupKey ?? null;
+  const baseModelByProductCode = siblingsIdx?.baseModelByProductCode ?? null;
 
   if (!includeJobCards) {
     const pos = await poStmt.all<ProductionOrderRow>();
     if (minimal) {
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
+        rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
       );
     }
     return (pos.results ?? []).map((p) => rowToPO(p, [], [], leadTimeMap));
@@ -1000,7 +1017,7 @@ async function fetchFilteredPOs(
         jcRows.map((j) => j.id),
       );
       return (pos.results ?? []).map((p) =>
-        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
+        rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
       );
     }
     if (hasFilter) {
@@ -1026,7 +1043,7 @@ async function fetchFilteredPOs(
         jcs.map((j) => j.id),
       );
       return poRows.map((p) =>
-        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
+        rowToMinimalPO(p, jcs, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
       );
     }
     // No status filter, no dept filter: legacy full-fetch backward-compat path.
@@ -1044,7 +1061,7 @@ async function fetchFilteredPOs(
       jcRows.map((j) => j.id),
     );
     return (pos.results ?? []).map((p) =>
-      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey),
+      rowToMinimalPO(p, jcRows, piecesDoneByJc, leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
     );
   }
 
@@ -1214,20 +1231,22 @@ async function fetchPaginatedPOs(
   // BOM templates + sofa sibling group map pre-load — same rationale as
   // fetchFilteredPOs above: load once per request so per-FAB_CUT-JC fabric
   // usage compute is O(1) lookup. Only on the minimal path; full payload
-  // skips them. Sibling map covers cross-PO sofa merged cuts (anchor PO's
-  // FC JC must sum every sibling sharing the same SO+fabric).
-  const [bomByProductCode, siblingsByGroupKey] = minimal
+  // skips them. Sibling index also carries productCode → baseModel for
+  // group-key resolution (key = `{SO|CO}::{baseModel}::{fabricCode}`).
+  const [bomByProductCode, siblingsIdx] = minimal
     ? await Promise.all([
         fetchBomWipComponentsByCode(db),
         fetchSofaSiblingsByGroupKey(db, orgId),
       ])
     : [null, null];
+  const siblingsByGroupKey = siblingsIdx?.byGroupKey ?? null;
+  const baseModelByProductCode = siblingsIdx?.baseModelByProductCode ?? null;
 
   if (!includeJobCards || posRows.length === 0) {
     if (minimal) {
       return {
         data: posRows.map((p) =>
-          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
+          rowToMinimalPO(p, [], new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
         ),
         total,
       };
@@ -1314,7 +1333,7 @@ async function fetchPaginatedPOs(
   if (minimal) {
     return {
       data: posRows.map((p) =>
-        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey),
+        rowToMinimalPO(p, jcs, new Map(), leadTimeMap, bomByProductCode, siblingsByGroupKey, baseModelByProductCode),
       ),
       total,
     };

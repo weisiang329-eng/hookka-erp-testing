@@ -119,3 +119,39 @@ export function cellFor(
     isOffLeadtime,
   };
 }
+
+// Whole-PO overdue predicate. A PO is overdue when at least one of its
+// non-PACKING job cards is overdue — i.e. the JC's dueDate < today AND
+// the JC is not in a terminal "done" state (COMPLETED / TRANSFERRED).
+// PACKING is excluded for parity with cellFor's treatment of the PACKING
+// column as the customer-delivery anchor (matches what the operator sees
+// painted red in the dept matrix). Returns false for COMPLETED / CANCELLED
+// POs so the count never includes already-shipped or killed orders.
+export function isOverduePO(po: ProductionOrder): boolean {
+  if (po.status === "COMPLETED" || po.status === "CANCELLED") return false;
+  const today = new Date().toISOString().slice(0, 10);
+  for (const jc of po.jobCards ?? []) {
+    if (jc.departmentCode === "PACKING") continue;
+    if (!jc.dueDate) continue;
+    if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
+    if (jc.dueDate < today) return true;
+  }
+  return false;
+}
+
+// Earliest overdue JC dueDate across this PO (non-PACKING, not done).
+// Used to sort the per-SO overdue breakdown list "earliest first" so the
+// operator can prioritize. Returns "" if no JC is overdue.
+export function earliestOverdueDateOnPO(po: ProductionOrder): string {
+  const today = new Date().toISOString().slice(0, 10);
+  let earliest = "";
+  for (const jc of po.jobCards ?? []) {
+    if (jc.departmentCode === "PACKING") continue;
+    if (!jc.dueDate) continue;
+    if (jc.status === "COMPLETED" || jc.status === "TRANSFERRED") continue;
+    if (jc.dueDate < today) {
+      if (!earliest || jc.dueDate < earliest) earliest = jc.dueDate;
+    }
+  }
+  return earliest;
+}

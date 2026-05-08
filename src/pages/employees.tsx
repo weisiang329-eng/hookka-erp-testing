@@ -2183,10 +2183,22 @@ function EfficiencyOverviewTab({
         label: "Total",
         align: "right",
         sortable: true,
+        // Inline `(<n>d)` subscript shows daysWithEntries alongside the
+        // headline hours number. Operators were getting confused when the
+        // selected range spans 5 weeks but Total reads ~70h - the subscript
+        // makes the coverage visible at a glance ("73h / 7d entered out of
+        // 38 calendar days"), which keeps Efficiency % readable when the
+        // working_hour_entries grid hasn't been backfilled for the full range.
         render: (_value, row) =>
           row.totalHours > 0 ? (
-            <span className="font-semibold tabular-nums text-[#1F1D1B]">
-              {row.totalHours.toFixed(1)}h
+            <span className="tabular-nums text-[#1F1D1B]">
+              <span className="font-semibold">{row.totalHours.toFixed(1)}h</span>
+              <span
+                className="ml-1 text-[10px] text-[#9CA3AF]"
+                title={`${row.daysWithEntries} day${row.daysWithEntries === 1 ? "" : "s"} with working_hour_entries in the selected range`}
+              >
+                ({row.daysWithEntries}d)
+              </span>
             </span>
           ) : (
             <span className="text-[#D1D5DB] tabular-nums">—</span>
@@ -2221,14 +2233,43 @@ function EfficiencyOverviewTab({
         label: "Efficiency %",
         align: "right",
         sortable: true,
+        // Numerator vs denominator coverage is the killer caveat here:
+        //   - prodMins  = sum of job_cards.completedDate within [from,to]
+        //                 with the worker as PIC1/PIC2
+        //   - prodHours = sum of working_hour_entries.date within [from,to]
+        //                 in production depts only
+        // The two come from DIFFERENT tables. If the operator picks a 5-week
+        // range but has only entered working hours for the last 7 days, the
+        // numerator covers 5 weeks while the denominator covers 1 week and
+        // the ratio explodes (e.g. 30h prod / 7h working = 428% - reported
+        // 2026-05-08). We can't intersect the two at the per-day level
+        // without per-worker activity windows, but we CAN:
+        //   1. show "—" when the worker has zero working_hour_entries in
+        //      ANY dept in the range (was already there - keep), AND
+        //   2. spell out both sides in the tooltip with the daysWithEntries
+        //      coverage so the operator can spot the skew at a glance.
         render: (_value, row) => {
           const prodHours = Object.entries(row.byDept).reduce(
             (s, [code, h]) => (productionDeptCodes.has(code) ? s + h : s),
             0,
           );
           const totalMins = prodHours * 60;
-          if (totalMins <= 0) {
-            return <span className="text-[#D1D5DB] tabular-nums">—</span>;
+          // Show em-dash when the denominator is zero - either because the
+          // worker has no working_hour_entries at all in the range, or
+          // because all their hours were in non-production depts.
+          if (totalMins <= 0 || row.daysWithEntries === 0) {
+            return (
+              <span
+                className="text-[#D1D5DB] tabular-nums"
+                title={
+                  row.daysWithEntries === 0
+                    ? "No working_hour_entries logged for this worker in the selected range"
+                    : "All hours in non-production depts (Warehousing / Repair / Maintenance / Shortfall)"
+                }
+              >
+                —
+              </span>
+            );
           }
           const prodMins = prodMinsByWorker.get(row.workerId) ?? 0;
           const pct = (prodMins / totalMins) * 100;
@@ -2241,7 +2282,7 @@ function EfficiencyOverviewTab({
           return (
             <span
               className={`font-semibold tabular-nums ${cls}`}
-              title={`${formatHours(prodMins)} production / ${prodHours.toFixed(1)}h in production depts`}
+              title={`${formatHours(prodMins)} production (job_cards) / ${prodHours.toFixed(1)}h in production depts (working_hour_entries, ${row.daysWithEntries}d entered)`}
             >
               {pct.toFixed(1)}%
             </span>

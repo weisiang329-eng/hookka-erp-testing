@@ -643,7 +643,7 @@ export default function EditSalesOrderPage() {
      guarantees idempotence on later renders. */
   useEffect(() => {
     if (loading) return;
-    if (fabricsResp === undefined) return;
+    if (fabricsTrackingForPickerResp === undefined) return;
     setItems((prev) => {
       let changed = false;
       const next = prev.map((it) => {
@@ -656,7 +656,7 @@ export default function EditSalesOrderPage() {
       return changed ? next : prev;
     });
     setFabricBackfillDone(true);
-  }, [fabrics, loading, fabricsResp]);
+  }, [fabrics, loading, fabricsTrackingForPickerResp]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);

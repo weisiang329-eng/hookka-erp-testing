@@ -3068,22 +3068,8 @@ function EmployeeDetailTab({
         ),
     },
     {
-      key: "perUnitMinutes",
-      label: "WIP Time",
-      align: "right",
-      sortable: true,
-      render: (_v, row) =>
-        row.perUnitMinutes && row.perUnitMinutes > 0 ? (
-          <span className="tabular-nums text-[#4B5563]" title="Per-unit production time from BOM">
-            {formatHours(row.perUnitMinutes)}
-          </span>
-        ) : (
-          <span className="text-[#9CA3AF] tabular-nums">—</span>
-        ),
-    },
-    {
       key: "minutes",
-      label: "Production Time",
+      label: "Total JC Time",
       align: "right",
       sortable: true,
       render: (_v, row) => {

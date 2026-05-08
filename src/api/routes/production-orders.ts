@@ -3523,6 +3523,183 @@ async function applyPoUpdate(
 //     Phase-5 historical-report hook. When set, UNIONs
 //     production_orders + production_orders_archive (and same for
 //     job_cards) before filtering/ordering. Default off — hot only.
+
+// ---------------------------------------------------------------------------
+// GET /api/production-orders/overdue-counts[?dept=WOOD_CUT]
+//
+// Aggregate replacement for the bare `?fields=minimal` fetch the Production
+// page used to do solely to compute the two top-bar pills + the breakdown
+// drill-down panel. Mirrors `isOverduePO` + `earliestOverdueDateOnPO` in
+// src/pages/production/utils.ts:
+//
+//   ?dept missing  → Overview rule: PO.targetEndDate < today AND any
+//                    UPHOLSTERY JC still open.  earliest = PO.targetEndDate.
+//   ?dept=<code>   → Per-dept rule: that dept's JC dueDate passed AND open.
+//                    earliest = MIN(such JC.dueDate).
+//
+// Skips COMPLETED / CANCELLED POs in both modes (matches the predicate).
+// Server SQL replaces a ~8MB / 800-PO + 12k-JC payload that the page used
+// to mash through in JS — see Phase B notes 2026-05-08. Response is one
+// breakdown row per (companySOId / salesOrderId / companyCOId /
+// consignmentOrderId) group with overdue POs in it, plus the per-category
+// totals the FE renders as "Bedframe Overdue: N" / "Sofa Overdue: N".
+// ---------------------------------------------------------------------------
+type OverduePoRow = {
+  id: string;
+  companySOId: string | null;
+  salesOrderId: string | null;
+  companyCOId: string | null;
+  consignmentOrderId: string | null;
+  customerName: string | null;
+  itemCategory: string | null;
+  poStatus: string;
+  earliestOverdue: string | null;
+};
+
+type OverdueBreakdownRow = {
+  soId: string;
+  displaySoId: string;
+  customer: string;
+  totalPos: number;
+  overduePos: number;
+  earliest: string;
+  poStatus: string;
+  salesOrderId: string;
+  overdueCategories: string[];
+};
+
+app.get("/overdue-counts", async (c) => {
+  const orgId = getOrgId(c);
+  const deptParam = c.req.query("dept");
+  const dept =
+    deptParam && deptParam.trim().length > 0
+      ? deptParam.trim().toUpperCase()
+      : null;
+  const today = new Date().toISOString().slice(0, 10);
+
+  // One SQL per request; the slim row list (~800 max) is aggregated in JS.
+  // Per-PO `earliestOverdue` is computed via the same predicate the FE used
+  // to apply locally — overview branch is anchored on PO.targetEndDate and
+  // gated on UPHOLSTERY-JC openness; dept branch is the MIN(jc.dueDate)
+  // across that dept's still-open JCs that have already passed today.
+  let rows: OverduePoRow[];
+  if (dept === null) {
+    const stmt = c.var.DB.prepare(
+      `SELECT po.id,
+              po.companySOId,
+              po.salesOrderId,
+              po.companyCOId,
+              po.consignmentOrderId,
+              po.customerName,
+              po.itemCategory,
+              po.status AS poStatus,
+              CASE
+                WHEN po.status NOT IN ('COMPLETED','CANCELLED')
+                  AND po.targetEndDate IS NOT NULL
+                  AND po.targetEndDate < ?
+                  AND EXISTS (
+                    SELECT 1 FROM job_cards jc
+                    WHERE jc.productionOrderId = po.id
+                      AND jc.departmentCode = 'UPHOLSTERY'
+                      AND jc.status NOT IN ('COMPLETED','TRANSFERRED')
+                  )
+                THEN po.targetEndDate
+                ELSE NULL
+              END AS earliestOverdue
+         FROM production_orders po
+        WHERE po.orgId = ?`,
+    ).bind(today, orgId);
+    const res = await stmt.all<OverduePoRow>();
+    rows = res.results ?? [];
+  } else {
+    const stmt = c.var.DB.prepare(
+      `SELECT po.id,
+              po.companySOId,
+              po.salesOrderId,
+              po.companyCOId,
+              po.consignmentOrderId,
+              po.customerName,
+              po.itemCategory,
+              po.status AS poStatus,
+              (SELECT MIN(jc.dueDate)
+                 FROM job_cards jc
+                WHERE jc.productionOrderId = po.id
+                  AND jc.departmentCode = ?
+                  AND jc.dueDate IS NOT NULL
+                  AND jc.dueDate < ?
+                  AND jc.status NOT IN ('COMPLETED','TRANSFERRED')) AS earliestOverdue
+         FROM production_orders po
+        WHERE po.orgId = ?
+          AND po.status NOT IN ('COMPLETED','CANCELLED')`,
+    ).bind(dept, today, orgId);
+    const res = await stmt.all<OverduePoRow>();
+    rows = res.results ?? [];
+  }
+
+  // Aggregate by SO group. totalPos counts non-CANCELLED POs in the group;
+  // overduePos / earliest / overdueCategories track only the overdue subset.
+  // Mirrors src/pages/production/index.tsx:1277-1326.
+  type Entry = Omit<OverdueBreakdownRow, "overdueCategories"> & {
+    overdueCategories: Set<string>;
+  };
+  const byso = new Map<string, Entry>();
+  for (const po of rows) {
+    if (po.poStatus === "CANCELLED") continue;
+    const groupId =
+      po.companySOId ||
+      po.salesOrderId ||
+      po.companyCOId ||
+      po.consignmentOrderId ||
+      "";
+    if (!groupId) continue;
+    let entry = byso.get(groupId);
+    if (!entry) {
+      entry = {
+        soId: groupId,
+        displaySoId: po.companySOId || po.companyCOId || groupId,
+        customer: po.customerName || "",
+        totalPos: 0,
+        overduePos: 0,
+        earliest: "",
+        poStatus: po.poStatus,
+        salesOrderId: po.salesOrderId || "",
+        overdueCategories: new Set<string>(),
+      };
+      byso.set(groupId, entry);
+    }
+    entry.totalPos += 1;
+    if (!entry.salesOrderId && po.salesOrderId) entry.salesOrderId = po.salesOrderId;
+    const eo = po.earliestOverdue;
+    if (eo) {
+      entry.overduePos += 1;
+      if (po.itemCategory) entry.overdueCategories.add(po.itemCategory);
+      if (!entry.earliest || eo < entry.earliest) entry.earliest = eo;
+    }
+  }
+
+  const breakdown: OverdueBreakdownRow[] = Array.from(byso.values())
+    .filter((r) => r.overduePos > 0)
+    .map((r) => ({ ...r, overdueCategories: Array.from(r.overdueCategories) }))
+    .sort((a, b) => {
+      if (!a.earliest && !b.earliest) return 0;
+      if (!a.earliest) return 1;
+      if (!b.earliest) return -1;
+      return a.earliest.localeCompare(b.earliest);
+    });
+
+  const bedframeCount = breakdown.filter((r) =>
+    r.overdueCategories.includes("BEDFRAME"),
+  ).length;
+  const sofaCount = breakdown.filter((r) =>
+    r.overdueCategories.includes("SOFA"),
+  ).length;
+
+  return c.json({
+    success: true,
+    data: { bedframeCount, sofaCount, breakdown },
+  });
+});
+
 app.get("/", async (c) => {
   const statusParam = c.req.query("status");
   const statuses = statusParam

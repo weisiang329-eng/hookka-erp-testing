@@ -20,12 +20,26 @@ import {
   cellFor,
   fmtShortDate,
   todayISO,
-  isOverduePO,
-  earliestOverdueDateOnPO,
 } from "./utils";
 import { CellBox } from "./components/CellBox";
 import { ProductDetailLine } from "./components/ProductDetailLine";
 import { CreateStockPODialog } from "./components/CreateStockPODialog";
+
+// ----- Overdue breakdown row (mirrors /api/production-orders/overdue-counts) -----
+// Server returns overdueCategories as string[] (it was Set<string> when the FE
+// computed it locally; arrays serialise cleanly through JSON whereas Sets do
+// not). Consumers below use .includes() instead of .has().
+type OverdueSORow = {
+  soId: string;          // grouping key — companySOId / salesOrderId / CO equivalent
+  displaySoId: string;   // human-facing label (e.g. "SO-2604-001")
+  customer: string;
+  totalPos: number;      // total non-CANCELLED POs under this SO
+  overduePos: number;
+  earliest: string;      // earliest overdue JC dueDate (or PO.targetEndDate in Overview mode)
+  poStatus: string;      // representative PO status seen first in the group
+  salesOrderId: string;  // canonical id for navigation (may be empty for CO-only)
+  overdueCategories: string[]; // itemCategory list across this SO's *overdue* POs
+};
 
 // ----- Overview sort / filter shared types (used by header sub-components) -----
 type OverviewSortKey =
@@ -505,28 +519,29 @@ export default function ProductionPage({
   // above. Gated on `shouldFetch` so it doesn't fire on a cold landing —
   // the existing first-mount seed (from/to → today) flips shouldFetch on
   // anyway, so in practice this fetches once per session alongside the
-  // main orders fetch. Cached by useCachedJson, so it's effectively a
-  // local-storage hit on subsequent renders.
-  // 2026-05-08: also gate on `ordersResp` being non-null so this bare
-  // (~800 PO, all depts) fetch fires AFTER the dept-filtered one returns,
-  // not concurrently. The two used to race on Hyperdrive — the bare one
-  // takes 5-17s and stacks behind the dept-filtered one, so when the user
-  // clicked away mid-load the response payloads landed together and the
-  // main thread froze long enough for the renderer to be flagged
-  // unresponsive. Sequencing means: navigate-away within the first ~5s
-  // lets the bare fetch never start, since the dept response never
-  // landed.
-  const allOrdersUrl: string | null =
-    shouldFetch && datesSeeded && ordersResp != null
-      ? "/api/production-orders?fields=minimal"
+  // main orders fetch.
+  //
+  // 2026-05-08: replaced the bare `/api/production-orders?fields=minimal`
+  // fetch with a thin aggregate endpoint. The page used to pull ~800 POs +
+  // 12k JCs (~8 MB body, ~4s TTFB) JUST to compute the Bedframe / Sofa
+  // overdue counts + the drill-down breakdown rows. The new endpoint does
+  // the GROUP BY in SQL and returns ~5 KB / ~50 ms. Dept context comes from
+  // activeTab — Overview ("ALL") uses the targetEndDate vs UPHOLSTERY rule,
+  // dept tabs use that dept's JC.dueDate rule (mirrors isOverduePO in
+  // src/pages/production/utils.ts).
+  const overdueDept: string | null = activeTab === "ALL" ? null : activeTab;
+  const overdueCountsUrl: string | null =
+    shouldFetch && datesSeeded
+      ? `/api/production-orders/overdue-counts${overdueDept ? `?dept=${encodeURIComponent(overdueDept)}` : ""}`
       : null;
-  const { data: allOrdersResp } = useCachedJson<{ success?: boolean; data?: ProductionOrder[] }>(allOrdersUrl);
-  const allOrders: ProductionOrder[] = useMemo(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const d: any = allOrdersResp;
-    if (!d) return [];
-    return d?.success ? (d.data || []) : Array.isArray(d) ? d : [];
-  }, [allOrdersResp]);
+  const { data: overdueCountsResp } = useCachedJson<{
+    success?: boolean;
+    data?: {
+      bedframeCount: number;
+      sofaCount: number;
+      breakdown: OverdueSORow[];
+    };
+  }>(overdueCountsUrl);
   // (Lifecycle dropdown removed 2026-04-27 — replaced by the Status
   // column's per-column filter. The grid loads all PO statuses now.)
   // New filters (2026-04-25):
@@ -576,8 +591,8 @@ export default function ProductionPage({
   // ("Bedframe Overdue: N" + "Sofa Overdue: N") each toggle the panel
   // scoped to that itemCategory. null = panel closed. Click the active
   // card again to close, or click the other card to switch categories.
-  // Date-filter-independent — the cards and the panel both scan
-  // `allOrders`, not `filteredOrders`.
+  // Date-filter-independent — counts come from
+  // /api/production-orders/overdue-counts which scans the whole PO set.
   const [overduePanelMode, setOverduePanelMode] = useState<
     "BEDFRAME" | "SOFA" | null
   >(null);
@@ -1251,91 +1266,18 @@ export default function ProductionPage({
     activeTab,
   ]);
 
-  // Date-filter-INDEPENDENT overdue breakdown. Scans the unfiltered
-  // `allOrders` payload and groups overdue POs by their parent SO/CO id,
-  // surfacing one row per affected SO for the drill-down panel. Sorted
-  // earliest-overdue first so the operator can prioritize. Uses the
-  // canonical isOverduePO predicate from utils so the count stays in
-  // lockstep with the red-cell colour the operator already sees in the
-  // matrix.
-  type OverdueSORow = {
-    soId: string;          // grouping key — companySOId / salesOrderId / CO equivalent
-    displaySoId: string;   // human-facing label (e.g. "SO-2604-001")
-    customer: string;
-    totalPos: number;      // total non-CANCELLED POs under this SO
-    overduePos: number;
-    earliest: string;      // earliest overdue JC dueDate across all POs in this SO
-    poStatus: string;      // representative PO status (READY_TO_SHIP / IN_PRODUCTION / PENDING)
-    salesOrderId: string;  // canonical id for navigation (may be empty for CO-only orders)
-    overdueCategories: Set<string>; // itemCategory set across this SO's *overdue* POs only
-  };
-  // Dept context for the overdue rule. Overview (activeTab = "ALL") uses
-  // the customer-promise rule (PO.targetEndDate passed AND UPH not done);
-  // a dept tab uses that dept's JC dueDate. Same shape feeds the cards
-  // AND the Filter Incomplete toggle so the two stay in lockstep.
-  const overdueDept: string | null = activeTab === "ALL" ? null : activeTab;
-  const overdueBreakdown: OverdueSORow[] = useMemo(() => {
-    const today = todayISO();
-    const byso = new Map<string, OverdueSORow>();
-    for (const po of allOrders) {
-      // Skip CANCELLED — they should never count as overdue.
-      if (po.status === "CANCELLED") continue;
-      const groupId =
-        po.companySOId ||
-        po.salesOrderId ||
-        po.companyCOId ||
-        po.consignmentOrderId ||
-        "";
-      if (!groupId) continue;
-      let entry = byso.get(groupId);
-      if (!entry) {
-        entry = {
-          soId: groupId,
-          displaySoId: po.companySOId || po.companyCOId || groupId,
-          customer: po.customerName || "",
-          totalPos: 0,
-          overduePos: 0,
-          earliest: "",
-          poStatus: po.status,
-          salesOrderId: po.salesOrderId || "",
-          overdueCategories: new Set<string>(),
-        };
-        byso.set(groupId, entry);
-      }
-      entry.totalPos += 1;
-      // Prefer a non-empty salesOrderId on any PO in the group (CO siblings
-      // can land first with empty salesOrderId).
-      if (!entry.salesOrderId && po.salesOrderId) entry.salesOrderId = po.salesOrderId;
-      if (isOverduePO(po, today, overdueDept)) {
-        entry.overduePos += 1;
-        if (po.itemCategory) entry.overdueCategories.add(po.itemCategory);
-        const e = earliestOverdueDateOnPO(po, today, overdueDept);
-        if (e && (!entry.earliest || e < entry.earliest)) entry.earliest = e;
-      }
-    }
-    return Array.from(byso.values())
-      .filter((r) => r.overduePos > 0)
-      .sort((a, b) => {
-        // Earliest overdue date wins; "" sorts last (defensive — every row
-        // we keep has overduePos>0 so .earliest should always be set).
-        if (!a.earliest && !b.earliest) return 0;
-        if (!a.earliest) return 1;
-        if (!b.earliest) return -1;
-        return a.earliest.localeCompare(b.earliest);
-      });
-  }, [allOrders, overdueDept]);
-  // Per-category counts. An SO with both BEDFRAME + SOFA overdue POs counts
-  // in BOTH cards — we want to surface both signals, not dedup at SO level.
-  // Operator request 2026-05-08: replace the single "Overdue SOs" chip
-  // with two side-by-side cards split by itemCategory.
-  const bedframeOverdueCount = useMemo(
-    () => overdueBreakdown.filter((r) => r.overdueCategories.has("BEDFRAME")).length,
-    [overdueBreakdown],
+  // Overdue breakdown + per-category counts. Pre-aggregated server-side
+  // (see /api/production-orders/overdue-counts above) so this is a thin
+  // pass-through. The endpoint already applies the same isOverduePO /
+  // earliestOverdueDateOnPO rules per `overdueDept`, so the rows match
+  // what the matrix's red cells show. An SO with both BEDFRAME + SOFA
+  // overdue POs counts in BOTH cards (no dedup) — same as before.
+  const overdueBreakdown: OverdueSORow[] = useMemo(
+    () => overdueCountsResp?.data?.breakdown ?? [],
+    [overdueCountsResp],
   );
-  const sofaOverdueCount = useMemo(
-    () => overdueBreakdown.filter((r) => r.overdueCategories.has("SOFA")).length,
-    [overdueBreakdown],
-  );
+  const bedframeOverdueCount = overdueCountsResp?.data?.bedframeCount ?? 0;
+  const sofaOverdueCount = overdueCountsResp?.data?.sofaCount ?? 0;
 
   const visibleOrders = useMemo(() => {
     let rows = filteredOrders;
@@ -3723,8 +3665,9 @@ export default function ProductionPage({
           title="To (due date)"
         />
         {/* Per-category overdue chips — date-filter-INDEPENDENT counts of
-            SOs with at least one overdue PO of that itemCategory. Scans the
-            full `allOrders` payload, not the date-windowed `filteredOrders`.
+            SOs with at least one overdue PO of that itemCategory. Counts
+            come from /api/production-orders/overdue-counts (server-side
+            GROUP BY), not the date-windowed `filteredOrders`.
             Click either to drill the panel below into that category; click
             again to close. An SO with both BEDFRAME + SOFA overdue POs is
             counted in BOTH cards (no dedup — both signals matter to the
@@ -3832,13 +3775,14 @@ export default function ProductionPage({
           mode comes from `overduePanelMode` (BEDFRAME / SOFA): only rows
           whose overdue PO set contains that itemCategory render. An SO
           with both BF + sofa overdue POs appears in either panel.
-          Date-filter-independent: rows come from the full `allOrders`
-          payload via `overdueBreakdown`. Click an SO row → navigate to
-          /sales/<id> when we have a salesOrderId, otherwise the row stays
-          read-only (CO-only orders don't have an SO detail page). */}
+          Date-filter-independent: rows come from the
+          /api/production-orders/overdue-counts breakdown payload. Click
+          an SO row → navigate to /sales/<id> when we have a salesOrderId,
+          otherwise the row stays read-only (CO-only orders don't have an
+          SO detail page). */}
       {overduePanelMode && (() => {
         const filteredRows = overdueBreakdown.filter((r) =>
-          r.overdueCategories.has(overduePanelMode),
+          r.overdueCategories.includes(overduePanelMode),
         );
         if (filteredRows.length === 0) return null;
         const label = overduePanelMode === "BEDFRAME" ? "Bedframe" : "Sofa";

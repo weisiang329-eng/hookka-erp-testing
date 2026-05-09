@@ -225,62 +225,57 @@ export default function generateCustomerQuotationPdfV2(
   const today = new Date().toISOString();
 
   // -------------------------------------------------------------------------
-  // 1. LETTERHEAD (top of page 1; footer applied to every page later)
+  // 1. LETTERHEAD (top of page 1; also re-rendered before the SOFA section
+  //    so Wei Siang can chop the bedframe pages and hand the SOFA pages out
+  //    standalone with their own letterhead.)
   // -------------------------------------------------------------------------
-  // Logo: reuse the addHookkaLetterhead helper. If no kv_config override is
-  // provided, this matches the legacy quotation look.
-  try {
-    addHookkaLetterhead(doc, margin, 5, 11);
-  } catch {
-    // Logo asset missing in some build modes — ignore so the PDF still renders.
-  }
-  const textX = margin + 28;
+  function renderLetterhead() {
+    try {
+      addHookkaLetterhead(doc, margin, 5, 11);
+    } catch {
+      // Logo asset missing in some build modes — ignore so the PDF still renders.
+    }
+    const textX = margin + 28;
 
-  doc.setTextColor(0, 0, 0);
-  doc.setFontSize(11);
-  doc.setFont("helvetica", "bold");
-  doc.text(letterhead.name, textX, 12);
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "bold");
+    doc.text(letterhead.name, textX, 12);
 
-  doc.setFontSize(7.5);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  let lhY = 17;
-  for (const line of letterhead.addressLines) {
-    doc.text(line, textX, lhY);
+    doc.setFontSize(7.5);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(80, 80, 80);
+    let lhY = 17;
+    for (const line of letterhead.addressLines) {
+      doc.text(line, textX, lhY);
+      lhY += 3.5;
+    }
+    doc.text(`Tel: ${letterhead.phone}  |  Email: ${letterhead.email}`, textX, lhY);
     lhY += 3.5;
+    doc.text(
+      `SSM: ${letterhead.ssmNo}  |  TIN: ${letterhead.taxNo}`,
+      textX,
+      lhY,
+    );
+
+    doc.setFontSize(20);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(0, 0, 0);
+    doc.text("QUOTATION", pageW - margin, 14, { align: "right" });
+
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(80, 80, 80);
+    doc.text(`Effective: ${fmtDate(asOf)}`, pageW - margin, 21, { align: "right" });
+    doc.text(`Generated: ${fmtDate(today)}`, pageW - margin, 25, { align: "right" });
+    doc.text(`Customer: ${customer.code}`, pageW - margin, 29, { align: "right" });
+
+    doc.setDrawColor(180, 180, 180);
+    doc.setLineWidth(0.5);
+    doc.line(margin, 35, pageW - margin, 35);
   }
-  doc.text(`Tel: ${letterhead.phone}  |  Email: ${letterhead.email}`, textX, lhY);
-  lhY += 3.5;
-  doc.text(
-    `SSM: ${letterhead.ssmNo}  |  TIN: ${letterhead.taxNo}`,
-    textX,
-    lhY,
-  );
 
-  // Right-aligned title + dates
-  doc.setFontSize(20);
-  doc.setFont("helvetica", "bold");
-  doc.setTextColor(0, 0, 0);
-  doc.text("QUOTATION", pageW - margin, 14, { align: "right" });
-
-  doc.setFontSize(8);
-  doc.setFont("helvetica", "normal");
-  doc.setTextColor(80, 80, 80);
-  doc.text(`Effective: ${fmtDate(asOf)}`, pageW - margin, 21, {
-    align: "right",
-  });
-  doc.text(`Generated: ${fmtDate(today)}`, pageW - margin, 25, {
-    align: "right",
-  });
-  doc.text(`Customer: ${customer.code}`, pageW - margin, 29, {
-    align: "right",
-  });
-
-  // Divider
-  doc.setDrawColor(180, 180, 180);
-  doc.setLineWidth(0.5);
-  doc.line(margin, 35, pageW - margin, 35);
-
+  renderLetterhead();
   let y = 42;
   doc.setTextColor(31, 29, 27);
 
@@ -387,6 +382,14 @@ export default function generateCustomerQuotationPdfV2(
     for (const cat of CATEGORY_ORDER) {
       const rows = grouped[cat];
       if (rows.length === 0) continue;
+
+      // SOFA gets its own page with a fresh letterhead so the bedframe
+      // pages can be detached and the SOFA pages handed out standalone.
+      if (cat === "SOFA") {
+        doc.addPage();
+        renderLetterhead();
+        y = 42;
+      }
 
       ensureRoom(20);
       doc.setFontSize(9);

@@ -62,6 +62,11 @@ import {
   type LeadTimeMap,
 } from "../lib/lead-times";
 import { createProductionOrdersForOrder } from "./_shared/production-builder";
+import {
+  createProductionOrdersForSO,
+  type SalesOrderRow,
+  type SalesOrderItemRow,
+} from "./sales-orders";
 import { getOrgId } from "../lib/tenant";
 import { validateFabricCodes } from "../lib/fabric-validation";
 import {
@@ -13348,6 +13353,154 @@ app.post("/delete-fg-units-by-ids", async (c) => {
     found: rows.length,
     deleted: rows.length,
     notFound,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/import/append-missing-pos
+//
+// One-shot fill-in for SOs whose original generator run emitted FEWER POs
+// than the SO's per-unit total (e.g. SO-2604-303: BF line qty=2 produced
+// only 1 PO; the 2nd unit's PO was never created).
+//
+// Calls createProductionOrdersForSO with `appendOnly: true`. Generator
+// skips the bail-on-existing-POs check and runs its full per-unit
+// expansion loop, emitting INSERT statements for every expected PO + JC.
+// INSERT OR IGNORE on production_orders + deterministic poId/jcId scheme
+// means pre-existing rows no-op silently; only new rows land.
+//
+// Body: { soIds: string[], dryRun: boolean }
+// Returns: { success, dryRun, processed: [{soId, companySOId, existingPosCount, newStatements, newPos}], updated?, errors? }
+//
+// Permission: purchase-orders:create.
+// ---------------------------------------------------------------------------
+app.post("/append-missing-pos", async (c) => {
+  const denied = await requirePermission(c, "purchase-orders", "create");
+  if (denied) return denied;
+
+  let body: { soIds?: unknown; dryRun?: unknown };
+  try {
+    body = (await c.req.json()) as { soIds?: unknown; dryRun?: unknown };
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const soIdsRaw = Array.isArray(body.soIds)
+    ? body.soIds.filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      )
+    : null;
+  if (!soIdsRaw || soIdsRaw.length === 0) {
+    return c.json(
+      { success: false, error: "body.soIds must be a non-empty array" },
+      400,
+    );
+  }
+  const dryRun = body.dryRun === true;
+  const db = c.var.DB;
+
+  type ProcessResult = {
+    soId: string;
+    companySOId?: string | null;
+    status: "ok" | "error";
+    existingPosCount?: number;
+    newStatements?: number;
+    newPos?: Array<{ poNo: string; poId: string; quantity: number }>;
+    error?: string;
+  };
+  const processed: ProcessResult[] = [];
+  const allStatements: D1PreparedStatement[] = [];
+
+  for (const soIdRaw of soIdsRaw) {
+    let so = await db
+      .prepare("SELECT * FROM sales_orders WHERE id = ? LIMIT 1")
+      .bind(soIdRaw)
+      .first<SalesOrderRow>();
+    if (!so) {
+      so = await db
+        .prepare("SELECT * FROM sales_orders WHERE companySOId = ? LIMIT 1")
+        .bind(soIdRaw)
+        .first<SalesOrderRow>();
+    }
+    if (!so) {
+      processed.push({
+        soId: soIdRaw,
+        status: "error",
+        error: "SO not found by id or companySOId",
+      });
+      continue;
+    }
+    const existing = await db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM production_orders WHERE salesOrderId = ? AND status <> 'CANCELLED'",
+      )
+      .bind(so.id)
+      .first<{ n: number }>();
+    const existingPosCount = Number(existing?.n ?? 0);
+
+    const itemsRes = await db
+      .prepare("SELECT * FROM sales_order_items WHERE salesOrderId = ?")
+      .bind(so.id)
+      .all<SalesOrderItemRow>();
+    const items = itemsRes.results ?? [];
+
+    const { statements, created } = await createProductionOrdersForSO(
+      db,
+      so,
+      items,
+      { appendOnly: true },
+    );
+
+    processed.push({
+      soId: so.id,
+      companySOId: so.companySOId,
+      status: "ok",
+      existingPosCount,
+      newStatements: statements.length,
+      newPos: created.map((p) => ({
+        poNo: p.poNo,
+        poId: p.id,
+        quantity: p.quantity,
+      })),
+    });
+    if (!dryRun) {
+      allStatements.push(...statements);
+    }
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      processed,
+      totalNewStatements: processed.reduce(
+        (sum, p) => sum + (p.newStatements ?? 0),
+        0,
+      ),
+    });
+  }
+
+  const CHUNK = 50;
+  let executed = 0;
+  const errors: Array<{ chunk: number; message: string }> = [];
+  for (let i = 0; i < allStatements.length; i += CHUNK) {
+    const slice = allStatements.slice(i, i + CHUNK);
+    if (slice.length === 0) continue;
+    try {
+      await db.batch(slice);
+      executed += slice.length;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push({ chunk: i, message });
+    }
+  }
+
+  return c.json({
+    success: errors.length === 0,
+    dryRun: false,
+    processed,
+    executed,
+    totalStatements: allStatements.length,
+    errors,
   });
 });
 

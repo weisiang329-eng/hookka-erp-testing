@@ -343,7 +343,7 @@ export async function createProductionOrdersForOrder(
   db: D1Database,
   order: OrderForProduction,
   items: OrderItemForProduction[],
-  opts: { forceRebuild?: boolean } = {},
+  opts: { forceRebuild?: boolean; appendOnly?: boolean } = {},
 ): Promise<{
   statements: D1PreparedStatement[];
   created: CreatedProductionOrder[];
@@ -365,7 +365,12 @@ export async function createProductionOrdersForOrder(
   // this read-only check — the existing POs they see here are the ones
   // about to be deleted by the same batch, so the check would falsely
   // bail the rebuild.
-  if (!opts.forceRebuild) {
+  // appendOnly: callers that want to fill in MISSING POs without touching
+  // existing ones (e.g. /append-missing-pos for SOs where the original
+  // generator emitted fewer POs than the SO's per-unit total). Skip the
+  // bail; rely on INSERT OR IGNORE + deterministic poId/jcId scheme so
+  // pre-existing rows no-op silently and only new rows land.
+  if (!opts.forceRebuild && !opts.appendOnly) {
     const fkColumn =
       order.sourceType === "SO" ? "salesOrderId" : "consignmentOrderId";
     const existing = await db

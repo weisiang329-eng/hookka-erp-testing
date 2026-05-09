@@ -410,6 +410,7 @@ export async function createProductionOrdersForSO(
   db: D1Database,
   so: SalesOrderRow,
   items: SalesOrderItemRow[],
+  opts: { forceRebuild?: boolean; appendOnly?: boolean } = {},
 ): Promise<{ statements: D1PreparedStatement[]; created: CreatedProductionOrder[]; preExisting: boolean }> {
   return createProductionOrdersForOrder(
     db,
@@ -444,6 +445,7 @@ export async function createProductionOrdersForSO(
       specialOrder: it.specialOrder,
       notes: it.notes,
     })),
+    opts,
   );
 }
 

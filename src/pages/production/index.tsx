@@ -3042,14 +3042,14 @@ export default function ProductionPage({
           ? ""
           : legHeights.map((h) => `${h}"`).join(", ");
 
-      // Renumber sofa compartments. Layout:
-      //   idx 0 (Compartment 1) → pieceNo 1
-      //   if hasLegs → Legs at pieceNo 2 (2-in-1 with Compartment 1)
-      //   idx 1..N-1 (Compartments 2..N) → pieceNo 2+legShift..N+legShift
-      //   if hasPillow → Pillow at pieceNo N+legShift+1 (2-in-1 with last comp)
-      const legShift = hasLegs ? 1 : 0;
+      // Renumber sofa compartments. Wei Siang spec 2026-05-10:
+      //   Sofas: 1, 2, ..., N (in SO line order)
+      //   Leg (if any): N+1 (after ALL sofas, not position 2)
+      //   Pillow (if any): N+2 (after leg) — or N+1 if no leg
+      // Physical 2合1 pairings unchanged: Leg shares Compartment 1's
+      // box, Pillow shares the LAST compartment's box.
       group.forEach((s, idx) => {
-        s.pieceNo = idx === 0 ? 1 : idx + 1 + legShift;
+        s.pieceNo = idx + 1;
         s.totalPieces = totalPacks;
         s.wipLabel = fullCompartment;
         s.boxLabel = fullCompartment;
@@ -3057,29 +3057,31 @@ export default function ProductionPage({
         if (legsInfo) s.legsInfo = legsInfo;
       });
 
-      // Build the output in physical box order:
-      // [Compartment 1, Legs?, Compartment 2..N-1, last(Compartment N), Pillow?]
-      // Pairing direction: secondary.comboPairKey → primary. The primary
-      // doesn't track its secondaries — render-time lookup walks the
-      // sticker list and finds any secondary whose comboPairKey points
-      // back. This handles single-compartment SOs where one compartment
-      // is BOTH the first AND last (legs + pillow on the same card).
+      // Build the output in pieceNo order:
+      //   Sofas 1..N (in SO line order)
+      //   Leg at N+1 (if any) — physically 2合1 with Compartment 1
+      //   Pillows at N+1+i (or N+2 with leg, etc) — first pillow 2合1
+      //     with the LAST sofa compartment
+      // Pairing direction: secondary.comboPairKey → primary. The
+      // render-time lookup walks the sticker list and finds any
+      // secondary whose comboPairKey points back to a given primary,
+      // so primary cards display their paired secondary inline.
       const compartment1 = group[0];
       const lastCompartment = group[group.length - 1];
 
       const outputForSo: FgSticker[] = [];
-      outputForSo.push(compartment1);
+      // Sofas first, in order
+      outputForSo.push(...group);
+      // Leg (after all sofas, position N+1)
       if (hasLegs) {
         const legsKey = `legs-${compartment1.salesOrderId}`;
-        // Badge text includes leg height — "4\" leg" or "2\", 4\" leg"
-        // for multi-height SOs. Falls back to bare "leg" when no height.
         const legBadge = legsInfo ? `${legsInfo} leg` : "leg";
         const legsSticker: FgSticker = {
           ...compartment1,
           key: legsKey,
           unitSerial: `${compartment1.salesOrderNo || compartment1.salesOrderId}-LEGS`,
           shortCode: "LEGS",
-          pieceNo: 2,
+          pieceNo: compartmentCount + 1,
           totalPieces: totalPacks,
           pieceName: legBadge,
           boxLabel: fullCompartment,
@@ -3090,18 +3092,9 @@ export default function ProductionPage({
         };
         outputForSo.push(legsSticker);
       }
-      // Middle compartments (between 1 and last).
-      for (let i = 1; i < group.length - (group.length > 1 ? 1 : 0); i++) {
-        outputForSo.push(group[i]);
-      }
-      if (group.length > 1) {
-        outputForSo.push(lastCompartment);
-      }
+      // Pillows (after leg, last)
       if (hasPillow) {
-        // One representative sticker per pillow productCode. Badge shows
-        // "{productName} x{qty}" so 3 fg_units of "Square Pillow" merge
-        // into one sticker labelled "Square Pillow x3". The first group
-        // pairs into the last compartment's card as 2-in-1.
+        const legShift = hasLegs ? 1 : 0;
         let pillowIdx = 0;
         for (const [, pillowGroup] of pillowGroups) {
           const rep = pillowGroup[0];
@@ -3118,7 +3111,6 @@ export default function ProductionPage({
           }
           outputForSo.push(rep);
           pillowIdx++;
-          // Other fg_units in this group are dropped — represented by `rep`.
         }
       }
 

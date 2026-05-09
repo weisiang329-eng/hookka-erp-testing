@@ -4976,31 +4976,31 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "230px", height: "320px" }}
+                      style={{ width: "250px", height: "380px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       <div className="text-center font-bold leading-tight" style={{ fontSize: "11px" }}>
                         {s.productCode}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
-                      <div className="space-y-[2px] text-[9px] leading-tight text-[#1F1D1B]">
+                      <div className="space-y-[3px] text-[11px] leading-tight text-[#1F1D1B]">
                         {s.boxLabel && (
-                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
+                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
                         )}
                         {s.itemCategory === "BEDFRAME" && (
-                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
+                          <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         )}
-                        <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
-                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
+                        <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
                         {s.customerPOId && (
-                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
+                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
                         )}
-                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
                         {s.itemCategory === "BEDFRAME" && (
-                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
+                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
                         )}
                         {s.specialOrder && (
-                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
+                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
                         )}
                       </div>
                       {/* QR + badge row — when paired (2-in-1 / 3-in-1)
@@ -5071,7 +5071,7 @@ export default function ProductionPage({
                       </div>
                       {/* Customer line below the QR row — uses the
                           empty footer space, decongests the body. */}
-                      <div className="mt-2 pt-1 border-t border-[#E6E0D9] text-[10px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
+                      <div className="mt-2 pt-1 border-t border-[#E6E0D9] text-[12px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
                         {customerLine}
                       </div>
                     </div>
@@ -5253,7 +5253,7 @@ export default function ProductionPage({
                       {s.productCode}
                     </div>
                     <div className="border-t border-black my-[1.5mm]" />
-                    <div className="flex-1 space-y-[0.6mm]" style={{ fontSize: "9pt", lineHeight: 1.25 }}>
+                    <div className="flex-1 space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
                       {s.boxLabel && (
                         <div><span className="inline-block w-[26mm] font-semibold">Code</span>: {s.boxLabel}</div>
                       )}
@@ -5329,7 +5329,7 @@ export default function ProductionPage({
                       )}
                     </div>
                     {/* Customer line below the QR row. */}
-                    <div className="mt-[2mm] pt-[1mm] border-t border-black text-center font-semibold" style={{ fontSize: "10pt" }}>
+                    <div className="mt-[2mm] pt-[1mm] border-t border-black text-center font-semibold" style={{ fontSize: "11pt" }}>
                       {customerLine}
                     </div>
                   </div>

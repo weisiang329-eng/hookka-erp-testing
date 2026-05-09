@@ -118,8 +118,12 @@ app.get("/", async (c) => {
       400,
     );
   }
-
-  const today = todayIso();
+  // asOf — let the customer-products grid display prices effective on a
+  // chosen date (default today). Plumbed in 2026-05-09 so the Customers
+  // page "Effective" date input also drives the on-screen grid, not just
+  // the Export Quotation PDF (Wei Siang: "我的 date 是放 10/5 没有显示出来东西").
+  const asOfRaw = (c.req.query("asOf") ?? "").trim();
+  const today = /^\d{4}-\d{2}-\d{2}$/.test(asOfRaw) ? asOfRaw : todayIso();
 
   const res = await c.var.DB.prepare(
     `SELECT cp.*,

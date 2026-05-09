@@ -181,8 +181,14 @@ function StateBadge({ state }: { state: string }) {
 //   - Pending badge surfaces when a future-dated history row exists.
 // =====================================================================
 function CustomerProductsPanel({ customerId, customerName, customer: _customer }: { customerId: string; customerName: string; customer: Customer }) {
+  // Date the operator wants prices resolved to. Drives BOTH the on-screen
+  // grid AND the Export Quotation PDF — plumbed into both
+  // /api/customer-products?asOf= and /api/customer-quotation?asOf=.
+  const [quotationAsOf, setQuotationAsOf] = useState<string>(() =>
+    new Date().toISOString().slice(0, 10),
+  );
   const { data: resp, refresh } = useCachedJson<{ success?: boolean; data?: CustomerProduct[] }>(
-    customerId ? `/api/customer-products?customerId=${customerId}` : null
+    customerId ? `/api/customer-products?customerId=${customerId}&asOf=${quotationAsOf}` : null
   );
   const serverRows: CustomerProduct[] = useMemo(
     () => (resp?.success ? resp.data ?? [] : Array.isArray(resp) ? (resp as CustomerProduct[]) : []),
@@ -265,7 +271,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
     setEditMode(false);
     setBulkNotes("");
     // Reload from server to undo optimistic local edits.
-    invalidateCache(`/api/customer-products?customerId=${customerId}`);
+    invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
     refresh();
   }
 
@@ -319,7 +325,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       setShowBulkSaveDialog(false);
       setEditMode(false);
       setBulkNotes("");
-      invalidateCache(`/api/customer-products?customerId=${customerId}`);
+      invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
       refresh();
     } finally {
       setBulkSaving(false);
@@ -362,7 +368,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       alert((j as { error?: string }).error || `Failed to remove (HTTP ${res.status})`);
       return;
     }
-    invalidateCache(`/api/customer-products?customerId=${customerId}`);
+    invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
     refresh();
   };
 
@@ -389,7 +395,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
         alert((j as { error?: string }).error || `Failed to assign (HTTP ${res.status})`);
         return;
       }
-      invalidateCache(`/api/customer-products?customerId=${customerId}`);
+      invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
       refresh();
       setAssignPicked(new Set());
       setAssignQuery("");
@@ -435,19 +441,13 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
       alert(
         `Sync done — assigned ${a} new SKU${a === 1 ? "" : "s"}, mirrored ${h} master price-history row${h === 1 ? "" : "s"}.`,
       );
-      invalidateCache(`/api/customer-products?customerId=${customerId}`);
+      invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
       refresh();
     } finally {
       setCopyingFromMaster(false);
     }
   };
 
-  // Date the operator wants prices resolved to. Defaults to today; past dates
-  // back-date a quote to a historical price, future dates preview a scheduled
-  // price hike. Plumbed straight into /api/customer-quotation?asOf=.
-  const [quotationAsOf, setQuotationAsOf] = useState<string>(() =>
-    new Date().toISOString().slice(0, 10),
-  );
   const [exportingQuotation, setExportingQuotation] = useState(false);
 
   // Date-aware export. Fetches the combined envelope (products + sofa combos
@@ -731,7 +731,7 @@ function CustomerProductsPanel({ customerId, customerName, customer: _customer }
             cp={historyTargetRow}
             onClose={() => setHistoryForCpId(null)}
             onChanged={() => {
-              invalidateCache(`/api/customer-products?customerId=${customerId}`);
+              invalidateCachePrefix(`/api/customer-products?customerId=${customerId}`);
               refresh();
             }}
           />

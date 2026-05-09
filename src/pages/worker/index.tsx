@@ -400,7 +400,7 @@ export default function WorkerHomePage() {
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
-              className="w-full h-10 px-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
               style={{ colorScheme: "dark" }}
             />
           </label>
@@ -410,7 +410,7 @@ export default function WorkerHomePage() {
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
-              className="w-full h-10 px-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32]"
+              className="w-full h-11 px-3 pr-2 rounded bg-white/10 text-white text-sm border border-white/20 focus:outline-none focus:ring-2 focus:ring-[#6B5C32] appearance-none"
               style={{ colorScheme: "dark" }}
             />
           </label>

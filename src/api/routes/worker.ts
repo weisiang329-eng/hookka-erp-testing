@@ -464,16 +464,41 @@ app.get("/history", async (c) => {
   )
     .bind(workerId, fromStr, toStr)
     .all<AttendanceRow>();
-  const attendance = (attRes.results ?? []).map((r) => ({
-    date: r.date,
-    clockIn: r.clockIn,
-    clockOut: r.clockOut,
-    workingMinutes: r.workingMinutes,
-    productionTimeMinutes: r.productionTimeMinutes,
-    efficiencyPct: r.efficiencyPct,
-    overtimeMinutes: r.overtimeMinutes,
-    status: r.status,
-  }));
+
+  // ---- working_hour_entries (manual admin grid) — source of truth for WORK HRS ----
+  // Wei Siang fills hours via the admin Working Hours grid which writes to
+  // working_hour_entries (per worker / date / departmentCode / category, decimal
+  // hours). The Clock-In/Out flow that populates attendance_records.workingMinutes
+  // is gated off until rollout (see commit a803ca9), so attendance.workingMinutes
+  // is typically 0. Sum hours per date and let working_hour_entries take precedence
+  // over attendance clock-time wherever both exist.
+  const wheRes = await c.var.DB.prepare(
+    "SELECT date, hours FROM working_hour_entries WHERE workerId = ? AND date >= ? AND date <= ?",
+  )
+    .bind(workerId, fromStr, toStr)
+    .all<{ date: string; hours: number }>();
+  const wheMinutesByDate = new Map<string, number>();
+  for (const r of wheRes.results ?? []) {
+    const d = (r.date || "").slice(0, 10);
+    if (!d) continue;
+    const mins = Math.round((Number(r.hours) || 0) * 60);
+    wheMinutesByDate.set(d, (wheMinutesByDate.get(d) ?? 0) + mins);
+  }
+
+  const attendance = (attRes.results ?? []).map((r) => {
+    const wheMins = wheMinutesByDate.get(r.date);
+    return {
+      date: r.date,
+      clockIn: r.clockIn,
+      clockOut: r.clockOut,
+      // working_hour_entries (manual admin grid) wins over attendance clock-time.
+      workingMinutes: wheMins != null ? wheMins : r.workingMinutes,
+      productionTimeMinutes: r.productionTimeMinutes,
+      efficiencyPct: r.efficiencyPct,
+      overtimeMinutes: r.overtimeMinutes,
+      status: r.status,
+    };
+  });
 
   // ---- completed job cards in range ----
   // First: every JC the worker touches that's COMPLETED/TRANSFERRED inside
@@ -641,10 +666,23 @@ app.get("/history", async (c) => {
   };
   const dailyMap = new Map<string, DailyRow>();
   for (const r of attendance) {
+    // attendance.workingMinutes was already overridden above when a
+    // working_hour_entries total exists for the date.
     dailyMap.set(r.date, {
       date: r.date,
       departmentName: "",
       workingMinutes: r.workingMinutes,
+      productionMinutes: 0,
+    });
+  }
+  // Days that have working_hour_entries but no attendance row at all still need
+  // to surface in the rollup so WORK HRS isn't dropped.
+  for (const [d, mins] of wheMinutesByDate) {
+    if (dailyMap.has(d)) continue;
+    dailyMap.set(d, {
+      date: d,
+      departmentName: "",
+      workingMinutes: mins,
       productionMinutes: 0,
     });
   }
@@ -656,7 +694,7 @@ app.get("/history", async (c) => {
       dailyMap.get(d) ?? {
         date: d,
         departmentName: "",
-        workingMinutes: 0,
+        workingMinutes: wheMinutesByDate.get(d) ?? 0,
         productionMinutes: 0,
       };
     prev.productionMinutes += c2.myMinutes || 0;
@@ -667,7 +705,19 @@ app.get("/history", async (c) => {
     a.date.localeCompare(b.date),
   );
 
-  const workedMinutes = attendance.reduce((s, r) => s + r.workingMinutes, 0);
+  // workedMinutes: prefer working_hour_entries per date, fall back to attendance
+  // clock-time for dates with no manual entry. Union the date sets so days that
+  // appear in only one source still contribute.
+  const workedDates = new Set<string>();
+  for (const r of attendance) workedDates.add(r.date);
+  for (const d of wheMinutesByDate.keys()) workedDates.add(d);
+  const attMinutesByDate = new Map<string, number>();
+  for (const r of attendance) attMinutesByDate.set(r.date, r.workingMinutes);
+  let workedMinutes = 0;
+  for (const d of workedDates) {
+    const wheMins = wheMinutesByDate.get(d);
+    workedMinutes += wheMins != null ? wheMins : (attMinutesByDate.get(d) ?? 0);
+  }
   const productionMinutes = completed.reduce(
     (s, r) => s + (r.myMinutes || 0),
     0,

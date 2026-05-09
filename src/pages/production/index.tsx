@@ -4960,7 +4960,7 @@ export default function ProductionPage({
                     <div
                       key={s.key}
                       className="flex-shrink-0 border border-[#E6E0D9] rounded-md bg-white flex flex-col p-2"
-                      style={{ width: "230px" }}
+                      style={{ width: "230px", height: "320px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
                       <div className="text-center font-bold leading-tight" style={{ fontSize: "11px" }}>
@@ -4991,8 +4991,11 @@ export default function ProductionPage({
                           the secondary section sits to the RIGHT of the
                           primary, separated by a vertical dashed line.
                           Each section has its own QR + badge so operator
-                          can scan whichever is relevant. */}
-                      <div className="flex items-end gap-2 mt-2">
+                          can scan whichever is relevant. mt-auto pushes
+                          this row + the customer footer to the bottom of
+                          the fixed-height card so all stickers in a row
+                          align cleanly. */}
+                      <div className="flex items-end gap-2 mt-auto">
                         <div className="flex items-end gap-1 flex-1">
                           <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0">
@@ -5254,8 +5257,10 @@ export default function ProductionPage({
                         RIGHT (vertical dashed dividers between sections).
                         Two-in-one and three-in-one stickers fit in the
                         same vertical space because they grow horizontally
-                        instead of stacking. */}
-                    <div className="flex items-end gap-[2mm] mt-[1mm]">
+                        instead of stacking. mt-auto pushes the row + the
+                        customer footer to the bottom of the 100mm × 150mm
+                        page so all stickers anchor consistently. */}
+                    <div className="flex items-end gap-[2mm] mt-auto">
                       <div className="flex items-end gap-[1mm] flex-1">
                         <QRImg data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />
                         <div className="flex-1 text-center min-w-0">

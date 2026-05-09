@@ -9495,59 +9495,13 @@ app.post("/backfill-ocr-so-fields", async (c) => {
   });
 });
 
-// One-shot backfill (2026-05): add inch quote to bare-numeric SOFA
-// sizeLabel ('30' → '30"'). The original /sales/create POST didn't
-// normalize, so 63 items have unquoted seat heights — Edit form
-// dropdown can't match them without a frontend workaround. Cascade
-// to production_orders snapshot.
-app.post("/backfill-sofa-sizelabel-quote", async (c) => {
-  const denied = await requirePermission(c, "sales-orders", "update");
-  if (denied) return denied;
-  const db = c.var.DB;
-  const orgId = getOrgId(c);
-
-  const targets = await db
-    .prepare(
-      `SELECT soi.id, soi.salesOrderId, soi.lineNo, soi.sizeLabel
-         FROM sales_order_items soi
-         JOIN sales_orders so ON so.id = soi.salesOrderId
-        WHERE so.orgId = ?
-          AND soi.itemCategory = 'SOFA'
-          AND soi.sizeLabel ~ '^[0-9]+(\\.[0-9]+)?$'`,
-    )
-    .bind(orgId)
-    .all<{ id: string; salesOrderId: string; lineNo: number; sizeLabel: string }>();
-
-  const items = targets.results ?? [];
-  let soiUpdated = 0;
-  let poUpdated = 0;
-
-  for (const r of items) {
-    const newLabel = `${r.sizeLabel.trim()}"`;
-    await db
-      .prepare("UPDATE sales_order_items SET sizeLabel = ? WHERE id = ?")
-      .bind(newLabel, r.id)
-      .run();
-    soiUpdated++;
-
-    const poRes = await db
-      .prepare(
-        `UPDATE production_orders SET sizeLabel = ?
-           WHERE salesOrderId = ? AND lineNo = ?`,
-      )
-      .bind(newLabel, r.salesOrderId, r.lineNo)
-      .run()
-      .catch(() => ({ meta: { changes: 0 } }));
-    poUpdated += poRes.meta?.changes ?? 0;
-  }
-
-  return c.json({
-    success: true,
-    scanned: items.length,
-    soiUpdated,
-    productionOrdersUpdated: poUpdated,
-  });
-});
+// (Removed 2026-05-09) POST /api/import/backfill-sofa-sizelabel-quote
+//   added inch quotes to bare-numeric SOFA sizeLabel rows ('30' → '30"').
+//   Reversed direction in DUP-001: the kv_config.sofaSizes dropdown source
+//   is bare numerics, so the bare-numeric form IS canonical and the quoted
+//   form was the dirty side. The 518-row backfill in commit af372e8
+//   stripped quotes from the legacy quoted rows; running this endpoint
+//   again would re-introduce the same drift. Deleted.
 
 // One-shot migration (2026-05): SOFA items with non-standard sizeLabel
 // (e.g. "12", "44", '24" x 37"', "24 X 24") get the size moved into the

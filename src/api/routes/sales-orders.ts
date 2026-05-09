@@ -1473,21 +1473,18 @@ app.post("/", async (c) => {
         // with a fresh stale id.
         const incomingFabricCode = String(item.fabricCode ?? "");
 
-        // Sofa seat-size normalization. The OCR pipeline ships sizeLabel
-        // as a bare number (e.g. "28") matching the SOFA Sizes catalog
-        // entry, but the Edit/Detail dropdowns key against quoted values
-        // (e.g. '28"'). Normalize once at the storage boundary so every
-        // downstream reader (Edit form, production sheet, etc.) sees the
-        // same shape. Only applies to SOFA items — bedframe sizeLabel is
-        // a free-form string like "Queen 5FT".
-        // Catalog vs client priority depends on category:
-        //   BEDFRAME — sizeLabel IS catalog data ("6FT" / "5FT" etc.).
-        //              Catalog ALWAYS wins. Shuts the OCR back-door where
-        //              the modal could persist PDF junk like "(K)".
-        //   SOFA — sizeLabel is the seat height the user picked (e.g.
-        //          "24""). Catalog's SOFA sizeLabel is the variant tag
-        //          ("1A(LHF)"), which is NOT what we store on the SO line.
-        //          Client wins, falls back to catalog only when missing.
+        // sizeLabel + sizeCode storage — category-driven:
+        //   BEDFRAME / ACCESSORY — catalog wins (closes the OCR back-door
+        //     where the modal could persist PDF junk like "(K)").
+        //   SOFA — client value passes through verbatim. The dropdown
+        //     source (kv_config.sofaSizes) is bare numerics ("28"), so the
+        //     value the operator picks is exactly what lands. The previous
+        //     normalize-add-quote logic at this site was the inverse of
+        //     correct — it took clean dropdown values and produced 518 dirty
+        //     rows that disagreed with the dropdown source. Removed in
+        //     DUP-001 commit B (2026-05-09) along with the wrong-direction
+        //     /backfill-sofa-sizelabel-quote endpoint. The strict gate that
+        //     replaces it lives in commit C as validateSofaSizeLabel.
         let normalizedSizeLabel: string;
         let normalizedSizeCode: string;
         if (isSofaItem) {
@@ -1495,18 +1492,9 @@ app.post("/", async (c) => {
             (item.sizeLabel as string) ||
             (item.sizeCode as string) ||
             "";
-          if (
-            normalizedSizeLabel &&
-            /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
-          ) {
-            normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
-          }
-          normalizedSizeCode = (item.sizeCode as string) || "";
-          if (!normalizedSizeCode && normalizedSizeLabel) {
-            normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
-          }
+          normalizedSizeCode =
+            (item.sizeCode as string) || normalizedSizeLabel;
         } else {
-          // BEDFRAME / ACCESSORY — catalog wins for both.
           normalizedSizeLabel =
             resolvedProduct?.sizeLabel ||
             (item.sizeLabel as string) ||
@@ -2558,20 +2546,14 @@ app.put("/:id", async (c) => {
         // 2026-05-09: fabricId resolve removed (matches POST path). Persist
         // null — column being dropped in a follow-up migration.
         const itemCategory = (item.itemCategory as string) || "BEDFRAME";
-        const isSofaItem = itemCategory === "SOFA";
         const incomingFabricCode = String(item.fabricCode ?? "");
-        let normalizedSizeLabel = (item.sizeLabel as string) || "";
-        if (
-          isSofaItem &&
-          normalizedSizeLabel &&
-          /^\d+(\.\d+)?$/.test(normalizedSizeLabel.trim())
-        ) {
-          normalizedSizeLabel = `${normalizedSizeLabel.trim()}"`;
-        }
-        let normalizedSizeCode = (item.sizeCode as string) || "";
-        if (isSofaItem && !normalizedSizeCode && normalizedSizeLabel) {
-          normalizedSizeCode = normalizedSizeLabel.replace(/"/g, "").trim();
-        }
+        // sizeLabel + sizeCode pass through verbatim. The previous
+        // normalize-add-quote logic at this site (mirror of the POST path)
+        // disagreed with the kv_config.sofaSizes dropdown source (bare
+        // numerics) — see the matching POST comment + DUP-001 backfill
+        // commit af372e8 (2026-05-09).
+        const normalizedSizeLabel = (item.sizeLabel as string) || "";
+        const normalizedSizeCode = (item.sizeCode as string) || "";
 
         // Free-text custom specials per line (migration 0074). Same
         // sanitization as the POST path — empty descriptions dropped, the

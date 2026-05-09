@@ -88,10 +88,22 @@ window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
 
   // 401 on /api/* → auth expired / invalid. Wipe state and redirect, but
   // don't loop if the user is already on /login.
+  //
+  // Worker portal exception: pages under /worker/* and calls to
+  // /api/worker* run on the separate worker-token auth flow. Bouncing
+  // them to the admin /login leaks them out of the mobile portal entirely
+  // (Wei Siang 2026-05-10: "为什么登录了之后让我登录电脑版本"). WorkerLayout
+  // + workerFetch handle their own 401 → /worker/login redirect.
+  const onWorkerPortal = window.location.pathname.startsWith("/worker");
+  const isWorkerApi = /^\/api\/worker(-auth)?(\/|$)/.test(
+    url.startsWith("/") ? url : new URL(url, window.location.origin).pathname,
+  );
   if (
     response.status === 401 &&
     isApiRequest(url) &&
-    window.location.pathname !== "/login"
+    window.location.pathname !== "/login" &&
+    !onWorkerPortal &&
+    !isWorkerApi
   ) {
     clearAuth();
     const intended = window.location.pathname + window.location.search;

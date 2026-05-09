@@ -48,12 +48,11 @@ async function main() {
 
   const dryRunOnly = process.argv[2] !== "--live";
 
-  // Find SOs that have at least one PACKED fg_unit. Use the most recent
-  // 20 SOs as a sample.
-  const soList = await get("/api/sales-orders?limit=50", auth);
-  const sos = (soList.json?.data?.rows || soList.json?.data || []).slice(0, 20);
+  // Scan ALL SOs.
+  const soList = await get("/api/sales-orders?limit=2000", auth);
+  const sos = soList.json?.data?.rows || soList.json?.data || [];
   const soIds = sos.map((s) => s.id);
-  console.log(`Sampling ${soIds.length} most-recent SOs\n`);
+  console.log(`Scanning ALL ${soIds.length} SOs\n`);
 
   // Dry-run first
   console.log("=== Dry-run ===");

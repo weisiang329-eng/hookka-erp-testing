@@ -68,6 +68,10 @@ import {
   addDays,
   type LeadTimeMap,
 } from "../lib/lead-times";
+import {
+  validateFabricCodes,
+  unknownFabricCodeError,
+} from "../lib/fabric-validation";
 
 const app = new Hono<Env>();
 
@@ -3970,6 +3974,18 @@ app.post("/stock", async (c) => {
       { success: false, error: "No jobCards to clone from source PO" },
       422,
     );
+  }
+
+  // Fabric integrity gate — sourcePO.fabricCode is copied verbatim into the
+  // new stock PO + its placeholder SO row. Without this check, a legacy SO
+  // with an orphan fabricCode (pre-c8696e1 data) would propagate forward
+  // every time a stock PO is cloned from it. See bug_audit_known_issues.md
+  // BUG-2026-05-09-005 + the 2026-05-09 fabricCode sneak-path audit.
+  if (sourcePO.fabricCode) {
+    const fabCheck = await validateFabricCodes(db, [sourcePO.fabricCode]);
+    if (!fabCheck.valid) {
+      return c.json(unknownFabricCodeError(fabCheck.unknown), 400);
+    }
   }
 
   const nowIso = new Date().toISOString();

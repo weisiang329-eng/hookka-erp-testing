@@ -457,11 +457,15 @@ export default function generateCustomerQuotationPdfV2(
           modelRows.sort((a, b) => a.code.localeCompare(b.code));
 
           // Build matrix body (all 5 heights), then drop empty columns.
+          // Wei Siang 2026-05-09: Code column dropped — Description already
+          // contains the same info ("SOFA 5531 1A (LHF/RHF)" carries the
+          // model + suffix). Indices 0/1 are Description/Tier; 2..6 are seat
+          // heights.
           const fullBody: string[][] = [];
           for (const p of modelRows) {
             if (!p.seatHeightPrices || p.seatHeightPrices.length === 0) continue;
             for (const tier of TIERS_ORDER) {
-              const row: string[] = [p.code, p.name, TIER_LABEL[tier] ?? tier];
+              const row: string[] = [p.name, TIER_LABEL[tier] ?? tier];
               let any = false;
               for (const h of SEAT_HEIGHTS) {
                 const sen = nthTierForHeight(p.seatHeightPrices, h, tier);
@@ -474,18 +478,18 @@ export default function generateCustomerQuotationPdfV2(
           if (fullBody.length === 0) continue;
 
           // Drop seat-height columns whose every body cell is DASH. Indices
-          // 0/1/2 are Code/Description/Tier — always kept.
+          // 0/1 are Description/Tier — always kept.
           const heightColUsed = SEAT_HEIGHTS.map((_, i) => {
-            const colIdx = 3 + i;
+            const colIdx = 2 + i;
             return fullBody.some((r) => r[colIdx] !== DASH);
           });
           const visibleHeights = SEAT_HEIGHTS.filter((_, i) => heightColUsed[i]);
           const matrixBody = fullBody.map((r) => [
-            r[0], r[1], r[2],
-            ...SEAT_HEIGHTS.map((_, i) => r[3 + i]).filter((_, i) => heightColUsed[i]),
+            r[0], r[1],
+            ...SEAT_HEIGHTS.map((_, i) => r[2 + i]).filter((_, i) => heightColUsed[i]),
           ]);
           const matrixHead = [
-            "Code", "Description", "Tier",
+            "Description", "Tier",
             ...visibleHeights.map((h) => `${h}"`),
           ];
 
@@ -507,14 +511,13 @@ export default function generateCustomerQuotationPdfV2(
             headStyles: sharedHead,
             alternateRowStyles: sharedAlt,
             columnStyles: {
-              0: { cellWidth: 24 },
-              1: { cellWidth: "auto" },
-              2: { cellWidth: 14 },
+              0: { cellWidth: "auto" }, // Description
+              1: { cellWidth: 14 },     // Tier
+              2: { halign: "right" },   // seat heights
               3: { halign: "right" },
               4: { halign: "right" },
               5: { halign: "right" },
               6: { halign: "right" },
-              7: { halign: "right" },
             },
           });
           advanceYAfterTable();

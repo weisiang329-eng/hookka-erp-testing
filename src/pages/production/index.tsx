@@ -4942,21 +4942,15 @@ export default function ProductionPage({
                         {s.boxLabel && (
                           <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
                         )}
-                        <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Size</span>: {s.sizeLabel}</div>
-                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Color</span>: {s.fabricColor || "-"}</div>
-                        {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
-                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches}"</div>
+                        {s.itemCategory === "BEDFRAME" && (
+                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         )}
-                        {s.legHeightInches != null && s.legHeightInches > 0 && (
-                          <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches}"</div>
-                        )}
+                        <div><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                         <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
                         {s.customerPOId && (
                           <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
                         )}
-                        {s.customerRef && (
-                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust Ref</span>: {s.customerRef}</div>
-                        )}
+                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
                         {s.specialOrder && (
                           <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
                         )}
@@ -5204,21 +5198,15 @@ export default function ProductionPage({
                       {s.boxLabel && (
                         <div><span className="inline-block w-[26mm] font-semibold">Code</span>: {s.boxLabel}</div>
                       )}
-                      <div><span className="inline-block w-[26mm] font-semibold">Size</span>: {s.sizeLabel}</div>
-                      <div><span className="inline-block w-[26mm] font-semibold">Color</span>: {s.fabricColor || "-"}</div>
-                      {s.itemCategory === "BEDFRAME" && s.divanHeightInches != null && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches}"</div>
+                      {s.itemCategory === "BEDFRAME" && (
+                        <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                       )}
-                      {s.legHeightInches != null && s.legHeightInches > 0 && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.legHeightInches}"</div>
-                      )}
+                      <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
                       <div><span className="inline-block w-[26mm] font-semibold">Comp SO</span>: {s.salesOrderNo}</div>
                       {s.customerPOId && (
                         <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId}</div>
                       )}
-                      {s.customerRef && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Cust Ref</span>: {s.customerRef}</div>
-                      )}
+                      <div><span className="inline-block w-[26mm] font-semibold">SO Ref</span>: {s.customerRef || "—"}</div>
                       {s.specialOrder && (
                         <div><span className="inline-block w-[26mm] font-semibold">Special</span>: {s.specialOrder}</div>
                       )}

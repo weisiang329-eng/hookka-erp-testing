@@ -305,7 +305,10 @@ export default function WorkerHomePage() {
       </div>
       )}
 
-      {/* Stat grid — today's job cards */}
+      {/* Stat grid — Pending / In Progress / Pieces done today.
+          Wei Siang 2026-05-10: tied to scan/JC flow which is hidden for now,
+          so the numbers are always 0 — gate behind SHOW_CLOCK_AND_SCAN too. */}
+      {SHOW_CLOCK_AND_SCAN && (
       <div className="grid grid-cols-3 gap-2">
         <StatCard
           label={t("home.pending")}
@@ -323,6 +326,7 @@ export default function WorkerHomePage() {
           tone="done"
         />
       </div>
+      )}
 
       {/* Big scan button */}
       {SHOW_CLOCK_AND_SCAN && (
@@ -337,7 +341,8 @@ export default function WorkerHomePage() {
       </Link>
       )}
 
-      {/* Report problem secondary */}
+      {/* Report problem secondary — Wei Siang 2026-05-10: not yet live. */}
+      {SHOW_CLOCK_AND_SCAN && (
       <Link
         to="/worker/issue"
         className="block w-full h-12 rounded-lg bg-white border border-[#D8D2CC] text-[#9A3A2D] font-semibold text-sm hover:bg-[#FDF6F4] transition-colors"
@@ -347,6 +352,7 @@ export default function WorkerHomePage() {
           {t("home.reportIssue")}
         </span>
       </Link>
+      )}
 
       {/* Breakdown by dept (only if any work done today) */}
       {Object.keys(data.doneByDept).length > 0 && (

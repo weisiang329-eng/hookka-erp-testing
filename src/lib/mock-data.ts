@@ -770,7 +770,6 @@ export type SalesOrderItem = {
   itemCategory: ItemCategory;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   // Customization (matching Google Sheet columns)
@@ -1167,8 +1166,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-001", companySOId: "SO-2604-001", companySODate: "2026-04-15",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-draft-1a", lineNo: 1, lineSuffix: "-01", productId: "prod-6", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 2, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 112000, notes: "" },
-      { id: "soi-draft-1b", lineNo: 2, lineSuffix: "-02", productId: "prod-39", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-draft-1a", lineNo: 1, lineSuffix: "-01", productId: "prod-6", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 2, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 112000, notes: "" },
+      { id: "soi-draft-1b", lineNo: 2, lineSuffix: "-02", productId: "prod-39", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-10", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 157000, totalSen: 157000,
     status: "DRAFT", overdue: "PENDING", notes: "From PO-008301 (Houzs KL)",
@@ -1182,7 +1181,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-002", companySOId: "SO-2604-002", companySODate: "2026-04-16",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-draft-2a", lineNo: 1, lineSuffix: "-01", productId: "prod-100", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 5, legPriceSen: 5000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-draft-2a", lineNo: 1, lineSuffix: "-01", productId: "prod-100", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-14", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 5, legPriceSen: 5000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 85000, totalSen: 85000,
     status: "DRAFT", overdue: "PENDING", notes: "From PO-008305 (Houzs PG)",
@@ -1196,9 +1195,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-003", companySOId: "SO-2604-003", companySODate: "2026-04-16",
     customerDeliveryDate: "2026-05-05", hookkaExpectedDD: "2026-05-03", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-draft-3a", lineNo: 1, lineSuffix: "-01", productId: "prod-39", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-draft-3b", lineNo: 2, lineSuffix: "-02", productId: "prod-44", productCode: "1019(A)-(K)", productName: "1019(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 63000, unitPriceSen: 63000, lineTotalSen: 63000, notes: "" },
-      { id: "soi-draft-3c", lineNo: 3, lineSuffix: "-03", productId: "prod-160", productCode: "5530-2S", productName: "5530-2S", itemCategory: "SOFA", sizeCode: "2S", sizeLabel: "2S", fabricId: "fab-KN390-2", fabricCode: "KN390-2", quantity: 1, gapInches: 0, divanHeightInches: 0, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 121700, unitPriceSen: 121700, lineTotalSen: 121700, notes: "Seat height: 28\"" },
+      { id: "soi-draft-3a", lineNo: 1, lineSuffix: "-01", productId: "prod-39", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-draft-3b", lineNo: 2, lineSuffix: "-02", productId: "prod-44", productCode: "1019(A)-(K)", productName: "1019(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 63000, unitPriceSen: 63000, lineTotalSen: 63000, notes: "" },
+      { id: "soi-draft-3c", lineNo: 3, lineSuffix: "-03", productId: "prod-160", productCode: "5530-2S", productName: "5530-2S", itemCategory: "SOFA", sizeCode: "2S", sizeLabel: "2S", fabricCode: "KN390-2", quantity: 1, gapInches: 0, divanHeightInches: 0, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 121700, unitPriceSen: 121700, lineTotalSen: 121700, notes: "Seat height: 28\"" },
     ],
     subtotalSen: 224700, totalSen: 224700,
     status: "DRAFT", overdue: "PENDING", notes: "From Carress PO/2604-201",
@@ -1216,7 +1215,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-226", companySOId: "SO-2603-226", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "2026-04-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-1", lineNo: 1, lineSuffix: "-01", productId: "prod-1009-A---Q-", productCode: "1009(A)-(Q)", productName: "1009(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-SF-AT-15", fabricCode: "SF-AT-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 0, unitPriceSen: 0, lineTotalSen: 0, notes: "" },
+      { id: "soi-bf-1", lineNo: 1, lineSuffix: "-01", productId: "prod-1009-A---Q-", productCode: "1009(A)-(Q)", productName: "1009(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "SF-AT-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 0, unitPriceSen: 0, lineTotalSen: 0, notes: "" },
     ],
     subtotalSen: 0, totalSen: 0,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1231,7 +1230,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-214", companySOId: "SO-2603-214", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-2", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-2", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1246,8 +1245,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-211", companySOId: "SO-2603-211", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-3", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
-      { id: "soi-bf-4", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-3", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-4", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 96000, totalSen: 96000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1262,7 +1261,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-210", companySOId: "SO-2603-210", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-5", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "DIVAN CURVE", specialOrderPriceSen: 5000, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-5", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "DIVAN CURVE", specialOrderPriceSen: 5000, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 45000, totalSen: 45000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1277,7 +1276,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-225", companySOId: "SO-2603-225", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-6", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-6", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1292,7 +1291,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-224", companySOId: "SO-2603-224", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-05-13", hookkaExpectedDD: "2026-05-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-7", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-7", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1307,7 +1306,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-223", companySOId: "SO-2603-223", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-17", hookkaExpectedDD: "2026-04-15", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-8", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-8", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
     ],
     subtotalSen: 68000, totalSen: 68000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1322,7 +1321,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-222", companySOId: "SO-2603-222", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-9", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 40000, unitPriceSen: 50000, lineTotalSen: 50000, notes: "" },
+      { id: "soi-bf-9", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 40000, unitPriceSen: 50000, lineTotalSen: 50000, notes: "" },
     ],
     subtotalSen: 50000, totalSen: 50000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1337,7 +1336,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-221", companySOId: "SO-2603-221", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-10", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-10", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 45000, totalSen: 45000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1352,7 +1351,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-220", companySOId: "SO-2603-220", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-11", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-11", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-14", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1367,7 +1366,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-219", companySOId: "SO-2603-219", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-16", hookkaExpectedDD: "2026-04-14", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-12", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
+      { id: "soi-bf-12", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
     ],
     subtotalSen: 67000, totalSen: 67000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1382,9 +1381,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-218", companySOId: "SO-2603-218", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-13", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-14", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-15", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-13", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-14", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-15", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 108000, totalSen: 108000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1399,7 +1398,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-215", companySOId: "SO-2603-215", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-16", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-16", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 85000, totalSen: 85000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1414,7 +1413,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-213", companySOId: "SO-2603-213", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-17", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-17", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1429,7 +1428,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-209", companySOId: "SO-2603-209", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-18", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 96000, lineTotalSen: 96000, notes: "" },
+      { id: "soi-bf-18", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 96000, lineTotalSen: 96000, notes: "" },
     ],
     subtotalSen: 96000, totalSen: 96000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1444,7 +1443,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-216", companySOId: "SO-2603-216", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-19", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-19", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1459,8 +1458,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2512-368", companySOId: "SO-2512-368", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-08", hookkaExpectedDD: "2026-04-06", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-20", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 56000, unitPriceSen: 76000, lineTotalSen: 76000, notes: "" },
-      { id: "soi-bf-21", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--S-", productCode: "1005-(S)", productName: "1005-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricId: "fab-PC151-09", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 38000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
+      { id: "soi-bf-20", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 56000, unitPriceSen: 76000, lineTotalSen: 76000, notes: "" },
+      { id: "soi-bf-21", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--S-", productCode: "1005-(S)", productName: "1005-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 38000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
     ],
     subtotalSen: 114000, totalSen: 114000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1475,7 +1474,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2602-065", companySOId: "SO-2602-065", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-08", hookkaExpectedDD: "2026-04-06", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-22", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 40000, unitPriceSen: 60000, lineTotalSen: 60000, notes: "" },
+      { id: "soi-bf-22", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 40000, unitPriceSen: 60000, lineTotalSen: 60000, notes: "" },
     ],
     subtotalSen: 60000, totalSen: 60000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1490,7 +1489,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2602-040", companySOId: "SO-2602-040", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-07", hookkaExpectedDD: "2026-04-05", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-23", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-23", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1505,9 +1504,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-140", companySOId: "SO-2604-140", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-24", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-25", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-26", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-24", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-25", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-26", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 84000, totalSen: 84000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1522,7 +1521,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-153", companySOId: "SO-2604-153", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-25", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-27", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-27", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1537,7 +1536,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-154", companySOId: "SO-2604-154", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-09", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-28", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 16, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-28", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 16, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1552,7 +1551,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-147", companySOId: "SO-2604-147", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-29", lineNo: 1, lineSuffix: "-01", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: null, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 42000, lineTotalSen: 42000, notes: "" },
+      { id: "soi-bf-29", lineNo: 1, lineSuffix: "-01", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-03", quantity: 1, gapInches: null, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 42000, lineTotalSen: 42000, notes: "" },
     ],
     subtotalSen: 42000, totalSen: 42000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1567,7 +1566,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-148", companySOId: "SO-2604-148", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-05-02", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-30", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-30", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-03", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1582,7 +1581,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-149", companySOId: "SO-2604-149", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-05-02", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-31", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 9, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer, Right Drawer", specialOrderPriceSen: 30000, basePriceSen: 52000, unitPriceSen: 87000, lineTotalSen: 87000, notes: "" },
+      { id: "soi-bf-31", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 9, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer, Right Drawer", specialOrderPriceSen: 30000, basePriceSen: 52000, unitPriceSen: 87000, lineTotalSen: 87000, notes: "" },
     ],
     subtotalSen: 87000, totalSen: 87000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1597,7 +1596,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-150", companySOId: "SO-2604-150", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-32", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 80000, unitPriceSen: 95000, lineTotalSen: 95000, notes: "" },
+      { id: "soi-bf-32", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer", specialOrderPriceSen: 15000, basePriceSen: 80000, unitPriceSen: 95000, lineTotalSen: 95000, notes: "" },
     ],
     subtotalSen: 95000, totalSen: 95000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1612,7 +1611,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-151", companySOId: "SO-2604-151", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-21", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-33", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-33", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1627,8 +1626,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-152", companySOId: "SO-2604-152", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-34", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-35", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-34", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-35", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 120000, totalSen: 120000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1643,7 +1642,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-201", companySOId: "SO-2603-201", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "2026-04-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-36", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-36", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1658,7 +1657,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-199", companySOId: "SO-2603-199", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-07", hookkaExpectedDD: "2026-04-05", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-37", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-37", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1673,7 +1672,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-196", companySOId: "SO-2603-196", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "2026-04-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-38", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-38", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1688,9 +1687,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-197", companySOId: "SO-2603-197", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "2026-04-16", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-39", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-40", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-41", lineNo: 3, lineSuffix: "-03", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-39", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-40", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-41", lineNo: 3, lineSuffix: "-03", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 172000, totalSen: 172000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1705,9 +1704,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-198", companySOId: "SO-2603-198", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-42", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--SS-", productCode: "1013-(SS)", productName: "1013-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-09", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 27000, unitPriceSen: 27000, lineTotalSen: 27000, notes: "" },
-      { id: "soi-bf-43", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-08", fabricCode: "PC151-08", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-44", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-42", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--SS-", productCode: "1013-(SS)", productName: "1013-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 27000, unitPriceSen: 27000, lineTotalSen: 27000, notes: "" },
+      { id: "soi-bf-43", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-08", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-44", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 95000, totalSen: 95000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1722,7 +1721,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-200", companySOId: "SO-2603-200", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-01", hookkaExpectedDD: "2026-03-30", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-45", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-45", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1737,7 +1736,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-190", companySOId: "SO-2603-190", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-11", hookkaExpectedDD: "2026-04-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-46", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-46", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1752,7 +1751,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-191", companySOId: "SO-2603-191", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-11", hookkaExpectedDD: "2026-04-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-47", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 33000, lineTotalSen: 33000, notes: "" },
+      { id: "soi-bf-47", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 33000, lineTotalSen: 33000, notes: "" },
     ],
     subtotalSen: 33000, totalSen: 33000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1767,7 +1766,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-192", companySOId: "SO-2603-192", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "2026-04-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-48", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-48", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 85000, totalSen: 85000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1782,7 +1781,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-193", companySOId: "SO-2603-193", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "2026-04-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-49", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-49", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1797,8 +1796,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-188", companySOId: "SO-2603-188", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-11", hookkaExpectedDD: "2026-04-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-50", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-51", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-11", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-50", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-51", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1813,7 +1812,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603--187", companySOId: "SO-2603--187", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-52", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-52", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1828,8 +1827,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-189", companySOId: "SO-2603-189", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-53", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-54", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-53", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-54", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1844,7 +1843,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-194", companySOId: "SO-2603-194", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-55", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-55", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1859,8 +1858,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-195", companySOId: "SO-2603-195", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-56", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-57", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-56", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-57", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 120000, totalSen: 120000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1875,8 +1874,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-181", companySOId: "SO-2603-181", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-58", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
-      { id: "soi-bf-59", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-58", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-59", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 130000, totalSen: 130000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1891,7 +1890,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-182", companySOId: "SO-2603-182", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-60", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--HF--W---S-", productCode: "2023-(HF)(W)-(S)", productName: "2023-(HF)(W)-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
+      { id: "soi-bf-60", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--HF--W---S-", productCode: "2023-(HF)(W)-(S)", productName: "2023-(HF)(W)-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
     ],
     subtotalSen: 61000, totalSen: 61000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1906,7 +1905,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-183", companySOId: "SO-2603-183", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-61", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---Q-", productCode: "2009(A)-(Q)", productName: "2009(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-61", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---Q-", productCode: "2009(A)-(Q)", productName: "2009(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
     ],
     subtotalSen: 70000, totalSen: 70000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1921,8 +1920,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-184", companySOId: "SO-2603-184", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-17", hookkaExpectedDD: "2026-04-15", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-62", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 70000, unitPriceSen: 82000, lineTotalSen: 82000, notes: "" },
-      { id: "soi-bf-63", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-62", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 70000, unitPriceSen: 82000, lineTotalSen: 82000, notes: "" },
+      { id: "soi-bf-63", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 138000, totalSen: 138000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1937,7 +1936,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-185", companySOId: "SO-2603-185", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-02", hookkaExpectedDD: "2026-03-31", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-64", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
+      { id: "soi-bf-64", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
     ],
     subtotalSen: 67000, totalSen: 67000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1952,7 +1951,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-186", companySOId: "SO-2603-186", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-08", hookkaExpectedDD: "2026-04-06", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-65", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 55000, unitPriceSen: 55000, lineTotalSen: 55000, notes: "" },
+      { id: "soi-bf-65", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 55000, unitPriceSen: 55000, lineTotalSen: 55000, notes: "" },
     ],
     subtotalSen: 55000, totalSen: 55000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1967,7 +1966,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-156", companySOId: "SO-2603-156", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-66", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-66", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -1982,10 +1981,10 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-157", companySOId: "SO-2603-157", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-08", hookkaExpectedDD: "2026-04-06", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-67", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
-      { id: "soi-bf-68", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-69", lineNo: 3, lineSuffix: "-03", productId: "prod-DIVAN--Q-", productCode: "DIVAN-(Q)", productName: "DIVAN-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 30000, unitPriceSen: 30000, lineTotalSen: 30000, notes: "" },
-      { id: "soi-bf-70", lineNo: 4, lineSuffix: "-04", productId: "prod-1003-A--HF--W---K-", productCode: "1003(A)(HF)(W)-(K)", productName: "1003(A)(HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-67", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-68", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-69", lineNo: 3, lineSuffix: "-03", productId: "prod-DIVAN--Q-", productCode: "DIVAN-(Q)", productName: "DIVAN-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 30000, unitPriceSen: 30000, lineTotalSen: 30000, notes: "" },
+      { id: "soi-bf-70", lineNo: 4, lineSuffix: "-04", productId: "prod-1003-A--HF--W---K-", productCode: "1003(A)(HF)(W)-(K)", productName: "1003(A)(HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
     ],
     subtotalSen: 206000, totalSen: 206000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2000,7 +1999,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-159", companySOId: "SO-2603-159", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-71", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-KS-15 COOL SILVER", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-71", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2015,7 +2014,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-160", companySOId: "SO-2603-160", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "2026-04-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-72", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 6, legPriceSen: 10000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 50000, lineTotalSen: 50000, notes: "" },
+      { id: "soi-bf-72", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 6, legPriceSen: 10000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 50000, lineTotalSen: 50000, notes: "" },
     ],
     subtotalSen: 50000, totalSen: 50000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2030,7 +2029,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-161", companySOId: "SO-2603-161", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-09", hookkaExpectedDD: "2026-04-07", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-73", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-73", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 45000, totalSen: 45000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2045,7 +2044,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-162", companySOId: "SO-2603-162", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-03", hookkaExpectedDD: "2026-04-01", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-74", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-74", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2060,7 +2059,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-167", companySOId: "SO-2603-167", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-09", hookkaExpectedDD: "2026-04-07", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-75", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---SS-", productCode: "2038(A)-(SS)", productName: "2038(A)-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 53000, unitPriceSen: 53000, lineTotalSen: 53000, notes: "" },
+      { id: "soi-bf-75", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---SS-", productCode: "2038(A)-(SS)", productName: "2038(A)-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 53000, unitPriceSen: 53000, lineTotalSen: 53000, notes: "" },
     ],
     subtotalSen: 53000, totalSen: 53000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2075,7 +2074,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-003", companySOId: "SO-2604-003", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-09", hookkaExpectedDD: "2026-04-07", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-76", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-76", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 85000, totalSen: 85000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2090,7 +2089,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-177", companySOId: "SO-2603-177", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-77", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-09", fabricCode: "PC151-09", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-77", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-09", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 45000, totalSen: 45000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2105,7 +2104,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-154", companySOId: "SO-2603-154", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "2026-04-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-78", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-15", fabricCode: "PC151-15", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-78", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-15", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2120,9 +2119,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-155", companySOId: "SO-2603-155", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-17", hookkaExpectedDD: "2026-04-15", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-79", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer, Left Drawer", specialOrderPriceSen: 30000, basePriceSen: 68000, unitPriceSen: 98000, lineTotalSen: 98000, notes: "" },
-      { id: "soi-bf-80", lineNo: 2, lineSuffix: "-02", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer", specialOrderPriceSen: 15000, basePriceSen: 55000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
-      { id: "soi-bf-81", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 40000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-79", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Right Drawer, Left Drawer", specialOrderPriceSen: 30000, basePriceSen: 68000, unitPriceSen: 98000, lineTotalSen: 98000, notes: "" },
+      { id: "soi-bf-80", lineNo: 2, lineSuffix: "-02", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer", specialOrderPriceSen: 15000, basePriceSen: 55000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-81", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 40000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 220000, totalSen: 220000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2137,7 +2136,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-163", companySOId: "SO-2603-163", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-82", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-82", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2152,7 +2151,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-164", companySOId: "SO-2603-164", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-83", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-83", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2167,8 +2166,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-165", companySOId: "SO-2603-165", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-16", hookkaExpectedDD: "2026-04-14", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-84", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 16, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
-      { id: "soi-bf-85", lineNo: 2, lineSuffix: "-02", productId: "prod-1019-A---HF---W---K-", productCode: "1019(A) (HF) (W)-(K)", productName: "1019(A) (HF) (W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 72000, lineTotalSen: 72000, notes: "" },
+      { id: "soi-bf-84", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-14", quantity: 1, gapInches: 16, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-85", lineNo: 2, lineSuffix: "-02", productId: "prod-1019-A---HF---W---K-", productCode: "1019(A) (HF) (W)-(K)", productName: "1019(A) (HF) (W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 72000, lineTotalSen: 72000, notes: "" },
     ],
     subtotalSen: 157000, totalSen: 157000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2183,7 +2182,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-166", companySOId: "SO-2603-166", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-11", hookkaExpectedDD: "2026-04-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-86", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
+      { id: "soi-bf-86", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-10", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
     ],
     subtotalSen: 57000, totalSen: 57000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2198,7 +2197,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-168", companySOId: "SO-2603-168", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "2026-04-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-87", lineNo: 1, lineSuffix: "-01", productId: "prod-2033--HF--W---K-", productCode: "2033 (HF)(W)-(K)", productName: "2033 (HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 12, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer, Right Drawer", specialOrderPriceSen: 30000, basePriceSen: 70000, unitPriceSen: 105000, lineTotalSen: 105000, notes: "" },
+      { id: "soi-bf-87", lineNo: 1, lineSuffix: "-01", productId: "prod-2033--HF--W---K-", productCode: "2033 (HF)(W)-(K)", productName: "2033 (HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 12, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "Left Drawer, Right Drawer", specialOrderPriceSen: 30000, basePriceSen: 70000, unitPriceSen: 105000, lineTotalSen: 105000, notes: "" },
     ],
     subtotalSen: 105000, totalSen: 105000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2213,7 +2212,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-169", companySOId: "SO-2603-169", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-11", hookkaExpectedDD: "2026-04-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-88", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--HF--W---K-", productCode: "2023 (HF)(W)-(K)", productName: "2023 (HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: null, divanHeightInches: null, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-88", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--HF--W---K-", productCode: "2023 (HF)(W)-(K)", productName: "2023 (HF)(W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: null, divanHeightInches: null, divanPriceSen: 0, legHeightInches: null, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
     ],
     subtotalSen: 70000, totalSen: 70000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2228,7 +2227,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-170", companySOId: "SO-2603-170", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-89", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-89", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2243,8 +2242,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-171", companySOId: "SO-2603-171", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-90", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-91", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-90", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-91", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 136000, totalSen: 136000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2259,8 +2258,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-173", companySOId: "SO-2603-173", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-92", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
-      { id: "soi-bf-93", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--SS-", productCode: "1007-(SS)", productName: "1007-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
+      { id: "soi-bf-92", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-93", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--SS-", productCode: "1007-(SS)", productName: "1007-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
     ],
     subtotalSen: 95000, totalSen: 95000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2275,7 +2274,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-175", companySOId: "SO-2603-175", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "2026-04-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-94", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---HF---W---Q-", productCode: "2038(A) (HF) (W)-(Q)", productName: "2038(A) (HF) (W)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-94", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---HF---W---Q-", productCode: "2038(A) (HF) (W)-(Q)", productName: "2038(A) (HF) (W)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2290,9 +2289,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-179", companySOId: "SO-2603-179", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-95", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-96", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-97", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-95", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-96", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-97", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 84000, totalSen: 84000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2307,9 +2306,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-180", companySOId: "SO-2603-180", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-10", hookkaExpectedDD: "2026-04-08", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-98", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-99", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-100", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-98", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-99", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-100", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 84000, totalSen: 84000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2324,9 +2323,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-178", companySOId: "SO-2603-178", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "2026-04-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-101", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-102", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-103", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-101", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-102", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-103", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 84000, totalSen: 84000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2341,7 +2340,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-153", companySOId: "SO-2603-153", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-104", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-104", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2356,7 +2355,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2603-127", companySOId: "SO-2603-127", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-01", hookkaExpectedDD: "2026-03-30", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-105", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-105", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2371,9 +2370,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-016", companySOId: "SO-2604-016", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-06", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-106", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
-      { id: "soi-bf-107", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
-      { id: "soi-bf-108", lineNo: 3, lineSuffix: "-03", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-106", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-107", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-108", lineNo: 3, lineSuffix: "-03", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 175000, totalSen: 175000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2388,15 +2387,15 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-015", companySOId: "SO-2604-015", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-08", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-109", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
-      { id: "soi-bf-110", lineNo: 2, lineSuffix: "-02", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 4, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 58000, lineTotalSen: 58000, notes: "" },
-      { id: "soi-bf-111", lineNo: 3, lineSuffix: "-03", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
-      { id: "soi-bf-112", lineNo: 4, lineSuffix: "-04", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
-      { id: "soi-bf-113", lineNo: 5, lineSuffix: "-05", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
-      { id: "soi-bf-114", lineNo: 6, lineSuffix: "-06", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 55000, unitPriceSen: 60000, lineTotalSen: 60000, notes: "" },
-      { id: "soi-bf-115", lineNo: 7, lineSuffix: "-07", productId: "prod-1041--Q-", productCode: "1041-(Q)", productName: "1041-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 37500, unitPriceSen: 42500, lineTotalSen: 42500, notes: "" },
-      { id: "soi-bf-116", lineNo: 8, lineSuffix: "-08", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 4, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 58000, lineTotalSen: 58000, notes: "" },
-      { id: "soi-bf-117", lineNo: 9, lineSuffix: "-09", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-109", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-110", lineNo: 2, lineSuffix: "-02", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 4, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 58000, lineTotalSen: 58000, notes: "" },
+      { id: "soi-bf-111", lineNo: 3, lineSuffix: "-03", productId: "prod-2038-A---Q-", productCode: "2038(A)-(Q)", productName: "2038(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
+      { id: "soi-bf-112", lineNo: 4, lineSuffix: "-04", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-113", lineNo: 5, lineSuffix: "-05", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
+      { id: "soi-bf-114", lineNo: 6, lineSuffix: "-06", productId: "prod-2006-A---Q-", productCode: "2006(A)-(Q)", productName: "2006(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 55000, unitPriceSen: 60000, lineTotalSen: 60000, notes: "" },
+      { id: "soi-bf-115", lineNo: 7, lineSuffix: "-07", productId: "prod-1041--Q-", productCode: "1041-(Q)", productName: "1041-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 37500, unitPriceSen: 42500, lineTotalSen: 42500, notes: "" },
+      { id: "soi-bf-116", lineNo: 8, lineSuffix: "-08", productId: "prod-DIVAN--K-", productCode: "DIVAN-(K)", productName: "DIVAN-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 4, divanPriceSen: 0, legHeightInches: 7, legPriceSen: 16000, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 42000, unitPriceSen: 58000, lineTotalSen: 58000, notes: "" },
+      { id: "soi-bf-117", lineNo: 9, lineSuffix: "-09", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 515500, totalSen: 515500,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2411,7 +2410,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-020", companySOId: "SO-2604-020", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-18", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-118", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-118", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2426,7 +2425,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-019", companySOId: "SO-2604-019", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-119", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-119", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2441,8 +2440,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-018", companySOId: "SO-2604-018", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-120", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-121", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-120", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-121", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2457,7 +2456,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-017", companySOId: "SO-2604-017", companySODate: "2026-04-06",
     customerDeliveryDate: "2026-04-13", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-122", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-122", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2472,9 +2471,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-141", companySOId: "SO-2604-141", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-05-02", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-123", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-09", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-124", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-15", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-125", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-15", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-123", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-124", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-125", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 96000, totalSen: 96000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2489,7 +2488,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-142", companySOId: "SO-2604-142", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-126", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 73000, lineTotalSen: 73000, notes: "" },
+      { id: "soi-bf-126", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 73000, lineTotalSen: 73000, notes: "" },
     ],
     subtotalSen: 73000, totalSen: 73000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2504,8 +2503,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-143", companySOId: "SO-2604-143", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-127", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-04", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-128", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-04", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-127", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-128", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 108000, totalSen: 108000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2520,7 +2519,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-144", companySOId: "SO-2604-144", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-21", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-129", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-129", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-14", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2535,7 +2534,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-145", companySOId: "SO-2604-145", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-130", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-130", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-10", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2550,9 +2549,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-146", companySOId: "SO-2604-146", companySODate: "2026-04-07",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-131", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-132", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-11", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-133", lineNo: 3, lineSuffix: "-03", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-131", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-132", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-133", lineNo: 3, lineSuffix: "-03", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 132000, totalSen: 132000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2567,8 +2566,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-078", companySOId: "SO-2604-078", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-134", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
-      { id: "soi-bf-135", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
+      { id: "soi-bf-134", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-135", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
     ],
     subtotalSen: 102000, totalSen: 102000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2583,7 +2582,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-072", companySOId: "SO-2604-072", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-136", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-136", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2598,7 +2597,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-073", companySOId: "SO-2604-073", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-137", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-137", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2613,7 +2612,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-074", companySOId: "SO-2604-074", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-138", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-138", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2628,8 +2627,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-076", companySOId: "SO-2604-076", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-139", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
-      { id: "soi-bf-140", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
+      { id: "soi-bf-139", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-140", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
     ],
     subtotalSen: 109000, totalSen: 109000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2644,7 +2643,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-071", companySOId: "SO-2604-071", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-05-11", hookkaExpectedDD: "2026-05-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-141", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-141", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
     ],
     subtotalSen: 70000, totalSen: 70000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2659,7 +2658,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-075", companySOId: "SO-2604-075", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-142", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 11, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-142", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 11, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
     ],
     subtotalSen: 68000, totalSen: 68000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2674,7 +2673,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-077", companySOId: "SO-2604-077", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-09", hookkaExpectedDD: "2026-04-07", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-143", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-04", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-143", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-04", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2689,11 +2688,11 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-079", companySOId: "SO-2604-079", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-144", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-145", lineNo: 2, lineSuffix: "-02", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
-      { id: "soi-bf-146", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-147", lineNo: 4, lineSuffix: "-04", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-148", lineNo: 5, lineSuffix: "-05", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-144", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-145", lineNo: 2, lineSuffix: "-02", productId: "prod-2008-A---Q-", productCode: "2008(A)-(Q)", productName: "2008(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 70000, unitPriceSen: 70000, lineTotalSen: 70000, notes: "" },
+      { id: "soi-bf-146", lineNo: 3, lineSuffix: "-03", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-147", lineNo: 4, lineSuffix: "-04", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-148", lineNo: 5, lineSuffix: "-05", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 322000, totalSen: 322000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2708,9 +2707,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-080", companySOId: "SO-2604-080", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-15", hookkaExpectedDD: "2026-04-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-149", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-150", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
-      { id: "soi-bf-151", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
+      { id: "soi-bf-149", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-150", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
+      { id: "soi-bf-151", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Top Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
     ],
     subtotalSen: 156000, totalSen: 156000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2725,8 +2724,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-081", companySOId: "SO-2604-081", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-152", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 13000, basePriceSen: 80000, unitPriceSen: 93000, lineTotalSen: 93000, notes: "" },
-      { id: "soi-bf-153", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Divan Top Fully Cover, HB Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
+      { id: "soi-bf-152", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 13000, basePriceSen: 80000, unitPriceSen: 93000, lineTotalSen: 93000, notes: "" },
+      { id: "soi-bf-153", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "Divan Top Fully Cover, HB Fully Cover, Divan Bottom Fully Cover", specialOrderPriceSen: 10000, basePriceSen: 28000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
     ],
     subtotalSen: 131000, totalSen: 131000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2741,8 +2740,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-082", companySOId: "SO-2604-082", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-23", hookkaExpectedDD: "2026-04-21", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-154", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-11", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-155", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-12", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-154", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-11", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-155", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2757,8 +2756,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-070", companySOId: "SO-2604-070", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-19", hookkaExpectedDD: "2026-04-17", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-156", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--S-", productCode: "1013-(S)", productName: "1013-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 26000, unitPriceSen: 26000, lineTotalSen: 26000, notes: "" },
-      { id: "soi-bf-157", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-156", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--S-", productCode: "1013-(S)", productName: "1013-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 26000, unitPriceSen: 26000, lineTotalSen: 26000, notes: "" },
+      { id: "soi-bf-157", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 54000, totalSen: 54000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2773,8 +2772,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-068", companySOId: "SO-2604-068", companySODate: "2026-04-03",
     customerDeliveryDate: "2026-04-07", hookkaExpectedDD: "2026-04-05", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-158", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-12", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-159", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-12", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-158", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-159", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-12", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2789,7 +2788,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-155", companySOId: "SO-2604-155", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-160", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-160", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2804,9 +2803,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-156", companySOId: "SO-2604-156", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-161", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-14", fabricCode: "PC151-14", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
-      { id: "soi-bf-162", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-06", fabricCode: "PC151-06", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
-      { id: "soi-bf-163", lineNo: 3, lineSuffix: "-03", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
+      { id: "soi-bf-161", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-14", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-162", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-06", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-163", lineNo: 3, lineSuffix: "-03", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 61000, lineTotalSen: 61000, notes: "" },
     ],
     subtotalSen: 202000, totalSen: 202000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2821,7 +2820,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-157", companySOId: "SO-2604-157", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-17", hookkaExpectedDD: "2026-04-15", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-164", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
+      { id: "soi-bf-164", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 57000, lineTotalSen: 57000, notes: "" },
     ],
     subtotalSen: 57000, totalSen: 57000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2836,7 +2835,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-158", companySOId: "SO-2604-158", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-21", hookkaExpectedDD: "2026-04-19", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-165", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 40000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-165", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 40000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2851,7 +2850,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-159", companySOId: "SO-2604-159", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-29", hookkaExpectedDD: "2026-04-27", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-166", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--SS-", productCode: "1007-(SS)", productName: "1007-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
+      { id: "soi-bf-166", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--SS-", productCode: "1007-(SS)", productName: "1007-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
     ],
     subtotalSen: 39000, totalSen: 39000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2866,7 +2865,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-160", companySOId: "SO-2604-160", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-29", hookkaExpectedDD: "2026-04-27", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-167", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-167", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2881,7 +2880,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-161", companySOId: "SO-2604-161", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-29", hookkaExpectedDD: "2026-04-27", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-168", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-168", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2896,7 +2895,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-162", companySOId: "SO-2604-162", companySODate: "2026-04-09",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-169", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-169", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2911,7 +2910,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-163", companySOId: "SO-2604-163", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-170", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 6, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-170", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 6, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
     ],
     subtotalSen: 68000, totalSen: 68000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2926,8 +2925,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-164", companySOId: "SO-2604-164", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-171", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-172", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-171", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-17", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-172", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 92000, totalSen: 92000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2942,8 +2941,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-165", companySOId: "SO-2604-165", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-173", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
-      { id: "soi-bf-174", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-173", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-174", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 124000, totalSen: 124000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2958,7 +2957,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-166", companySOId: "SO-2604-166", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-175", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--S-", productCode: "2023-(S)", productName: "2023-(S)", itemCategory: "BEDFRAME", sizeCode: "", sizeLabel: "", fabricId: "fab-KS-17 ROCK GRANITE", fabricCode: "KS-17 ROCK GRANITE", quantity: 1, gapInches: null, divanHeightInches: null, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 0, unitPriceSen: 0, lineTotalSen: 0, notes: "" },
+      { id: "soi-bf-175", lineNo: 1, lineSuffix: "-01", productId: "prod-2023--S-", productCode: "2023-(S)", productName: "2023-(S)", itemCategory: "BEDFRAME", sizeCode: "", sizeLabel: "", fabricCode: "KS-17 ROCK GRANITE", quantity: 1, gapInches: null, divanHeightInches: null, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 0, unitPriceSen: 0, lineTotalSen: 0, notes: "" },
     ],
     subtotalSen: 0, totalSen: 0,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2973,8 +2972,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-167", companySOId: "SO-2604-167", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-20", hookkaExpectedDD: "2026-05-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-176", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---SK-", productCode: "1003(A)-(SK)", productName: "1003(A)-(SK)", itemCategory: "BEDFRAME", sizeCode: "", sizeLabel: "200CMX200CM", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 112000, unitPriceSen: 129000, lineTotalSen: 129000, notes: "" },
-      { id: "soi-bf-177", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-04", fabricCode: "PC151-04", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 68000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-176", lineNo: 1, lineSuffix: "-01", productId: "prod-1003-A---SK-", productCode: "1003(A)-(SK)", productName: "1003(A)-(SK)", itemCategory: "BEDFRAME", sizeCode: "", sizeLabel: "200CMX200CM", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 112000, unitPriceSen: 129000, lineTotalSen: 129000, notes: "" },
+      { id: "soi-bf-177", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---K-", productCode: "1003(A)-(K)", productName: "1003(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-04", quantity: 1, gapInches: 14, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "Front Drawer", specialOrderPriceSen: 12000, basePriceSen: 68000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 214000, totalSen: 214000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -2989,7 +2988,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-168", companySOId: "SO-2604-168", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-20", hookkaExpectedDD: "2026-04-18", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-178", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-178", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3004,8 +3003,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-169", companySOId: "SO-2604-169", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-179", lineNo: 1, lineSuffix: "-01", productId: "prod-DIVAN--Q-", productCode: "DIVAN-(Q)", productName: "DIVAN-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 30000, unitPriceSen: 35000, lineTotalSen: 35000, notes: "" },
-      { id: "soi-bf-180", lineNo: 2, lineSuffix: "-02", productId: "prod-DIVAN--SS-", productCode: "DIVAN-(SS)", productName: "DIVAN-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 29000, unitPriceSen: 34000, lineTotalSen: 34000, notes: "" },
+      { id: "soi-bf-179", lineNo: 1, lineSuffix: "-01", productId: "prod-DIVAN--Q-", productCode: "DIVAN-(Q)", productName: "DIVAN-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 30000, unitPriceSen: 35000, lineTotalSen: 35000, notes: "" },
+      { id: "soi-bf-180", lineNo: 2, lineSuffix: "-02", productId: "prod-DIVAN--SS-", productCode: "DIVAN-(SS)", productName: "DIVAN-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-01", quantity: 1, gapInches: null, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 29000, unitPriceSen: 34000, lineTotalSen: 34000, notes: "" },
     ],
     subtotalSen: 69000, totalSen: 69000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3020,8 +3019,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-170", companySOId: "SO-2604-170", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-181", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-182", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-181", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-182", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 92000, totalSen: 92000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3036,7 +3035,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-171", companySOId: "SO-2604-171", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-08", hookkaExpectedDD: "2026-05-06", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-183", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-183", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3051,7 +3050,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-172", companySOId: "SO-2604-172", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-14", hookkaExpectedDD: "2026-04-12", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-184", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-09", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-184", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-09", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3066,8 +3065,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-173", companySOId: "SO-2604-173", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-185", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-186", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-185", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-186", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3082,9 +3081,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-174", companySOId: "SO-2604-174", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-187", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-188", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-189", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-187", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-188", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-189", lineNo: 3, lineSuffix: "-03", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 84000, totalSen: 84000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3099,8 +3098,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-175", companySOId: "SO-2604-175", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-04", hookkaExpectedDD: "2026-05-02", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-190", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-191", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-190", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-191", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 56000, totalSen: 56000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3115,7 +3114,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-176", companySOId: "SO-2604-176", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-192", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-192", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3130,10 +3129,10 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-177", companySOId: "SO-2604-177", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-193", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-194", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
-      { id: "soi-bf-195", lineNo: 3, lineSuffix: "-03", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "HB Straight", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
-      { id: "soi-bf-196", lineNo: 4, lineSuffix: "-04", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-10", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-193", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-194", lineNo: 2, lineSuffix: "-02", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-195", lineNo: 3, lineSuffix: "-03", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "HB Straight", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-196", lineNo: 4, lineSuffix: "-04", productId: "prod-1003-A---Q-", productCode: "1003(A)-(Q)", productName: "1003(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-10", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 248000, totalSen: 248000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3148,7 +3147,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-178", companySOId: "SO-2604-178", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-197", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-KS-15 COOL SILVER", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-197", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3163,7 +3162,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-179", companySOId: "SO-2604-179", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-198", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
+      { id: "soi-bf-198", lineNo: 1, lineSuffix: "-01", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 85000, lineTotalSen: 85000, notes: "" },
     ],
     subtotalSen: 85000, totalSen: 85000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3178,9 +3177,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-180", companySOId: "SO-2604-180", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-28", hookkaExpectedDD: "2026-04-26", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-199", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
-      { id: "soi-bf-200", lineNo: 2, lineSuffix: "-02", productId: "prod-2041-A---Q-", productCode: "2041(A)-(Q)", productName: "2041(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
-      { id: "soi-bf-201", lineNo: 3, lineSuffix: "-03", productId: "prod-2041-A---Q-", productCode: "2041(A)-(Q)", productName: "2041(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-199", lineNo: 1, lineSuffix: "-01", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-200", lineNo: 2, lineSuffix: "-02", productId: "prod-2041-A---Q-", productCode: "2041(A)-(Q)", productName: "2041(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
+      { id: "soi-bf-201", lineNo: 3, lineSuffix: "-03", productId: "prod-2041-A---Q-", productCode: "2041(A)-(Q)", productName: "2041(A)-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 56000, unitPriceSen: 56000, lineTotalSen: 56000, notes: "" },
     ],
     subtotalSen: 192000, totalSen: 192000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3195,8 +3194,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-181", companySOId: "SO-2604-181", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-202", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-15", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-203", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--S-", productCode: "1007-(S)", productName: "1007-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricId: "fab-PC151-16", fabricCode: "PC151-16", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 38000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
+      { id: "soi-bf-202", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-15", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-203", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--S-", productCode: "1007-(S)", productName: "1007-(S)", itemCategory: "BEDFRAME", sizeCode: "S", sizeLabel: "3FT", fabricCode: "PC151-16", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 38000, unitPriceSen: 38000, lineTotalSen: 38000, notes: "" },
     ],
     subtotalSen: 78000, totalSen: 78000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3211,8 +3210,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-182", companySOId: "SO-2604-182", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-13", hookkaExpectedDD: "2026-05-11", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-204", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
-      { id: "soi-bf-205", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-204", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-205", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--K-", productCode: "1013-(K)", productName: "1013-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 68000, totalSen: 68000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3227,7 +3226,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-183", companySOId: "SO-2604-183", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-25", hookkaExpectedDD: "2026-04-23", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-206", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-KS-15 COOL SILVER", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-206", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3242,7 +3241,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-184", companySOId: "SO-2604-184", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-207", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-KS-15 COOL SILVER", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-207", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "KS-15 COOL SILVER", quantity: 1, gapInches: 10, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 28000, totalSen: 28000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3257,7 +3256,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-185", companySOId: "SO-2604-185", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-24", hookkaExpectedDD: "2026-04-22", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-208", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
+      { id: "soi-bf-208", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-03", quantity: 1, gapInches: 12, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 45000, lineTotalSen: 45000, notes: "" },
     ],
     subtotalSen: 45000, totalSen: 45000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3272,7 +3271,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-186", companySOId: "SO-2604-186", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-27", hookkaExpectedDD: "2026-04-25", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-209", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-209", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3287,10 +3286,10 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-187", companySOId: "SO-2604-187", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-23", hookkaExpectedDD: "2026-04-21", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-210", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-06", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
-      { id: "soi-bf-211", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-06", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-212", lineNo: 3, lineSuffix: "-03", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-08", fabricCode: "PC151-08", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
-      { id: "soi-bf-213", lineNo: 4, lineSuffix: "-04", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-06", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
+      { id: "soi-bf-210", lineNo: 1, lineSuffix: "-01", productId: "prod-1005--K-", productCode: "1005-(K)", productName: "1005-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-211", lineNo: 2, lineSuffix: "-02", productId: "prod-1005--Q-", productCode: "1005-(Q)", productName: "1005-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-212", lineNo: 3, lineSuffix: "-03", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-08", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
+      { id: "soi-bf-213", lineNo: 4, lineSuffix: "-04", productId: "prod-1005--SS-", productCode: "1005-(SS)", productName: "1005-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-06", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 39000, unitPriceSen: 39000, lineTotalSen: 39000, notes: "" },
     ],
     subtotalSen: 170000, totalSen: 170000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3305,7 +3304,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-188", companySOId: "SO-2604-188", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-06", hookkaExpectedDD: "2026-05-04", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-214", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-18", fabricCode: "PC151-18", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 72000, lineTotalSen: 72000, notes: "" },
+      { id: "soi-bf-214", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-18", quantity: 1, gapInches: 10, divanHeightInches: 10, divanPriceSen: 5000, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 72000, lineTotalSen: 72000, notes: "" },
     ],
     subtotalSen: 72000, totalSen: 72000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3320,8 +3319,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-189", companySOId: "SO-2604-189", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-30", hookkaExpectedDD: "2026-04-28", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-215", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-216", lineNo: 2, lineSuffix: "-02", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-215", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-216", lineNo: 2, lineSuffix: "-02", productId: "prod-2009-A---K-", productCode: "2009(A)-(K)", productName: "2009(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 1, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 120000, totalSen: 120000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3336,7 +3335,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-190", companySOId: "SO-2604-190", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-23", hookkaExpectedDD: "2026-04-21", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-217", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-03", fabricCode: "PC151-03", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
+      { id: "soi-bf-217", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--K-", productCode: "1007-(K)", productName: "1007-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-03", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 52000, unitPriceSen: 52000, lineTotalSen: 52000, notes: "" },
     ],
     subtotalSen: 52000, totalSen: 52000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3351,9 +3350,9 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-191", companySOId: "SO-2604-191", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-11", hookkaExpectedDD: "2026-05-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-218", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
-      { id: "soi-bf-219", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
-      { id: "soi-bf-220", lineNo: 3, lineSuffix: "-03", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
+      { id: "soi-bf-218", lineNo: 1, lineSuffix: "-01", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-219", lineNo: 2, lineSuffix: "-02", productId: "prod-2038-A---K-", productCode: "2038(A)-(K)", productName: "2038(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 68000, unitPriceSen: 68000, lineTotalSen: 68000, notes: "" },
+      { id: "soi-bf-220", lineNo: 3, lineSuffix: "-03", productId: "prod-2008-A---K-", productCode: "2008(A)-(K)", productName: "2008(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 80000, unitPriceSen: 80000, lineTotalSen: 80000, notes: "" },
     ],
     subtotalSen: 216000, totalSen: 216000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3368,7 +3367,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-192", companySOId: "SO-2604-192", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-05", hookkaExpectedDD: "2026-05-03", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-221", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
+      { id: "soi-bf-221", lineNo: 1, lineSuffix: "-01", productId: "prod-2006-A---K-", productCode: "2006(A)-(K)", productName: "2006(A)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 2, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 67000, unitPriceSen: 67000, lineTotalSen: 67000, notes: "" },
     ],
     subtotalSen: 67000, totalSen: 67000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3383,8 +3382,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-193", companySOId: "SO-2604-193", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-11", hookkaExpectedDD: "2026-05-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-222", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-223", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-17", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-222", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-223", lineNo: 2, lineSuffix: "-02", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-17", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 80000, totalSen: 80000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3399,7 +3398,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-194", companySOId: "SO-2604-194", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-15", hookkaExpectedDD: "2026-05-13", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-224", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-224", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3414,7 +3413,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-195", companySOId: "SO-2604-195", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-05", hookkaExpectedDD: "2026-05-03", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-225", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-225", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
     ],
     subtotalSen: 40000, totalSen: 40000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3429,8 +3428,8 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-196", companySOId: "SO-2604-196", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-05", hookkaExpectedDD: "2026-05-03", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-226", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
-      { id: "soi-bf-227", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricId: "fab-PC151-02", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
+      { id: "soi-bf-226", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--Q-", productCode: "1007-(Q)", productName: "1007-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-01", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 40000, unitPriceSen: 40000, lineTotalSen: 40000, notes: "" },
+      { id: "soi-bf-227", lineNo: 2, lineSuffix: "-02", productId: "prod-1013--Q-", productCode: "1013-(Q)", productName: "1013-(Q)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "5FT", fabricCode: "PC151-02", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 4, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 28000, unitPriceSen: 28000, lineTotalSen: 28000, notes: "" },
     ],
     subtotalSen: 68000, totalSen: 68000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3445,7 +3444,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-197", companySOId: "SO-2604-197", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-05-11", hookkaExpectedDD: "2026-05-09", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-228", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--SS-", productCode: "1013-(SS)", productName: "1013-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricId: "fab-PC151-13", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 27000, unitPriceSen: 27000, lineTotalSen: 27000, notes: "" },
+      { id: "soi-bf-228", lineNo: 1, lineSuffix: "-01", productId: "prod-1013--SS-", productCode: "1013-(SS)", productName: "1013-(SS)", itemCategory: "BEDFRAME", sizeCode: "Q", sizeLabel: "3.5FT", fabricCode: "PC151-13", quantity: 1, gapInches: 12, divanHeightInches: 8, divanPriceSen: 0, legHeightInches: 0, legPriceSen: 0, specialOrder: "", specialOrderPriceSen: 0, basePriceSen: 27000, unitPriceSen: 27000, lineTotalSen: 27000, notes: "" },
     ],
     subtotalSen: 27000, totalSen: 27000,
     status: "DRAFT", overdue: "PENDING", notes: "",
@@ -3460,7 +3459,7 @@ export const salesOrders: SalesOrder[] = [
     companySO: "SO-2604-198", companySOId: "SO-2604-198", companySODate: "2026-04-14",
     customerDeliveryDate: "2026-04-22", hookkaExpectedDD: "2026-04-20", hookkaDeliveryOrder: "",
     items: [
-      { id: "soi-bf-229", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--HF---W---K-", productCode: "1007 (HF) (W)-(K)", productName: "1007 (HF) (W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricId: "fab-PC151-01", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 13, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Front Drawer", specialOrderPriceSen: 5000, basePriceSen: 52000, unitPriceSen: 62000, lineTotalSen: 62000, notes: "DRAWER 10\\\"" },
+      { id: "soi-bf-229", lineNo: 1, lineSuffix: "-01", productId: "prod-1007--HF---W---K-", productCode: "1007 (HF) (W)-(K)", productName: "1007 (HF) (W)-(K)", itemCategory: "BEDFRAME", sizeCode: "K", sizeLabel: "6FT", fabricCode: "PC151-01", quantity: 1, gapInches: 14, divanHeightInches: 13, divanPriceSen: 5000, legHeightInches: 0, legPriceSen: 0, specialOrder: "HB Fully Cover, Front Drawer", specialOrderPriceSen: 5000, basePriceSen: 52000, unitPriceSen: 62000, lineTotalSen: 62000, notes: "DRAWER 10\\\"" },
     ],
     subtotalSen: 81000, totalSen: 81000,
     status: "DRAFT", overdue: "PENDING", notes: "",

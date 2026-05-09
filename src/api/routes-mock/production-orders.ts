@@ -640,7 +640,6 @@ app.post('/stock', async (c) => {
     itemCategory: sourcePO.itemCategory,
     sizeCode: sourcePO.sizeCode,
     sizeLabel: sourcePO.sizeLabel,
-    fabricId: '',
     fabricCode: sourcePO.fabricCode,
     quantity,
     gapInches: sourcePO.gapInches,

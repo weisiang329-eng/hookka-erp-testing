@@ -15,7 +15,6 @@ export const SalesOrderItemSchema = z
     itemCategory: z.string().optional(),
     sizeCode: z.string().optional(),
     sizeLabel: z.string().optional(),
-    fabricId: z.string().optional(),
     fabricCode: z.string().optional(),
     quantity: z.number().optional(),
     gapInches: z.number().nullable().optional(),

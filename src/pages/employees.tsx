@@ -2405,7 +2405,7 @@ function EfficiencyOverviewTab({
     {
       label: "Refresh",
       icon: <RefreshCw className="h-4 w-4" />,
-      action: () => {},
+      action: () => { window.location.reload(); },
       separator: true,
     },
   ];
@@ -3217,7 +3217,7 @@ function EmployeeDetailTab({
     {
       label: "Refresh",
       icon: <RefreshCw className="h-4 w-4" />,
-      action: () => {},
+      action: () => { window.location.reload(); },
       separator: true,
     },
   ];

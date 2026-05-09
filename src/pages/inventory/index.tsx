@@ -1082,18 +1082,6 @@ const rmColumns: Column<RawMaterial>[] = [
 ];
 
 // ============================================================
-// Context menu
-// ============================================================
-function inventoryContextMenu(toastFn: (msg: string) => void): ContextMenuItem[] {
-  return [
-    { label: "View", action: (row) => { toastFn("Detail view for: " + (row.code || row.itemCode)); } },
-    { label: "Edit", action: () => {} },
-    { separator: true, label: "", action: () => {} },
-    { label: "Refresh", action: () => {} },
-  ];
-}
-
-// ============================================================
 // Component
 // ============================================================
 
@@ -1539,7 +1527,6 @@ export default function InventoryPage() {
   const rmLowStock = liveRawMaterials.filter(r => r.balanceQty > 0 && r.balanceQty < 5).length;
   const rmZeroStock = liveRawMaterials.filter(r => r.balanceQty === 0).length;
 
-  const contextMenu = inventoryContextMenu(toast.info);
 
   // Edit FG dialog state
   const [editFG, setEditFG] = useState<FGItem | null>(null);
@@ -1632,6 +1619,29 @@ export default function InventoryPage() {
     }
     setRmBatchesLoading(false);
   };
+
+  // Context menus per tab. Each Edit/View action opens the same dialog the
+  // double-click handler does — right-click was previously stubbed
+  // (`action: () => {}`) which made the menu look unresponsive to
+  // operators. Refresh hard-reloads after invalidating the relevant cache
+  // prefix so the next render fetches fresh data.
+  const fgContextMenu: ContextMenuItem[] = [
+    { label: "View", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
+    { label: "Edit", action: (row: FGItem) => { void handleDoubleClickFG(row); } },
+    { separator: true, label: "", action: () => {} },
+    { label: "Refresh", action: () => { invalidateCachePrefix("/api/products"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
+  ];
+  const wipContextMenu: ContextMenuItem[] = [
+    { label: "View", action: (row: WIPItem) => { handleDoubleClickWIP(row); } },
+    { separator: true, label: "", action: () => {} },
+    { label: "Refresh", action: () => { invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
+  ];
+  const rmContextMenu: ContextMenuItem[] = [
+    { label: "View", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
+    { label: "Edit", action: (row: RawMaterial) => { void handleDoubleClickRM(row); } },
+    { separator: true, label: "", action: () => {} },
+    { label: "Refresh", action: () => { invalidateCachePrefix("/api/raw-materials"); invalidateCachePrefix("/api/inventory"); window.location.reload(); } },
+  ];
 
   // Batch import state (FG and RM share the same dialog component with
   // different column schemas / key columns / handlers).
@@ -2092,7 +2102,7 @@ export default function InventoryPage() {
                 data={filteredFG}
                 keyField="id"
                 gridId="inventory-fg"
-                contextMenuItems={contextMenu}
+                contextMenuItems={fgContextMenu}
                 onDoubleClick={handleDoubleClickFG}
               />
             </CardContent>
@@ -2146,7 +2156,7 @@ export default function InventoryPage() {
                 data={filteredWIP}
                 keyField="id"
                 gridId="inventory-wip"
-                contextMenuItems={contextMenu}
+                contextMenuItems={wipContextMenu}
                 onDoubleClick={handleDoubleClickWIP}
               />
             </CardContent>
@@ -2310,7 +2320,7 @@ export default function InventoryPage() {
                 data={filteredRM}
                 keyField="id"
                 gridId="inventory-rm"
-                contextMenuItems={contextMenu}
+                contextMenuItems={rmContextMenu}
                 onDoubleClick={handleDoubleClickRM}
               />
             </CardContent>

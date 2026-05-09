@@ -4993,9 +4993,13 @@ export default function ProductionPage({
                           Each section has its own QR + badge so operator
                           can scan whichever is relevant. mt-auto pushes
                           this row + the customer footer to the bottom of
-                          the fixed-height card so all stickers in a row
-                          align cleanly. */}
-                      <div className="flex items-end gap-2 mt-auto">
+                          the fixed-height card. min-height keeps the row
+                          itself a consistent vertical size regardless of
+                          single vs 2合1 vs 3合1 — without it the smaller
+                          QRs (70px) make the row visibly shorter than
+                          the single big QR (110px), and the customer
+                          divider drifts up. */}
+                      <div className="flex items-end gap-2 mt-auto" style={{ minHeight: "118px" }}>
                         <div className="flex items-end gap-1 flex-1">
                           <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
                           <div className="flex-1 text-center min-w-0">

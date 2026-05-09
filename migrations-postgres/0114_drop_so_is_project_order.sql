@@ -1,0 +1,44 @@
+-- ---------------------------------------------------------------------------
+-- 0114_drop_so_is_project_order.sql
+--
+-- Drop sales_orders.is_project_order. The Project Order toggle was added
+-- 2026-05-06 (migration 0073) so SOFA items could fan out per-piece in the
+-- production cascade — same shape as BEDFRAME's per-PO split.
+--
+-- 2026-05-09 made the toggle moot. Commit 7302f0f (`feat(sales-orders):
+-- reject SOFA qty>1 — must use 1 unit per line`) enforces qty=1 on every
+-- SOFA line at SO save. With qty=1, the per-piece-vs-merged distinction
+-- the toggle controlled collapses:
+--   * SOFA qty=1 + isProjectOrder=false → 1 PO, 1 piece (set semantics)
+--   * SOFA qty=1 + isProjectOrder=true  → 1 PO, 1 piece (per-piece semantics)
+--   ↑ identical output
+--
+-- The only remaining functional effect of the toggle was on FAB_CUT
+-- cross-PO grouping in `aggregateFcSlots()` — when isProjectOrder=true,
+-- SOFA slots stayed per-PO instead of merging into one cut JC. We've
+-- decided cross-PO merge is always correct for SOFA (cutter physically
+-- cuts every piece in the same SO + baseModel + fabric in one pass).
+--
+-- Audit on 2026-05-09: 0 of 444 SOs in production had isProjectOrder=1,
+-- so dropping is lossless.
+--
+-- Companion changes in this commit:
+--   * production-builder.ts: drop `isProjectOrder` from OrderForProduction
+--     + FcSlotInfo; simplify isSetItem / mergeAsSofa / wipQty conditions
+--   * sales-orders.ts: drop the column from POST INSERT, PUT UPDATE,
+--     SalesOrderRow type, rowToSO mapping, Option D rebuild caller, and
+--     the self-apply ALTER ADD COLUMN for migration 0073
+--   * import-completion.ts: drop the field pass-through in the rebuild path
+--   * types/index.ts: drop `isProjectOrder?: boolean` from the SO type
+--   * sales/create.tsx + sales/edit.tsx + sales/detail.tsx: drop the UI
+--     toggle, state, draft persistence field, request body field, lock
+--     logic, and the Project Order chip on the detail page
+--   * column-rename-map.json: drop the isProjectOrder entry so a future
+--     re-introduction of the camelCase identifier doesn't silently route
+--     to a non-existent column
+--
+-- Self-applied via `ensurePendingMigrations()` in sales-orders.ts so first
+-- POST per isolate heals the schema even before this file runs.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE sales_orders DROP COLUMN IF EXISTS is_project_order;

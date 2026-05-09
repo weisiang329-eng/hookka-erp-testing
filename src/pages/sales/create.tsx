@@ -381,11 +381,6 @@ function CreateSalesOrderPage() {
   const [hookkaExpectedDD, setHookkaExpectedDD] = useState("");
   const [notes, setNotes] = useState("");
   const [items, setItems] = useState<LineItem[]>([makeEmptyLine()]);
-  // Project Order toggle — when ON, SOFA items in this SO fan out per-piece
-  // in the production cascade (each sofa gets its own PO, mirroring the
-  // bedframe split). Lets the operator track each sofa independently and
-  // partial-ship.
-  const [isProjectOrder, setIsProjectOrder] = useState(false);
 
   // Mark this tab as dirty (un-evictable from the 10-tab cap) the moment
   // the user has touched the form. Heuristic: any of the header fields
@@ -395,7 +390,6 @@ function CreateSalesOrderPage() {
   const isDirty = !saving && (
     !!customerId || !!customerPOId || !!customerSOId || !!reference ||
     !!customerDeliveryDate || !!hookkaExpectedDD || !!notes ||
-    isProjectOrder ||
     items.some((it) => !!it.productId)
   );
   useUnsavedChanges(isDirty);
@@ -418,7 +412,6 @@ function CreateSalesOrderPage() {
     hookkaExpectedDD: string;
     notes: string;
     items: LineItem[];
-    isProjectOrder: boolean;
   };
   const draftCurrent: DraftShape = useMemo(() => ({
     customerId,
@@ -431,11 +424,9 @@ function CreateSalesOrderPage() {
     hookkaExpectedDD,
     notes,
     items,
-    isProjectOrder,
   }), [
     customerId, deliveryHubId, customerPOId, customerSOId, reference,
     companySODate, customerDeliveryDate, hookkaExpectedDD, notes, items,
-    isProjectOrder,
   ]);
   const restoredDraft = useFormDraft<DraftShape>(draftKey, draftCurrent);
   const [draftBannerDismissed, setDraftBannerDismissed] = useState(false);
@@ -458,7 +449,6 @@ function CreateSalesOrderPage() {
     setCustomerDeliveryDate(restoredDraft.customerDeliveryDate);
     setHookkaExpectedDD(restoredDraft.hookkaExpectedDD);
     setNotes(restoredDraft.notes);
-    setIsProjectOrder(restoredDraft.isProjectOrder ?? false);
     // Old drafts won't have `_uid` — backfill on restore so React keys stay
     // stable for whatever the user does next.
     setItems(restoredDraft.items.map((it) => (it._uid ? it : { ...it, _uid: crypto.randomUUID() })));
@@ -659,7 +649,6 @@ function CreateSalesOrderPage() {
           setCustomerDeliveryDate(data.customerDeliveryDate || "");
           setHookkaExpectedDD(data.hookkaExpectedDD || "");
           setNotes(data.notes || "");
-          setIsProjectOrder(data.isProjectOrder ?? false);
           if (data.items && data.items.length > 0) {
             // Migrate old single specialOrder string to specialOrders array.
             // Always assign a fresh `_uid` per cloned line — the source's uid
@@ -1538,7 +1527,6 @@ function CreateSalesOrderPage() {
           companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
           items: itemsForServer,
           status,
-          isProjectOrder,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as { success?: boolean; error?: string; data?: { id?: string; companySOId?: string } };
@@ -1795,33 +1783,6 @@ function CreateSalesOrderPage() {
                 <Input type="date" value={customerDeliveryDate} onChange={(e) => setCustomerDeliveryDate(e.target.value)} />
               </div>
             </div>
-
-            {/* Project Order toggle — when ON, SOFA items fan out per-piece
-                in the production cascade (each sofa = its own PO). Mirrors
-                the bedframe split behaviour. Operator can partial-ship and
-                track each sofa independently. */}
-            <label
-              className={`flex items-start gap-3 rounded-md border px-3 py-2.5 cursor-pointer transition-colors ${
-                isProjectOrder
-                  ? "bg-[#6B5C32]/10 border-[#6B5C32]/40"
-                  : "bg-white border-[#E2DDD8] hover:bg-[#FAF9F7]"
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={isProjectOrder}
-                onChange={(e) => setIsProjectOrder(e.target.checked)}
-                className="mt-0.5 rounded border-[#D1D5DB] text-[#6B5C32] focus:ring-[#6B5C32]/20"
-              />
-              <div className="flex-1">
-                <div className={`text-sm font-medium ${isProjectOrder ? "text-[#6B5C32]" : "text-[#374151]"}`}>
-                  Project Order
-                </div>
-                <div className="text-xs text-[#6B7280]">
-                  Split sofa items per piece (each sofa gets its own production order, like bedframes)
-                </div>
-              </div>
-            </label>
 
             {selectedCustomer && (
               <div className="rounded-md bg-[#FAF9F7] border border-[#E2DDD8] p-3 text-sm">

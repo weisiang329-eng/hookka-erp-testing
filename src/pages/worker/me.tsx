@@ -167,6 +167,9 @@ export default function WorkerMePage() {
     }
   });
 
+  // Wei Siang 2026-05-10: leave-application flow not yet live for workers.
+  // Flip back on by setting SHOW_LEAVES = true.
+  const SHOW_LEAVES = false;
   const [leaves, setLeaves] = useState<LeavesData | null>(null);
   const [leavesLoading, setLeavesLoading] = useState(true);
   const [phone, setPhone] = useState(me?.phone || "");
@@ -335,7 +338,8 @@ export default function WorkerMePage() {
         </label>
       </div>
 
-      {/* Leaves card */}
+      {/* Leaves card — Wei Siang 2026-05-10: hidden until rollout. */}
+      {SHOW_LEAVES && (
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">
         <div className="flex items-center justify-between mb-3">
           <p className="text-sm font-semibold">{t("me.leaves")}</p>
@@ -480,6 +484,7 @@ export default function WorkerMePage() {
           </>
         )}
       </div>
+      )}
 
       {/* Language selector */}
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC]">

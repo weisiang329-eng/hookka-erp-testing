@@ -13,7 +13,7 @@
 // ============================================================
 import { Outlet, useLocation, useNavigate, Link } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Home, ScanLine, Wallet, User, Globe } from "lucide-react";
+import { Home, Wallet, User, Globe } from "lucide-react";
 import {
   useT,
   useApplyHtmlLang,
@@ -134,20 +134,15 @@ export default function WorkerLayout() {
       </main>
 
       {/* ----- Bottom tab bar (hidden on login) ----- */}
+      {/* Wei Siang 2026-05-10: Scan tab hidden until rollout. */}
       {!isLogin && (
         <nav className="fixed bottom-0 left-0 right-0 z-30 bg-white border-t border-[#D8D2CC] shadow-[0_-2px_8px_rgba(0,0,0,0.04)]">
-          <div className="max-w-md mx-auto grid grid-cols-4">
+          <div className="max-w-md mx-auto grid grid-cols-3">
             <TabButton
               to="/worker"
               active={pathname === "/worker"}
               icon={<Home className="h-5 w-5" />}
               label={t("nav.home")}
-            />
-            <TabButton
-              to="/worker/scan"
-              active={pathname.startsWith("/worker/scan")}
-              icon={<ScanLine className="h-5 w-5" />}
-              label={t("nav.scan")}
             />
             <TabButton
               to="/worker/pay"

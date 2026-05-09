@@ -145,16 +145,14 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
       )
       .bind(orgId)
       .all<{ code: string; name: string; category: string; sizeLabel: string | null }>(),
-    // Source-of-truth fabric catalog. Must be the same table the manual
-    // /sales/create dropdown reads from (`fabrics`), so OCR-resolved
-    // fabricCode round-trips through the same fabricId space — Edit form
-    // dropdowns can find them. fabric_trackings is a separate per-roll
-    // tracker (ft- ids) that won't match the create/edit pickers.
+    // Source-of-truth fabric catalog (2026-05-09): read from
+    // fabric_trackings, the modern raw_materials-derived mirror that the
+    // /sales/create + Edit pickers also use. fabricCode is the canonical
+    // reference downstream, so OCR-resolved codes round-trip cleanly.
     db
       .prepare(
-        "SELECT code AS \"fabricCode\", name AS \"fabricDescription\", category AS \"priceTier\" FROM fabrics WHERE orgId = ? ORDER BY code",
+        "SELECT \"fabricCode\", \"fabricDescription\", \"fabricCategory\" AS \"priceTier\" FROM fabric_trackings ORDER BY \"fabricCode\"",
       )
-      .bind(orgId)
       .all<{ fabricCode: string; fabricDescription: string | null; priceTier: string | null }>(),
     db
       .prepare("SELECT value FROM kv_config WHERE key = ?")

@@ -13942,4 +13942,169 @@ app.post("/regen-fg-units", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/backfill-sofa-leg-heights
+//
+// Wei Siang's standard config (2026-05-09):
+//   - Models 5535 / 5536 → 1" legs by default
+//   - All other sofa models → 6" legs by default
+//
+// Historical SOs were created without legHeightInches consistently set.
+// This one-shot scans sales_order_items + production_orders for SOFA
+// rows where legHeightInches is NULL or 0 and applies the rule.
+//
+// Body: { dryRun?: boolean }     — defaults true
+// Response: { scanned, updates: [{soNo, lineNo, productCode, from, to}] }
+//
+// Per project_migration_in_progress: one-shot, will be removed
+// post-migration.
+// ---------------------------------------------------------------------------
+app.post("/backfill-sofa-leg-heights", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "update");
+  if (denied) return denied;
+
+  let body: { dryRun?: unknown } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // empty body OK
+  }
+  const dryRun = body.dryRun !== false;
+  const db = c.var.DB;
+
+  // Default leg height by productCode prefix.
+  const defaultLeg = (productCode: string | null): number => {
+    if (!productCode) return 6;
+    const p = productCode.trim().toUpperCase();
+    if (p.startsWith("5535") || p.startsWith("5536")) return 1;
+    return 6;
+  };
+
+  type ItemRow = {
+    id: string;
+    salesOrderId: string;
+    salesOrderNo: string | null;
+    companySOId: string | null;
+    lineNo: number | null;
+    lineSuffix: string | null;
+    productCode: string | null;
+    legHeightInches: number | null;
+  };
+
+  // sales_order_items first.
+  const soItemsRes = await db
+    .prepare(
+      `SELECT soi.id, soi.salesOrderId,
+              so.salesOrderNo AS salesOrderNo, so.companySOId AS companySOId,
+              soi.lineNo, soi.lineSuffix, soi.productCode, soi.legHeightInches
+         FROM sales_order_items AS soi
+         LEFT JOIN sales_orders AS so ON so.id = soi.salesOrderId
+         WHERE soi.itemCategory = 'SOFA'
+           AND (soi.legHeightInches IS NULL OR soi.legHeightInches = 0)`,
+    )
+    .all<ItemRow>();
+  const soItems = soItemsRes.results ?? [];
+
+  // production_orders — separate scan so PO-only-data also gets updated
+  // (some POs were generated before the SO line was finalised, etc.).
+  type PoRow = {
+    id: string;
+    poNo: string;
+    salesOrderId: string | null;
+    salesOrderNo: string | null;
+    companySOId: string | null;
+    lineNo: number | null;
+    productCode: string | null;
+    legHeightInches: number | null;
+  };
+  const posRes = await db
+    .prepare(
+      `SELECT po.id, po.poNo, po.salesOrderId, po.salesOrderNo, po.companySOId,
+              po.lineNo, po.productCode, po.legHeightInches
+         FROM production_orders AS po
+         WHERE po.itemCategory = 'SOFA'
+           AND (po.legHeightInches IS NULL OR po.legHeightInches = 0)`,
+    )
+    .all<PoRow>();
+  const pos = posRes.results ?? [];
+
+  type Update = {
+    table: "sales_order_items" | "production_orders";
+    rowId: string;
+    soNo: string | null;
+    lineNo: number | null;
+    productCode: string | null;
+    from: number | null;
+    to: number;
+  };
+  const updates: Update[] = [];
+
+  for (const r of soItems) {
+    updates.push({
+      table: "sales_order_items",
+      rowId: r.id,
+      soNo: r.companySOId || r.salesOrderNo,
+      lineNo: r.lineNo,
+      productCode: r.productCode,
+      from: r.legHeightInches,
+      to: defaultLeg(r.productCode),
+    });
+  }
+  for (const r of pos) {
+    updates.push({
+      table: "production_orders",
+      rowId: r.id,
+      soNo: r.companySOId || r.salesOrderNo,
+      lineNo: r.lineNo,
+      productCode: r.productCode,
+      from: r.legHeightInches,
+      to: defaultLeg(r.productCode),
+    });
+  }
+
+  // Distribution summary by suggested value.
+  const dist: Record<string, number> = {};
+  for (const u of updates) {
+    const k = `${u.table}|${u.to}"`;
+    dist[k] = (dist[k] || 0) + 1;
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      scanned: { soItems: soItems.length, pos: pos.length },
+      updateCount: updates.length,
+      distribution: dist,
+      sampleUpdates: updates.slice(0, 30),
+    });
+  }
+
+  // Live: apply updates in batches.
+  const statements = updates.map((u) =>
+    db
+      .prepare(
+        `UPDATE ${u.table} SET legHeightInches = ? WHERE id = ?`,
+      )
+      .bind(u.to, u.rowId),
+  );
+  if (statements.length > 0) {
+    // d1 batch can take 50-100 statements at a time depending on engine —
+    // chunk to be safe.
+    const chunkSize = 50;
+    for (let i = 0; i < statements.length; i += chunkSize) {
+      await db.batch(statements.slice(i, i + chunkSize));
+    }
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    scanned: { soItems: soItems.length, pos: pos.length },
+    updated: updates.length,
+    distribution: dist,
+    sampleUpdates: updates.slice(0, 30),
+  });
+});
+
 export default app;

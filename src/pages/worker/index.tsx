@@ -240,6 +240,9 @@ export default function WorkerHomePage() {
   const displayName = cachedName || data.worker.name;
   const clockedIn = !!data.attendance?.clockIn;
   const clockedOut = !!data.attendance?.clockOut;
+  // Wei Siang 2026-05-10: Clock-in + Scan Job Card not yet live for workers.
+  // Hide the two action cards on the home page until rollout.
+  const SHOW_CLOCK_AND_SCAN = false;
 
   return (
     <div className="space-y-4 pt-2">
@@ -253,6 +256,7 @@ export default function WorkerHomePage() {
       </div>
 
       {/* Clock card */}
+      {SHOW_CLOCK_AND_SCAN && (
       <div className="bg-white rounded-xl p-4 border border-[#D8D2CC] shadow-sm">
         {!clockedIn ? (
           <button
@@ -299,6 +303,7 @@ export default function WorkerHomePage() {
           </div>
         )}
       </div>
+      )}
 
       {/* Stat grid — today's job cards */}
       <div className="grid grid-cols-3 gap-2">
@@ -320,6 +325,7 @@ export default function WorkerHomePage() {
       </div>
 
       {/* Big scan button */}
+      {SHOW_CLOCK_AND_SCAN && (
       <Link
         to="/worker/scan"
         className="block w-full h-20 rounded-xl bg-[#6B5C32] hover:bg-[#5a4d2a] text-white text-xl font-bold tracking-wide shadow-md active:shadow-sm active:translate-y-[1px] transition-all"
@@ -329,6 +335,7 @@ export default function WorkerHomePage() {
           {t("home.scanBig")}
         </span>
       </Link>
+      )}
 
       {/* Report problem secondary */}
       <Link

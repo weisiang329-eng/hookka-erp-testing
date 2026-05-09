@@ -13247,4 +13247,108 @@ app.post("/correct-so-line-qty-cascade", async (c) => {
   return c.json({ ...result, executedStatements: stmts.length });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/delete-fg-units-by-ids
+//
+// Surgical fg_units cleanup — deletes only the explicit unit IDs passed in
+// the body. Used after /correct-so-line-qty-cascade scaled a PO down: the
+// FG cascade originally generated more units than actually exist, so we
+// need to drop the over-counted ones.
+//
+// Body: { unitIds: string[], dryRun: boolean }
+// Returns: { success, dryRun, deleted, errors }
+//
+// Permission: production-orders:update (FG mgmt is downstream of PO).
+// ---------------------------------------------------------------------------
+app.post("/delete-fg-units-by-ids", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { unitIds?: unknown; dryRun?: unknown };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const ids = Array.isArray(body.unitIds)
+    ? body.unitIds.filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      )
+    : null;
+  if (!ids || ids.length === 0) {
+    return c.json(
+      { success: false, error: "body.unitIds must be a non-empty array" },
+      400,
+    );
+  }
+  const dryRun = body.dryRun === true;
+  const db = c.var.DB;
+
+  // Pre-flight: verify these units exist + check status (refuse to delete
+  // anything beyond PACKED — DELIVERED/RETURNED/INVOICED are immutable
+  // historical records).
+  const placeholders = ids.map(() => "?").join(",");
+  const existing = await db
+    .prepare(
+      `SELECT id, status, unit_serial AS unitSerial, po_id AS poId
+         FROM fg_units WHERE id IN (${placeholders})`,
+    )
+    .bind(...ids)
+    .all<{ id: string; status: string; unitSerial: string; poId: string }>();
+  const rows = existing.results ?? [];
+  const found = new Set(rows.map((r) => r.id));
+  const notFound = ids.filter((id) => !found.has(id));
+  const unsafeStatuses = ["DELIVERED", "RETURNED", "LOADED"];
+  const unsafe = rows.filter((r) => unsafeStatuses.includes(r.status));
+  if (unsafe.length > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `Refuse to delete fg_units with status in ${unsafeStatuses.join("/")}: ${unsafe.map((u) => `${u.id}(${u.status})`).slice(0, 5).join(", ")}`,
+      },
+      409,
+    );
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      requested: ids.length,
+      found: rows.length,
+      notFound,
+      wouldDelete: rows.map((r) => ({
+        id: r.id,
+        unitSerial: r.unitSerial,
+        status: r.status,
+      })),
+    });
+  }
+
+  // Live DELETE
+  try {
+    await db
+      .prepare(`DELETE FROM fg_units WHERE id IN (${placeholders})`)
+      .bind(...ids)
+      .run();
+  } catch (err) {
+    return c.json(
+      {
+        success: false,
+        error: `DELETE failed: ${err instanceof Error ? err.message : String(err)}`,
+      },
+      500,
+    );
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    requested: ids.length,
+    found: rows.length,
+    deleted: rows.length,
+    notFound,
+  });
+});
+
 export default app;

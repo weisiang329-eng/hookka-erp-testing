@@ -4987,39 +4987,23 @@ export default function ProductionPage({
                         {s.boxLabel && (
                           <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Code</span>: {s.boxLabel}</div>
                         )}
-                        {s.itemCategory === "SOFA" && (
-                          <>
-                            <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Seat</span>: {s.sizeLabel || "—"}</div>
-                            <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Fabric</span>: {s.fabricCode || "—"}</div>
-                          </>
-                        )}
                         {s.itemCategory === "BEDFRAME" && (
                           <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         )}
                         <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Fabric</span>: {s.fabricCode || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Comp SO</span>: {s.salesOrderNo}</div>
-                        {s.customerPOId && (
-                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
-                        )}
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId || "—"}</div>
                         <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
-                        {s.itemCategory === "BEDFRAME" && (
-                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
-                        )}
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
+                        <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#9A3A2D]">Special</span>: {s.specialOrder ? <span className="font-bold text-[#9A3A2D]">★ {s.specialOrder}</span> : "—"}</div>
                       </div>
-                      {/* Bottom group: anchored to card bottom via mt-auto.
-                          Order inside: optional Special order line → QR
-                          row → customer footer. Special sits ABOVE QR
-                          when set so it grabs attention before the
-                          packer scans. QR layout is HORIZONTAL (QR
-                          left, badge text right) at the original sizes
-                          — operators are scanning info first, QR
-                          second. */}
+                      {/* QR row + Customer footer — anchored to card
+                          bottom via mt-auto. QR is HORIZONTAL (QR left,
+                          badge right) at the original sizes — info is
+                          the focus, not the QR. Special order is in the
+                          body section above (not here). */}
                       <div className="mt-auto flex flex-col gap-2">
-                        {s.specialOrder && (
-                          <div className="text-center font-bold text-[#9A3A2D] leading-tight" style={{ fontSize: "11px" }}>
-                            ★ {s.specialOrder}
-                          </div>
-                        )}
                         <div className="flex items-end gap-2">
                           <div className="flex items-end gap-1 flex-1 min-w-0">
                             <QRImg data={trackUrl} size={legsPair || pillowPair ? 70 : 110} alt="FG unit QR" className="block" />
@@ -5263,37 +5247,25 @@ export default function ProductionPage({
                       {s.boxLabel && (
                         <div><span className="inline-block w-[26mm] font-semibold">Code</span>: {s.boxLabel}</div>
                       )}
-                      {s.itemCategory === "SOFA" && (
-                        <>
-                          <div><span className="inline-block w-[26mm] font-semibold">Seat</span>: {s.sizeLabel || "—"}</div>
-                          <div><span className="inline-block w-[26mm] font-semibold">Fabric</span>: {s.fabricCode || "—"}</div>
-                        </>
-                      )}
                       {s.itemCategory === "BEDFRAME" && (
                         <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                       )}
                       <div><span className="inline-block w-[26mm] font-semibold">Leg</span>: {s.legHeightInches != null && s.legHeightInches > 0 ? `${s.legHeightInches}"` : "—"}</div>
+                      <div><span className="inline-block w-[26mm] font-semibold">Fabric</span>: {s.fabricCode || "—"}</div>
                       <div><span className="inline-block w-[26mm] font-semibold">Comp SO</span>: {s.salesOrderNo}</div>
-                      {s.customerPOId && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId}</div>
-                      )}
+                      <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId || "—"}</div>
                       <div><span className="inline-block w-[26mm] font-semibold">SO Ref</span>: {s.customerRef || "—"}</div>
-                      {s.itemCategory === "BEDFRAME" && (
-                        <div><span className="inline-block w-[26mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
-                      )}
+                      <div><span className="inline-block w-[26mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
+                      <div>
+                        <span className="inline-block w-[26mm] font-semibold" style={{ color: "#9A3A2D" }}>Special</span>:{" "}
+                        {s.specialOrder ? <span className="font-bold" style={{ color: "#9A3A2D" }}>★ {s.specialOrder}</span> : "—"}
+                      </div>
                     </div>
-                    {/* Bottom group: anchored to bottom via mt-auto.
-                        Order: optional Special line → QR row → customer
-                        footer. Special is ABOVE the QR (operator sees it
-                        right before scanning), QR layout is HORIZONTAL
-                        (QR left, badge right) at the original sizes —
-                        info is the focus, not the QR. */}
+                    {/* QR row + Customer footer — anchored to bottom.
+                        Special is in body above (not here). QR is
+                        HORIZONTAL (QR left, badge right) at original
+                        sizes — info is the focus. */}
                     <div className="mt-auto flex flex-col gap-[2mm]">
-                      {s.specialOrder && (
-                        <div className="text-center font-bold" style={{ fontSize: "11pt", color: "#9A3A2D" }}>
-                          ★ {s.specialOrder}
-                        </div>
-                      )}
                       <div className="flex items-end gap-[2mm]">
                         <div className="flex items-end gap-[1mm] flex-1 min-w-0">
                           <QRImg data={trackUrl} size={legsPair || pillowPair ? 320 : 500} alt="FG unit QR" className="block" />

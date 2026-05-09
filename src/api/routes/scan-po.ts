@@ -145,13 +145,25 @@ async function loadCatalog(db: DBLike, orgId: string): Promise<Catalog> {
       )
       .bind(orgId)
       .all<{ code: string; name: string; category: string; sizeLabel: string | null }>(),
-    // Source-of-truth fabric catalog (2026-05-09): read from
-    // fabric_trackings, the modern raw_materials-derived mirror that the
-    // /sales/create + Edit pickers also use. fabricCode is the canonical
-    // reference downstream, so OCR-resolved codes round-trip cleanly.
+    // Source-of-truth fabric catalog: raw_materials filtered to the fabric
+    // itemGroups. This MUST match what validateFabricCodes uses
+    // (src/api/lib/fabric-validation.ts) — otherwise Claude can suggest a
+    // code (e.g. legacy `BO315-2`) that exists in fabric_trackings but
+    // not in raw_materials, the operator clicks Save, and SO POST 400s
+    // with "Unknown fabricCode" with no clue why. Closes the OCR fabric
+    // sneak path surfaced by 2026-05-09 audit. fabric_trackings stays
+    // around as a metadata cache (description / priceTier) but is no
+    // longer the prompt source.
     db
       .prepare(
-        "SELECT \"fabricCode\", \"fabricDescription\", \"fabricCategory\" AS \"priceTier\" FROM fabric_trackings ORDER BY \"fabricCode\"",
+        `SELECT rm."itemCode" AS "fabricCode",
+                COALESCE(ft."fabricDescription", rm.description, '') AS "fabricDescription",
+                COALESCE(ft."priceTier", 'PRICE_1') AS "priceTier"
+           FROM raw_materials rm
+           LEFT JOIN fabric_trackings ft ON ft."fabricCode" = rm."itemCode"
+          WHERE rm."itemCode" IS NOT NULL
+            AND rm."itemGroup" IN ('B.M-FABR','S-FABR','S.M-FABR','LINING','WEBBING')
+          ORDER BY rm."itemCode"`,
       )
       .all<{ fabricCode: string; fabricDescription: string | null; priceTier: string | null }>(),
     db

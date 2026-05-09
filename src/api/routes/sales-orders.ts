@@ -2347,10 +2347,10 @@ app.post("/:id/confirm", async (c) => {
   }
 
   // PO ↔ SO line alignment validation (defense-in-depth, warn-only).
-  // Surfaces a warning in the response when the post-INSERT state shows
-  // PO count mismatch / unlinked POs / attribute mismatches against
-  // SO line items. Won't block confirm; operator sees the warning and
-  // can run /api/import/audit-po-alignment for full details.
+  // Multiset-based: compares (productCode, size, fabric, divan, ...) tuple
+  // bag from sales_order_items vs production_orders. Surplus / missing
+  // tuples surface attribute-shuffle bugs (see SO-2605-027). Warn-only;
+  // operator can run /api/import/audit-po-alignment for full details.
   const alignmentValidation = await loadAndValidatePOAlignment(c.var.DB, id);
   const alignmentWarnings: string[] = [];
   if (!alignmentValidation.ok) {
@@ -2359,14 +2359,14 @@ app.post("/:id/confirm", async (c) => {
         `PO count mismatch: expected ${alignmentValidation.expectedPoCount} (sum of line qty), got ${alignmentValidation.actualPoCount}`,
       );
     }
-    if (alignmentValidation.unlinkedPos.length > 0) {
+    if (alignmentValidation.surplusTuples.length > 0) {
       alignmentWarnings.push(
-        `${alignmentValidation.unlinkedPos.length} PO(s) missing salesOrderItemId — traceability broken: ${alignmentValidation.unlinkedPos.slice(0, 3).join(", ")}${alignmentValidation.unlinkedPos.length > 3 ? "…" : ""}`,
+        `${alignmentValidation.surplusTuples.length} attribute tuple(s) over-represented in POs — possible attribute shuffle, see alignmentValidation.surplusTuples`,
       );
     }
-    if (alignmentValidation.mismatches.length > 0) {
+    if (alignmentValidation.missingTuples.length > 0) {
       alignmentWarnings.push(
-        `${alignmentValidation.mismatches.length} PO(s) have attributes diverging from their linked SO line — see alignmentValidation.mismatches`,
+        `${alignmentValidation.missingTuples.length} attribute tuple(s) expected from SO lines but not found in POs — see alignmentValidation.missingTuples`,
       );
     }
     console.warn(

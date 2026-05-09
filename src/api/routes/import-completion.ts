@@ -67,6 +67,7 @@ import {
   type SalesOrderRow,
   type SalesOrderItemRow,
 } from "./sales-orders";
+import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { getOrgId } from "../lib/tenant";
 import { validateFabricCodes } from "../lib/fabric-validation";
 import {
@@ -13576,6 +13577,68 @@ app.post("/delete-jcs-by-ids", async (c) => {
     requested: ids.length,
     deleted: rows.length,
     notFound,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/import/audit-po-alignment?soId=XXX
+//
+// On-demand audit of an SO's production_orders against its
+// sales_order_items. Returns alignment errors, attribute mismatches, and
+// unlinked POs. Read-only — no writes.
+//
+// soId can be either internal id (e.g. "so-0f7cf47b") or companySOId
+// (e.g. "SO-2605-027"). Falls back to companySOId lookup when direct id
+// query returns nothing.
+//
+// Permission: sales-orders:read.
+// ---------------------------------------------------------------------------
+app.get("/audit-po-alignment", async (c) => {
+  const denied = await requirePermission(c, "sales-orders", "read");
+  if (denied) return denied;
+
+  const soIdRaw = c.req.query("soId");
+  if (!soIdRaw) {
+    return c.json(
+      { success: false, error: "soId query param required" },
+      400,
+    );
+  }
+
+  let soId: string | null = null;
+  let companySOId: string | null = null;
+  const direct = await c.var.DB.prepare(
+    "SELECT id, companySOId FROM sales_orders WHERE id = ? LIMIT 1",
+  )
+    .bind(soIdRaw)
+    .first<{ id: string; companySOId: string | null }>();
+  if (direct) {
+    soId = direct.id;
+    companySOId = direct.companySOId;
+  } else {
+    const byCompany = await c.var.DB.prepare(
+      "SELECT id, companySOId FROM sales_orders WHERE companySOId = ? LIMIT 1",
+    )
+      .bind(soIdRaw)
+      .first<{ id: string; companySOId: string | null }>();
+    if (byCompany) {
+      soId = byCompany.id;
+      companySOId = byCompany.companySOId;
+    }
+  }
+  if (!soId) {
+    return c.json(
+      { success: false, error: `SO not found: ${soIdRaw}` },
+      404,
+    );
+  }
+
+  const result = await loadAndValidatePOAlignment(c.var.DB, soId);
+  return c.json({
+    success: true,
+    soId,
+    companySOId,
+    ...result,
   });
 });
 

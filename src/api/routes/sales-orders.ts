@@ -32,6 +32,7 @@ import {
   hookkaDDBufferFor,
 } from "../lib/lead-times";
 import { breakBomIntoWips, type BomVariantContext } from "../lib/bom-wip-breakdown";
+import { loadAndValidatePOAlignment } from "../lib/po-alignment-validator";
 import { resolveCustomerPriceAsOf } from "./customer-products";
 import { withOrgScope } from "../lib/tenant";
 import {
@@ -2345,12 +2346,43 @@ app.post("/:id/confirm", async (c) => {
     // the promise still runs; we just don't await it.
   }
 
+  // PO ↔ SO line alignment validation (defense-in-depth, warn-only).
+  // Surfaces a warning in the response when the post-INSERT state shows
+  // PO count mismatch / unlinked POs / attribute mismatches against
+  // SO line items. Won't block confirm; operator sees the warning and
+  // can run /api/import/audit-po-alignment for full details.
+  const alignmentValidation = await loadAndValidatePOAlignment(c.var.DB, id);
+  const alignmentWarnings: string[] = [];
+  if (!alignmentValidation.ok) {
+    if (alignmentValidation.actualPoCount !== alignmentValidation.expectedPoCount) {
+      alignmentWarnings.push(
+        `PO count mismatch: expected ${alignmentValidation.expectedPoCount} (sum of line qty), got ${alignmentValidation.actualPoCount}`,
+      );
+    }
+    if (alignmentValidation.unlinkedPos.length > 0) {
+      alignmentWarnings.push(
+        `${alignmentValidation.unlinkedPos.length} PO(s) missing salesOrderItemId — traceability broken: ${alignmentValidation.unlinkedPos.slice(0, 3).join(", ")}${alignmentValidation.unlinkedPos.length > 3 ? "…" : ""}`,
+      );
+    }
+    if (alignmentValidation.mismatches.length > 0) {
+      alignmentWarnings.push(
+        `${alignmentValidation.mismatches.length} PO(s) have attributes diverging from their linked SO line — see alignmentValidation.mismatches`,
+      );
+    }
+    console.warn(
+      `[sales-orders/confirm] PO alignment validation FAILED for soId=${id}:`,
+      JSON.stringify(alignmentValidation, null, 2).slice(0, 2000),
+    );
+  }
+
   return c.json({
     success: true,
     data: order,
     productionOrders,
     bomFallbacks: [],
     bomWarnings: [],
+    alignmentWarnings,
+    alignmentValidation,
     message: preExisting
       ? `Order confirmed. ${productionOrders.length} existing production order(s) reused.`
       : `Order confirmed. ${productionOrders.length} production order(s) created.`,

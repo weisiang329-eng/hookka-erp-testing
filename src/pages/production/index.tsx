@@ -2911,19 +2911,25 @@ export default function ProductionPage({
       }
     }
 
-    // Bedframe boxLabel + WIP label + short pieceName for the pack badge.
-    //   pieceNo === 1 → HB box  → boxLabel "{productCode} {size} HB", badge "HB"
-    //   pieceNo > 1   → Divan   → boxLabel "{divanH}\" Divan {sizeLabel}", badge "Divan"
+    // Bedframe boxLabel = complete WIP-style identification of THIS box.
+    // Includes product + size + fabric so QC / packer can trace the
+    // production batch from the sticker without scanning.
+    //   pieceNo === 1 → HB box  → "{productCode} {size} {fabric} HB"
+    //   pieceNo > 1   → Divan   → "{divanH}\" Divan {size} {fabric}"
     for (const s of nonSofa) {
       if (s.itemCategory === "BEDFRAME") {
         const parts = [s.sizeLabel, s.fabricCode].filter(Boolean);
         s.wipLabel = parts.join(" | ");
         if (s.pieceNo === 1) {
-          s.boxLabel = [s.productCode, s.sizeLabel, "HB"].filter(Boolean).join(" ");
+          s.boxLabel = [s.productCode, s.sizeLabel, s.fabricCode, "HB"]
+            .filter(Boolean)
+            .join(" ");
           s.pieceName = "HB";
         } else {
           const divanH = s.divanHeightInches != null ? `${s.divanHeightInches}"` : "";
-          s.boxLabel = [divanH, "Divan", s.sizeLabel].filter(Boolean).join(" ");
+          s.boxLabel = [divanH, "Divan", s.sizeLabel, s.fabricCode]
+            .filter(Boolean)
+            .join(" ");
           s.pieceName = "Divan";
         }
       }
@@ -4916,7 +4922,7 @@ export default function ProductionPage({
                         {s.legHeightInches != null && s.legHeightInches > 0 && (
                           <div><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Leg</span>: {s.legHeightInches}"</div>
                         )}
-                        {s.itemCategory === "SOFA" && s.specialOrder && (
+                        {s.specialOrder && (
                           <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
                         )}
                         <div className="truncate"><span className="inline-block w-[52px] font-semibold text-[#6B7280]">PO No</span>: {s.poNo}</div>
@@ -5158,7 +5164,7 @@ export default function ProductionPage({
                       {s.legHeightInches != null && s.legHeightInches > 0 && (
                         <div><span className="inline-block w-[22mm] font-semibold">Leg</span>: {s.legHeightInches}"</div>
                       )}
-                      {s.itemCategory === "SOFA" && s.specialOrder && (
+                      {s.specialOrder && (
                         <div><span className="inline-block w-[22mm] font-semibold">Special</span>: {s.specialOrder}</div>
                       )}
                       <div><span className="inline-block w-[22mm] font-semibold">PO No</span>: {s.poNo}</div>

@@ -290,7 +290,7 @@ export default function WorkerPayPage() {
       <div className="bg-[#1F1D1B] text-white rounded-xl p-4">
         <div className="flex items-center justify-between mb-3">
           <p className="text-xs text-[#B0AAA3]">{t("pay.thisMonth")}</p>
-          <p className="text-xs font-mono">{pay.current.period}</p>
+          <p className="text-xs tabular-nums">{pay.current.period}</p>
         </div>
         <p className="text-4xl font-bold tracking-tight">
           {rm(pay.current.estimatedGrossSen)}
@@ -391,17 +391,17 @@ export default function WorkerPayPage() {
                   key={a.date}
                   className="grid grid-cols-[auto_1fr_auto_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
                 >
-                  <span className="font-mono text-xs text-[#5A5550]">
+                  <span className="tabular-nums text-xs text-[#5A5550]">
                     {fmtDay(a.date)}
                   </span>
-                  <span className="font-mono text-xs text-[#5A5550] truncate">
+                  <span className="tabular-nums text-xs text-[#5A5550] truncate">
                     {inOut}
                   </span>
-                  <span className="font-mono text-right font-semibold">
+                  <span className="tabular-nums text-right font-semibold">
                     {mins2hrs(a.workingMinutes)}
                   </span>
                   <span
-                    className={`font-mono text-right font-semibold ${
+                    className={`tabular-nums text-right font-semibold ${
                       a.overtimeMinutes > 0 ? "text-[#9C6F1E]" : "text-[#8A8680]"
                     }`}
                   >
@@ -438,7 +438,7 @@ export default function WorkerPayPage() {
                     className="w-full px-4 py-3 flex items-center justify-between hover:bg-[#FAF9F7]"
                   >
                     <div className="text-left">
-                      <p className="text-sm font-mono text-[#5A5550]">
+                      <p className="text-sm tabular-nums text-[#5A5550]">
                         {p.period}
                       </p>
                       <p className="text-lg font-bold mt-0.5">

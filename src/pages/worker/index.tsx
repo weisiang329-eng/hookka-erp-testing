@@ -438,53 +438,53 @@ export default function WorkerHomePage() {
         </div>
       )}
 
-      {/* Daily attendance — shows clock In/Out per day alongside Work/Prod hours */}
-      {hist && (() => {
-        // Index attendance by date so we can pull clock times into the daily rows.
-        // Using the `daily` rollup as the source-of-truth for row set (it already
-        // merges days with production but no attendance, and vice versa).
-        const clockByDate = new Map(
-          hist.attendance.map((a) => [a.date, a]),
-        );
-        return (
-          <TableSection title="Daily attendance">
-            <TableHeader
-              cols={["Date", "In → Out", "Work hrs", "Prod hrs"]}
-              align={["left", "left", "right", "right"]}
-            />
-            {hist.daily.length === 0 ? (
-              <EmptyRow />
-            ) : (
-              hist.daily.map((r) => {
-                const att = clockByDate.get(r.date);
-                const inOut =
-                  att && (att.clockIn || att.clockOut)
-                    ? `${att.clockIn || "—"} → ${att.clockOut || "—"}`
-                    : "—";
-                return (
-                  <div
-                    key={r.date}
-                    className="grid grid-cols-[auto_1fr_auto_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
-                  >
-                    <span className="font-mono text-xs text-[#5A5550]">
-                      {fmtDay(r.date)}
-                    </span>
-                    <span className="font-mono text-xs text-[#5A5550] truncate">
-                      {inOut}
-                    </span>
-                    <span className="font-mono text-right font-semibold">
-                      {mins2hrs(r.workingMinutes)}
-                    </span>
-                    <span className="font-mono text-right font-semibold text-[#3E6570]">
-                      {mins2hrs(r.productionMinutes)}
-                    </span>
-                  </div>
-                );
-              })
-            )}
-          </TableSection>
-        );
-      })()}
+      {/* Daily attendance — Work/Prod/Eff per day. Clock In/Out column dropped
+          since the clock-in flow itself is hidden (Wei Siang 2026-05-10). */}
+      {hist && (
+        <TableSection title="Daily breakdown">
+          <TableHeader
+            cols={["Date", "Work", "Prod", "Eff %"]}
+            align={["left", "right", "right", "right"]}
+          />
+          {hist.daily.length === 0 ? (
+            <EmptyRow />
+          ) : (
+            hist.daily.map((r) => {
+              const eff =
+                r.workingMinutes > 0
+                  ? Math.round((r.productionMinutes / r.workingMinutes) * 100)
+                  : null;
+              const effTone =
+                eff == null
+                  ? "text-[#9CA3AF]"
+                  : eff >= 80
+                    ? "text-[#2A6B4A]"
+                    : eff >= 60
+                      ? "text-[#9C6F1E]"
+                      : "text-[#9A3A2D]";
+              return (
+                <div
+                  key={r.date}
+                  className="grid grid-cols-[auto_1fr_1fr_1fr] gap-3 py-2.5 text-sm border-t border-[#F0ECE9] items-center"
+                >
+                  <span className="text-[#1F1D1B] font-medium">
+                    {fmtDay(r.date)}
+                  </span>
+                  <span className="tabular-nums text-right font-semibold">
+                    {mins2hrs(r.workingMinutes)}
+                  </span>
+                  <span className="tabular-nums text-right font-semibold text-[#3E6570]">
+                    {mins2hrs(r.productionMinutes)}
+                  </span>
+                  <span className={`tabular-nums text-right font-semibold ${effTone}`}>
+                    {eff == null ? "—" : `${eff}%`}
+                  </span>
+                </div>
+              );
+            })
+          )}
+        </TableSection>
+      )}
 
       {/* Completed products */}
       {hist && (
@@ -510,7 +510,7 @@ export default function WorkerHomePage() {
                   key={c.jobCardId}
                   className="grid grid-cols-[auto_auto_1fr_auto] gap-2 py-2 text-sm border-t border-[#F0ECE9] items-center"
                 >
-                  <span className="font-mono text-xs text-[#5A5550] whitespace-nowrap">
+                  <span className="tabular-nums text-xs text-[#5A5550] whitespace-nowrap">
                     {fmtDay(c.completedDate || "")}
                   </span>
                   <span className="text-[11px] px-1.5 py-0.5 rounded bg-[#F0ECE9] text-[#5A5550] font-semibold whitespace-nowrap">
@@ -532,7 +532,7 @@ export default function WorkerHomePage() {
                       </span>
                     )}
                   </span>
-                  <span className="font-mono text-right font-semibold">
+                  <span className="tabular-nums text-right font-semibold">
                     {c.myMinutes}
                   </span>
                 </div>

@@ -1132,7 +1132,7 @@ export default function WorkerScanPage() {
                 the worker can see the QR WAS readable — the problem is
                 data-side, not camera-side. */}
             {result.decoded && (
-              <p className="mt-1.5 text-[10px] text-[#9A3A2D]/70 break-all font-mono">
+              <p className="mt-1.5 text-[10px] text-[#9A3A2D]/70 break-all tabular-nums">
                 QR: {result.decoded}
               </p>
             )}
@@ -1305,7 +1305,7 @@ export default function WorkerScanPage() {
                               </span>
                             )}
                           </span>
-                          <span className="font-mono text-right font-semibold">
+                          <span className="tabular-nums text-right font-semibold">
                             {r.perPieceMins}
                           </span>
                         </div>

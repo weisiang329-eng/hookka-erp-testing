@@ -9242,16 +9242,16 @@ app.post("/backfill-so-reference", async (c) => {
 //   2. Re-resolves productName / sizeCode / sizeLabel from products.code.
 //   3. For SOFA items: snaps sizeLabel to the quoted '28"' shape the
 //      Edit dropdown keys against; fills sizeCode from sizeLabel if blank.
-//   4. Resolves fabricId from fabric_trackings.fabricCode when fabricCode
-//      is set but fabricId is empty (mirrors the SO create path's
-//      resolver added later — old rows missed it).
-//   5. Cleans specialOrder: drops any comma-token that doesn't appear in
+//   4. Cleans specialOrder: drops any comma-token that doesn't appear in
 //      the variants-config catalog (Specials list, scoped per category).
 //      Tokens are matched case-insensitively but stored with the catalog
 //      casing. Empty result becomes "".
 //
-// Returns: { candidates, productNameUpdated, sizeUpdated, fabricIdUpdated,
+// Returns: { candidates, productNameUpdated, sizeUpdated,
 //            specialOrderCleaned }.
+//
+// 2026-05-09: fabricId backfill step removed — picker now keys on
+// fabricCode directly; sales_order_items.fabricId column is being dropped.
 //
 // Permission: sales-orders:update (same gate as the PATCH handler).
 // ---------------------------------------------------------------------------
@@ -9312,7 +9312,6 @@ app.post("/backfill-ocr-so-fields", async (c) => {
               soi.itemCategory,
               soi.sizeCode,
               soi.sizeLabel,
-              soi.fabricId,
               soi.fabricCode,
               soi.specialOrder,
               p.id   AS "canonProductId",
@@ -9339,7 +9338,6 @@ app.post("/backfill-ocr-so-fields", async (c) => {
       itemCategory: string | null;
       sizeCode: string | null;
       sizeLabel: string | null;
-      fabricId: string | null;
       fabricCode: string | null;
       specialOrder: string | null;
       canonProductId: string | null;
@@ -9352,28 +9350,14 @@ app.post("/backfill-ocr-so-fields", async (c) => {
 
   let productNameUpdated = 0;
   let sizeUpdated = 0;
-  let fabricIdUpdated = 0;
   let specialOrderCleaned = 0;
   let nullCanonName = 0;
   let alreadyMatches = 0;
   const notUpdatedSamples: { code: string; name: string; canonName: string | null }[] = [];
 
-  // Cache fabricCode → fabricId lookups across rows.
-  // Resolve from `fabrics` master catalog (matches the /sales/create +
-  // Edit dropdown source), NOT fabric_trackings. The dropdowns key on
-  // fabrics.id (`fab-XXX`); fabric_trackings.id (`ft-XXX`) ids show up
-  // blank in the Edit form.
-  const fabricIdCache = new Map<string, string | null>();
-  const resolveFabricId = async (code: string): Promise<string | null> => {
-    if (fabricIdCache.has(code)) return fabricIdCache.get(code) ?? null;
-    const row = await db
-      .prepare("SELECT id FROM fabrics WHERE code = ? LIMIT 1")
-      .bind(code)
-      .first<{ id: string }>();
-    const id = row?.id ?? null;
-    fabricIdCache.set(code, id);
-    return id;
-  };
+  // 2026-05-09: fabricId resolve removed. Picker now keys on fabricCode
+  // directly so no client-side namespace translation is needed; the
+  // sales_order_items.fabricId column is being dropped.
 
   for (const r of candidates) {
     // -- productName -----------------------------------------------------
@@ -9466,24 +9450,7 @@ app.post("/backfill-ocr-so-fields", async (c) => {
       sizeUpdated++;
     }
 
-    // -- fabricId from fabricCode ---------------------------------------
-    // Trigger on: empty fabricId, OR legacy `ft-` id (from the old
-    // fabric_trackings code path). Edit dropdowns key against fabrics.id
-    // (`fab-`), so any non-`fab-` fabricId shows blank in the form.
-    const isStaleId =
-      r.fabricId != null &&
-      r.fabricId !== "" &&
-      !r.fabricId.startsWith("fab-");
-    if ((r.fabricId == null || r.fabricId === "" || isStaleId) && r.fabricCode) {
-      const fid = await resolveFabricId(r.fabricCode);
-      if (fid && fid !== r.fabricId) {
-        await db
-          .prepare("UPDATE sales_order_items SET fabricId = ? WHERE id = ?")
-          .bind(fid, r.id)
-          .run();
-        fabricIdUpdated++;
-      }
-    }
+    // 2026-05-09: fabricId backfill removed — column being dropped.
 
     // -- specialOrder cleaning ------------------------------------------
     // Only when we have a catalog loaded — otherwise we'd risk wiping
@@ -9521,7 +9488,6 @@ app.post("/backfill-ocr-so-fields", async (c) => {
     candidates: candidates.length,
     productNameUpdated,
     sizeUpdated,
-    fabricIdUpdated,
     specialOrderCleaned,
     nullCanonName,
     alreadyMatches,

@@ -6,7 +6,6 @@
 // ---------------------------------------------------------------------------
 import { Hono } from "hono";
 import type { Env } from "../worker";
-import { requirePermission } from "../lib/rbac";
 import { getOrgId } from "../lib/tenant";
 
 const app = new Hono<Env>();
@@ -45,138 +44,25 @@ app.get("/", async (c) => {
   return c.json({ success: true, data });
 });
 
-type FabricBody = {
-  code?: string;
-  name?: string;
-  category?: string;
-  priceSen?: number;
-  sohMeters?: number;
-  reorderLevel?: number;
+// 2026-05-09: POST / PUT / DELETE on /api/fabrics are deprecated.
+//
+// The canonical write path is POST /api/raw-materials with itemGroup IN
+// ('B.M-FABR','S.M-FABR','S-FABRIC'); the cascade in _fabric-cascade.ts
+// auto-mirrors into both `fabrics` and `fabric_trackings`. Direct writes
+// here bypass that cascade and create the kind of orphan rows we just
+// finished cleaning up. Returning 410 Gone surfaces the issue loudly to
+// any caller still hitting these endpoints (frontend should not).
+//
+// GET / is kept (read-only mirror) for now in case any reader still
+// depends on the legacy shape.
+const DEPRECATED = {
+  success: false,
+  error:
+    "Deprecated: write fabrics via POST /api/raw-materials (cascade mirrors to fabrics + fabric_trackings).",
 };
 
-function genId(): string {
-  return `fab-${crypto.randomUUID().slice(0, 8)}`;
-}
-
-// POST /api/fabrics — create a new fabric master row.
-//
-// NOTE: In the LIVE cascade model, the canonical way to add a fabric is via
-// POST /api/raw-materials with itemGroup in ('B.M-FABR','S.M-FABR','S-FABRIC').
-// This endpoint exists for direct edits from the Fabric Master tab, but does
-// NOT mirror back into raw_materials (that would be a loop). Use sparingly.
-app.post("/", async (c) => {
-  const denied = await requirePermission(c, "fabrics", "create");
-  if (denied) return denied;
-  let body: FabricBody;
-  try {
-    body = (await c.req.json()) as FabricBody;
-  } catch {
-    return c.json({ success: false, error: "Invalid JSON" }, 400);
-  }
-  const code = (body.code ?? "").trim();
-  const name = (body.name ?? "").trim() || code;
-  if (!code) return c.json({ success: false, error: "code is required" }, 400);
-
-  const existing = await c.var.DB.prepare(
-    "SELECT id FROM fabrics WHERE code = ? LIMIT 1",
-  )
-    .bind(code)
-    .first<{ id: string }>();
-  if (existing) {
-    return c.json(
-      { success: false, error: `Fabric ${code} already exists` },
-      400,
-    );
-  }
-
-  const id = genId();
-  await c.var.DB.prepare(
-    `INSERT INTO fabrics (id, code, name, category, priceSen, sohMeters, reorderLevel)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  )
-    .bind(
-      id,
-      code,
-      name,
-      body.category ?? null,
-      Number(body.priceSen) || 0,
-      Number(body.sohMeters) || 0,
-      Number(body.reorderLevel) || 0,
-    )
-    .run();
-  const created = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
-    .bind(id)
-    .first<FabricRow>();
-  if (!created) {
-    return c.json({ success: false, error: "Failed to create fabric" }, 500);
-  }
-  return c.json({ success: true, data: rowToFabric(created) }, 201);
-});
-
-// PUT /api/fabrics/:id — partial update (name/category/priceSen/sohMeters/reorderLevel).
-app.put("/:id", async (c) => {
-  const denied = await requirePermission(c, "fabrics", "update");
-  if (denied) return denied;
-  const id = c.req.param("id");
-  const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
-    .bind(id)
-    .first<FabricRow>();
-  if (!existing) {
-    return c.json({ success: false, error: "Fabric not found" }, 404);
-  }
-  let body: FabricBody;
-  try {
-    body = (await c.req.json()) as FabricBody;
-  } catch {
-    return c.json({ success: false, error: "Invalid JSON" }, 400);
-  }
-  const merged = {
-    name: body.name ?? existing.name,
-    category: body.category !== undefined ? body.category : existing.category,
-    priceSen:
-      body.priceSen !== undefined ? Number(body.priceSen) : existing.priceSen,
-    sohMeters:
-      body.sohMeters !== undefined ? Number(body.sohMeters) : existing.sohMeters,
-    reorderLevel:
-      body.reorderLevel !== undefined
-        ? Number(body.reorderLevel)
-        : existing.reorderLevel,
-  };
-  await c.var.DB.prepare(
-    `UPDATE fabrics SET name = ?, category = ?, priceSen = ?, sohMeters = ?, reorderLevel = ?
-       WHERE id = ?`,
-  )
-    .bind(
-      merged.name,
-      merged.category,
-      merged.priceSen,
-      merged.sohMeters,
-      merged.reorderLevel,
-      id,
-    )
-    .run();
-  const updated = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
-    .bind(id)
-    .first<FabricRow>();
-  if (!updated) {
-    return c.json({ success: false, error: "Failed to reload fabric" }, 500);
-  }
-  return c.json({ success: true, data: rowToFabric(updated) });
-});
-
-// DELETE /api/fabrics/:id
-app.delete("/:id", async (c) => {
-  const denied = await requirePermission(c, "fabrics", "delete");
-  if (denied) return denied;
-  const id = c.req.param("id");
-  const existing = await c.var.DB.prepare("SELECT * FROM fabrics WHERE id = ?")
-    .bind(id)
-    .first<FabricRow>();
-  if (!existing) {
-    return c.json({ success: false, error: "Fabric not found" }, 404);
-  }
-  await c.var.DB.prepare("DELETE FROM fabrics WHERE id = ?").bind(id).run();
-  return c.json({ success: true, data: rowToFabric(existing) });
-});
+app.post("/", (c) => c.json(DEPRECATED, 410));
+app.put("/:id", (c) => c.json(DEPRECATED, 410));
+app.delete("/:id", (c) => c.json(DEPRECATED, 410));
 
 export default app;

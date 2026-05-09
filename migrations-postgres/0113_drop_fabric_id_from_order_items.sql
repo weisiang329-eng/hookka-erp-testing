@@ -1,0 +1,46 @@
+-- ---------------------------------------------------------------------------
+-- 0113_drop_fabric_id_from_order_items.sql
+--
+-- Drop fabric_id from sales_order_items + consignment_order_items.
+--
+-- Background: fabric_id was a UI-only artifact carrying the dropdown's
+-- selected option id. Two id namespaces accumulated over time —
+-- fabrics.id (`fab-XXX`) and fabric_trackings.id (`ft-XXX`) — and after
+-- commit fd90b9c (2026-05-08) flipped all 4 pickers to `fabric_trackings`,
+-- the backend write path kept resolving from `fabrics`, so every save
+-- produced a stale `fab-` id that no current picker option matched.
+-- Audit on 2026-05-09: 0/761 SO line items had a fabricId that resolved
+-- to any picker option.
+--
+-- The rest of the system never depended on this column:
+--   * production_orders has fabric_code only, no fabric_id
+--   * fabric usage / MRP / cost ledger / fabric-validation / DO / Invoice
+--     / PO outstanding all key on fabric_code (= raw_materials.item_code)
+--   * Validation (validateFabricCodes) checks raw_materials.item_code,
+--     unrelated to fabric_id
+--
+-- Companion changes in the same branch:
+--   * pickers (sales create/edit, consignment create/edit) now key on
+--     fabricCode — every existing SO/CO Edit form pre-fills correctly
+--     immediately after deploy
+--   * sales-orders.ts + consignment-orders.ts POST/PUT persist fabric_id
+--     = NULL; the resolve block was removed
+--   * import-completion.ts /backfill-ocr-so-fields drops the fabric_id
+--     backfill step (was already broken — pointed at fabrics, not the
+--     picker source)
+--   * /api/fabrics POST/PUT/DELETE return 410 Gone (write path is
+--     /api/raw-materials → cascade)
+--
+-- After this migration: only fabric_code persists on order line items;
+-- fabric data flows through one canonical path
+--   raw_materials → _fabric-cascade → fabric_trackings → consumers.
+--
+-- The fabric_id columns on sales_order_items and consignment_order_items
+-- carried 761 stale values; dropping is lossless because nothing reads
+-- them. The rename-map entry for fabricId is also removed in the same
+-- commit so translateSql() won't silently route a re-introduction to a
+-- non-existent column.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE sales_order_items DROP COLUMN IF EXISTS fabric_id;
+ALTER TABLE consignment_order_items DROP COLUMN IF EXISTS fabric_id;

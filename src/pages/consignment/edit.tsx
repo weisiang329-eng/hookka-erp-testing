@@ -401,10 +401,12 @@ export default function EditSalesOrderPage() {
     });
   };
 
-  const selectFabric = (idx: number, fabricId: string) => {
-    const fab = fabrics.find(f => f.id === fabricId);
+  // Picker writes only fabricCode — see comment in sales/create.tsx selectFabric.
+  // fabricId is a UI-only artifact deprecated 2026-05-09.
+  const selectFabric = (idx: number, fabricCode: string) => {
+    const fab = fabrics.find(f => f.code === fabricCode);
     if (fab) {
-      updateItem(idx, { fabricId: fab.id, fabricCode: fab.code });
+      updateItem(idx, { fabricCode: fab.code });
     }
   };
 
@@ -440,7 +442,7 @@ export default function EditSalesOrderPage() {
   const handleSubmit = async () => {
     if (!customerId) { toast.warning("Please select a customer"); return; }
     if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
-    if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+    if (items.some(l => !l.fabricCode)) { toast.warning("Please select a fabric for all line items"); return; }
     // Sofa lines require model + seat size from dropdown — no free text / blanks
     if (items.some(l => l.itemCategory === "SOFA" && !l.baseModel)) {
       toast.warning("Please select a model for all sofa items"); return;
@@ -748,9 +750,9 @@ export default function EditSalesOrderPage() {
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Fabric *</label>
                         <SearchableSelect
-                          value={item.fabricId}
+                          value={item.fabricCode}
                           onChange={(val) => selectFabric(idx, val)}
-                          options={fabrics.map(f => ({ value: f.id, label: `${f.code} - ${f.name}` }))}
+                          options={fabrics.map(f => ({ value: f.code, label: `${f.code} - ${f.name}` }))}
                           placeholder="Select fabric..."
                           className={sc}
                         />

@@ -161,6 +161,15 @@ type FabricRow = {
   sohMeters: number;
 };
 
+// Aliased shape returned by the fabric_trackings SELECT below.
+type FabricTrackingRowMrp = {
+  id: string;
+  fabricCode: string;
+  fabricDescription: string | null;
+  fabricCategory: string | null;
+  soh: number;
+};
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -556,9 +565,13 @@ app.post("/", async (c) => {
          FROM supplier_material_bindings`,
     ).all<SupplierBindingRow>(),
     c.var.DB.prepare("SELECT id, name FROM suppliers").all<SupplierRow>(),
+    // 2026-05-09: switched from `fabrics` (legacy, has stale duplicates) to
+    // `fabric_trackings` (raw_materials-derived mirror, same source pickers
+    // use). Output shape adapted to the legacy FabricRow at the boundary so
+    // the rest of this handler is unchanged.
     c.var.DB.prepare(
-      "SELECT id, code, name, category, sohMeters FROM fabrics",
-    ).all<FabricRow>(),
+      `SELECT id, "fabricCode", "fabricDescription", "fabricCategory", soh FROM fabric_trackings`,
+    ).all<FabricTrackingRowMrp>(),
     // Single source of truth for per-fabric demand: walks active FAB_CUT
     // JCs (Fab Cut sheet's view), computes per-JC fabric meters via BOM +
     // cross-PO siblings, buckets by FC dueDate. MRP and Inventory > Fabrics
@@ -572,7 +585,16 @@ app.post("/", async (c) => {
   const rawMaterials = rmRes.results ?? [];
   const bindings = bindRes.results ?? [];
   const suppliers = supRes.results ?? [];
-  const fabrics = fabRes.results ?? [];
+  // Adapt fabric_trackings shape to legacy FabricRow shape so the existing
+  // detail-builder below (fab.code, fab.name, fab.category, fab.sohMeters)
+  // doesn't need to be rewritten.
+  const fabrics: FabricRow[] = (fabRes.results ?? []).map((r) => ({
+    id: r.id,
+    code: r.fabricCode,
+    name: r.fabricDescription ?? "",
+    category: r.fabricCategory,
+    sohMeters: Number(r.soh) || 0,
+  }));
 
   // Index job cards by production order id for earliest-dueDate lookups.
   const jcByPO = new Map<string, JobCardRow[]>();

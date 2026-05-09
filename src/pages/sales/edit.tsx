@@ -232,7 +232,7 @@ export default function EditSalesOrderPage() {
       companySODate, customerDeliveryDate, hookkaExpectedDD, notes,
       isProjectOrder,
       items: items.map((it) => ({
-        productId: it.productId, fabricId: it.fabricId, quantity: it.quantity,
+        productId: it.productId, fabricCode: it.fabricCode, quantity: it.quantity,
         seatHeight: it.seatHeight, gapInches: it.gapInches,
         divanHeightInches: it.divanHeightInches,
         legHeightInches: it.legHeightInches,
@@ -248,18 +248,12 @@ export default function EditSalesOrderPage() {
     ],
   );
   const [initialSig, setInitialSig] = useState<string | null>(null);
-  // Track whether the deferred fabricId backfill (declared in the load-
-  // effect block below) has had a chance to run. The dirty-state
-  // baseline must wait for it — otherwise OCR-created SOs would flag
-  // themselves dirty the moment /api/fabric-tracking arrives, for a backfill
-  // the user never triggered.
-  const [fabricBackfillDone, setFabricBackfillDone] = useState(false);
   /* eslint-disable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps -- one-shot baseline snapshot when the loaded order arrives; deliberately excludes formSig so later edits don't reset the baseline */
   useEffect(() => {
-    if (!loading && order && fabricBackfillDone && initialSig === null) {
+    if (!loading && order && initialSig === null) {
       setInitialSig(formSig);
     }
-  }, [loading, order, fabricBackfillDone, initialSig]);
+  }, [loading, order, initialSig]);
   /* eslint-enable react-hooks/set-state-in-effect, react-hooks/exhaustive-deps */
   const isDirty =
     !saving && !loading && initialSig !== null && initialSig !== formSig;
@@ -635,34 +629,11 @@ export default function EditSalesOrderPage() {
       })();
   }, [orderResp, id]);
 
-  // Deferred fabricId backfill — when the loaded SO carries fabricCode
-  // but blank fabricId (the typical Scan-PO OCR shape), look up the id
-  // from the cached fabrics list as soon as it lands so the Fabric
-  // dropdown pre-selects. The mapping is a no-op once every line already
-  // has a fabricId, so user edits during the session aren't disturbed.
-  // Flips `fabricBackfillDone` (declared above) once both inputs have
-  // settled so the dirty-state baseline waits before snapshotting.
-  /* eslint-disable react-hooks/set-state-in-effect -- one-shot post-load
-     mutation: items is mutated only when fabricCode→fabricId resolves,
-     which happens once per SO load; the no-op-on-clean check above
-     guarantees idempotence on later renders. */
-  useEffect(() => {
-    if (loading) return;
-    if (fabricsTrackingForPickerResp === undefined) return;
-    setItems((prev) => {
-      let changed = false;
-      const next = prev.map((it) => {
-        if (it.fabricId || !it.fabricCode) return it;
-        const match = fabrics.find((f) => f.code === it.fabricCode);
-        if (!match) return it;
-        changed = true;
-        return { ...it, fabricId: match.id };
-      });
-      return changed ? next : prev;
-    });
-    setFabricBackfillDone(true);
-  }, [fabrics, loading, fabricsTrackingForPickerResp]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  // 2026-05-09: deferred fabricId backfill removed. Picker now keys on
+  // fabricCode (the canonical reference matching raw_materials.itemCode),
+  // so loaded SOs pre-select the dropdown directly without any client-side
+  // namespace translation. fabricId is no longer touched anywhere on this
+  // page; the legacy column on sales_order_items is being dropped.
 
   const addItem = () => setItems([...items, { ...EMPTY_LINE, _uid: crypto.randomUUID() }]);
 
@@ -697,10 +668,12 @@ export default function EditSalesOrderPage() {
     });
   };
 
-  const selectFabric = (idx: number, fabricId: string) => {
-    const fab = fabrics.find(f => f.id === fabricId);
+  // Picker writes only fabricCode — see comment in sales/create.tsx selectFabric.
+  // fabricId is a UI-only artifact deprecated 2026-05-09.
+  const selectFabric = (idx: number, fabricCode: string) => {
+    const fab = fabrics.find(f => f.code === fabricCode);
     if (fab) {
-      updateItem(idx, { fabricId: fab.id, fabricCode: fab.code });
+      updateItem(idx, { fabricCode: fab.code });
     }
   };
 
@@ -736,7 +709,7 @@ export default function EditSalesOrderPage() {
   const handleSubmit = async () => {
     if (!customerId) { toast.warning("Please select a customer"); return; }
     if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
-    if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+    if (items.some(l => !l.fabricCode)) { toast.warning("Please select a fabric for all line items"); return; }
     // Sofa lines require model + seat size from dropdown — no free text / blanks
     if (items.some(l => l.itemCategory === "SOFA" && !l.baseModel)) {
       toast.warning("Please select a model for all sofa items"); return;
@@ -1155,9 +1128,9 @@ export default function EditSalesOrderPage() {
                       <div>
                         <label className="block text-xs text-[#9CA3AF] mb-1">Fabric *</label>
                         <SearchableSelect
-                          value={item.fabricId}
+                          value={item.fabricCode}
                           onChange={(val) => selectFabric(idx, val)}
-                          options={fabrics.map(f => ({ value: f.id, label: `${f.code} - ${f.name}` }))}
+                          options={fabrics.map(f => ({ value: f.code, label: `${f.code} - ${f.name}` }))}
                           placeholder="Select fabric..."
                           className={sc}
                         />

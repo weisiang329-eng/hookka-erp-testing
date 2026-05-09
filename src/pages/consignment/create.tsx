@@ -550,13 +550,15 @@ function CreateConsignmentOrderPage() {
     });
   };
 
-  const selectFabric = (idx: number, fabricId: string) => {
-    const fab = fabrics.find(f => f.id === fabricId);
+  // Picker writes only fabricCode — see comment in sales/create.tsx selectFabric.
+  // fabricId is a UI-only artifact deprecated 2026-05-09.
+  const selectFabric = (idx: number, fabricCode: string) => {
+    const fab = fabrics.find(f => f.code === fabricCode);
     if (!fab) return;
     const item = items[idx];
 
     if (item?.itemCategory === "SOFA") {
-      propagateSofaVariant(idx, { fabricId: fab.id, fabricCode: fab.code });
+      propagateSofaVariant(idx, { fabricCode: fab.code });
     } else if (item?.itemCategory === "BEDFRAME" && item.productId) {
       // Look up fabric priceTier from tracking data
       const tracking = fabricTrackings.find(ft => ft.fabricCode === fab.code);
@@ -571,9 +573,9 @@ function CreateConsignmentOrderPage() {
           ? p1
           : (prod.basePriceSen || 0);
       }
-      updateItem(idx, { fabricId: fab.id, fabricCode: fab.code, basePriceSen: newPrice });
+      updateItem(idx, { fabricCode: fab.code, basePriceSen: newPrice });
     } else {
-      updateItem(idx, { fabricId: fab.id, fabricCode: fab.code });
+      updateItem(idx, { fabricCode: fab.code });
     }
   };
 
@@ -738,7 +740,7 @@ function CreateConsignmentOrderPage() {
   const handleSubmit = async (status: "DRAFT" | "CONFIRMED" = "DRAFT") => {
     if (!customerId) { toast.warning("Please select a customer"); return; }
     if (items.some(l => !l.productId)) { toast.warning("Please select a product for all line items"); return; }
-    if (items.some(l => !l.fabricId)) { toast.warning("Please select a fabric for all line items"); return; }
+    if (items.some(l => !l.fabricCode)) { toast.warning("Please select a fabric for all line items"); return; }
     // Sofa lines must have model + seat size chosen from dropdowns (no free text / blanks)
     if (items.some(l => l.itemCategory === "SOFA" && !l.baseModel)) {
       toast.warning("Please select a model for all sofa items"); return;
@@ -1424,9 +1426,9 @@ function LineItemCard({
             <div>
               <label className="block text-xs text-[#9CA3AF] mb-1">Fabric *</label>
               <SearchableSelect
-                value={item.fabricId}
+                value={item.fabricCode}
                 onChange={(val) => onSelectFabric(idx, val)}
-                options={availableFabrics.map(f => ({ value: f.id, label: `${f.code} - ${f.name}` }))}
+                options={availableFabrics.map(f => ({ value: f.code, label: `${f.code} - ${f.name}` }))}
                 placeholder="Select fabric..."
                 className={selectClass}
               />

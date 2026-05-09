@@ -590,51 +590,77 @@ export default function generateCustomerQuotationPdfV2(
     doc.text("No combo rules apply on this date.", margin, y);
     y += 8;
   } else {
-    // Heights actually present across all combos — sorted ascending.
-    const heightsSet = new Set<string>();
+    // Group combos by baseModel (Wei Siang 2026-05-09 — same treatment as
+    // the SOFA SKU section). Each model gets its own sub-header + sub-table
+    // with only the heights that group actually uses (auto-hide empties).
+    const byModel = new Map<string, typeof sofaCombos>();
     for (const c of sofaCombos) {
-      for (const h of Object.keys(c.pricesByHeight)) heightsSet.add(h);
+      if (!byModel.has(c.baseModel)) byModel.set(c.baseModel, []);
+      byModel.get(c.baseModel)!.push(c);
     }
-    const heights = Array.from(heightsSet).sort(
-      (a, b) => Number(a) - Number(b),
-    );
-    const head: string[] = [
-      "Base",
-      "Components",
-      "Tier",
-      "Scope",
-      ...heights.map((h) => `${h}"`),
-    ];
-    const body: string[][] = sofaCombos.map((c) => {
-      const row: string[] = [
-        c.baseModel,
-        fmtComponentGroups(c.componentSizes),
-        TIER_LABEL[c.fabricTier] ?? c.fabricTier,
-        c.customerName ? `Customer (${c.customerName})` : "Master",
-      ];
-      for (const h of heights) {
-        const sen = c.pricesByHeight[h];
-        row.push(typeof sen === "number" && sen > 0 ? fmtRM(sen) : DASH);
-      }
-      return row;
-    });
+    const orderedModels = [...byModel.keys()].sort();
 
-    autoTable(doc, {
-      startY: y,
-      margin: { left: margin, right: margin },
-      head: [head],
-      body,
-      styles: sharedStyles,
-      headStyles: sharedHead,
-      alternateRowStyles: sharedAlt,
-      columnStyles: {
-        0: { cellWidth: 16 },
-        1: { cellWidth: "auto" },
-        2: { cellWidth: 14 },
-        3: { cellWidth: 28 },
-      },
-    });
-    advanceYAfterTable();
+    for (const model of orderedModels) {
+      const modelCombos = byModel.get(model)!;
+      // Heights actually present across THIS model's combos.
+      const heightsSet = new Set<string>();
+      for (const c of modelCombos) {
+        for (const [h, v] of Object.entries(c.pricesByHeight)) {
+          if (typeof v === "number" && v > 0) heightsSet.add(h);
+        }
+      }
+      const heights = Array.from(heightsSet).sort((a, b) => Number(a) - Number(b));
+      if (heights.length === 0) continue;
+
+      const head: string[] = [
+        "Components",
+        "Tier",
+        "Scope",
+        ...heights.map((h) => `${h}"`),
+      ];
+      const body: string[][] = modelCombos.map((c) => {
+        const row: string[] = [
+          fmtComponentGroups(c.componentSizes),
+          TIER_LABEL[c.fabricTier] ?? c.fabricTier,
+          c.customerName ? `Customer (${c.customerName})` : "Master",
+        ];
+        for (const h of heights) {
+          const sen = c.pricesByHeight[h];
+          row.push(typeof sen === "number" && sen > 0 ? fmtRM(sen) : DASH);
+        }
+        return row;
+      });
+
+      ensureRoom(14);
+      y += 1.5;
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(80, 80, 80);
+      doc.text(`${model}  (${modelCombos.length})`, margin, y);
+      y += 1.5;
+
+      autoTable(doc, {
+        startY: y,
+        margin: { left: margin, right: margin },
+        head: [head],
+        body,
+        styles: sharedStyles,
+        headStyles: sharedHead,
+        alternateRowStyles: sharedAlt,
+        columnStyles: {
+          0: { cellWidth: "auto" }, // Components
+          1: { cellWidth: 14 },     // Tier
+          2: { cellWidth: 28 },     // Scope
+          3: { halign: "right" },   // heights
+          4: { halign: "right" },
+          5: { halign: "right" },
+          6: { halign: "right" },
+          7: { halign: "right" },
+        },
+      });
+      advanceYAfterTable();
+      y += 2; // gap between model sub-tables
+    }
   }
 
   // -------------------------------------------------------------------------

@@ -2795,11 +2795,12 @@ export default function ProductionPage({
       customerName: string; customerHub?: string;
       mfdDate: string | null;
     };
-    // Threshold: sofa legs <= 0.5" sit inside the compartment box (no
-    // separate pack). Anything taller gets its own pack, physically placed
-    // inside Compartment 1 of the SO and labelled with a 2-in-1 sticker
-    // shared with Compartment 1.
-    const LEG_PACK_THRESHOLD_INCHES = 0.5;
+    // Threshold: sofa legs <= 1" sit inside the compartment box (no
+    // separate pack — Wei Siang clarified 2026-05-09: 5535/5536 standard
+    // 1" legs go inside, only legs >= 2" need their own pack). Anything
+    // taller gets its own pack, physically placed inside Compartment 1
+    // of the SO and labelled with a 2-in-1 sticker shared with Comp 1.
+    const LEG_PACK_THRESHOLD_INCHES = 1;
 
     // Mirror of joinModelLabel from src/api/routes/_shared/production-builder.ts:
     // join multiple sofa productCodes into a single composite "fullcompartment"

@@ -4979,16 +4979,18 @@ export default function ProductionPage({
                       style={{ width: "250px", height: "380px" }}
                       title={`${s.productCode} — ${s.poNo} · ${s.sizeLabel} · piece ${s.pieceNo} of ${s.totalPieces}${legsPair ? " (+ Legs combined)" : ""}`}
                     >
-                      {/* Top header = the full Code (boxLabel). Includes
-                            BF: "{productCode} {size} {fabric} HB"
-                            Sofa: SO-wide joined "5535-1A(LHF)+1NA+L(RHF)"
-                          Replaces the separate productCode + Code-body
-                          duplication. */}
-                      <div className="text-center font-bold leading-tight" style={{ fontSize: "12px" }}>
-                        {s.boxLabel || s.productCode}
+                      {/* Top header = Product Code (this box's specific
+                          code, e.g. "1005-(Q)" / "5535-1A(LHF)"). The
+                          full WIP / fullcompartment string sits in the
+                          body just above Divan/Leg, not at the top. */}
+                      <div className="text-center font-bold leading-tight" style={{ fontSize: "13px" }}>
+                        {s.productCode}
                       </div>
                       <div className="border-t border-[#E6E0D9] my-1" />
                       <div className="space-y-[3px] text-[11px] leading-tight text-[#1F1D1B]">
+                        {s.boxLabel && (
+                          <div className="truncate"><span className="inline-block w-[68px] font-semibold text-[#6B7280]">WIP</span>: {s.boxLabel}</div>
+                        )}
                         {s.itemCategory === "BEDFRAME" && (
                           <div><span className="inline-block w-[68px] font-semibold text-[#6B7280]">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                         )}
@@ -5224,12 +5226,15 @@ export default function ProductionPage({
                   style={{ width: "100mm", height: "150mm" }}
                 >
                   <div className="w-full h-full flex flex-col" style={{ fontSize: "9pt" }}>
-                    {/* Top header = the full Code (boxLabel). */}
-                    <div className="text-center font-bold" style={{ fontSize: "13pt", lineHeight: 1.15 }}>
-                      {s.boxLabel || s.productCode}
+                    {/* Top header = Product Code; full WIP sits in body. */}
+                    <div className="text-center font-bold" style={{ fontSize: "14pt", lineHeight: 1.1 }}>
+                      {s.productCode}
                     </div>
                     <div className="border-t border-black my-[1.5mm]" />
                     <div className="space-y-[0.8mm]" style={{ fontSize: "10pt", lineHeight: 1.3 }}>
+                      {s.boxLabel && (
+                        <div><span className="inline-block w-[26mm] font-semibold">WIP</span>: {s.boxLabel}</div>
+                      )}
                       {s.itemCategory === "BEDFRAME" && (
                         <div><span className="inline-block w-[26mm] font-semibold">Divan</span>: {s.divanHeightInches != null ? `${s.divanHeightInches}"` : "—"}</div>
                       )}

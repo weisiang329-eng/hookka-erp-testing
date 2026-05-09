@@ -13640,4 +13640,197 @@ app.get("/audit-po-alignment", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// /backfill-po-line-no — one-shot rewrite of stale `production_orders.lineNo`.
+//
+// Background: Phase 2 audit on 2026-05-09 found 25 POs across 17 SOs whose
+// `lineNo` field doesn't match the SO line they're actually for. The PO's
+// product/size/fabric/divan/leg/gap attributes ARE correct for the unit
+// they represent — only the `lineNo` column is stale because the legacy
+// fan-out wrote sequential per-PO indices (1,2,3,4...) instead of the
+// actual SO line number.
+//
+// Algorithm — cumulative-qty mapping:
+//   1. Read SO's items sorted by lineNo.
+//   2. Read SO's POs sorted by poNo's `-NN` suffix.
+//   3. For each SO line, allocate `pieceCount` POs to it where:
+//        SOFA → 1 PO carries the full qty (set semantics)
+//        BF/ACC → N POs each qty=1 (per-piece)
+//   4. Each PO's expected lineNo is the SO line it gets allocated to.
+//   5. UPDATE if expected != current.
+//
+// Skip conditions:
+//   * SOs where the cumulative-qty allocation can't cover all POs (model
+//     break — e.g. duplicate poNo with different ids — surface as error).
+//   * POs that already have correct lineNo (idempotent).
+//
+// Read-only safe in dry-run. No JC/wip/cost data is touched — only the
+// scalar `production_orders.lineNo` column.
+//
+// Body: { dryRun?: boolean (default true), soIds?: string[] }
+// ---------------------------------------------------------------------------
+type LinenoFixRow = {
+  poId: string;
+  poNo: string;
+  companySOId: string;
+  currentLineNo: number;
+  expectedLineNo: number;
+};
+
+app.post("/backfill-po-line-no", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+  const db = c.var.DB;
+  let body: { dryRun?: boolean; soIds?: string[] } = {};
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    // Empty body OK — defaults below.
+  }
+  const dryRun = body.dryRun !== false; // default true
+  const filterSoIds = Array.isArray(body.soIds) && body.soIds.length > 0
+    ? new Set(body.soIds)
+    : null;
+
+  // Pull every non-cancelled SO with its items. We hit it as one query
+  // joining items so we don't do N+1 round-trips.
+  const itemsRes = await db
+    .prepare(
+      `SELECT soi.salesOrderId, soi.lineNo, soi.itemCategory, soi.quantity,
+              so.companySOId, so.status
+         FROM sales_order_items soi
+         JOIN sales_orders so ON so.id = soi.salesOrderId
+        WHERE COALESCE(so.status, '') <> 'CANCELLED'
+        ORDER BY soi.salesOrderId, soi.lineNo`,
+    )
+    .all<{
+      salesOrderId: string;
+      lineNo: number;
+      itemCategory: string | null;
+      quantity: number;
+      companySOId: string | null;
+      status: string;
+    }>();
+  const itemsBySo = new Map<string, typeof itemsRes.results>();
+  const companySOIdBySo = new Map<string, string>();
+  for (const it of itemsRes.results ?? []) {
+    if (!itemsBySo.has(it.salesOrderId)) {
+      itemsBySo.set(it.salesOrderId, [] as unknown as typeof itemsRes.results);
+    }
+    (itemsBySo.get(it.salesOrderId) as unknown as typeof itemsRes.results)!.push(it);
+    if (it.companySOId) companySOIdBySo.set(it.salesOrderId, it.companySOId);
+  }
+
+  const posRes = await db
+    .prepare(
+      `SELECT id AS "poId", poNo, salesOrderId, lineNo
+         FROM production_orders
+        WHERE salesOrderId IS NOT NULL AND salesOrderId <> ''
+          AND COALESCE(status, '') <> 'CANCELLED'
+        ORDER BY salesOrderId, poNo`,
+    )
+    .all<{
+      poId: string;
+      poNo: string;
+      salesOrderId: string;
+      lineNo: number;
+    }>();
+  const posBySo = new Map<string, typeof posRes.results>();
+  for (const p of posRes.results ?? []) {
+    if (!posBySo.has(p.salesOrderId)) {
+      posBySo.set(p.salesOrderId, [] as unknown as typeof posRes.results);
+    }
+    (posBySo.get(p.salesOrderId) as unknown as typeof posRes.results)!.push(p);
+  }
+
+  const fixes: LinenoFixRow[] = [];
+  const skipped: { salesOrderId: string; companySOId: string | null; reason: string }[] = [];
+
+  for (const [soId, items] of itemsBySo.entries()) {
+    if (filterSoIds && !filterSoIds.has(soId)) continue;
+    const pos = posBySo.get(soId) ?? [];
+    if (pos.length === 0) continue;
+
+    // Sort POs by poNo's `-NN` suffix (numeric, falls back to lex).
+    const sortedPos = [...pos].sort((a, b) => {
+      const ma = /-(\d+)$/.exec(a.poNo);
+      const mb = /-(\d+)$/.exec(b.poNo);
+      const na = ma ? parseInt(ma[1], 10) : 0;
+      const nb = mb ? parseInt(mb[1], 10) : 0;
+      return na - nb;
+    });
+    const sortedItems = [...items].sort((a, b) => a.lineNo - b.lineNo);
+
+    // Allocate POs to lines via cumulative-qty.
+    const expectedLineNoByPoId = new Map<string, number>();
+    let poIdx = 0;
+    for (const line of sortedItems) {
+      const isSofa = (line.itemCategory ?? "BEDFRAME") === "SOFA";
+      // SOFA = 1 PO per line (set semantics); BF/ACC = N POs per line.
+      const pieceCount = isSofa ? 1 : Math.max(1, line.quantity || 1);
+      for (let k = 0; k < pieceCount; k++) {
+        if (poIdx >= sortedPos.length) break;
+        expectedLineNoByPoId.set(sortedPos[poIdx].poId, line.lineNo);
+        poIdx++;
+      }
+    }
+
+    // If we couldn't cover every PO, the SO has duplicate poNos / model
+    // break (Pattern 2). Skip — surface for separate cleanup.
+    if (poIdx !== sortedPos.length) {
+      skipped.push({
+        salesOrderId: soId,
+        companySOId: companySOIdBySo.get(soId) ?? null,
+        reason: `${sortedPos.length} POs but cumulative-qty mapping covered ${poIdx} (model break — likely duplicate poNo)`,
+      });
+      continue;
+    }
+
+    for (const p of sortedPos) {
+      const expected = expectedLineNoByPoId.get(p.poId);
+      if (expected === undefined) continue;
+      if (expected !== p.lineNo) {
+        fixes.push({
+          poId: p.poId,
+          poNo: p.poNo,
+          companySOId: companySOIdBySo.get(soId) ?? "",
+          currentLineNo: p.lineNo,
+          expectedLineNo: expected,
+        });
+      }
+    }
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      candidatePoCount: fixes.length,
+      affectedSoCount: new Set(fixes.map((f) => f.companySOId)).size,
+      fixes,
+      skipped,
+    });
+  }
+
+  // Live: UPDATE each PO's lineNo. Sequential — small batch (~25 rows).
+  const stmts = fixes.map((f) =>
+    db
+      .prepare(
+        `UPDATE production_orders SET lineNo = ?, updated_at = ? WHERE id = ?`,
+      )
+      .bind(f.expectedLineNo, new Date().toISOString(), f.poId),
+  );
+  if (stmts.length > 0) {
+    await db.batch(stmts);
+  }
+  return c.json({
+    success: true,
+    dryRun: false,
+    updatedPoCount: fixes.length,
+    affectedSoCount: new Set(fixes.map((f) => f.companySOId)).size,
+    fixes,
+    skipped,
+  });
+});
+
 export default app;

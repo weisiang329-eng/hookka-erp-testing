@@ -97,7 +97,6 @@ export type SalesOrderItemRow = {
   itemCategory: string | null;
   sizeCode: string | null;
   sizeLabel: string | null;
-  fabricId: string | null;
   fabricCode: string | null;
   quantity: number;
   gapInches: number | null;
@@ -213,7 +212,6 @@ function rowToItem(r: SalesOrderItemRow) {
     itemCategory: r.itemCategory ?? "BEDFRAME",
     sizeCode: r.sizeCode ?? "",
     sizeLabel: r.sizeLabel ?? "",
-    fabricId: r.fabricId ?? "",
     fabricCode: r.fabricCode ?? "",
     quantity: r.quantity,
     gapInches: r.gapInches,
@@ -1874,7 +1872,6 @@ app.post("/", async (c) => {
             "BEDFRAME",
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,
-          fabricId: null,
           fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,
@@ -2893,7 +2890,6 @@ app.put("/:id", async (c) => {
           itemCategory,
           sizeCode: normalizedSizeCode,
           sizeLabel: normalizedSizeLabel,
-          fabricId: null,
           fabricCode: incomingFabricCode,
           quantity,
           gapInches: item.gapInches ?? null,
@@ -3040,7 +3036,6 @@ app.put("/:id", async (c) => {
             itemCategory: (item.itemCategory as string) || "BEDFRAME",
             sizeCode: (item.sizeCode as string) || "",
             sizeLabel: (item.sizeLabel as string) || "",
-            fabricId: (item.fabricId as string) || "",
             fabricCode: (item.fabricCode as string) || "",
             quantity: Number(item.quantity) || 0,
             gapInches: (item.gapInches as number | null) ?? null,
@@ -3117,7 +3112,6 @@ app.put("/:id", async (c) => {
             itemCategory: (item.itemCategory as string) || "BEDFRAME",
             sizeCode: (item.sizeCode as string) || "",
             sizeLabel: (item.sizeLabel as string) || "",
-            fabricId: (item.fabricId as string) || "",
             fabricCode: (item.fabricCode as string) || "",
             quantity: Number(item.quantity) || 0,
             gapInches: (item.gapInches as number | null) ?? null,

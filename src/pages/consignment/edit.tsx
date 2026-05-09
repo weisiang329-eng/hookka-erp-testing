@@ -35,7 +35,6 @@ type LineItem = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   basePriceSen: number;
@@ -53,7 +52,7 @@ type LineItem = {
 
 const EMPTY_LINE: LineItem = {
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
-  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
@@ -189,7 +188,7 @@ export default function EditSalesOrderPage() {
       customerId, customerPOId, customerCOId, reference,
       companyCODate, customerDeliveryDate, hookkaExpectedDD, notes,
       items: items.map((it) => ({
-        productId: it.productId, fabricId: it.fabricId, quantity: it.quantity,
+        productId: it.productId, fabricCode: it.fabricCode, quantity: it.quantity,
         seatHeight: it.seatHeight, gapInches: it.gapInches,
         divanHeightInches: it.divanHeightInches,
         legHeightInches: it.legHeightInches,
@@ -341,7 +340,6 @@ export default function EditSalesOrderPage() {
                 : ((item.baseModel as string) || productCode || ""),
               sizeCode: rawSizeCode,
               sizeLabel: rawSizeLabel,
-              fabricId: item.fabricId as string,
               fabricCode: item.fabricCode as string,
               quantity: item.quantity as number,
               basePriceSen: item.basePriceSen as number,

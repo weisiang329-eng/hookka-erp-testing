@@ -201,7 +201,6 @@ export type SalesOrderItem = {
   itemCategory: ItemCategory;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   gapInches: number | null;
@@ -968,7 +967,6 @@ export type ConsignmentOrderItem = {
   itemCategory: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   gapInches: number | null;

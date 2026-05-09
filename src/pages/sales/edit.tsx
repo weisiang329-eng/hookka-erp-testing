@@ -40,7 +40,6 @@ type LineItem = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   basePriceSen: number;
@@ -59,7 +58,7 @@ type LineItem = {
 
 const EMPTY_LINE: LineItem = {
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
-  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "",
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0,
@@ -568,7 +567,6 @@ export default function EditSalesOrderPage() {
               // sofa items so the Seat Size dropdown reads the same value
               // it pre-selected against. Bedframes keep sizeLabel verbatim.
               sizeLabel: isSofa && seatHeight ? seatHeight : rawSizeLabel,
-              fabricId: (item.fabricId as string) || "",
               fabricCode: (item.fabricCode as string) || "",
               quantity: item.quantity as number,
               basePriceSen: item.basePriceSen as number,

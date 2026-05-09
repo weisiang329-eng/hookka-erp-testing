@@ -58,7 +58,6 @@ type LineItem = {
   baseModel: string;
   sizeCode: string;
   sizeLabel: string;
-  fabricId: string;
   fabricCode: string;
   quantity: number;
   basePriceSen: number;
@@ -88,7 +87,7 @@ type LineItem = {
 const makeEmptyLine = (): LineItem => ({
   _uid: crypto.randomUUID(),
   productId: "", productCode: "", productName: "", itemCategory: "", baseModel: "",
-  sizeCode: "", sizeLabel: "", fabricId: "", fabricCode: "",
+  sizeCode: "", sizeLabel: "", fabricCode: "",
   quantity: 1, basePriceSen: 0, seatHeight: "", selectedModules: [],
   gapInches: null, divanHeightInches: null, divanPriceSen: 0,
   legHeightInches: null, legPriceSen: 0, totalHeightPriceSen: 0,
@@ -709,7 +708,6 @@ function CreateSalesOrderPage() {
         sizeLabel: prod.sizeLabel,
         basePriceSen: priceSen,
         seatHeight: template.seatHeight,
-        fabricId: template.fabricId,
         fabricCode: template.fabricCode,
         quantity: 1,
         legHeightInches: isSofa ? template.legHeightInches : null,
@@ -885,8 +883,8 @@ function CreateSalesOrderPage() {
     const defaultSpecialSurcharge = defaultSpecialCodes.length > 0
       ? calcSpecialOrderSurcharge(defaultSpecialCodes)
       : 0;
-    // Fabric default — resolve to fabricId by code so downstream fabric
-    // picker shows the right selection. Skip if defaults didn't set one.
+    // Fabric default — resolve by code so downstream fabric picker shows
+    // the right selection. Skip if defaults didn't set one.
     const defaultFabric = def.fabricCode
       ? fabrics.find((f) => f.code === def.fabricCode)
       : undefined;
@@ -919,9 +917,7 @@ function CreateSalesOrderPage() {
       price1Sen: seedPrice1,
       seatHeightPrices: seedSeat,
       // Fabric prefill (applies to all categories).
-      ...(defaultFabric
-        ? { fabricId: defaultFabric.id, fabricCode: defaultFabric.code }
-        : {}),
+      ...(defaultFabric ? { fabricCode: defaultFabric.code } : {}),
       // Specials prefill — codes (LineItem.specialOrders) + comma-joined
       // display string for the saved specialOrder field + surcharge. We
       // preserve any custom specials the user already typed on this line

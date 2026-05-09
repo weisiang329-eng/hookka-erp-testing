@@ -13504,4 +13504,113 @@ app.post("/append-missing-pos", async (c) => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// POST /api/import/delete-jcs-by-ids
+//
+// Surgical job_cards cleanup — deletes only the explicit JC IDs passed in
+// the body. Used after /append-missing-pos when the appendOnly cascade
+// emits a duplicate FAB_CUT JC for a PO that already had a per-piece
+// FAB_CUT JC tracked under a different jcId convention (legacy long-form
+// vs new aggregator short-form jc-fc-po-).
+//
+// Body: { jcIds: string[], dryRun: boolean }
+// Permission: production-orders:update.
+// ---------------------------------------------------------------------------
+app.post("/delete-jcs-by-ids", async (c) => {
+  const denied = await requirePermission(c, "production-orders", "update");
+  if (denied) return denied;
+
+  let body: { jcIds?: unknown; dryRun?: unknown };
+  try {
+    body = (await c.req.json()) as typeof body;
+  } catch {
+    return c.json({ success: false, error: "Invalid JSON body" }, 400);
+  }
+  const ids = Array.isArray(body.jcIds)
+    ? body.jcIds.filter(
+        (x): x is string => typeof x === "string" && x.length > 0,
+      )
+    : null;
+  if (!ids || ids.length === 0) {
+    return c.json(
+      { success: false, error: "body.jcIds must be a non-empty array" },
+      400,
+    );
+  }
+  const dryRun = body.dryRun === true;
+  const db = c.var.DB;
+
+  const placeholders = ids.map(() => "?").join(",");
+  const existing = await db
+    .prepare(
+      `SELECT id, status, departmentCode, wipKey, productionOrderId
+         FROM job_cards WHERE id IN (${placeholders})`,
+    )
+    .bind(...ids)
+    .all<{
+      id: string;
+      status: string;
+      departmentCode: string;
+      wipKey: string;
+      productionOrderId: string;
+    }>();
+  const rows = existing.results ?? [];
+  const found = new Set(rows.map((r) => r.id));
+  const notFound = ids.filter((id) => !found.has(id));
+
+  // Refuse to delete COMPLETED / TRANSFERRED JCs (work credit + cost ledger
+  // entries already posted; deleting would orphan those).
+  const unsafe = rows.filter((r) =>
+    ["COMPLETED", "TRANSFERRED"].includes(r.status),
+  );
+  if (unsafe.length > 0) {
+    return c.json(
+      {
+        success: false,
+        error: `Refuse to delete JCs with status COMPLETED/TRANSFERRED: ${unsafe.map((u) => `${u.id}(${u.status})`).slice(0, 5).join(", ")}`,
+      },
+      409,
+    );
+  }
+
+  if (dryRun) {
+    return c.json({
+      success: true,
+      dryRun: true,
+      requested: ids.length,
+      found: rows.length,
+      notFound,
+      wouldDelete: rows.map((r) => ({
+        id: r.id,
+        status: r.status,
+        deptCode: r.departmentCode,
+        wipKey: r.wipKey,
+      })),
+    });
+  }
+
+  try {
+    await db
+      .prepare(`DELETE FROM job_cards WHERE id IN (${placeholders})`)
+      .bind(...ids)
+      .run();
+  } catch (err) {
+    return c.json(
+      {
+        success: false,
+        error: `DELETE failed: ${err instanceof Error ? err.message : String(err)}`,
+      },
+      500,
+    );
+  }
+
+  return c.json({
+    success: true,
+    dryRun: false,
+    requested: ids.length,
+    deleted: rows.length,
+    notFound,
+  });
+});
+
 export default app;

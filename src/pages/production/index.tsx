@@ -884,6 +884,10 @@ export default function ProductionPage({
     // customer's free-text reference (e.g. ship-to dept code).
     customerPOId?: string;
     customerRef?: string;
+    // Customer SO — customer's own SO number (sales_orders.customerSO).
+    // Distinct from companySOId; shown on bedframe stickers per Wei
+    // Siang spec (2026-05-09). Sofa stickers don't need this field.
+    customerSO?: string;
     // Bedframe: divan height in inches (used both as a body field and to
     // build the Divan box's "Code" line "{N}\" Divan {sizeLabel}").
     divanHeightInches?: number | null;
@@ -2795,6 +2799,30 @@ export default function ProductionPage({
       customerName: string; customerHub?: string;
       mfdDate: string | null;
     };
+
+    // Pre-fetch sales_orders for unique salesOrderIds in this batch — we
+    // need sales_orders.customerSO (the customer's own SO number, distinct
+    // from companySOId). Used on bedframe stickers per Wei Siang spec.
+    // production_orders does not carry customerSO so we fetch SOs directly.
+    const uniqueSoIds = Array.from(
+      new Set(filteredOrders.map((o) => o.salesOrderId).filter(Boolean)),
+    );
+    const customerSOBySo = new Map<string, string>();
+    await Promise.all(
+      uniqueSoIds.map(async (id) => {
+        try {
+          const r = await fetch(`/api/sales-orders/${encodeURIComponent(id)}`);
+          const j = (await r.json().catch(() => null)) as
+            | { success?: boolean; data?: { customerSO?: string | null } }
+            | null;
+          if (j?.success && j.data) {
+            customerSOBySo.set(id, j.data.customerSO || "");
+          }
+        } catch {
+          // tolerate single-fetch failure — sticker just shows "—"
+        }
+      }),
+    );
     // Threshold: sofa legs <= 1" sit inside the compartment box (no
     // separate pack — Wei Siang clarified 2026-05-09: 5535/5536 standard
     // 1" legs go inside, only legs >= 2" need their own pack). Anything
@@ -2872,6 +2900,7 @@ export default function ProductionPage({
             specialOrder: o.specialOrder ?? "",
             customerPOId: o.customerPOId ?? "",
             customerRef: o.customerReference ?? "",
+            customerSO: customerSOBySo.get(o.salesOrderId) ?? "",
           });
         }
       }
@@ -4951,10 +4980,12 @@ export default function ProductionPage({
                           <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust PO</span>: {s.customerPOId}</div>
                         )}
                         <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">SO Ref</span>: {s.customerRef || "—"}</div>
+                        {s.itemCategory === "BEDFRAME" && (
+                          <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Cust SO</span>: {s.customerSO || "—"}</div>
+                        )}
                         {s.specialOrder && (
                           <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Special</span>: {s.specialOrder}</div>
                         )}
-                        <div className="truncate"><span className="inline-block w-[60px] font-semibold text-[#6B7280]">Customer</span>: {customerLine}</div>
                       </div>
                       {/* QR + badge row — when paired (2-in-1 / 3-in-1)
                           the secondary section sits to the RIGHT of the
@@ -5014,6 +5045,11 @@ export default function ProductionPage({
                             </div>
                           </>
                         )}
+                      </div>
+                      {/* Customer line below the QR row — uses the
+                          empty footer space, decongests the body. */}
+                      <div className="mt-2 pt-1 border-t border-[#E6E0D9] text-[10px] leading-tight text-[#1F1D1B] truncate text-center font-medium">
+                        {customerLine}
                       </div>
                     </div>
                   );
@@ -5207,10 +5243,12 @@ export default function ProductionPage({
                         <div><span className="inline-block w-[26mm] font-semibold">Cust PO</span>: {s.customerPOId}</div>
                       )}
                       <div><span className="inline-block w-[26mm] font-semibold">SO Ref</span>: {s.customerRef || "—"}</div>
+                      {s.itemCategory === "BEDFRAME" && (
+                        <div><span className="inline-block w-[26mm] font-semibold">Cust SO</span>: {s.customerSO || "—"}</div>
+                      )}
                       {s.specialOrder && (
                         <div><span className="inline-block w-[26mm] font-semibold">Special</span>: {s.specialOrder}</div>
                       )}
-                      <div><span className="inline-block w-[26mm] font-semibold">Customer</span>: {customerLine}</div>
                     </div>
                     {/* QR + badge row — paired secondaries sit to the
                         RIGHT (vertical dashed dividers between sections).
@@ -5270,6 +5308,10 @@ export default function ProductionPage({
                           </div>
                         </>
                       )}
+                    </div>
+                    {/* Customer line below the QR row. */}
+                    <div className="mt-[2mm] pt-[1mm] border-t border-black text-center font-semibold" style={{ fontSize: "10pt" }}>
+                      {customerLine}
                     </div>
                   </div>
                 </div>

@@ -13983,7 +13983,6 @@ app.post("/backfill-sofa-leg-heights", async (c) => {
   type ItemRow = {
     id: string;
     salesOrderId: string;
-    salesOrderNo: string | null;
     companySOId: string | null;
     lineNo: number | null;
     lineSuffix: string | null;
@@ -13991,11 +13990,11 @@ app.post("/backfill-sofa-leg-heights", async (c) => {
     legHeightInches: number | null;
   };
 
-  // sales_order_items first.
+  // sales_order_items first. sales_orders has companySOId (no salesOrderNo).
   const soItemsRes = await db
     .prepare(
       `SELECT soi.id, soi.salesOrderId,
-              so.salesOrderNo AS salesOrderNo, so.companySOId AS companySOId,
+              so.companySOId AS companySOId,
               soi.lineNo, soi.lineSuffix, soi.productCode, soi.legHeightInches
          FROM sales_order_items AS soi
          LEFT JOIN sales_orders AS so ON so.id = soi.salesOrderId
@@ -14043,7 +14042,7 @@ app.post("/backfill-sofa-leg-heights", async (c) => {
     updates.push({
       table: "sales_order_items",
       rowId: r.id,
-      soNo: r.companySOId || r.salesOrderNo,
+      soNo: r.companySOId,
       lineNo: r.lineNo,
       productCode: r.productCode,
       from: r.legHeightInches,

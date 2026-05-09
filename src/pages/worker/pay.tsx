@@ -371,12 +371,12 @@ export default function WorkerPayPage() {
         </div>
       )}
 
-      {/* Daily breakdown — Hours pulled from working_hour_entries via /history.
+      {/* Daily attendance — Hours pulled from working_hour_entries via /history.
           Clock-in/out column dropped (flow not yet live). */}
       {hist && (
-        <TableSection title="Daily breakdown">
+        <TableSection title="Daily Attendance">
           <TableHeader
-            cols={["Date", "Work hrs", "OT"]}
+            cols={["Date", "Working hrs", "Overtime hrs"]}
             align={["left", "right", "right"]}
           />
           {hist.attendance.length === 0 ? (

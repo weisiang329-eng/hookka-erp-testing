@@ -80,6 +80,9 @@ type CompletedRow = {
   wipCode?: string;
   itemCategory?: string;
   sizeLabel?: string;
+  // Co-PICs the worker shared this JC with — used to surface "shared with X"
+  // when the worker taps the share badge.
+  sharedWith?: Array<{ id: string; name: string }>;
 };
 type AttendanceRow = {
   date: string;
@@ -141,6 +144,8 @@ export default function WorkerHomePage() {
   const [from, setFrom] = useState<string>(() => ymd(addDays(new Date(), -6)));
   const [to, setTo] = useState<string>(() => ymd(new Date()));
   const [hist, setHist] = useState<HistoryData | null>(null);
+  // Tap-to-expand share roster on Completed Products.
+  const [openShare, setOpenShare] = useState<string | null>(null);
 
   // ---- fetches ----
   const refreshToday = useCallback(async () => {
@@ -447,9 +452,9 @@ export default function WorkerHomePage() {
       {/* Daily attendance — Work/Prod/Eff per day. Clock In/Out column dropped
           since the clock-in flow itself is hidden (Wei Siang 2026-05-10). */}
       {hist && (
-        <TableSection title="Daily breakdown">
+        <TableSection title="Daily Attendance">
           <TableHeader
-            cols={["Date", "Work", "Prod", "Eff %"]}
+            cols={["Date", "Working hrs", "Production hrs", "Efficiency %"]}
             align={["left", "right", "right", "right"]}
           />
           {hist.daily.length === 0 ? (
@@ -539,11 +544,26 @@ export default function WorkerHomePage() {
                       </span>
                     )}
                     {c.piecesShared > 0 && (
-                      <span className="ml-1 text-[10px] text-[#6B5C32]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenShare((prev) =>
+                            prev === c.jobCardId ? null : c.jobCardId,
+                          )
+                        }
+                        className="ml-1 text-[10px] text-[#6B5C32] underline decoration-dotted underline-offset-2 hover:text-[#5a4d2a]"
+                      >
                         · share
-                      </span>
+                      </button>
                     )}
                   </div>
+                  {openShare === c.jobCardId && c.piecesShared > 0 && (
+                    <div className="mt-1.5 ml-0 px-2.5 py-1.5 rounded bg-[#FAF7EE] border border-[#E5DEC6] text-[11px] text-[#5A5550]">
+                      {c.sharedWith && c.sharedWith.length > 0
+                        ? `Shared with: ${c.sharedWith.map((w) => w.name).join(", ")}`
+                        : "Shared with another worker (name unavailable)"}
+                    </div>
+                  )}
                 </div>
               );
             })

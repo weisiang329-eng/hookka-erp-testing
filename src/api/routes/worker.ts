@@ -592,13 +592,43 @@ app.get("/history", async (c) => {
     wipCode?: string;
     itemCategory?: string;
     sizeLabel?: string;
+    // Co-PICs the worker shared this JC with (id + name). Empty when solo.
+    sharedWith: Array<{ id: string; name: string }>;
   };
+  // Resolve the names of every co-PIC that appears anywhere in this batch
+  // so we can attach them to each completed card. Cheap one-shot lookup.
+  const coPicIds = new Set<string>();
+  for (const jc of inRangeJcs) {
+    const pieces = picsByJc.get(jc.id) ?? [];
+    if (pieces.length > 0) {
+      for (const s of pieces) {
+        if (s.pic1Id && s.pic1Id !== workerId) coPicIds.add(s.pic1Id);
+        if (s.pic2Id && s.pic2Id !== workerId) coPicIds.add(s.pic2Id);
+      }
+    } else {
+      if (jc.pic1Id && jc.pic1Id !== workerId) coPicIds.add(jc.pic1Id);
+      if (jc.pic2Id && jc.pic2Id !== workerId) coPicIds.add(jc.pic2Id);
+    }
+  }
+  const coPicNameById = new Map<string, string>();
+  if (coPicIds.size > 0) {
+    const ids = Array.from(coPicIds);
+    const placeholders = ids.map(() => "?").join(",");
+    const r = await c.var.DB.prepare(
+      `SELECT id, name FROM workers WHERE id IN (${placeholders})`,
+    )
+      .bind(...ids)
+      .all<{ id: string; name: string }>();
+    for (const row of r.results ?? []) coPicNameById.set(row.id, row.name);
+  }
+
   const completed: CompletedCard[] = [];
   for (const jc of inRangeJcs) {
     const pieces = picsByJc.get(jc.id) ?? [];
     let myMinutes = 0;
     let piecesWorked = 0;
     let piecesShared = 0;
+    const sharedIds = new Set<string>();
     let role: "PIC1" | "PIC2" | "MIXED" = "PIC1";
     const rolesSeen = new Set<"PIC1" | "PIC2">();
 
@@ -611,7 +641,11 @@ app.get("/history", async (c) => {
         const picCount = (s.pic1Id ? 1 : 0) + (s.pic2Id ? 1 : 0);
         myMinutes += perPieceMinutes / Math.max(1, picCount);
         piecesWorked++;
-        if (picCount >= 2) piecesShared++;
+        if (picCount >= 2) {
+          piecesShared++;
+          if (isPic1 && s.pic2Id) sharedIds.add(s.pic2Id);
+          if (isPic2 && s.pic1Id) sharedIds.add(s.pic1Id);
+        }
         if (isPic1) rolesSeen.add("PIC1");
         if (isPic2) rolesSeen.add("PIC2");
       }
@@ -630,6 +664,8 @@ app.get("/history", async (c) => {
       piecesWorked = 1;
       piecesShared = coPicCount >= 2 ? 1 : 0;
       role = jc.pic1Id === workerId ? "PIC1" : "PIC2";
+      if (jc.pic1Id && jc.pic1Id !== workerId) sharedIds.add(jc.pic1Id);
+      if (jc.pic2Id && jc.pic2Id !== workerId) sharedIds.add(jc.pic2Id);
     }
 
     const po = posById.get(jc.productionOrderId);
@@ -651,6 +687,10 @@ app.get("/history", async (c) => {
       wipCode: jc.wipCode ?? undefined,
       itemCategory: po?.itemCategory ?? undefined,
       sizeLabel: po?.sizeLabel ?? undefined,
+      sharedWith: Array.from(sharedIds).map((id) => ({
+        id,
+        name: coPicNameById.get(id) ?? id,
+      })),
     });
   }
   completed.sort((a, b) =>
@@ -862,34 +902,39 @@ app.get("/payslips", async (c) => {
 
   // Piece bonus this month — sum of PIECE_RATE_SEN[deptCode] for every
   // completed/transferred JC where this worker is pic1/pic2/piecePic.
+  // The legacy path here queried `production_orders.jobCards` (a JSON
+  // text column) but that column was retired during the job_cards-table
+  // migration — `column "jobcards" does not exist` 500s the entire
+  // /payslips response. Read job_cards + piece_pics directly instead.
   let pieceBonusSen = 0;
-  const poRes = await c.var.DB.prepare(
-    "SELECT id, jobCards FROM production_orders",
-  ).all<{ id: string; jobCards: string }>();
-  for (const o of poRes.results ?? []) {
-    let cards: Array<{
-      status?: string;
-      completedDate?: string | null;
-      pic1Id?: string | null;
-      pic2Id?: string | null;
-      departmentCode?: string;
-      piecePics?: Array<{ pic1Id?: string | null; pic2Id?: string | null }>;
-    }> = [];
-    try {
-      const parsed = JSON.parse(o.jobCards || "[]");
-      if (Array.isArray(parsed)) cards = parsed;
-    } catch { /* skip */ }
-    for (const jc of cards) {
-      if (jc.status !== "COMPLETED" && jc.status !== "TRANSFERRED") continue;
-      const d = (jc.completedDate || "").slice(0, 10);
-      if (!d.startsWith(monthPrefix)) continue;
-      const onLegacyPic = jc.pic1Id === workerId || jc.pic2Id === workerId;
-      const onPiecePic = (jc.piecePics ?? []).some(
-        (s) => s.pic1Id === workerId || s.pic2Id === workerId,
-      );
-      if (!onLegacyPic && !onPiecePic) continue;
-      pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
-    }
+  const monthJcRes = await c.var.DB.prepare(
+    `SELECT id, departmentCode, pic1Id, pic2Id
+       FROM job_cards
+      WHERE status IN ('COMPLETED','TRANSFERRED')
+        AND completedDate LIKE ?
+        AND (pic1Id = ? OR pic2Id = ?)`,
+  )
+    .bind(`${monthPrefix}%`, workerId, workerId)
+    .all<{ id: string; departmentCode: string; pic1Id: string | null; pic2Id: string | null }>();
+  const legacyJcIds = new Set<string>();
+  for (const jc of monthJcRes.results ?? []) {
+    pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
+    legacyJcIds.add(jc.id);
+  }
+  // Also count JCs the worker only touched via piece_pics, not pic1/2.
+  const pieceJcRes = await c.var.DB.prepare(
+    `SELECT DISTINCT jc.id, jc.departmentCode
+       FROM job_cards jc
+       JOIN piece_pics pp ON pp.jobCardId = jc.id
+      WHERE jc.status IN ('COMPLETED','TRANSFERRED')
+        AND jc.completedDate LIKE ?
+        AND (pp.pic1Id = ? OR pp.pic2Id = ?)`,
+  )
+    .bind(`${monthPrefix}%`, workerId, workerId)
+    .all<{ id: string; departmentCode: string }>();
+  for (const jc of pieceJcRes.results ?? []) {
+    if (legacyJcIds.has(jc.id)) continue; // already counted via pic1/2
+    pieceBonusSen += PIECE_RATE_SEN[jc.departmentCode ?? ""] ?? 0;
   }
 
   return c.json({

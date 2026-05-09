@@ -413,7 +413,48 @@ export default function generateCustomerQuotationPdfV2(
         const orderedModels = [...sofaByModel.keys()].sort();
 
         for (const model of orderedModels) {
-          const modelRows = sofaByModel.get(model)!;
+          const rawRows = sofaByModel.get(model)!;
+
+          // Merge LHF/RHF pairs whose seat_height_prices are identical into
+          // a single virtual row labelled "X(LHF/RHF)" — Wei Siang 2026-05-09.
+          // Pattern: code matches /^(\d+)-(.+)\((LHF|RHF)\)$/. Pair key is
+          // (model, suffix-without-side, tier-array). When both sides exist
+          // and price arrays match exactly, one merged row replaces the two.
+          // Non-pair components and non-matching pairs pass through unchanged.
+          const seatKey = (sh: typeof rawRows[number]["seatHeightPrices"]) =>
+            (sh ?? [])
+              .map((t) => `${String(t.height).replace('"', '').trim()}|${t.tier ?? "PRICE_2"}|${t.priceSen}`)
+              .sort()
+              .join(",");
+          const sideRe = /^(.+)\((LHF|RHF)\)$/;
+          const byKey = new Map<string, { lhf?: typeof rawRows[number]; rhf?: typeof rawRows[number] }>();
+          const singletons: typeof rawRows = [];
+          for (const p of rawRows) {
+            const compPart = p.code.replace(/^\d+-/, "");
+            const m = compPart.match(sideRe);
+            if (!m) { singletons.push(p); continue; }
+            const baseSuffix = m[1];
+            const side = m[2] as "LHF" | "RHF";
+            const key = `${baseSuffix}::${seatKey(p.seatHeightPrices)}`;
+            if (!byKey.has(key)) byKey.set(key, {});
+            byKey.get(key)![side === "LHF" ? "lhf" : "rhf"] = p;
+          }
+          const modelRows: typeof rawRows = [...singletons];
+          for (const [key, pair] of byKey) {
+            if (pair.lhf && pair.rhf) {
+              const baseSuffix = key.split("::")[0];
+              modelRows.push({
+                ...pair.lhf,
+                code: `${model}-${baseSuffix}(LHF/RHF)`,
+                name: pair.lhf.name.replace(/\s*\(LHF\)\s*$/, "").trim() + " (LHF/RHF)",
+              });
+            } else {
+              if (pair.lhf) modelRows.push(pair.lhf);
+              if (pair.rhf) modelRows.push(pair.rhf);
+            }
+          }
+          // Stable order by code for readability.
+          modelRows.sort((a, b) => a.code.localeCompare(b.code));
 
           // Build matrix body (all 5 heights), then drop empty columns.
           const fullBody: string[][] = [];
